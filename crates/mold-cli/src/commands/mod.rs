@@ -9,6 +9,7 @@ pub mod discord;
 pub mod expand;
 pub(crate) mod generate;
 pub mod gpu;
+pub(crate) mod h3;
 pub mod info;
 pub mod jobs;
 pub mod lambda;

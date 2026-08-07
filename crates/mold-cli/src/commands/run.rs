@@ -10,11 +10,12 @@ use mold_core::{
     OutputFormat, Scheduler, TimeRange,
 };
 use std::io::{IsTerminal, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{Ltx2PipelineArg, Ltx2SpatialUpscaleArg, Ltx2TemporalUpscaleArg};
 
 use super::generate;
+use super::h3::{self, ReferenceArg};
 
 /// Provide model name completions for shell tab-completion.
 pub fn complete_model_name() -> Vec<CompletionCandidate> {
@@ -626,6 +627,7 @@ pub async fn run(
     batch: u32,
     frames: Option<u32>,
     fps: Option<u32>,
+    duration: Option<f64>,
     clip_frames: Option<u32>,
     motion_tail: u32,
     audio: bool,
@@ -635,6 +637,9 @@ pub async fn run(
     extend: Option<String>,
     extend_overlap: Option<u32>,
     keyframe: Vec<String>,
+    first_frame: Option<PathBuf>,
+    last_frame: Option<PathBuf>,
+    references: Vec<ReferenceArg>,
     pipeline: Option<Ltx2PipelineArg>,
     ic_lora_control: Option<String>,
     hdr_exr_dir: Option<String>,
@@ -645,7 +650,7 @@ pub async fn run(
     guidance_flags: GuidanceFlags,
     camera_control: Option<String>,
     host: Option<String>,
-    format: OutputFormat,
+    format: Option<OutputFormat>,
     no_metadata: bool,
     preview: bool,
     local: bool,
@@ -662,7 +667,7 @@ pub async fn run(
     lora: Vec<String>,
     lora_scale: f64,
     image: Vec<String>,
-    strength: f64,
+    strength: Option<f64>,
     mask: Option<String>,
     control: Option<String>,
     control_model: Option<String>,
@@ -686,6 +691,83 @@ pub async fn run(
 
     let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &mut config)?;
     let family = resolve_family(&model, &config);
+    let is_h3 = mold_core::minimax_h3::is_family(&family);
+
+    h3::validate_h3_flags(h3::FlagValidation {
+        family: &family,
+        format,
+        guidance,
+        strength,
+        no_audio,
+        negative_prompt: negative_prompt.as_deref(),
+        scheduler_set: scheduler.is_some(),
+        cfg_plus,
+        has_lora: !lora.is_empty(),
+        has_mask: mask.is_some(),
+        has_control: control.is_some() || control_model.is_some() || control_scale != 1.0,
+        has_audio_file: audio_file.is_some(),
+        has_video: video.is_some(),
+        has_extend: extend.is_some() || extend_overlap.is_some(),
+        has_generic_keyframes: !keyframe.is_empty(),
+        has_ltx_pipeline_fields: pipeline.is_some()
+            || ic_lora_control.is_some()
+            || hdr_exr_dir.is_some()
+            || hdr_exr_full_float
+            || retake.is_some()
+            || spatial_upscale.is_some()
+            || temporal_upscale.is_some()
+            || guidance_flags.stg_scale.is_some()
+            || guidance_flags.stg_blocks.is_some()
+            || guidance_flags.rescale_scale.is_some()
+            || guidance_flags.modality_scale.is_some()
+            || guidance_flags.skip_step.is_some()
+            || camera_control.is_some(),
+        clip_frames,
+    })?;
+    if is_h3 && !references.is_empty() && batch > 1 {
+        anyhow::bail!(
+            "MiniMax H3 ordered references currently require --batch 1 because upload handles are one-use and request-bound"
+        );
+    }
+    if is_h3 && steps.is_some_and(|value| value < 2) {
+        anyhow::bail!(
+            "MiniMax H3 --steps counts terminal-inclusive sigma grid points and must be at least 2"
+        );
+    }
+
+    let mut h3_authoring = h3::prepare_authoring(
+        &model,
+        &family,
+        duration,
+        frames,
+        fps,
+        width,
+        height,
+        first_frame.as_deref(),
+        image.first().map(String::as_str),
+        last_frame.as_deref(),
+        &references,
+    )?;
+    let frames = h3_authoring.frames.or(frames);
+    let fps = h3_authoring.fps.or(fps);
+    let width = h3_authoring.width.or(width);
+    let height = h3_authoring.height.or(height);
+    let format = if is_h3 {
+        OutputFormat::Mp4
+    } else {
+        format.unwrap_or(OutputFormat::Png)
+    };
+    let strength = if is_h3 { 1.0 } else { strength.unwrap_or(0.75) };
+    if is_h3 {
+        if let Some(path) = output.as_deref().filter(|path| *path != "-") {
+            let extension = Path::new(path).extension().and_then(|value| value.to_str());
+            if !extension.is_some_and(|value| value.eq_ignore_ascii_case("mp4")) {
+                anyhow::bail!(
+                    "MiniMax H3 output is always MP4; use --output <name>.mp4 or stdout (-)"
+                );
+            }
+        }
+    }
 
     // Validate file-based arguments early — before expansion or inference.
     validate_file_args_full(FileArgRefs {
@@ -713,19 +795,26 @@ pub async fn run(
 
     validate_image_args_for_model(&family, &model, &image)?;
 
-    let loaded_images = image
-        .iter()
-        .map(|img_path| {
-            if img_path == "-" {
-                let mut buf = Vec::new();
-                std::io::stdin().read_to_end(&mut buf)?;
-                Ok(buf)
-            } else {
-                std::fs::read(img_path)
-                    .map_err(|e| anyhow::anyhow!("failed to read image '{}': {e}", img_path))
-            }
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let loaded_images = if let Some(source) = h3_authoring.source_image.take() {
+        vec![source]
+    } else {
+        image
+            .iter()
+            .map(|img_path| {
+                if img_path == "-" {
+                    let mut buf = Vec::new();
+                    std::io::stdin().read_to_end(&mut buf)?;
+                    if is_h3 {
+                        h3::validate_boundary_image_bytes(&buf, "first")?;
+                    }
+                    Ok(buf)
+                } else {
+                    std::fs::read(img_path)
+                        .map_err(|e| anyhow::anyhow!("failed to read image '{}': {e}", img_path))
+                }
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
     let ordered_images = family == "qwen-image-edit" || is_flux2_dev_model(&model);
     let source_image = if ordered_images {
         None
@@ -758,7 +847,11 @@ pub async fn run(
     let audio_file_bytes = audio_file.as_deref().map(std::fs::read).transpose()?;
     let source_video_bytes = video.as_deref().map(std::fs::read).transpose()?;
     let extend_video_bytes = extend.as_deref().map(std::fs::read).transpose()?;
-    let keyframes = parse_keyframes(&keyframe)?;
+    let keyframes = if is_h3 {
+        h3_authoring.keyframes.take()
+    } else {
+        parse_keyframes(&keyframe)?
+    };
     let pipeline = resolve_ic_lora_pipeline(
         parse_pipeline(pipeline),
         ic_lora_control.as_deref(),
@@ -806,15 +899,23 @@ pub async fn run(
     if should_expand {
         mold_core::expand::validate_expansion_variation_count(batch.max(1) as usize)?;
     }
-    let expansion_task = mold_core::ExpandTask::for_conditioning(
-        &family,
-        pipeline,
-        source_image.is_some(),
-        source_video_bytes.is_some() || extend_video_bytes.is_some(),
-        audio_file_bytes.is_some(),
-        keyframes.as_ref().map_or(0, Vec::len),
-        retake_range.is_some(),
-    );
+    let expansion_task = if h3_authoring
+        .references
+        .as_ref()
+        .is_some_and(|references| !references.is_empty())
+    {
+        mold_core::ExpandTask::ReferenceToAudioVideo
+    } else {
+        mold_core::ExpandTask::for_conditioning(
+            &family,
+            pipeline,
+            source_image.is_some(),
+            source_video_bytes.is_some() || extend_video_bytes.is_some(),
+            audio_file_bytes.is_some(),
+            keyframes.as_ref().map_or(0, Vec::len),
+            retake_range.is_some(),
+        )
+    };
 
     // Expansion strategy:
     // - If --local or server unreachable: expand client-side (existing path)
@@ -900,10 +1001,8 @@ pub async fn run(
 
         let variations = batch.max(1) as usize;
         let model_family = super::expand::resolve_family_from_config(&model, &config);
-        let client = match host.as_deref() {
-            Some(h) => mold_core::MoldClient::new(h),
-            None => mold_core::MoldClient::from_env(),
-        };
+        let expand_context = crate::control::CliContext::new(host.as_deref());
+        let client = expand_context.client();
         let expand_req = mold_core::ExpandRequest {
             prompt: prompt.clone(),
             model_family,
@@ -995,7 +1094,7 @@ pub async fn run(
 
     // Resolve effective negative prompt: CLI flag > per-model config > global config > None.
     // --no-negative suppresses all defaults (forces empty unconditional).
-    let effective_negative_prompt = if no_negative {
+    let effective_negative_prompt = if is_h3 || no_negative {
         None
     } else if negative_prompt.is_some() {
         negative_prompt
@@ -1006,8 +1105,9 @@ pub async fn run(
 
     // Resolve LoRA: explicit CLI values override config defaults.
     let model_cfg = config.resolved_model_config(&model);
-    let default_lora = model_cfg
-        .effective_lora()
+    let default_lora = (!is_h3)
+        .then(|| model_cfg.effective_lora())
+        .flatten()
         .map(|(path, scale)| LoraWeight { path, scale });
     let (effective_lora, loras) = resolve_effective_loras_for_family(
         &family,
@@ -1055,6 +1155,20 @@ pub async fn run(
             spatial_upscale,
             temporal_upscale,
             guidance_overrides,
+            source_image_name: if is_h3 {
+                h3_authoring.source_image_name.or_else(|| {
+                    image
+                        .first()
+                        .filter(|path| path.as_str() != "-")
+                        .and_then(|path| Path::new(path).file_name())
+                        .and_then(|name| name.to_str())
+                        .map(str::to_string)
+                })
+            } else {
+                None
+            },
+            references: h3_authoring.references,
+            reference_uploads: h3_authoring.uploads,
         },
         host,
         format,

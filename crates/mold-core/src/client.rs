@@ -7,11 +7,18 @@ use crate::error::MoldError;
 use crate::types::{
     AudioData, DeviceState, ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest,
     GenerateResponse, ImageData, LoraInfo, ModelInfo, ModelInfoExtended, OutputFormat,
-    QueueListingWire, ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent, VideoData,
+    QueueListingWire, ReferenceUploadCompleteResponse, ReferenceUploadSessionRequest,
+    ReferenceUploadSessionResponse, ServerStatus, SseCompleteEvent, SseErrorEvent,
+    SseProgressEvent, VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use reqwest::{Client, StatusCode};
+use std::path::Path;
+use tokio_util::io::ReaderStream;
+
+const REFERENCE_UPLOAD_HANDLE_HEADER: &str = "x-mold-reference-upload";
+const REFERENCE_UPLOAD_SESSION_HEADER: &str = "x-mold-reference-upload-session";
 
 #[derive(Clone)]
 pub struct MoldClient {
@@ -46,6 +53,86 @@ impl MoldClient {
             base_url: normalize_host(&base_url),
             client,
         }
+    }
+
+    /// Create a request-bound MiniMax H3 reference upload session.
+    ///
+    /// The server applies authentication and legal activation before it
+    /// allocates staging. Error bodies (including HTTP 451 policy details) are
+    /// retained verbatim for callers instead of being collapsed to a generic
+    /// reqwest status error.
+    pub async fn create_reference_upload_session(
+        &self,
+        request: &ReferenceUploadSessionRequest,
+    ) -> Result<ReferenceUploadSessionResponse> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/generate/reference-upload-sessions",
+                self.base_url
+            ))
+            .json(request)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(response)
+            .await?
+            .json::<ReferenceUploadSessionResponse>()
+            .await?)
+    }
+
+    /// Stream one local reference file through a one-use bearer handle.
+    ///
+    /// The handle stays in a header, while the opened file's exact length is
+    /// sent as `Content-Length`. `ReaderStream` keeps large video references
+    /// out of process-sized buffers; the server independently hashes, probes,
+    /// and checks the declared descriptor before admission.
+    pub async fn upload_reference_file(
+        &self,
+        handle: &str,
+        path: &Path,
+        mime_type: &str,
+    ) -> Result<ReferenceUploadCompleteResponse> {
+        let file = tokio::fs::File::open(path)
+            .await
+            .with_context(|| format!("failed to open reference '{}'", path.display()))?;
+        let metadata = file
+            .metadata()
+            .await
+            .with_context(|| format!("failed to inspect reference '{}'", path.display()))?;
+        anyhow::ensure!(
+            metadata.is_file() && metadata.len() > 0,
+            "reference upload source is not a non-empty regular file: {}",
+            path.display()
+        );
+        let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
+        let response = self
+            .client
+            .put(format!("{}/api/generate/reference-upload", self.base_url))
+            .header(REFERENCE_UPLOAD_HANDLE_HEADER, handle)
+            .header(reqwest::header::CONTENT_TYPE, mime_type)
+            .header(reqwest::header::CONTENT_LENGTH, metadata.len())
+            .body(body)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(response)
+            .await?
+            .json::<ReferenceUploadCompleteResponse>()
+            .await?)
+    }
+
+    /// Best-effort cleanup for an unconsumed reference upload session.
+    pub async fn cancel_reference_upload_session(&self, handle: &str) -> Result<()> {
+        let response = self
+            .client
+            .delete(format!(
+                "{}/api/generate/reference-upload-sessions",
+                self.base_url
+            ))
+            .header(REFERENCE_UPLOAD_SESSION_HEADER, handle)
+            .send()
+            .await?;
+        error_for_status_with_body(response).await?;
+        Ok(())
     }
 
     /// Generate an image. Returns raw image bytes (PNG or JPEG).
@@ -1417,6 +1504,40 @@ mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
 
+    fn reference_session_request() -> ReferenceUploadSessionRequest {
+        let request = serde_json::from_value(serde_json::json!({
+            "prompt": "match the reference",
+            "model": crate::minimax_h3::REF2VA_COMFY,
+            "width": crate::minimax_h3::DEFAULT_WIDTH,
+            "height": crate::minimax_h3::DEFAULT_HEIGHT,
+            "steps": crate::minimax_h3::DEFAULT_STEPS,
+            "guidance": 0.0,
+            "seed": 7,
+            "batch_size": 1,
+            "output_format": "mp4",
+            "strength": 1.0,
+            "frames": crate::minimax_h3::MIN_FRAMES,
+            "fps": crate::minimax_h3::FIXED_FPS,
+            "enable_audio": true,
+            "references": [{
+                "kind": "image",
+                "media": { "authority": "descriptor" },
+                "provenance": {
+                    "name": "reference.png",
+                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+                },
+                "mime_type": "image/png",
+                "width": 1,
+                "height": 1
+            }]
+        }))
+        .unwrap();
+        ReferenceUploadSessionRequest {
+            request,
+            upload_references: vec![1],
+        }
+    }
+
     #[test]
     fn test_new_trims_trailing_slash() {
         let client = MoldClient::new("http://localhost:7680/");
@@ -1535,6 +1656,89 @@ mod tests {
     fn test_is_connection_error_via_mold_error() {
         let err: anyhow::Error = MoldError::Client("connection refused".to_string()).into();
         assert!(MoldClient::is_connection_error(&err));
+    }
+
+    #[tokio::test]
+    async fn reference_session_preserves_authenticated_http_451_body() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate/reference-upload-sessions"))
+            .and(header("x-api-key", "sekrit"))
+            .respond_with(ResponseTemplate::new(451).set_body_json(serde_json::json!({
+                "error": "MiniMax H3 legal activation is unavailable",
+                "code": crate::MINIMAX_H3_AUTHORIZATION_REQUIRED
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = MoldClient::with_api_key(&server.uri(), "sekrit".to_string())
+            .create_reference_upload_session(&reference_session_request())
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("451 Unavailable For Legal Reasons"));
+        assert!(message.contains(crate::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[tokio::test]
+    async fn reference_file_streams_with_secret_headers_and_cancels_by_session_header() {
+        use wiremock::matchers::{body_string, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/generate/reference-upload"))
+            .and(header("x-api-key", "sekrit"))
+            .and(header(REFERENCE_UPLOAD_HANDLE_HEADER, "mru_secret"))
+            .and(header("content-type", "image/png"))
+            .and(header("content-length", "5"))
+            .and(body_string("bytes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "instance_id": "server-1",
+                "reference": 1,
+                "metadata": {
+                    "kind": "image",
+                    "index": 1,
+                    "name": "reference.png",
+                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "mime_type": "image/png",
+                    "width": 1,
+                    "height": 1
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/generate/reference-upload-sessions"))
+            .and(header("x-api-key", "sekrit"))
+            .and(header(
+                REFERENCE_UPLOAD_SESSION_HEADER,
+                "mrs_session_secret",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reference.png");
+        std::fs::write(&path, b"bytes").unwrap();
+        let client = MoldClient::with_api_key(&server.uri(), "sekrit".to_string());
+        let completed = client
+            .upload_reference_file("mru_secret", &path, "image/png")
+            .await
+            .unwrap();
+        assert_eq!(completed.instance_id, "server-1");
+        assert_eq!(completed.reference, 1);
+        client
+            .cancel_reference_upload_session("mrs_session_secret")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

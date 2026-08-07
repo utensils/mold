@@ -19,7 +19,13 @@ pub(crate) struct CliContext {
 impl CliContext {
     pub(crate) fn new(host: Option<&str>) -> Self {
         let client = match host {
-            Some(host) => MoldClient::new(host),
+            Some(host) => std::env::var("MOLD_API_KEY")
+                .ok()
+                .filter(|key| !key.is_empty())
+                .map_or_else(
+                    || MoldClient::new(host),
+                    |key| MoldClient::with_api_key(host, key),
+                ),
             None => MoldClient::from_env(),
         };
         let config = Config::load_or_default();

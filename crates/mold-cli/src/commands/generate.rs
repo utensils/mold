@@ -1,13 +1,14 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 #[cfg(any(feature = "preview", test))]
 use base64::{engine::general_purpose, Engine as _};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{
     classify_generate_error, fit_to_model_dimensions_aligned, fit_to_target_area, manifest, Config,
-    DevicePlacement, GenerateRequest, GenerateResponse, GenerateServerAction, ImageData,
-    KeyframeCondition, LoraWeight, Ltx2GuidanceOverrides, Ltx2PipelineMode, Ltx2SpatialUpscale,
-    Ltx2TemporalUpscale, MoldClient, OutputFormat, Scheduler, TimeRange,
+    DevicePlacement, GenerateRequest, GenerateResponse, GenerateServerAction, GenerationReference,
+    GenerationReferenceAuthority, ImageData, KeyframeCondition, LoraWeight, Ltx2GuidanceOverrides,
+    Ltx2PipelineMode, Ltx2SpatialUpscale, Ltx2TemporalUpscale, MoldClient, OutputFormat,
+    ReferenceUploadSessionRequest, Scheduler, TimeRange,
 };
 use rand::Rng;
 #[cfg(feature = "preview")]
@@ -15,6 +16,7 @@ use std::io::IsTerminal;
 use std::io::Write;
 use std::time::Duration;
 
+use crate::commands::h3::ReferenceUpload;
 use crate::control::{stream_server_pull, CliContext};
 use crate::errors::RemoteInferenceError;
 use crate::output::{is_piped, status};
@@ -140,6 +142,25 @@ fn effective_dimensions(
     source_image: Option<&[u8]>,
     edit_images: Option<&[Vec<u8>]>,
 ) -> Result<(u32, u32)> {
+    if family.is_some_and(mold_core::minimax_h3::is_family) {
+        return match (width, height, source_image) {
+            (Some(width), Some(height), _) => Ok((width, height)),
+            (Some(width), None, _) => Ok((width, model_cfg.effective_height(config))),
+            (None, Some(height), _) => Ok((model_cfg.effective_width(config), height)),
+            (None, None, Some(source_image)) => {
+                let image = image::load_from_memory(source_image)
+                    .map_err(|error| anyhow::anyhow!("failed to decode H3 first frame: {error}"))?;
+                Ok(mold_core::minimax_h3::recommended_dimensions(
+                    image.width(),
+                    image.height(),
+                ))
+            }
+            (None, None, None) => Ok((
+                mold_core::minimax_h3::DEFAULT_WIDTH,
+                mold_core::minimax_h3::DEFAULT_HEIGHT,
+            )),
+        };
+    }
     match (width, height, source_image) {
         (Some(width), Some(height), _) => Ok((width, height)),
         (Some(width), None, _) => Ok((width, model_cfg.effective_height(config))),
@@ -278,6 +299,13 @@ pub struct Ltx2Options {
     /// Advanced multimodal-guider overrides. `None` keeps every pipeline
     /// constant, which is what makes existing seeds reproducible.
     pub guidance_overrides: Option<Ltx2GuidanceOverrides>,
+    /// Display-safe first-frame provenance. Never a client path.
+    pub source_image_name: Option<String>,
+    /// Payload-free ordered H3 Ref2VA descriptors.
+    pub references: Option<Vec<GenerationReference>>,
+    /// Local files corresponding one-for-one with `references`. They are
+    /// streamed only after an authenticated request-bound session is created.
+    pub reference_uploads: Vec<ReferenceUpload>,
 }
 
 fn require_local_hdr_exr_dir(hdr_exr_dir: Option<String>, local: bool) -> Result<Option<String>> {
@@ -350,6 +378,9 @@ pub async fn run(
         spatial_upscale,
         temporal_upscale,
         guidance_overrides,
+        source_image_name,
+        references,
+        reference_uploads,
     } = ltx2;
     // Keep the filesystem path out of every remote request shape. Local
     // generation retains the exact user path so export metadata remains
@@ -372,8 +403,36 @@ pub async fn run(
     let embed_metadata = config.effective_embed_metadata(no_metadata.then_some(false));
     let model_cfg = config.resolved_model_config(model);
     let family = resolve_family(model, &config);
-    let effective_frames = frames.or_else(|| model_cfg.effective_frames());
-    let effective_fps = fps.or_else(|| model_cfg.effective_fps());
+    let is_h3 = family
+        .as_deref()
+        .is_some_and(mold_core::minimax_h3::is_family);
+    if is_h3 && !reference_uploads.is_empty() && batch != 1 {
+        anyhow::bail!(
+            "MiniMax H3 ordered references require batch 1 because upload handles are one-use and request-bound"
+        );
+    }
+    if is_h3
+        && references.as_ref().is_some_and(|references| {
+            references.iter().any(|reference| {
+                matches!(reference.media(), GenerationReferenceAuthority::Descriptor)
+            })
+        })
+        && reference_uploads.is_empty()
+    {
+        anyhow::bail!(
+            "MiniMax H3 reference descriptors require authenticated streaming upload sources"
+        );
+    }
+    let effective_frames = if is_h3 {
+        Some(frames.unwrap_or(mold_core::minimax_h3::MIN_FRAMES))
+    } else {
+        frames.or_else(|| model_cfg.effective_frames())
+    };
+    let effective_fps = if is_h3 {
+        Some(mold_core::minimax_h3::FIXED_FPS)
+    } else {
+        fps.or_else(|| model_cfg.effective_fps())
+    };
     let is_ltx2 = family.as_deref() == Some("ltx2");
     validate_cli_batch_for_family(family.as_deref(), batch)?;
 
@@ -383,7 +442,9 @@ pub async fn run(
     let audio_only_pipeline = ltx2
         .pipeline
         .is_some_and(mold_core::Ltx2PipelineMode::is_audio_only);
-    let output_format = if audio_only_pipeline && format == OutputFormat::Png {
+    let output_format = if is_h3 {
+        OutputFormat::Mp4
+    } else if audio_only_pipeline && format == OutputFormat::Png {
         OutputFormat::Wav
     } else if format == OutputFormat::Png && effective_frames.is_some() {
         if is_ltx2 {
@@ -645,13 +706,25 @@ pub async fn run(
         source_image.as_deref(),
         edit_images.as_deref(),
     )?;
-    let effective_steps = steps.unwrap_or_else(|| model_cfg.effective_steps(&config));
-    let effective_guidance = guidance.unwrap_or_else(|| model_cfg.effective_guidance());
-    let effective_negative_prompt = effective_negative_prompt(
-        family.as_deref(),
-        effective_guidance,
-        negative_prompt.clone(),
-    );
+    let effective_steps = if is_h3 {
+        steps.unwrap_or(mold_core::minimax_h3::DEFAULT_STEPS)
+    } else {
+        steps.unwrap_or_else(|| model_cfg.effective_steps(&config))
+    };
+    let effective_guidance = if is_h3 {
+        0.0
+    } else {
+        guidance.unwrap_or_else(|| model_cfg.effective_guidance())
+    };
+    let effective_negative_prompt = if is_h3 {
+        None
+    } else {
+        effective_negative_prompt(
+            family.as_deref(),
+            effective_guidance,
+            negative_prompt.clone(),
+        )
+    };
 
     let mut req = GenerateRequest {
         hdr_exr_dir,
@@ -668,13 +741,13 @@ pub async fn run(
         batch_size: batch,
         output_format: Some(output_format),
         embed_metadata: Some(embed_metadata),
-        scheduler,
-        cfg_plus,
+        scheduler: (!is_h3).then_some(scheduler).flatten(),
+        cfg_plus: (!is_h3).then_some(cfg_plus).flatten(),
         edit_images: edit_images.clone(),
-        references: None,
+        references,
         source_image: source_image.clone(),
-        source_image_name: None,
-        strength,
+        source_image_name,
+        strength: if is_h3 { 1.0 } else { strength },
         mask_image: mask_image.clone(),
         control_image: control_image.clone(),
         control_model: control_model.clone(),
@@ -690,7 +763,7 @@ pub async fn run(
         fps: effective_fps,
         upscale_model: None,
         gif_preview: preview,
-        enable_audio,
+        enable_audio: if is_h3 { Some(true) } else { enable_audio },
         audio_file,
         audio_file_path: None,
         source_video,
@@ -707,10 +780,18 @@ pub async fn run(
         temporal_upscale,
         placement,
     };
+    let base_seed = req.seed.unwrap_or_else(|| rand::thread_rng().gen());
+    let mut reference_session = None;
     if local {
         require_local_request_model_activation(&req, &config)?;
         materialize_local_builtin_control(&mut req, &config).await?;
         materialize_local_builtin_camera_controls(&mut req, &config).await?;
+    } else if !reference_uploads.is_empty() {
+        // Upload sessions bind the complete request. Freeze a random seed now
+        // rather than changing it between session creation and generation.
+        req.seed = Some(base_seed);
+        reference_session =
+            bind_remote_reference_uploads(ctx.client(), &mut req, &reference_uploads).await?;
     }
 
     // Warn if user-provided dimensions don't match model recommendations.
@@ -775,7 +856,34 @@ pub async fn run(
             );
         }
     }
-    if mask_image.is_some() {
+    if is_h3 {
+        let mode = match mold_core::minimax_h3::task_for_model(&req.model) {
+            Some(mold_core::minimax_h3::Task::Ref2va) => format!(
+                "Ref2VA with {} ordered reference{}",
+                req.references.as_ref().map_or(0, Vec::len),
+                if req.references.as_ref().map_or(0, Vec::len) == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ),
+            Some(mold_core::minimax_h3::Task::Fl2va) => {
+                let first = req.source_image.is_some();
+                let last = req
+                    .keyframes
+                    .as_ref()
+                    .is_some_and(|items| !items.is_empty());
+                match (first, last) {
+                    (false, false) => "T2VA".to_string(),
+                    (true, false) => "FL2VA with first frame".to_string(),
+                    (false, true) => "FL2VA with last frame".to_string(),
+                    (true, true) => "FL2VA with first and last frames".to_string(),
+                }
+            }
+            None => "unknown task".to_string(),
+        };
+        status!("{} MiniMax H3 {mode}", theme::icon_mode());
+    } else if mask_image.is_some() {
         status!(
             "{} inpainting mode (strength: {:.2})",
             theme::icon_mode(),
@@ -809,7 +917,15 @@ pub async fn run(
     let is_video = effective_frames.is_some() && !audio_only_pipeline;
     if let Some(f) = effective_frames {
         let effective_fps = effective_fps.unwrap_or(24);
-        if audio_only_pipeline {
+        if is_h3 {
+            status!(
+                "{} Synchronized AV: {} frames @ {} fps ({:.2}s), 32 kHz stereo",
+                theme::icon_mode(),
+                f,
+                effective_fps,
+                f64::from(f) / f64::from(effective_fps.max(1)),
+            );
+        } else if audio_only_pipeline {
             status!(
                 "{} Audio mode: {:.2}s ({} frames @ {} fps)",
                 theme::icon_mode(),
@@ -835,7 +951,16 @@ pub async fn run(
         }
     }
     let displayed_guidance = guidance_caps.fixed_scale.unwrap_or(effective_guidance);
-    if audio_only_pipeline {
+    if is_h3 {
+        status!(
+            "{} Generating {}x{} ({} sigma points / {} model evaluations, no CFG)",
+            theme::icon_info(),
+            effective_width,
+            effective_height,
+            effective_steps,
+            effective_steps.saturating_sub(1),
+        );
+    } else if audio_only_pipeline {
         // No raster to report. Printing the request's width and height here
         // would describe a frame this pipeline never renders.
         status!(
@@ -856,7 +981,6 @@ pub async fn run(
     }
     status!("{}", "─".repeat(40).dimmed());
 
-    let base_seed = req.seed.unwrap_or_else(|| rand::thread_rng().gen());
     let response = if local {
         print_using_local_inference();
         generate_local_batch(
@@ -934,7 +1058,16 @@ pub async fn run(
                 steps,
                 guidance,
             )
-            .await?;
+            .await;
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    if let Some(session) = reference_session.as_deref() {
+                        let _ = ctx.client().cancel_reference_upload_session(session).await;
+                    }
+                    return Err(error);
+                }
+            };
 
             // Persist every successful artifact before the next batch item can
             // fail. The aggregate retains the last clip or track only for the
@@ -1219,6 +1352,191 @@ fn local_control_artifact_is_complete(
     })
 }
 
+async fn bind_remote_reference_uploads(
+    client: &MoldClient,
+    request: &mut GenerateRequest,
+    uploads: &[ReferenceUpload],
+) -> Result<Option<String>> {
+    let descriptors = request
+        .references
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("reference uploads require ordered H3 descriptors"))?;
+    if descriptors.len() != uploads.len() || descriptors.is_empty() {
+        anyhow::bail!(
+            "reference descriptor/file count mismatch: {} descriptors for {} files",
+            descriptors.len(),
+            uploads.len()
+        );
+    }
+    mold_core::minimax_h3::validate_reference_descriptors(&descriptors)
+        .map_err(anyhow::Error::new)?;
+    let upload_references = (1..=descriptors.len())
+        .map(|index| u32::try_from(index).context("too many reference uploads"))
+        .collect::<Result<Vec<_>>>()?;
+    let session = client
+        .create_reference_upload_session(&ReferenceUploadSessionRequest {
+            request: request.clone(),
+            upload_references,
+        })
+        .await?;
+    if session.instance_id.trim().is_empty()
+        || session.expires_at_ms == 0
+        || !is_sha256_hex(&session.request_scope_sha256)
+        || !is_reference_upload_handle(&session.session_handle)
+        || session.uploads.len() != descriptors.len()
+    {
+        let _ = client
+            .cancel_reference_upload_session(&session.session_handle)
+            .await;
+        anyhow::bail!("server returned an incomplete reference upload session");
+    }
+
+    let upload_result: Result<Vec<GenerationReference>> = async {
+        let mut bound = Vec::with_capacity(descriptors.len());
+        let mut seen_handles = std::collections::HashSet::new();
+        for (index, (descriptor, source)) in descriptors.iter().zip(uploads).enumerate() {
+            let reference = u32::try_from(index)
+                .context("too many reference uploads")?
+                .saturating_add(1);
+            let slot = session
+                .uploads
+                .iter()
+                .find(|slot| slot.reference == reference)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("server omitted reference upload slot {reference}")
+                })?;
+            if !is_reference_upload_handle(&slot.handle) {
+                anyhow::bail!("server returned an invalid reference upload handle");
+            }
+            if !seen_handles.insert(slot.handle.as_str()) {
+                anyhow::bail!("server reused a one-use reference upload handle");
+            }
+            let completed = client
+                .upload_reference_file(&slot.handle, &source.path, &source.mime_type)
+                .await
+                .with_context(|| format!("reference {reference} upload failed"))?;
+            if completed.instance_id != session.instance_id || completed.reference != reference {
+                anyhow::bail!(
+                    "reference {reference} upload response did not match its bound server session"
+                );
+            }
+            let expected = descriptor
+                .redacted_metadata(index)
+                .ok_or_else(|| anyhow::anyhow!("reference {reference} lost digest provenance"))?;
+            if completed.metadata != expected {
+                anyhow::bail!(
+                    "reference {reference} upload response drifted from the client-probed descriptor"
+                );
+            }
+            bound.push(reference_with_authority(
+                descriptor,
+                GenerationReferenceAuthority::Upload {
+                    handle: slot.handle.clone(),
+                },
+            ));
+        }
+        Ok(bound)
+    }
+    .await;
+
+    match upload_result {
+        Ok(bound) => {
+            request.references = Some(bound);
+            Ok(Some(session.session_handle))
+        }
+        Err(error) => {
+            let _ = client
+                .cancel_reference_upload_session(&session.session_handle)
+                .await;
+            Err(error)
+        }
+    }
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_reference_upload_handle(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= mold_core::minimax_h3::MAX_REFERENCE_UPLOAD_HANDLE_BYTES
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn reference_with_authority(
+    reference: &GenerationReference,
+    media: GenerationReferenceAuthority,
+) -> GenerationReference {
+    match reference {
+        GenerationReference::Image {
+            provenance,
+            mime_type,
+            width,
+            height,
+            ..
+        } => GenerationReference::Image {
+            media,
+            provenance: provenance.clone(),
+            mime_type: mime_type.clone(),
+            width: *width,
+            height: *height,
+        },
+        GenerationReference::Video {
+            provenance,
+            mime_type,
+            width,
+            height,
+            duration_ms,
+            fps,
+            has_audio,
+            audio_duration_ms,
+            ..
+        } => GenerationReference::Video {
+            media,
+            provenance: provenance.clone(),
+            mime_type: mime_type.clone(),
+            width: *width,
+            height: *height,
+            duration_ms: *duration_ms,
+            fps: *fps,
+            has_audio: *has_audio,
+            audio_duration_ms: *audio_duration_ms,
+        },
+        GenerationReference::Audio {
+            provenance,
+            mime_type,
+            duration_ms,
+            sample_rate,
+            channels,
+            ..
+        } => GenerationReference::Audio {
+            media,
+            provenance: provenance.clone(),
+            mime_type: mime_type.clone(),
+            duration_ms: *duration_ms,
+            sample_rate: *sample_rate,
+            channels: *channels,
+        },
+    }
+}
+
+fn has_remote_reference_handles(request: &GenerateRequest) -> bool {
+    request.references.as_ref().is_some_and(|references| {
+        references.iter().any(|reference| {
+            matches!(
+                reference.media(),
+                GenerationReferenceAuthority::Upload { .. }
+            )
+        })
+    })
+}
+
+fn require_remote_auto_pull_activation(request: &GenerateRequest, config: &Config) -> Result<()> {
+    let family = resolve_family(&request.model, config);
+    mold_core::require_model_activation(&request.model, family.as_deref())
+        .map_err(anyhow::Error::new)
+}
+
 /// Remote generation: try SSE streaming first, fall back to blocking API.
 #[allow(clippy::too_many_arguments)]
 async fn generate_remote(
@@ -1281,6 +1599,8 @@ async fn generate_remote(
             let _ = render.await;
             match classify_generate_error(&e) {
                 GenerateServerAction::PullModelAndRetry => {
+                    require_remote_auto_pull_activation(req, config)
+                        .map_err(|error| tag_remote(client, error))?;
                     print_server_pull_missing_model(model);
                     stream_server_pull(client, model)
                         .await
@@ -1311,6 +1631,14 @@ async fn generate_remote(
                     }
                 }
                 GenerateServerAction::FallbackLocal => {
+                    if has_remote_reference_handles(req) {
+                        return Err(tag_remote(
+                            client,
+                            anyhow::anyhow!(
+                                "server connection failed after H3 references were bound; secure upload handles cannot fall back to local inference"
+                            ),
+                        ));
+                    }
                     print_using_local_inference();
                     let mut local_request = req.clone();
                     materialize_local_builtin_control(&mut local_request, config).await?;
@@ -1385,6 +1713,8 @@ async fn generate_remote_blocking(
             pb.finish_and_clear();
             match classify_generate_error(&e) {
                 GenerateServerAction::PullModelAndRetry => {
+                    require_remote_auto_pull_activation(req, config)
+                        .map_err(|error| tag_remote(client, error))?;
                     print_server_pull_missing_model(model);
                     stream_server_pull(client, model)
                         .await
@@ -1396,6 +1726,14 @@ async fn generate_remote_blocking(
                         .map_err(|e| tag_remote(client, e))
                 }
                 GenerateServerAction::FallbackLocal => {
+                    if has_remote_reference_handles(req) {
+                        return Err(tag_remote(
+                            client,
+                            anyhow::anyhow!(
+                                "server connection failed after H3 references were bound; secure upload handles cannot fall back to local inference"
+                            ),
+                        ));
+                    }
                     print_using_local_inference();
                     let mut local_request = req.clone();
                     materialize_local_builtin_control(&mut local_request, config).await?;
@@ -2643,6 +2981,243 @@ fn default_filename(model: &str, timestamp: u64, ext: &str, batch: u32, index: u
 mod tests {
     use super::*;
     use mold_core::ModelConfig;
+
+    fn h3_request(model: &str) -> GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "a synchronized scene",
+            "model": model,
+            "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+            "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+            "steps": mold_core::minimax_h3::DEFAULT_STEPS,
+            "guidance": 0.0,
+            "seed": 42,
+            "batch_size": 1,
+            "output_format": "mp4",
+            "strength": 1.0,
+            "frames": mold_core::minimax_h3::MIN_FRAMES,
+            "fps": mold_core::minimax_h3::FIXED_FPS,
+            "enable_audio": true
+        }))
+        .unwrap()
+    }
+
+    fn descriptor(name: &str, sha256: &str) -> GenerationReference {
+        GenerationReference::Image {
+            media: GenerationReferenceAuthority::Descriptor,
+            provenance: mold_core::GenerationReferenceProvenance {
+                name: Some(name.to_string()),
+                sha256: Some(sha256.to_string()),
+            },
+            mime_type: "image/png".to_string(),
+            width: 32,
+            height: 32,
+        }
+    }
+
+    #[tokio::test]
+    async fn h3_reference_binding_preserves_order_and_uses_one_use_handles() {
+        use sha2::{Digest as _, Sha256};
+        use wiremock::matchers::{body_string, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let first_path = dir.path().join("first.png");
+        let second_path = dir.path().join("second.png");
+        std::fs::write(&first_path, b"first").unwrap();
+        std::fs::write(&second_path, b"second").unwrap();
+        let first_sha = format!("{:x}", Sha256::digest(b"first"));
+        let second_sha = format!("{:x}", Sha256::digest(b"second"));
+        let descriptors = vec![
+            descriptor("first.png", &first_sha),
+            descriptor("second.png", &second_sha),
+        ];
+        let first_metadata = descriptors[0].redacted_metadata(0).unwrap();
+        let second_metadata = descriptors[1].redacted_metadata(1).unwrap();
+
+        Mock::given(method("POST"))
+            .and(path("/api/generate/reference-upload-sessions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                mold_core::ReferenceUploadSessionResponse {
+                    instance_id: "server-1".to_string(),
+                    expires_at_ms: u64::MAX,
+                    request_scope_sha256: "a".repeat(64),
+                    session_handle: "mrs_secret".to_string(),
+                    uploads: vec![
+                        mold_core::ReferenceUploadSlot {
+                            reference: 1,
+                            handle: "mru_first".to_string(),
+                        },
+                        mold_core::ReferenceUploadSlot {
+                            reference: 2,
+                            handle: "mru_second".to_string(),
+                        },
+                    ],
+                },
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        for (handle, body, metadata) in [
+            ("mru_first", "first", first_metadata),
+            ("mru_second", "second", second_metadata),
+        ] {
+            let reference = metadata.index;
+            Mock::given(method("PUT"))
+                .and(path("/api/generate/reference-upload"))
+                .and(header("x-mold-reference-upload", handle))
+                .and(body_string(body))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    mold_core::ReferenceUploadCompleteResponse {
+                        instance_id: "server-1".to_string(),
+                        reference,
+                        metadata,
+                    },
+                ))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let mut request = h3_request(mold_core::minimax_h3::REF2VA_COMFY);
+        request.references = Some(descriptors);
+        let session = bind_remote_reference_uploads(
+            &MoldClient::new(&server.uri()),
+            &mut request,
+            &[
+                ReferenceUpload {
+                    path: first_path,
+                    mime_type: "image/png".to_string(),
+                },
+                ReferenceUpload {
+                    path: second_path,
+                    mime_type: "image/png".to_string(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.as_deref(), Some("mrs_secret"));
+        let references = request.references.unwrap();
+        assert!(matches!(
+            references[0].media(),
+            GenerationReferenceAuthority::Upload { handle } if handle == "mru_first"
+        ));
+        assert!(matches!(
+            references[1].media(),
+            GenerationReferenceAuthority::Upload { handle } if handle == "mru_second"
+        ));
+    }
+
+    #[tokio::test]
+    async fn h3_remote_builder_freezes_exact_av_contract_before_http_451() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate/stream"))
+            .respond_with(ResponseTemplate::new(451).set_body_json(serde_json::json!({
+                "error": "MiniMax H3 legal activation is unavailable",
+                "code": mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = run(
+            "a synchronized scene",
+            mold_core::minimax_h3::FL2VA_COMFY,
+            None,
+            None,
+            None,
+            None,
+            Some(7.5),
+            Some(42),
+            1,
+            Ltx2Options {
+                frames: None,
+                fps: None,
+                clip_frames: None,
+                motion_tail: 17,
+                enable_audio: None,
+                audio_file: None,
+                source_video: None,
+                extend_video: None,
+                extend_overlap_frames: None,
+                keyframes: None,
+                pipeline: None,
+                ic_lora_control: None,
+                hdr_exr_dir: None,
+                hdr_exr_full_float: false,
+                loras: None,
+                retake_range: None,
+                spatial_upscale: None,
+                temporal_upscale: None,
+                guidance_overrides: None,
+                source_image_name: None,
+                references: None,
+                reference_uploads: Vec::new(),
+            },
+            Some(server.uri()),
+            OutputFormat::Png,
+            false,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Scheduler::UniPc),
+            Some(true),
+            false,
+            false,
+            None,
+            None,
+            None,
+            0.75,
+            None,
+            None,
+            None,
+            1.0,
+            Some("bad negative".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body["output_format"], "mp4");
+        assert_eq!(body["width"], mold_core::minimax_h3::DEFAULT_WIDTH);
+        assert_eq!(body["height"], mold_core::minimax_h3::DEFAULT_HEIGHT);
+        assert_eq!(body["steps"], mold_core::minimax_h3::DEFAULT_STEPS);
+        assert_eq!(body["guidance"], 0.0);
+        assert_eq!(body["strength"], 1.0);
+        assert_eq!(body["frames"], mold_core::minimax_h3::MIN_FRAMES);
+        assert_eq!(body["fps"], mold_core::minimax_h3::FIXED_FPS);
+        assert_eq!(body["enable_audio"], true);
+        assert!(body["negative_prompt"].is_null());
+        assert!(body["scheduler"].is_null());
+        assert!(body["cfg_plus"].is_null());
+    }
+
+    #[test]
+    fn h3_remote_missing_model_cannot_enter_auto_pull() {
+        let request = h3_request(mold_core::minimax_h3::FL2VA_COMFY);
+        let error = require_remote_auto_pull_activation(&request, &Config::default()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
 
     #[tokio::test]
     async fn local_control_materialization_preserves_built_in_first_ordering() {
