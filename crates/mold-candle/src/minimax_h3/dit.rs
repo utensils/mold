@@ -7,9 +7,10 @@
 //! (`transformer` versus `transformer_ref`) separately and the audit fails
 //! closed when that identity does not match the requested task.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::error::Error as StdError;
 use std::fmt;
+use std::path::Path;
 
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn as nn;
@@ -134,8 +135,88 @@ pub struct H3CheckpointInventory {
     pub tensors: BTreeMap<String, H3TensorSpec>,
 }
 
+/// One concrete checkpoint source whose header inventory and tensor backend
+/// cannot be separated after construction. The component role is still an
+/// authority supplied by the artifact resolver because the released
+/// `transformer` and `transformer_ref` headers are indistinguishable.
+pub struct H3CheckpointSource<'a> {
+    inventory: H3CheckpointInventory,
+    vb: VarBuilder<'a>,
+}
+
+impl fmt::Debug for H3CheckpointSource<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("H3CheckpointSource")
+            .field("component", &self.inventory.component)
+            .field("tensor_count", &self.inventory.tensors.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl H3CheckpointSource<'static> {
+    /// Build an owned source from the exact tensors that its loader will use.
+    /// This is useful for synthetic conformance and buffered integrations; the
+    /// inventory is derived rather than accepted separately.
+    pub fn from_tensors(
+        component: H3CheckpointComponent,
+        tensors: HashMap<String, Tensor>,
+        device: &Device,
+    ) -> Result<Self> {
+        let inventory = H3CheckpointInventory {
+            component,
+            tensors: tensors
+                .iter()
+                .map(|(name, tensor)| {
+                    (
+                        name.clone(),
+                        H3TensorSpec::new(tensor.dims().to_vec(), tensor.dtype()),
+                    )
+                })
+                .collect(),
+        };
+        Ok(Self {
+            inventory,
+            // Every H3 load site requests its checkpoint dtype explicitly.
+            vb: VarBuilder::from_tensors(tensors, DType::F32, device),
+        })
+    }
+
+    /// Memory-map safetensors shards, derive their inventory from those exact
+    /// mappings, and retain the same mappings as the only tensor backend.
+    /// Duplicate tensor names across shards are rejected rather than inheriting
+    /// Candle's last-shard-wins behavior.
+    ///
+    /// # Safety
+    ///
+    /// The mapped files must not be modified or truncated until this source has
+    /// been consumed by [`H3Transformer::load`]. This is the same requirement as
+    /// [`candle::safetensors::MmapedSafetensors::multi`].
+    pub unsafe fn from_mmaped_safetensors<P: AsRef<Path>>(
+        component: H3CheckpointComponent,
+        paths: &[P],
+        device: &Device,
+    ) -> Result<Self> {
+        // SAFETY: inherited by this function's documented caller contract.
+        let mapped = unsafe { candle::safetensors::MmapedSafetensors::multi(paths)? };
+        let mut tensors = BTreeMap::new();
+        for (name, view) in mapped.tensors() {
+            let spec = H3TensorSpec::new(view.shape().to_vec(), DType::try_from(view.dtype())?);
+            if tensors.insert(name.clone(), spec).is_some() {
+                candle::bail!("duplicate MiniMax H3 tensor {name:?} across checkpoint shards")
+            }
+        }
+        Ok(Self {
+            inventory: H3CheckpointInventory { component, tensors },
+            // Every H3 load site requests its checkpoint dtype explicitly.
+            vb: VarBuilder::from_backend(Box::new(mapped), DType::F32, device.clone()),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum H3WeightAuditIssue {
+    InvalidConfig(String),
     WrongComponent {
         expected: H3CheckpointComponent,
         actual: H3CheckpointComponent,
@@ -190,6 +271,36 @@ pub struct H3LoadPlan {
     mode: H3AdaLnMode,
     precision: H3PrecisionProfile,
     expected: BTreeMap<String, H3TensorSpec>,
+}
+
+/// A single-use audit result that owns the validated architecture and the exact
+/// checkpoint backend. It deliberately does not implement `Clone`: a plan
+/// cannot be replayed with another component, config, or `VarBuilder`.
+pub struct H3AuditedCheckpoint<'a> {
+    config: H3TransformerConfig,
+    plan: H3LoadPlan,
+    source: H3CheckpointSource<'a>,
+}
+
+impl fmt::Debug for H3AuditedCheckpoint<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("H3AuditedCheckpoint")
+            .field("config", &self.config)
+            .field("plan", &self.plan)
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
+impl H3AuditedCheckpoint<'_> {
+    pub fn config(&self) -> &H3TransformerConfig {
+        &self.config
+    }
+
+    pub fn plan(&self) -> &H3LoadPlan {
+        &self.plan
+    }
 }
 
 impl H3LoadPlan {
@@ -296,7 +407,34 @@ impl H3TransformerConfig {
         if !self.timestep_input_dim.is_multiple_of(2) {
             candle::bail!("MiniMax H3 timestep_input_dim must be even")
         }
-        let rotary_dim = 6 * self.rope_inv_freq_len;
+        let checked_product = |name: &str, values: &[usize]| -> Result<usize> {
+            values.iter().try_fold(1usize, |product, value| {
+                product.checked_mul(*value).ok_or_else(|| {
+                    candle::Error::Msg(format!("MiniMax H3 {name} dimension arithmetic overflows"))
+                })
+            })
+        };
+        checked_product(
+            "attention inner",
+            &[self.num_attention_heads, self.attention_head_dim],
+        )?;
+        checked_product(
+            "QKV",
+            &[3, self.num_attention_heads, self.attention_head_dim],
+        )?;
+        checked_product("SwiGLU", &[2, self.ffn_hidden_size])?;
+        checked_product(
+            "video patch",
+            &[
+                self.video_latent_channels,
+                self.patch_size[0],
+                self.patch_size[1],
+                self.patch_size[2],
+            ],
+        )?;
+        checked_product("AdaLN", &[6, H3_MODALITY_COUNT, self.hidden_size])?;
+        checked_product("final AdaLN", &[2, self.hidden_size])?;
+        let rotary_dim = checked_product("rotary", &[6, self.rope_inv_freq_len])?;
         if rotary_dim > self.attention_head_dim {
             candle::bail!(
                 "MiniMax H3 rotary width {rotary_dim} exceeds head width {}",
@@ -445,7 +583,13 @@ pub fn expected_h3_weight_specs(
     config: &H3TransformerConfig,
     mode: H3AdaLnMode,
     precision: H3PrecisionProfile,
-) -> BTreeMap<String, H3TensorSpec> {
+) -> Result<BTreeMap<String, H3TensorSpec>> {
+    config.validate()?;
+    if let H3AdaLnMode::Curve { grid, basis_dim } = mode {
+        if grid < 2 || basis_dim == 0 {
+            candle::bail!("MiniMax H3 curve mode requires grid >= 2 and a positive basis width")
+        }
+    }
     let mut specs = BTreeMap::new();
     for (name, shape) in [
         (
@@ -558,16 +702,22 @@ pub fn expected_h3_weight_specs(
     ] {
         insert_spec(&mut specs, name, shape, dtype_for(name, mode, precision));
     }
-    specs
+    Ok(specs)
 }
 
-pub fn audit_h3_checkpoint(
-    config: &H3TransformerConfig,
+pub fn audit_h3_checkpoint<'a>(
+    config: H3TransformerConfig,
     task: H3TransformerTask,
     precision: H3PrecisionProfile,
-    inventory: &H3CheckpointInventory,
-) -> std::result::Result<H3LoadPlan, H3WeightAuditError> {
+    source: H3CheckpointSource<'a>,
+) -> std::result::Result<H3AuditedCheckpoint<'a>, H3WeightAuditError> {
     let mut issues = Vec::new();
+    if let Err(error) = config.validate() {
+        return Err(H3WeightAuditError {
+            issues: vec![H3WeightAuditIssue::InvalidConfig(error.to_string())],
+        });
+    }
+    let inventory = &source.inventory;
     let expected_component = task.checkpoint_component();
     if inventory.component != expected_component {
         issues.push(H3WeightAuditIssue::WrongComponent {
@@ -613,7 +763,13 @@ pub fn audit_h3_checkpoint(
         H3AdaLnMode::Full
     };
 
-    let expected = expected_h3_weight_specs(config, mode, precision);
+    let expected = match expected_h3_weight_specs(&config, mode, precision) {
+        Ok(expected) => expected,
+        Err(error) => {
+            issues.push(H3WeightAuditIssue::InvalidConfig(error.to_string()));
+            return Err(H3WeightAuditError { issues });
+        }
+    };
     for (key, expected_spec) in &expected {
         match inventory.tensors.get(key) {
             None => issues.push(H3WeightAuditIssue::MissingKey(key.clone())),
@@ -642,12 +798,16 @@ pub fn audit_h3_checkpoint(
     }
 
     if issues.is_empty() {
-        Ok(H3LoadPlan {
-            task,
-            component: inventory.component,
-            mode,
-            precision,
-            expected,
+        Ok(H3AuditedCheckpoint {
+            config,
+            plan: H3LoadPlan {
+                task,
+                component: inventory.component,
+                mode,
+                precision,
+                expected,
+            },
+            source,
         })
     } else {
         Err(H3WeightAuditError { issues })
@@ -1559,8 +1719,14 @@ pub struct H3Transformer {
 }
 
 impl H3Transformer {
-    pub fn load(config: H3TransformerConfig, plan: &H3LoadPlan, vb: VarBuilder) -> Result<Self> {
-        config.validate()?;
+    pub fn load(checkpoint: H3AuditedCheckpoint<'_>) -> Result<Self> {
+        let H3AuditedCheckpoint {
+            config,
+            plan,
+            source,
+        } = checkpoint;
+        debug_assert_eq!(source.inventory.component, plan.component);
+        let vb = source.vb;
         for key in plan.expected.keys() {
             if !vb.contains_tensor(key) {
                 candle::bail!("MiniMax H3 audited tensor {key:?} is absent from the loader")
@@ -1784,7 +1950,7 @@ mod tests {
     ) -> H3CheckpointInventory {
         H3CheckpointInventory {
             component,
-            tensors: expected_h3_weight_specs(config, mode, precision),
+            tensors: expected_h3_weight_specs(config, mode, precision).unwrap(),
         }
     }
 
@@ -1833,6 +1999,14 @@ mod tests {
             .collect()
     }
 
+    fn source_from_inventory(
+        inventory: H3CheckpointInventory,
+        device: &Device,
+    ) -> Result<H3CheckpointSource<'static>> {
+        let tensors = tensor_map(&inventory.tensors, device)?;
+        H3CheckpointSource::from_tensors(inventory.component, tensors, device)
+    }
+
     fn load_tiny(
         device: &Device,
         mode: H3AdaLnMode,
@@ -1841,11 +2015,10 @@ mod tests {
     ) -> Result<H3Transformer> {
         let config = H3TransformerConfig::tiny();
         let inventory = inventory(&config, mode, precision, task.checkpoint_component());
-        let plan = audit_h3_checkpoint(&config, task, precision, &inventory)
+        let source = source_from_inventory(inventory, device)?;
+        let checkpoint = audit_h3_checkpoint(config, task, precision, source)
             .map_err(|error| candle::Error::Msg(error.to_string()))?;
-        let tensors = tensor_map(plan.expected_tensors(), device)?;
-        let vb = VarBuilder::from_tensors(tensors, precision.compute_dtype(), device);
-        H3Transformer::load(config, &plan, vb)
+        H3Transformer::load(checkpoint)
     }
 
     fn tiny_layout() -> H3PackedLayout {
@@ -1939,6 +2112,7 @@ mod tests {
                 H3AdaLnMode::Full,
                 H3PrecisionProfile::OfficialMixedBf16F32,
             )
+            .unwrap()
             .len(),
             535
         );
@@ -1951,6 +2125,7 @@ mod tests {
                 },
                 H3PrecisionProfile::OfficialMixedBf16F32,
             )
+            .unwrap()
             .len(),
             532
         );
@@ -1964,7 +2139,8 @@ mod tests {
             basis_dim: 3,
         };
         let specs =
-            expected_h3_weight_specs(&config, mode, H3PrecisionProfile::OfficialMixedBf16F32);
+            expected_h3_weight_specs(&config, mode, H3PrecisionProfile::OfficialMixedBf16F32)
+                .unwrap();
 
         assert_eq!(specs["adaln_t_table"].dtype, DType::F32);
         assert!(!specs.keys().any(|name| name.starts_with("time_embedder.")));
@@ -1982,46 +2158,48 @@ mod tests {
     #[test]
     fn full_and_pruned_layouts_detect_with_explicit_qkv_physics() {
         let config = H3TransformerConfig::tiny();
-        let full = inventory(
+        let full_inventory = inventory(
             &config,
             H3AdaLnMode::Full,
             H3PrecisionProfile::SyntheticF32,
             H3CheckpointComponent::Transformer,
         );
+        let full_source = source_from_inventory(full_inventory, &Device::Cpu).unwrap();
         let full = audit_h3_checkpoint(
-            &config,
+            config.clone(),
             H3TransformerTask::T2VaFl2Va,
             H3PrecisionProfile::SyntheticF32,
-            &full,
+            full_source,
         )
         .unwrap();
-        assert_eq!(full.adaln_mode(), H3AdaLnMode::Full);
-        assert_eq!(full.qkv_layout(), H3QkvLayout::GroupedPerHead);
-        assert!(full.ignored_keys().is_empty());
+        assert_eq!(full.plan().adaln_mode(), H3AdaLnMode::Full);
+        assert_eq!(full.plan().qkv_layout(), H3QkvLayout::GroupedPerHead);
+        assert!(full.plan().ignored_keys().is_empty());
 
         let curve_mode = H3AdaLnMode::Curve {
             grid: 9,
             basis_dim: 3,
         };
-        let pruned = inventory(
+        let pruned_inventory = inventory(
             &config,
             curve_mode,
             H3PrecisionProfile::SyntheticF32,
             H3CheckpointComponent::TransformerRef,
         );
+        let pruned_source = source_from_inventory(pruned_inventory, &Device::Cpu).unwrap();
         let pruned = audit_h3_checkpoint(
-            &config,
+            config,
             H3TransformerTask::Ref2Va,
             H3PrecisionProfile::SyntheticF32,
-            &pruned,
+            pruned_source,
         )
         .unwrap();
-        assert_eq!(pruned.adaln_mode(), curve_mode);
-        assert_eq!(pruned.qkv_layout(), H3QkvLayout::QkvMajor);
+        assert_eq!(pruned.plan().adaln_mode(), curve_mode);
+        assert_eq!(pruned.plan().qkv_layout(), H3QkvLayout::QkvMajor);
     }
 
     #[test]
-    fn identical_partition_indexes_cannot_be_interchanged() {
+    fn official_fl_and_ref_sources_cannot_be_interchanged() {
         let config = H3TransformerConfig::tiny();
         let ref_inventory = inventory(
             &config,
@@ -2029,11 +2207,12 @@ mod tests {
             H3PrecisionProfile::SyntheticF32,
             H3CheckpointComponent::TransformerRef,
         );
+        let ref_source = source_from_inventory(ref_inventory, &Device::Cpu).unwrap();
         let error = audit_h3_checkpoint(
-            &config,
+            config.clone(),
             H3TransformerTask::T2VaFl2Va,
             H3PrecisionProfile::SyntheticF32,
-            &ref_inventory,
+            ref_source,
         )
         .unwrap_err();
         assert_eq!(
@@ -2043,6 +2222,102 @@ mod tests {
                 actual: H3CheckpointComponent::TransformerRef,
             }]
         );
+
+        let fl_inventory = inventory(
+            &config,
+            H3AdaLnMode::Full,
+            H3PrecisionProfile::SyntheticF32,
+            H3CheckpointComponent::Transformer,
+        );
+        let fl_source = source_from_inventory(fl_inventory, &Device::Cpu).unwrap();
+        let error = audit_h3_checkpoint(
+            config,
+            H3TransformerTask::Ref2Va,
+            H3PrecisionProfile::SyntheticF32,
+            fl_source,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.issues,
+            vec![H3WeightAuditIssue::WrongComponent {
+                expected: H3CheckpointComponent::TransformerRef,
+                actual: H3CheckpointComponent::Transformer,
+            }]
+        );
+    }
+
+    #[test]
+    fn checkpoint_source_cannot_be_audited_with_a_different_config() {
+        let source_config = H3TransformerConfig::tiny();
+        let source = source_from_inventory(
+            inventory(
+                &source_config,
+                H3AdaLnMode::Full,
+                H3PrecisionProfile::SyntheticF32,
+                H3CheckpointComponent::Transformer,
+            ),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let mut requested_config = source_config;
+        requested_config.num_layers = 1;
+
+        let error = audit_h3_checkpoint(
+            requested_config,
+            H3TransformerTask::T2VaFl2Va,
+            H3PrecisionProfile::SyntheticF32,
+            source,
+        )
+        .unwrap_err();
+        assert!(error.issues.iter().any(|issue| matches!(
+            issue,
+            H3WeightAuditIssue::UnexpectedKey(key) if key.starts_with("blocks.1.")
+        )));
+    }
+
+    #[test]
+    fn mmap_audit_and_load_share_one_checkpoint_backend() -> Result<()> {
+        let device = Device::Cpu;
+        let config = H3TransformerConfig::tiny();
+        let tensors = tensor_map(
+            &expected_h3_weight_specs(
+                &config,
+                H3AdaLnMode::Full,
+                H3PrecisionProfile::SyntheticF32,
+            )?,
+            &device,
+        )?;
+        let directory = std::env::temp_dir().join(format!(
+            "mold-h3-dit-source-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| candle::Error::Msg(error.to_string()))?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("transformer.safetensors");
+        candle::safetensors::save(&tensors, &path)?;
+
+        // SAFETY: the file stays immutable until `load` consumes the source.
+        let source = unsafe {
+            H3CheckpointSource::from_mmaped_safetensors(
+                H3CheckpointComponent::Transformer,
+                std::slice::from_ref(&path),
+                &device,
+            )?
+        };
+        let checkpoint = audit_h3_checkpoint(
+            config,
+            H3TransformerTask::T2VaFl2Va,
+            H3PrecisionProfile::SyntheticF32,
+            source,
+        )
+        .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        let model = H3Transformer::load(checkpoint)?;
+        assert_eq!(model.task(), H3TransformerTask::T2VaFl2Va);
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
     }
 
     #[test]
@@ -2067,11 +2342,12 @@ mod tests {
             "quantized.aux_scale".into(),
             H3TensorSpec::new([1], DType::F32),
         );
+        let source = source_from_inventory(inventory, &Device::Cpu).unwrap();
         let error = audit_h3_checkpoint(
-            &config,
+            config,
             H3TransformerTask::T2VaFl2Va,
             H3PrecisionProfile::SyntheticF32,
-            &inventory,
+            source,
         )
         .unwrap_err();
         assert!(error
