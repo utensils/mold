@@ -32,8 +32,13 @@ export interface ReferenceUploadCapabilities {
   session_ttl_ms: number;
 }
 
-export type ReferenceUploadRequest = Record<string, unknown> & {
+export type ReferenceUploadRequest = {
   model: string;
+  prompt?: string;
+  frames?: number | null;
+  fps?: number | null;
+  guidance?: number | null;
+  batch_size?: number | null;
   references?: GenerationReference[] | null;
 };
 

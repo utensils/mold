@@ -7,6 +7,12 @@ vi.mock("../lib/api/sse", () => ({
   sseStream: (...a: unknown[]) => sseStream(...a),
 }));
 
+const prepareReferenceUploads = vi.fn();
+vi.mock("@studio/api/referenceUploads", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/referenceUploads")>()),
+  prepareReferenceUploads: (...args: unknown[]) => prepareReferenceUploads(...args),
+}));
+
 const streamableMediaUrl = vi.fn().mockResolvedValue("https://hal9000/media/generated-video");
 const evictMedia = vi.fn();
 vi.mock("../lib/gallery/media", async (importOriginal) => ({
@@ -96,6 +102,90 @@ beforeEach(() => {
 });
 
 describe("generation store multi-host routing", () => {
+  it("creates a fresh exact-host reference lease for every submission attempt", async () => {
+    let attempt = 0;
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    prepareReferenceUploads.mockImplementation(
+      async ({ request: original }: { request: GenerateRequest }) => {
+        attempt += 1;
+        return {
+          request: {
+            ...original,
+            references: original.references?.map((reference) => ({
+              ...reference,
+              media: { authority: "upload", handle: `lease-${attempt}` },
+            })),
+          },
+          expiresAtMs: Date.now() + 60_000,
+          requestScopeSha256: "a".repeat(64),
+          cancel,
+        };
+      },
+    );
+    sseStream.mockResolvedValue(undefined);
+    const original: GenerateRequest = {
+      ...request(),
+      model: "minimax-h3-ref2va",
+      frames: 124,
+      fps: 24,
+      references: [
+        {
+          kind: "image",
+          media: { authority: "inline", data: "PRIVATE-IMAGE-BYTES" },
+          provenance: { name: "identity.png", sha256: "b".repeat(64) },
+          mime_type: "image/png",
+          width: 32,
+          height: 24,
+        },
+      ],
+    };
+    const route = {
+      ...halRoute,
+      instanceId: "instance-1",
+      referenceUploads: {
+        available: true,
+        protocol_version: 1,
+        requires_api_key: true,
+        session_path: "/api/generate/reference-upload-sessions",
+        upload_path: "/api/generate/reference-upload",
+        session_handle_header: "x-mold-reference-session",
+        upload_handle_header: "x-mold-reference-upload",
+        max_file_bytes: 1_000_000,
+        max_session_bytes: 2_000_000,
+        session_ttl_ms: 60_000,
+      },
+    };
+
+    const first = useGenerationStore().submitBatch(original, 1, route);
+    await first.settled;
+    const second = useGenerationStore().submitBatch(original, 1, route);
+    await second.settled;
+
+    expect(prepareReferenceUploads).toHaveBeenCalledTimes(2);
+    expect(prepareReferenceUploads.mock.calls[0]?.[0]).toMatchObject({
+      target: halRoute.target,
+      expectedInstanceId: "instance-1",
+      capabilities: route.referenceUploads,
+    });
+    expect(sseStream.mock.calls[0]?.[1].body.references[0].media).toEqual({
+      authority: "upload",
+      handle: "lease-1",
+    });
+    expect(sseStream.mock.calls[1]?.[1].body.references[0].media).toEqual({
+      authority: "upload",
+      handle: "lease-2",
+    });
+    expect(first.jobs[0]!.request!.references?.[0]?.media).toEqual({
+      authority: "inline",
+      data: "PRIVATE-IMAGE-BYTES",
+    });
+    expect(second.jobs[0]!.request!.references?.[0]?.media).toEqual({
+      authority: "inline",
+      data: "PRIVATE-IMAGE-BYTES",
+    });
+    expect(cancel).toHaveBeenCalledTimes(2);
+  });
+
   it("tags jobs with their host and streams against its target", async () => {
     sseStream.mockResolvedValue(undefined);
     const store = useGenerationStore();

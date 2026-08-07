@@ -40,6 +40,7 @@ import type { DevelopPhase } from "@ui/lib/grain";
 import type { ClipRailMedia } from "@ui/components/types";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { requestNeedsReferenceUpload } from "@studio/api/referenceUploads";
 import {
   expansionTaskForRequest,
   type ExpandTask,
@@ -304,8 +305,14 @@ function cloneRoute(route: HostRoute | null): HostRoute | null {
   return route ? { ...route, target: { ...route.target } } : null;
 }
 
-function normalizeSubmitRoute(route: HostRoute | null): HostRoute | null {
-  return route?.hostId === "origin" ? null : route;
+function normalizeSubmitRoute(
+  route: HostRoute | null,
+  request?: GenerateRequestWire,
+): HostRoute | null {
+  return route?.hostId === "origin" &&
+    !(request && requestNeedsReferenceUpload(request))
+    ? null
+    : route;
 }
 
 function sameRoute(
@@ -2395,7 +2402,7 @@ function submitRequestCopies(
 ): void {
   const copies = requestCopyCount(request);
   if (copies === 1) {
-    stream.submit(request, decision, normalizeSubmitRoute(route));
+    stream.submit(request, decision, normalizeSubmitRoute(route, request));
     return;
   }
 
@@ -2415,7 +2422,7 @@ function submitRequestCopies(
         seed: baseSeed + index,
       },
       decision,
-      normalizeSubmitRoute(route),
+      normalizeSubmitRoute(route, request),
     );
   }
 }
@@ -2899,32 +2906,33 @@ async function queueVariations() {
       // prompt — override the base request's prompt rather than re-appending.
       // Each is one print; the batch size drove the variation count, not the
       // per-job image count.
+      const request: GenerateRequestWire = {
+        ...prepared.baseRequest,
+        prompt,
+        batch_size: 1,
+        original_prompt: prepared.rootPrompt ?? prepared.sourcePrompt,
+        ...(prepared.kind === "remix"
+          ? {
+              prompt_transform: {
+                operation: "remix" as const,
+                ...(prepared.rootPrompt
+                  ? { root_prompt: prepared.rootPrompt }
+                  : {}),
+                source_prompt: prepared.sourcePrompt,
+                source_kind: prepared.sourceKind ?? "direct",
+                task: prepared.task,
+                dimensions: [...(prepared.remixDimensions?.[index] ?? [])],
+              },
+            }
+          : {}),
+        batch_id: prepared.batchId,
+        batch_index: index + 1,
+        batch_count: list.length,
+      };
       stream.submit(
-        {
-          ...prepared.baseRequest,
-          prompt,
-          batch_size: 1,
-          original_prompt: prepared.rootPrompt ?? prepared.sourcePrompt,
-          ...(prepared.kind === "remix"
-            ? {
-                prompt_transform: {
-                  operation: "remix" as const,
-                  ...(prepared.rootPrompt
-                    ? { root_prompt: prepared.rootPrompt }
-                    : {}),
-                  source_prompt: prepared.sourcePrompt,
-                  source_kind: prepared.sourceKind ?? "direct",
-                  task: prepared.task,
-                  dimensions: [...(prepared.remixDimensions?.[index] ?? [])],
-                },
-              }
-            : {}),
-          batch_id: prepared.batchId,
-          batch_index: index + 1,
-          batch_count: list.length,
-        },
+        request,
         prepared.decision,
-        normalizeSubmitRoute(revalidated.route),
+        normalizeSubmitRoute(revalidated.route, request),
       );
     }
     variations.value = [];

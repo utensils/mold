@@ -501,6 +501,16 @@ function inventoryKnown(hostId: string): boolean {
   return inventoryHostIds.value.includes(hostId);
 }
 
+function withReferenceUploads(route: HostRoute | null): HostRoute | null {
+  if (!route) return null;
+  return {
+    ...route,
+    target: { ...route.target },
+    referenceUploads:
+      capabilitiesByHost.value[route.hostId]?.reference_uploads ?? null,
+  };
+}
+
 function resolve(model: string | null): HostRoute | null {
   const selection = targetId.value;
   if (
@@ -514,7 +524,9 @@ function resolve(model: string | null): HostRoute | null {
   const eligible = model
     ? hosts.value.filter((host) => !accessRestrictionForHost(host.id, model))
     : hosts.value;
-  return resolveRoute(eligible, selection, hostsForModel(model));
+  return withReferenceUploads(
+    resolveRoute(eligible, selection, hostsForModel(model)),
+  );
 }
 
 async function resolveFeasibleWithPreview(
@@ -647,6 +659,8 @@ async function resolveFeasibleWithPreview(
           label: chosen.label,
           target,
           instanceId: chosen.instanceId ?? null,
+          referenceUploads:
+            capabilitiesByHost.value[chosen.id]?.reference_uploads ?? null,
         },
       };
     }
@@ -672,7 +686,7 @@ async function resolveFeasibleWithPreview(
       unsupportedIds.includes(id),
     );
     const route = resolveRoute(originRoutable, selection, legacyModelIds);
-    if (route) return { kind: "route", route };
+    if (route) return { kind: "route", route: withReferenceUploads(route)! };
   }
 
   const transient = probes.flatMap((probe) => {
@@ -954,6 +968,8 @@ async function revalidateFeasibleWithPreview(
       label: route.label,
       target: { ...route.target },
       instanceId: capturedInstanceId,
+      referenceUploads:
+        capabilitiesByHost.value[route.hostId]?.reference_uploads ?? null,
     },
   };
 }

@@ -17,6 +17,12 @@ import type { ChainRoutingDecision } from "../lib/chainRouting";
 import type { HostRoute } from "../lib/hostRouting";
 import { StreamSlotPool } from "../lib/streamSlots";
 import { createUuid } from "@studio/lib/id";
+import {
+  prepareReferenceUploads,
+  requestNeedsReferenceUpload,
+  type ReferenceUploadLease,
+} from "@studio/api/referenceUploads";
+import { redactGenerationReference } from "@studio/lib/generationReferences";
 
 export interface JobProgress {
   stage: string;
@@ -498,6 +504,20 @@ function stripHeavyResult(r: SseCompleteEvent | null): PersistedResult | null {
   return rest;
 }
 
+/** Job recovery keeps only redacted reference descriptors. Inline bytes and
+ * one-use upload handles are session memory, never localStorage state. */
+function persistenceSafeRequest(
+  request: GenerateRequestWire | ChainRequestWire,
+): GenerateRequestWire | ChainRequestWire {
+  if (isPrebuiltChainRequest(request) || !request.references?.length) {
+    return request;
+  }
+  return {
+    ...request,
+    references: request.references.map(redactGenerationReference),
+  };
+}
+
 /** Reconstitute the persisted job rail. `raw` is the localStorage payload
  * (caller injects it so tests can drive the dead-letter logic without
  * touching `localStorage` directly).
@@ -613,7 +633,7 @@ function persistJobs(jobs: Job[]) {
     });
     const serializable: PersistedJob[] = filtered.map((j) => ({
       id: j.id,
-      request: j.request,
+      request: persistenceSafeRequest(j.request),
       startedAt: j.startedAt,
       progress: j.progress,
       result: stripHeavyResult(j.result),
@@ -828,10 +848,10 @@ function submitJob(
     recordFailedSettlement(job);
   };
 
-  const startStream = () => {
+  const startStream = async () => {
     if (decision.kind === "chain") {
       const chainReq = resolveChainRequest(req, decision);
-      return generateChainStream(
+      await generateChainStream(
         chainReq,
         {
           onProgress: (evt) => applyChainProgress(job, evt),
@@ -859,27 +879,58 @@ function submitJob(
         "internal: ChainRequestWire submitted with non-chain routing decision";
       recordFailedSettlement(job);
     } else {
-      return generateStream(
-        req,
-        {
-          onProgress: (evt) => applyProgress(job, evt),
-          onComplete: (evt) => {
-            job.result = evt;
-            job.state = "done";
-            recordSuccessfulSettlement(job);
-            job.previewUrl = null;
-            if (evt.gpu !== null && evt.gpu !== undefined)
-              job.progress.gpu = evt.gpu;
-            fireComplete(job);
-            scheduleAutoRemoveOnDone(id);
+      let lease: ReferenceUploadLease<GenerateRequestWire> | null = null;
+      try {
+        let transportRequest = req;
+        if (requestNeedsReferenceUpload(req)) {
+          if (!route) {
+            throw new Error(
+              "MiniMax H3 reference uploads require a frozen authenticated host route.",
+            );
+          }
+          const prepared = await prepareReferenceUploads({
+            target: {
+              baseUrl: route.target.baseUrl,
+              apiKey: route.target.apiKey ?? null,
+            },
+            expectedInstanceId: route.instanceId ?? "",
+            capabilities: route.referenceUploads,
+            request: req,
+            signal: controller.signal,
+          });
+          lease = prepared;
+          transportRequest = prepared.request;
+        }
+        await generateStream(
+          transportRequest,
+          {
+            onProgress: (evt) => applyProgress(job, evt),
+            onComplete: (evt) => {
+              job.result = evt;
+              job.state = "done";
+              recordSuccessfulSettlement(job);
+              job.previewUrl = null;
+              if (evt.gpu !== null && evt.gpu !== undefined)
+                job.progress.gpu = evt.gpu;
+              fireComplete(job);
+              scheduleAutoRemoveOnDone(id);
+            },
+            onError: onErrorCommon,
           },
-          onError: onErrorCommon,
-        },
-        controller.signal,
-        route?.target,
-      );
+          controller.signal,
+          route?.target,
+        );
+      } catch (error) {
+        if (!controller.signal.aborted && job.state === "running") {
+          onErrorCommon({
+            kind: "network",
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } finally {
+        if (lease) void lease.cancel().catch(() => undefined);
+      }
     }
-    return Promise.resolve();
   };
 
   // Four held-open render streams leave browser connection headroom for queue

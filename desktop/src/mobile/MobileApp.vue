@@ -1318,6 +1318,7 @@ function routeForMobileHost(host: MobileHost): HostRoute {
     kind: "remote",
     target: { ...mobileHostTarget(host) },
     instanceId: host.instanceId ?? null,
+    referenceUploads: serverCapabilities[host.id]?.reference_uploads ?? null,
   };
 }
 
@@ -3415,6 +3416,8 @@ async function generate(): Promise<void> {
       label: route.label,
       kind: "remote",
       target: { ...route.target },
+      instanceId: route.instanceId ?? null,
+      referenceUploads: route.referenceUploads ?? null,
       mirrorRemoteOutput: false,
       retainEncodedResult: false,
       metadataOnlyCompletion: true,

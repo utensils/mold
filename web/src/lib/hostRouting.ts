@@ -12,6 +12,7 @@
  */
 import { ORIGIN_HOST_ID } from "./hostRegistry";
 import type { ModelInfoExtended } from "../types";
+import type { ReferenceUploadCapabilities } from "@studio/api/referenceUploads";
 
 /** Least-busy routing across every ready host. */
 export const AUTO_TARGET_ID = "auto";
@@ -56,6 +57,8 @@ export interface HostRoute {
   target: HostTarget;
   /** Frozen server-installation identity for same-endpoint replacement fences. */
   instanceId?: string | null;
+  /** Frozen authenticated reference-ingress contract for this exact host. */
+  referenceUploads?: ReferenceUploadCapabilities | null;
 }
 
 export function sameHostRoute(
