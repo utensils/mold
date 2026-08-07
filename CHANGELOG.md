@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-08-07
+
 ### Added
 
 - **Desktop can relocate the complete Mold home with optional migration.** Settings now shows the effective shared root and accepts either a native folder choice or a typed path, with a recommended copy-everything path and an explicit use-as-is alternative. Migration validates before stopping the embedded server, rejects a separately owned `mold serve`, resolves symlink aliases, copies through a sibling staging directory without overwriting a non-empty destination, preserves the original, restores the old engine after a failure, saves the new root only after success, and relaunches. An unavailable external drive is shown as a recoverable offline state and is never initialized as a replacement tree. The saved bootstrap selection lives outside the selected root and is resolved by `mold-core` after an explicit `MOLD_HOME` environment override but before the `~/.mold` default, so CLI, TUI, server/web, and desktop agree on config, SQLite, models, outputs, and logs; iPhone continues to use its selected remote host's root.
@@ -1516,7 +1518,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/utensils/mold/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/utensils/mold/compare/v0.20.2...v0.21.0
 [0.20.2]: https://github.com/utensils/mold/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/utensils/mold/compare/v0.20.0...v0.20.1
