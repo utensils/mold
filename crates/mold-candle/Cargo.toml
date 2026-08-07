@@ -14,6 +14,8 @@ name = "mold_candle"
 default = []
 cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
+# Developer-only H3 FlashAttention v2 primitive. Mold release artifacts do not
+# enable this feature; the H3 authority remains a separate fail-closed gate.
 flash-attn = ["dep:candle-flash-attn", "cuda"]
 
 [dependencies]
