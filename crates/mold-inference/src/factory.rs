@@ -760,9 +760,12 @@ mod tests {
         std::iter::repeat_n(byte, 64).collect()
     }
 
-    fn h3_factory_authority(frozen: &FrozenEngineConfig) -> crate::FrozenH3FactoryAuthority {
+    fn h3_factory_authority(
+        frozen: &FrozenEngineConfig,
+        model: &str,
+    ) -> crate::FrozenH3FactoryAuthority {
         crate::FrozenH3FactoryAuthority::new_contract_only(crate::H3FactoryAuthorityInput {
-            model: mold_core::minimax_h3::FL2VA_COMFY.into(),
+            model: model.into(),
             device_id: "gpu-0".into(),
             device_ordinal: 0,
             compute_capability: (8, 9),
@@ -906,33 +909,37 @@ mod tests {
 
     #[test]
     fn frozen_factory_never_calls_h3_loader_before_the_legal_gate() {
-        let mut frozen =
-            FrozenEngineConfig::resolve(mold_core::minimax_h3::FL2VA_COMFY, &Config::default());
-        frozen.family = mold_core::minimax_h3::FAMILY.to_string();
-        frozen.h3_factory_authority = Some(h3_factory_authority(&frozen));
-        let called = Arc::new(AtomicBool::new(false));
-        let loader_called = Arc::clone(&called);
+        for model in [
+            mold_core::minimax_h3::FL2VA_COMFY,
+            mold_core::minimax_h3::REF2VA_COMFY,
+        ] {
+            let mut frozen = FrozenEngineConfig::resolve(model, &Config::default());
+            frozen.family = mold_core::minimax_h3::FAMILY.to_string();
+            frozen.h3_factory_authority = Some(h3_factory_authority(&frozen, model));
+            let called = Arc::new(AtomicBool::new(false));
+            let loader_called = Arc::clone(&called);
 
-        let error = create_engine_with_frozen_config_and_h3_factory(
-            mold_core::minimax_h3::FL2VA_COMFY.into(),
-            dummy_paths(),
-            &frozen,
-            LoadStrategy::Sequential,
-            0,
-            true,
-            None,
-            move |_| {
-                loader_called.store(true, Ordering::SeqCst);
-                unreachable!("the MiniMax H3 legal gate must precede the loader")
-            },
-        )
-        .err()
-        .expect("compliance-gated H3 must fail closed");
+            let error = create_engine_with_frozen_config_and_h3_factory(
+                model.into(),
+                dummy_paths(),
+                &frozen,
+                LoadStrategy::Sequential,
+                0,
+                true,
+                None,
+                move |_| {
+                    loader_called.store(true, Ordering::SeqCst);
+                    unreachable!("the MiniMax H3 legal gate must precede the loader")
+                },
+            )
+            .err()
+            .expect("compliance-gated H3 must fail closed");
 
-        assert!(error
-            .to_string()
-            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
-        assert!(!called.load(Ordering::SeqCst));
+            assert!(error
+                .to_string()
+                .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+            assert!(!called.load(Ordering::SeqCst));
+        }
     }
 
     #[test]

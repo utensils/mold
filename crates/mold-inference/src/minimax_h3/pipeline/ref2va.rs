@@ -8,6 +8,7 @@
 //! synthetic unit-test backend.
 
 use super::*;
+use crate::engine::GenerationReferenceBinding;
 use crate::minimax_h3::sampler::H3_VISUAL_CONDITION_TIMESTEP;
 use mold_candle::minimax_h3::{
     pack_h3_audio, sample_video_frames, AudioVaeConfig, RefPresentation, RefPresentationKind,
@@ -80,6 +81,7 @@ pub(crate) trait H3Ref2VaBackend {
     fn decode_reference(
         &mut self,
         reference: &H3PreparedReference,
+        binding: &GenerationReferenceBinding,
         checkpoint: &mut dyn H3PipelineCheckpoint,
     ) -> Result<H3DecodedReferenceFacts>;
 
@@ -172,10 +174,31 @@ pub(crate) fn prepare_request(
     progress: &ProgressReporter,
     observer: &mut dyn H3PipelineObserver,
 ) -> Result<H3PreparedRef2VaRequest> {
+    prepare_request_with_authority(req, false, progress, observer)
+}
+
+pub(crate) fn prepare_resolved_request(
+    req: &GenerateRequest,
+    progress: &ProgressReporter,
+    observer: &mut dyn H3PipelineObserver,
+) -> Result<H3PreparedRef2VaRequest> {
+    prepare_request_with_authority(req, true, progress, observer)
+}
+
+fn prepare_request_with_authority(
+    req: &GenerateRequest,
+    resolved_references: bool,
+    progress: &ProgressReporter,
+    observer: &mut dyn H3PipelineObserver,
+) -> Result<H3PreparedRef2VaRequest> {
     let mut control = PipelineControl { progress, observer };
     phase_boundary(&mut control, H3PipelinePhase::Validate, false)?;
-    let mode = contract::validate_request_contract(req, Task::Ref2va)
-        .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
+    let mode = if resolved_references {
+        contract::validate_resolved_request_contract(req, Task::Ref2va)
+    } else {
+        contract::validate_request_contract(req, Task::Ref2va)
+    }
+    .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
     if mode != Mode::ReferenceToAudioVideo {
         bail!("MiniMax H3 Ref2VA preparation resolved the wrong mode {mode:?}");
     }
@@ -220,10 +243,12 @@ pub(crate) fn prepare_request(
 
 pub(crate) fn execute_staged(
     prepared: &H3PreparedRef2VaRequest,
+    bindings: &[GenerationReferenceBinding],
     backend: &mut dyn H3Ref2VaBackend,
     progress: &ProgressReporter,
     observer: &mut dyn H3PipelineObserver,
 ) -> Result<H3StagedAvOutput> {
+    validate_reference_bindings(prepared, bindings)?;
     let frozen_identity = backend.identity();
     frozen_identity.validate(backend.device())?;
     let device = backend.device().clone();
@@ -236,9 +261,9 @@ pub(crate) fn execute_staged(
         total,
     })?;
     let mut decoded = Vec::with_capacity(total);
-    for (offset, reference) in prepared.references.iter().enumerate() {
+    for (offset, (reference, binding)) in prepared.references.iter().zip(bindings).enumerate() {
         ensure_ref_identity(backend, &frozen_identity, &device)?;
-        let facts = backend.decode_reference(reference, &mut control)?;
+        let facts = backend.decode_reference(reference, binding, &mut control)?;
         ensure_ref_identity(backend, &frozen_identity, &device)?;
         validate_decoded_reference(reference, &facts)?;
         decoded.push(facts);
@@ -576,6 +601,42 @@ pub(crate) fn execute_staged(
             execution_fingerprint: frozen_identity.execution_fingerprint,
         },
     })
+}
+
+fn validate_reference_bindings(
+    prepared: &H3PreparedRef2VaRequest,
+    bindings: &[GenerationReferenceBinding],
+) -> Result<()> {
+    if bindings.len() != prepared.references.len() {
+        bail!(
+            "MiniMax H3 Ref2VA received {} private media bindings for {} ordered references",
+            bindings.len(),
+            prepared.references.len()
+        );
+    }
+    for (reference, binding) in prepared.references.iter().zip(bindings) {
+        let mut bound_metadata = binding.metadata().clone();
+        bound_metadata.prepared_shape = Some(reference.shape.clone());
+        if bound_metadata != reference.metadata {
+            bail!(
+                "MiniMax H3 Ref2VA private media binding {} differs from frozen reference provenance",
+                reference.metadata.index
+            );
+        }
+    }
+    let metadata = bindings
+        .iter()
+        .zip(&prepared.references)
+        .map(|(binding, reference)| {
+            let mut metadata = binding.metadata().clone();
+            metadata.prepared_shape = Some(reference.shape.clone());
+            metadata
+        })
+        .collect::<Vec<_>>();
+    if generation_reference_fingerprint(&metadata) != prepared.reference_fingerprint {
+        bail!("MiniMax H3 Ref2VA private media binding order changed after admission");
+    }
+    Ok(())
 }
 
 fn validate_decoded_reference(
@@ -1287,6 +1348,18 @@ mod tests {
         .unwrap()
     }
 
+    fn bindings(prepared: &H3PreparedRef2VaRequest) -> Vec<GenerationReferenceBinding> {
+        prepared
+            .references
+            .iter()
+            .map(|reference| {
+                let mut metadata = reference.metadata.clone();
+                metadata.prepared_shape = None;
+                GenerationReferenceBinding::synthetic(metadata)
+            })
+            .collect()
+    }
+
     #[derive(Default)]
     struct RecordingObserver {
         events: Vec<H3PipelineEvent>,
@@ -1361,6 +1434,7 @@ mod tests {
         fn decode_reference(
             &mut self,
             reference: &H3PreparedReference,
+            binding: &GenerationReferenceBinding,
             checkpoint: &mut dyn H3PipelineCheckpoint,
         ) -> Result<H3DecodedReferenceFacts> {
             checkpoint.checkpoint(H3PipelineEvent {
@@ -1369,6 +1443,10 @@ mod tests {
                 total: 1,
             })?;
             let metadata = &reference.metadata;
+            let mut bound_metadata = binding.metadata().clone();
+            bound_metadata.prepared_shape = Some(reference.shape.clone());
+            assert_eq!(&bound_metadata, metadata);
+            assert!(binding.file().metadata().unwrap().is_file());
             self.decoded_order.push(metadata.index);
             let audio = match metadata.kind {
                 GenerationReferenceKind::Image => None,
@@ -1734,6 +1812,7 @@ mod tests {
         let mut backend = SyntheticBackend::new();
         let staged = execute_staged(
             &prepared,
+            &bindings(&prepared),
             &mut backend,
             &ProgressReporter::default(),
             &mut NoopH3PipelineObserver,
@@ -1793,6 +1872,40 @@ mod tests {
     }
 
     #[test]
+    fn private_reference_bindings_require_exact_count_order_and_provenance() {
+        let prepared = prepare(&request());
+        let mut missing = bindings(&prepared);
+        missing.pop();
+        let mut backend = SyntheticBackend::new();
+        let error = execute_staged(
+            &prepared,
+            &missing,
+            &mut backend,
+            &ProgressReporter::default(),
+            &mut NoopH3PipelineObserver,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("private media bindings"));
+        assert!(backend.decoded_order.is_empty());
+
+        let mut reordered = bindings(&prepared);
+        reordered.swap(0, 1);
+        let mut backend = SyntheticBackend::new();
+        let error = execute_staged(
+            &prepared,
+            &reordered,
+            &mut backend,
+            &ProgressReporter::default(),
+            &mut NoopH3PipelineObserver,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("differs from frozen reference provenance"));
+        assert!(backend.decoded_order.is_empty());
+    }
+
+    #[test]
     fn every_long_ref2va_phase_has_a_cancellation_checkpoint() {
         let prepared = prepare(&request());
         for phase in [
@@ -1819,6 +1932,7 @@ mod tests {
             };
             let error = execute_staged(
                 &prepared,
+                &bindings(&prepared),
                 &mut SyntheticBackend::new(),
                 &progress,
                 &mut observer,
@@ -1835,6 +1949,7 @@ mod tests {
         rerouted.reroute_after_decode = true;
         let error = execute_staged(
             &prepared,
+            &bindings(&prepared),
             &mut rerouted,
             &ProgressReporter::default(),
             &mut NoopH3PipelineObserver,
@@ -1846,6 +1961,7 @@ mod tests {
         denoise_reroute.reroute_after_denoise = true;
         let error = execute_staged(
             &prepared,
+            &bindings(&prepared),
             &mut denoise_reroute,
             &ProgressReporter::default(),
             &mut NoopH3PipelineObserver,
@@ -1857,6 +1973,7 @@ mod tests {
         too_small.maximum_rows = 1;
         let error = execute_staged(
             &prepared,
+            &bindings(&prepared),
             &mut too_small,
             &ProgressReporter::default(),
             &mut NoopH3PipelineObserver,
@@ -1873,6 +1990,7 @@ mod tests {
         let prepared = prepare(&request());
         let staged = execute_staged(
             &prepared,
+            &bindings(&prepared),
             &mut SyntheticBackend::new(),
             &ProgressReporter::default(),
             &mut NoopH3PipelineObserver,

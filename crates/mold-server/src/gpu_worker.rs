@@ -168,6 +168,14 @@ impl mold_inference::InferenceEngine for PlannedInferenceEngine {
         self.inner.generate(req)
     }
 
+    fn generate_with_reference_bindings(
+        &mut self,
+        req: &mold_core::GenerateRequest,
+        bindings: &[mold_inference::GenerationReferenceBinding],
+    ) -> anyhow::Result<mold_core::GenerateResponse> {
+        self.inner.generate_with_reference_bindings(req, bindings)
+    }
+
     fn model_name(&self) -> &str {
         self.inner.model_name()
     }
@@ -2646,6 +2654,31 @@ fn process_job_with_sink(
         return false;
     }
 
+    // The durable parent owns an attempt-scoped token. Reference hashing runs
+    // on this dedicated worker thread and polls the same token before any
+    // model or CUDA work begins.
+    let batch_cancellation = job
+        .batch_child
+        .as_ref()
+        .map(|child| child.cancellation.clone());
+    let reference_bindings = match crate::reference_uploads::inference_bindings_for_request(
+        &job.request,
+        job.resolved_references.as_ref(),
+        batch_cancellation.as_ref(),
+    ) {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            let err_msg = format!("generation reference binding error: {error:#}");
+            if let Some(ref tx) = job.progress_tx {
+                let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                    message: err_msg.clone(),
+                }));
+            }
+            let _ = job.result_tx.send(Err(err_msg));
+            return false;
+        }
+    };
+
     // Mark the registry entry as running on this specific GPU. The /api/queue
     // listing now shows this row as `state: "running"` with `gpu: <ordinal>`.
     // The V2 coordinator claims the row atomically before transport. Legacy
@@ -2858,14 +2891,6 @@ fn process_job_with_sink(
             .expect("failed to spawn RSS watchdog")
     };
 
-    // The durable parent owns an attempt-scoped token. Installing that exact
-    // token lets cancellation stop expensive inference at family-defined safe
-    // checkpoints instead of merely fencing publication after work completes.
-    let batch_cancellation = job
-        .batch_child
-        .as_ref()
-        .map(|child| child.cancellation.clone());
-
     // Run inference — cache mutex is FREE during this.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ensure_worker_not_poisoned(worker, &model_name)?;
@@ -2873,9 +2898,11 @@ fn process_job_with_sink(
             Some(cancellation) => mold_inference::with_inference_cancellation(
                 &mut *cached_engine.engine,
                 cancellation.clone(),
-                |engine| engine.generate(&job.request),
+                |engine| engine.generate_with_reference_bindings(&job.request, &reference_bindings),
             ),
-            None => cached_engine.engine.generate(&job.request),
+            None => cached_engine
+                .engine
+                .generate_with_reference_bindings(&job.request, &reference_bindings),
         }
     }));
 

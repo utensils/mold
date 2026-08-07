@@ -61,7 +61,8 @@ pub use batch::{
     QualificationReference, SeedContract, TiledVaeCapability, WorkflowCapabilities,
 };
 pub use engine::{
-    with_inference_cancellation, BatchExecutionCapability, InferenceEngine, LoadStrategy,
+    with_inference_cancellation, BatchExecutionCapability, GenerationReferenceBinding,
+    InferenceEngine, LoadStrategy,
 };
 pub use error::InferenceError;
 pub use factory::{

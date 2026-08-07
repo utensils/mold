@@ -248,9 +248,6 @@ impl FrozenH3Fl2VaCandlePlan {
     ) -> Result<Self> {
         let contract = contract::capability_contract_for_model(model)
             .ok_or_else(|| anyhow!("{model:?} has no MiniMax H3 capability contract"))?;
-        if contract.task != Task::Fl2va {
-            bail!("MiniMax H3 FL2VA backend cannot load a Ref2VA transformer");
-        }
         let device_id = device_id.into();
         let execution_fingerprint = execution_fingerprint.into();
         let mut plan = Self {
@@ -324,7 +321,6 @@ impl FrozenH3Fl2VaCandlePlan {
         let contract = contract::capability_contract_for_model(&self.canonical_model)
             .ok_or_else(|| anyhow!("H3 backend plan lost its canonical model"))?;
         if self.canonical_model != contract.canonical_model
-            || self.task != Task::Fl2va
             || self.task != contract.task
             || self.layout != contract.layout
         {
@@ -509,6 +505,11 @@ where
     let requirements = plan.missing_requirements();
     if !requirements.is_empty() {
         return Err(H3BackendActivationError::Unavailable { requirements });
+    }
+    if plan.task() != Task::Fl2va {
+        return Err(H3BackendActivationError::InvalidPlan(
+            "the eager MiniMax H3 Candle backend remains FL2VA-only".to_string(),
+        ));
     }
     let components = loader
         .load(&plan)
@@ -1185,8 +1186,8 @@ mod tests {
     }
 
     #[test]
-    fn ref2va_conditioner_and_streaming_reroutes_fail_before_activation() {
-        assert!(FrozenH3Fl2VaCandlePlan::new_unavailable(
+    fn ref2va_plan_is_contract_only_and_route_mutations_fail_before_activation() {
+        let ref2va = FrozenH3Fl2VaCandlePlan::new_unavailable(
             contract::REF2VA_OFFICIAL,
             "gpu-0",
             H3CandleBackendDevice::Cuda {
@@ -1203,7 +1204,9 @@ mod tests {
             FrozenH3BlockStreamingPlan::new("gpu-0", EXECUTION, 8, 1).unwrap(),
             authorities(),
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(ref2va.task(), Task::Ref2va);
+        ref2va.validate().unwrap();
 
         assert!(FrozenH3Fl2VaCandlePlan::new_unavailable(
             contract::FL2VA_OFFICIAL,
@@ -1358,6 +1361,7 @@ mod tests {
         for (model, quantized) in [
             (contract::FL2VA_OFFICIAL, false),
             (contract::FL2VA_COMFY, true),
+            (contract::REF2VA_OFFICIAL, false),
         ] {
             let called = Arc::new(AtomicBool::new(false));
             let error = try_activate_h3_candle_backend(

@@ -1,4 +1,4 @@
-//! Legal-neutral MiniMax H3 FL2VA engine and streamed-dispatch seam.
+//! Legal-neutral MiniMax H3 FL2VA/Ref2VA engine and streamed-dispatch seam.
 //!
 //! This module deliberately has no production loader registration. The public
 //! frozen factory still rejects H3 before paths or loader callbacks while the
@@ -29,11 +29,19 @@ use super::offload::{
 };
 #[cfg(feature = "mp4")]
 use super::pipeline;
+#[cfg(feature = "mp4")]
+use super::pipeline::ref2va as ref2va_pipeline;
+use super::pipeline::ref2va::{
+    H3AudioConditionEncodeMode, H3DecodedReferenceFacts, H3PreparedReference, H3Ref2VaBackend,
+    H3ReferencePresentation,
+};
 use super::pipeline::{
     H3Fl2VaBackend, H3PipelineBackendIdentity, H3PipelineCheckpoint, H3PipelineEvent,
     H3PipelineObserver, H3PipelinePhase, H3PreparedEndpoint, H3TextConditioning, H3VideoEncodeSink,
 };
-use crate::engine::{BatchExecutionCapability, InferenceEngine, LoadStrategy};
+use crate::engine::{
+    BatchExecutionCapability, GenerationReferenceBinding, InferenceEngine, LoadStrategy,
+};
 use crate::progress::{
     InferenceCancellationToken, ProgressCallback, ProgressEvent, ProgressPhase, ProgressReporter,
 };
@@ -74,6 +82,7 @@ pub(crate) trait H3RuntimeSession: Send + Sync {
     fn generate(
         &mut self,
         request: &GenerateRequest,
+        bindings: &[GenerationReferenceBinding],
         progress: &ProgressReporter,
         observer: &mut dyn H3PipelineObserver,
     ) -> Result<H3EngineOutput>;
@@ -95,12 +104,14 @@ pub(crate) struct H3EngineOutput {
     pub(crate) device_id: String,
     pub(crate) execution_fingerprint: String,
     pub(crate) component_set_identity_sha256: String,
+    pub(crate) reference_fingerprint: Option<String>,
 }
 
-/// Concrete `InferenceEngine` adapter. It owns the exact server-frozen route,
-/// but can be constructed only with an injected loader; production factory
-/// dispatch deliberately has no such loader today.
+/// Concrete task-bound `InferenceEngine` adapter. It owns the exact
+/// server-frozen route, but can be constructed only with an injected loader;
+/// production factory dispatch deliberately has no such loader today.
 pub(crate) struct H3Fl2VaEngine {
+    task: Task,
     model_name: String,
     paths: ModelPaths,
     authority: FrozenH3FactoryAuthority,
@@ -122,8 +133,59 @@ impl H3Fl2VaEngine {
         block_offload: bool,
         loader: Box<dyn H3RuntimeLoader>,
     ) -> Result<Self> {
+        Self::new_task_injected(
+            Task::Fl2va,
+            model_name,
+            paths,
+            authority,
+            load_strategy,
+            gpu_ordinal,
+            block_offload,
+            loader,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_ref2va_injected(
+        model_name: String,
+        paths: ModelPaths,
+        authority: FrozenH3FactoryAuthority,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+        block_offload: bool,
+        loader: Box<dyn H3RuntimeLoader>,
+    ) -> Result<Self> {
+        Self::new_task_injected(
+            Task::Ref2va,
+            model_name,
+            paths,
+            authority,
+            load_strategy,
+            gpu_ordinal,
+            block_offload,
+            loader,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_task_injected(
+        task: Task,
+        model_name: String,
+        paths: ModelPaths,
+        authority: FrozenH3FactoryAuthority,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+        block_offload: bool,
+        loader: Box<dyn H3RuntimeLoader>,
+    ) -> Result<Self> {
         authority.validate_engine_seam(&model_name, gpu_ordinal, block_offload)?;
+        let model_task = contract::task_for_model(&model_name)
+            .context("MiniMax H3 engine model has no task contract")?;
+        if model_task != task {
+            bail!("MiniMax H3 engine constructor and model task disagree");
+        }
         Ok(Self {
+            task,
             model_name,
             paths,
             authority,
@@ -139,7 +201,10 @@ impl H3Fl2VaEngine {
         request: H3RuntimeLoadRequest<'_>,
         loader: Box<dyn H3RuntimeLoader>,
     ) -> Result<Self> {
-        Self::new_injected(
+        let task = contract::task_for_model(request.model_name)
+            .context("MiniMax H3 factory request has no task contract")?;
+        Self::new_task_injected(
+            task,
             request.model_name.to_string(),
             request.paths.clone(),
             request.authority.clone(),
@@ -165,6 +230,7 @@ impl H3Fl2VaEngine {
         &self,
         request: &GenerateRequest,
         expected_mode: Mode,
+        expected_reference_fingerprint: Option<&str>,
         output: &H3EngineOutput,
     ) -> Result<()> {
         if output.mode != expected_mode
@@ -179,6 +245,7 @@ impl H3Fl2VaEngine {
             || output.execution_fingerprint != self.authority.execution_fingerprint()
             || output.component_set_identity_sha256
                 != self.authority.component_set_identity_sha256()
+            || output.reference_fingerprint.as_deref() != expected_reference_fingerprint
             || output.mp4.is_empty()
             || output.thumbnail_png.is_empty()
         {
@@ -186,12 +253,30 @@ impl H3Fl2VaEngine {
         }
         Ok(())
     }
-}
 
-impl InferenceEngine for H3Fl2VaEngine {
-    fn generate(&mut self, request: &GenerateRequest) -> Result<GenerateResponse> {
-        let expected_mode = contract::validate_request_contract(request, Task::Fl2va)
+    fn generate_bound(
+        &mut self,
+        request: &GenerateRequest,
+        bindings: &[GenerationReferenceBinding],
+    ) -> Result<GenerateResponse> {
+        let request_contract = match self.task {
+            Task::Fl2va => contract::validate_request_contract(request, self.task),
+            Task::Ref2va => contract::validate_resolved_request_contract(request, self.task),
+        };
+        let expected_mode = request_contract
             .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+        let expected_reference_fingerprint = match self.task {
+            Task::Fl2va => {
+                if !bindings.is_empty() {
+                    bail!("MiniMax H3 FL2VA cannot consume Ref2VA media bindings");
+                }
+                None
+            }
+            Task::Ref2va => {
+                validate_ref2va_bindings(request, bindings)?;
+                Some(ref2va_reference_fingerprint(request)?)
+            }
+        };
         if !self.is_loaded() {
             self.load_for_request(request)?;
         }
@@ -202,9 +287,14 @@ impl InferenceEngine for H3Fl2VaEngine {
             .runtime
             .as_mut()
             .context("MiniMax H3 runtime disappeared after load")?
-            .generate(request, &self.progress, &mut observer)?;
+            .generate(request, bindings, &self.progress, &mut observer)?;
         self.progress.checkpoint()?;
-        self.validate_output(request, expected_mode, &output)?;
+        self.validate_output(
+            request,
+            expected_mode,
+            expected_reference_fingerprint.as_deref(),
+            &output,
+        )?;
         Ok(GenerateResponse {
             images: Vec::new(),
             video: Some(VideoData {
@@ -228,6 +318,81 @@ impl InferenceEngine for H3Fl2VaEngine {
             seed_used: output.seed,
             gpu: None,
         })
+    }
+}
+
+pub(crate) type H3Ref2VaEngine = H3Fl2VaEngine;
+
+fn ref2va_reference_fingerprint(request: &GenerateRequest) -> Result<String> {
+    let references = request
+        .references
+        .as_deref()
+        .context("MiniMax H3 Ref2VA request lost ordered references")?;
+    let shapes = contract::reference_prepared_shapes_for_target(
+        references,
+        request.frames.unwrap_or(contract::MIN_FRAMES),
+    )
+    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+    let metadata = references
+        .iter()
+        .zip(shapes)
+        .enumerate()
+        .map(|(index, (reference, shape))| {
+            let mut metadata = reference.redacted_metadata_lossless(index);
+            metadata.prepared_shape = Some(shape);
+            metadata
+        })
+        .collect::<Vec<_>>();
+    Ok(mold_core::generation_reference_fingerprint(&metadata))
+}
+
+fn validate_ref2va_bindings(
+    request: &GenerateRequest,
+    bindings: &[GenerationReferenceBinding],
+) -> Result<()> {
+    let references = request
+        .references
+        .as_deref()
+        .context("MiniMax H3 Ref2VA request lost ordered reference descriptors")?;
+    if references.len() != bindings.len() {
+        bail!(
+            "MiniMax H3 Ref2VA received {} private media bindings for {} ordered references",
+            bindings.len(),
+            references.len()
+        );
+    }
+    let request_metadata = references
+        .iter()
+        .enumerate()
+        .map(|(index, reference)| reference.redacted_metadata_lossless(index))
+        .collect::<Vec<_>>();
+    let binding_metadata = bindings
+        .iter()
+        .map(|binding| binding.metadata().clone())
+        .collect::<Vec<_>>();
+    if binding_metadata != request_metadata
+        || mold_core::generation_reference_fingerprint(&binding_metadata)
+            != mold_core::generation_reference_fingerprint(&request_metadata)
+    {
+        bail!("MiniMax H3 Ref2VA private media bindings changed order or provenance");
+    }
+    Ok(())
+}
+
+impl InferenceEngine for H3Fl2VaEngine {
+    fn generate(&mut self, request: &GenerateRequest) -> Result<GenerateResponse> {
+        if self.task == Task::Ref2va {
+            bail!("MiniMax H3 Ref2VA requires authenticated server-resolved media bindings");
+        }
+        self.generate_bound(request, &[])
+    }
+
+    fn generate_with_reference_bindings(
+        &mut self,
+        request: &GenerateRequest,
+        bindings: &[GenerationReferenceBinding],
+    ) -> Result<GenerateResponse> {
+        self.generate_bound(request, bindings)
     }
 
     fn model_name(&self) -> &str {
@@ -454,9 +619,13 @@ where
     fn generate(
         &mut self,
         request: &GenerateRequest,
+        bindings: &[GenerationReferenceBinding],
         progress: &ProgressReporter,
         observer: &mut dyn H3PipelineObserver,
     ) -> Result<H3EngineOutput> {
+        if !bindings.is_empty() {
+            bail!("MiniMax H3 FL2VA runtime received Ref2VA media bindings");
+        }
         #[cfg(not(feature = "mp4"))]
         {
             let _ = (request, progress, observer);
@@ -491,9 +660,123 @@ where
                 device_id: output.provenance.device_id,
                 execution_fingerprint: output.provenance.execution_fingerprint,
                 component_set_identity_sha256: self.component_set_identity_sha256.clone(),
+                reference_fingerprint: output.provenance.reference_fingerprint,
             })
         }
     }
+}
+
+/// Runtime adapter over the landed ordered Ref2VA pipeline. Like the FL2VA
+/// adapter, it is constructable only from an injected, block-streamed backend.
+pub(crate) struct H3Ref2VaPipelineRuntime<B> {
+    backend: B,
+    identity: H3PipelineBackendIdentity,
+    component_set_identity_sha256: String,
+}
+
+pub(crate) trait H3StreamedRef2VaBackend: H3Ref2VaBackend + Send + Sync {
+    fn component_set_identity_sha256(&self) -> &str;
+}
+
+impl<B> H3Ref2VaPipelineRuntime<B>
+where
+    B: H3StreamedRef2VaBackend,
+{
+    pub(crate) fn new(backend: B, authority: &FrozenH3FactoryAuthority) -> Result<Self> {
+        let identity = backend.identity();
+        if authority.task() != Task::Ref2va
+            || identity.device_id != authority.device_id()
+            || identity.execution_fingerprint != authority.execution_fingerprint()
+            || backend.component_set_identity_sha256() != authority.component_set_identity_sha256()
+        {
+            bail!("MiniMax H3 Ref2VA backend differs from frozen factory authority");
+        }
+        Ok(Self {
+            backend,
+            identity,
+            component_set_identity_sha256: authority.component_set_identity_sha256().to_string(),
+        })
+    }
+}
+
+impl<B> H3RuntimeSession for H3Ref2VaPipelineRuntime<B>
+where
+    B: H3StreamedRef2VaBackend,
+{
+    fn device_id(&self) -> &str {
+        &self.identity.device_id
+    }
+
+    fn execution_fingerprint(&self) -> &str {
+        &self.identity.execution_fingerprint
+    }
+
+    fn component_set_identity_sha256(&self) -> &str {
+        &self.component_set_identity_sha256
+    }
+
+    fn generate(
+        &mut self,
+        request: &GenerateRequest,
+        bindings: &[GenerationReferenceBinding],
+        progress: &ProgressReporter,
+        observer: &mut dyn H3PipelineObserver,
+    ) -> Result<H3EngineOutput> {
+        #[cfg(not(feature = "mp4"))]
+        {
+            let _ = (request, bindings, progress, observer);
+            bail!("MiniMax H3 synchronized audio-video requires Mold's mp4 feature")
+        }
+        #[cfg(feature = "mp4")]
+        {
+            let prepared = ref2va_pipeline::prepare_resolved_request(request, progress, observer)?;
+            let staged = ref2va_pipeline::execute_staged(
+                &prepared,
+                bindings,
+                &mut self.backend,
+                progress,
+                observer,
+            )?;
+            let output = pipeline::finalize_av(staged, progress, observer)?;
+            h3_engine_output_from_pipeline(
+                output,
+                Mode::ReferenceToAudioVideo,
+                &self.component_set_identity_sha256,
+            )
+        }
+    }
+}
+
+#[cfg(feature = "mp4")]
+fn h3_engine_output_from_pipeline(
+    output: super::pipeline::H3PipelineOutput,
+    mode: Mode,
+    component_set_identity_sha256: &str,
+) -> Result<H3EngineOutput> {
+    let duration_ms = u64::from(1_000_u16)
+        .checked_mul(output.mux_report.video_duration_ticks)
+        .context("MiniMax H3 output duration overflow")?
+        / u64::from(output.mux_report.video_timescale);
+    Ok(H3EngineOutput {
+        mp4: output.mp4,
+        thumbnail_png: output.thumbnail_png,
+        mode,
+        seed: output.provenance.seed,
+        width: u32::try_from(output.provenance.width)
+            .context("MiniMax H3 output width exceeds u32")?,
+        height: u32::try_from(output.provenance.height)
+            .context("MiniMax H3 output height exceeds u32")?,
+        frames: u32::try_from(output.provenance.frames)
+            .context("MiniMax H3 output frames exceed u32")?,
+        fps: output.provenance.fps,
+        duration_ms,
+        audio_sample_rate: output.mux_report.sample_rate,
+        audio_channels: u32::from(output.mux_report.channels),
+        device_id: output.provenance.device_id,
+        execution_fingerprint: output.provenance.execution_fingerprint,
+        component_set_identity_sha256: component_set_identity_sha256.to_string(),
+        reference_fingerprint: output.provenance.reference_fingerprint,
+    })
 }
 
 /// Main-block executor paired with a cancellation-safe block loader.
@@ -771,6 +1054,149 @@ where
     }
 }
 
+/// Combines ordered-reference component operations with the same audited
+/// block-streamed main DiT used by FL2VA. Each decode receives the exact
+/// request-scoped private binding alongside its frozen payload-free metadata.
+pub(crate) struct H3StreamedRef2VaPipelineBackend<B, D> {
+    components: B,
+    denoiser: D,
+    component_set_identity_sha256: String,
+}
+
+impl<B, D> H3StreamedRef2VaPipelineBackend<B, D>
+where
+    B: H3Ref2VaBackend,
+    D: H3StreamedDenoiser,
+{
+    pub(crate) fn new(
+        components: B,
+        denoiser: D,
+        component_set_identity_sha256: String,
+    ) -> Result<Self> {
+        if components.identity() != denoiser.identity() {
+            bail!("MiniMax H3 Ref2VA component and streamed-transformer routes disagree");
+        }
+        if component_set_identity_sha256.len() != 64
+            || !component_set_identity_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            bail!("MiniMax H3 component-set identity must be one SHA-256 digest");
+        }
+        Ok(Self {
+            components,
+            denoiser,
+            component_set_identity_sha256,
+        })
+    }
+}
+
+impl<B, D> H3Ref2VaBackend for H3StreamedRef2VaPipelineBackend<B, D>
+where
+    B: H3Ref2VaBackend,
+    D: H3StreamedDenoiser,
+{
+    fn identity(&self) -> H3PipelineBackendIdentity {
+        self.components.identity()
+    }
+
+    fn device(&self) -> &Device {
+        self.components.device()
+    }
+
+    fn maximum_packed_rows(&self) -> usize {
+        self.components.maximum_packed_rows()
+    }
+
+    fn decode_reference(
+        &mut self,
+        reference: &H3PreparedReference,
+        binding: &GenerationReferenceBinding,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<H3DecodedReferenceFacts> {
+        self.components
+            .decode_reference(reference, binding, checkpoint)
+    }
+
+    fn preprocess_reference(
+        &mut self,
+        reference: &H3PreparedReference,
+        decoded: &H3DecodedReferenceFacts,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<H3ReferencePresentation> {
+        self.components
+            .preprocess_reference(reference, decoded, checkpoint)
+    }
+
+    fn encode_text(
+        &mut self,
+        prompt: &str,
+        references: &[H3ReferencePresentation],
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<H3TextConditioning> {
+        self.components.encode_text(prompt, references, checkpoint)
+    }
+
+    fn encode_visual_reference(
+        &mut self,
+        reference: &H3PreparedReference,
+        mode: mold_candle::minimax_h3::ConditionEncodeMode,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<Tensor> {
+        self.components
+            .encode_visual_reference(reference, mode, checkpoint)
+    }
+
+    fn encode_audio_reference(
+        &mut self,
+        reference: &H3PreparedReference,
+        mode: H3AudioConditionEncodeMode,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<StereoLatents> {
+        self.components
+            .encode_audio_reference(reference, mode, checkpoint)
+    }
+
+    fn denoise(
+        &mut self,
+        input: H3ForwardInput<'_>,
+        layout: &H3FrozenPackedLayout,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<H3TransformerOutput> {
+        if self.components.identity() != self.denoiser.identity() {
+            bail!("MiniMax H3 Ref2VA streamed-transformer route changed during inference");
+        }
+        self.denoiser.denoise(input, layout, checkpoint)
+    }
+
+    fn decode_video(
+        &mut self,
+        latents: &Tensor,
+        sink: &mut H3VideoEncodeSink,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<()> {
+        self.components.decode_video(latents, sink, checkpoint)
+    }
+
+    fn decode_audio(
+        &mut self,
+        latents: &StereoLatents,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<StereoWaveform> {
+        self.components.decode_audio(latents, checkpoint)
+    }
+}
+
+impl<B, D> H3StreamedRef2VaBackend for H3StreamedRef2VaPipelineBackend<B, D>
+where
+    B: H3Ref2VaBackend + Send + Sync,
+    D: H3StreamedDenoiser,
+{
+    fn component_set_identity_sha256(&self) -> &str {
+        &self.component_set_identity_sha256
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -778,7 +1204,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use candle_core::DType;
-    use mold_candle::minimax_h3::{H3Modality, H3PackedLayout};
+    use image::{Rgb, RgbImage};
+    use mold_candle::minimax_h3::{
+        AudioSoundtrackAssociation, ConditionEncodeMode, H3Modality, H3ModalityTag, H3PackedLayout,
+        RefPresentation, RefPresentationKind,
+    };
     use serde_json::json;
 
     use super::*;
@@ -794,13 +1224,10 @@ mod tests {
         std::iter::repeat_n(byte, 64).collect()
     }
 
-    fn authority() -> FrozenH3FactoryAuthority {
-        let frozen = crate::FrozenEngineConfig::resolve(
-            contract::FL2VA_COMFY,
-            &mold_core::Config::default(),
-        );
+    fn authority_for(model: &str) -> FrozenH3FactoryAuthority {
+        let frozen = crate::FrozenEngineConfig::resolve(model, &mold_core::Config::default());
         FrozenH3FactoryAuthority::new_contract_only(H3FactoryAuthorityInput {
-            model: contract::FL2VA_COMFY.into(),
+            model: model.into(),
             device_id: "gpu-0".into(),
             device_ordinal: 0,
             compute_capability: (8, 9),
@@ -845,6 +1272,10 @@ mod tests {
         .unwrap()
     }
 
+    fn authority() -> FrozenH3FactoryAuthority {
+        authority_for(contract::FL2VA_COMFY)
+    }
+
     fn paths() -> ModelPaths {
         ModelPaths {
             low_noise_transformer: None,
@@ -885,6 +1316,86 @@ mod tests {
         .unwrap()
     }
 
+    fn ref2va_request() -> GenerateRequest {
+        use mold_core::{
+            GenerationReference, GenerationReferenceAuthority, GenerationReferenceProvenance,
+        };
+
+        let provenance = |name: &str, digest: char| GenerationReferenceProvenance {
+            name: Some(name.to_string()),
+            sha256: Some(sha(digest)),
+        };
+        let mut request = request();
+        request.model = contract::REF2VA_COMFY.into();
+        request.references = Some(vec![
+            GenerationReference::Video {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("motion.mp4", '1'),
+                mime_type: "video/mp4".into(),
+                width: 64,
+                height: 64,
+                frame_count: Some(48),
+                duration_ms: 2_000,
+                fps: 24.0,
+                has_audio: true,
+                audio_duration_ms: Some(2_000),
+                audio_sample_count: Some(96_000),
+                audio_sample_rate: Some(48_000),
+                audio_channels: Some(2),
+            },
+            GenerationReference::Image {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("portrait.png", '2'),
+                mime_type: "image/png".into(),
+                width: 48,
+                height: 48,
+            },
+            GenerationReference::Audio {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("voice.wav", '3'),
+                mime_type: "audio/wav".into(),
+                duration_ms: 2_000,
+                sample_rate: 48_000,
+                channels: 1,
+                sample_count: Some(96_000),
+            },
+        ]);
+        request
+    }
+
+    fn image_ref2va_request() -> GenerateRequest {
+        use mold_core::{
+            GenerationReference, GenerationReferenceAuthority, GenerationReferenceProvenance,
+        };
+
+        let mut request = request();
+        request.model = contract::REF2VA_COMFY.into();
+        request.references = Some(vec![GenerationReference::Image {
+            media: GenerationReferenceAuthority::Descriptor,
+            provenance: GenerationReferenceProvenance {
+                name: Some("portrait.png".to_string()),
+                sha256: Some(sha('2')),
+            },
+            mime_type: "image/png".into(),
+            width: 48,
+            height: 48,
+        }]);
+        request
+    }
+
+    fn ref2va_bindings(request: &GenerateRequest) -> Vec<GenerationReferenceBinding> {
+        request
+            .references
+            .as_deref()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(index, reference)| {
+                GenerationReferenceBinding::synthetic(reference.redacted_metadata_lossless(index))
+            })
+            .collect()
+    }
+
     struct SyntheticRuntime {
         device: String,
         execution: String,
@@ -907,9 +1418,11 @@ mod tests {
         fn generate(
             &mut self,
             request: &GenerateRequest,
+            bindings: &[GenerationReferenceBinding],
             progress: &ProgressReporter,
             observer: &mut dyn H3PipelineObserver,
         ) -> Result<H3EngineOutput> {
+            assert!(bindings.is_empty());
             progress.checkpoint()?;
             for event in [
                 H3PipelineEvent {
@@ -966,6 +1479,7 @@ mod tests {
                 device_id: self.device.clone(),
                 execution_fingerprint: self.execution.clone(),
                 component_set_identity_sha256: self.components.clone(),
+                reference_fingerprint: None,
             })
         }
     }
@@ -973,6 +1487,107 @@ mod tests {
     struct SyntheticLoader {
         loads: Arc<AtomicUsize>,
         wrong_device: bool,
+    }
+
+    struct SyntheticRefRuntime {
+        device: String,
+        execution: String,
+        components: String,
+        observed: Arc<Mutex<Vec<(u32, mold_core::GenerationReferenceKind)>>>,
+        wrong_reference_fingerprint: bool,
+    }
+
+    impl H3RuntimeSession for SyntheticRefRuntime {
+        fn device_id(&self) -> &str {
+            &self.device
+        }
+
+        fn execution_fingerprint(&self) -> &str {
+            &self.execution
+        }
+
+        fn component_set_identity_sha256(&self) -> &str {
+            &self.components
+        }
+
+        fn generate(
+            &mut self,
+            request: &GenerateRequest,
+            bindings: &[GenerationReferenceBinding],
+            progress: &ProgressReporter,
+            observer: &mut dyn H3PipelineObserver,
+        ) -> Result<H3EngineOutput> {
+            progress.checkpoint()?;
+            let observed = bindings
+                .iter()
+                .map(|binding| {
+                    assert!(binding.file().metadata().unwrap().is_file());
+                    (binding.metadata().index, binding.metadata().kind)
+                })
+                .collect::<Vec<_>>();
+            *self.observed.lock().unwrap() = observed;
+            observer.observe(H3PipelineEvent {
+                phase: H3PipelinePhase::QwenEncode,
+                completed: 0,
+                total: 1,
+            });
+            progress.checkpoint()?;
+            observer.observe(H3PipelineEvent {
+                phase: H3PipelinePhase::QwenEncode,
+                completed: 1,
+                total: 1,
+            });
+            progress.checkpoint()?;
+            Ok(H3EngineOutput {
+                mp4: vec![0, 0, 0, 1],
+                thumbnail_png: vec![137, 80, 78, 71],
+                mode: Mode::ReferenceToAudioVideo,
+                seed: request.seed.unwrap(),
+                width: request.width,
+                height: request.height,
+                frames: request.frames.unwrap(),
+                fps: request.fps.unwrap(),
+                duration_ms: 5_166,
+                audio_sample_rate: contract::AUDIO_SAMPLE_RATE_HZ,
+                audio_channels: contract::AUDIO_CHANNELS,
+                device_id: self.device.clone(),
+                execution_fingerprint: self.execution.clone(),
+                component_set_identity_sha256: self.components.clone(),
+                reference_fingerprint: Some(if self.wrong_reference_fingerprint {
+                    sha('f')
+                } else {
+                    ref2va_reference_fingerprint(request)?
+                }),
+            })
+        }
+    }
+
+    struct SyntheticRefLoader {
+        loads: Arc<AtomicUsize>,
+        observed: Arc<Mutex<Vec<(u32, mold_core::GenerationReferenceKind)>>>,
+        wrong_reference_fingerprint: bool,
+    }
+
+    impl H3RuntimeLoader for SyntheticRefLoader {
+        fn load(
+            &mut self,
+            request: H3RuntimeLoadRequest<'_>,
+            progress: &ProgressReporter,
+        ) -> Result<Box<dyn H3RuntimeSession>> {
+            progress.checkpoint()?;
+            assert_eq!(request.model_name, contract::REF2VA_COMFY);
+            assert_eq!(request.authority.task(), Task::Ref2va);
+            assert_eq!(request.gpu_ordinal, 0);
+            assert!(request.block_offload);
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(SyntheticRefRuntime {
+                device: request.authority.device_id().into(),
+                execution: request.authority.execution_fingerprint().into(),
+                components: request.authority.component_set_identity_sha256().into(),
+                observed: Arc::clone(&self.observed),
+                wrong_reference_fingerprint: self.wrong_reference_fingerprint,
+            }))
+        }
     }
 
     impl H3RuntimeLoader for SyntheticLoader {
@@ -1014,6 +1629,34 @@ mod tests {
             Box::new(SyntheticLoader {
                 loads,
                 wrong_device,
+            }),
+        )
+        .unwrap()
+    }
+
+    fn ref2va_engine(
+        loads: Arc<AtomicUsize>,
+        observed: Arc<Mutex<Vec<(u32, mold_core::GenerationReferenceKind)>>>,
+    ) -> H3Ref2VaEngine {
+        ref2va_engine_with_output_fingerprint(loads, observed, false)
+    }
+
+    fn ref2va_engine_with_output_fingerprint(
+        loads: Arc<AtomicUsize>,
+        observed: Arc<Mutex<Vec<(u32, mold_core::GenerationReferenceKind)>>>,
+        wrong_reference_fingerprint: bool,
+    ) -> H3Ref2VaEngine {
+        H3Ref2VaEngine::new_ref2va_injected(
+            contract::REF2VA_COMFY.into(),
+            paths(),
+            authority_for(contract::REF2VA_COMFY),
+            LoadStrategy::Eager,
+            0,
+            true,
+            Box::new(SyntheticRefLoader {
+                loads,
+                observed,
+                wrong_reference_fingerprint,
             }),
         )
         .unwrap()
@@ -1073,6 +1716,7 @@ mod tests {
         let error = cancelled.generate(&request()).unwrap_err();
         assert!(is_inference_cancelled(&error));
         assert_eq!(loads.load(Ordering::SeqCst), 0);
+
         assert!(!cancelled.is_loaded());
 
         let mut rerouted = engine(Arc::clone(&loads), true);
@@ -1080,6 +1724,89 @@ mod tests {
         assert!(error.to_string().contains("frozen factory authority"));
         assert_eq!(loads.load(Ordering::SeqCst), 1);
         assert!(!rerouted.is_loaded());
+    }
+
+    #[test]
+    fn ref2va_adapter_requires_exact_private_bindings_and_preserves_ordered_av_contract() {
+        let request = ref2va_request();
+        let bindings = ref2va_bindings(&request);
+        assert!(!format!("{:?}", bindings[0]).contains("/synthetic/not-read"));
+        let loads = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = ref2va_engine(Arc::clone(&loads), Arc::clone(&observed));
+
+        let error = engine.generate(&request).unwrap_err();
+        assert!(error.to_string().contains("server-resolved media bindings"));
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+
+        let response = engine
+            .generate_with_reference_bindings(&request, &bindings)
+            .unwrap();
+        let video = response.video.unwrap();
+        assert!(video.has_audio);
+        assert_eq!(
+            video.audio_sample_rate,
+            Some(contract::AUDIO_SAMPLE_RATE_HZ)
+        );
+        assert_eq!(video.audio_channels, Some(contract::AUDIO_CHANNELS));
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![
+                (1, mold_core::GenerationReferenceKind::Video),
+                (2, mold_core::GenerationReferenceKind::Image),
+                (3, mold_core::GenerationReferenceKind::Audio),
+            ]
+        );
+    }
+
+    #[test]
+    fn ref2va_binding_mutation_and_cancellation_fail_before_runtime_load() {
+        let request = ref2va_request();
+        let loads = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+
+        let mut missing = ref2va_bindings(&request);
+        missing.pop();
+        let mut engine = ref2va_engine(Arc::clone(&loads), Arc::clone(&observed));
+        let error = engine
+            .generate_with_reference_bindings(&request, &missing)
+            .unwrap_err();
+        assert!(error.to_string().contains("private media bindings"));
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+
+        let mut reordered = ref2va_bindings(&request);
+        reordered.swap(0, 1);
+        let mut engine = ref2va_engine(Arc::clone(&loads), Arc::clone(&observed));
+        let error = engine
+            .generate_with_reference_bindings(&request, &reordered)
+            .unwrap_err();
+        assert!(error.to_string().contains("changed order or provenance"));
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+
+        let mut cancelled = ref2va_engine(Arc::clone(&loads), observed);
+        let token = InferenceCancellationToken::default();
+        token.cancel();
+        cancelled.set_cancellation_token(token);
+        let error = cancelled
+            .generate_with_reference_bindings(&request, &ref2va_bindings(&request))
+            .unwrap_err();
+        assert!(is_inference_cancelled(&error));
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+
+        let wrong_loads = Arc::new(AtomicUsize::new(0));
+        let mut wrong_output = ref2va_engine_with_output_fingerprint(
+            Arc::clone(&wrong_loads),
+            Arc::new(Mutex::new(Vec::new())),
+            true,
+        );
+        let error = wrong_output
+            .generate_with_reference_bindings(&request, &ref2va_bindings(&request))
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("differs from the frozen request or factory authority"));
+        assert_eq!(wrong_loads.load(Ordering::SeqCst), 1);
     }
 
     #[derive(Clone)]
@@ -1185,6 +1912,240 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    struct StructuralRefComponents {
+        device: Device,
+        identity: H3PipelineBackendIdentity,
+        trace: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl H3Ref2VaBackend for StructuralRefComponents {
+        fn identity(&self) -> H3PipelineBackendIdentity {
+            self.identity.clone()
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
+
+        fn maximum_packed_rows(&self) -> usize {
+            100_000
+        }
+
+        fn decode_reference(
+            &mut self,
+            reference: &H3PreparedReference,
+            binding: &GenerationReferenceBinding,
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<H3DecodedReferenceFacts> {
+            self.trace.lock().unwrap().push("decode-reference");
+            let mut bound = binding.metadata().clone();
+            bound.prepared_shape = Some(reference.shape.clone());
+            assert_eq!(bound, reference.metadata);
+            assert!(binding.file().metadata()?.is_file());
+            Ok(H3DecodedReferenceFacts {
+                index: reference.metadata.index,
+                kind: reference.metadata.kind,
+                width: reference.metadata.width,
+                height: reference.metadata.height,
+                frame_count: None,
+                fps: None,
+                audio: None,
+            })
+        }
+
+        fn preprocess_reference(
+            &mut self,
+            reference: &H3PreparedReference,
+            decoded: &H3DecodedReferenceFacts,
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<H3ReferencePresentation> {
+            self.trace.lock().unwrap().push("preprocess-reference");
+            assert_eq!(decoded.index, reference.metadata.index);
+            Ok(H3ReferencePresentation {
+                index: reference.metadata.index,
+                presentation: RefPresentation {
+                    kind: RefPresentationKind::Image { vision_tokens: 2 },
+                    has_audio: false,
+                },
+            })
+        }
+
+        fn encode_text(
+            &mut self,
+            prompt: &str,
+            references: &[H3ReferencePresentation],
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<H3TextConditioning> {
+            self.trace.lock().unwrap().push("encode-text");
+            assert!(!prompt.is_empty());
+            assert_eq!(references.len(), 1);
+            let tags = vec![
+                H3ModalityTag::Text,
+                H3ModalityTag::Text,
+                H3ModalityTag::Vision,
+                H3ModalityTag::Vision,
+            ];
+            Ok(H3TextConditioning {
+                states: Tensor::zeros((1, tags.len(), 5_120), DType::F32, &self.device)?,
+                tags,
+            })
+        }
+
+        fn encode_visual_reference(
+            &mut self,
+            reference: &H3PreparedReference,
+            mode: ConditionEncodeMode,
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<Tensor> {
+            self.trace.lock().unwrap().push("encode-visual");
+            assert_eq!(mode, ConditionEncodeMode::OfficialFreshSeed42);
+            let height = usize::try_from(reference.shape.normalized_height.unwrap())? / 16;
+            let width = usize::try_from(reference.shape.normalized_width.unwrap())? / 16;
+            Tensor::zeros((1, 24, 1, height, width), DType::F32, &self.device).map_err(Into::into)
+        }
+
+        fn encode_audio_reference(
+            &mut self,
+            _reference: &H3PreparedReference,
+            _mode: H3AudioConditionEncodeMode,
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<StereoLatents> {
+            unreachable!("structural composition test does not encode audio")
+        }
+
+        fn denoise(
+            &mut self,
+            _input: H3ForwardInput<'_>,
+            _layout: &H3FrozenPackedLayout,
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<H3TransformerOutput> {
+            unreachable!("the composed backend must route denoise to its streamed authority")
+        }
+
+        fn decode_video(
+            &mut self,
+            latents: &Tensor,
+            sink: &mut H3VideoEncodeSink,
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<()> {
+            self.trace.lock().unwrap().push("decode-video");
+            assert_eq!(latents.dims(), [1, 24, 37, 2, 2]);
+            for frame in 0..124 {
+                sink.push(
+                    &RgbImage::from_pixel(32, 32, Rgb([frame as u8, 2, 3])),
+                    _checkpoint,
+                )?;
+            }
+            Ok(())
+        }
+
+        fn decode_audio(
+            &mut self,
+            latents: &StereoLatents,
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<StereoWaveform> {
+            self.trace.lock().unwrap().push("decode-audio");
+            assert_eq!(latents.normalized().dims(), [1, 32, 2, 207]);
+            StereoWaveform::new(
+                Tensor::zeros((1, 2, 207 * 800), DType::F32, &self.device)?,
+                contract::AUDIO_SAMPLE_RATE_HZ as usize,
+                AudioSoundtrackAssociation::Generated,
+            )
+            .map_err(Into::into)
+        }
+    }
+
+    struct StructuralDenoiser {
+        identity: H3PipelineBackendIdentity,
+        trace: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl H3StreamedDenoiser for StructuralDenoiser {
+        fn identity(&self) -> H3PipelineBackendIdentity {
+            self.identity.clone()
+        }
+
+        fn denoise(
+            &mut self,
+            input: H3ForwardInput<'_>,
+            _layout: &H3FrozenPackedLayout,
+            _checkpoint: &mut dyn H3PipelineCheckpoint,
+        ) -> Result<H3TransformerOutput> {
+            self.trace.lock().unwrap().push("streamed-denoise");
+            Ok(H3TransformerOutput {
+                video: Tensor::zeros_like(input.video_rows)?,
+                audio: Tensor::zeros_like(input.audio_rows)?,
+            })
+        }
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn ref2va_runtime_executes_exact_composed_streamed_backend_authority() {
+        let authority = authority_for(contract::REF2VA_COMFY);
+        let identity = H3PipelineBackendIdentity {
+            kind: crate::minimax_h3::pipeline::H3PipelineBackendKind::SyntheticCpu,
+            device_id: authority.device_id().to_string(),
+            execution_fingerprint: authority.execution_fingerprint().to_string(),
+        };
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let composed = H3StreamedRef2VaPipelineBackend::new(
+            StructuralRefComponents {
+                device: Device::Cpu,
+                identity: identity.clone(),
+                trace: Arc::clone(&trace),
+            },
+            StructuralDenoiser {
+                identity,
+                trace: Arc::clone(&trace),
+            },
+            authority.component_set_identity_sha256().to_string(),
+        )
+        .unwrap();
+        let mut runtime = H3Ref2VaPipelineRuntime::new(composed, &authority).unwrap();
+        assert_eq!(runtime.device_id(), authority.device_id());
+        assert_eq!(
+            runtime.execution_fingerprint(),
+            authority.execution_fingerprint()
+        );
+        assert_eq!(
+            runtime.component_set_identity_sha256(),
+            authority.component_set_identity_sha256()
+        );
+
+        let request = image_ref2va_request();
+        let bindings = ref2va_bindings(&request);
+        let output = runtime
+            .generate(
+                &request,
+                &bindings,
+                &ProgressReporter::default(),
+                &mut pipeline::NoopH3PipelineObserver,
+            )
+            .unwrap();
+        assert!(!output.mp4.is_empty());
+        assert!(!output.thumbnail_png.is_empty());
+        assert_eq!(output.mode, Mode::ReferenceToAudioVideo);
+        assert_eq!(
+            output.reference_fingerprint,
+            Some(ref2va_reference_fingerprint(&request).unwrap())
+        );
+        assert_eq!(
+            *trace.lock().unwrap(),
+            vec![
+                "decode-reference",
+                "preprocess-reference",
+                "encode-text",
+                "encode-visual",
+                "streamed-denoise",
+                "streamed-denoise",
+                "streamed-denoise",
+                "decode-video",
+                "decode-audio",
+            ]
+        );
     }
 
     fn frozen_layout() -> H3FrozenPackedLayout {

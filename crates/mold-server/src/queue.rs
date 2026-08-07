@@ -1404,7 +1404,7 @@ pub(crate) fn resolve_max_deferrals() -> usize {
     }
 }
 
-async fn process_job(state: &AppState, job: GenerationJob) {
+async fn process_job(state: &AppState, mut job: GenerationJob) {
     // Check if client already disconnected before doing any work
     if job.result_tx.is_closed() {
         tracing::debug!("skipping queued job — client disconnected");
@@ -1424,6 +1424,48 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             id: job.id.clone(),
         }));
     }
+
+    // Reference binding verifies up to one GiB of staged media. Keep that I/O
+    // off Tokio's async worker and return the staging owner alongside the
+    // opened handles so it remains alive for the whole generation attempt.
+    let reference_binding_result =
+        if job.request.references.is_none() && job.resolved_references.is_none() {
+            Ok(Vec::new())
+        } else {
+            let request = job.request.clone();
+            let resolved = job.resolved_references.take();
+            match tokio::task::spawn_blocking(move || {
+                let result = crate::reference_uploads::inference_bindings_for_request(
+                    &request,
+                    resolved.as_ref(),
+                    None,
+                );
+                (resolved, result)
+            })
+            .await
+            {
+                Ok((resolved, result)) => {
+                    job.resolved_references = resolved;
+                    result
+                }
+                Err(_) => Err(anyhow::anyhow!(
+                    "reference binding worker did not complete safely"
+                )),
+            }
+        };
+    let reference_bindings = match reference_binding_result {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            let err_msg = format!("generation reference binding error: {error:#}");
+            if let Some(ref tx) = job.progress_tx {
+                let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                    message: err_msg.clone(),
+                }));
+            }
+            let _ = job.result_tx.send(Err(err_msg));
+            return;
+        }
+    };
 
     // 1. Ensure model is ready (with progress forwarding)
     let progress_callback = job.progress_tx.as_ref().map(|tx| {
@@ -1515,7 +1557,9 @@ async fn process_job(state: &AppState, job: GenerationJob) {
     // the cache in async context regardless of outcome.
     let join_result = tokio::task::spawn_blocking(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            cached_engine.engine.generate(&gen_req)
+            cached_engine
+                .engine
+                .generate_with_reference_bindings(&gen_req, &reference_bindings)
         }));
         if was_streaming {
             cached_engine.engine.clear_on_progress();
@@ -4216,6 +4260,160 @@ mod tests {
             event.image.is_empty(),
             "metadata-only SSE must not duplicate MP4 bytes"
         );
+    }
+
+    #[test]
+    fn synthetic_h3_ref2va_publication_preserves_ordered_redacted_provenance() {
+        use mold_core::{
+            GenerationReference, GenerationReferenceAuthority, GenerationReferenceKind,
+            GenerationReferenceProvenance,
+        };
+
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let provenance = |name: &str, byte: u8| GenerationReferenceProvenance {
+            name: Some(name.to_string()),
+            sha256: Some(format!("{byte:02x}").repeat(32)),
+        };
+        let mut request = fake_request(mold_core::minimax_h3::REF2VA_COMFY);
+        request.width = 1344;
+        request.height = 768;
+        request.frames = Some(124);
+        request.fps = Some(24);
+        request.output_format = Some(OutputFormat::Mp4);
+        request.enable_audio = Some(true);
+        request.guidance = 0.0;
+        request.strength = 1.0;
+        request.references = Some(vec![
+            GenerationReference::Video {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("motion.mp4", 1),
+                mime_type: "video/mp4".to_string(),
+                width: 1280,
+                height: 720,
+                frame_count: Some(48),
+                duration_ms: 2_000,
+                fps: 24.0,
+                has_audio: true,
+                audio_duration_ms: Some(2_000),
+                audio_sample_count: Some(96_000),
+                audio_sample_rate: Some(48_000),
+                audio_channels: Some(2),
+            },
+            GenerationReference::Image {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("portrait.png", 2),
+                mime_type: "image/png".to_string(),
+                width: 1024,
+                height: 768,
+            },
+            GenerationReference::Audio {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("voice.wav", 3),
+                mime_type: "audio/wav".to_string(),
+                duration_ms: 2_000,
+                sample_rate: 48_000,
+                channels: 1,
+                sample_count: Some(96_000),
+            },
+        ]);
+        let video = mold_core::VideoData {
+            data: b"synthetic-ref2va-mp4-with-synchronized-audio".to_vec(),
+            format: OutputFormat::Mp4,
+            width: request.width,
+            height: request.height,
+            frames: request.frames.unwrap(),
+            fps: request.fps.unwrap(),
+            pipeline: None,
+            thumbnail: b"synthetic-ref2va-thumbnail".to_vec(),
+            gif_preview: Vec::new(),
+            has_audio: true,
+            duration_ms: Some(5_167),
+            audio_sample_rate: Some(mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ),
+            audio_channels: Some(mold_core::minimax_h3::AUDIO_CHANNELS),
+        };
+        let response = mold_core::GenerateResponse {
+            images: Vec::new(),
+            video: Some(video.clone()),
+            audio: None,
+            generation_time_ms: 12_345,
+            model: request.model.clone(),
+            seed_used: 42,
+            gpu: Some(0),
+        };
+        let mut metadata = OutputMetadata::from_generate_request(&request, 42, None, "test");
+        metadata.apply_video_output(&video);
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
+        let filename = save_video_to_dir(
+            tmp.path(),
+            &video.data,
+            &video.gif_preview,
+            video.format,
+            &request.model,
+            &metadata,
+            Some(response.generation_time_ms as i64),
+            Some(&db),
+            None,
+            &gallery_gate,
+        )
+        .unwrap();
+
+        let rows = db.list(Some(tmp.path())).unwrap();
+        let references = rows[0].metadata.references.as_deref().unwrap();
+        assert_eq!(
+            references.iter().map(|item| item.kind).collect::<Vec<_>>(),
+            [
+                GenerationReferenceKind::Video,
+                GenerationReferenceKind::Image,
+                GenerationReferenceKind::Audio,
+            ]
+        );
+        assert_eq!(references[0].index, 1);
+        assert!(references[0].has_audio);
+        assert_eq!(references[0].audio_sample_rate, Some(48_000));
+        assert_eq!(references[2].index, 3);
+        let durable_json = serde_json::to_string(&rows[0].metadata).unwrap();
+        for secret in ["authority", "handle", "server_path", "/synthetic/"] {
+            assert!(!durable_json.contains(secret));
+        }
+
+        let thumbnail = ImageData {
+            data: video.thumbnail.clone(),
+            format: OutputFormat::Png,
+            width: video.width,
+            height: video.height,
+            index: 0,
+        };
+        let SseMessage::Complete(event) = build_sse_completion_message(
+            &response,
+            &thumbnail,
+            None,
+            Some(&metadata),
+            &SavedOutputNames {
+                output: Some(filename),
+                original: None,
+            },
+            SseCompletionPayload::MetadataOnly,
+        ) else {
+            panic!("saved synthetic Ref2VA output must complete over SSE")
+        };
+        assert_eq!(
+            event.video_audio_sample_rate,
+            Some(mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ)
+        );
+        assert_eq!(
+            event.video_audio_channels,
+            Some(mold_core::minimax_h3::AUDIO_CHANNELS)
+        );
+        assert_eq!(
+            event
+                .metadata
+                .as_ref()
+                .and_then(|value| value.references.as_ref())
+                .map(|items| items.iter().map(|item| item.index).collect::<Vec<_>>()),
+            Some(vec![1, 2, 3])
+        );
+        assert!(event.image.is_empty());
     }
 
     #[test]
