@@ -13,9 +13,10 @@ const TARGET = {
 };
 const INSTANCE_ID = "instance-exact";
 const SCOPE_DIGEST = "a".repeat(64);
+const REBOUND_SCOPE_DIGEST = "b".repeat(64);
 const CAPABILITIES: ReferenceUploadCapabilities = {
   available: true,
-  protocol_version: 1,
+  protocol_version: 2,
   requires_api_key: true,
   session_path: "/api/generate/reference-upload-sessions",
   upload_path: "/api/generate/reference-upload",
@@ -109,6 +110,21 @@ function metadataFor(
   };
 }
 
+function uploadComplete(
+  reference: GenerationReference,
+  index: number,
+  sessionComplete: boolean,
+  requestScopeSha256 = REBOUND_SCOPE_DIGEST,
+): Record<string, unknown> {
+  return {
+    instance_id: INSTANCE_ID,
+    reference: index,
+    metadata: metadataFor(reference, index),
+    request_scope_sha256: requestScopeSha256,
+    session_complete: sessionComplete,
+  };
+}
+
 afterEach(() => vi.unstubAllGlobals());
 
 describe("MiniMax H3 reference upload leases", () => {
@@ -172,11 +188,9 @@ describe("MiniMax H3 reference upload leases", () => {
             expect((body as Blob).size).toBe(
               index === 1 ? "image-one".length : "audio-two".length,
             );
-            return Response.json({
-              instance_id: INSTANCE_ID,
-              reference: index,
-              metadata: metadataFor(descriptors[index - 1]!, index),
-            });
+            return Response.json(
+              uploadComplete(descriptors[index - 1]!, index, index === 2),
+            );
           }
           expect(method).toBe("DELETE");
           return new Response(null, { status: 204 });
@@ -202,7 +216,7 @@ describe("MiniMax H3 reference upload leases", () => {
       { authority: "upload", handle: "upload-secret-two" },
     ]);
     expect(lease.expiresAtMs).toBe(20_000);
-    expect(lease.requestScopeSha256).toBe(SCOPE_DIGEST);
+    expect(lease.requestScopeSha256).toBe(REBOUND_SCOPE_DIGEST);
     expect(JSON.stringify(lease)).not.toContain("secret");
     expect(calls).toHaveLength(3);
     expect(calls.every((call) => call.url.startsWith(TARGET.baseUrl))).toBe(
@@ -273,11 +287,7 @@ describe("MiniMax H3 reference upload leases", () => {
                 ? descriptorDigest
                 : (request.references?.[1]?.provenance?.sha256 ?? null),
           };
-          return Response.json({
-            instance_id: INSTANCE_ID,
-            reference: index,
-            metadata: metadataFor(copy, index),
-          });
+          return Response.json(uploadComplete(copy, index, index === 2));
         },
       ),
     );
@@ -293,6 +303,88 @@ describe("MiniMax H3 reference upload leases", () => {
     expect(lease.request.references?.[0]?.provenance?.sha256).toBe(
       descriptorDigest,
     );
+  });
+
+  it("replaces provisional media facts with canonical upload metadata and its rebound scope", async () => {
+    const request = await requestFixture();
+    request.references![0]!.provenance!.name = "  identity.png  ";
+    let descriptors: GenerationReference[] = [];
+    const methods: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async (
+          _input: RequestInfo | URL,
+          init?: RequestInit,
+        ): Promise<Response> => {
+          const method = init?.method ?? "GET";
+          methods.push(method);
+          if (method === "POST") {
+            const payload = JSON.parse(String(init?.body)) as {
+              request: ReferenceUploadRequest;
+            };
+            descriptors = payload.request.references ?? [];
+            expect(descriptors[0]?.provenance?.name).toBe("identity.png");
+            return Response.json({
+              instance_id: INSTANCE_ID,
+              expires_at_ms: 20_000,
+              request_scope_sha256: SCOPE_DIGEST,
+              session_handle: "canonical-session",
+              uploads: [
+                { reference: 1, handle: "canonical-image" },
+                { reference: 2, handle: "canonical-audio" },
+              ],
+            });
+          }
+          const handle = new Headers(init?.headers).get(
+            CAPABILITIES.upload_handle_header,
+          );
+          const index = handle === "canonical-image" ? 1 : 2;
+          const canonical = JSON.parse(
+            JSON.stringify(descriptors[index - 1]),
+          ) as GenerationReference;
+          if (canonical.kind === "image") {
+            canonical.width = 40;
+            canonical.height = 30;
+          } else if (canonical.kind === "audio") {
+            // The provisional packet/container timeline is not queue
+            // authority; the host's decoded PCM count wins.
+            canonical.duration_ms = 2_001;
+            canonical.sample_count = 48_001;
+          }
+          return Response.json(
+            uploadComplete(
+              canonical,
+              index,
+              index === 2,
+              (index === 1 ? "c" : "d").repeat(64),
+            ),
+          );
+        },
+      ),
+    );
+
+    const lease = await prepareReferenceUploads({
+      target: TARGET,
+      expectedInstanceId: INSTANCE_ID,
+      capabilities: CAPABILITIES,
+      request,
+      now: () => 10_000,
+    });
+
+    expect(methods).toEqual(["POST", "PUT", "PUT"]);
+    expect(lease.requestScopeSha256).toBe("d".repeat(64));
+    expect(lease.request.references?.[0]).toMatchObject({
+      provenance: { name: "identity.png" },
+      width: 40,
+      height: 30,
+      media: { authority: "upload", handle: "canonical-image" },
+    });
+    expect(lease.request.references?.[1]).toMatchObject({
+      duration_ms: 2_001,
+      sample_count: 48_001,
+      media: { authority: "upload", handle: "canonical-audio" },
+    });
   });
 
   it("fails closed before network access when capability, auth, or digest authority is invalid", async () => {
@@ -416,11 +508,10 @@ describe("MiniMax H3 reference upload leases", () => {
           }
           if (init?.method === "PUT") {
             return Response.json({
-              instance_id: INSTANCE_ID,
-              reference: 1,
+              ...uploadComplete(descriptor!, 1, false),
               metadata: {
                 ...metadataFor(descriptor!, 1),
-                width: 999,
+                mime_type: "image/jpeg",
               },
             });
           }

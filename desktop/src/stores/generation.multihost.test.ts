@@ -144,7 +144,7 @@ describe("generation store multi-host routing", () => {
       instanceId: "instance-1",
       referenceUploads: {
         available: true,
-        protocol_version: 1,
+        protocol_version: 2,
         requires_api_key: true,
         session_path: "/api/generate/reference-upload-sessions",
         upload_path: "/api/generate/reference-upload",

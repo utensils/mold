@@ -13,8 +13,11 @@ import {
   clearMemoryDraftsForTest,
   getDraftMedia,
   newDraftId,
-  putDraftMedia,
 } from "../lib/draftMediaStore";
+import {
+  putDurableMediaBatch,
+  type DraftMediaRecord,
+} from "@studio/lib/draftMediaStore";
 import {
   generationCapabilitiesForFamily,
   isQwenImageEditFamily,
@@ -46,7 +49,9 @@ import {
   minimaxH3ReferenceDraftsFromMetadata,
   minimaxH3TaskForModel,
   serializeMinimaxH3Authoring,
-  stripMinimaxH3AuthoringMedia,
+  type MinimaxH3AuthoringState,
+  type MinimaxH3BoundaryImage,
+  type MinimaxH3ReferenceDraft,
 } from "@studio/lib/minimaxH3Authoring";
 
 /** The prompt actually sent to the server: the textarea content composed with
@@ -167,28 +172,40 @@ function cloneFormState<T>(state: T): T {
 /** Remove browser-only binary media from a form snapshot before writing it to
  * localStorage or a local generation template. Server-local path fields
  * (`audioFilePath`, `sourceVideoPath`) are preserved because they are stable
- * references; upload/gallery base64 payloads are intentionally not stored. */
+ * references; upload/gallery base64 payloads remain outside serialized form
+ * state and durable Create drafts hydrate them from IndexedDB instead. */
 export function sanitizePersistedForm(
   state: GenerateFormState,
 ): GenerateFormState {
-  const sanitized = {
-    ...cloneFormState(state),
+  // Pull every byte-bearing root out before cloning the ordinary form fields.
+  // JSON-cloning the full state first briefly doubled multi-gigabyte H3 media
+  // in memory even though those bytes were immediately stripped below.
+  const {
+    imageAttachments,
+    maskImage,
+    controlImage,
+    audioFile,
+    sourceVideo,
+    extendVideo,
+    keyframes,
+    h3Authoring,
+    ...metadata
+  } = state;
+  return {
+    ...cloneFormState(metadata),
     version: FORM_VERSION,
-    imageAttachments: state.imageAttachments.map(stripMediaBytes),
-    maskImage: state.maskImage ? stripMediaBytes(state.maskImage) : null,
-    controlImage: state.controlImage
-      ? stripMediaBytes(state.controlImage)
-      : null,
-    audioFile: state.audioFile ? stripMediaBytes(state.audioFile) : null,
-    sourceVideo: state.sourceVideo ? stripMediaBytes(state.sourceVideo) : null,
-    extendVideo: state.extendVideo ? stripMediaBytes(state.extendVideo) : null,
-    keyframes: state.keyframes.map((k) => ({
+    imageAttachments: imageAttachments.map(stripMediaBytes),
+    maskImage: maskImage ? stripMediaBytes(maskImage) : null,
+    controlImage: controlImage ? stripMediaBytes(controlImage) : null,
+    audioFile: audioFile ? stripMediaBytes(audioFile) : null,
+    sourceVideo: sourceVideo ? stripMediaBytes(sourceVideo) : null,
+    extendVideo: extendVideo ? stripMediaBytes(extendVideo) : null,
+    keyframes: keyframes.map((k) => ({
       ...k,
       image: stripMediaBytes(k.image),
     })),
-    h3Authoring: stripMinimaxH3AuthoringMedia(state.h3Authoring),
+    h3Authoring: stripH3AuthoringMedia(h3Authoring),
   };
-  return sanitized;
 }
 
 /** Clone the generation configuration that can be safely represented in a
@@ -428,34 +445,82 @@ export function applyMetadataToForm(
 }
 
 function stripMediaBytes<T extends { base64: string }>(media: T): T {
-  const { base64: _base64, ...rest } = cloneFormState(media) as T & {
-    base64?: string;
-  };
+  const { base64: _base64, ...rest } = media;
   void _base64;
-  return rest as T;
+  return cloneFormState(rest) as T;
+}
+
+function stripH3AuthoringMedia(
+  state: MinimaxH3AuthoringState | null | undefined,
+): MinimaxH3AuthoringState {
+  const boundary = (
+    value: MinimaxH3BoundaryImage | null,
+  ): MinimaxH3BoundaryImage | null => {
+    if (!value) return null;
+    const { data: _data, ...descriptor } = value;
+    void _data;
+    return cloneFormState({ ...descriptor, data: "" });
+  };
+  return {
+    firstFrame: boundary(state?.firstFrame ?? null),
+    lastFrame: boundary(state?.lastFrame ?? null),
+    references: (state?.references ?? []).map((draft) => {
+      const { reference, ...draftMetadata } = draft;
+      return {
+        ...cloneFormState(draftMetadata),
+        reference: cloneFormState({
+          ...reference,
+          media: { authority: "descriptor" },
+        }) as typeof reference,
+      };
+    }),
+  };
 }
 
 function ensureDraftIds(state: GenerateFormState) {
-  const ensure = <T extends { base64: string; draftId?: string } | null>(
-    media: T,
-  ): T => {
+  const ensure = (media: { base64: string; draftId?: string } | null): void => {
     if (media?.base64 && !media.draftId) media.draftId = newDraftId();
-    return media;
   };
-  state.imageAttachments = state.imageAttachments.map((m) => ensure(m)!);
-  state.maskImage = ensure(state.maskImage);
-  state.controlImage = ensure(state.controlImage);
-  state.audioFile = ensure(state.audioFile);
-  state.sourceVideo = ensure(state.sourceVideo);
-  state.extendVideo = ensure(state.extendVideo);
-  state.keyframes = state.keyframes.map((k) => ({
-    ...k,
-    image: ensure(k.image)!,
-  }));
+  state.imageAttachments.forEach(ensure);
+  ensure(state.maskImage);
+  ensure(state.controlImage);
+  ensure(state.audioFile);
+  ensure(state.sourceVideo);
+  ensure(state.extendVideo);
+  state.keyframes.forEach((keyframe) => ensure(keyframe.image));
+  const h3 = state.h3Authoring;
+  if (!h3) return;
+  for (const boundary of [h3.firstFrame, h3.lastFrame]) {
+    if (boundary?.data && !boundary.draftId) boundary.draftId = newDraftId();
+  }
+  for (const draft of h3.references) {
+    const media = draft.reference.media;
+    if (media.authority === "inline" && media.data && !draft.draftId) {
+      draft.draftId = newDraftId();
+    }
+  }
 }
 
-function mediaFromState(state: GenerateFormState) {
-  return [
+function h3MediaFromState(state: GenerateFormState): DraftMediaRecord[] {
+  const h3 = state.h3Authoring;
+  if (!h3) return [];
+  const records: DraftMediaRecord[] = [];
+  for (const boundary of [h3.firstFrame, h3.lastFrame]) {
+    if (boundary?.data) {
+      records.push({ draftId: boundary.draftId, base64: boundary.data });
+    }
+  }
+  for (const draft of h3.references) {
+    const media = draft.reference.media;
+    if (media.authority === "inline" && media.data) {
+      records.push({ draftId: draft.draftId, base64: media.data });
+    }
+  }
+  return records;
+}
+
+function mediaFromState(state: GenerateFormState): DraftMediaRecord[] {
+  const ordinary = [
     ...state.imageAttachments,
     state.maskImage,
     state.controlImage,
@@ -464,15 +529,18 @@ function mediaFromState(state: GenerateFormState) {
     state.extendVideo,
     ...state.keyframes.map((k) => k.image),
   ].filter((m): m is NonNullable<typeof m> => Boolean(m?.base64));
+  return [...ordinary, ...h3MediaFromState(state)];
 }
 
 let pendingDraftWrites: Promise<unknown>[] = [];
 let pendingHydration: Promise<unknown> | null = null;
+let pendingPersistence: Promise<void> | null = null;
+let persistenceEpoch = 0;
 
-function persistDraftMedia(state: GenerateFormState) {
-  ensureDraftIds(state);
-  pendingDraftWrites = mediaFromState(state).map((m) => putDraftMedia(m));
-  return Promise.allSettled(pendingDraftWrites);
+function persistDraftMedia(media: readonly DraftMediaRecord[]) {
+  const write = putDurableMediaBatch(media);
+  pendingDraftWrites = [write];
+  return write;
 }
 
 async function hydrateDraftMedia(state: GenerateFormState) {
@@ -531,6 +599,51 @@ async function hydrateDraftMedia(state: GenerateFormState) {
   ) {
     state.keyframes = keyframes;
   }
+
+  const h3 = state.h3Authoring;
+  if (!h3) return;
+  const hydrateBoundary = async (
+    boundary: MinimaxH3BoundaryImage | null,
+  ): Promise<MinimaxH3BoundaryImage | null> => {
+    if (!boundary?.draftId || boundary.data) return boundary;
+    const stored = await getDraftMedia(boundary.draftId);
+    return stored?.base64 ? { ...boundary, data: stored.base64 } : boundary;
+  };
+  const hydrateReference = async (
+    draft: MinimaxH3ReferenceDraft,
+  ): Promise<MinimaxH3ReferenceDraft> => {
+    if (
+      !draft.draftId ||
+      (draft.reference.media.authority === "inline" &&
+        draft.reference.media.data)
+    ) {
+      return draft;
+    }
+    const stored = await getDraftMedia(draft.draftId);
+    if (!stored?.base64) return draft;
+    return {
+      ...draft,
+      reference: {
+        ...draft.reference,
+        media: { authority: "inline", data: stored.base64 },
+      },
+    };
+  };
+
+  const firstSnapshot = h3.firstFrame;
+  const lastSnapshot = h3.lastFrame;
+  const referencesSnapshot = h3.references;
+  const [firstFrame, lastFrame, references] = await Promise.all([
+    hydrateBoundary(firstSnapshot),
+    hydrateBoundary(lastSnapshot),
+    Promise.all(referencesSnapshot.map(hydrateReference)),
+  ]);
+  const current = state.h3Authoring;
+  if (!current) return;
+  if (current.firstFrame === firstSnapshot) current.firstFrame = firstFrame;
+  if (current.lastFrame === lastSnapshot) current.lastFrame = lastFrame;
+  if (current.references === referencesSnapshot)
+    current.references = references;
 }
 
 function load(): GenerateFormState {
@@ -561,17 +674,30 @@ function load(): GenerateFormState {
 }
 
 function persist(state: GenerateFormState) {
+  const epoch = ++persistenceEpoch;
+  let serialized: string;
   try {
-    void persistDraftMedia(state);
-    // Drop base64 bytes from localStorage — they blow past the quota quickly
-    // and the attachment is re-picked trivially on reload.
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify(sanitizePersistedForm(state)),
-    );
+    ensureDraftIds(state);
+    // Drop base64 bytes from localStorage — they blow past the quota quickly.
+    // Draft IDs reconnect this descriptor state to IndexedDB during hydration.
+    serialized = JSON.stringify(sanitizePersistedForm(state));
   } catch {
-    /* ignore */
+    return;
   }
+  const write = persistDraftMedia(mediaFromState(state));
+  pendingPersistence = (async () => {
+    // The descriptor is valid only after every referenced byte payload commits
+    // in the same transaction. A later edit supersedes this snapshot; a quota,
+    // private-mode, or transaction failure leaves the prior valid draft alone
+    // and the next form change retries from current in-memory state.
+    if (!(await write) || epoch !== persistenceEpoch) return;
+    try {
+      localStorage.setItem(STORAGE_KEY, serialized);
+    } catch {
+      // Bytes are durable but no descriptor points at them. The next change
+      // safely retries; never publish a descriptor before its media exists.
+    }
+  })();
 }
 
 export interface UseGenerateForm {
@@ -835,6 +961,7 @@ export { isQwenImageEditFamily };
 
 export const __testing__ = {
   resetForTest() {
+    persistenceEpoch += 1;
     stopPersistWatch?.();
     stopPersistWatch = null;
     if (persistTimer) clearTimeout(persistTimer);
@@ -842,9 +969,11 @@ export const __testing__ = {
     singleton = null;
     pendingDraftWrites = [];
     pendingHydration = null;
+    pendingPersistence = null;
   },
   async flushDraftWrites() {
     await Promise.allSettled(pendingDraftWrites);
+    await pendingPersistence;
   },
   async flushHydration() {
     await pendingHydration;

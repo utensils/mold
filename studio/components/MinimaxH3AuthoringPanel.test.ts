@@ -1,7 +1,11 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import MinimaxH3AuthoringPanel from "./MinimaxH3AuthoringPanel.vue";
 import type { MinimaxH3AuthoringState } from "../lib/minimaxH3Authoring";
+import {
+  h264AacMp4Fixture,
+  pcmWavFixture,
+} from "../lib/minimaxH3MediaProbe.testFixtures";
 
 function state(): MinimaxH3AuthoringState {
   return {
@@ -52,6 +56,12 @@ function state(): MinimaxH3AuthoringState {
   };
 }
 
+function fileBuffer(bytes: Uint8Array): ArrayBuffer {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
+}
+
 describe("MinimaxH3AuthoringPanel", () => {
   it("renders semantic resynthesis, one-based mixed order, soundtrack association, and budgets", () => {
     const wrapper = mount(MinimaxH3AuthoringPanel, {
@@ -97,6 +107,88 @@ describe("MinimaxH3AuthoringPanel", () => {
       "image",
       "audio",
     ]);
+  });
+
+  it("canonicalizes audio/x-wav without resampling or rounding its sample timeline", async () => {
+    const wrapper = mount(MinimaxH3AuthoringPanel, {
+      props: {
+        modelValue: { firstFrame: null, lastFrame: null, references: [] },
+        task: "ref2va",
+      },
+    });
+    const bytes = pcmWavFixture({
+      sampleRate: 44_100,
+      channels: 2,
+      sampleCount: 44_101,
+    });
+    const file = new File([fileBuffer(bytes)], "fractional.wav", {
+      type: "audio/x-wav",
+    });
+    const input = wrapper.get('[data-test="h3-reference-files"]');
+    Object.defineProperty(input.element, "files", {
+      configurable: true,
+      value: [file],
+    });
+
+    await input.trigger("change");
+    await vi.waitFor(() => {
+      expect(wrapper.emitted("update:modelValue")).toHaveLength(1);
+    });
+
+    const emitted = wrapper.emitted(
+      "update:modelValue",
+    )?.[0]?.[0] as MinimaxH3AuthoringState;
+    expect(emitted.references[0]?.reference).toMatchObject({
+      kind: "audio",
+      mime_type: "audio/wav",
+      duration_ms: 1_001,
+      sample_rate: 44_100,
+      channels: 2,
+      sample_count: 44_101,
+      provenance: { name: "fractional.wav" },
+    });
+  });
+
+  it("authors H.264/AAC upload hints without browser audio resampling", async () => {
+    const wrapper = mount(MinimaxH3AuthoringPanel, {
+      props: {
+        modelValue: { firstFrame: null, lastFrame: null, references: [] },
+        task: "ref2va",
+      },
+    });
+    const bytes = h264AacMp4Fixture();
+    const file = new File([fileBuffer(bytes)], "motion.mp4", {
+      type: "video/mp4",
+    });
+    const input = wrapper.get('[data-test="h3-reference-files"]');
+    Object.defineProperty(input.element, "files", {
+      configurable: true,
+      value: [file],
+    });
+
+    await input.trigger("change");
+    await vi.waitFor(() => {
+      expect(wrapper.emitted("update:modelValue")).toHaveLength(1);
+    });
+
+    const emitted = wrapper.emitted(
+      "update:modelValue",
+    )?.[0]?.[0] as MinimaxH3AuthoringState;
+    expect(emitted.references[0]?.reference).toMatchObject({
+      kind: "video",
+      mime_type: "video/mp4",
+      width: 1_280,
+      height: 720,
+      frame_count: 48,
+      duration_ms: 2_000,
+      fps: 24,
+      has_audio: true,
+      audio_duration_ms: 2_021,
+      audio_sample_count: 89_088,
+      audio_sample_rate: 44_100,
+      audio_channels: 2,
+      provenance: { name: "motion.mp4" },
+    });
   });
 
   it("renders all four FL2VA endpoint modes and removes endpoints explicitly", async () => {

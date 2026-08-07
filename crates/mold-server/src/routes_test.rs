@@ -3735,7 +3735,7 @@ mod tests {
         assert_eq!(body["devices"]["planned_lanes"], true);
         assert_eq!(body["devices"]["learned_eta"], true);
         assert_eq!(body["reference_uploads"]["available"], true);
-        assert_eq!(body["reference_uploads"]["protocol_version"], 1);
+        assert_eq!(body["reference_uploads"]["protocol_version"], 2);
         assert_eq!(body["reference_uploads"]["requires_api_key"], true);
         assert_eq!(
             body["reference_uploads"]["upload_handle_header"],

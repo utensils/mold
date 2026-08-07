@@ -9,6 +9,12 @@ import type {
   OutputMetadata,
 } from "../lib/api/types";
 import { isCancelledError, metadataOnlyResult, type Job } from "../lib/generationJob";
+import { sha256HexOfBase64 } from "../lib/sourceRestore";
+import {
+  isMinimaxH3Identity,
+  minimaxH3TaskForModel,
+  type MinimaxH3Task,
+} from "@studio/lib/minimaxH3Authoring";
 
 /**
  * Foreground-resume reconciliation for iPhone generations.
@@ -73,32 +79,199 @@ export function isInterruptedGenerationError(error: string | null | undefined): 
   return error === STREAM_CLOSED_EARLY || isTransportFailure(error);
 }
 
+type GalleryMatchJob = Pick<
+  Job,
+  "visualSeed" | "model" | "prompt" | "width" | "height" | "total" | "request"
+>;
+
+interface H3BoundaryIdentity {
+  task: "fl2va";
+  firstFrameSha256: string | null;
+  keyframes: Array<{ frame: number; sha256: string }>;
+}
+
+interface H3ReferenceIdentity {
+  task: "ref2va";
+  references: Array<{ index: number; kind: string; sha256: string }>;
+}
+
+type H3ConditioningIdentity = H3BoundaryIdentity | H3ReferenceIdentity;
+
+interface H3RecoveryIdentity {
+  conditioning: H3ConditioningIdentity;
+  width: number;
+  height: number;
+  steps: number;
+  frames: number;
+  fps: number;
+}
+
+function normalizedSha256(value: string | null | undefined): string | null {
+  return value?.trim().toLowerCase() || null;
+}
+
+async function inlineSha256(value: string | null | undefined): Promise<string | null> {
+  if (!value) return null;
+  return sha256HexOfBase64(value).catch(() => null);
+}
+
+function requiredPositiveInteger(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+async function submittedH3RecoveryIdentity(
+  job: GalleryMatchJob,
+): Promise<H3RecoveryIdentity | null | undefined> {
+  if (!isMinimaxH3Identity(null, job.model)) return undefined;
+  const task = minimaxH3TaskForModel(job.model);
+  const request = job.request;
+  if (!task || !request || request.model !== job.model) return null;
+  // H3 recovery is intentionally stricter than the legacy gallery join. The
+  // frozen request is the only authority for its exact render shape, and a
+  // host row that predates any of these fields cannot safely be claimed.
+  const width = requiredPositiveInteger(request.width);
+  const height = requiredPositiveInteger(request.height);
+  const steps = requiredPositiveInteger(request.steps);
+  const frames = requiredPositiveInteger(request.frames);
+  const fps = requiredPositiveInteger(request.fps);
+  if (!width || !height || !steps || !frames || !fps) return null;
+
+  if (task === "fl2va") {
+    // Snapshot every mutable field before the first digest await. This one
+    // concrete submission identity is then reused for every recovery poll.
+    const sourceImage = request.source_image;
+    const submittedKeyframes = (request.keyframes ?? []).map(({ frame, image }) => ({
+      frame,
+      image,
+    }));
+    const firstFrameSha256 = await inlineSha256(sourceImage);
+    if (sourceImage && !firstFrameSha256) return null;
+    const keyframes: H3BoundaryIdentity["keyframes"] = [];
+    for (const keyframe of submittedKeyframes) {
+      const sha256 = await inlineSha256(keyframe.image);
+      if (!sha256) return null;
+      keyframes.push({ frame: keyframe.frame, sha256 });
+    }
+    return {
+      conditioning: { task, firstFrameSha256, keyframes },
+      width,
+      height,
+      steps,
+      frames,
+      fps,
+    };
+  }
+
+  const submittedReferences = (request.references ?? []).map((reference) => ({
+    kind: reference.kind,
+    media: reference.media,
+    provenanceSha256: normalizedSha256(reference.provenance?.sha256),
+  }));
+  if (submittedReferences.length === 0) return null;
+  const references: H3ReferenceIdentity["references"] = [];
+  for (const [offset, reference] of submittedReferences.entries()) {
+    let sha256 = reference.provenanceSha256;
+    if (reference.media.authority === "inline") {
+      const inline = await inlineSha256(reference.media.data);
+      if (!inline || (sha256 && inline !== sha256)) return null;
+      sha256 = inline;
+    }
+    if (!sha256) return null;
+    references.push({ index: offset + 1, kind: reference.kind, sha256 });
+  }
+  return {
+    conditioning: { task, references },
+    width,
+    height,
+    steps,
+    frames,
+    fps,
+  };
+}
+
+function recordedH3Conditioning(
+  task: MinimaxH3Task,
+  metadata: OutputMetadata | null | undefined,
+): H3ConditioningIdentity | null {
+  if (!metadata) return null;
+  if (task === "fl2va") {
+    const firstFrameSha256 = normalizedSha256(metadata.source_image_sha256);
+    if (metadata.source_image_name && !firstFrameSha256) return null;
+    const keyframes: H3BoundaryIdentity["keyframes"] = [];
+    for (const keyframe of metadata.keyframes ?? []) {
+      const sha256 = normalizedSha256(keyframe.sha256);
+      if (!sha256) return null;
+      keyframes.push({ frame: keyframe.frame, sha256 });
+    }
+    return { task, firstFrameSha256, keyframes };
+  }
+
+  const references: H3ReferenceIdentity["references"] = [];
+  for (const reference of metadata.references ?? []) {
+    const sha256 = normalizedSha256(reference.sha256);
+    if (!sha256) return null;
+    references.push({ index: reference.index, kind: reference.kind, sha256 });
+  }
+  return { task, references };
+}
+
+function h3RecoveryIdentityMatches(
+  submitted: H3RecoveryIdentity,
+  metadata: OutputMetadata | null | undefined,
+): boolean {
+  if (
+    !metadata ||
+    metadata.width !== submitted.width ||
+    metadata.height !== submitted.height ||
+    metadata.steps !== submitted.steps ||
+    metadata.frames !== submitted.frames ||
+    metadata.fps !== submitted.fps
+  ) {
+    return false;
+  }
+  const recorded = recordedH3Conditioning(submitted.conditioning.task, metadata);
+  return recorded !== null && JSON.stringify(recorded) === JSON.stringify(submitted.conditioning);
+}
+
+function matchGalleryPrintWithIdentity(
+  job: GalleryMatchJob,
+  prints: readonly GalleryImage[],
+  h3Identity: H3RecoveryIdentity | null | undefined,
+): GalleryImage | null {
+  const seed = Number(job.visualSeed);
+  if (!Number.isSafeInteger(seed) || h3Identity === null) return null;
+  const differs = (recorded: number | null | undefined, submitted: number): boolean =>
+    typeof recorded === "number" && submitted > 0 && recorded !== submitted;
+  for (const print of prints) {
+    const meta = print.metadata;
+    if (!meta || meta.seed !== seed || meta.model !== job.model) continue;
+    if (meta.prompt && job.prompt && meta.prompt !== job.prompt) continue;
+    if (h3Identity) {
+      if (!h3RecoveryIdentityMatches(h3Identity, meta)) continue;
+    } else {
+      if (differs(meta.width, job.width) || differs(meta.height, job.height)) continue;
+      if (differs(meta.steps, job.total)) continue;
+    }
+    return print;
+  }
+  return null;
+}
+
 /**
  * Match a job to the gallery row its completion produced. Every mobile
  * sibling ships an explicit seed (`base + i`), so seed + model is an exact
  * join; the recorded prompt is the tiebreaker for prepared siblings, whose
  * prompts are unique within a batch. Dimensions and steps must also agree
  * when both sides know them — a fixed-seed re-run at new settings whose
- * stream died pre-queue must not resurrect an older print.
+ * stream died pre-queue must not resurrect an older print. H3 additionally
+ * joins on exact endpoint and ordered-reference content hashes.
  */
-export function matchGalleryPrint(
-  job: Pick<Job, "visualSeed" | "model" | "prompt" | "width" | "height" | "total">,
+export async function matchGalleryPrint(
+  job: GalleryMatchJob,
   prints: readonly GalleryImage[],
-): GalleryImage | null {
-  const seed = Number(job.visualSeed);
-  if (!Number.isSafeInteger(seed)) return null;
-  const differs = (recorded: number | null | undefined, submitted: number): boolean =>
-    typeof recorded === "number" && submitted > 0 && recorded !== submitted;
-  return (
-    prints.find((print) => {
-      const meta = print.metadata;
-      if (!meta || meta.seed !== seed || meta.model !== job.model) return false;
-      if (meta.prompt && job.prompt && meta.prompt !== job.prompt) return false;
-      if (differs(meta.width, job.width) || differs(meta.height, job.height)) return false;
-      if (differs(meta.steps, job.total)) return false;
-      return true;
-    }) ?? null
-  );
+): Promise<GalleryImage | null> {
+  const h3Identity = await submittedH3RecoveryIdentity(job);
+  return matchGalleryPrintWithIdentity(job, prints, h3Identity);
 }
 
 function formatFromFilename(filename: string): OutputFormat | null {
@@ -190,27 +363,32 @@ function settleCompleted(job: Job, complete: CompleteEvent, opts: GenerationReco
 function findQueueEntry(
   entries: readonly RecoveryQueueEntry[],
   job: Job,
+  h3Identity: H3RecoveryIdentity | null | undefined,
 ): RecoveryQueueEntry | null {
   if (job.id) return entries.find((entry) => entry.id === job.id) ?? null;
   // Pre-ID jobs (the queued frame never arrived) join on the pinned seed the
-  // request carried — mirrors the cancel path's pre-ID snapshot semantics.
+  // request carried, plus H3 conditioning identity when applicable — mirrors
+  // the cancel path's pre-ID snapshot semantics without crossing submissions.
   const seed = Number(job.visualSeed);
-  if (!Number.isSafeInteger(seed)) return null;
+  if (!Number.isSafeInteger(seed) || h3Identity === null) return null;
   const earliest = job.submittedAtUnixMs - PRE_ID_CLOCK_SKEW_MS;
   const latest = job.submittedAtUnixMs + PRE_ID_JOIN_WINDOW_MS;
+  const candidates = entries
+    .filter(
+      (entry) =>
+        typeof entry.started_at_unix_ms === "number" &&
+        entry.started_at_unix_ms >= earliest &&
+        entry.started_at_unix_ms <= latest &&
+        entry.seed_pinned !== false &&
+        entry.metadata?.seed === seed &&
+        (entry.metadata.model === job.model || entry.model === job.model) &&
+        (!entry.metadata.prompt || !job.prompt || entry.metadata.prompt === job.prompt),
+    )
+    .sort((a, b) => a.started_at_unix_ms! - b.started_at_unix_ms!);
   return (
-    entries
-      .filter(
-        (entry) =>
-          typeof entry.started_at_unix_ms === "number" &&
-          entry.started_at_unix_ms >= earliest &&
-          entry.started_at_unix_ms <= latest &&
-          entry.seed_pinned !== false &&
-          entry.metadata?.seed === seed &&
-          (entry.metadata.model === job.model || entry.model === job.model) &&
-          (!entry.metadata.prompt || !job.prompt || entry.metadata.prompt === job.prompt),
-      )
-      .sort((a, b) => a.started_at_unix_ms! - b.started_at_unix_ms!)[0] ?? null
+    candidates.find(
+      (entry) => !h3Identity || h3RecoveryIdentityMatches(h3Identity, entry.metadata),
+    ) ?? null
   );
 }
 
@@ -245,7 +423,17 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
   const interval = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const interruptedCopy = `The connection to ${opts.hostLabel} was interrupted and this print didn’t finish.`;
   let transportRetries = 0;
+  let h3Identity: H3RecoveryIdentity | null | undefined;
   try {
+    // Digest the frozen H3 request once. Queue polls and the eventual gallery
+    // lookup reuse this value, so large frame/reference payloads are never
+    // re-read every four seconds.
+    h3Identity = await submittedH3RecoveryIdentity(job);
+    if (settledExternally(job) || !isActive()) return;
+    if (h3Identity === null) {
+      settleFailure(job, interruptedCopy);
+      return;
+    }
     while (isActive() && !settledExternally(job)) {
       try {
         await reconcileJobOnce();
@@ -266,7 +454,7 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
       }
     }
   } catch (cause) {
-    if (!settledExternally(job)) {
+    if (!settledExternally(job) && isActive()) {
       settleFailure(job, describeTransportError(cause, opts.hostLabel));
     }
   }
@@ -276,11 +464,15 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
   async function reconcileJobOnce(): Promise<void> {
     while (isActive() && !settledExternally(job)) {
       if (opts.chain && !job.id) {
-        job.id = (await findPreIdChain(job, opts)) ?? "";
+        const chainId = await findPreIdChain(job, opts);
         transportRetries = 0;
+        if (settledExternally(job) || !isActive()) return;
+        job.id = chainId ?? "";
         if (!job.id) {
           const prints = await apiJsonTo<GalleryImage[]>(opts.target, "/api/gallery");
-          const match = matchGalleryPrint(job, prints);
+          transportRetries = 0;
+          if (settledExternally(job) || !isActive()) return;
+          const match = matchGalleryPrintWithIdentity(job, prints, h3Identity);
           if (match) settleCompleted(job, galleryCompletion(match), opts);
           else settleFailure(job, interruptedCopy);
           return;
@@ -325,7 +517,7 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
         if (settledExternally(job) || !isActive()) return;
         const match =
           (chainOutput ? prints.find((print) => print.filename === chainOutput) : null) ??
-          matchGalleryPrint(job, prints);
+          matchGalleryPrintWithIdentity(job, prints, h3Identity);
         if (match) {
           settleCompleted(job, galleryCompletion(match), opts);
         } else if (chainOutput) {
@@ -342,7 +534,7 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
       );
       transportRetries = 0;
       if (settledExternally(job) || !isActive()) return;
-      const entry = findQueueEntry(listing.entries ?? [], job);
+      const entry = findQueueEntry(listing.entries ?? [], job, h3Identity);
       if (entry?.state === "running") {
         // Still developing server-side — re-attach by polling until it
         // leaves the queue, then collect the print from the gallery.
@@ -356,7 +548,7 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
         await apiFetchTo(opts.target, `/api/queue/${encodeURIComponent(entry.id)}`, {
           method: "DELETE",
         }).catch(() => undefined);
-        if (settledExternally(job)) return;
+        if (settledExternally(job) || !isActive()) return;
         settleFailure(
           job,
           `The connection dropped while this print waited in ${opts.hostLabel}’s queue. Develop again to requeue it.`,
@@ -366,7 +558,7 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
       const prints = await apiJsonTo<GalleryImage[]>(opts.target, "/api/gallery");
       transportRetries = 0;
       if (settledExternally(job) || !isActive()) return;
-      const match = matchGalleryPrint(job, prints);
+      const match = matchGalleryPrintWithIdentity(job, prints, h3Identity);
       if (match) {
         settleCompleted(job, galleryCompletion(match), opts);
       } else {

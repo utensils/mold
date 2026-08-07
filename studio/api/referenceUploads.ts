@@ -6,6 +6,7 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 const HTTP_TOKEN_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const SAFE_API_PATH_PATTERN = /^\/api\/[A-Za-z0-9/_-]+$/;
 const MAX_SECRET_BYTES = 1_024;
+const MAX_REFERENCE_NAME_BYTES = 255;
 const RESERVED_SECRET_HEADERS = new Set([
   "authorization",
   "connection",
@@ -134,7 +135,7 @@ function validateCapabilities(
   if (
     !value ||
     value.available !== true ||
-    value.protocol_version !== 1 ||
+    value.protocol_version !== 2 ||
     value.requires_api_key !== true
   ) {
     protocolError(
@@ -181,7 +182,7 @@ function validateCapabilities(
   }
   return {
     available: true,
-    protocol_version: 1,
+    protocol_version: 2,
     requires_api_key: true,
     session_path: sessionPath,
     upload_path: uploadPath,
@@ -359,6 +360,25 @@ function captureReferences(
       provenance: { ...(reference.provenance ?? {}) },
       media: { ...media },
     } as GenerationReference;
+    const rawName = reference.provenance?.name;
+    if (rawName != null) {
+      const name = rawName.trim();
+      if (
+        name.length === 0 ||
+        new TextEncoder().encode(name).byteLength > MAX_REFERENCE_NAME_BYTES ||
+        name === "." ||
+        name === ".." ||
+        name.includes("/") ||
+        name.includes("\\") ||
+        /[\u0000-\u001f\u007f-\u009f]/u.test(name)
+      ) {
+        protocolError(
+          "REFERENCE_UPLOAD_REQUEST_INVALID",
+          `Reference ${oneBased} has an invalid display-only filename.`,
+        );
+      }
+      copy.provenance = { ...(copy.provenance ?? {}), name };
+    }
     const descriptor = {
       ...copy,
       media: { authority: "descriptor" as const },
@@ -548,72 +568,159 @@ function normalizedOptional(value: unknown): unknown {
   return value ?? null;
 }
 
-function metadataMatchesReference(
+function positiveSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) > 0;
+}
+
+function canonicalDescriptorFromMetadata(
   metadata: Record<string, unknown>,
-  reference: GenerationReference,
-  oneBased: number,
-): boolean {
+  entry: CapturedReference,
+): GenerationReference | null {
+  const reference = entry.original;
+  const oneBased = entry.oneBased;
   if (
     metadata.index !== oneBased ||
     metadata.kind !== reference.kind ||
-    metadata.mime_type !== reference.mime_type ||
+    typeof metadata.mime_type !== "string" ||
     String(metadata.sha256 ?? "").toLowerCase() !==
-      reference.provenance?.sha256?.toLowerCase()
+      reference.provenance?.sha256?.toLowerCase() ||
+    normalizedOptional(metadata.name) !==
+      normalizedOptional(reference.provenance?.name)
   ) {
-    return false;
+    return null;
   }
+  const provenance = {
+    ...(reference.provenance ?? {}),
+    sha256: String(metadata.sha256).toLowerCase(),
+  };
   if (reference.kind === "image") {
-    return (
-      metadata.width === reference.width && metadata.height === reference.height
-    );
+    if (
+      metadata.mime_type !== reference.mime_type ||
+      !positiveSafeInteger(metadata.width) ||
+      !positiveSafeInteger(metadata.height)
+    ) {
+      return null;
+    }
+    return {
+      kind: "image",
+      media: { authority: "descriptor" },
+      provenance,
+      mime_type: metadata.mime_type,
+      width: metadata.width,
+      height: metadata.height,
+    };
   }
   if (reference.kind === "audio") {
-    return (
-      metadata.duration_ms === reference.duration_ms &&
-      metadata.sample_rate === reference.sample_rate &&
-      metadata.channels === reference.channels &&
-      normalizedOptional(metadata.sample_count) ===
-        normalizedOptional(reference.sample_count)
-    );
+    const declaredMime = reference.mime_type.trim().toLowerCase();
+    if (
+      !["audio/wav", "audio/x-wav", "audio/wave"].includes(declaredMime) ||
+      metadata.mime_type !== "audio/wav" ||
+      !positiveSafeInteger(metadata.duration_ms) ||
+      !positiveSafeInteger(metadata.sample_rate) ||
+      !positiveSafeInteger(metadata.channels) ||
+      !positiveSafeInteger(metadata.sample_count) ||
+      (metadata.channels !== 1 && metadata.channels !== 2)
+    ) {
+      return null;
+    }
+    return {
+      kind: "audio",
+      media: { authority: "descriptor" },
+      provenance,
+      mime_type: "audio/wav",
+      duration_ms: metadata.duration_ms,
+      sample_rate: metadata.sample_rate,
+      channels: metadata.channels,
+      sample_count: metadata.sample_count,
+    };
   }
-  return (
-    metadata.width === reference.width &&
-    metadata.height === reference.height &&
-    normalizedOptional(metadata.frame_count) ===
-      normalizedOptional(reference.frame_count) &&
-    metadata.duration_ms === reference.duration_ms &&
-    metadata.fps === reference.fps &&
-    Boolean(metadata.has_audio) === Boolean(reference.has_audio) &&
-    normalizedOptional(metadata.audio_duration_ms) ===
-      normalizedOptional(reference.audio_duration_ms) &&
-    normalizedOptional(metadata.audio_sample_count) ===
-      normalizedOptional(reference.audio_sample_count) &&
-    normalizedOptional(metadata.audio_sample_rate) ===
-      normalizedOptional(reference.audio_sample_rate) &&
-    normalizedOptional(metadata.audio_channels) ===
-      normalizedOptional(reference.audio_channels)
-  );
+  if (
+    reference.mime_type !== "video/mp4" ||
+    metadata.mime_type !== "video/mp4" ||
+    !positiveSafeInteger(metadata.width) ||
+    !positiveSafeInteger(metadata.height) ||
+    !positiveSafeInteger(metadata.frame_count) ||
+    !positiveSafeInteger(metadata.duration_ms) ||
+    typeof metadata.fps !== "number" ||
+    !Number.isFinite(metadata.fps) ||
+    metadata.fps <= 0 ||
+    typeof metadata.has_audio !== "boolean"
+  ) {
+    return null;
+  }
+  if (metadata.has_audio) {
+    if (
+      !positiveSafeInteger(metadata.audio_duration_ms) ||
+      !positiveSafeInteger(metadata.audio_sample_count) ||
+      !positiveSafeInteger(metadata.audio_sample_rate) ||
+      !positiveSafeInteger(metadata.audio_channels) ||
+      (metadata.audio_channels !== 1 && metadata.audio_channels !== 2)
+    ) {
+      return null;
+    }
+  } else if (
+    normalizedOptional(metadata.audio_duration_ms) !== null ||
+    normalizedOptional(metadata.audio_sample_count) !== null ||
+    normalizedOptional(metadata.audio_sample_rate) !== null ||
+    normalizedOptional(metadata.audio_channels) !== null
+  ) {
+    return null;
+  }
+  return {
+    kind: "video",
+    media: { authority: "descriptor" },
+    provenance,
+    mime_type: "video/mp4",
+    width: metadata.width,
+    height: metadata.height,
+    frame_count: metadata.frame_count,
+    duration_ms: metadata.duration_ms,
+    fps: metadata.fps,
+    has_audio: metadata.has_audio,
+    audio_duration_ms: metadata.has_audio
+      ? (metadata.audio_duration_ms as number)
+      : null,
+    audio_sample_count: metadata.has_audio
+      ? (metadata.audio_sample_count as number)
+      : null,
+    audio_sample_rate: metadata.has_audio
+      ? (metadata.audio_sample_rate as number)
+      : null,
+    audio_channels: metadata.has_audio
+      ? (metadata.audio_channels as number)
+      : null,
+  };
 }
 
 function validateUploadComplete(
   value: unknown,
   expectedInstanceId: string,
   entry: CapturedReference,
-): void {
+  expectedSessionComplete: boolean,
+): { descriptor: GenerationReference; requestScopeSha256: string } {
   const row = asRecord(value);
   const metadata = asRecord(row?.metadata);
+  const descriptor = metadata
+    ? canonicalDescriptorFromMetadata(metadata, entry)
+    : null;
   if (
     !row ||
     row.instance_id !== expectedInstanceId ||
     row.reference !== entry.oneBased ||
-    !metadata ||
-    !metadataMatchesReference(metadata, entry.descriptor, entry.oneBased)
+    !descriptor ||
+    typeof row.request_scope_sha256 !== "string" ||
+    !SHA256_PATTERN.test(row.request_scope_sha256) ||
+    row.session_complete !== expectedSessionComplete
   ) {
     protocolError(
       "REFERENCE_UPLOAD_RESPONSE_MISMATCH",
       `The host returned mismatched metadata for reference ${entry.oneBased}.`,
     );
   }
+  return {
+    descriptor,
+    requestScopeSha256: row.request_scope_sha256.toLowerCase(),
+  };
 }
 
 /** Create, fill, and validate one request-bound reference-upload session.
@@ -706,6 +813,8 @@ export async function prepareReferenceUploads<
     return cancelPromise;
   };
 
+  let completedUploads = 0;
+  let canonicalScopeSha256 = session.requestScopeSha256;
   try {
     for (const entry of captured) {
       if (entry.inlineData === null || entry.byteLength === null) continue;
@@ -737,7 +846,15 @@ export async function prepareReferenceUploads<
           ...signal,
         },
       );
-      validateUploadComplete(complete, options.expectedInstanceId, entry);
+      completedUploads += 1;
+      const canonical = validateUploadComplete(
+        complete,
+        options.expectedInstanceId,
+        entry,
+        completedUploads === uploadReferences.length,
+      );
+      entry.descriptor = canonical.descriptor;
+      canonicalScopeSha256 = canonical.requestScopeSha256;
     }
   } catch (error) {
     try {
@@ -769,7 +886,7 @@ export async function prepareReferenceUploads<
 
   const lease = {
     expiresAtMs: session.expiresAtMs,
-    requestScopeSha256: session.requestScopeSha256,
+    requestScopeSha256: canonicalScopeSha256,
     cancel,
   } as Omit<ReferenceUploadLease<T>, "request"> & { request?: T };
   Object.defineProperty(lease, "request", {

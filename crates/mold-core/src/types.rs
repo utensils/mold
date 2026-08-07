@@ -786,6 +786,13 @@ pub struct ReferenceUploadCompleteResponse {
     pub instance_id: String,
     pub reference: u32,
     pub metadata: GenerationReferenceMetadata,
+    /// Scope rebound to every canonical descriptor observed so far. This is
+    /// authoritative only when `session_complete` is true.
+    pub request_scope_sha256: String,
+    /// True only after every slot in the request-bound session has been
+    /// content-probed and the resulting complete descriptor set has passed
+    /// MiniMax H3 validation.
+    pub session_complete: bool,
 }
 
 impl GenerationReference {

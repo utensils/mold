@@ -13,7 +13,16 @@ vi.mock("../lib/api/client", async (importOriginal) => ({
   apiJsonTo,
 }));
 
+vi.mock("../lib/sourceRestore", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/sourceRestore")>();
+  return {
+    ...original,
+    sha256HexOfBase64: vi.fn(original.sha256HexOfBase64),
+  };
+});
+
 import { ApiError } from "../lib/api/client";
+import { sha256HexOfBase64 } from "../lib/sourceRestore";
 import {
   galleryCompletion,
   isInterruptedGenerationError,
@@ -22,6 +31,10 @@ import {
 } from "./mobileGenerationRecovery";
 
 const target = { baseUrl: "http://studio.tailnet.ts.net:7680", apiKey: "secret" };
+const ABC_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+const DEF_SHA256 = "cb8379ac2098aa165029e3938a51da0bcecfc008fd6795f401178647f96c5b34";
+const GHI_SHA256 = "50ae61e841fac4e8f9e40baf2ad36ec868922ea48368c18f9535e47db56dd7fb";
+const sha256HexOfBase64Mock = vi.mocked(sha256HexOfBase64);
 
 function makeJob(overrides: Partial<Job> = {}): Job {
   const job = newJob({
@@ -43,6 +56,23 @@ function makeJob(overrides: Partial<Job> = {}): Job {
   job.status = "error";
   job.error = "Load failed";
   return Object.assign(job, overrides);
+}
+
+function makeH3Job(request: GenerateRequest, overrides: Partial<Job> = {}): Job {
+  const job = newJob(request);
+  return Object.assign(job, {
+    clientId: 8,
+    batchId: 2,
+    id: "h3-job",
+    hostId: "studio-id",
+    hostLabel: "Studio",
+    remote: true,
+    metadataOnlyCompletion: true,
+    streamStarted: true,
+    status: "error" as const,
+    error: "Load failed",
+    ...overrides,
+  });
 }
 
 const galleryPrint: GalleryImage = {
@@ -74,6 +104,7 @@ function options(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   apiFetchTo.mockReset().mockResolvedValue(new Response(null, { status: 204 }));
   apiJsonTo.mockReset();
+  sha256HexOfBase64Mock.mockClear();
 });
 
 describe("isInterruptedGenerationError", () => {
@@ -96,33 +127,232 @@ describe("isInterruptedGenerationError", () => {
 });
 
 describe("matchGalleryPrint", () => {
-  it("joins on the explicit seed and model", () => {
+  it("joins on the explicit seed and model", async () => {
     const job = makeJob();
-    expect(matchGalleryPrint(job, [galleryPrint])).toBe(galleryPrint);
-    expect(matchGalleryPrint(makeJob({ visualSeed: "78" }), [galleryPrint])).toBeNull();
-    expect(matchGalleryPrint(makeJob({ model: "flux:q8" }), [galleryPrint])).toBeNull();
+    expect(await matchGalleryPrint(job, [galleryPrint])).toBe(galleryPrint);
+    expect(await matchGalleryPrint(makeJob({ visualSeed: "78" }), [galleryPrint])).toBeNull();
+    expect(await matchGalleryPrint(makeJob({ model: "flux:q8" }), [galleryPrint])).toBeNull();
   });
 
-  it("uses the recorded prompt as the prepared-sibling tiebreaker", () => {
+  it("uses the recorded prompt as the prepared-sibling tiebreaker", async () => {
     expect(
-      matchGalleryPrint(makeJob({ prompt: "a different sibling" }), [galleryPrint]),
+      await matchGalleryPrint(makeJob({ prompt: "a different sibling" }), [galleryPrint]),
     ).toBeNull();
   });
 
-  it("rejects a stale same-seed print whose dimensions or steps differ", () => {
+  it("rejects a stale same-seed print whose dimensions or steps differ", async () => {
     // A fixed-seed re-run at a new resolution must not resurrect yesterday's
     // print: the join requires dims and steps to agree when both sides know
     // them.
-    expect(matchGalleryPrint(makeJob({ width: 1024, height: 1024 }), [galleryPrint])).toBeNull();
-    expect(matchGalleryPrint(makeJob({ total: 8 }), [galleryPrint])).toBeNull();
+    expect(
+      await matchGalleryPrint(makeJob({ width: 1024, height: 1024 }), [galleryPrint]),
+    ).toBeNull();
+    expect(await matchGalleryPrint(makeJob({ total: 8 }), [galleryPrint])).toBeNull();
     // Absent metadata on either side stays permissive — old hosts omit steps.
     const { steps: _s, width: _w, height: _h, ...bareMeta } = galleryPrint.metadata;
     const bare = { ...galleryPrint, metadata: bareMeta } as GalleryImage;
-    expect(matchGalleryPrint(makeJob({ width: 1024, height: 1024 }), [bare])).toBe(bare);
+    expect(await matchGalleryPrint(makeJob({ width: 1024, height: 1024 }), [bare])).toBe(bare);
   });
 
-  it("requires an exact numeric seed", () => {
-    expect(matchGalleryPrint(makeJob({ visualSeed: "ltx2:q8·prompt" }), [galleryPrint])).toBeNull();
+  it("requires an exact numeric seed", async () => {
+    expect(
+      await matchGalleryPrint(makeJob({ visualSeed: "ltx2:q8·prompt" }), [galleryPrint]),
+    ).toBeNull();
+  });
+
+  it("binds H3 endpoint gallery recovery to exact first- and last-frame hashes", async () => {
+    const request: GenerateRequest = {
+      prompt: "a synchronized storm crossing",
+      model: "minimax-h3-fl2va:official-bf16",
+      width: 768,
+      height: 512,
+      steps: 50,
+      frames: 125,
+      fps: 24,
+      seed: 77,
+      source_image: "YWJj",
+      source_image_name: "opening.png",
+      keyframes: [{ frame: 124, image: "ZGVm", name: "closing.png" }],
+    };
+    const job = makeH3Job(request);
+    const metadata = {
+      prompt: request.prompt,
+      model: request.model,
+      seed: 77,
+      steps: 50,
+      guidance: 0,
+      width: 768,
+      height: 512,
+      frames: 125,
+      fps: 24,
+      source_image_name: "opening.png",
+      source_image_sha256: ABC_SHA256,
+      keyframes: [{ frame: 124, name: "closing.png", sha256: DEF_SHA256 }],
+    };
+    const wrongFirst = {
+      filename: "wrong-first.mp4",
+      timestamp: 1,
+      format: "mp4" as const,
+      metadata: { ...metadata, source_image_sha256: GHI_SHA256 },
+    };
+    const wrongLast = {
+      filename: "wrong-last.mp4",
+      timestamp: 2,
+      format: "mp4" as const,
+      metadata: {
+        ...metadata,
+        keyframes: [{ frame: 124, name: "closing.png", sha256: GHI_SHA256 }],
+      },
+    };
+    const exact = {
+      filename: "exact.mp4",
+      timestamp: 3,
+      format: "mp4" as const,
+      metadata,
+    };
+
+    expect(await matchGalleryPrint(job, [wrongFirst, wrongLast, exact])).toBe(exact);
+    expect(await matchGalleryPrint(job, [wrongFirst, wrongLast])).toBeNull();
+  });
+
+  it("fails H3 gallery recovery closed on missing or mismatched shape and timing", async () => {
+    const request: GenerateRequest = {
+      prompt: "a synchronized storm crossing",
+      model: "minimax-h3-fl2va:official-bf16",
+      width: 768,
+      height: 512,
+      steps: 50,
+      frames: 125,
+      fps: 24,
+      seed: 77,
+      source_image: "YWJj",
+    };
+    const job = makeH3Job(request);
+    const metadata = {
+      prompt: request.prompt,
+      model: request.model,
+      seed: 77,
+      steps: 50,
+      guidance: 0,
+      width: 768,
+      height: 512,
+      frames: 125,
+      fps: 24,
+      source_image_sha256: ABC_SHA256,
+    };
+    const print = {
+      filename: "exact.mp4",
+      timestamp: 1,
+      format: "mp4" as const,
+      metadata,
+    };
+
+    expect(await matchGalleryPrint(job, [print])).toBe(print);
+    for (const field of ["width", "height", "steps", "frames", "fps"] as const) {
+      const missing = { ...metadata } as Partial<typeof metadata>;
+      delete missing[field];
+      expect(
+        await matchGalleryPrint(job, [{ ...print, metadata: missing } as GalleryImage]),
+      ).toBeNull();
+      expect(
+        await matchGalleryPrint(job, [
+          { ...print, metadata: { ...metadata, [field]: metadata[field] + 1 } },
+        ]),
+      ).toBeNull();
+    }
+    const { source_image_sha256: _sha, ...missingConditioning } = metadata;
+    expect(
+      await matchGalleryPrint(job, [{ ...print, metadata: missingConditioning } as GalleryImage]),
+    ).toBeNull();
+
+    const { frames: _frames, ...withoutFrames } = request;
+    const { fps: _fps, ...withoutFps } = request;
+    const missingSubmittedFrames = makeH3Job(withoutFrames);
+    const missingSubmittedFps = makeH3Job(withoutFps);
+    expect(await matchGalleryPrint(missingSubmittedFrames, [print])).toBeNull();
+    expect(await matchGalleryPrint(missingSubmittedFps, [print])).toBeNull();
+  });
+
+  it("binds H3 Ref2VA gallery recovery to ordered reference hashes", async () => {
+    const request: GenerateRequest = {
+      prompt: "resynthesize the performance",
+      model: "minimax-h3-ref2va:official-bf16",
+      width: 768,
+      height: 512,
+      steps: 50,
+      frames: 125,
+      fps: 24,
+      seed: 77,
+      references: [
+        {
+          kind: "image",
+          media: { authority: "inline", data: "YWJj" },
+          provenance: { name: "subject.png", sha256: ABC_SHA256 },
+          mime_type: "image/png",
+          width: 512,
+          height: 512,
+        },
+        {
+          kind: "audio",
+          media: { authority: "inline", data: "ZGVm" },
+          provenance: { name: "voice.wav", sha256: DEF_SHA256 },
+          mime_type: "audio/wav",
+          duration_ms: 2_000,
+          sample_rate: 32_000,
+          channels: 2,
+          sample_count: 64_000,
+        },
+      ],
+    };
+    const job = makeH3Job(request);
+    const metadata = {
+      prompt: request.prompt,
+      model: request.model,
+      seed: 77,
+      steps: 50,
+      guidance: 0,
+      width: 768,
+      height: 512,
+      frames: 125,
+      fps: 24,
+      references: [
+        {
+          index: 1,
+          kind: "image" as const,
+          name: "subject.png",
+          sha256: ABC_SHA256,
+          mime_type: "image/png",
+        },
+        {
+          index: 2,
+          kind: "audio" as const,
+          name: "voice.wav",
+          sha256: DEF_SHA256,
+          mime_type: "audio/wav",
+        },
+      ],
+    };
+    const reordered = {
+      filename: "reordered.mp4",
+      timestamp: 1,
+      format: "mp4" as const,
+      metadata: {
+        ...metadata,
+        references: [
+          { ...metadata.references[1]!, index: 1 },
+          { ...metadata.references[0]!, index: 2 },
+        ],
+      },
+    };
+    const exact = {
+      filename: "exact.mp4",
+      timestamp: 2,
+      format: "mp4" as const,
+      metadata,
+    };
+
+    expect(await matchGalleryPrint(job, [reordered, exact])).toBe(exact);
+    expect(await matchGalleryPrint(job, [reordered])).toBeNull();
   });
 });
 
@@ -252,6 +482,235 @@ describe("reconcileInterruptedGenerationJobs", () => {
 
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/mine", { method: "DELETE" });
     expect(job.status).toBe("error");
+  });
+
+  it("joins an id-less H3 job only to the queue row with matching conditioning hashes", async () => {
+    const submittedAtUnixMs = 1_700_000_000_000;
+    const request: GenerateRequest = {
+      prompt: "a synchronized storm crossing",
+      model: "minimax-h3-fl2va:official-bf16",
+      width: 768,
+      height: 512,
+      steps: 50,
+      frames: 125,
+      fps: 24,
+      seed: 77,
+      source_image: "YWJj",
+      keyframes: [{ frame: 124, image: "ZGVm", name: "closing.png" }],
+    };
+    const metadata = {
+      prompt: request.prompt,
+      model: request.model,
+      seed: 77,
+      steps: 50,
+      guidance: 0,
+      width: 768,
+      height: 512,
+      frames: 125,
+      fps: 24,
+      source_image_sha256: ABC_SHA256,
+      keyframes: [{ frame: 124, name: "closing.png", sha256: DEF_SHA256 }],
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [
+            {
+              id: "same-settings-missing-shape",
+              model: request.model,
+              state: "queued",
+              started_at_unix_ms: submittedAtUnixMs + 10,
+              metadata: { ...metadata, width: undefined },
+            },
+            {
+              id: "same-settings-missing-frames",
+              model: request.model,
+              state: "queued",
+              started_at_unix_ms: submittedAtUnixMs + 20,
+              metadata: { ...metadata, frames: undefined },
+            },
+            {
+              id: "same-settings-wrong-fps",
+              model: request.model,
+              state: "queued",
+              started_at_unix_ms: submittedAtUnixMs + 30,
+              metadata: { ...metadata, fps: 30 },
+            },
+            {
+              id: "same-settings-wrong-conditioning",
+              model: request.model,
+              state: "queued",
+              started_at_unix_ms: submittedAtUnixMs + 50,
+              metadata: { ...metadata, source_image_sha256: GHI_SHA256 },
+            },
+            {
+              id: "h3-mine",
+              model: request.model,
+              state: "queued",
+              started_at_unix_ms: submittedAtUnixMs + 100,
+              metadata,
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeH3Job(request, { id: "", submittedAtUnixMs });
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/h3-mine", {
+      method: "DELETE",
+    });
+    expect(apiFetchTo).not.toHaveBeenCalledWith(
+      target,
+      "/api/queue/same-settings-wrong-conditioning",
+      { method: "DELETE" },
+    );
+    for (const id of [
+      "same-settings-missing-shape",
+      "same-settings-missing-frames",
+      "same-settings-wrong-fps",
+    ]) {
+      expect(apiFetchTo).not.toHaveBeenCalledWith(target, `/api/queue/${id}`, {
+        method: "DELETE",
+      });
+    }
+  });
+
+  it("hashes H3 conditioning once across repeated queue polls and gallery recovery", async () => {
+    const submittedAtUnixMs = 1_700_000_000_000;
+    const request: GenerateRequest = {
+      prompt: "a synchronized storm crossing",
+      model: "minimax-h3-fl2va:official-bf16",
+      width: 768,
+      height: 512,
+      steps: 50,
+      frames: 125,
+      fps: 24,
+      seed: 77,
+      source_image: "YWJj",
+      keyframes: [{ frame: 124, image: "ZGVm", name: "closing.png" }],
+    };
+    const metadata = {
+      prompt: request.prompt,
+      model: request.model,
+      seed: 77,
+      steps: 50,
+      guidance: 0,
+      width: 768,
+      height: 512,
+      frames: 125,
+      fps: 24,
+      source_image_sha256: ABC_SHA256,
+      keyframes: [{ frame: 124, name: "closing.png", sha256: DEF_SHA256 }],
+    };
+    const print = {
+      filename: "exact.mp4",
+      timestamp: 1,
+      format: "mp4" as const,
+      metadata,
+    };
+    let queueCalls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        queueCalls += 1;
+        return Promise.resolve({
+          entries:
+            queueCalls <= 2
+              ? [
+                  {
+                    id: "h3-running",
+                    model: request.model,
+                    state: "running",
+                    started_at_unix_ms: submittedAtUnixMs + 100,
+                    metadata,
+                  },
+                ]
+              : [],
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeH3Job(request, { id: "", submittedAtUnixMs });
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(queueCalls).toBe(3);
+    expect(sha256HexOfBase64Mock.mock.calls).toEqual([["YWJj"], ["ZGVm"]]);
+    expect(job.status).toBe("complete");
+    expect(job.result?.filename).toBe("exact.mp4");
+  });
+
+  it("lets cancellation win while the initial H3 digest is in flight", async () => {
+    let releaseDigest!: (value: string) => void;
+    sha256HexOfBase64Mock.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          releaseDigest = resolve;
+        }),
+    );
+    const request: GenerateRequest = {
+      prompt: "a synchronized storm crossing",
+      model: "minimax-h3-fl2va:official-bf16",
+      width: 768,
+      height: 512,
+      steps: 50,
+      frames: 125,
+      fps: 24,
+      seed: 77,
+      source_image: "YWJj",
+    };
+    const job = makeH3Job(request);
+    const opts = options();
+
+    const recovery = reconcileInterruptedGenerationJobs([job], opts);
+    await vi.waitFor(() => expect(sha256HexOfBase64Mock).toHaveBeenCalledOnce());
+    job.status = "error";
+    job.error = "Cancelled";
+    releaseDigest(ABC_SHA256);
+    await recovery;
+
+    expect(job.status).toBe("error");
+    expect(job.error).toBe("Cancelled");
+    expect(apiJsonTo).not.toHaveBeenCalled();
+    expect(opts.refreshResultUrl).not.toHaveBeenCalled();
+  });
+
+  it("abandons recovery when the owner unmounts during the initial H3 digest", async () => {
+    let releaseDigest!: (value: string) => void;
+    let active = true;
+    sha256HexOfBase64Mock.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          releaseDigest = resolve;
+        }),
+    );
+    const request: GenerateRequest = {
+      prompt: "a synchronized storm crossing",
+      model: "minimax-h3-fl2va:official-bf16",
+      width: 768,
+      height: 512,
+      steps: 50,
+      frames: 125,
+      fps: 24,
+      seed: 77,
+      source_image: "YWJj",
+    };
+    const job = makeH3Job(request);
+    const opts = options({ isActive: () => active });
+
+    const recovery = reconcileInterruptedGenerationJobs([job], opts);
+    await vi.waitFor(() => expect(sha256HexOfBase64Mock).toHaveBeenCalledOnce());
+    active = false;
+    releaseDigest(ABC_SHA256);
+    await recovery;
+
+    expect(job.status).toBe("loading");
+    expect(job.error).toBeNull();
+    expect(apiJsonTo).not.toHaveBeenCalled();
+    expect(opts.refreshResultUrl).not.toHaveBeenCalled();
   });
 
   it("does not delete a compatible pre-ID duplicate submitted after the interrupted job", async () => {

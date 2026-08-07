@@ -3296,6 +3296,7 @@ dependencies = [
  "mold-ai-db",
  "mold-ai-inference",
  "mold-ai-scheduler",
+ "mp4",
  "nvml-wrapper",
  "rust-embed",
  "serde",

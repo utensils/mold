@@ -19,6 +19,10 @@ import {
   type MinimaxH3ReferenceDraft,
   type MinimaxH3Task,
 } from "../lib/minimaxH3Authoring";
+import {
+  probeMinimaxH3Mp4,
+  probeMinimaxH3Wav,
+} from "../lib/minimaxH3MediaProbe";
 
 const props = withDefaults(
   defineProps<{
@@ -64,15 +68,18 @@ function base64(file: File): Promise<string> {
   });
 }
 
-async function digest(file: File): Promise<string> {
+async function digestBytes(bytes: ArrayBuffer): Promise<string> {
   if (!globalThis.crypto?.subtle) {
     throw new Error("Secure media hashing is unavailable on this device.");
   }
-  const bytes = await file.arrayBuffer();
   const value = await globalThis.crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(value)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+async function digest(file: File): Promise<string> {
+  return digestBytes(await file.arrayBuffer());
 }
 
 async function imageDimensions(
@@ -119,62 +126,76 @@ async function boundaryImage(file: File): Promise<MinimaxH3BoundaryImage> {
 
 async function referenceDraft(file: File): Promise<MinimaxH3ReferenceDraft> {
   const mime = file.type.toLowerCase();
-  if (mime.startsWith("video/")) {
-    // HTMLMediaElement duration is not an exact decoded frame count. The H3
-    // admission contract deliberately refuses estimates here; a future host
-    // probe/upload consumer can add the canonical descriptor without changing
-    // the editor or request model.
-    throw new Error(
-      `${file.name}: video references require the host’s exact decoded frame and soundtrack probe.`,
-    );
-  }
-  const [data, sha256] = await Promise.all([base64(file), digest(file)]);
-  const media = { authority: "inline" as const, data };
-  const provenance = { name: file.name, sha256 };
   if (mime.startsWith("image/")) {
+    const [data, sha256] = await Promise.all([base64(file), digest(file)]);
     const dimensions = await imageDimensions(file);
     return {
       reference: {
         kind: "image",
-        media,
-        provenance,
+        media: { authority: "inline", data },
+        provenance: { name: file.name, sha256 },
         mime_type: file.type,
         ...dimensions,
       },
     };
   }
-  if (!mime.startsWith("audio/")) {
+  const isMp4 = mime === "video/mp4" || /\.mp4$/i.test(file.name);
+  const isWav =
+    ["audio/wav", "audio/x-wav", "audio/wave"].includes(mime) ||
+    /\.wav$/i.test(file.name);
+  if (!isMp4 && !isWav) {
     throw new Error(`${file.name}: choose an image, video, or audio file.`);
   }
-  if (!["audio/wav", "audio/x-wav", "audio/wave"].includes(mime)) {
-    throw new Error(`${file.name}: H3 reference audio must be a WAV file.`);
-  }
-  const AudioContextClass = globalThis.AudioContext;
-  if (!AudioContextClass) {
-    throw new Error(
-      `${file.name}: audio decoding is unavailable on this device.`,
-    );
-  }
-  const context = new AudioContextClass();
+  const bytes = await file.arrayBuffer();
   try {
-    const decoded = await context.decodeAudioData(await file.arrayBuffer());
-    if (decoded.numberOfChannels < 1 || decoded.numberOfChannels > 2) {
-      throw new Error(`${file.name}: H3 accepts mono or stereo audio.`);
+    const facts = isMp4 ? probeMinimaxH3Mp4(bytes) : probeMinimaxH3Wav(bytes);
+    if (
+      facts.mimeType === "audio/wav" &&
+      (facts.channels < 1 || facts.channels > 2)
+    ) {
+      throw new Error("H3 accepts mono or stereo audio.");
+    }
+    const [data, sha256] = await Promise.all([
+      base64(file),
+      digestBytes(bytes),
+    ]);
+    const media = { authority: "inline" as const, data };
+    const provenance = { name: file.name, sha256 };
+    if (facts.mimeType === "video/mp4") {
+      return {
+        reference: {
+          kind: "video",
+          media,
+          provenance,
+          mime_type: facts.mimeType,
+          width: facts.width,
+          height: facts.height,
+          frame_count: facts.frameCount,
+          duration_ms: facts.durationMs,
+          fps: facts.fps,
+          has_audio: facts.hasAudio,
+          audio_duration_ms: facts.audioDurationMs,
+          audio_sample_count: facts.audioSampleCount,
+          audio_sample_rate: facts.audioSampleRate,
+          audio_channels: facts.audioChannels,
+        },
+      };
     }
     return {
       reference: {
         kind: "audio",
         media,
         provenance,
-        mime_type: file.type,
-        duration_ms: Math.round((decoded.length / decoded.sampleRate) * 1_000),
-        sample_rate: decoded.sampleRate,
-        channels: decoded.numberOfChannels,
-        sample_count: decoded.length,
+        mime_type: facts.mimeType,
+        duration_ms: facts.durationMs,
+        sample_rate: facts.sampleRate,
+        channels: facts.channels,
+        sample_count: facts.sampleCount,
       },
     };
-  } finally {
-    await context.close();
+  } catch (reason) {
+    const message = reason instanceof Error ? reason.message : String(reason);
+    throw new Error(`${file.name}: ${message}`);
   }
 }
 
@@ -220,7 +241,9 @@ function referenceAccept(
 ): string {
   return reference.kind === "audio"
     ? ".wav,audio/wav,audio/x-wav,audio/wave"
-    : `${reference.kind}/*`;
+    : reference.kind === "video"
+      ? ".mp4,video/mp4"
+      : "image/*";
 }
 
 async function reattachReference(index: number, event: Event): Promise<void> {
@@ -435,7 +458,7 @@ function durationLabel(
         <input
           type="file"
           multiple
-          accept="image/*,video/*,.wav,audio/wav,audio/x-wav,audio/wave"
+          accept="image/*,.mp4,video/mp4,.wav,audio/wav,audio/x-wav,audio/wave"
           :disabled="
             disabled ||
             busy ||
