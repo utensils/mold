@@ -7,6 +7,7 @@
 mod artifacts;
 mod attention;
 mod comfy_dit;
+mod comfy_quant;
 mod config;
 mod dit;
 mod loader;
@@ -57,6 +58,10 @@ pub use comfy_dit::{
     H3ComfyRuntimeRejection, H3ComfyRuntimeRequirement, H3_COMFYUI_SOURCE_REVISION,
     H3_COMFY_KITCHEN_REPOSITORY, H3_COMFY_KITCHEN_SOURCE_REVISION, H3_COMFY_KITCHEN_VERSION,
     H3_COMFY_ORG_SOURCE_REVISION,
+};
+pub use comfy_quant::{
+    H3ComfyInt8ConvRotLinear, H3ComfyNvfp4AwqLinear, H3_COMFY_CONVROT_GROUP_SIZE,
+    H3_COMFY_NVFP4_BLOCK_SIZE, H3_COMFY_PORTABLE_ROW_CHUNK,
 };
 pub use config::{
     H3ConditionerConfig, H3TextConfig, H3VisionConfig, H3_BF16_PARAMETER_BYTES,
