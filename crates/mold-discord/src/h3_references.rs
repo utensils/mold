@@ -18,6 +18,13 @@ use std::{
     collections::HashSet,
     io::{Cursor, Read, Seek, SeekFrom},
 };
+use symphonia::{
+    core::{
+        audio::SampleBuffer, codecs::DecoderOptions, errors::Error as SymphoniaError,
+        formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint,
+    },
+    default::{get_codecs, get_probe},
+};
 
 pub(crate) const MAX_DISCORD_REFERENCES: usize = 2;
 const MAX_REFERENCE_IMAGE_BYTES: usize = 10 * 1024 * 1024;
@@ -254,6 +261,7 @@ fn probe_reference(
             duration_ms: wav.duration_ms,
             sample_rate: wav.sample_rate,
             channels: wav.channels,
+            sample_count: Some(wav.sample_count),
         });
     }
     probe_video(bytes, provenance)
@@ -276,6 +284,7 @@ fn probe_video(
     );
     let width = track.width() as u32;
     let height = track.height() as u32;
+    let frame_count = track.sample_count();
     let fps = track.frame_rate().round() as u32;
     let duration_ms = track.duration().as_millis() as u64;
     anyhow::ensure!(
@@ -286,23 +295,146 @@ fn probe_video(
         .tracks()
         .values()
         .any(|track| matches!(track.track_type(), Ok(TrackType::Audio)));
+    let decoded_audio = if has_audio {
+        Some(
+            probe_decoded_mp4_audio(bytes)?
+                .context("MP4 audio track could not be decoded exactly")?,
+        )
+    } else {
+        None
+    };
+    let audio_duration_ms = decoded_audio
+        .as_ref()
+        .map(|audio| {
+            audio
+                .samples_per_channel
+                .checked_mul(1_000)
+                .context("MP4 soundtrack duration overflowed")
+                .map(|samples| samples.div_ceil(u64::from(audio.sample_rate)))
+        })
+        .transpose()?;
     Ok(GenerationReference::Video {
         media: GenerationReferenceAuthority::Descriptor,
         provenance,
         mime_type: "video/mp4".to_string(),
         width,
         height,
+        frame_count: Some(frame_count),
         duration_ms,
         fps: f64::from(fps),
         has_audio,
-        audio_duration_ms: has_audio.then_some(duration_ms),
+        audio_duration_ms,
+        audio_sample_count: decoded_audio
+            .as_ref()
+            .map(|audio| audio.samples_per_channel),
+        audio_sample_rate: decoded_audio.as_ref().map(|audio| audio.sample_rate),
+        audio_channels: decoded_audio.as_ref().map(|audio| audio.channels),
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExactAudioProbe {
+    sample_rate: u32,
+    channels: u16,
+    samples_per_channel: u64,
+}
+
+/// Decode attachment audio instead of estimating it from MP4 duration or AAC
+/// packet count. Codec delay and the final packet make either estimate unsafe
+/// for H3's frozen Ref2VA row calculation.
+fn probe_decoded_mp4_audio(bytes: &[u8]) -> Result<Option<ExactAudioProbe>> {
+    let source = MediaSourceStream::new(Box::new(Cursor::new(bytes.to_vec())), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension("mp4");
+    let probed = get_probe()
+        .format(
+            &hint,
+            source,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .context("failed to probe MP4 attachment audio")?;
+    let mut format = probed.format;
+    let Some(track) = format
+        .tracks()
+        .iter()
+        .find(|track| track.codec_params.sample_rate.is_some())
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let track_id = track.id;
+    let mut decoder = get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .context("failed to create MP4 attachment audio decoder")?;
+    let mut sample_rate = None;
+    let mut channels = None;
+    let mut samples_per_channel = 0_u64;
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(packet) => packet,
+            Err(SymphoniaError::IoError(_)) => break,
+            Err(error) => return Err(error.into()),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(decoded) => decoded,
+            Err(SymphoniaError::DecodeError(_)) | Err(SymphoniaError::IoError(_)) => continue,
+            Err(SymphoniaError::ResetRequired) => {
+                anyhow::bail!("MP4 attachment audio decoder requested a reset")
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let observed_rate = decoded.spec().rate;
+        let observed_channels = decoded.spec().channels.count();
+        anyhow::ensure!(
+            observed_rate > 0 && matches!(observed_channels, 1 | 2),
+            "MP4 attachment audio must be mono or stereo with a positive sample rate"
+        );
+        if let Some(expected) = sample_rate {
+            anyhow::ensure!(
+                expected == observed_rate,
+                "MP4 attachment audio changed sample rate mid-stream"
+            );
+        }
+        if let Some(expected) = channels {
+            anyhow::ensure!(
+                expected == observed_channels,
+                "MP4 attachment audio changed channel count mid-stream"
+            );
+        }
+        sample_rate = Some(observed_rate);
+        channels = Some(observed_channels);
+        let mut samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+        samples.copy_interleaved_ref(decoded);
+        anyhow::ensure!(
+            samples.samples().len().is_multiple_of(observed_channels),
+            "MP4 attachment audio decoder returned a partial frame"
+        );
+        samples_per_channel = samples_per_channel
+            .checked_add((samples.samples().len() / observed_channels) as u64)
+            .context("MP4 attachment decoded sample count overflowed")?;
+    }
+
+    let (Some(sample_rate), Some(channels)) = (sample_rate, channels) else {
+        return Ok(None);
+    };
+    anyhow::ensure!(samples_per_channel > 0, "MP4 attachment audio was empty");
+    Ok(Some(ExactAudioProbe {
+        sample_rate,
+        channels: u16::try_from(channels).context("MP4 audio channel count exceeded u16")?,
+        samples_per_channel,
+    }))
 }
 
 struct WavProbe {
     duration_ms: u64,
     sample_rate: u32,
     channels: u16,
+    sample_count: u64,
 }
 
 fn probe_wav(bytes: &[u8]) -> Result<WavProbe> {
@@ -399,6 +531,7 @@ fn probe_wav(bytes: &[u8]) -> Result<WavProbe> {
         duration_ms: data_bytes.saturating_mul(1_000).div_ceil(byte_rate),
         sample_rate,
         channels,
+        sample_count: data_bytes / block_align,
     })
 }
 
@@ -460,10 +593,14 @@ fn with_authority(
             mime_type,
             width,
             height,
+            frame_count,
             duration_ms,
             fps,
             has_audio,
             audio_duration_ms,
+            audio_sample_count,
+            audio_sample_rate,
+            audio_channels,
             ..
         } => GenerationReference::Video {
             media,
@@ -471,10 +608,14 @@ fn with_authority(
             mime_type: mime_type.clone(),
             width: *width,
             height: *height,
+            frame_count: *frame_count,
             duration_ms: *duration_ms,
             fps: *fps,
             has_audio: *has_audio,
             audio_duration_ms: *audio_duration_ms,
+            audio_sample_count: *audio_sample_count,
+            audio_sample_rate: *audio_sample_rate,
+            audio_channels: *audio_channels,
         },
         GenerationReference::Audio {
             provenance,
@@ -482,6 +623,7 @@ fn with_authority(
             duration_ms,
             sample_rate,
             channels,
+            sample_count,
             ..
         } => GenerationReference::Audio {
             media,
@@ -490,6 +632,7 @@ fn with_authority(
             duration_ms: *duration_ms,
             sample_rate: *sample_rate,
             channels: *channels,
+            sample_count: *sample_count,
         },
     }
 }
@@ -537,7 +680,12 @@ mod tests {
         ));
         assert!(matches!(
             &prepared.descriptors[1],
-            GenerationReference::Audio { provenance, duration_ms: 2_000, .. }
+            GenerationReference::Audio {
+                provenance,
+                duration_ms: 2_000,
+                sample_count: Some(16_000),
+                ..
+            }
                 if provenance.name.as_deref() == Some("voice.wav")
         ));
         assert!(!format!("{prepared:?}").contains("89504e47"));

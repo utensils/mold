@@ -385,20 +385,44 @@ fn probe_video(
     file: File,
     provenance: GenerationReferenceProvenance,
 ) -> Result<GenerationReference> {
-    let probe = mold_inference::ltx2::media::probe_video_file(file)?;
+    let probe = mold_inference::ltx2::media::probe_video_file(file.try_clone()?)?;
     let duration_ms = probe
         .duration_ms
         .ok_or_else(|| anyhow::anyhow!("MP4 video duration is unavailable"))?;
+    let decoded_audio = if probe.has_audio {
+        Some(
+            mold_inference::ltx2::media::probe_decoded_mp4_audio_open_file(file)?
+                .context("MP4 audio track could not be decoded exactly")?,
+        )
+    } else {
+        None
+    };
+    let audio_duration_ms = decoded_audio
+        .as_ref()
+        .map(|audio| {
+            audio
+                .samples_per_channel
+                .checked_mul(1_000)
+                .context("MP4 soundtrack duration overflowed")
+                .map(|samples| samples.div_ceil(u64::from(audio.sample_rate)))
+        })
+        .transpose()?;
     Ok(GenerationReference::Video {
         media: GenerationReferenceAuthority::Descriptor,
         provenance,
         mime_type: "video/mp4".to_string(),
         width: probe.width,
         height: probe.height,
+        frame_count: probe.frames,
         duration_ms,
         fps: f64::from(probe.fps),
         has_audio: probe.has_audio,
-        audio_duration_ms: probe.has_audio.then_some(duration_ms),
+        audio_duration_ms,
+        audio_sample_count: decoded_audio
+            .as_ref()
+            .map(|audio| audio.samples_per_channel),
+        audio_sample_rate: decoded_audio.as_ref().map(|audio| audio.sample_rate),
+        audio_channels: decoded_audio.as_ref().map(|audio| audio.channels),
     })
 }
 
@@ -414,6 +438,7 @@ fn probe_audio(
         duration_ms: wav.duration_ms,
         sample_rate: wav.sample_rate,
         channels: wav.channels,
+        sample_count: Some(wav.sample_count),
     })
 }
 
@@ -421,6 +446,7 @@ struct WavProbe {
     duration_ms: u64,
     sample_rate: u32,
     channels: u16,
+    sample_count: u64,
 }
 
 fn probe_wav(file: File) -> Result<WavProbe> {
@@ -527,6 +553,7 @@ fn probe_wav(file: File) -> Result<WavProbe> {
         duration_ms,
         sample_rate,
         channels,
+        sample_count: data_bytes / u64::from(block_align),
     })
 }
 
@@ -573,10 +600,14 @@ fn with_authority(
             mime_type,
             width,
             height,
+            frame_count,
             duration_ms,
             fps,
             has_audio,
             audio_duration_ms,
+            audio_sample_count,
+            audio_sample_rate,
+            audio_channels,
             ..
         } => GenerationReference::Video {
             media,
@@ -584,10 +615,14 @@ fn with_authority(
             mime_type: mime_type.clone(),
             width: *width,
             height: *height,
+            frame_count: *frame_count,
             duration_ms: *duration_ms,
             fps: *fps,
             has_audio: *has_audio,
             audio_duration_ms: *audio_duration_ms,
+            audio_sample_count: *audio_sample_count,
+            audio_sample_rate: *audio_sample_rate,
+            audio_channels: *audio_channels,
         },
         GenerationReference::Audio {
             provenance,
@@ -595,6 +630,7 @@ fn with_authority(
             duration_ms,
             sample_rate,
             channels,
+            sample_count,
             ..
         } => GenerationReference::Audio {
             media,
@@ -603,6 +639,7 @@ fn with_authority(
             duration_ms: *duration_ms,
             sample_rate: *sample_rate,
             channels: *channels,
+            sample_count: *sample_count,
         },
     }
 }
@@ -683,7 +720,12 @@ mod tests {
         ));
         assert!(matches!(
             &prepared.descriptors[1],
-            GenerationReference::Audio { provenance, duration_ms: 2_000, .. }
+            GenerationReference::Audio {
+                provenance,
+                duration_ms: 2_000,
+                sample_count: Some(16_000),
+                ..
+            }
                 if provenance.name.as_deref() == Some("voice.wav")
                     && provenance.sha256.as_ref().is_some_and(|value| value.len() == 64)
         ));

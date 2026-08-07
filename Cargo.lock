@@ -3224,6 +3224,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "symphonia",
  "tokio",
  "tracing",
  "tracing-subscriber",

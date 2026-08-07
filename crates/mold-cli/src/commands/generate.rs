@@ -1486,10 +1486,14 @@ fn reference_with_authority(
             mime_type,
             width,
             height,
+            frame_count,
             duration_ms,
             fps,
             has_audio,
             audio_duration_ms,
+            audio_sample_count,
+            audio_sample_rate,
+            audio_channels,
             ..
         } => GenerationReference::Video {
             media,
@@ -1497,10 +1501,14 @@ fn reference_with_authority(
             mime_type: mime_type.clone(),
             width: *width,
             height: *height,
+            frame_count: *frame_count,
             duration_ms: *duration_ms,
             fps: *fps,
             has_audio: *has_audio,
             audio_duration_ms: *audio_duration_ms,
+            audio_sample_count: *audio_sample_count,
+            audio_sample_rate: *audio_sample_rate,
+            audio_channels: *audio_channels,
         },
         GenerationReference::Audio {
             provenance,
@@ -1508,6 +1516,7 @@ fn reference_with_authority(
             duration_ms,
             sample_rate,
             channels,
+            sample_count,
             ..
         } => GenerationReference::Audio {
             media,
@@ -1516,6 +1525,7 @@ fn reference_with_authority(
             duration_ms: *duration_ms,
             sample_rate: *sample_rate,
             channels: *channels,
+            sample_count: *sample_count,
         },
     }
 }
