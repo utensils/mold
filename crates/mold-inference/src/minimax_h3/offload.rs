@@ -27,11 +27,24 @@ impl FrozenH3BlockStreamingPlan {
         resident_block_count: usize,
         prefetch_depth: usize,
     ) -> Result<Self> {
-        let device_id = device_id.into();
-        let execution_fingerprint = execution_fingerprint.into();
-        if device_id.trim().is_empty()
-            || execution_fingerprint.len() != 64
-            || !execution_fingerprint
+        let plan = Self {
+            device_id: device_id.into(),
+            execution_fingerprint: execution_fingerprint.into(),
+            resident_block_count,
+            prefetch_depth,
+        };
+        plan.validate()?;
+        Ok(plan)
+    }
+
+    /// Revalidate after the admission projection crosses into the runtime
+    /// backend. This catches mutation without duplicating streaming bounds in
+    /// the consumer.
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.device_id.trim().is_empty()
+            || self.execution_fingerprint.len() != 64
+            || !self
+                .execution_fingerprint
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit())
         {
@@ -39,22 +52,19 @@ impl FrozenH3BlockStreamingPlan {
                 "H3 block streaming requires a frozen device and SHA-256 execution identity"
             ));
         }
-        if resident_block_count > H3_MAIN_BLOCK_COUNT {
+        if self.resident_block_count > H3_MAIN_BLOCK_COUNT {
             return Err(anyhow!(
-                "H3 resident block count {resident_block_count} exceeds {H3_MAIN_BLOCK_COUNT}"
+                "H3 resident block count {} exceeds {H3_MAIN_BLOCK_COUNT}",
+                self.resident_block_count
             ));
         }
-        if prefetch_depth > H3_MAX_PREFETCH_DEPTH {
+        if self.prefetch_depth > H3_MAX_PREFETCH_DEPTH {
             return Err(anyhow!(
-                "H3 prefetch depth {prefetch_depth} exceeds bounded maximum {H3_MAX_PREFETCH_DEPTH}"
+                "H3 prefetch depth {} exceeds bounded maximum {H3_MAX_PREFETCH_DEPTH}",
+                self.prefetch_depth
             ));
         }
-        Ok(Self {
-            device_id,
-            execution_fingerprint,
-            resident_block_count,
-            prefetch_depth,
-        })
+        Ok(())
     }
 }
 
@@ -144,6 +154,7 @@ pub(crate) struct H3BlockStreamState<L: H3BlockLoader, A: H3BlockLease> {
 
 impl<L: H3BlockLoader, A: H3BlockLease> H3BlockStreamState<L, A> {
     pub(crate) fn new(plan: FrozenH3BlockStreamingPlan, lease: A, loader: L) -> Result<Self> {
+        plan.validate()?;
         validate_lease(&plan, &lease)?;
         Ok(Self {
             plan,
@@ -621,5 +632,27 @@ mod tests {
             H3_MAX_PREFETCH_DEPTH + 1,
         )
         .is_err());
+
+        let mut mutated = plan;
+        mutated.resident_block_count = H3_MAIN_BLOCK_COUNT + 1;
+        let loader = SyntheticLoader {
+            counters: Arc::clone(&counters),
+            fail_load: None,
+            fail_wait: None,
+        };
+        let error = H3BlockStreamState::new(
+            mutated,
+            SyntheticLease {
+                id: "lease-3",
+                device: "gpu-0",
+                fingerprint: PLAN_FINGERPRINT,
+                active: true,
+                counters,
+            },
+            loader,
+        )
+        .err()
+        .expect("mutated frozen plan must fail before loading");
+        assert!(error.to_string().contains("resident block count"));
     }
 }
