@@ -950,6 +950,8 @@ fn prepared_config_overlay(
 
 #[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
 pub enum ExecutionPlanError {
+    #[error("model activation rejected execution planning: {0}")]
+    ModelActivation(String),
     #[error("model '{model}' has no concrete local artifact paths")]
     MissingArtifacts { model: String },
     #[error("component {role:?} is pinned to CPU, but family '{family}' does not support that placement")]
@@ -1012,6 +1014,18 @@ pub fn capabilities_for_family(family: &str) -> PlacementCapabilities {
     }
 }
 
+fn require_execution_plan_activation(model: &str, family: &str) -> Result<(), ExecutionPlanError> {
+    if mold_core::minimax_h3::is_family(family)
+        || mold_core::minimax_h3::capability_contract_for_model(model).is_some()
+    {
+        return Err(ExecutionPlanError::ModelActivation(
+            crate::h3_admission::reject_normal_h3_admission(model, family).to_string(),
+        ));
+    }
+    mold_core::require_model_activation(model, Some(family))
+        .map_err(|error| ExecutionPlanError::ModelActivation(error.to_string()))
+}
+
 /// Resolve hard request/config placement before dependency preparation.
 ///
 /// This is intentionally artifact-only: it filters irrelevant sibling GPUs
@@ -1022,11 +1036,6 @@ pub fn eligible_devices_for_request(
     request: &GenerateRequest,
     devices: &[DeviceFact],
 ) -> Result<Vec<DeviceFact>, ExecutionPlanError> {
-    let paths = ModelPaths::resolve(&request.model, config).ok_or_else(|| {
-        ExecutionPlanError::MissingArtifacts {
-            model: request.model.clone(),
-        }
-    })?;
     let family = config
         .resolved_model_config(&request.model)
         .family
@@ -1035,6 +1044,12 @@ pub fn eligible_devices_for_request(
                 .map(|manifest| manifest.family.clone())
         })
         .unwrap_or_else(|| "unknown".to_string());
+    require_execution_plan_activation(&request.model, &family)?;
+    let paths = ModelPaths::resolve(&request.model, config).ok_or_else(|| {
+        ExecutionPlanError::MissingArtifacts {
+            model: request.model.clone(),
+        }
+    })?;
     let capabilities = capabilities_for_family(&family);
     let engine_config = mold_inference::FrozenEngineConfig::resolve(&request.model, config);
     if let Some(alias) = unresolvable_camera_control_alias(config, request) {
@@ -1137,11 +1152,6 @@ fn resolve_execution_plans_with_policy(
 ) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
     let overlaid_config = prepared_config_overlay(config, request, prepared);
     let config = overlaid_config.as_ref().unwrap_or(config);
-    let paths = ModelPaths::resolve(&request.model, config).ok_or_else(|| {
-        ExecutionPlanError::MissingArtifacts {
-            model: request.model.clone(),
-        }
-    })?;
     let family = config
         .resolved_model_config(&request.model)
         .family
@@ -1150,6 +1160,12 @@ fn resolve_execution_plans_with_policy(
                 .map(|manifest| manifest.family.clone())
         })
         .unwrap_or_else(|| "unknown".to_string());
+    require_execution_plan_activation(&request.model, &family)?;
+    let paths = ModelPaths::resolve(&request.model, config).ok_or_else(|| {
+        ExecutionPlanError::MissingArtifacts {
+            model: request.model.clone(),
+        }
+    })?;
     let capabilities = capabilities_for_family(&family);
     if offload_requested && !capabilities.supports_block_offload {
         return Err(ExecutionPlanError::UnsupportedOffload { family });
@@ -1413,6 +1429,7 @@ pub fn validate_before_cuda(
     request: &GenerateRequest,
     prepared: Option<&PreparedExecutionInputs>,
 ) -> Result<(), ExecutionPlanError> {
+    require_execution_plan_activation(&request.model, &plan.model_family)?;
     if plan.device_id != worker_device_id || plan.device_ordinal != worker_ordinal {
         return Err(ExecutionPlanError::PlanInvalidated(format!(
             "lease targets {worker_device_id}/gpu:{worker_ordinal}, plan targets {}/gpu:{}",
@@ -3682,6 +3699,19 @@ mod tests {
         .unwrap();
         request.placement = placement;
         request
+    }
+
+    #[test]
+    fn h3_activation_gate_precedes_artifact_resolution_in_normal_planning() {
+        let root = TempDir::new().unwrap();
+        let config = config(root.path(), "minimax-h3", None);
+        let error = resolve_execution_plans(&config, &request(None), &devices(&[24 * GIB]), false)
+            .unwrap_err();
+
+        assert!(matches!(error, ExecutionPlanError::ModelActivation(_)));
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
     }
 
     #[test]

@@ -396,11 +396,7 @@ pub fn create_engine_with_frozen_config(
         gpu_ordinal,
         offload,
         shared_pool,
-        |_| {
-            bail!(
-                "MiniMax H3 typed factory authority is present but no runnable loader is registered"
-            )
-        },
+        |_| bail!(crate::minimax_h3::engine::H3_REAL_LOADER_DISABLED),
     )
 }
 
@@ -416,7 +412,9 @@ fn create_engine_with_frozen_config_and_h3_factory<F>(
     h3_factory: F,
 ) -> Result<Box<dyn InferenceEngine>>
 where
-    F: FnOnce(&crate::FrozenH3FactoryAuthority) -> Result<Box<dyn InferenceEngine>>,
+    F: FnOnce(
+        crate::minimax_h3::engine::H3RuntimeLoadRequest<'_>,
+    ) -> Result<Box<dyn InferenceEngine>>,
 {
     // The compliance gate is intentionally the first operation. No path,
     // runtime, device, authority, or future loader inspection may precede it.
@@ -725,7 +723,14 @@ where
                 frozen.attention_backend,
                 frozen.attention_chunk,
             )?;
-            h3_factory(authority)
+            h3_factory(crate::minimax_h3::engine::H3RuntimeLoadRequest {
+                model_name: &model_name,
+                paths: &paths,
+                authority,
+                load_strategy,
+                gpu_ordinal,
+                block_offload: offload,
+            })
         }
         "wuerstchen" | "wuerstchen-v2" => Ok(boxed_inference_engine(WuerstchenEngine::new(
             model_name,

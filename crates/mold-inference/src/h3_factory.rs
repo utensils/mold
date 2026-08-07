@@ -348,6 +348,33 @@ impl FrozenH3FactoryAuthority {
         self.block_offload
     }
 
+    /// Validate the immutable authority carried into the legal-neutral engine
+    /// seam without claiming that H3 is runnable.
+    ///
+    /// Production factory dispatch must still call `validate_for_dispatch`,
+    /// which additionally requires the public runtime capability and family
+    /// registry. This narrower check exists only so an injected, weight-free
+    /// runtime can exercise the engine/worker transaction while those gates
+    /// remain closed.
+    pub(crate) fn validate_engine_seam(
+        &self,
+        model: &str,
+        gpu_ordinal: usize,
+        offload: bool,
+    ) -> Result<()> {
+        self.validate_frozen()?;
+        let request_contract = contract::capability_contract_for_model(model)
+            .ok_or_else(|| anyhow!("{model:?} has no MiniMax H3 capability contract"))?;
+        if request_contract.canonical_model != self.canonical_model()
+            || request_contract.task != Task::Fl2va
+            || gpu_ordinal != self.device_ordinal
+            || offload != self.block_offload
+        {
+            bail!("MiniMax H3 frozen engine authority changed before construction");
+        }
+        Ok(())
+    }
+
     pub fn quantization(&self) -> &H3FactoryQuantizationAuthority {
         &self.quantization
     }
