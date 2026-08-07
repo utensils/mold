@@ -206,6 +206,8 @@ pub struct BuildParams<'a> {
     pub negative_prompt: Option<&'a str>,
     pub defaults: Option<&'a mold_core::ModelDefaults>,
     pub source_image: Option<Vec<u8>>,
+    /// Display-safe source attachment basename; never a Discord URL or path.
+    pub source_image_name: Option<String>,
     pub references: Option<Vec<mold_core::GenerationReference>>,
     pub frames: Option<u32>,
     pub fps: Option<u32>,
@@ -468,7 +470,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
             None
         },
         source_image: params.source_image,
-        source_image_name: None,
+        source_image_name: params.source_image_name,
         strength: if is_h3 {
             1.0
         } else {
@@ -958,7 +960,9 @@ pub async fn generate(
     let prepared_references = if reference_attachments.is_empty() {
         None
     } else {
-        match crate::h3_references::prepare_attachments(&reference_attachments).await {
+        match crate::h3_references::prepare_attachments(&ctx.data().client, &reference_attachments)
+            .await
+        {
             Ok(prepared) => Some(prepared),
             Err(error) => {
                 ctx.data().quotas.refund(user_id);
@@ -1065,6 +1069,9 @@ pub async fn generate(
         negative_prompt: negative_prompt.as_deref(),
         defaults: model_defaults,
         source_image: source_bytes,
+        source_image_name: source_image
+            .as_ref()
+            .and_then(|attachment| crate::h3_references::safe_name(&attachment.filename)),
         references: prepared_references
             .as_ref()
             .map(|prepared| prepared.descriptors.clone()),
@@ -1080,7 +1087,7 @@ pub async fn generate(
         retake_range,
     });
 
-    let reference_session = if let Some(prepared) = prepared_references {
+    let mut reference_session = if let Some(prepared) = prepared_references {
         match crate::h3_references::bind_remote_references(&ctx.data().client, &mut req, prepared)
             .await
         {
@@ -1101,16 +1108,15 @@ pub async fn generate(
 
     match handler::run_generation(ctx, req).await {
         Ok(()) => {
+            if let Some(lease) = reference_session.as_mut() {
+                lease.mark_consumed();
+            }
             // Quota slot was already consumed atomically in check_generate_auth
             ctx.data().cooldowns.record(user_id);
         }
         Err(e) => {
-            if let Some(session) = reference_session {
-                let _ = ctx
-                    .data()
-                    .client
-                    .cancel_reference_upload_session(&session)
-                    .await;
+            if let Some(lease) = reference_session.as_mut() {
+                let _ = lease.cancel().await;
             }
             // Refund the quota slot consumed during auth check
             ctx.data().quotas.refund(user_id);
@@ -1447,6 +1453,20 @@ mod tests {
                 ..
             }]) if provenance.name.as_deref() == Some("anchor.png")
         ));
+    }
+
+    #[test]
+    fn h3_builder_preserves_only_sanitized_source_name() {
+        let name = crate::h3_references::safe_name("../../closing-frame.png\nignored");
+        assert!(name.is_none());
+        let req = build_generate_request(BuildParams {
+            family: Some(mold_core::minimax_h3::FAMILY),
+            source_image: Some(vec![1, 2, 3]),
+            source_image_name: crate::h3_references::safe_name("C:\\uploads\\opening-frame.png"),
+            ..base_params("animate the frame", mold_core::minimax_h3::FL2VA_COMFY)
+        });
+        assert_eq!(req.source_image_name.as_deref(), Some("opening-frame.png"));
+        assert!(!format!("{req:?}").contains("C:\\uploads"));
     }
 
     #[test]

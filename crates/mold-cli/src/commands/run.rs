@@ -735,6 +735,8 @@ pub async fn run(
         );
     }
 
+    let reference_client =
+        (is_h3 && !references.is_empty()).then(|| crate::control::client_for_host(host.as_deref()));
     let mut h3_authoring = h3::prepare_authoring(
         &model,
         &family,
@@ -747,6 +749,7 @@ pub async fn run(
         image.first().map(String::as_str),
         last_frame.as_deref(),
         &references,
+        reference_client.as_ref(),
     )?;
     let frames = h3_authoring.frames.or(frames);
     let fps = h3_authoring.fps.or(fps);

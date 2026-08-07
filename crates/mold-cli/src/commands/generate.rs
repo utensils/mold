@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 #[cfg(any(feature = "preview", test))]
 use base64::{engine::general_purpose, Engine as _};
 use colored::Colorize;
@@ -8,7 +8,7 @@ use mold_core::{
     DevicePlacement, GenerateRequest, GenerateResponse, GenerateServerAction, GenerationReference,
     GenerationReferenceAuthority, ImageData, KeyframeCondition, LoraWeight, Ltx2GuidanceOverrides,
     Ltx2PipelineMode, Ltx2SpatialUpscale, Ltx2TemporalUpscale, MoldClient, OutputFormat,
-    ReferenceUploadSessionRequest, Scheduler, TimeRange,
+    ReferenceUploadLease, ReferenceUploadSource, Scheduler, TimeRange,
 };
 use rand::Rng;
 #[cfg(feature = "preview")]
@@ -791,7 +791,7 @@ pub async fn run(
         // rather than changing it between session creation and generation.
         req.seed = Some(base_seed);
         reference_session =
-            bind_remote_reference_uploads(ctx.client(), &mut req, &reference_uploads).await?;
+            bind_remote_reference_uploads(ctx.client(), &mut req, reference_uploads).await?;
     }
 
     // Warn if user-provided dimensions don't match model recommendations.
@@ -1017,13 +1017,15 @@ pub async fn run(
 
         for i in 0..batch {
             let mut iter_req = req.clone();
-            iter_req.seed = Some(base_seed.wrapping_add(i as u64));
-            iter_req.batch_size = 1;
+            if reference_session.is_none() {
+                iter_req.seed = Some(base_seed.wrapping_add(i as u64));
+                iter_req.batch_size = 1;
 
-            // Use per-batch expanded prompt if available
-            if let Some(ref prompts) = batch_prompts {
-                if let Some(p) = prompts.get(i as usize) {
-                    iter_req.prompt = p.clone();
+                // Use per-batch expanded prompt if available
+                if let Some(ref prompts) = batch_prompts {
+                    if let Some(p) = prompts.get(i as usize) {
+                        iter_req.prompt = p.clone();
+                    }
                 }
             }
 
@@ -1062,12 +1064,15 @@ pub async fn run(
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    if let Some(session) = reference_session.as_deref() {
-                        let _ = ctx.client().cancel_reference_upload_session(session).await;
+                    if let Some(lease) = reference_session.as_mut() {
+                        let _ = lease.cancel().await;
                     }
                     return Err(error);
                 }
             };
+            if let Some(lease) = reference_session.as_mut() {
+                lease.mark_consumed();
+            }
 
             // Persist every successful artifact before the next batch item can
             // fail. The aggregate retains the last clip or track only for the
@@ -1355,8 +1360,8 @@ fn local_control_artifact_is_complete(
 async fn bind_remote_reference_uploads(
     client: &MoldClient,
     request: &mut GenerateRequest,
-    uploads: &[ReferenceUpload],
-) -> Result<Option<String>> {
+    uploads: Vec<ReferenceUpload>,
+) -> Result<Option<ReferenceUploadLease>> {
     let descriptors = request
         .references
         .clone()
@@ -1370,164 +1375,13 @@ async fn bind_remote_reference_uploads(
     }
     mold_core::minimax_h3::validate_reference_descriptors(&descriptors)
         .map_err(anyhow::Error::new)?;
-    let upload_references = (1..=descriptors.len())
-        .map(|index| u32::try_from(index).context("too many reference uploads"))
+    let sources = uploads
+        .into_iter()
+        .map(|upload| ReferenceUploadSource::open_file(upload.file))
         .collect::<Result<Vec<_>>>()?;
-    let session = client
-        .create_reference_upload_session(&ReferenceUploadSessionRequest {
-            request: request.clone(),
-            upload_references,
-        })
-        .await?;
-    if session.instance_id.trim().is_empty()
-        || session.expires_at_ms == 0
-        || !is_sha256_hex(&session.request_scope_sha256)
-        || !is_reference_upload_handle(&session.session_handle)
-        || session.uploads.len() != descriptors.len()
-    {
-        let _ = client
-            .cancel_reference_upload_session(&session.session_handle)
-            .await;
-        anyhow::bail!("server returned an incomplete reference upload session");
-    }
-
-    let upload_result: Result<Vec<GenerationReference>> = async {
-        let mut bound = Vec::with_capacity(descriptors.len());
-        let mut seen_handles = std::collections::HashSet::new();
-        for (index, (descriptor, source)) in descriptors.iter().zip(uploads).enumerate() {
-            let reference = u32::try_from(index)
-                .context("too many reference uploads")?
-                .saturating_add(1);
-            let slot = session
-                .uploads
-                .iter()
-                .find(|slot| slot.reference == reference)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("server omitted reference upload slot {reference}")
-                })?;
-            if !is_reference_upload_handle(&slot.handle) {
-                anyhow::bail!("server returned an invalid reference upload handle");
-            }
-            if !seen_handles.insert(slot.handle.as_str()) {
-                anyhow::bail!("server reused a one-use reference upload handle");
-            }
-            let completed = client
-                .upload_reference_file(&slot.handle, &source.path, &source.mime_type)
-                .await
-                .with_context(|| format!("reference {reference} upload failed"))?;
-            if completed.instance_id != session.instance_id || completed.reference != reference {
-                anyhow::bail!(
-                    "reference {reference} upload response did not match its bound server session"
-                );
-            }
-            let expected = descriptor
-                .redacted_metadata(index)
-                .ok_or_else(|| anyhow::anyhow!("reference {reference} lost digest provenance"))?;
-            if completed.metadata != expected {
-                anyhow::bail!(
-                    "reference {reference} upload response drifted from the client-probed descriptor"
-                );
-            }
-            bound.push(reference_with_authority(
-                descriptor,
-                GenerationReferenceAuthority::Upload {
-                    handle: slot.handle.clone(),
-                },
-            ));
-        }
-        Ok(bound)
-    }
-    .await;
-
-    match upload_result {
-        Ok(bound) => {
-            request.references = Some(bound);
-            Ok(Some(session.session_handle))
-        }
-        Err(error) => {
-            let _ = client
-                .cancel_reference_upload_session(&session.session_handle)
-                .await;
-            Err(error)
-        }
-    }
-}
-
-fn is_sha256_hex(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn is_reference_upload_handle(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= mold_core::minimax_h3::MAX_REFERENCE_UPLOAD_HANDLE_BYTES
-        && value.bytes().all(|byte| byte.is_ascii_graphic())
-}
-
-fn reference_with_authority(
-    reference: &GenerationReference,
-    media: GenerationReferenceAuthority,
-) -> GenerationReference {
-    match reference {
-        GenerationReference::Image {
-            provenance,
-            mime_type,
-            width,
-            height,
-            ..
-        } => GenerationReference::Image {
-            media,
-            provenance: provenance.clone(),
-            mime_type: mime_type.clone(),
-            width: *width,
-            height: *height,
-        },
-        GenerationReference::Video {
-            provenance,
-            mime_type,
-            width,
-            height,
-            frame_count,
-            duration_ms,
-            fps,
-            has_audio,
-            audio_duration_ms,
-            audio_sample_count,
-            audio_sample_rate,
-            audio_channels,
-            ..
-        } => GenerationReference::Video {
-            media,
-            provenance: provenance.clone(),
-            mime_type: mime_type.clone(),
-            width: *width,
-            height: *height,
-            frame_count: *frame_count,
-            duration_ms: *duration_ms,
-            fps: *fps,
-            has_audio: *has_audio,
-            audio_duration_ms: *audio_duration_ms,
-            audio_sample_count: *audio_sample_count,
-            audio_sample_rate: *audio_sample_rate,
-            audio_channels: *audio_channels,
-        },
-        GenerationReference::Audio {
-            provenance,
-            mime_type,
-            duration_ms,
-            sample_rate,
-            channels,
-            sample_count,
-            ..
-        } => GenerationReference::Audio {
-            media,
-            provenance: provenance.clone(),
-            mime_type: mime_type.clone(),
-            duration_ms: *duration_ms,
-            sample_rate: *sample_rate,
-            channels: *channels,
-            sample_count: *sample_count,
-        },
-    }
+    let lease = client.bind_reference_uploads_v2(request, sources).await?;
+    *request = lease.request().clone();
+    Ok(Some(lease))
 }
 
 fn has_remote_reference_handles(request: &GenerateRequest) -> bool {
@@ -1573,11 +1427,21 @@ async fn generate_remote(
     // Try SSE streaming first
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let render = tokio::spawn(render_progress(rx));
+    let one_use_references = has_remote_reference_handles(req);
 
     match client.generate_stream(req, tx).await {
         Ok(Some(response)) => {
             let _ = render.await;
             Ok(response)
+        }
+        Ok(None) if one_use_references => {
+            let _ = render.await;
+            Err(tag_remote(
+                client,
+                anyhow::anyhow!(
+                    "server lacks secure streaming generation required for one-use MiniMax H3 references; create a fresh upload attempt after updating the server"
+                ),
+            ))
         }
         Ok(None) => {
             // Server doesn't support SSE — fall back to blocking API with spinner
@@ -1607,6 +1471,14 @@ async fn generate_remote(
         }
         Err(e) => {
             let _ = render.await;
+            if one_use_references {
+                return Err(tag_remote(
+                    client,
+                    e.context(
+                        "one-use MiniMax H3 reference handles cannot be retried, pulled, or replayed through another generation endpoint",
+                    ),
+                ));
+            }
             match classify_generate_error(&e) {
                 GenerateServerAction::PullModelAndRetry => {
                     require_remote_auto_pull_activation(req, config)
@@ -1699,6 +1571,11 @@ async fn generate_remote_blocking(
     cli_steps: Option<u32>,
     cli_guidance: Option<f64>,
 ) -> Result<GenerateResponse> {
+    if has_remote_reference_handles(req) {
+        anyhow::bail!(
+            "one-use MiniMax H3 reference handles require streaming generation and cannot use the blocking fallback"
+        );
+    }
     let pb = ProgressBar::new_spinner();
     if piped {
         pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
@@ -3024,6 +2901,74 @@ mod tests {
         }
     }
 
+    async fn generate_remote_for_test(
+        client: &MoldClient,
+        request: &GenerateRequest,
+    ) -> Result<GenerateResponse> {
+        generate_remote(
+            client,
+            request,
+            &Config::default(),
+            &request.model,
+            false,
+            request.width,
+            request.height,
+            request.steps,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn mount_reference_v2_authority(server: &wiremock::MockServer) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let capabilities = mold_core::ServerCapabilities {
+            reference_uploads: mold_core::ReferenceUploadCapabilities {
+                available: true,
+                protocol_version: 2,
+                requires_api_key: true,
+                session_path: mold_core::reference_upload::SESSION_PATH.into(),
+                upload_path: mold_core::reference_upload::UPLOAD_PATH.into(),
+                session_handle_header: mold_core::reference_upload::SESSION_HANDLE_HEADER.into(),
+                upload_handle_header: mold_core::reference_upload::UPLOAD_HANDLE_HEADER.into(),
+                max_file_bytes: 256 * 1024 * 1024,
+                max_session_bytes: 1024 * 1024 * 1024,
+                session_ttl_ms: 120_000,
+            },
+            ..Default::default()
+        };
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(capabilities))
+            .expect(1)
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "version": "test",
+                "models_loaded": [],
+                "busy": false,
+                "gpu_info": null,
+                "uptime_secs": 1,
+                "instance_id": "server-1"
+            })))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
     #[tokio::test]
     async fn h3_reference_binding_preserves_order_and_uses_one_use_handles() {
         use sha2::{Digest as _, Sha256};
@@ -3031,6 +2976,7 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
+        mount_reference_v2_authority(&server).await;
         let dir = tempfile::tempdir().unwrap();
         let first_path = dir.path().join("first.png");
         let second_path = dir.path().join("second.png");
@@ -3068,9 +3014,15 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        for (handle, body, metadata) in [
-            ("mru_first", "first", first_metadata),
-            ("mru_second", "second", second_metadata),
+        for (handle, body, metadata, session_complete, scope) in [
+            ("mru_first", "first", first_metadata, false, "b".repeat(64)),
+            (
+                "mru_second",
+                "second",
+                second_metadata,
+                true,
+                "c".repeat(64),
+            ),
         ] {
             let reference = metadata.index;
             Mock::given(method("PUT"))
@@ -3082,6 +3034,8 @@ mod tests {
                         instance_id: "server-1".to_string(),
                         reference,
                         metadata,
+                        request_scope_sha256: scope,
+                        session_complete,
                     },
                 ))
                 .expect(1)
@@ -3091,23 +3045,22 @@ mod tests {
 
         let mut request = h3_request(mold_core::minimax_h3::REF2VA_COMFY);
         request.references = Some(descriptors);
-        let session = bind_remote_reference_uploads(
-            &MoldClient::new(&server.uri()),
+        let mut lease = bind_remote_reference_uploads(
+            &MoldClient::with_api_key(&server.uri(), "sekrit".into()),
             &mut request,
-            &[
+            vec![
                 ReferenceUpload {
-                    path: first_path,
-                    mime_type: "image/png".to_string(),
+                    file: mold_core::secure_file::open_regular_file_no_follow(&first_path).unwrap(),
                 },
                 ReferenceUpload {
-                    path: second_path,
-                    mime_type: "image/png".to_string(),
+                    file: mold_core::secure_file::open_regular_file_no_follow(&second_path)
+                        .unwrap(),
                 },
             ],
         )
         .await
         .unwrap();
-        assert_eq!(session.as_deref(), Some("mrs_secret"));
+        assert!(lease.is_some());
         let references = request.references.unwrap();
         assert!(matches!(
             references[0].media(),
@@ -3117,6 +3070,125 @@ mod tests {
             references[1].media(),
             GenerationReferenceAuthority::Upload { handle } if handle == "mru_second"
         ));
+        lease.as_mut().unwrap().mark_consumed();
+    }
+
+    #[tokio::test]
+    async fn h3_reference_http_451_sends_no_upload_or_generation() {
+        use sha2::{Digest as _, Sha256};
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_reference_v2_authority(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate/reference-upload-sessions"))
+            .and(header("x-api-key", "sekrit"))
+            .respond_with(ResponseTemplate::new(451).set_body_json(serde_json::json!({
+                "error": "MiniMax H3 legal activation is unavailable",
+                "code": mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reference.png");
+        std::fs::write(&path, b"reference").unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"reference"));
+        let mut request = h3_request(mold_core::minimax_h3::REF2VA_COMFY);
+        request.references = Some(vec![descriptor("reference.png", &digest)]);
+        let error = bind_remote_reference_uploads(
+            &MoldClient::with_api_key(&server.uri(), "sekrit".into()),
+            &mut request,
+            vec![ReferenceUpload {
+                file: mold_core::secure_file::open_regular_file_no_follow(&path).unwrap(),
+            }],
+        )
+        .await
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.method.as_str() == "PUT")
+                .count(),
+            0
+        );
+        assert!(!requests.iter().any(|request| {
+            matches!(request.url.path(), "/api/generate" | "/api/generate/stream")
+        }));
+    }
+
+    #[tokio::test]
+    async fn one_use_reference_handles_never_use_blocking_fallback() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate/stream"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut request = h3_request(mold_core::minimax_h3::REF2VA_COMFY);
+        request.references = Some(vec![GenerationReference::Image {
+            media: GenerationReferenceAuthority::Upload {
+                handle: "mru_one_use".into(),
+            },
+            provenance: mold_core::GenerationReferenceProvenance {
+                name: Some("reference.png".into()),
+                sha256: Some("a".repeat(64)),
+            },
+            mime_type: "image/png".into(),
+            width: 32,
+            height: 32,
+        }]);
+        let error = generate_remote_for_test(&MoldClient::new(&server.uri()), &request)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("secure streaming generation"));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path(), "/api/generate/stream");
+    }
+
+    #[tokio::test]
+    async fn one_use_reference_handles_never_pull_and_retry() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate/stream"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("model is not downloaded"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut request = h3_request(mold_core::minimax_h3::REF2VA_COMFY);
+        request.references = Some(vec![GenerationReference::Image {
+            media: GenerationReferenceAuthority::Upload {
+                handle: "mru_one_use".into(),
+            },
+            provenance: mold_core::GenerationReferenceProvenance {
+                name: Some("reference.png".into()),
+                sha256: Some("a".repeat(64)),
+            },
+            mime_type: "image/png".into(),
+            width: 32,
+            height: 32,
+        }]);
+        let error = generate_remote_for_test(&MoldClient::new(&server.uri()), &request)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot be retried"));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path(), "/api/generate/stream");
     }
 
     #[tokio::test]

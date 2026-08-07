@@ -6269,10 +6269,24 @@ impl App {
             }
             self.target.clone()
         } else {
-            let Some(snapshot) = self.generate.params.prepared_transform_snapshot.as_ref() else {
+            let Some(snapshot) = self.generate.params.prepared_transform_snapshot.clone() else {
                 self.generate.error_message =
                     Some("Prepared Remix lost its frozen route; remix again".into());
                 return;
+            };
+            let current_reference_fingerprint = if self.generate.params.model == snapshot.model
+                && self.target == snapshot.target
+                && self.prompt_transform_task() == snapshot.task
+            {
+                match self.reference_fingerprint_for_target(&self.target) {
+                    Ok(fingerprint) => Some(fingerprint),
+                    Err(error) => {
+                        self.generate.error_message = Some(error);
+                        return;
+                    }
+                }
+            } else {
+                None
             };
             let stale_reason = if self.generate.params.model != snapshot.model {
                 Some("model changed")
@@ -6280,9 +6294,8 @@ impl App {
                 Some("generation target changed")
             } else if self.prompt_transform_task() != snapshot.task {
                 Some("conditioning task changed")
-            } else if crate::h3_references::authority_fingerprint(
-                &self.generate.params.reference_paths,
-            ) != snapshot.reference_fingerprint
+            } else if current_reference_fingerprint.as_deref()
+                != Some(snapshot.reference_fingerprint.as_str())
             {
                 Some("ordered references changed")
             } else if self.generate.params.prepared_prompts.len()
@@ -6310,7 +6323,7 @@ impl App {
                 ));
                 return;
             }
-            snapshot.target.clone()
+            snapshot.target
         };
 
         // Route by the frozen prepared target or the current sticky Machines target. Auto keeps
@@ -6324,7 +6337,11 @@ impl App {
         let mut route_name = None;
         let mut api_key = None;
         match &generation_target {
-            GenTarget::Auto => {}
+            GenTarget::Auto => {
+                api_key = std::env::var("MOLD_API_KEY")
+                    .ok()
+                    .filter(|key| !key.is_empty());
+            }
             GenTarget::Local if h3_task.is_some() => {
                 self.generate.error_message = Some(format!(
                     "MiniMax H3 has no in-process TUI runtime. Select an authorized mold server. {}",
@@ -6434,6 +6451,48 @@ impl App {
         )
     }
 
+    /// Hash ordered reference content only after the selected route proves it
+    /// has a syntactically valid API-key header. This keeps transform
+    /// staleness exact without letting UI snapshotting read media before the
+    /// same authentication precondition used by upload binding.
+    fn reference_fingerprint_for_target(
+        &self,
+        target: &crate::hosts::GenTarget,
+    ) -> std::result::Result<String, String> {
+        let references = &self.generate.params.reference_paths;
+        if references.is_empty() {
+            return crate::h3_references::authority_fingerprint(None, references)
+                .map_err(|error| error.to_string());
+        }
+
+        use crate::hosts::GenTarget;
+        let (url, api_key) = match target {
+            GenTarget::Host(id) => {
+                let entry = self.machines.registry.get(id).ok_or_else(|| {
+                    format!("Machine '{id}' is no longer saved. Pick a target in Machines (4).")
+                })?;
+                (entry.url.clone(), crate::hosts::api_key_for(id))
+            }
+            GenTarget::Auto => {
+                let url = self.server_url.clone().ok_or_else(|| {
+                    "MiniMax H3 references require an authorized remote Mold target".to_string()
+                })?;
+                let api_key = std::env::var("MOLD_API_KEY")
+                    .ok()
+                    .filter(|key| !key.is_empty());
+                (url, api_key)
+            }
+            GenTarget::Local => {
+                return Err(
+                    "MiniMax H3 references require an authorized remote Mold target".to_string(),
+                );
+            }
+        };
+        let client = crate::hosts::client_for(&url, api_key.as_deref());
+        crate::h3_references::authority_fingerprint(Some(&client), references)
+            .map_err(|error| error.to_string())
+    }
+
     fn start_prompt_transform(&mut self, operation: PromptTransformOperation) {
         if !self.generate.params.reference_paths.is_empty()
             && operation == PromptTransformOperation::Remix
@@ -6494,14 +6553,19 @@ impl App {
             .filter(|root| !root.trim().is_empty());
         let family = family_for_model(&self.generate.params.model, &self.config);
         let task = self.prompt_transform_task();
+        let reference_fingerprint = match self.reference_fingerprint_for_target(&self.target) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                self.generate.error_message = Some(error);
+                return;
+            }
+        };
         let snapshot = PromptTransformSnapshot {
             operation,
             model: self.generate.params.model.clone(),
             target: self.target.clone(),
             task,
-            reference_fingerprint: crate::h3_references::authority_fingerprint(
-                &self.generate.params.reference_paths,
-            ),
+            reference_fingerprint,
             source_prompt: source_prompt.clone(),
             current_prompt,
             root_prompt: root.clone(),
@@ -6534,7 +6598,12 @@ impl App {
                 }
             },
             GenTarget::Local => (None, None),
-            GenTarget::Auto => (self.server_url.clone(), None),
+            GenTarget::Auto => (
+                self.server_url.clone(),
+                std::env::var("MOLD_API_KEY")
+                    .ok()
+                    .filter(|key| !key.is_empty()),
+            ),
         };
         self.generate.prompt_transform_token = self.generate.prompt_transform_token.wrapping_add(1);
         let token = self.generate.prompt_transform_token;
@@ -6576,9 +6645,11 @@ impl App {
                 "Remix is stale because the conditioning task changed; remix again".into(),
             );
         }
-        if crate::h3_references::authority_fingerprint(&self.generate.params.reference_paths)
-            != snapshot.reference_fingerprint
-        {
+        let reference_fingerprint = match self.reference_fingerprint_for_target(&self.target) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => return Some(error),
+        };
+        if reference_fingerprint != snapshot.reference_fingerprint {
             return Some(
                 "Remix is stale because the ordered references changed; remix again".into(),
             );
@@ -6596,27 +6667,26 @@ impl App {
     /// Validate reviewed Batch-1 semantics while deliberately ignoring the
     /// snapshotted host. Quick work may be submitted on the current target;
     /// prepared Batch N remains route-frozen in `start_generation`.
-    fn quick_transform_staleness(
-        &self,
-        snapshot: &PromptTransformSnapshot,
-    ) -> Option<&'static str> {
+    fn quick_transform_staleness(&self, snapshot: &PromptTransformSnapshot) -> Option<String> {
         if self.generate.params.model != snapshot.model {
-            return Some("model changed");
+            return Some("model changed".into());
         }
         if self.prompt_transform_task() != snapshot.task {
-            return Some("conditioning task changed");
+            return Some("conditioning task changed".into());
         }
-        if crate::h3_references::authority_fingerprint(&self.generate.params.reference_paths)
-            != snapshot.reference_fingerprint
-        {
-            return Some("ordered references changed");
+        let reference_fingerprint = match self.reference_fingerprint_for_target(&self.target) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => return Some(error),
+        };
+        if reference_fingerprint != snapshot.reference_fingerprint {
+            return Some("ordered references changed".into());
         }
         let current = self.generate.prompt.lines().join("\n").trim().to_string();
         if current != snapshot.current_prompt {
-            return Some("reviewed prompt changed");
+            return Some("reviewed prompt changed".into());
         }
         let Some(provenance) = self.generate.params.prompt_transform.as_ref() else {
-            return Some("transform provenance changed");
+            return Some("transform provenance changed".into());
         };
         if provenance.operation != snapshot.operation
             || provenance.source_prompt != snapshot.source_prompt
@@ -6624,7 +6694,7 @@ impl App {
             || provenance.source_kind != snapshot.source_kind
             || provenance.task != snapshot.task
         {
-            return Some("transform provenance changed");
+            return Some("transform provenance changed".into());
         }
         None
     }
@@ -14680,8 +14750,10 @@ mod tests {
             target: crate::hosts::GenTarget::Auto,
             task: app.prompt_transform_task(),
             reference_fingerprint: crate::h3_references::authority_fingerprint(
+                None,
                 &app.generate.params.reference_paths,
-            ),
+            )
+            .unwrap(),
             source_prompt: "source idea".into(),
             current_prompt: "source idea".into(),
             root_prompt: None,
@@ -14714,45 +14786,52 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn transform_snapshot_names_model_prompt_and_reference_staleness() {
-        let mut app = make_settings_test_app();
-        app.set_prompt_text("frozen prompt");
-        app.generate
-            .params
-            .reference_paths
-            .push(crate::h3_references::ReferencePath {
-                kind: crate::h3_references::ReferenceKind::Image,
-                path: "/tmp/first.png".into(),
-            });
-        let snapshot = PromptTransformSnapshot {
-            operation: PromptTransformOperation::Remix,
-            model: app.generate.params.model.clone(),
-            target: app.target.clone(),
-            task: app.prompt_transform_task(),
-            reference_fingerprint: crate::h3_references::authority_fingerprint(
-                &app.generate.params.reference_paths,
-            ),
-            source_prompt: "frozen prompt".into(),
-            current_prompt: "frozen prompt".into(),
-            root_prompt: None,
-            source_kind: mold_core::RemixSourceKind::Direct,
-        };
-        app.generate.params.model = "different-model".into();
-        assert!(app
-            .prompt_transform_staleness(&snapshot)
-            .is_some_and(|message| message.contains("model changed")));
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.machines
+                .registry
+                .add(machines_test_host("reference-host"))
+                .unwrap();
+            crate::hosts::save_api_key("reference-host", "sekrit");
+            app.target = crate::hosts::GenTarget::Host("reference-host".into());
+            app.set_prompt_text("frozen prompt");
+            app.generate
+                .params
+                .reference_paths
+                .push(crate::h3_references::ReferencePath {
+                    kind: crate::h3_references::ReferenceKind::Image,
+                    path: "/tmp/first.png".into(),
+                });
+            let snapshot = PromptTransformSnapshot {
+                operation: PromptTransformOperation::Remix,
+                model: app.generate.params.model.clone(),
+                target: app.target.clone(),
+                task: app.prompt_transform_task(),
+                reference_fingerprint: app.reference_fingerprint_for_target(&app.target).unwrap(),
+                source_prompt: "frozen prompt".into(),
+                current_prompt: "frozen prompt".into(),
+                root_prompt: None,
+                source_kind: mold_core::RemixSourceKind::Direct,
+            };
+            app.generate.params.model = "different-model".into();
+            assert!(app
+                .prompt_transform_staleness(&snapshot)
+                .is_some_and(|message| message.contains("model changed")));
 
-        app.generate.params.model = snapshot.model.clone();
-        app.set_prompt_text("edited prompt");
-        assert!(app
-            .prompt_transform_staleness(&snapshot)
-            .is_some_and(|message| message.contains("current prompt changed")));
+            app.generate.params.model = snapshot.model.clone();
+            app.set_prompt_text("edited prompt");
+            assert!(app
+                .prompt_transform_staleness(&snapshot)
+                .is_some_and(|message| message.contains("current prompt changed")));
 
-        app.set_prompt_text("frozen prompt");
-        app.generate.params.reference_paths[0].path = "/tmp/replacement.png".into();
-        assert!(app
-            .prompt_transform_staleness(&snapshot)
-            .is_some_and(|message| message.contains("ordered references changed")));
+            app.set_prompt_text("frozen prompt");
+            app.generate.params.reference_paths[0].path = "/tmp/replacement.png".into();
+            assert!(app
+                .prompt_transform_staleness(&snapshot)
+                .is_some_and(|message| message.contains("ordered references changed")));
+        });
     }
 
     #[tokio::test]
@@ -14787,8 +14866,10 @@ mod tests {
             target: crate::hosts::GenTarget::Auto,
             task: app.prompt_transform_task(),
             reference_fingerprint: crate::h3_references::authority_fingerprint(
+                None,
                 &app.generate.params.reference_paths,
-            ),
+            )
+            .unwrap(),
             source_prompt: "source idea".into(),
             current_prompt: "source idea".into(),
             root_prompt: None,

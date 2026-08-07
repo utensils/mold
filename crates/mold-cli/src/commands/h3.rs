@@ -10,7 +10,6 @@ use mold_core::{
     minimax_h3, GenerationReference, GenerationReferenceAuthority, GenerationReferenceProvenance,
     KeyframeCondition, OutputFormat,
 };
-use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{BufReader, Cursor, Read, Seek, SeekFrom},
@@ -19,6 +18,7 @@ use std::{
 };
 
 const MAX_REFERENCE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_REFERENCE_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_BOUNDARY_IMAGE_BYTES: u64 = minimax_h3::MAX_INLINE_REFERENCE_BYTES as u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,10 +28,20 @@ pub(crate) enum ReferenceKind {
     Audio,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ReferenceArg {
     pub kind: ReferenceKind,
     pub path: PathBuf,
+}
+
+impl std::fmt::Debug for ReferenceArg {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferenceArg")
+            .field("kind", &self.kind)
+            .field("path", &"<redacted>")
+            .finish()
+    }
 }
 
 impl FromStr for ReferenceArg {
@@ -67,13 +77,20 @@ impl FromStr for ReferenceArg {
     }
 }
 
-#[derive(Debug, Clone)]
 pub(crate) struct ReferenceUpload {
-    pub path: PathBuf,
-    pub mime_type: String,
+    pub file: File,
 }
 
-#[derive(Debug, Default)]
+impl std::fmt::Debug for ReferenceUpload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferenceUpload")
+            .field("file", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Default)]
 pub(crate) struct PreparedAuthoring {
     pub frames: Option<u32>,
     pub fps: Option<u32>,
@@ -84,6 +101,29 @@ pub(crate) struct PreparedAuthoring {
     pub keyframes: Option<Vec<KeyframeCondition>>,
     pub references: Option<Vec<GenerationReference>>,
     pub uploads: Vec<ReferenceUpload>,
+}
+
+impl std::fmt::Debug for PreparedAuthoring {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedAuthoring")
+            .field("frames", &self.frames)
+            .field("fps", &self.fps)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field(
+                "source_image",
+                &self
+                    .source_image
+                    .as_ref()
+                    .map(|bytes| format!("<redacted {} bytes>", bytes.len())),
+            )
+            .field("source_image_name", &self.source_image_name)
+            .field("keyframes", &self.keyframes.as_ref().map(Vec::len))
+            .field("references", &self.references)
+            .field("uploads", &self.uploads)
+            .finish()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -99,6 +139,7 @@ pub(crate) fn prepare_authoring(
     legacy_image: Option<&str>,
     last_frame: Option<&Path>,
     references: &[ReferenceArg],
+    reference_client: Option<&mold_core::MoldClient>,
 ) -> Result<PreparedAuthoring> {
     let is_h3 = minimax_h3::is_family(family);
     let has_h3_authoring = duration_seconds.is_some()
@@ -169,6 +210,10 @@ pub(crate) fn prepare_authoring(
                     "MiniMax H3 Ref2VA requires at least one ordered --reference KIND=PATH"
                 );
             }
+            anyhow::ensure!(
+                reference_client.is_some_and(mold_core::MoldClient::has_api_key),
+                "MiniMax H3 reference preparation requires a configured, valid MOLD_API_KEY"
+            );
         }
     }
 
@@ -348,13 +393,16 @@ fn validate_dimensions(width: u32, height: u32) -> Result<()> {
 }
 
 fn read_boundary_image(path: &Path, boundary: &str) -> Result<(Vec<u8>, (u32, u32))> {
-    ensure_regular_file(
-        path,
-        &format!("--{boundary}-frame"),
-        MAX_BOUNDARY_IMAGE_BYTES,
-    )?;
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("failed to read {boundary} frame '{}'", path.display()))?;
+    let mut file = mold_core::secure_file::open_regular_file_no_follow(path)
+        .with_context(|| format!("failed to open {boundary} frame"))?;
+    let length = file.metadata()?.len();
+    anyhow::ensure!(
+        length > 0 && length <= MAX_BOUNDARY_IMAGE_BYTES,
+        "MiniMax H3 {boundary} frame must contain 1..={MAX_BOUNDARY_IMAGE_BYTES} bytes"
+    );
+    let mut bytes = Vec::with_capacity(usize::try_from(length)?);
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read {boundary} frame"))?;
     let dimensions = validate_boundary_image_bytes(&bytes, boundary).map_err(|error| {
         anyhow::anyhow!("invalid {boundary} frame '{}': {error}", path.display())
     })?;
@@ -387,30 +435,42 @@ fn prepare_references(
 ) -> Result<(Vec<GenerationReference>, Vec<ReferenceUpload>)> {
     let mut descriptors = Vec::with_capacity(inputs.len());
     let mut uploads = Vec::with_capacity(inputs.len());
+    let mut total_bytes = 0_u64;
     for (index, input) in inputs.iter().enumerate() {
-        ensure_regular_file(
-            &input.path,
-            &format!("reference {}", index + 1),
-            MAX_REFERENCE_FILE_BYTES,
-        )?;
-        let sha256 = sha256_file(&input.path)
+        let mut file = mold_core::secure_file::open_regular_file_no_follow(&input.path)
+            .with_context(|| format!("reference {} could not be opened no-follow", index + 1))?;
+        let length = file.metadata()?.len();
+        anyhow::ensure!(
+            length > 0 && length <= MAX_REFERENCE_FILE_BYTES,
+            "reference {} must be a non-empty regular file no larger than {} MiB",
+            index + 1,
+            MAX_REFERENCE_FILE_BYTES / (1024 * 1024)
+        );
+        total_bytes = total_bytes
+            .checked_add(length)
+            .context("combined reference size overflowed")?;
+        anyhow::ensure!(
+            total_bytes <= MAX_REFERENCE_TOTAL_BYTES,
+            "combined references must stay under {} MiB",
+            MAX_REFERENCE_TOTAL_BYTES / (1024 * 1024)
+        );
+        let sha256 = mold_core::secure_file::sha256_open_file(&file)
             .with_context(|| format!("failed to hash reference {}", index + 1))?;
+        file.seek(SeekFrom::Start(0))?;
         let provenance = GenerationReferenceProvenance {
             name: display_name(&input.path),
             sha256: Some(sha256),
         };
         let descriptor = match input.kind {
-            ReferenceKind::Image => probe_image(&input.path, provenance)
+            ReferenceKind::Image => probe_image(file.try_clone()?, provenance)
                 .with_context(|| format!("reference {} image probe failed", index + 1))?,
-            ReferenceKind::Video => probe_video(&input.path, provenance)
+            ReferenceKind::Video => probe_video(file.try_clone()?, provenance)
                 .with_context(|| format!("reference {} video probe failed", index + 1))?,
-            ReferenceKind::Audio => probe_audio(&input.path, provenance)
+            ReferenceKind::Audio => probe_audio(file.try_clone()?, provenance)
                 .with_context(|| format!("reference {} audio probe failed", index + 1))?,
         };
-        uploads.push(ReferenceUpload {
-            path: input.path.clone(),
-            mime_type: reference_mime_type(&descriptor).to_string(),
-        });
+        file.seek(SeekFrom::Start(0))?;
+        uploads.push(ReferenceUpload { file });
         descriptors.push(descriptor);
     }
     if !descriptors.is_empty() {
@@ -419,48 +479,26 @@ fn prepare_references(
     Ok((descriptors, uploads))
 }
 
-fn ensure_regular_file(path: &Path, label: &str, max_bytes: u64) -> Result<()> {
-    let metadata = path
-        .metadata()
-        .with_context(|| format!("{label} file not found: {}", path.display()))?;
-    if !metadata.is_file() {
-        anyhow::bail!("{label} path is not a regular file: {}", path.display());
-    }
-    if metadata.len() == 0 || metadata.len() > max_bytes {
-        anyhow::bail!(
-            "{label} must contain 1..={max_bytes} bytes: {}",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
 fn display_name(path: &Path) -> Option<String> {
     path.file_name()
         .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
+        .map(str::trim)
+        .filter(|name| {
+            !name.is_empty()
+                && name.len() <= minimax_h3::MAX_REFERENCE_NAME_BYTES
+                && *name != "."
+                && *name != ".."
+                && !name.contains(['/', '\\'])
+                && !name.chars().any(char::is_control)
+        })
         .map(str::to_string)
 }
 
-fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = File::open(path)?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", digest.finalize()))
-}
-
 fn probe_image(
-    path: &Path,
+    file: File,
     provenance: GenerationReferenceProvenance,
 ) -> Result<GenerationReference> {
-    let reader = image::ImageReader::open(path)?.with_guessed_format()?;
+    let reader = image::ImageReader::new(BufReader::new(file)).with_guessed_format()?;
     let format = reader
         .format()
         .ok_or_else(|| anyhow::anyhow!("unknown image format"))?;
@@ -482,16 +520,16 @@ fn probe_image(
 }
 
 fn probe_video(
-    path: &Path,
+    file: File,
     provenance: GenerationReferenceProvenance,
 ) -> Result<GenerationReference> {
-    let probe = mold_inference::ltx2::media::probe_video(path)?;
+    let probe = mold_inference::ltx2::media::probe_video_file(file.try_clone()?)?;
     let duration_ms = probe
         .duration_ms
         .ok_or_else(|| anyhow::anyhow!("MP4 video duration is unavailable"))?;
     let decoded_audio = if probe.has_audio {
         Some(
-            mold_inference::ltx2::media::probe_decoded_mp4_audio_file(path)?
+            mold_inference::ltx2::media::probe_decoded_mp4_audio_open_file(file)?
                 .context("MP4 audio track could not be decoded exactly")?,
         )
     } else {
@@ -527,10 +565,10 @@ fn probe_video(
 }
 
 fn probe_audio(
-    path: &Path,
+    file: File,
     provenance: GenerationReferenceProvenance,
 ) -> Result<GenerationReference> {
-    let wav = probe_wav(File::open(path)?)?;
+    let wav = probe_wav(file)?;
     Ok(GenerationReference::Audio {
         media: GenerationReferenceAuthority::Descriptor,
         provenance,
@@ -662,14 +700,6 @@ fn probe_wav(file: File) -> Result<WavProbe> {
     })
 }
 
-fn reference_mime_type(reference: &GenerationReference) -> &str {
-    match reference {
-        GenerationReference::Image { mime_type, .. }
-        | GenerationReference::Video { mime_type, .. }
-        | GenerationReference::Audio { mime_type, .. } => mime_type,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,6 +710,7 @@ mod tests {
         let parsed: ReferenceArg = "video=/tmp/clip=final.mp4".parse().unwrap();
         assert_eq!(parsed.kind, ReferenceKind::Video);
         assert_eq!(parsed.path, PathBuf::from("/tmp/clip=final.mp4"));
+        assert!(!format!("{parsed:?}").contains("clip=final"));
     }
 
     #[test]
@@ -727,6 +758,7 @@ mod tests {
             None,
             Some(&last),
             &[],
+            None,
         )
         .unwrap();
         assert_eq!(prepared.frames, Some(124));
@@ -759,6 +791,7 @@ mod tests {
             None,
             Some(&last),
             &[],
+            None,
         )
         .unwrap_err();
         assert!(error.to_string().contains("must be PNG or JPEG"));
@@ -787,5 +820,49 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.to_string().contains("--format mp4"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reference_preparation_rejects_symlink_input() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("anchor.png");
+        image::DynamicImage::new_rgb8(32, 16).save(&target).unwrap();
+        let link = dir.path().join("linked.png");
+        symlink(target, &link).unwrap();
+        let error = prepare_references(&[ReferenceArg {
+            kind: ReferenceKind::Image,
+            path: link,
+        }])
+        .expect_err("symlink references must fail no-follow");
+        assert!(error.to_string().contains("no-follow"));
+    }
+
+    #[test]
+    fn ref2va_auth_preflight_wins_before_reference_file_access() {
+        let missing = PathBuf::from("/definitely/not/opened/reference.png");
+        let client = mold_core::MoldClient::new("http://127.0.0.1:9");
+        let error = prepare_authoring(
+            minimax_h3::REF2VA_COMFY,
+            minimax_h3::FAMILY,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[ReferenceArg {
+                kind: ReferenceKind::Image,
+                path: missing,
+            }],
+            Some(&client),
+        )
+        .expect_err("a missing API key must fail before touching the path");
+        assert!(error.to_string().contains("MOLD_API_KEY"));
+        assert!(!error.to_string().contains("opened no-follow"));
     }
 }

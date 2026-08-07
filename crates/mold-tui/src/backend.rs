@@ -255,12 +255,16 @@ pub async fn run_generation(
             if let Some(ref url) = effective_url {
                 let client = crate::hosts::client_for(url, api_key.as_deref());
                 let mut req = build_request(&iter_params, &iter_prompt, &negative_prompt);
-                let reference_session = if iter_params.reference_paths.is_empty() {
+                let mut reference_session = if iter_params.reference_paths.is_empty() {
                     None
                 } else {
                     let reference_paths = iter_params.reference_paths.clone();
+                    let reference_client = client.clone();
                     let prepared = match tokio::task::spawn_blocking(move || {
-                        crate::h3_references::prepare_references(&reference_paths)
+                        crate::h3_references::prepare_references(
+                            &reference_client,
+                            &reference_paths,
+                        )
                     })
                     .await
                     {
@@ -292,10 +296,12 @@ pub async fn run_generation(
                 };
 
                 let result = try_server_generate(&client, &req, &metadata_snapshot, &tx).await;
-                if !matches!(&result, ServerResult::Done) {
-                    if let Some(session) = reference_session {
-                        let _ = client.cancel_reference_upload_session(&session).await;
+                if matches!(&result, ServerResult::Done) {
+                    if let Some(lease) = reference_session.as_mut() {
+                        lease.mark_consumed();
                     }
+                } else if let Some(lease) = reference_session.as_mut() {
+                    let _ = lease.cancel().await;
                 }
                 match result {
                     ServerResult::Done => {}

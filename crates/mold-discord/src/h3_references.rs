@@ -9,15 +9,12 @@ use anyhow::{Context, Result};
 use image::ImageReader;
 use mold_core::{
     minimax_h3, GenerateRequest, GenerationReference, GenerationReferenceAuthority,
-    GenerationReferenceProvenance, MoldClient, ReferenceUploadSessionRequest,
+    GenerationReferenceProvenance, MoldClient, ReferenceUploadLease, ReferenceUploadSource,
 };
 use mp4_rs::{MediaType, Mp4Reader, TrackType};
 use poise::serenity_prelude as serenity;
 use sha2::{Digest, Sha256};
-use std::{
-    collections::HashSet,
-    io::{Cursor, Read, Seek, SeekFrom},
-};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use symphonia::{
     core::{
         audio::SampleBuffer, codecs::DecoderOptions, errors::Error as SymphoniaError,
@@ -50,12 +47,16 @@ impl std::fmt::Debug for PreparedReferences {
 
 struct ReferenceUpload {
     bytes: Vec<u8>,
-    mime_type: String,
 }
 
 pub(crate) async fn prepare_attachments(
+    client: &MoldClient,
     attachments: &[&serenity::Attachment],
 ) -> Result<PreparedReferences> {
+    anyhow::ensure!(
+        client.has_api_key(),
+        "MiniMax H3 reference preparation requires a configured, valid server API key"
+    );
     anyhow::ensure!(
         !attachments.is_empty() && attachments.len() <= MAX_DISCORD_REFERENCES,
         "Discord accepts one or two ordered MiniMax H3 references"
@@ -119,10 +120,7 @@ fn prepare_named_bytes<'a>(
                 index + 1
             );
         }
-        uploads.push(ReferenceUpload {
-            mime_type: reference_mime_type(&descriptor).to_string(),
-            bytes,
-        });
+        uploads.push(ReferenceUpload { bytes });
         descriptors.push(descriptor);
     }
     minimax_h3::validate_reference_descriptors(&descriptors).map_err(anyhow::Error::new)?;
@@ -136,95 +134,22 @@ pub(crate) async fn bind_remote_references(
     client: &MoldClient,
     request: &mut GenerateRequest,
     prepared: PreparedReferences,
-) -> Result<String> {
+) -> Result<ReferenceUploadLease> {
     anyhow::ensure!(
         prepared.descriptors.len() == prepared.uploads.len(),
         "reference descriptor/body count mismatch"
     );
     minimax_h3::validate_reference_descriptors(&prepared.descriptors)
         .map_err(anyhow::Error::new)?;
-    request.references = Some(prepared.descriptors.clone());
-    let upload_references = (1..=prepared.descriptors.len())
-        .map(|index| u32::try_from(index).context("too many reference uploads"))
+    request.references = Some(prepared.descriptors);
+    let sources = prepared
+        .uploads
+        .into_iter()
+        .map(|upload| ReferenceUploadSource::bytes(upload.bytes))
         .collect::<Result<Vec<_>>>()?;
-    let session = client
-        .create_reference_upload_session(&ReferenceUploadSessionRequest {
-            request: request.clone(),
-            upload_references,
-        })
-        .await?;
-    if session.instance_id.trim().is_empty()
-        || session.expires_at_ms == 0
-        || !is_sha256_hex(&session.request_scope_sha256)
-        || !is_upload_handle(&session.session_handle)
-        || session.uploads.len() != prepared.descriptors.len()
-    {
-        let _ = client
-            .cancel_reference_upload_session(&session.session_handle)
-            .await;
-        anyhow::bail!("server returned an incomplete reference upload session");
-    }
-
-    let result: Result<Vec<GenerationReference>> = async {
-        let mut bound = Vec::with_capacity(prepared.descriptors.len());
-        let mut seen = HashSet::new();
-        for (index, (descriptor, upload)) in prepared
-            .descriptors
-            .iter()
-            .zip(prepared.uploads)
-            .enumerate()
-        {
-            let reference = u32::try_from(index)
-                .context("too many reference uploads")?
-                .saturating_add(1);
-            let slot = session
-                .uploads
-                .iter()
-                .find(|slot| slot.reference == reference)
-                .ok_or_else(|| anyhow::anyhow!("server omitted reference upload slot {reference}"))?;
-            if !is_upload_handle(&slot.handle) || !seen.insert(slot.handle.as_str()) {
-                anyhow::bail!("server returned an invalid or reused reference upload handle");
-            }
-            let completed = client
-                .upload_reference_bytes(&slot.handle, upload.bytes, &upload.mime_type)
-                .await
-                .with_context(|| format!("reference {reference} upload failed"))?;
-            if completed.instance_id != session.instance_id || completed.reference != reference {
-                anyhow::bail!(
-                    "reference {reference} upload response did not match its bound server session"
-                );
-            }
-            let expected = descriptor
-                .redacted_metadata(index)
-                .ok_or_else(|| anyhow::anyhow!("reference {reference} lost digest provenance"))?;
-            if completed.metadata != expected {
-                anyhow::bail!(
-                    "reference {reference} upload response drifted from the client-probed descriptor"
-                );
-            }
-            bound.push(with_authority(
-                descriptor,
-                GenerationReferenceAuthority::Upload {
-                    handle: slot.handle.clone(),
-                },
-            ));
-        }
-        Ok(bound)
-    }
-    .await;
-
-    match result {
-        Ok(bound) => {
-            request.references = Some(bound);
-            Ok(session.session_handle)
-        }
-        Err(error) => {
-            let _ = client
-                .cancel_reference_upload_session(&session.session_handle)
-                .await;
-            Err(error)
-        }
-    }
+    let lease = client.bind_reference_uploads_v2(request, sources).await?;
+    *request = lease.request().clone();
+    Ok(lease)
 }
 
 fn probe_reference(
@@ -535,7 +460,7 @@ fn probe_wav(bytes: &[u8]) -> Result<WavProbe> {
     })
 }
 
-fn safe_name(value: &str) -> Option<String> {
+pub(crate) fn safe_name(value: &str) -> Option<String> {
     value
         .rsplit(['/', '\\'])
         .next()
@@ -548,93 +473,6 @@ fn safe_name(value: &str) -> Option<String> {
                 && !name.chars().any(char::is_control)
         })
         .map(str::to_string)
-}
-
-fn reference_mime_type(reference: &GenerationReference) -> &str {
-    match reference {
-        GenerationReference::Image { mime_type, .. }
-        | GenerationReference::Video { mime_type, .. }
-        | GenerationReference::Audio { mime_type, .. } => mime_type,
-    }
-}
-
-fn is_sha256_hex(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn is_upload_handle(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= minimax_h3::MAX_REFERENCE_UPLOAD_HANDLE_BYTES
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
-}
-
-fn with_authority(
-    reference: &GenerationReference,
-    media: GenerationReferenceAuthority,
-) -> GenerationReference {
-    match reference {
-        GenerationReference::Image {
-            provenance,
-            mime_type,
-            width,
-            height,
-            ..
-        } => GenerationReference::Image {
-            media,
-            provenance: provenance.clone(),
-            mime_type: mime_type.clone(),
-            width: *width,
-            height: *height,
-        },
-        GenerationReference::Video {
-            provenance,
-            mime_type,
-            width,
-            height,
-            frame_count,
-            duration_ms,
-            fps,
-            has_audio,
-            audio_duration_ms,
-            audio_sample_count,
-            audio_sample_rate,
-            audio_channels,
-            ..
-        } => GenerationReference::Video {
-            media,
-            provenance: provenance.clone(),
-            mime_type: mime_type.clone(),
-            width: *width,
-            height: *height,
-            frame_count: *frame_count,
-            duration_ms: *duration_ms,
-            fps: *fps,
-            has_audio: *has_audio,
-            audio_duration_ms: *audio_duration_ms,
-            audio_sample_count: *audio_sample_count,
-            audio_sample_rate: *audio_sample_rate,
-            audio_channels: *audio_channels,
-        },
-        GenerationReference::Audio {
-            provenance,
-            mime_type,
-            duration_ms,
-            sample_rate,
-            channels,
-            sample_count,
-            ..
-        } => GenerationReference::Audio {
-            media,
-            provenance: provenance.clone(),
-            mime_type: mime_type.clone(),
-            duration_ms: *duration_ms,
-            sample_rate: *sample_rate,
-            channels: *channels,
-            sample_count: *sample_count,
-        },
-    }
 }
 
 #[cfg(test)]
@@ -696,5 +534,41 @@ mod tests {
         let error = prepare_named_bytes([("voice.wav", wav_bytes(2))])
             .expect_err("audio-only input must fail");
         assert!(error.to_string().contains("audio references require"));
+    }
+
+    #[tokio::test]
+    async fn auth_preflight_prevents_attachment_download() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/reference.png", listener.local_addr().unwrap());
+        let attachment: serenity::Attachment = serde_json::from_value(serde_json::json!({
+            "id": "1",
+            "filename": "reference.png",
+            "description": null,
+            "height": 1,
+            "proxy_url": url,
+            "size": 1,
+            "url": url,
+            "width": 1,
+            "content_type": "image/png",
+            "ephemeral": false,
+            "duration_secs": null,
+            "waveform": null
+        }))
+        .unwrap();
+        let client = MoldClient::new("http://127.0.0.1:9");
+        let error = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            prepare_attachments(&client, &[&attachment]),
+        )
+        .await
+        .expect("auth preflight must return without waiting on attachment I/O")
+        .unwrap_err();
+        assert!(error.to_string().contains("API key"));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "missing-key preparation must not contact the attachment URL"
+        );
     }
 }

@@ -8,11 +8,10 @@
 use anyhow::{Context, Result};
 use mold_core::{
     minimax_h3, GenerateRequest, GenerationReference, GenerationReferenceAuthority,
-    GenerationReferenceProvenance, MoldClient, ReferenceUploadSessionRequest,
+    GenerationReferenceProvenance, MoldClient, ReferenceUploadLease, ReferenceUploadSource,
 };
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
     fs::File,
     io::{BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -130,16 +129,38 @@ pub(crate) fn format_reference_input(references: &[ReferencePath]) -> String {
 
 /// Safe identity for conditioning staleness checks. The digest retains order
 /// and kind without putting local paths into prompt-transform snapshots/logs.
-pub(crate) fn authority_fingerprint(references: &[ReferencePath]) -> String {
+pub(crate) fn authority_fingerprint(
+    client: Option<&MoldClient>,
+    references: &[ReferencePath],
+) -> Result<String> {
+    if !references.is_empty() {
+        anyhow::ensure!(
+            client.is_some_and(MoldClient::has_api_key),
+            "MiniMax H3 reference inspection requires a configured, valid server API key"
+        );
+    }
     let mut digest = Sha256::new();
-    digest.update(b"mold.tui.minimax-h3.reference-paths.v1\0");
+    digest.update(b"mold.tui.minimax-h3.reference-content.v2\0");
     for reference in references {
         digest.update(reference.kind.label().as_bytes());
         digest.update(b"\0");
-        digest.update(reference.path.as_os_str().as_encoded_bytes());
+        match mold_core::secure_file::open_regular_file_no_follow(&reference.path)
+            .and_then(|file| mold_core::secure_file::sha256_open_file(&file))
+        {
+            Ok(content_sha256) => {
+                digest.update(b"content\0");
+                digest.update(content_sha256.as_bytes());
+            }
+            Err(_) => {
+                // An unavailable/no-follow-invalid path must still remain
+                // distinct without retaining it in the snapshot.
+                digest.update(b"unavailable\0");
+                digest.update(reference.path.as_os_str().as_encoded_bytes());
+            }
+        }
         digest.update(b"\0");
     }
-    format!("{:x}", digest.finalize())
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 pub(crate) struct PreparedReferences {
@@ -162,19 +183,25 @@ impl std::fmt::Debug for PreparedReferences {
 
 struct ReferenceUpload {
     file: File,
-    mime_type: String,
 }
 
 /// Probe exact payload-free descriptors while retaining an already-open file
 /// descriptor for the subsequent upload. Server ingress probes the staged bytes
 /// independently and rejects any drift.
-pub(crate) fn prepare_references(inputs: &[ReferencePath]) -> Result<PreparedReferences> {
+pub(crate) fn prepare_references(
+    client: &MoldClient,
+    inputs: &[ReferencePath],
+) -> Result<PreparedReferences> {
+    anyhow::ensure!(
+        client.has_api_key(),
+        "MiniMax H3 reference preparation requires a configured, valid server API key"
+    );
     let mut descriptors = Vec::with_capacity(inputs.len());
     let mut uploads = Vec::with_capacity(inputs.len());
     let mut total_bytes = 0_u64;
     for (index, input) in inputs.iter().enumerate() {
-        let mut file = File::open(&input.path)
-            .with_context(|| format!("reference {} could not be opened", index + 1))?;
+        let mut file = mold_core::secure_file::open_regular_file_no_follow(&input.path)
+            .with_context(|| format!("reference {} could not be opened no-follow", index + 1))?;
         let metadata = file
             .metadata()
             .with_context(|| format!("reference {} could not be inspected", index + 1))?;
@@ -217,10 +244,7 @@ pub(crate) fn prepare_references(inputs: &[ReferencePath]) -> Result<PreparedRef
         .with_context(|| format!("reference {} media probe failed", index + 1))?;
         file.seek(SeekFrom::Start(0))
             .with_context(|| format!("reference {} could not be rewound", index + 1))?;
-        uploads.push(ReferenceUpload {
-            file,
-            mime_type: reference_mime_type(&descriptor).to_string(),
-        });
+        uploads.push(ReferenceUpload { file });
         descriptors.push(descriptor);
     }
     minimax_h3::validate_reference_descriptors(&descriptors).map_err(anyhow::Error::new)?;
@@ -236,7 +260,7 @@ pub(crate) async fn bind_remote_references(
     client: &MoldClient,
     request: &mut GenerateRequest,
     prepared: PreparedReferences,
-) -> Result<String> {
+) -> Result<ReferenceUploadLease> {
     let PreparedReferences {
         descriptors,
         uploads,
@@ -246,85 +270,14 @@ pub(crate) async fn bind_remote_references(
         "reference descriptor/file count mismatch"
     );
     minimax_h3::validate_reference_descriptors(&descriptors).map_err(anyhow::Error::new)?;
-    request.references = Some(descriptors.clone());
-    let upload_references = (1..=descriptors.len())
-        .map(|index| u32::try_from(index).context("too many reference uploads"))
+    request.references = Some(descriptors);
+    let sources = uploads
+        .into_iter()
+        .map(|upload| ReferenceUploadSource::open_file(upload.file))
         .collect::<Result<Vec<_>>>()?;
-    let session = client
-        .create_reference_upload_session(&ReferenceUploadSessionRequest {
-            request: request.clone(),
-            upload_references,
-        })
-        .await?;
-    if session.instance_id.trim().is_empty()
-        || session.expires_at_ms == 0
-        || !is_sha256_hex(&session.request_scope_sha256)
-        || !is_upload_handle(&session.session_handle)
-        || session.uploads.len() != descriptors.len()
-    {
-        let _ = client
-            .cancel_reference_upload_session(&session.session_handle)
-            .await;
-        anyhow::bail!("server returned an incomplete reference upload session");
-    }
-
-    let upload_result: Result<Vec<GenerationReference>> = async {
-        let mut bound = Vec::with_capacity(descriptors.len());
-        let mut seen_handles = HashSet::new();
-        for (index, (descriptor, upload)) in
-            descriptors.iter().zip(uploads).enumerate()
-        {
-            let reference = u32::try_from(index)
-                .context("too many reference uploads")?
-                .saturating_add(1);
-            let slot = session
-                .uploads
-                .iter()
-                .find(|slot| slot.reference == reference)
-                .ok_or_else(|| anyhow::anyhow!("server omitted reference upload slot {reference}"))?;
-            if !is_upload_handle(&slot.handle) || !seen_handles.insert(slot.handle.as_str()) {
-                anyhow::bail!("server returned an invalid or reused reference upload handle");
-            }
-            let completed = client
-                .upload_reference_open_file(&slot.handle, upload.file, &upload.mime_type)
-                .await
-                .with_context(|| format!("reference {reference} upload failed"))?;
-            if completed.instance_id != session.instance_id || completed.reference != reference {
-                anyhow::bail!(
-                    "reference {reference} upload response did not match its bound server session"
-                );
-            }
-            let expected = descriptor
-                .redacted_metadata(index)
-                .ok_or_else(|| anyhow::anyhow!("reference {reference} lost digest provenance"))?;
-            if completed.metadata != expected {
-                anyhow::bail!(
-                    "reference {reference} upload response drifted from the client-probed descriptor"
-                );
-            }
-            bound.push(with_authority(
-                descriptor,
-                GenerationReferenceAuthority::Upload {
-                    handle: slot.handle.clone(),
-                },
-            ));
-        }
-        Ok(bound)
-    }
-    .await;
-
-    match upload_result {
-        Ok(bound) => {
-            request.references = Some(bound);
-            Ok(session.session_handle)
-        }
-        Err(error) => {
-            let _ = client
-                .cancel_reference_upload_session(&session.session_handle)
-                .await;
-            Err(error)
-        }
-    }
+    let lease = client.bind_reference_uploads_v2(request, sources).await?;
+    *request = lease.request().clone();
+    Ok(lease)
 }
 
 fn sha256_file(mut file: File) -> Result<String> {
@@ -557,96 +510,13 @@ fn probe_wav(file: File) -> Result<WavProbe> {
     })
 }
 
-fn reference_mime_type(reference: &GenerationReference) -> &str {
-    match reference {
-        GenerationReference::Image { mime_type, .. }
-        | GenerationReference::Video { mime_type, .. }
-        | GenerationReference::Audio { mime_type, .. } => mime_type,
-    }
-}
-
-fn is_sha256_hex(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn is_upload_handle(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= minimax_h3::MAX_REFERENCE_UPLOAD_HANDLE_BYTES
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
-}
-
-fn with_authority(
-    reference: &GenerationReference,
-    media: GenerationReferenceAuthority,
-) -> GenerationReference {
-    match reference {
-        GenerationReference::Image {
-            provenance,
-            mime_type,
-            width,
-            height,
-            ..
-        } => GenerationReference::Image {
-            media,
-            provenance: provenance.clone(),
-            mime_type: mime_type.clone(),
-            width: *width,
-            height: *height,
-        },
-        GenerationReference::Video {
-            provenance,
-            mime_type,
-            width,
-            height,
-            frame_count,
-            duration_ms,
-            fps,
-            has_audio,
-            audio_duration_ms,
-            audio_sample_count,
-            audio_sample_rate,
-            audio_channels,
-            ..
-        } => GenerationReference::Video {
-            media,
-            provenance: provenance.clone(),
-            mime_type: mime_type.clone(),
-            width: *width,
-            height: *height,
-            frame_count: *frame_count,
-            duration_ms: *duration_ms,
-            fps: *fps,
-            has_audio: *has_audio,
-            audio_duration_ms: *audio_duration_ms,
-            audio_sample_count: *audio_sample_count,
-            audio_sample_rate: *audio_sample_rate,
-            audio_channels: *audio_channels,
-        },
-        GenerationReference::Audio {
-            provenance,
-            mime_type,
-            duration_ms,
-            sample_rate,
-            channels,
-            sample_count,
-            ..
-        } => GenerationReference::Audio {
-            media,
-            provenance: provenance.clone(),
-            mime_type: mime_type.clone(),
-            duration_ms: *duration_ms,
-            sample_rate: *sample_rate,
-            channels: *channels,
-            sample_count: *sample_count,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn authenticated_client() -> MoldClient {
+        MoldClient::with_api_key("http://127.0.0.1:9", "sekrit".into())
+    }
 
     fn wav_bytes(seconds: u32) -> Vec<u8> {
         let sample_rate = 8_000_u32;
@@ -684,7 +554,8 @@ mod tests {
             format_reference_input(&references),
             "video=/tmp/a=b.mp4; image=/tmp/frame.png; audio=/tmp/voice.wav"
         );
-        let fingerprint = authority_fingerprint(&references);
+        let client = authenticated_client();
+        let fingerprint = authority_fingerprint(Some(&client), &references).unwrap();
         assert_eq!(fingerprint.len(), 64);
         assert!(!fingerprint.contains("tmp"));
         assert!(!format!("{references:?}").contains("/tmp"));
@@ -710,7 +581,8 @@ mod tests {
                 path: audio_path.clone(),
             },
         ];
-        let prepared = prepare_references(&inputs).unwrap();
+        let client = authenticated_client();
+        let prepared = prepare_references(&client, &inputs).unwrap();
         assert_eq!(prepared.descriptors.len(), 2);
         assert!(matches!(
             &prepared.descriptors[0],
@@ -730,10 +602,13 @@ mod tests {
                     && provenance.sha256.as_ref().is_some_and(|value| value.len() == 64)
         ));
 
-        let error = prepare_references(&[ReferencePath {
-            kind: ReferenceKind::Audio,
-            path: audio_path,
-        }])
+        let error = prepare_references(
+            &client,
+            &[ReferencePath {
+                kind: ReferenceKind::Audio,
+                path: audio_path,
+            }],
+        )
         .expect_err("audio-only references must fail");
         assert!(error.to_string().contains("audio references require"));
     }
@@ -747,5 +622,60 @@ mod tests {
         assert!(parse_reference_input(&input)
             .unwrap_err()
             .contains("at most 12"));
+    }
+
+    #[test]
+    fn authority_fingerprint_detects_same_path_content_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reference.bin");
+        std::fs::write(&path, b"first").unwrap();
+        let references = vec![ReferencePath {
+            kind: ReferenceKind::Image,
+            path: path.clone(),
+        }];
+        let client = authenticated_client();
+        let frozen = authority_fingerprint(Some(&client), &references).unwrap();
+        std::fs::write(path, b"other").unwrap();
+        assert_ne!(
+            frozen,
+            authority_fingerprint(Some(&client), &references).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reference_preparation_rejects_symlink_input() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("anchor.png");
+        image::DynamicImage::new_rgb8(32, 16).save(&target).unwrap();
+        let link = dir.path().join("linked.png");
+        symlink(target, &link).unwrap();
+        let client = authenticated_client();
+        let error = prepare_references(
+            &client,
+            &[ReferencePath {
+                kind: ReferenceKind::Image,
+                path: link,
+            }],
+        )
+        .expect_err("symlink references must fail no-follow");
+        assert!(error.to_string().contains("no-follow"));
+    }
+
+    #[test]
+    fn auth_preflight_wins_before_reference_file_access() {
+        let client = MoldClient::new("http://127.0.0.1:9");
+        let references = [ReferencePath {
+            kind: ReferenceKind::Image,
+            path: "/definitely/not/opened/reference.png".into(),
+        }];
+
+        let fingerprint_error = authority_fingerprint(Some(&client), &references).unwrap_err();
+        assert!(fingerprint_error.to_string().contains("API key"));
+        let preparation_error = prepare_references(&client, &references).unwrap_err();
+        assert!(preparation_error.to_string().contains("API key"));
+        assert!(!preparation_error.to_string().contains("opened no-follow"));
     }
 }
