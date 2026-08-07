@@ -55,8 +55,7 @@ export function generationCapabilitiesForFamily(
     // correct only while LTX-2 was the sole image-conditioned video family:
     // Wan is video, is not advanced-video, and reads a source image — and
     // `wan22-i2v-a14b` cannot generate without one.
-    supportsImg2img:
-      !shared.supportsVideo || isImageConditionedVideoFamily(family),
+    supportsImg2img: !shared.supportsVideo || isImageConditionedVideoFamily(family),
     supportsMask: shared.supportsMask && !shared.supportsVideo,
     supportsAdvancedVideo,
   };
