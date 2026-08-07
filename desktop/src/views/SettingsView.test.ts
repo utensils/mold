@@ -16,6 +16,7 @@ vi.mock("../components/settings/AboutSection.vue", () => stub("stub-about"));
 vi.mock("../components/settings/HostsSection.vue", () => stub("stub-hosts"));
 vi.mock("../components/settings/PerformanceSection.vue", () => stub("stub-performance"));
 vi.mock("../components/settings/GenerationSection.vue", () => stub("stub-generation"));
+vi.mock("../components/settings/MediaSection.vue", () => stub("stub-media"));
 vi.mock("../components/settings/ExpansionSection.vue", () => stub("stub-expansion"));
 vi.mock("../components/settings/AccountsSection.vue", () => stub("stub-accounts"));
 vi.mock("../components/settings/ProfilesSection.vue", () => stub("stub-profiles"));
@@ -59,6 +60,7 @@ describe("SettingsView shell", () => {
     for (const id of [
       "performance",
       "generation",
+      "media",
       "expansion",
       "accounts",
       "profiles",
@@ -72,7 +74,7 @@ describe("SettingsView shell", () => {
     const wrapper = await mountView();
     const accordions = wrapper.findAllComponents(AccordionSection);
 
-    expect(accordions).toHaveLength(6);
+    expect(accordions).toHaveLength(7);
     for (const accordion of accordions) {
       expect(accordion.props("icon")).toBeTruthy();
       expect(accordion.props("summary")).toBeTruthy();
@@ -85,6 +87,7 @@ describe("SettingsView shell", () => {
     for (const id of [
       "performance",
       "generation",
+      "media",
       "expansion",
       "accounts",
       "profiles",

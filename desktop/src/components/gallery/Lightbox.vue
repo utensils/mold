@@ -20,12 +20,11 @@ import type { GalleryImage } from "../../lib/api/types";
 import { isUpscaledImage } from "../../lib/gallery/upscaled";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
-  downloadVideoExport,
   videoExportFilename,
-  videoExportPath,
   type VideoExportCapabilities,
   type VideoExportOptions,
 } from "@studio/lib/videoExport";
+import { saveGalleryMedia, showSavedMediaToast } from "../../lib/mediaSave";
 
 const props = withDefaults(
   defineProps<{
@@ -90,6 +89,7 @@ watch(
 const confirmingDelete = ref(false);
 const exportOpen = ref(false);
 const exportBusy = ref(false);
+const saveBusy = ref(false);
 const exportError = ref("");
 const exportCapabilities = ref<VideoExportCapabilities>(DEFAULT_VIDEO_EXPORT_CAPABILITIES);
 watch(
@@ -215,24 +215,16 @@ function onDelete() {
   toasts.push("Deleted print");
 }
 
-/** Save the print to a user-chosen location. Self-contained: fetch the
- *  authed full-size bytes (origin-aware) and hand them to the WebView's file
- *  saver. Videos and stills alike. */
 async function saveMedia() {
+  if (saveBusy.value) return;
+  saveBusy.value = true;
   try {
-    const path = galleryMediaPath(props.item.filename, props.source);
-    const { apiFetch, apiFetchTo } = await import("../../lib/api/client");
-    const res = props.target ? await apiFetchTo(props.target, path) : await apiFetch(path);
-    const url = URL.createObjectURL(await res.blob());
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = props.item.filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    const saved = await saveGalleryMedia(props.target, props.item.filename);
+    showSavedMediaToast(toasts, saved);
   } catch (error) {
     toasts.push(error instanceof Error ? error.message : String(error), "error");
+  } finally {
+    saveBusy.value = false;
   }
 }
 
@@ -256,22 +248,14 @@ async function performVideoExport(options: VideoExportOptions) {
   exportBusy.value = true;
   exportError.value = "";
   try {
-    const { apiFetch, apiFetchTo } = await import("../../lib/api/client");
-    const path = videoExportPath(props.item.filename);
-    const init = {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(options),
-    };
-    const response = props.target
-      ? await apiFetchTo(props.target, path, init)
-      : await apiFetch(path, init);
-    downloadVideoExport(
-      await response.blob(),
+    const saved = await saveGalleryMedia(
+      props.target,
+      props.item.filename,
       videoExportFilename(props.item.filename, options.format),
+      options,
     );
     exportOpen.value = false;
-    toasts.push("Video exported");
+    showSavedMediaToast(toasts, saved);
   } catch (error) {
     exportError.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -545,9 +529,10 @@ async function performVideoExport(options: VideoExportOptions) {
             type="button"
             data-test="save-media"
             class="border-ce h-10 flex-1 rounded-control border text-body font-semibold text-ink-2 transition-colors duration-100 hover:text-ink"
+            :disabled="saveBusy"
             @click="saveMedia"
           >
-            {{ audio ? "Save audio" : video ? "Save video" : "Save image" }}
+            {{ saveBusy ? "Saving…" : audio ? "Save audio" : video ? "Save video" : "Save image" }}
           </button>
         </div>
         <div class="mt-2 flex gap-2.5">

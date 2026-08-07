@@ -82,7 +82,7 @@ describe("ipc.pickSourceImages", () => {
   });
 });
 
-describe("ipc.saveImageAs browser fallback", () => {
+describe("ipc.saveMediaBytes browser fallback", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     Object.defineProperty(URL, "createObjectURL", {
@@ -101,7 +101,7 @@ describe("ipc.saveImageAs browser fallback", () => {
   });
 
   it("rejects malformed base64 instead of throwing before returning a promise", async () => {
-    const result = ipc.saveImageAs("broken.png", "%%%");
+    const result = ipc.saveMediaBytes("broken.png", "%%%");
     expect(result).toBeInstanceOf(Promise);
     await expect(result).rejects.toThrow();
   });
@@ -109,7 +109,11 @@ describe("ipc.saveImageAs browser fallback", () => {
   it("defers object URL cleanup until after the download click", async () => {
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
 
-    await expect(ipc.saveImageAs("render.png", "aA==")).resolves.toBe("render.png");
+    await expect(ipc.saveMediaBytes("render.png", "aA==")).resolves.toEqual({
+      filename: "render.png",
+      path: "render.png",
+      directory: "Downloads",
+    });
     expect(click).toHaveBeenCalledOnce();
     expect(URL.revokeObjectURL).not.toHaveBeenCalled();
 

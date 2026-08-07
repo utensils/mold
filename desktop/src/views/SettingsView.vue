@@ -9,6 +9,7 @@ import AboutSection from "../components/settings/AboutSection.vue";
 import HostsSection from "../components/settings/HostsSection.vue";
 import PerformanceSection from "../components/settings/PerformanceSection.vue";
 import GenerationSection from "../components/settings/GenerationSection.vue";
+import MediaSection from "../components/settings/MediaSection.vue";
 import ExpansionSection from "../components/settings/ExpansionSection.vue";
 import AccountsSection from "../components/settings/AccountsSection.vue";
 import ProfilesSection from "../components/settings/ProfilesSection.vue";
@@ -53,6 +54,7 @@ const advancedKeys = computed(() => config.advancedRows.map((row) => row.key));
 const componentFor: Record<string, unknown> = {
   performance: PerformanceSection,
   generation: GenerationSection,
+  media: MediaSection,
   expansion: ExpansionSection,
   accounts: AccountsSection,
   profiles: ProfilesSection,

@@ -29,6 +29,8 @@ vi.mock("../lib/ipc", () => ({
   ipc: {
     appSettingsGet: vi.fn().mockResolvedValue({}),
     appSettingsSet: vi.fn().mockResolvedValue(undefined),
+    saveMediaBytes: vi.fn(),
+    revealSavedMedia: vi.fn(),
   },
 }));
 vi.mock("../lib/api/sse", () => ({ sseStream: vi.fn().mockResolvedValue(undefined) }));
@@ -152,7 +154,7 @@ describe("GenerateView — sequence output", () => {
     const labels = useContextMenuStore().entries.flatMap((entry) =>
       "separator" in entry ? [] : [entry.label],
     );
-    expect(labels).toContain("Save image…");
+    expect(labels).toContain("Save image");
     expect(labels).toContain("Copy file path");
   });
 

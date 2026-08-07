@@ -14,6 +14,7 @@ export type SectionId =
   | "hosts"
   | "performance"
   | "generation"
+  | "media"
   | "expansion"
   | "accounts"
   | "app"
@@ -43,6 +44,7 @@ export const SECTIONS: SectionInfo[] = [
   { id: "hosts", label: "Hosts" },
   { id: "performance", label: "Performance" },
   { id: "generation", label: "Generation" },
+  { id: "media", label: "Saved media" },
   { id: "expansion", label: "Prompt expansion" },
   { id: "accounts", label: "Accounts & tokens" },
   { id: "app", label: "Appearance & app" },
@@ -71,6 +73,23 @@ export const ACCORDION_SECTIONS: AccordionSectionInfo[] = [
     label: "Generation",
     icon: "image",
     summary: "Defaults for new image and video jobs",
+  },
+  {
+    id: "media",
+    label: "Saved media",
+    icon: "save",
+    summary: "Where photos, videos, and converted exports are saved",
+    keywords: [
+      "save",
+      "save location",
+      "default save location",
+      "export",
+      "download",
+      "folder",
+      "location",
+      "photo",
+      "video",
+    ],
   },
   {
     id: "expansion",
