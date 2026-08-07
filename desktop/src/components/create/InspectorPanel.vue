@@ -33,7 +33,7 @@ import { normalizeTargetHost } from "../../lib/hosts";
 import { modelDisplayName } from "../../lib/models";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { advancedActiveCount } from "../../lib/advancedCount";
-import { ASPECTS } from "@ui/lib/resolution";
+import { ASPECTS, aspectsSupportedByPresets } from "@ui/lib/resolution";
 import {
   aspectIdFor,
   closestResolutionPreset,
@@ -329,18 +329,23 @@ const followsSource = computed(
 const sourceStatus = computed(() =>
   sourceResolution.value ? sourceResolutionStatus(sourceResolution.value) : null,
 );
+const canonicalShapeOptions = computed(() => {
+  const options = ASPECTS;
+  if (props.form.family.trim().toLowerCase() !== "wan") return options;
+  return aspectsSupportedByPresets(presetsForModel(selectedModel.value ?? props.form.family));
+});
 const shapeOptions = computed(() => {
   const source = sourceResolution.value;
   return source
     ? [
-        ...ASPECTS,
+        ...canonicalShapeOptions.value,
         {
           id: "source",
           label: "Source",
           ratio: source.output.width / source.output.height,
         },
       ]
-    : ASPECTS;
+    : canonicalShapeOptions.value;
 });
 const shapeId = computed(() =>
   followsSource.value ? "source" : (aspectIdFor(props.form.width, props.form.height) ?? ""),

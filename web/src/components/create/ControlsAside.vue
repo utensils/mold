@@ -17,7 +17,7 @@ import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Stepper from "@ui/components/Stepper.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
-import { ASPECTS } from "@ui/lib/resolution";
+import { ASPECTS, aspectsSupportedByPresets } from "@ui/lib/resolution";
 import type { GenerateFormState, ModelInfoExtended } from "../../types";
 import {
   closestResolutionPreset,
@@ -146,18 +146,24 @@ const sourceStatus = computed(() =>
     ? sourceResolutionStatus(sourceResolution.value)
     : null,
 );
+const canonicalShapeOptions = computed(() => {
+  if (props.family.trim().toLowerCase() !== "wan") return ASPECTS;
+  return aspectsSupportedByPresets(
+    presetsForModel(props.model ?? props.family),
+  );
+});
 const shapeOptions = computed(() => {
   const source = sourceResolution.value;
   return source
     ? [
-        ...ASPECTS,
+        ...canonicalShapeOptions.value,
         {
           id: "source",
           label: "Source",
           ratio: source.output.width / source.output.height,
         },
       ]
-    : ASPECTS;
+    : canonicalShapeOptions.value;
 });
 const aspectId = computed(() =>
   followsSource.value ? "source" : (projection.value.aspectId ?? ""),

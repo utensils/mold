@@ -104,6 +104,37 @@ describe("GenerateView form persistence", () => {
     expect(wrapper.find('[data-test="model-option-name"]').exists()).toBe(false);
   });
 
+  it("keeps Generate enabled at wan-only 4n+1 frame counts", async () => {
+    const wan = {
+      ...model,
+      name: "wan22-i2v-a14b:q5",
+      family: "wan",
+      default_frames: 81,
+      default_fps: 16,
+      frame_step: 4,
+      recommended_dimensions: [
+        { width: 832, height: 480 },
+        { width: 480, height: 832 },
+      ],
+      dimension_alignment: 16,
+      max_pixels: 1280 * 720,
+    } as ModelEntry;
+    useModelStore().all = [wan];
+    const form = useGenerateFormStore().form;
+    form.model = wan.name;
+    form.family = wan.family;
+    form.prompt = "a sailboat crossing the bay";
+    form.width = 832;
+    form.height = 480;
+    form.frames = 45; // valid 4n+1, invalid under the old hard-coded 8n+1 gate
+    form.fps = 16;
+
+    const wrapper = mountView();
+    await flushPromises();
+
+    expect(wrapper.get('[data-test="generate-button"]').attributes("disabled")).toBeUndefined();
+  });
+
   it("renders the workbench and auto-selects a model installed only on a remote host", async () => {
     const conn = useConnectionStore();
     conn.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" };

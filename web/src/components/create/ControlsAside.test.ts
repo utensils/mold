@@ -188,6 +188,36 @@ describe("ControlsAside", () => {
     expect(next.height).toBe(768);
   });
 
+  it("hides aspect ratios the selected wan checkpoint does not support", () => {
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm({
+          model: "wan22-i2v-a14b:q5",
+          modelFamily: "wan",
+          width: 480,
+          height: 832,
+        }),
+        family: "wan",
+        advCount: 0,
+        model: {
+          name: "wan22-i2v-a14b:q5",
+          family: "wan",
+          recommended_dimensions: [
+            { width: 832, height: 480 },
+            { width: 480, height: 832 },
+          ],
+          dimension_alignment: 16,
+          max_pixels: 1280 * 720,
+        } as never,
+      },
+    });
+
+    expect(wrapper.getComponent(ShapePicker).props("options")).toEqual([
+      expect.objectContaining({ id: "wide", label: "16:9" }),
+      expect.objectContaining({ id: "tall", label: "9:16" }),
+    ]);
+  });
+
   it("applies the projected dims when resolution changes", async () => {
     const wrapper = factory({ width: 1024, height: 1024 }, "qwen-image");
     wrapper

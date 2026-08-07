@@ -210,6 +210,31 @@ describe("MobileGenerateParameters", () => {
     ).toEqual([false]);
   });
 
+  it("accepts wan's 4n+1 frame counts and snaps its exact field on that grid", async () => {
+    const model = {
+      name: "wan22-i2v-a14b:q5",
+      family: "wan",
+      frame_step: 4,
+    } as ModelEntry;
+    const wan = mountParameters(
+      { ...formFor("wan", model.name), frames: 45 },
+      [],
+      true,
+      [],
+      [cameraControl],
+      model,
+    );
+    const child = wan.wrapper.getComponent(MobileGenerateParameters);
+
+    expect(wan.wrapper.find("[data-test='mobile-frames-error']").exists()).toBe(false);
+    expect(child.emitted("validity-change")?.at(-1)).toEqual([true]);
+    const frames = wan.wrapper.get("[data-test='mobile-frames']");
+    expect(frames.attributes("step")).toBe("4");
+    await frames.setValue("46");
+    await frames.trigger("change");
+    expect(wan.form.frames).toBe(45);
+  });
+
   it("keeps temporal x2 single-pass through 257 frames and enforces chain stage limits", async () => {
     const temporal = formFor("ltx2", "ltx-2-19b-dev:fp8");
     temporal.frames = 257;

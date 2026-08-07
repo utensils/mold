@@ -27,7 +27,7 @@ import {
   defaultOutputFormat,
   outputFormatsForFamily,
 } from "../../lib/capabilities";
-import { frames8n1Error, snapFrames } from "../../lib/chain";
+import { snapVideoFrames, videoFramesError, videoFrameStep } from "@studio/lib/videoDuration";
 import {
   autoChainFieldList,
   decideGenerateRequestRouting,
@@ -150,7 +150,8 @@ function swapSize() {
 const seedFixed = computed(() => seedMode(props.form.seed) === "fixed");
 
 // ── Video (ltx families) ─────────────────────────────────────────────────────
-const framesError = computed(() => frames8n1Error(props.form.frames));
+const videoFrameContract = computed(() => props.selectedModel ?? { family: props.form.family });
+const framesError = computed(() => videoFramesError(props.form.frames, videoFrameContract.value));
 const generationRequest = computed(() => buildRequest(props.form));
 const chainDecision = computed<ChainRoutingDecision>(() =>
   caps.value.supportsVideo
@@ -349,7 +350,7 @@ function clearAudioFile() {
   props.form.audioFile = null;
 }
 function snapFramesField() {
-  props.form.frames = snapFrames(props.form.frames);
+  props.form.frames = snapVideoFrames(props.form.frames, videoFrameContract.value);
 }
 
 // ── Reset — restore the model's defaults, preserve prompt + prepared state ────
@@ -567,7 +568,7 @@ function reset() {
         <input
           v-model.number="form.frames"
           type="number"
-          step="8"
+          :step="videoFrameStep(videoFrameContract)"
           min="1"
           aria-label="Frames"
           :aria-invalid="framesError ? 'true' : undefined"

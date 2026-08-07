@@ -91,7 +91,7 @@ import {
 } from "../lib/chainRouting";
 import { applyPrefillToForm, buildRequest, cloneGenerateForm } from "../lib/generateForm";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
-import { frames8n1Error } from "../lib/chain";
+import { videoFramesError } from "@studio/lib/videoDuration";
 import {
   advancedVideoValidationError,
   audioOutputValidationError,
@@ -511,7 +511,9 @@ const formValidationError = computed(
     ) ??
     stepsValidationError(form.steps) ??
     guidanceValidationError(form.guidance) ??
-    (caps.value.supportsVideo ? frames8n1Error(form.frames) : null) ??
+    (caps.value.supportsVideo
+      ? videoFramesError(form.frames, selectedEntry.value ?? { family: form.family })
+      : null) ??
     (caps.value.supportsVideo ? fpsValidationError(form.fps) : null) ??
     cameraControlValidationError(form) ??
     audioOutputValidationError(form) ??

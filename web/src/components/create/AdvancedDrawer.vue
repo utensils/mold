@@ -46,6 +46,7 @@ import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { OutputMode } from "@studio/lib/sequence";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
+import { snapVideoFrames, videoFrameStep } from "@studio/lib/videoDuration";
 import {
   SOURCE_FIT_OPTIONS,
   coerceSourceFitForMaskless,
@@ -360,10 +361,9 @@ function setPlacement(placement: DevicePlacement | null) {
   patch({ placement });
 }
 
-// frames must be 8n+1 (9, 17, 25, 33, …) — ported from GenerateParamsPanel.
 function clampFrames(n: number): number {
   if (!Number.isFinite(n)) return 25;
-  return Math.max(9, Math.round((n - 1) / 8) * 8 + 1);
+  return snapVideoFrames(n, selectedModel.value ?? { family: props.family });
 }
 
 // ── Reset (advanced fields only — prompt/model/shape/seed survive) ────
@@ -1012,7 +1012,11 @@ function setSequenceCameraMode(mode: string) {
             />
           </div>
           <div class="adv__field">
-            <label class="adv__label">Frames (8n+1)</label>
+            <label class="adv__label"
+              >Frames ({{
+                videoFrameStep(selectedModel ?? { family })
+              }}n+1)</label
+            >
             <input
               class="adv__input"
               data-test="video-frames"
@@ -1026,7 +1030,10 @@ function setSequenceCameraMode(mode: string) {
                 })
               "
             />
-            <p class="adv__hint">Frames must be 8n+1 — try 97.</p>
+            <p class="adv__hint">
+              Frames must be
+              {{ videoFrameStep(selectedModel ?? { family }) }}n+1.
+            </p>
           </div>
           <div class="adv__field">
             <label class="adv__label">Frames per second</label>
