@@ -72,11 +72,19 @@ it automatically when `--negative` is not given.
 | Property   | `wan21-t2v-1.3b`  | `wan22-ti2v-5b`     | `wan22-*-a14b:q5` | `wan22-*-a14b:q8` |
 | ---------- | ----------------- | ------------------- | ----------------- | ----------------- |
 | Resolution | 832x480 / 480x832 | 1280x704 / 704x1280 | 832x480           | 832x480           |
-| Frames     | 81 @ 16 fps       | 121 @ 24 fps        | 81 @ 16 fps       | 81 @ 16 fps       |
+| Frames     | 81 @ 16 fps       | 121 @ 24 fps        | 53 @ 16 fps       | 33 @ 16 fps       |
 | Steps      | 30                | 20                  | 4                 | 20                |
 | Guidance   | 6.0               | 5.0                 | 1.0 (no CFG pass) | 3.5               |
 | Flow shift | 8.0               | 8.0                 | 5.0               | 5.0               |
 | Sampler    | FlowUniPC (bh2)   | FlowUniPC (bh2)     | FlowUniPC (bh2)   | FlowUniPC (bh2)   |
+
+The A14B frame defaults are the measured 24 GB envelope, not the checkpoint's
+trained 81-frame clip length: on an RTX 4090 the `:q5` pair peaks at
+23,975 MiB rendering 53 frames at 832x480 (81 frames peaked at 23.0 GB and
+then ran out of memory), and the `:q8` pair's ~4.6 GB larger resident expert
+moves its edge to ~33 frames. Larger cards simply pass `--frames 81`.
+Reclaiming 81-frame clips on 24 GB is tracked in
+[#776](https://github.com/utensils/mold/issues/776).
 
 The sampler schedule matches the one lightx2v's Lightning distills were
 trained against (diffusers' flow-UniPC grid), so the 4-step tier reproduces

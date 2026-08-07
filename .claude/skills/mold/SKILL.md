@@ -208,10 +208,14 @@ the real queued-job dispatch order.
 **Requirements:**
 
 - FLUX (BF16 + GGUF), Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image (+ Qwen-Image-Edit),
-  and Z-Image families support LoRAs. Wuerstchen and LTX-Video are not yet wired —
+  Wan, and Z-Image families support LoRAs. Wuerstchen and LTX-Video are not yet wired —
   the server returns a 400 with the list of supported families for any other family.
   (The message text is centralised in `mold-core::validation::require_lora_capable_family`
   and will list whichever families are wired at the time it's surfaced.)
+- Wan adapters cover low-rank pairs and full-weight `.diff`/`.diff_b` deltas: bf16
+  safetensors merge as the weights are read, GGUF applies them as a parallel branch
+  at full precision (never requantized). fp8-scaled Wan checkpoints refuse adapter
+  stacks rather than re-round their weights.
 - LoRA file must be `.safetensors` format. Z-Image / FLUX accept
   diffusers (PEFT canonical), Kohya/sd-scripts, OneTrainer, and PEFT
   default-adapter naming. Z-Image fused-QKV LoRAs (cv:2904324) splat
@@ -234,7 +238,7 @@ lora_scale = 0.8
 
 ### Video Generation
 
-Generate video clips with LTX Video models. Output defaults to APNG (lossless, with metadata).
+Generate video clips with the LTX Video and Wan families. LTX Video output defaults to APNG (lossless, with metadata); Wan defaults to MP4.
 
 ```bash
 # Basic video generation (25 frames, APNG output)
@@ -263,7 +267,7 @@ mold run wan22-i2v-a14b:q5 "the balloon lifts off" --image balloon.png
 mold run ltx-video-0.9.6-distilled:bf16 "a waterfall" --frames 9 --format webp -o waterfall.webp
 ```
 
-**Constraints:** Frame count must be 8n+1 (9, 17, 25, 33, 49, ...). Dimensions must be multiples of 32. Current LTX defaults are 1216x704, 25 frames, 30 fps. Distilled models use fewer steps.
+**Constraints:** LTX frame counts must be 8n+1 (9, 17, 25, 33, 49, ...) with dimensions in multiples of 32; Wan frame counts must be 4n+1 (49, 53, 81, ...) with dimensions in multiples of 16 (32 for `wan22-ti2v-5b`). Current LTX defaults are 1216x704, 25 frames, 30 fps. A14B defaults to 53 frames (`:q5`) / 33 (`:q8`) — the measured 24 GB envelope; larger cards pass `--frames 81`. Distilled models use fewer steps.
 
 **Current status:** `ltx-video-0.9.6-distilled:bf16` is still the safest default, but the `0.9.8` models now run the full multiscale refinement path. mold pulls the required spatial upscaler asset explicitly, keeps the shared T5 assets under `shared/flux/...`, and intentionally continues using the compatible `LTX-Video-0.9.5` VAE source until the newer VAE layout is ported. Legacy LTX-Video 13B BF16 still has no streaming transformer; CUDA runs preflight full-resident VRAM and fail before allocation when it cannot fit.
 

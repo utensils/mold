@@ -147,8 +147,9 @@ raises.
 
 ## Video Generation
 
-mold supports text-to-video generation with the LTX Video model family. Video
-output defaults to APNG, with GIF, WebP, and MP4 also supported.
+mold supports text-to-video generation with the LTX Video, LTX-2 (next
+section), and Wan 2.1/2.2 model families. LTX Video output defaults to APNG,
+with GIF, WebP, and MP4 also supported; LTX-2 and Wan default to MP4.
 
 ```bash
 # Generate a 25-frame video clip with the fast distilled path
@@ -185,8 +186,35 @@ then drops before the transformer loads, then the transformer drops before VAE
 decode. Peak VRAM depends heavily on the selected LTX checkpoint.
 :::
 
-Video dimensions must be multiples of 32 (not 16 like images). Current LTX
+LTX video dimensions must be multiples of 32 (not 16 like images). Current LTX
 defaults use 1216×704 at 30 FPS.
+
+### Wan Video
+
+Wan 2.1/2.2 is a separate `wan` family: MP4 by default, frames on a 4n+1 grid
+(49, 53, 81, 121, ...), dimensions in multiples of 16 — except
+`wan22-ti2v-5b`, whose 2.2 VAE requires multiples of 32.
+
+```bash
+# 480p16 text-to-video (defaults: 81 frames @ 16 fps)
+mold run wan21-t2v-1.3b "a red fox trotting through fresh snow, golden hour"
+
+# 720p24 — Wan 2.2 5B, text- or image-to-video
+mold run wan22-ti2v-5b "waves breaking on a black sand beach" \
+  --width 1280 --height 704 --frames 121 --fps 24
+
+# Wan 2.2 A14B, 4-step Lightning tier (defaults: 53 frames @ 16 fps)
+mold run wan22-t2v-a14b:q5 "a paper boat drifting down a rain gutter"
+
+# A14B image-to-video from a still
+mold run wan22-i2v-a14b:q5 "the balloon lifts off" --image balloon.png
+```
+
+Wan checkpoints were tuned against a specific negative prompt; mold applies it
+automatically when `--negative` is not given. A14B is a two-expert mixture
+with one 14B expert resident at a time, and its 53/33-frame defaults are the
+measured 24 GB envelope — larger cards pass `--frames 81` explicitly. See
+[Wan Video](/models/wan) for variants, defaults, and limits.
 
 ## Joint Audio-Video Generation
 
@@ -296,7 +324,7 @@ mold run sd15:fp16 "a cat" --scheduler euler-ancestral # Stochastic
 ## LoRA Adapters
 
 Apply fine-tuned style adapters across the supported families — **FLUX, Flux.2,
-LTX-2, SD1.5, SD3, SDXL, Qwen-Image (+ Qwen-Image-Edit), Z-Image**:
+LTX-2, SD1.5, SD3, SDXL, Qwen-Image (+ Qwen-Image-Edit), Wan, Z-Image**:
 
 ```bash
 # Basic LoRA (FLUX example)

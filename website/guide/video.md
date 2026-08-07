@@ -4,18 +4,44 @@ title: Video Generation
 
 # Video Generation
 
-mold supports generating video clips using LTX Video and LTX-2 models. Every
-LTX-2 checkpoint can chain multiple clips together for longer videos with
-scene-by-scene direction. A dev checkpoint renders its clips through the
-two-stage pipeline, so expect roughly twice the wall time per clip as a
-distilled one — stage 1 runs classifier-free guidance as two sequential
-forward passes.
+mold supports generating video clips using the LTX Video, LTX-2, and Wan
+2.1/2.2 model families. Every LTX-2 checkpoint can chain multiple clips
+together for longer videos with scene-by-scene direction. A dev checkpoint
+renders its clips through the two-stage pipeline, so expect roughly twice the
+wall time per clip as a distilled one — stage 1 runs classifier-free guidance
+as two sequential forward passes.
 
 ## Single-clip generation
 
 ```bash
 mold run ltx-2-19b-distilled:fp8 "a cat walks through autumn leaves" --frames 97
 ```
+
+## Wan Video
+
+Wan renders single clips (multi-prompt sequences remain LTX-only today) and
+defaults to MP4:
+
+```bash
+# 480p16 text-to-video (defaults: 81 frames @ 16 fps)
+mold run wan21-t2v-1.3b "a red fox trotting through fresh snow, golden hour"
+
+# Wan 2.2 A14B, 4-step Lightning tier (defaults: 53 frames @ 16 fps)
+mold run wan22-t2v-a14b:q5 "a paper boat drifting down a rain gutter"
+
+# A14B image-to-video from a still
+mold run wan22-i2v-a14b:q5 "the balloon lifts off" --image balloon.png
+```
+
+Wan's frame grid is 4n+1 (49, 53, 81, 121, ...) from its VAE's 4x temporal
+compression, and dimensions must be multiples of 16 — except `wan22-ti2v-5b`,
+whose 2.2 VAE requires multiples of 32. A14B is a two-expert mixture: mold
+keeps one 14B expert resident at a time, so VRAM is the larger expert, not
+the sum. Its frame defaults (53 on the `:q5` fast tier, 33 on `:q8`) are the
+measured 24 GB envelope rather than the trained 81-frame clip length — larger
+cards pass `--frames 81` explicitly. Wan checkpoints were tuned against a
+specific negative prompt that mold applies automatically when `--negative` is
+not given. See [Wan Video](/models/wan) for variants, defaults, and limits.
 
 ## Resolution and spatial tiling
 
