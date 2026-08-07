@@ -11,6 +11,10 @@ mod model;
 mod presentation;
 mod processor;
 mod text;
+mod visual_condition;
+mod visual_geometry;
+mod visual_vae;
+mod visual_weights;
 mod vision;
 
 pub mod audio;
@@ -53,4 +57,22 @@ pub use presentation::{
 pub use processor::{
     create_mm_token_type_ids, pack_qwen_vision_u8, qwen_mrope_positions, sample_video_frames,
     GridThw, PackedVisionPatches, QwenMmTokenType, SampledVideo,
+};
+pub use visual_condition::{
+    ConditionEncodeMode, SignedRgbPixels, Uint8RgbPixels, UnitRgbPixels, H3_IMAGENET_MEAN,
+    H3_IMAGENET_STD, H3_LATENTS_MEAN, H3_LATENTS_STD,
+};
+pub use visual_geometry::{
+    EndpointResizePlan, ReferenceImageResizePlan, SpatialTilePlan, TemporalDecodeChunk,
+    TemporalDecodePlan, TemporalEncodeChunk, TemporalEncodePlan, VisualTemporalGeometry,
+};
+pub use visual_vae::{
+    DecodeComputePolicy, DecodeSink, MiniMaxH3VisualVae, MiniMaxH3VisualVaeConfig,
+    NoopVisualVaeObserver, VisualVaeEvent, VisualVaeObserver, VisualVaePhase, WeightLayout,
+};
+pub use visual_weights::{
+    comfy_tensor_transforms, component_fingerprint, expected_diffusers_weight_shapes,
+    inspect_safetensors_header, inspect_visual_vae_config, validate_diffusers_weight_index,
+    ComfyTensorTransform, DiffusersWeightIndex, SafetensorsHeader, SafetensorsTensorHeader,
+    VisualVaeComponentRole, VisualVaeWeightInspection,
 };
