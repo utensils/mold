@@ -5,6 +5,7 @@
 //! whether callers may construct these primitives with real weights.
 
 mod artifacts;
+mod attention;
 mod comfy_dit;
 mod config;
 mod dit;
@@ -38,6 +39,15 @@ pub use audio_weights::{
 pub use artifacts::{
     validate_checkpoint_keys, ArtifactError, ArtifactFingerprint, ArtifactRole,
     ArtifactVerificationProgress, CheckpointKeyReport, ConditionerArtifacts, FrozenArtifact,
+};
+pub use attention::{
+    execute_h3_attention, H3AttentionActivation, H3AttentionBackend, H3AttentionDType,
+    H3AttentionDevice, H3AttentionError, H3AttentionErrorCode, H3AttentionKernel, H3AttentionMask,
+    H3AttentionModelContract, H3AttentionReleaseRejection, H3AttentionReleaseRequirement,
+    H3AttentionRequirement, H3AttentionRuntimeAuthority, H3AttentionScope, H3AttentionWorkspace,
+    H3FrozenAttentionExecution, H3FrozenAttentionPlan, H3_DENSE_SYNTHETIC_MAX_SCORE_ELEMENTS,
+    H3_FLASH_ATTN_CRATE_SHA256, H3_FLASH_ATTN_PACKAGE_VERSION,
+    H3_FLASH_ATTN_QUALIFIED_COMPUTE_CAPABILITY,
 };
 pub use comfy_dit::{
     inspect_h3_comfy_published_header, H3ComfyAccuracyTier, H3ComfyCheckpointCandidate,

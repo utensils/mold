@@ -17,6 +17,13 @@ use candle_nn as nn;
 use nn::{Module, VarBuilder};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+use super::attention::H3AttentionBackend;
+use super::attention::{
+    execute_h3_attention, H3AttentionDType, H3AttentionDevice, H3AttentionModelContract,
+    H3AttentionRuntimeAuthority, H3FrozenAttentionExecution, H3FrozenAttentionPlan,
+};
+
 pub const H3_MODALITY_COUNT: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1251,6 +1258,7 @@ impl H3Attention {
         &self,
         hidden: &Tensor,
         rotary: Option<(&Tensor, &Tensor, usize)>,
+        attention_plan: &H3FrozenAttentionPlan,
     ) -> Result<Tensor> {
         let (batch, seq_len, _) = hidden.dims3()?;
         let qkv = self.qkv.forward(hidden)?;
@@ -1274,21 +1282,8 @@ impl H3Attention {
             k = apply_h3_rotary(&k, cos, sin, rotary_dim)?;
         }
 
-        // Full, non-causal attention over one packed document. The F32 score
-        // path is the correctness backend; fused/chunked policies live above
-        // this primitive and must be selected explicitly.
-        let q = q.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-        let k = k.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-        let v = v.transpose(1, 2)?.contiguous()?.to_dtype(DType::F32)?;
-        let scores = q
-            .matmul(&k.transpose(2, 3)?.contiguous()?)?
-            .affine(1.0 / (self.head_dim as f64).sqrt(), 0.0)?;
-        let probabilities = nn::ops::softmax(&scores, D::Minus1)?;
-        let output = probabilities
-            .matmul(&v)?
-            .to_dtype(hidden.dtype())?
-            .transpose(1, 2)?
-            .contiguous()?
+        let output = execute_h3_attention(attention_plan, &q, &k, &v)
+            .map_err(|error| candle::Error::Msg(error.to_string()))?
             .reshape((batch, seq_len, self.inner_dim))?;
         self.out.forward(&output)
     }
@@ -1353,8 +1348,10 @@ impl H3TokenRefinerBlock {
         })
     }
 
-    fn forward(&self, hidden: &Tensor) -> Result<Tensor> {
-        let attention = self.attention.forward(&self.norm1.forward(hidden)?, None)?;
+    fn forward(&self, hidden: &Tensor, attention_plan: &H3FrozenAttentionPlan) -> Result<Tensor> {
+        let attention =
+            self.attention
+                .forward(&self.norm1.forward(hidden)?, None, attention_plan)?;
         let hidden = hidden.broadcast_add(&attention)?;
         let mlp = self.mlp.forward(&self.norm2.forward(&hidden)?)?;
         hidden.broadcast_add(&mlp)
@@ -1480,6 +1477,7 @@ impl H3TransformerBlock {
         adaln_input: &Tensor,
         adaln_indices: &Tensor,
         rotary: (&Tensor, &Tensor, usize),
+        attention_plan: &H3FrozenAttentionPlan,
     ) -> Result<Tensor> {
         let parameters = self.adaln.forward(adaln_input)?;
         let [shift_attention, scale_attention, gate_attention, shift_mlp, scale_mlp, gate_mlp]:
@@ -1492,7 +1490,9 @@ impl H3TransformerBlock {
             &scale_attention,
             adaln_indices,
         )?;
-        let update = self.attention.forward(&normalized, Some(rotary))?;
+        let update = self
+            .attention
+            .forward(&normalized, Some(rotary), attention_plan)?;
         let hidden = gated_residual(hidden, &update, &gate_attention, adaln_indices)?;
         let normalized = modulate(
             &self.norm2.forward(&hidden)?,
@@ -1728,6 +1728,7 @@ pub struct H3Transformer {
     task: H3TransformerTask,
     mode: H3AdaLnMode,
     precision: H3PrecisionProfile,
+    attention_runtime: H3AttentionRuntimeAuthority,
     video_projection: nn::Linear,
     audio_projection: nn::Linear,
     text_projection: nn::Linear,
@@ -1741,6 +1742,30 @@ pub struct H3Transformer {
 
 impl H3Transformer {
     pub fn load(checkpoint: H3AuditedCheckpoint<'_>) -> Result<Self> {
+        let contract = H3AttentionModelContract {
+            heads: checkpoint.config.num_attention_heads,
+            head_dim: checkpoint.config.attention_head_dim,
+            dtype: H3AttentionDType::from_candle(checkpoint.plan.precision.compute_dtype())
+                .map_err(|error| candle::Error::Msg(error.to_string()))?,
+        };
+        let attention_runtime = H3AttentionRuntimeAuthority::bounded_synthetic_math(
+            H3AttentionDevice::from_candle(checkpoint.source.vb.device()),
+            contract,
+        )
+        .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        Self::load_with_attention(checkpoint, attention_runtime)
+    }
+
+    /// Load with one explicit attention authority.
+    ///
+    /// This does not activate H3 in any engine or release artifact. It exists
+    /// so a scheduler can eventually bind a qualified kernel/device identity
+    /// before model construction and so developer qualification can exercise
+    /// the exact DiT dispatch without environment-driven fallback.
+    pub fn load_with_attention(
+        checkpoint: H3AuditedCheckpoint<'_>,
+        attention_runtime: H3AttentionRuntimeAuthority,
+    ) -> Result<Self> {
         let H3AuditedCheckpoint {
             config,
             plan,
@@ -1748,12 +1773,23 @@ impl H3Transformer {
         } = checkpoint;
         debug_assert_eq!(source.inventory.component, plan.component);
         let vb = source.vb;
+        let compute_dtype = plan.precision.compute_dtype();
+        attention_runtime
+            .verify_model(
+                H3AttentionModelContract {
+                    heads: config.num_attention_heads,
+                    head_dim: config.attention_head_dim,
+                    dtype: H3AttentionDType::from_candle(compute_dtype)
+                        .map_err(|error| candle::Error::Msg(error.to_string()))?,
+                },
+                vb.device(),
+            )
+            .map_err(|error| candle::Error::Msg(error.to_string()))?;
         for key in plan.expected.keys() {
             if !vb.contains_tensor(key) {
                 candle::bail!("MiniMax H3 audited tensor {key:?} is absent from the loader")
             }
         }
-        let compute_dtype = plan.precision.compute_dtype();
         let mut token_refiner = Vec::with_capacity(config.token_refiner_num_layers);
         for index in 0..config.token_refiner_num_layers {
             token_refiner.push(H3TokenRefinerBlock::load(
@@ -1776,6 +1812,7 @@ impl H3Transformer {
             task: plan.task,
             mode: plan.mode,
             precision: plan.precision,
+            attention_runtime,
             video_projection: linear_with_dtype(
                 config.video_patch_dim(),
                 config.hidden_size,
@@ -1829,6 +1866,23 @@ impl H3Transformer {
         self.precision
     }
 
+    pub const fn attention_runtime(&self) -> &H3AttentionRuntimeAuthority {
+        &self.attention_runtime
+    }
+
+    /// Freeze both token-refiner and packed-transformer attention identities
+    /// before any projection or model block runs.
+    pub fn freeze_attention_execution(
+        &self,
+        batch_size: usize,
+        token_refiner_rows: usize,
+        packed_rows: usize,
+    ) -> Result<H3FrozenAttentionExecution> {
+        self.attention_runtime
+            .freeze_execution(batch_size, token_refiner_rows, packed_rows)
+            .map_err(|error| candle::Error::Msg(error.to_string()))
+    }
+
     pub fn forward(
         &self,
         input: H3ForwardInput<'_>,
@@ -1873,6 +1927,12 @@ impl H3Transformer {
             candle::bail!("MiniMax H3 inputs and frozen layout must share one device")
         }
 
+        // This is intentionally before any projection or block execution: a
+        // product-size N² math fallback is rejected without spending model
+        // compute or waiting for a late CUDA allocation failure.
+        let attention_execution =
+            self.freeze_attention_execution(batch, text_rows, layout.seq_len)?;
+
         let compute_dtype = self.precision.compute_dtype();
         let video = self
             .video_projection
@@ -1892,7 +1952,7 @@ impl H3Transformer {
             total: self.token_refiner.len(),
         })?;
         for (index, block) in self.token_refiner.iter().enumerate() {
-            text = block.forward(&text)?;
+            text = block.forward(&text, &attention_execution.token_refiner)?;
             observer(H3BlockProgress {
                 stack: H3BlockStack::TokenRefiner,
                 completed: index + 1,
@@ -1928,6 +1988,7 @@ impl H3Transformer {
                 &adaln_input,
                 &layout.adaln_indices,
                 (&cos, &sin, rotary_dim),
+                &attention_execution.packed_transformer,
             )?;
             observer(H3BlockProgress {
                 stack: H3BlockStack::Transformer,
@@ -2040,6 +2101,21 @@ mod tests {
         let checkpoint = audit_h3_checkpoint(config, task, precision, source)
             .map_err(|error| candle::Error::Msg(error.to_string()))?;
         H3Transformer::load(checkpoint)
+    }
+
+    fn load_with_attention(
+        device: &Device,
+        config: H3TransformerConfig,
+        mode: H3AdaLnMode,
+        precision: H3PrecisionProfile,
+        task: H3TransformerTask,
+        attention: H3AttentionRuntimeAuthority,
+    ) -> Result<H3Transformer> {
+        let inventory = inventory(&config, mode, precision, task.checkpoint_component());
+        let source = source_from_inventory(inventory, device)?;
+        let checkpoint = audit_h3_checkpoint(config, task, precision, source)
+            .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        H3Transformer::load_with_attention(checkpoint, attention)
     }
 
     fn tiny_layout() -> H3PackedLayout {
@@ -2569,6 +2645,51 @@ mod tests {
     }
 
     #[test]
+    fn default_attention_authority_is_bounded_and_rejects_product_rows_early() -> Result<()> {
+        let model = load_tiny(
+            &Device::Cpu,
+            H3AdaLnMode::Full,
+            H3PrecisionProfile::SyntheticF32,
+            H3TransformerTask::T2VaFl2Va,
+        )?;
+        assert_eq!(
+            model.attention_runtime().backend(),
+            H3AttentionBackend::BoundedDenseMath
+        );
+        let tiny = model.freeze_attention_execution(1, 2, 6)?;
+        assert_eq!(tiny.packed_transformer.rows(), 6);
+        let error = model
+            .freeze_attention_execution(1, 256, 37_296)
+            .unwrap_err();
+        assert!(error.to_string().contains("synthetic bound"));
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_attention_authority_must_match_model_before_loading() -> Result<()> {
+        let attention = H3AttentionRuntimeAuthority::bounded_synthetic_math(
+            H3AttentionDevice::Cpu,
+            H3AttentionModelContract {
+                heads: 3,
+                head_dim: 8,
+                dtype: H3AttentionDType::F32,
+            },
+        )
+        .unwrap();
+        let error = load_with_attention(
+            &Device::Cpu,
+            H3TransformerConfig::tiny(),
+            H3AdaLnMode::Full,
+            H3PrecisionProfile::SyntheticF32,
+            H3TransformerTask::T2VaFl2Va,
+            attention,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not match model"));
+        Ok(())
+    }
+
+    #[test]
     fn pruned_curve_stack_interpolates_dual_timesteps() -> Result<()> {
         let device = Device::Cpu;
         let mode = H3AdaLnMode::Curve {
@@ -2758,6 +2879,55 @@ mod tests {
         let output = model.forward(input.borrowed(), &tiny_layout().freeze(&cuda)?)?;
         assert_eq!(output.video.dtype(), DType::F32);
         assert_eq!(output.audio.dtype(), DType::F32);
+        assert!(output
+            .video
+            .flatten_all()?
+            .to_vec1::<f32>()?
+            .iter()
+            .all(|value| value.is_finite()));
+        assert!(output
+            .audio
+            .flatten_all()?
+            .to_vec1::<f32>()?
+            .iter()
+            .all(|value| value.is_finite()));
+        Ok(())
+    }
+
+    #[cfg(feature = "flash-attn")]
+    #[test]
+    fn h3_stack_dispatches_through_qualified_flash_attention_on_cuda() -> Result<()> {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let mut config = H3TransformerConfig::tiny();
+        config.num_attention_heads = 56;
+        config.attention_head_dim = 128;
+        let attention = H3AttentionRuntimeAuthority::qualify_flash_attention_v2(
+            H3AttentionDevice::Cuda {
+                compute_capability: Some((8, 9)),
+            },
+            H3AttentionModelContract::released_bf16(),
+        )
+        .unwrap();
+        let model = load_with_attention(
+            &cuda,
+            config,
+            H3AdaLnMode::Curve {
+                grid: 9,
+                basis_dim: 3,
+            },
+            H3PrecisionProfile::OfficialMixedBf16F32,
+            H3TransformerTask::Ref2Va,
+            attention,
+        )?;
+        let execution = model.freeze_attention_execution(1, 2, 6)?;
+        assert_eq!(
+            execution.packed_transformer.backend(),
+            H3AttentionBackend::FlashAttentionV2
+        );
+        let input = OwnedInput::new(&cuda)?;
+        let output = model.forward(input.borrowed(), &tiny_layout().freeze(&cuda)?)?;
         assert!(output
             .video
             .flatten_all()?
