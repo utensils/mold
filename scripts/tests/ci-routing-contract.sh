@@ -48,6 +48,9 @@ for manifest in Cargo.toml Cargo.lock desktop/src-tauri/Cargo.toml desktop/src-t
   grep -Fxq "              - '$manifest'" <<< "$release_filter" \
     || fail "release classifier does not run the desktop Candle lock guard for $manifest changes"
 done
+require_text "$ci" \
+  "run: bash scripts/tests/desktop-candle-nix-source-hash.sh" \
+  "release CI does not verify the Nix hash for the locked desktop Candle source"
 for workflow in desktop.yml ios.yml; do
   grep -Fq ".github/workflows/$workflow" <<< "$release_filter" \
     || fail "release classifier does not run the routing contract for $workflow changes"

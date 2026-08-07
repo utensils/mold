@@ -150,6 +150,7 @@ jobs:
               - 'docs/qualification/**'
               - 'scripts/tests/docker-web-context.sh'
               - 'scripts/tests/desktop-candle-lock-sync.sh'
+              - 'scripts/tests/desktop-candle-nix-source-hash.sh'
               - 'scripts/tests/release-sync-pr.sh'
               - 'scripts/tests/crates-publish-contract.sh'
               - '.github/workflows/release-plz.yml'
@@ -161,6 +162,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - uses: DeterminateSystems/determinate-nix-action@v3
       - name: Test release PR synchronization
         run: bash scripts/tests/release-sync-pr.sh
       - name: Test crates.io publication contract
@@ -173,6 +175,8 @@ jobs:
         run: bash scripts/tests/docker-web-context.sh
       - name: Test desktop Candle lock synchronization
         run: bash scripts/tests/desktop-candle-lock-sync.sh
+      - name: Test desktop Candle Nix source hash
+        run: bash scripts/tests/desktop-candle-nix-source-hash.sh
       - name: Test CUDA distribution contract
         run: bash scripts/tests/cuda-distribution-contract.sh
       - name: Test embedded PTX parser contract
