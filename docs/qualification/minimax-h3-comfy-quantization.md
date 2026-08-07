@@ -4,8 +4,9 @@ Status: source-only portable primitives; runtime activation remains blocked.
 
 This audit did not access MiniMax H3 model payloads, safetensors headers, or
 generated outputs. It used only public implementation source. The model's
-license gate in `mold-core` remains authoritative, H3 factory registration is
-still absent, and the Comfy checkpoint candidate continues to reject every
+license gate in `mold-core` remains authoritative. Frozen H3 factory authority
+and FL2VA/Ref2VA dispatch seams now exist, but `runtime_available` remains
+false and the Comfy checkpoint candidate continues to reject every production
 runtime backend.
 
 ## Pinned implementation sources
@@ -158,7 +159,8 @@ The committed tests use tiny deterministic synthetic tensors only. They prove:
 
 Before any production activation, separate authorization and qualification
 work must still provide an approved H3 checkpoint identity, verify its complete
-content digest, connect an immutable loader/frozen placement to these
-primitives, measure real quality and memory, validate representative long
-sequences, and explicitly register the runtime factory. None of those gates is
-satisfied by this source-only change.
+content digest, bind an authorized and qualified loader to the existing frozen
+factory authority, measure real quality and memory, validate representative
+long sequences, and explicitly activate the runtime capability. None of those
+gates is satisfied by these source-only primitives or the fail-closed factory
+and dispatch seams.

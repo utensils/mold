@@ -20,6 +20,12 @@ home such as `/Volumes/ExternalStorage/mold-uat/minimax-h3`, while an H3-named
 model, sidecar directory, ControlNet, LoRA, upscaler, or nested component below
 that root remains gated.
 
+As of 2026-08-07, `/Volumes/ExternalStorage` is also operationally excluded:
+the bounded create/fsync/read/checksum/delete probe and later filesystem
+commands did not complete. Do not use, remount, or repair it for Mold UAT until
+that separate storage work is authorized and a clean probe passes. No H3 bytes
+were written there. Storage recovery would not change this authorization gate.
+
 ## Reviewed sources
 
 - [MiniMax H3 Community License, pinned revision](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/bfc8ed0353f5a9733be73e6b2c98ec0948195b86/LICENSE)
@@ -29,15 +35,15 @@ that root remains gated.
 
 ## Activation record
 
-No authorization evidence has been accepted as of 2026-08-06.
+No authorization evidence has been accepted as of 2026-08-07.
 
-| Field | Current record |
-|---|---|
-| Decision | Unavailable; fail closed |
-| Policy owner | `utensils/mold` maintainers through issue #831 |
-| Last review | 2026-08-06 |
-| Authorization evidence | None accepted |
-| Next mandatory review | Any upstream license/Q&A revision, proposed H3 artifact, or release touching H3 |
+| Field                  | Current record                                                                  |
+| ---------------------- | ------------------------------------------------------------------------------- |
+| Decision               | Unavailable; fail closed                                                        |
+| Policy owner           | `utensils/mold` maintainers through issue #831                                  |
+| Last review            | 2026-08-07                                                                      |
+| Authorization evidence | None accepted                                                                   |
+| Next mandatory review  | Any upstream license/Q&A revision, proposed H3 artifact, or release touching H3 |
 
 Activation requires all of the following in a reviewed change:
 
@@ -56,6 +62,6 @@ restored before any release or hosted deployment proceeds.
 ## Release checklist
 
 - [ ] Compare the pinned H3 license and Q&A revisions with their current
-  upstream versions. Any change, or any proposed H3-specific artifact, blocks
-  the release until the authorization record and policy tests are reviewed by
-  the named compliance owner in issue #831.
+      upstream versions. Any change, or any proposed H3-specific artifact, blocks
+      the release until the authorization record and policy tests are reviewed by
+      the named compliance owner in issue #831.
