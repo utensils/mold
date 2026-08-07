@@ -328,13 +328,18 @@ impl WanTi2vInpaint {
     /// the caller rounds the sequence up (upstream does it for
     /// sequence-parallel splits, `textimage2video.py:573-578`); diffusers omits
     /// it because its `seq_len` already equals the token count.
+    ///
+    /// Deliberately F32 regardless of the compute dtype: `embed_timestep`
+    /// reads the values back as F32 → f64 for the sinusoid, so a hop through
+    /// BF16 (the CUDA compute dtype) only rounds the noise tokens' schedule
+    /// value — its ulp is 4 in [512, 1024), turning 937 into 936 (#786). The
+    /// conditioning tokens' 0 survives any dtype; the noise tokens must too.
     pub fn per_token_timesteps(
         &self,
         timestep: f64,
         patch: usize,
         seq_len: Option<usize>,
         device: &Device,
-        dtype: DType,
     ) -> Result<Tensor> {
         if patch == 0 {
             bail!("Wan TI2V conditioning: patch size must be positive");
@@ -354,9 +359,7 @@ impl WanTi2vInpaint {
         for slot in values.iter_mut().take(tokens_per_frame) {
             *slot = 0.0;
         }
-        Tensor::from_vec(values, (1, total), device)?
-            .to_dtype(dtype)
-            .map_err(Into::into)
+        Tensor::from_vec(values, (1, total), device).map_err(Into::into)
     }
 
     fn check_operand(&self, tensor: &Tensor, label: &str) -> Result<()> {
@@ -4764,20 +4767,14 @@ mod tests {
 
             // Unpadded: exactly one entry per token.
             let ts = inpaint
-                .per_token_timesteps(case.timestep, 2, None, &cpu(), DType::F32)
+                .per_token_timesteps(case.timestep, 2, None, &cpu())
                 .unwrap();
             assert_eq!(ts.dims(), &[1, case.temp_ts.len()]);
             assert_eq!(max_abs_diff(&values(&ts), case.temp_ts), 0.0);
 
             // Padded out to an over-long sequence with `t`.
             let padded = inpaint
-                .per_token_timesteps(
-                    case.timestep,
-                    2,
-                    Some(case.padded_seq_len),
-                    &cpu(),
-                    DType::F32,
-                )
+                .per_token_timesteps(case.timestep, 2, Some(case.padded_seq_len), &cpu())
                 .unwrap();
             assert_eq!(padded.dims(), &[1, case.padded_seq_len]);
             assert_eq!(max_abs_diff(&values(&padded), case.temp_ts_padded), 0.0);
@@ -4892,11 +4889,43 @@ mod tests {
         let inpaint = WanTi2vInpaint::new(geometry, &cpu(), DType::F32).unwrap();
         // 2 frames x 2 x 2 tokens = 8; 7 is short.
         assert!(inpaint
-            .per_token_timesteps(500.0, 2, Some(7), &cpu(), DType::F32)
+            .per_token_timesteps(500.0, 2, Some(7), &cpu())
             .is_err());
-        assert!(inpaint
-            .per_token_timesteps(500.0, 0, None, &cpu(), DType::F32)
-            .is_err());
+        assert!(inpaint.per_token_timesteps(500.0, 0, None, &cpu()).is_err());
+    }
+
+    /// #786: TI2V's noise-token timesteps must reach the DiT exactly.
+    ///
+    /// On CUDA the pipeline's compute dtype is BF16, whose ulp is 4 in
+    /// [512, 1024): the Lightning grid's 999/937/833/625 round to
+    /// 1000/936/832/624 before `embed_timestep` reads them back as F32. The
+    /// conditioning tokens' 0 survives any dtype; the noise tokens must too.
+    #[test]
+    fn per_token_timesteps_survive_the_compute_dtype() {
+        let geometry = WanLatentGeometry {
+            latent_frames: 2,
+            latent_height: 4,
+            latent_width: 4,
+        };
+        let inpaint = WanTi2vInpaint::new(geometry, &cpu(), DType::F32).unwrap();
+        for timestep in [999i64, 937, 833, 625] {
+            let ts = inpaint
+                .per_token_timesteps(timestep as f64, 2, None, &cpu())
+                .unwrap();
+            // F32 until `embed_timestep` — a compute-dtype hop rounds it.
+            assert_eq!(ts.dtype(), DType::F32);
+            // Decode exactly as `embed_timestep` does: an F32 read-back.
+            let vals = values(&ts.to_dtype(DType::F32).unwrap());
+            // Patch 2 over a 4x4 grid: 4 tokens/frame, frame 0 conditioned.
+            assert_eq!(vals.len(), 8);
+            assert!(vals[..4].iter().all(|v| *v == 0.0));
+            for v in &vals[4..] {
+                assert_eq!(
+                    *v, timestep as f32,
+                    "noise-token timestep {timestep} was corrupted"
+                );
+            }
+        }
     }
 
     #[test]

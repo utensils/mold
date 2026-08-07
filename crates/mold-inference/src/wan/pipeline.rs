@@ -445,6 +445,19 @@ pub(crate) fn needs_cfg_pass(guidance: f64) -> bool {
     guidance > 1.0
 }
 
+/// The scalar timestep tensor handed to the DiT for one denoise step.
+///
+/// Deliberately F32 regardless of the compute dtype: the DiT's
+/// `embed_timestep` immediately reads the value back as F32 → f64 for the
+/// sinusoid, so a hop through BF16 (the CUDA compute dtype) is pure
+/// information loss — its ulp is 4 in [512, 1024), which rounds the 4-step
+/// Lightning grid `[999, 937, 833, 625]` to `[1000, 936, 832, 624]` (#786).
+/// CPU already fed F32 here, so this also keeps the backends on the same
+/// schedule.
+fn scalar_timestep_tensor(timestep: i64, device: &Device) -> Result<Tensor> {
+    Ok(Tensor::from_vec(vec![timestep as f32], 1, device)?)
+}
+
 /// Everything one denoise run needs. Bundled because the loop is shared
 /// between `generate` and the CPU smoke tests, and a dozen positional
 /// parameters is worse than a struct.
@@ -463,7 +476,6 @@ struct DenoiseInputs<'a> {
     patch: usize,
     rope: &'a (Tensor, Tensor),
     device: &'a Device,
-    dtype: DType,
     progress: &'a crate::progress::ProgressReporter,
 }
 
@@ -485,7 +497,6 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
         patch,
         rope,
         device,
-        dtype,
         progress,
     } = inputs;
 
@@ -499,8 +510,7 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
 
         // Each conditioning mode decides what the DiT sees and how the
         // timestep is expressed. The solver always steps on `latents`.
-        let scalar_timestep =
-            || Tensor::from_vec(vec![*timestep as f32], 1, device)?.to_dtype(dtype);
+        let scalar_timestep = || scalar_timestep_tensor(*timestep, device);
         let (model_input, timestep_tensor) = match conditioning {
             WanImageConditioning::None => (latents.clone(), scalar_timestep()?),
             WanImageConditioning::LatentInpaint { inpaint, condition } => {
@@ -508,7 +518,7 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
                 // 0 so the DiT treats them as already denoised.
                 let blended = inpaint.blend(condition, &latents)?;
                 let per_token =
-                    inpaint.per_token_timesteps(*timestep as f64, patch, None, device, dtype)?;
+                    inpaint.per_token_timesteps(*timestep as f64, patch, None, device)?;
                 (blended, per_token)
             }
             WanImageConditioning::ChannelConcat { conditioning } => (
@@ -1002,7 +1012,6 @@ impl WanEngine {
             patch: transformer_config.patch_size.1,
             rope: &rope,
             device: &device,
-            dtype,
             progress,
         })?;
         progress.checkpoint()?;
@@ -1229,6 +1238,39 @@ mod tests {
             text_encoder_files: vec![],
             text_tokenizer: None,
             decoder: None,
+        }
+    }
+
+    /// #786: the schedule's integer timesteps must reach the DiT exactly.
+    ///
+    /// On CUDA the compute dtype is BF16 (`gpu_dtype`), whose ulp is 4 in
+    /// [512, 1024): a hop through it rounds every step of the 4-step Lightning
+    /// grid (999→1000, 937→936, 833→832, 625→624) before `embed_timestep`
+    /// reads the value back as F32 for the sinusoid. BF16 rounds identically
+    /// on CPU tensors, which is what makes the loss reproducible here.
+    #[test]
+    fn denoise_timesteps_survive_the_trip_to_the_embedding() {
+        let schedule = WanSchedule::new(WanScheduleConfig::new(4, 5.0)).unwrap();
+        assert_eq!(
+            schedule.timesteps,
+            vec![999, 937, 833, 625],
+            "the 4-step Lightning grid moved; this test's premise is stale"
+        );
+        for timestep in &schedule.timesteps {
+            let tensor = scalar_timestep_tensor(*timestep, &Device::Cpu).unwrap();
+            // F32 until `embed_timestep` — a compute-dtype hop rounds it.
+            assert_eq!(tensor.dtype(), DType::F32);
+            // Decode exactly as `embed_timestep` does: an F32 read-back.
+            let decoded = tensor
+                .to_dtype(DType::F32)
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            assert_eq!(
+                decoded,
+                vec![*timestep as f32],
+                "timestep {timestep} was corrupted on its way to the embedding"
+            );
         }
     }
 
@@ -1976,7 +2018,6 @@ mod tests {
                 patch: transformer_config.patch_size.1,
                 rope: &rope,
                 device: &device,
-                dtype,
                 progress: &progress,
             })
             .unwrap();
