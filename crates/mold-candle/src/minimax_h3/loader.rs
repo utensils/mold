@@ -617,7 +617,7 @@ mod tests {
     fn safetensors_fixture(label: &str, header: serde_json::Value, payload: &[u8]) -> PathBuf {
         let path = test_path(label);
         let mut header = serde_json::to_vec(&header).unwrap();
-        while header.len() % 8 != 0 {
+        while !header.len().is_multiple_of(8) {
             header.push(b' ');
         }
         let mut file = (header.len() as u64).to_le_bytes().to_vec();
