@@ -5,6 +5,7 @@
 //! whether callers may construct these primitives with real weights.
 
 mod artifacts;
+mod comfy_dit;
 mod config;
 mod dit;
 mod loader;
@@ -38,17 +39,26 @@ pub use artifacts::{
     validate_checkpoint_keys, ArtifactError, ArtifactFingerprint, ArtifactRole,
     ArtifactVerificationProgress, CheckpointKeyReport, ConditionerArtifacts, FrozenArtifact,
 };
+pub use comfy_dit::{
+    inspect_h3_comfy_published_header, H3ComfyAccuracyTier, H3ComfyCheckpointCandidate,
+    H3ComfyCheckpointError, H3ComfyCheckpointErrorCode, H3ComfyCurveInterpolation,
+    H3ComfyFrozenStrategyMetadata, H3ComfyMemoryAccounting, H3ComfyPrunedFormat,
+    H3ComfyPublishedArtifact, H3ComfyQuantizationPolicy, H3ComfyRuntimeBackend,
+    H3ComfyRuntimeRejection, H3ComfyRuntimeRequirement, H3_COMFYUI_SOURCE_REVISION,
+    H3_COMFY_KITCHEN_REPOSITORY, H3_COMFY_KITCHEN_SOURCE_REVISION, H3_COMFY_KITCHEN_VERSION,
+    H3_COMFY_ORG_SOURCE_REVISION,
+};
 pub use config::{
     H3ConditionerConfig, H3TextConfig, H3VisionConfig, H3_BF16_PARAMETER_BYTES,
     H3_COMFY_SAFETENSORS_BYTES, H3_FULL_CHECKPOINT_BYTES, H3_FULL_LANGUAGE_LAYERS,
     H3_SELECTED_LANGUAGE_LAYERS,
 };
 pub use dit::{
-    audit_h3_checkpoint, expected_h3_weight_specs, pack_h3_audio, patchify_h3_video,
-    reorder_h3_grouped_qkv, unpack_h3_audio, unpatchify_h3_video, H3AdaLnMode, H3AuditedCheckpoint,
-    H3BlockProgress, H3BlockStack, H3CheckpointComponent, H3CheckpointInventory,
-    H3CheckpointSource, H3ForwardInput, H3FrozenPackedLayout, H3LoadPlan, H3Modality,
-    H3PackedLayout, H3PrecisionProfile, H3QkvLayout, H3TensorSpec, H3Transformer,
+    audit_h3_checkpoint, expected_h3_weight_specs, interpolate_h3_adaln_curve, pack_h3_audio,
+    patchify_h3_video, reorder_h3_grouped_qkv, unpack_h3_audio, unpatchify_h3_video, H3AdaLnMode,
+    H3AuditedCheckpoint, H3BlockProgress, H3BlockStack, H3CheckpointComponent,
+    H3CheckpointInventory, H3CheckpointSource, H3ForwardInput, H3FrozenPackedLayout, H3LoadPlan,
+    H3Modality, H3PackedLayout, H3PrecisionProfile, H3QkvLayout, H3TensorSpec, H3Transformer,
     H3TransformerConfig, H3TransformerOutput, H3TransformerTask, H3WeightAuditError,
     H3WeightAuditIssue, H3_MODALITY_COUNT,
 };

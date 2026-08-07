@@ -61,7 +61,7 @@ impl fmt::Display for H3CheckpointComponent {
 
 /// The two checkpoint-level representations supported by this correctness
 /// primitive. Quantized auxiliary tensors are deliberately not accepted here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum H3AdaLnMode {
     /// Released full transformer: FP32 timestep MLP and BF16 AdaLN projections.
     Full,
@@ -88,7 +88,7 @@ impl H3AdaLnMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum H3QkvLayout {
     GroupedPerHead,
     QkvMajor,
@@ -96,7 +96,7 @@ pub enum H3QkvLayout {
 
 /// Production checkpoints are mixed BF16/FP32. The all-F32 profile exists only
 /// for weight-free synthetic conformance and must be selected explicitly.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum H3PrecisionProfile {
     OfficialMixedBf16F32,
     SyntheticF32,
@@ -1570,22 +1570,43 @@ impl H3TimeConditioner {
                 let embedding = Tensor::cat(&[arguments.cos()?, arguments.sin()?], 1)?;
                 proj_out.forward(&silu(&proj_in.forward(&embedding)?)?)
             }
-            Self::Curve { table } => {
-                let grid = table.dim(0)?;
-                let position = timesteps.clamp(0.0, 1.0)?.affine(grid as f64 - 1.0, 0.0)?;
-                let lower_f32 = position.floor()?.clamp(0.0, grid as f64 - 2.0)?;
-                let upper_f32 = lower_f32.affine(1.0, 1.0)?;
-                let lower = lower_f32.to_dtype(DType::U32)?;
-                let upper = upper_f32.to_dtype(DType::U32)?;
-                let fraction = position.broadcast_sub(&lower_f32)?.unsqueeze(1)?;
-                let first = table.index_select(&lower, 0)?;
-                let second = table.index_select(&upper, 0)?;
-                first
-                    .broadcast_mul(&fraction.affine(-1.0, 1.0)?)?
-                    .broadcast_add(&second.broadcast_mul(&fraction)?)
-            }
+            Self::Curve { table } => interpolate_h3_adaln_curve(table, &timesteps),
         }
     }
+}
+
+/// Interpolate ComfyUI's pruned MiniMax H3 AdaLN basis.
+///
+/// The pinned Comfy implementation maps a finite timestep through
+/// `clamp(t, 0, 1) * (grid - 1)`, clamps the lower row to the final valid
+/// interval, then linearly blends its two adjacent rows. Keeping this as a
+/// named primitive makes the pruned checkpoint strategy independently
+/// testable without constructing or running an H3 model.
+pub fn interpolate_h3_adaln_curve(table: &Tensor, timesteps: &Tensor) -> Result<Tensor> {
+    let (grid, basis_dim) = table.dims2()?;
+    if grid < 2 || basis_dim == 0 {
+        candle::bail!("MiniMax H3 AdaLN curve must have shape [grid >= 2,basis > 0]")
+    }
+    let count = timesteps.dims1()?;
+    if count == 0 {
+        candle::bail!("MiniMax H3 requires at least one distinct timestep")
+    }
+    if !table.device().same_device(timesteps.device()) {
+        candle::bail!("MiniMax H3 AdaLN curve and timesteps must share one device")
+    }
+    let timesteps = timesteps.to_dtype(DType::F32)?;
+    let table = table.to_dtype(DType::F32)?;
+    let position = timesteps.clamp(0.0, 1.0)?.affine(grid as f64 - 1.0, 0.0)?;
+    let lower_f32 = position.floor()?.clamp(0.0, grid as f64 - 2.0)?;
+    let upper_f32 = lower_f32.affine(1.0, 1.0)?;
+    let lower = lower_f32.to_dtype(DType::U32)?;
+    let upper = upper_f32.to_dtype(DType::U32)?;
+    let fraction = position.broadcast_sub(&lower_f32)?.unsqueeze(1)?;
+    let first = table.index_select(&lower, 0)?;
+    let second = table.index_select(&upper, 0)?;
+    first
+        .broadcast_mul(&fraction.affine(-1.0, 1.0)?)?
+        .broadcast_add(&second.broadcast_mul(&fraction)?)
 }
 
 #[derive(Clone, Debug)]
