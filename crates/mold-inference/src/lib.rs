@@ -26,8 +26,9 @@ pub mod loader;
 pub mod ltx2;
 pub mod ltx_video;
 // The deterministic scheduler contract lands ahead of the license-gated H3
-// engine. Keeping it crate-private avoids advertising a runnable family while
-// leaving the exact math ready for the future pipeline to consume.
+// engine. Keeping these primitives crate-private avoids advertising a runnable
+// family while leaving exact math and conditioner lifecycle ready for the
+// future pipeline to consume.
 #[allow(dead_code)]
 pub(crate) mod minimax_h3;
 pub mod model_registry;
