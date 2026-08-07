@@ -3317,8 +3317,10 @@ pub enum SseProgressEvent {
         elapsed_ms: u64,
     },
     /// Live low-fidelity preview of the denoising latent: a base64 PNG at
-    /// latent resolution (~width/8 × height/8) — clients upscale it. Emitted
-    /// throttled between denoise steps; disable with `MOLD_STEP_PREVIEW=0`.
+    /// latent resolution (~width/8 × height/8 for most families; Wan 2.2
+    /// TI2V's VAE compresses 16×) — clients upscale it. Video families
+    /// project the clip's middle latent frame. Emitted throttled between
+    /// denoise steps; disable with `MOLD_STEP_PREVIEW=0`.
     Preview {
         image: String,
         step: usize,
