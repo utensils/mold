@@ -1190,6 +1190,18 @@ pub fn validate_request_contract(req: &GenerateRequest, task: Task) -> Result<Mo
             "MiniMax H3 does not use classifier-free guidance; guidance must be 0",
         ));
     }
+    if req.scheduler.is_some() {
+        return Err(violation(
+            "MINIMAX_H3_FIXED_DUAL_SCHEDULE",
+            "MiniMax H3 uses its dedicated synchronized video/audio flow schedules; generic scheduler overrides are unsupported",
+        ));
+    }
+    if req.steps < 2 {
+        return Err(violation(
+            "MINIMAX_H3_GRID_POINTS",
+            "MiniMax H3 steps count terminal-inclusive sigma grid points and must be at least 2",
+        ));
+    }
     if req
         .negative_prompt
         .as_deref()
@@ -1198,6 +1210,12 @@ pub fn validate_request_contract(req: &GenerateRequest, task: Task) -> Result<Mo
         return Err(violation(
             "MINIMAX_H3_NO_NEGATIVE_PROMPT",
             "MiniMax H3 has no negative-prompt branch",
+        ));
+    }
+    if req.strength != 1.0 {
+        return Err(violation(
+            "MINIMAX_H3_FIXED_STRENGTH",
+            "MiniMax H3 generation has no denoise-strength control; strength must be 1",
         ));
     }
     if req.source_video.is_some()
@@ -1210,6 +1228,34 @@ pub fn validate_request_contract(req: &GenerateRequest, task: Task) -> Result<Mo
         return Err(violation(
             "MINIMAX_H3_CONDITIONING_UNSUPPORTED",
             "MiniMax H3 supports text, FL2VA boundary frames, or Ref2VA references; source video/audio, retake, and extend are unsupported",
+        ));
+    }
+    if req.mask_image.is_some()
+        || req.control_image.is_some()
+        || req.control_model.is_some()
+        || req.control_scale != 1.0
+        || req.cfg_plus.is_some()
+        || req.lora.is_some()
+        || req.loras.as_ref().is_some_and(|items| !items.is_empty())
+        || req.pipeline.is_some()
+        || req.ic_lora_control.is_some()
+        || req.hdr_exr_dir.is_some()
+        || req.hdr_exr_full_float
+        || req.upscale_model.is_some()
+        || req.spatial_upscale.is_some()
+        || req.temporal_upscale.is_some()
+        || req.guidance_overrides.is_some()
+        || req.extend_overlap_frames.is_some()
+    {
+        return Err(violation(
+            "MINIMAX_H3_FOREIGN_PIPELINE_FIELD",
+            "MiniMax H3 does not accept mask, ControlNet, CFG+, LoRA, LTX-2 pipeline, HDR, post/upscale-stage, extend-overlap, or guidance-override fields",
+        ));
+    }
+    if req.source_image.is_none() && req.source_image_name.is_some() {
+        return Err(violation(
+            "MINIMAX_H3_ORPHAN_SOURCE_NAME",
+            "MiniMax H3 source_image_name requires a first-frame source image",
         ));
     }
 
@@ -2226,6 +2272,84 @@ mod tests {
                 .unwrap_err()
                 .code,
             "MINIMAX_H3_SYNCHRONIZED_AUDIO_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn generic_sampler_overrides_and_degenerate_grids_fail_closed() {
+        let mut req = request();
+        req.scheduler = Some(crate::Scheduler::EulerAncestral);
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_FIXED_DUAL_SCHEDULE"
+        );
+
+        req.scheduler = None;
+        req.steps = 1;
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_GRID_POINTS"
+        );
+    }
+
+    #[test]
+    fn foreign_pipeline_fields_fail_before_fl2va_planning() {
+        let mut req = request();
+        req.mask_image = Some(vec![1, 2, 3]);
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_FOREIGN_PIPELINE_FIELD"
+        );
+
+        req.mask_image = None;
+        req.source_image_name = Some("orphan.png".into());
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_ORPHAN_SOURCE_NAME"
+        );
+
+        req.source_image_name = None;
+        req.strength = 0.75;
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_FIXED_STRENGTH"
+        );
+
+        req.strength = 1.0;
+        req.upscale_model = Some("real-esrgan-x4plus:fp16".into());
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_FOREIGN_PIPELINE_FIELD"
+        );
+
+        req.upscale_model = None;
+        req.control_scale = 0.5;
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_FOREIGN_PIPELINE_FIELD"
+        );
+
+        req.control_scale = 1.0;
+        req.extend_overlap_frames = Some(17);
+        assert_eq!(
+            validate_request_contract(&req, Task::Fl2va)
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_FOREIGN_PIPELINE_FIELD"
         );
     }
 

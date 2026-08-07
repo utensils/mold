@@ -3022,6 +3022,10 @@ mod tests {
         req.fps = Some(crate::minimax_h3::FIXED_FPS);
         req.output_format = Some(OutputFormat::Mp4);
         req.enable_audio = Some(true);
+        // H3 has no denoise-strength control. The wire field is non-optional
+        // for legacy families, so activated H3 callers must send its neutral
+        // value rather than inheriting the generic img2img default.
+        req.strength = 1.0;
         req
     }
 
