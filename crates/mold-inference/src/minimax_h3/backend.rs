@@ -8,8 +8,9 @@
 //!
 //! Component loaders receive only an immutable, fingerprinted plan. They are
 //! not invoked until the legal policy, public capability contract, lossless
-//! packed-attention runtime, and block-streaming transformer have all been
-//! authorized. Today that preflight always rejects before any loader callback.
+//! packed-attention runtime, and executable block-streaming DiT binding have
+//! all been authorized. The exact #856 streaming plan is already part of the
+//! frozen identity; today preflight still rejects before any loader callback.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -30,6 +31,7 @@ use mold_core::minimax_h3::{self as contract, Layout, Task};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use super::offload::FrozenH3BlockStreamingPlan;
 use super::pipeline::{
     H3Fl2VaBackend, H3PipelineBackendIdentity, H3PipelineBackendKind, H3PipelineCheckpoint,
     H3PipelineEvent, H3PipelinePhase, H3PreparedEndpoint, H3TextConditioning, H3VideoEncodeSink,
@@ -40,7 +42,7 @@ use super::{
 };
 use crate::progress::{InferenceCancelled, ProgressReporter};
 
-const BACKEND_PLAN_SCHEMA_VERSION: u32 = 1;
+const BACKEND_PLAN_SCHEMA_VERSION: u32 = 2;
 const QWEN_MAXIMUM_TOKENS: usize = 262_144;
 const QWEN_SPATIAL_MERGE_SIZE: usize = 2;
 const PRODUCTION_TOKEN_REFINER_BLOCKS: usize = 2;
@@ -187,13 +189,11 @@ impl H3CandleBackendDevice {
     }
 }
 
-/// Prerequisites deliberately have no public `qualified` constructor yet.
-/// The attention and offload PRs own those authorities; a follow-up replaces
-/// these deferred slots with their opaque, validated plan types after merge.
+/// Kernel prerequisites deliberately have no public `qualified` constructor
+/// yet. The attention and quantization integrations own those authorities.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct H3DeferredRuntimeAuthorities {
     packed_attention_sha256: Option<String>,
-    block_streaming_sha256: Option<String>,
     quantization_sha256: Option<String>,
 }
 
@@ -201,7 +201,6 @@ impl H3DeferredRuntimeAuthorities {
     fn unavailable() -> Self {
         Self {
             packed_attention_sha256: None,
-            block_streaming_sha256: None,
             quantization_sha256: None,
         }
     }
@@ -209,7 +208,6 @@ impl H3DeferredRuntimeAuthorities {
     fn validate(&self) -> Result<()> {
         for (label, fingerprint) in [
             ("packed attention", self.packed_attention_sha256.as_deref()),
-            ("block streaming", self.block_streaming_sha256.as_deref()),
             ("quantization", self.quantization_sha256.as_deref()),
         ] {
             if let Some(fingerprint) = fingerprint {
@@ -231,6 +229,7 @@ pub(crate) struct FrozenH3Fl2VaCandlePlan {
     backend: H3CandleBackendDevice,
     execution_fingerprint: String,
     conditioner_placement: FrozenH3ConditionerPlacement,
+    block_streaming: FrozenH3BlockStreamingPlan,
     components: H3ValidatedComponentSet,
     runtime: H3DeferredRuntimeAuthorities,
     identity_sha256: String,
@@ -244,6 +243,7 @@ impl FrozenH3Fl2VaCandlePlan {
         backend: H3CandleBackendDevice,
         execution_fingerprint: impl Into<String>,
         conditioner_placement: FrozenH3ConditionerPlacement,
+        block_streaming: FrozenH3BlockStreamingPlan,
         components: H3ValidatedComponentSet,
     ) -> Result<Self> {
         let contract = contract::capability_contract_for_model(model)
@@ -262,6 +262,7 @@ impl FrozenH3Fl2VaCandlePlan {
             backend,
             execution_fingerprint,
             conditioner_placement,
+            block_streaming,
             components,
             runtime: H3DeferredRuntimeAuthorities::unavailable(),
             identity_sha256: String::new(),
@@ -304,6 +305,10 @@ impl FrozenH3Fl2VaCandlePlan {
         &self.conditioner_placement
     }
 
+    pub(crate) fn block_streaming(&self) -> &FrozenH3BlockStreamingPlan {
+        &self.block_streaming
+    }
+
     pub(crate) fn components(&self) -> &H3ValidatedComponentSet {
         &self.components
     }
@@ -334,6 +339,12 @@ impl FrozenH3Fl2VaCandlePlan {
         {
             bail!("MiniMax H3 resident conditioner is assigned to another CUDA device");
         }
+        self.block_streaming.validate()?;
+        if self.block_streaming.device_id != self.device_id
+            || self.block_streaming.execution_fingerprint != self.execution_fingerprint
+        {
+            bail!("MiniMax H3 block streaming and backend admission authorities disagree");
+        }
         self.components.validate()?;
         self.runtime.validate()
     }
@@ -360,9 +371,10 @@ impl FrozenH3Fl2VaCandlePlan {
         if self.runtime.packed_attention_sha256.is_none() {
             missing.push(H3BackendRequirement::QualifiedLosslessPackedAttention);
         }
-        if self.runtime.block_streaming_sha256.is_none() {
-            missing.push(H3BackendRequirement::AuditedBlockStreamingTransformer);
-        }
+        // The #856 plan/lifecycle is bound above, but H3Transformer still owns
+        // an eager Vec of blocks. Activation stays closed until the DiT loader
+        // supplies those real block objects through that audited lifecycle.
+        missing.push(H3BackendRequirement::IntegratedBlockStreamingTransformer);
         if self.layout == Layout::ComfyPrunedInt8ConvrotNvfp4Awq
             && self.runtime.quantization_sha256.is_none()
         {
@@ -377,7 +389,7 @@ pub(crate) enum H3BackendRequirement {
     LicenseAuthorization,
     RunnableCapabilityContract,
     QualifiedLosslessPackedAttention,
-    AuditedBlockStreamingTransformer,
+    IntegratedBlockStreamingTransformer,
     QualifiedComfyQuantization,
 }
 
@@ -436,7 +448,8 @@ where
 
 /// Load callbacks cannot run until [`FrozenH3Fl2VaCandlePlan`] has passed all
 /// activation gates. Each callback receives the exact frozen component set,
-/// route, and conditioner placement rather than discovering paths itself.
+/// route, conditioner placement, and block-streaming plan rather than
+/// discovering paths or recomputing admission itself.
 pub(crate) trait H3CandleBackendLoader {
     type ConditionerLease: H3ConditionerLease;
     type ExecutionLease: H3BackendExecutionLease;
@@ -984,7 +997,7 @@ fn component_set_identity(authorities: &[H3ValidatedComponentAuthority]) -> Stri
 
 fn backend_plan_identity(plan: &FrozenH3Fl2VaCandlePlan) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"mold.minimax-h3.candle-backend-plan.v1\0");
+    digest.update(b"mold.minimax-h3.candle-backend-plan.v2\0");
     digest.update(plan.schema_version.to_le_bytes());
     digest.update(plan.canonical_model.as_bytes());
     digest.update([0]);
@@ -1018,10 +1031,14 @@ fn backend_plan_identity(plan: &FrozenH3Fl2VaCandlePlan) -> String {
     ] {
         digest.update(value.to_le_bytes());
     }
+    digest.update(plan.block_streaming.device_id.as_bytes());
+    digest.update([0]);
+    digest.update(plan.block_streaming.execution_fingerprint.as_bytes());
+    digest.update(plan.block_streaming.resident_block_count.to_le_bytes());
+    digest.update(plan.block_streaming.prefetch_depth.to_le_bytes());
     digest.update(plan.components.identity_sha256.as_bytes());
     for authority in [
         plan.runtime.packed_attention_sha256.as_deref(),
-        plan.runtime.block_streaming_sha256.as_deref(),
         plan.runtime.quantization_sha256.as_deref(),
     ] {
         digest.update([0]);
@@ -1080,6 +1097,7 @@ mod tests {
                 1_024,
             )
             .unwrap(),
+            FrozenH3BlockStreamingPlan::new("gpu-0", EXECUTION, 8, 1).unwrap(),
             authorities(),
         )
         .unwrap()
@@ -1096,7 +1114,7 @@ mod tests {
             (
                 (|plan: &mut FrozenH3Fl2VaCandlePlan| plan.device_id = "gpu-1".into())
                     as fn(&mut FrozenH3Fl2VaCandlePlan),
-                "plan identity changed after admission",
+                "streaming and backend admission authorities disagree",
             ),
             (
                 |plan: &mut FrozenH3Fl2VaCandlePlan| {
@@ -1115,6 +1133,10 @@ mod tests {
                     plan.components.authorities[1].validation_sha256 = digest('e')
                 },
                 "component-set authority changed after validation",
+            ),
+            (
+                |plan: &mut FrozenH3Fl2VaCandlePlan| plan.block_streaming.resident_block_count += 1,
+                "plan identity changed after admission",
             ),
         ] {
             let mut changed = plan.clone();
@@ -1151,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn ref2va_and_conditioner_reroutes_fail_before_activation() {
+    fn ref2va_conditioner_and_streaming_reroutes_fail_before_activation() {
         assert!(FrozenH3Fl2VaCandlePlan::new_unavailable(
             contract::REF2VA_OFFICIAL,
             "gpu-0",
@@ -1166,6 +1188,7 @@ mod tests {
                 1,
             )
             .unwrap(),
+            FrozenH3BlockStreamingPlan::new("gpu-0", EXECUTION, 8, 1).unwrap(),
             authorities(),
         )
         .is_err());
@@ -1184,9 +1207,54 @@ mod tests {
                 1,
             )
             .unwrap(),
+            FrozenH3BlockStreamingPlan::new("gpu-0", EXECUTION, 8, 1).unwrap(),
             authorities(),
         )
         .is_err());
+
+        let wrong_stream_route = FrozenH3Fl2VaCandlePlan::new_unavailable(
+            contract::FL2VA_OFFICIAL,
+            "gpu-0",
+            H3CandleBackendDevice::Cuda {
+                compute_capability: (8, 9),
+            },
+            EXECUTION,
+            FrozenH3ConditionerPlacement::new(
+                "cpu",
+                H3ConditionerExecution::CpuOffloaded,
+                EXECUTION,
+                1,
+            )
+            .unwrap(),
+            FrozenH3BlockStreamingPlan::new("gpu-1", EXECUTION, 8, 1).unwrap(),
+            authorities(),
+        )
+        .unwrap_err();
+        assert!(wrong_stream_route
+            .to_string()
+            .contains("streaming and backend admission authorities disagree"));
+
+        let wrong_stream_execution = FrozenH3Fl2VaCandlePlan::new_unavailable(
+            contract::FL2VA_OFFICIAL,
+            "gpu-0",
+            H3CandleBackendDevice::Cuda {
+                compute_capability: (8, 9),
+            },
+            EXECUTION,
+            FrozenH3ConditionerPlacement::new(
+                "cpu",
+                H3ConditionerExecution::CpuOffloaded,
+                EXECUTION,
+                1,
+            )
+            .unwrap(),
+            FrozenH3BlockStreamingPlan::new("gpu-0", digest('b'), 8, 1).unwrap(),
+            authorities(),
+        )
+        .unwrap_err();
+        assert!(wrong_stream_execution
+            .to_string()
+            .contains("streaming and backend admission authorities disagree"));
     }
 
     struct NeverConditionerLease;
@@ -1293,7 +1361,9 @@ mod tests {
             assert!(requirements.contains(&H3BackendRequirement::LicenseAuthorization));
             assert!(requirements.contains(&H3BackendRequirement::RunnableCapabilityContract));
             assert!(requirements.contains(&H3BackendRequirement::QualifiedLosslessPackedAttention));
-            assert!(requirements.contains(&H3BackendRequirement::AuditedBlockStreamingTransformer));
+            assert!(
+                requirements.contains(&H3BackendRequirement::IntegratedBlockStreamingTransformer)
+            );
             assert_eq!(
                 requirements.contains(&H3BackendRequirement::QualifiedComfyQuantization),
                 quantized
