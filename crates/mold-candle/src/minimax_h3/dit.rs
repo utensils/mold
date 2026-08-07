@@ -1858,6 +1858,11 @@ impl H3Transformer {
         self.task
     }
 
+    /// Exact architecture consumed by the audited checkpoint loader.
+    pub fn config(&self) -> &H3TransformerConfig {
+        &self.config
+    }
+
     pub const fn adaln_mode(&self) -> H3AdaLnMode {
         self.mode
     }
