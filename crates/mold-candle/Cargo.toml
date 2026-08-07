@@ -14,9 +14,13 @@ name = "mold_candle"
 default = []
 cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
-# Developer-only H3 FlashAttention v2 primitive. Mold release artifacts do not
-# enable this feature; the H3 authority remains a separate fail-closed gate.
-flash-attn = ["dep:candle-flash-attn", "cuda"]
+# H3-only release-candidate qualification path. This compiles the reviewed
+# FlashAttention v2 primitive without making it reachable from the Mold CLI,
+# server factory, catalog, downloads, or any published artifact.
+h3-flash-attn-rc = ["dep:candle-flash-attn", "cuda"]
+# Backwards-compatible forwarding for Mold's existing developer-only global
+# attention benchmark. Shipping feature sets continue to omit both features.
+flash-attn = ["h3-flash-attn-rc"]
 
 [dependencies]
 candle = { package = "candle-core", version = "0.11" }

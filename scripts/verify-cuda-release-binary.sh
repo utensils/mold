@@ -11,6 +11,7 @@ compute_cap="$2"
 archive="${3:-}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ptx_probe="$repo_root/scripts/probe-cuda-embedded-ptx.py"
+h3_release_exclusion="$repo_root/scripts/verify-h3-release-exclusion.sh"
 
 [[ "$compute_cap" =~ ^[0-9]+$ ]] \
   || { echo "compute capability must be numeric: $compute_cap" >&2; exit 64; }
@@ -74,6 +75,10 @@ fi
 
 LD_LIBRARY_PATH="$loader_path" "$binary" version >/dev/null \
   || { echo "CUDA release binary failed its GPU-less loader smoke" >&2; exit 1; }
+
+[[ -x "$h3_release_exclusion" ]] \
+  || { echo "MiniMax H3 release exclusion verifier is missing: $h3_release_exclusion" >&2; exit 1; }
+"$h3_release_exclusion" "$binary" >/dev/null
 
 if [[ -n "$archive" ]]; then
   [[ -f "$archive" ]] \
