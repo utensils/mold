@@ -91,7 +91,7 @@ pub fn encode_chain_frames(
             {
                 let video_only = video_enc::encode_mp4(frames, fps)?;
                 let muxed = match audio {
-                    Some(track) => crate::ltx2::media::attach_aac_track_to_mp4_bytes(
+                    Some(track) => crate::av_media::attach_aac_track_to_mp4_bytes(
                         &video_only,
                         &track.interleaved_samples,
                         track.sample_rate,

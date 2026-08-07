@@ -2,6 +2,7 @@ pub(crate) mod adaptive_offload;
 pub mod artifact_format;
 pub mod attention;
 pub mod audio;
+pub mod av_media;
 mod batch;
 mod cache;
 pub(crate) mod cfg_plus_ddim;

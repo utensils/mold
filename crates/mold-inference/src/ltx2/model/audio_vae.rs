@@ -1549,7 +1549,7 @@ mod tests {
         Ltx2AudioEncoderConfig,
     };
     #[cfg(feature = "mp4")]
-    use crate::ltx2::media::attach_aac_track_from_f32_interleaved;
+    use crate::av_media::attach_aac_track_from_f32_interleaved;
     use crate::ltx2::media::encode_wav_f32_interleaved;
     use crate::ltx2::model::AudioLatentShape;
     #[cfg(feature = "mp4")]
@@ -1966,6 +1966,18 @@ mod tests {
         assert_eq!(decoded.sample_rate, 24_000);
         assert_eq!(decoded.channel_count(), 1);
         assert_eq!(decoded.sample_count(), 1_200);
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn decoded_audio_from_mp4_fallback_handles_stereo_32khz_native_aac() {
+        let (_dir, path) = write_mp4_with_native_aac_params(32_000, 2, "mp4");
+
+        let decoded = DecodedAudio::from_file(&path, Some(0.05)).unwrap().unwrap();
+
+        assert_eq!(decoded.sample_rate, 32_000);
+        assert_eq!(decoded.channel_count(), 2);
+        assert_eq!(decoded.sample_count(), 1_600);
     }
 
     #[cfg(feature = "mp4")]

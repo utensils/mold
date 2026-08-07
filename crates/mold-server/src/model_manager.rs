@@ -227,11 +227,14 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
 
 fn annotate_audio_capabilities(catalog: &mut [ModelInfoExtended], config: &Config) {
     for entry in catalog {
-        if entry.info.family != "ltx2" || entry.supports_audio.is_some() || !entry.downloaded {
+        if entry.supports_audio.is_some()
+            || !entry.downloaded
+            || !mold_inference::audio::output_probe_registered(&entry.info.family)
+        {
             continue;
         }
         entry.supports_audio = ModelPaths::resolve(&entry.info.name, config)
-            .map(|paths| mold_inference::ltx2::audio_output_supported(&paths));
+            .and_then(|paths| mold_inference::audio::output_supported(&entry.info.family, &paths));
     }
 }
 
@@ -687,8 +690,10 @@ fn installed_catalog_models(
             kind: Some(sidecar.kind.clone()),
             modality: Some(sidecar.modality.clone()),
             nsfw: sidecar.nsfw,
-            supports_audio: (sidecar.family == "ltx2")
-                .then(|| mold_inference::ltx2::checkpoint_supports_audio_output(&primary_path)),
+            supports_audio: mold_inference::audio::checkpoint_output_supported(
+                &sidecar.family,
+                &primary_path,
+            ),
             // Continuation reuses the chain motion-tail handoff, which the
             // whole ltx2 family implements — unlike audio, it does not depend
             // on optional checkpoint assets.
