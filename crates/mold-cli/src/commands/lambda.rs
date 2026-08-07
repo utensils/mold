@@ -1,6 +1,6 @@
 //! `mold lambda` — Lambda Cloud deployment helpers.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use mold_core::config::Config;
 use mold_core::lambda::{
     build_launch_request, filesystem_name, gpu_uses_unsupported_linux_arm64, render_cloud_init,
@@ -295,7 +295,12 @@ pub async fn run_status(json: bool) -> Result<()> {
 }
 
 pub async fn run_deploy(opts: DeployOptions) -> Result<()> {
-    let config = Config::load_or_default();
+    let mut config = Config::load_or_default();
+    if let Some(model) = opts.model.as_deref() {
+        crate::catalog_bridge::require_cloud_model_activation(&mut config, model).await?;
+    }
+    let preload_model = opts.model.clone();
+
     let client = client_from_config(&config)?;
     if !opts.new {
         let existing = load_state();
@@ -307,11 +312,17 @@ pub async fn run_deploy(opts: DeployOptions) -> Result<()> {
         ) {
             let mut state = existing;
             if !state.has_live_tunnel(pid_exists) {
-                if let Ok(pid) = spawn_tunnel(&ip, &PathBuf::from(key), port) {
-                    state.tunnel_pid = Some(pid);
-                    state.updated_at = Some(now_epoch());
-                    save_state(&state)?;
-                }
+                let pid = spawn_tunnel(&ip, &PathBuf::from(key), port)?;
+                state.tunnel_pid = Some(pid);
+                state.updated_at = Some(now_epoch());
+            }
+            // The reusable instance/tunnel authority is durable before any
+            // optional post-reuse download can fail.
+            save_state(&state)?;
+            if let Some(model) = preload_model.as_deref() {
+                enqueue_download(port, model)
+                    .await
+                    .with_context(|| format!("enqueue model download '{model}'"))?;
             }
             if opts.json {
                 print_event(DeployEvent::new("reuse", "ok").with_detail("instance_id", id))?;
@@ -384,41 +395,54 @@ pub async fn run_deploy(opts: DeployOptions) -> Result<()> {
         .first()
         .cloned()
         .ok_or_else(|| anyhow!("Lambda launch response did not include an instance id"))?;
-    let instance = wait_for_instance_ip(&client, &instance_id).await?;
-    let local_port = choose_local_port(config.lambda.local_port)?;
+
+    // Persist the provider identity immediately. Every operation below this
+    // point can fail after Lambda has started billing, so callers must retain
+    // enough state to inspect or terminate the launched instance.
     let mut state = LambdaState {
-        instance_id: Some(instance.id.clone()),
-        region: Some(region),
-        instance_type: Some(instance_type),
-        public_ip: instance.ip.clone(),
-        ssh_key_name: Some(ssh.key_name),
+        instance_id: Some(instance_id.clone()),
+        region: Some(region.clone()),
+        instance_type: Some(instance_type.clone()),
+        ssh_key_name: Some(ssh.key_name.clone()),
         ssh_private_key_path: Some(ssh.private_key_path.display().to_string()),
-        filesystem_name: Some(fs_name),
-        local_port: Some(local_port),
+        filesystem_name: Some(fs_name.clone()),
         remote_port: Some(REMOTE_PORT),
         updated_at: Some(now_epoch()),
         ..Default::default()
     };
-    if let Some(ip) = instance.ip {
-        if opts.forward_secrets {
-            forward_secrets(&ip, &ssh.private_key_path)?;
-        }
-        if let Ok(pid) = spawn_tunnel(&ip, &ssh.private_key_path, local_port) {
-            state.tunnel_pid = Some(pid);
-            if opts.json {
-                print_event(
-                    DeployEvent::new("tunnel", "ready").with_detail("local_port", local_port),
-                )?;
-            }
-            if opts.open_browser {
-                open_browser(&format!("http://127.0.0.1:{local_port}"));
-            }
-            if let Some(model) = opts.model {
-                enqueue_download(local_port, &model).await.ok();
-            }
-        }
+    save_state(&state).context("record launched Lambda instance")?;
+
+    let instance = wait_for_instance_ip(&client, &instance_id).await?;
+    let local_port = choose_local_port(config.lambda.local_port)?;
+    state.instance_id = Some(instance.id.clone());
+    state.public_ip = instance.ip.clone();
+    state.local_port = Some(local_port);
+    state.updated_at = Some(now_epoch());
+    save_state(&state).context("record reachable Lambda instance")?;
+
+    let ip = instance
+        .ip
+        .as_deref()
+        .ok_or_else(|| anyhow!("Lambda instance {} has no public IP", instance.id))?;
+    if opts.forward_secrets {
+        forward_secrets(ip, &ssh.private_key_path)?;
     }
-    save_state(&state)?;
+    let pid = spawn_tunnel(ip, &ssh.private_key_path, local_port)?;
+    state.tunnel_pid = Some(pid);
+    state.updated_at = Some(now_epoch());
+    save_state(&state).context("record Lambda tunnel")?;
+
+    if opts.json {
+        print_event(DeployEvent::new("tunnel", "ready").with_detail("local_port", local_port))?;
+    }
+    if opts.open_browser {
+        open_browser(&format!("http://127.0.0.1:{local_port}"));
+    }
+    if let Some(model) = preload_model.as_deref() {
+        enqueue_download(local_port, model)
+            .await
+            .with_context(|| format!("enqueue model download '{model}'"))?;
+    }
     if !opts.json {
         println!(
             "{} Lambda instance launched: {}",
@@ -821,6 +845,67 @@ async fn enqueue_download(local_port: u16, model: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MoldHomeGuard(Option<String>);
+
+    impl Drop for MoldHomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("MOLD_HOME", value),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn deploy_rejects_restricted_preload_before_client_or_state_work() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let mold_home = temp.path().join("mold-home");
+        let previous = std::env::var("MOLD_HOME").ok();
+        std::env::set_var("MOLD_HOME", &mold_home);
+        let _home = MoldHomeGuard(previous);
+
+        let error = run_deploy(DeployOptions {
+            model: Some("hf:MiniMaxAI/MiniMax-H3".into()),
+            ..Default::default()
+        })
+        .await
+        .expect_err("restricted preload must fail before provider configuration");
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        assert!(
+            !mold_home.exists(),
+            "policy rejection must precede Lambda state creation"
+        );
+    }
+
+    #[tokio::test]
+    async fn enqueue_download_surfaces_remote_rejection() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/downloads"))
+            .respond_with(ResponseTemplate::new(451).set_body_json(serde_json::json!({
+                "error": "restricted",
+                "code": mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = enqueue_download(server.address().port(), "cv:42")
+            .await
+            .expect_err("non-success download response must reach deploy caller");
+        assert!(error.to_string().contains("451"));
+        server.verify().await;
+    }
 
     #[test]
     fn ssh_key_discovery_prefers_ed25519_then_rsa_then_generated() {

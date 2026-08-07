@@ -16,6 +16,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum InstallError {
+    /// A single core model-access policy rejected this identity before any
+    /// installed sidecar or live catalog metadata could activate it.
+    #[error(transparent)]
+    ModelActivation(#[from] crate::ModelActivationError),
+
     /// Live HF/Civitai lookup failed to *reach* the upstream — DNS,
     /// connect, TLS, or timeout. Maps to HTTP 502 Bad Gateway. The
     /// inner string carries the upstream error message for the user.

@@ -156,6 +156,7 @@ async fn upscale_local(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("no weights path for model '{}'", model_name))?;
     let weights_path = std::path::PathBuf::from(weights_path);
+    let artifact_root = config.resolved_models_dir();
 
     // Create engine and run upscaling in a blocking thread
     let model_name_owned = model_name.clone();
@@ -171,6 +172,7 @@ async fn upscale_local(
         let mut engine = mold_inference::create_upscale_engine(
             model_name_owned,
             weights_path,
+            Some(&artifact_root),
             mold_inference::LoadStrategy::Sequential,
             best_gpu_ordinal,
         )?;

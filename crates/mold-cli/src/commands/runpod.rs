@@ -1186,8 +1186,33 @@ fn short_timestamp() -> String {
         .unwrap_or_else(|_| "pod".into())
 }
 
+async fn require_create_model_activation(config: &mut Config, opts: &CreateOptions) -> Result<()> {
+    if let Some(model) = opts.model.as_deref() {
+        crate::catalog_bridge::require_cloud_model_activation(config, model).await?;
+    }
+    Ok(())
+}
+
+async fn require_run_model_activation(config: &mut Config, opts: &RunOptions) -> Result<String> {
+    let effective_model = opts
+        .model
+        .clone()
+        .unwrap_or_else(|| config.default_model.clone());
+    crate::catalog_bridge::require_cloud_model_activation(config, &effective_model).await?;
+
+    if let Some(preload_model) = opts.create.model.as_deref() {
+        if preload_model != effective_model {
+            crate::catalog_bridge::require_cloud_model_activation(config, preload_model).await?;
+        }
+    }
+    Ok(effective_model)
+}
+
 /// `mold runpod create` — create a new pod.
 pub async fn run_create(opts: CreateOptions) -> Result<()> {
+    let mut config = Config::load_or_default();
+    require_create_model_activation(&mut config, &opts).await?;
+
     reap_idle_warm_pod_if_needed().await;
     let client = match build_client() {
         Ok(c) => c,
@@ -1196,7 +1221,6 @@ pub async fn run_create(opts: CreateOptions) -> Result<()> {
             return Err(AlreadyReported.into());
         }
     };
-    let config = Config::load_or_default();
     let req = build_create_request(&opts, &client, &config).await?;
     if !opts.dry_run {
         enforce_cost_alert(&client, &config).await?;
@@ -1525,6 +1549,9 @@ pub struct RunOptions {
 /// `mold runpod run "<prompt>"` — end-to-end: reuse warm pod or create one,
 /// generate, save to local repo, park (or delete with --keep).
 pub async fn run_run(opts: RunOptions) -> Result<()> {
+    let mut config = Config::load_or_default();
+    let effective_model = require_run_model_activation(&mut config, &opts).await?;
+
     reap_idle_warm_pod_if_needed().await;
     let client = match build_client() {
         Ok(c) => c,
@@ -1533,11 +1560,11 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
             return Err(AlreadyReported.into());
         }
     };
-    let config = Config::load_or_default();
 
     // Warn up front if this model is gated but we have no HF_TOKEN source
     // at all — the user is about to burn pod startup time for nothing.
-    if let Some(model) = opts.model.as_deref().or(opts.create.model.as_deref()) {
+    {
+        let model = effective_model.as_str();
         let resolved = mold_core::manifest::resolve_model_name(model);
         let gated = mold_core::manifest::find_manifest(&resolved)
             .is_some_and(|m| m.files.iter().any(|f| f.gated));
@@ -1576,11 +1603,7 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
     // Build a request using per-model defaults from config. This mirrors
     // the behaviour of `commands::run` so `mold runpod run` and local
     // `mold run` produce the same image for the same inputs.
-    let model = opts
-        .model
-        .clone()
-        .or_else(|| Some(config.default_model.clone()))
-        .unwrap_or_else(|| "flux2-klein:q8".into());
+    let model = effective_model;
     // Pick a sensible output format: video families always need video
     // containers. PNG is the fallback for image models.
     let is_video_model =
@@ -2408,6 +2431,126 @@ mod tests {
         Arc,
     };
     use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+
+    fn policy_create_options(model: Option<&str>) -> CreateOptions {
+        CreateOptions {
+            name: None,
+            gpu: None,
+            datacenter: None,
+            cloud: CloudType::Secure,
+            volume_gb: 50,
+            disk_gb: 20,
+            image_tag: None,
+            model: model.map(str::to_owned),
+            hf_token: false,
+            network_volume_id: None,
+            dry_run: false,
+            json: false,
+        }
+    }
+
+    struct MoldHomeGuard(Option<String>);
+
+    impl Drop for MoldHomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("MOLD_HOME", value),
+                None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    fn pin_mold_home(path: &std::path::Path) -> MoldHomeGuard {
+        let previous = std::env::var("MOLD_HOME").ok();
+        std::env::set_var("MOLD_HOME", path);
+        MoldHomeGuard(previous)
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn public_create_and_run_gate_before_reap_or_local_mutation() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let mold_home = temp.path().join("mold-home");
+        let output_dir = temp.path().join("outputs");
+        let _home = pin_mold_home(&mold_home);
+
+        let error = run_create(policy_create_options(Some("MiniMax-H3-FL2VA")))
+            .await
+            .expect_err("create must reject before reaping or provider setup");
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        assert!(!mold_home.exists());
+
+        let run = RunOptions {
+            prompt: "test".into(),
+            model: Some("MiniMaxH3Scheduler".into()),
+            output_dir: output_dir.clone(),
+            keep: false,
+            seed: None,
+            steps: None,
+            width: None,
+            height: None,
+            create: policy_create_options(None),
+            wait_ready_timeout_secs: 1,
+        };
+        let error = run_run(run)
+            .await
+            .expect_err("run must reject before reaping or provider setup");
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        assert!(!mold_home.exists());
+        assert!(!output_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn create_and_run_models_are_rejected_before_provider_admission() {
+        let mut config = Config::default();
+        let create = policy_create_options(Some("hf:MiniMaxAI/MiniMax-H3"));
+        let error = require_create_model_activation(&mut config, &create)
+            .await
+            .expect_err("RunPod create preload must be compliance-gated");
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+
+        config.default_model = "MiniMaxH3Scheduler".into();
+        let run = RunOptions {
+            prompt: "test".into(),
+            model: None,
+            output_dir: std::path::PathBuf::from("/tmp/mold-runpod-policy"),
+            keep: false,
+            seed: None,
+            steps: None,
+            width: None,
+            height: None,
+            create: policy_create_options(None),
+            wait_ready_timeout_secs: 1,
+        };
+        let error = require_run_model_activation(&mut config, &run)
+            .await
+            .expect_err("RunPod run default must be compliance-gated");
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+
+        config.default_model = "flux2-klein:q8".into();
+        let run = RunOptions {
+            model: Some("flux2-klein:q8".into()),
+            create: policy_create_options(Some("MiniMax-H3-FL2VA")),
+            ..run
+        };
+        let error = require_run_model_activation(&mut config, &run)
+            .await
+            .expect_err("distinct RunPod preload must also be compliance-gated");
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
 
     #[test]
     fn gpu_id_normalization() {

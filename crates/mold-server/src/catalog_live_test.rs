@@ -174,6 +174,197 @@ async fn post(router: axum::Router, uri: &str) -> (StatusCode, String) {
     (status, String::from_utf8(bytes.to_vec()).unwrap())
 }
 
+#[tokio::test]
+async fn raw_h3_catalog_routes_fail_before_upstream_lookup_or_download() {
+    let router = create_router(AppState::for_tests());
+    let encoded_id = "hf%3AMiniMaxAI%2FMiniMax-H3";
+
+    let (get_status, get_body) = get(router.clone(), &format!("/api/catalog/{encoded_id}")).await;
+    assert_eq!(get_status, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+    assert!(get_body.contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+
+    let (post_status, post_body) =
+        post(router, &format!("/api/catalog/{encoded_id}/download")).await;
+    assert_eq!(post_status, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+    assert!(post_body.contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+}
+
+#[test]
+fn resolved_catalog_metadata_cannot_hide_h3_behind_an_opaque_id() {
+    let mut entry = hf_checkpoint("ordinary/repo");
+    entry.id = mold_catalog::entry::CatalogId::from("cv:42");
+    entry.source_id = "42".to_string();
+    entry.name = "MiniMax H3 Ref2VA".to_string();
+
+    let error = mold_catalog::entry::require_catalog_entry_activation(&entry).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+
+    let mut companion_only = hf_checkpoint("ordinary/repo");
+    companion_only.id = mold_catalog::entry::CatalogId::from("cv:43");
+    companion_only.source_id = "43".to_string();
+    companion_only.companions = vec!["MiniMaxH3Transformer3DModel".to_string()];
+    let error = mold_catalog::entry::require_catalog_entry_activation(&companion_only)
+        .expect_err("an H3 companion must not hide behind neutral entry metadata");
+    assert!(error
+        .to_string()
+        .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+}
+
+#[tokio::test]
+async fn h3_persisted_sidecar_repair_is_rejected_before_presence_short_circuit() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/model-versions/8100"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = AppState::for_tests().with_civitai_base(server.uri());
+    state.config.write().await.models_dir = tmp.path().display().to_string();
+
+    let sidecar_path = mold_catalog::sidecar::civitai_sidecar_path(tmp.path(), "cv:8100");
+    let install_dir = sidecar_path.parent().unwrap();
+    std::fs::create_dir_all(install_dir).unwrap();
+    std::fs::write(install_dir.join("ordinary.safetensors"), b"weights").unwrap();
+    write_sidecar(
+        &sidecar_path,
+        &CatalogSidecar {
+            schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+            id: "cv:8100".into(),
+            source: "civitai".into(),
+            source_id: "8100".into(),
+            name: "MiniMax H3 renamed checkpoint".into(),
+            author: None,
+            family: "flux".into(),
+            family_role: "finetune".into(),
+            sub_family: None,
+            kind: "checkpoint".into(),
+            modality: "image".into(),
+            nsfw: None,
+            description: None,
+            tags: Vec::new(),
+            license: None,
+            page_url: None,
+            thumbnail_url: None,
+            size_bytes: Some(b"weights".len() as u64),
+            supported: true,
+            trained_words: Vec::new(),
+            primary_filename_rel: "ordinary.safetensors".into(),
+            written_at: 0,
+        },
+    )
+    .unwrap();
+
+    let error = super::enqueue_catalog_primary_repair(&state, "cv:8100")
+        .await
+        .expect_err("gated sidecar metadata must override the present-file shortcut");
+
+    assert_eq!(error.code, mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+    assert!(error
+        .error
+        .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    let listing = state.downloads.listing().await;
+    assert!(listing.active_jobs.is_empty());
+    assert!(listing.queued.is_empty());
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn h3_upstream_change_invalidates_cached_ordinary_repair_intent_before_write_or_enqueue() {
+    let server = MockServer::start().await;
+    let version = r#"{
+        "id": 8200,
+        "modelId": 9200,
+        "name": "v2",
+        "baseModel": "Flux.1 D",
+        "baseModelType": "Standard",
+        "trainedWords": [],
+        "files": [{
+            "id": 1,
+            "name": "ordinary.safetensors",
+            "sizeKB": 1,
+            "downloadCount": 1,
+            "metadata": { "format": "SafeTensor" },
+            "downloadUrl": "https://civitai.example/ordinary.safetensors",
+            "hashes": { "SHA256": "deadbeef" }
+        }],
+        "images": [],
+        "model": {
+            "name": "MiniMax H3 renamed upstream",
+            "type": "Checkpoint",
+            "nsfw": false,
+            "tags": []
+        }
+    }"#;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/model-versions/8200"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(version))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = AppState::for_tests().with_civitai_base(server.uri());
+    state.config.write().await.models_dir = tmp.path().display().to_string();
+    state.catalog_intents.write().await.insert(
+        "cv:8200".into(),
+        mold_catalog::synthesis::CatalogModelIntent {
+            family: "flux".into(),
+            sub_family: None,
+            primary_recipe_path: tmp.path().join("cv-8200/ordinary.safetensors"),
+            vae_recipe_path: None,
+            text_encoder_recipe_paths: Vec::new(),
+            companions: Vec::new(),
+            bundling: mold_catalog::entry::Bundling::SingleFile,
+        },
+    );
+
+    let sidecar_path = mold_catalog::sidecar::civitai_sidecar_path(tmp.path(), "cv:8200");
+    let response = create_router(state.clone())
+        .oneshot(
+            Request::post("/api/models/pull")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"cv:8200"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+    let response_body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let response: serde_json::Value = serde_json::from_slice(&response_body).unwrap();
+    assert_eq!(
+        response["code"],
+        mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
+    );
+    assert!(response["error"]
+        .as_str()
+        .unwrap()
+        .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    assert!(
+        !sidecar_path.exists(),
+        "rejected fresh metadata must not be persisted"
+    );
+    let listing = state.downloads.listing().await;
+    assert!(listing.active_jobs.is_empty());
+    assert!(listing.queued.is_empty());
+    assert_eq!(
+        state
+            .catalog_intents
+            .read()
+            .await
+            .get("cv:8200")
+            .map(|intent| intent.family.as_str()),
+        Some("flux")
+    );
+    server.verify().await;
+}
+
 fn hf_checkpoint(source_id: &str) -> mold_catalog::entry::CatalogEntry {
     use mold_catalog::entry::{
         Bundling, CatalogEntry, CatalogId, DownloadRecipe, FamilyRole, FileFormat, Kind,

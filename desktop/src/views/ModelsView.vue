@@ -13,6 +13,7 @@ import { useHostsStore } from "../stores/hosts";
 import { primaryModifierPressed } from "../lib/platform";
 import { mediaTypeFromQuery, type MediaType } from "../lib/modelAvailability";
 import { mergeModelPresentationMetadata } from "../lib/models";
+import { filterRestrictedModels } from "@studio/lib/modelAccess";
 
 const conn = useConnectionStore();
 const models = useModelStore();
@@ -55,7 +56,10 @@ function setMediaType(type: MediaType) {
 
 const installedModels = computed(() => {
   const byName = new Map(
-    models.installed.map((entry) => [entry.name, { ...entry, hostIds: ["local"] }]),
+    filterRestrictedModels(models.installed, hosts.capabilities.local).map((entry) => [
+      entry.name,
+      { ...entry, hostIds: ["local"] },
+    ]),
   );
   for (const entry of hostModels.unionInstalled) {
     const existing = byName.get(entry.name);

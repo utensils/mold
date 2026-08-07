@@ -1261,6 +1261,36 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
     validate_generate_request_with_family(req, None)
 }
 
+/// Enforce model access for every model/artifact identity carried directly by
+/// a generation request.
+///
+/// This is deliberately separate from shape/feature validation: callers that
+/// own an artifact root must run it before downloads, queue registration, or
+/// other admission mutations. The base model's configured/default artifacts
+/// remain the caller's responsibility because they do not travel in the
+/// request itself.
+pub fn require_generate_request_model_activation(
+    req: &GenerateRequest,
+    artifact_root: Option<&std::path::Path>,
+    family_hint: Option<&str>,
+) -> Result<(), crate::ModelActivationError> {
+    crate::require_model_activation(&req.model, family_hint)?;
+    for identity in [req.control_model.as_deref(), req.upscale_model.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        crate::require_model_activation(identity, None)?;
+    }
+    for lora in req.lora.iter().chain(req.loras.iter().flatten()) {
+        crate::require_model_artifact_activation(
+            std::path::Path::new(&lora.path),
+            artifact_root,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
 /// Variant of [`validate_generate_request`] that accepts an explicit family
 /// hint. The hint takes precedence over the manifest lookup, letting the HTTP
 /// server feed in the catalog-resolved family for `cv:` / `hf:` model IDs.
@@ -1268,6 +1298,7 @@ pub fn validate_generate_request_with_family(
     req: &GenerateRequest,
     family_hint: Option<&str>,
 ) -> Result<(), String> {
+    crate::require_model_activation(&req.model, family_hint).map_err(|error| error.to_string())?;
     let family = resolved_family(&req.model, family_hint);
 
     if req.prompt.trim().is_empty() && prompt_required_for(req, family_hint) {
@@ -2784,6 +2815,55 @@ mod tests {
             temporal_upscale: None,
             placement: None,
         }
+    }
+
+    #[test]
+    fn generation_rejects_compliance_gated_model_identity_before_other_validation() {
+        let mut req = valid_req();
+        req.model = "hf:MiniMaxAI/MiniMax-H3".to_string();
+        req.prompt.clear();
+
+        let error = validate_generate_request_with_family(&req, None).unwrap_err();
+        assert!(error.contains(crate::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        assert!(!error.contains(&req.model));
+    }
+
+    #[test]
+    fn generation_rejects_opaque_catalog_id_with_compliance_gated_family() {
+        let mut req = valid_req();
+        req.model = "cv:42".to_string();
+
+        let error = validate_generate_request_with_family(&req, Some("minimax-h3")).unwrap_err();
+        assert!(error.contains(crate::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[test]
+    fn generation_model_preflight_gates_nested_identities_and_artifacts() {
+        let root = std::path::Path::new("/Volumes/ExternalStorage/mold-uat/minimax-h3/models");
+
+        let mut req = valid_req();
+        req.control_model = Some("MiniMax-H3-FL2VA".to_string());
+        assert!(require_generate_request_model_activation(&req, Some(root), Some("flux")).is_err());
+
+        req.control_model = None;
+        req.upscale_model = Some("hf:MiniMaxAI/MiniMax-H3".to_string());
+        assert!(require_generate_request_model_activation(&req, Some(root), Some("flux")).is_err());
+
+        req.upscale_model = None;
+        req.lora = Some(crate::LoraWeight {
+            path: root
+                .join("custom/MiniMax-H3/adapter.safetensors")
+                .to_string_lossy()
+                .into_owned(),
+            scale: 1.0,
+        });
+        assert!(require_generate_request_model_activation(&req, Some(root), Some("flux")).is_err());
+
+        req.lora.as_mut().unwrap().path = root
+            .join("flux/ordinary-adapter.safetensors")
+            .to_string_lossy()
+            .into_owned();
+        assert!(require_generate_request_model_activation(&req, Some(root), Some("flux")).is_ok());
     }
 
     /// Minimal valid PNG header bytes for testing.

@@ -12,7 +12,11 @@ import {
 } from "../lib/hostRegistry";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type { HostEntry } from "../lib/hostRegistry";
-import type { ChainRequestWire, ModelInfoExtended } from "../types";
+import type {
+  ChainRequestWire,
+  ModelInfoExtended,
+  ServerCapabilities,
+} from "../types";
 import type { DeviceInfo, DeviceListResponse } from "@studio/api/devices";
 import type { GenerationPlacementPreview } from "@studio/api/generationPlacement";
 import { ApiError } from "@studio/api/client";
@@ -21,6 +25,7 @@ import { ApiError } from "@studio/api/client";
 const statuses = new Map<string, unknown>();
 const models = new Map<string, ModelInfoExtended[]>();
 const devices = new Map<string, DeviceListResponse>();
+const capabilities = new Map<string, ServerCapabilities>();
 const hostStatusCall = vi.hoisted(() => vi.fn());
 const placementCall = vi.hoisted(() => vi.fn());
 
@@ -49,6 +54,12 @@ vi.mock("../components/machines/hostClient", () => ({
       : Promise.reject(new Error("legacy server"));
   },
   hostQueue: () => Promise.resolve({ entries: [], plan: null }),
+  hostCapabilities: (host: HostEntry) =>
+    Promise.resolve(
+      capabilities.get(host.id) ?? {
+        gallery: { can_delete: true },
+      },
+    ),
 }));
 
 function placement(
@@ -159,6 +170,7 @@ describe("useHostRouting", () => {
     statuses.clear();
     models.clear();
     devices.clear();
+    capabilities.clear();
     hostStatusCall.mockReset().mockImplementation((host: HostEntry) => {
       const canned = statuses.get(host.id);
       return canned
@@ -187,6 +199,60 @@ describe("useHostRouting", () => {
 
     expect(routing.hosts.value.map((h) => h.id)).toEqual([ORIGIN_HOST_ID]);
     expect(routing.multiHost.value).toBe(false);
+  });
+
+  it("removes advertised restricted rows and refuses routing before placement", async () => {
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, [
+      model("flux-dev:q8"),
+      model("hf:MiniMaxAI/MiniMaxH3", { family: "minimax-h3" }),
+    ]);
+    capabilities.set(ORIGIN_HOST_ID, {
+      gallery: { can_delete: true },
+      model_access: {
+        restrictions: [
+          {
+            code: "minimax_h3_authorization_required",
+            family: "minimax-h3",
+            message: "MiniMax H3 is not activated.",
+            license_url: "https://example.test/license",
+            authorization_url: "https://example.test/authorize",
+          },
+        ],
+      },
+    });
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    expect(routing.targetModels.value.map((entry) => entry.name)).toEqual([
+      "flux-dev:q8",
+    ]);
+    expect(routing.modelOwnerIds("hf:MiniMaxAI/MiniMaxH3")).toEqual([]);
+    expect(routing.resolve("hf:MiniMaxAI/MiniMaxH3")).toBeNull();
+    placementCall.mockClear();
+    await expect(
+      routing.resolveFeasible({
+        prompt: "blocked",
+        model: "hf:MiniMaxAI/MiniMaxH3",
+        width: 768,
+        height: 512,
+        steps: 20,
+        guidance: 3.5,
+        seed: null,
+        batch_size: 1,
+      }),
+    ).resolves.toEqual({
+      kind: "infeasible",
+      perHost: [
+        {
+          hostId: ORIGIN_HOST_ID,
+          label: "this server",
+          reason: "MiniMax H3 is not activated.",
+          missingComponents: [],
+        },
+      ],
+    });
+    expect(placementCall).not.toHaveBeenCalled();
   });
 
   it("ignores an older same-host poll after a newer refresh settles", async () => {

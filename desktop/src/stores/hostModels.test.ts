@@ -134,6 +134,34 @@ describe("hostModels store", () => {
     expect(union.some((m) => m.name === "real-esrgan-x4plus")).toBe(false);
   });
 
+  it("removes rows restricted by each host's advertised model access policy", () => {
+    const hosts = useHostsStore();
+    hosts.capabilities.local = {
+      gallery: { can_delete: true },
+      model_access: {
+        restrictions: [
+          {
+            code: "minimax_h3_authorization_required",
+            family: "minimax-h3",
+            message: "MiniMax H3 is not activated.",
+            license_url: "https://example.test/license",
+            authorization_url: "https://example.test/authorize",
+          },
+        ],
+      },
+    };
+    const store = useHostModelsStore();
+    store.byHost.local = {
+      entries: [model("flux-dev:q8"), model("cv:123", { family: "MiniMaxH3" })],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+
+    expect(store.modelsOn("local").map((entry) => entry.name)).toEqual(["flux-dev:q8"]);
+    expect(store.installedOn("local").map((entry) => entry.name)).toEqual(["flux-dev:q8"]);
+    expect(store.hostsFor("cv:123")).toEqual([]);
+  });
+
   it("conservatively fills missing presentation metadata from duplicate host rows", () => {
     addExtra("hal9000-7680", "http://hal9000:7680");
     const store = useHostModelsStore();

@@ -481,6 +481,7 @@ impl ExecutionSemanticConfig {
     ) -> Result<Self, ExecutionPlanError> {
         let mold_inference::FrozenEngineConfig {
             family,
+            artifact_root: _,
             is_schnell,
             is_turbo,
             scheduler,
@@ -3493,10 +3494,67 @@ fn execution_fingerprint(
     hash.update(device.id.as_bytes());
     hash.update(format!("{effective:?}").as_bytes());
     hash.update(format!("{components:?}").as_bytes());
-    hash.update(format!("{engine_config:?}").as_bytes());
+    hash.update(format!("{:?}", ExecutionFingerprintEngineConfig(engine_config)).as_bytes());
     hash.update(format!("{effective_loras:?}").as_bytes());
     hash.update([u8::from(offload)]);
     format!("{:x}", hash.finalize())
+}
+
+/// Stable exact-fingerprint view of the engine configuration.
+///
+/// `artifact_root` is a storage trust boundary, not an execution input. The
+/// concrete component paths are already part of the exact fingerprint, so
+/// moving the same artifacts under a different configured root must not alter
+/// execution identity. Keep the historical `FrozenEngineConfig` debug shape
+/// for the remaining fields because this fingerprint is a persisted contract.
+struct ExecutionFingerprintEngineConfig<'a>(&'a mold_inference::FrozenEngineConfig);
+
+impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mold_inference::FrozenEngineConfig {
+            family,
+            artifact_root: _,
+            is_schnell,
+            is_turbo,
+            scheduler,
+            t5_variant,
+            qwen3_variant,
+            qwen2_variant,
+            qwen2_text_encoder_mode,
+            ltx2_gemma_variant,
+            selected_t5_path,
+            selected_qwen3_paths,
+            selected_qwen2_path,
+            selected_gemma_paths,
+            runtime_environment,
+            attention_backend,
+            attention_chunk,
+            vae_tiling,
+            vae_dtype,
+        } = self.0;
+
+        formatter
+            .debug_struct("FrozenEngineConfig")
+            .field("family", family)
+            .field("is_schnell", is_schnell)
+            .field("is_turbo", is_turbo)
+            .field("scheduler", scheduler)
+            .field("t5_variant", t5_variant)
+            .field("qwen3_variant", qwen3_variant)
+            .field("qwen2_variant", qwen2_variant)
+            .field("qwen2_text_encoder_mode", qwen2_text_encoder_mode)
+            .field("ltx2_gemma_variant", ltx2_gemma_variant)
+            .field("selected_t5_path", selected_t5_path)
+            .field("selected_qwen3_paths", selected_qwen3_paths)
+            .field("selected_qwen2_path", selected_qwen2_path)
+            .field("selected_gemma_paths", selected_gemma_paths)
+            .field("runtime_environment", runtime_environment)
+            .field("attention_backend", attention_backend)
+            .field("attention_chunk", attention_chunk)
+            .field("vae_tiling", vae_tiling)
+            .field("vae_dtype", vae_dtype)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -5454,6 +5512,7 @@ mod tests {
         )]);
         let engine_config = mold_inference::FrozenEngineConfig {
             family: "flux2".into(),
+            artifact_root: PathBuf::from("/models"),
             is_schnell: Some(false),
             is_turbo: None,
             scheduler: None,
@@ -5484,6 +5543,22 @@ mod tests {
         assert_eq!(
             fingerprint, "6148b3759215b8e2082e7e0ac02d0b31bc5d29841e73d4625f1140d77bb200d8",
             "this is the exact path/device-qualified candidate 0bacf81d contract"
+        );
+
+        let mut relocated_config = engine_config.clone();
+        relocated_config.artifact_root = PathBuf::from("/different-mold-home/models");
+        assert_eq!(
+            fingerprint,
+            execution_fingerprint(
+                "cv:opaque",
+                &device,
+                &effective,
+                &components,
+                &relocated_config,
+                &[],
+                false,
+            ),
+            "the storage trust root is not part of execution identity"
         );
     }
 

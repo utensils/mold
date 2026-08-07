@@ -44,10 +44,17 @@ pub(crate) async fn resolve_chain_model_authority(
     // authority that is newer than (or absent from) bootstrap storage.
     {
         let config = state.config.read().await;
+        require_chain_model_artifact_activation(&config, model, None, None)?;
         if let Some(authority) =
             crate::model_manager::resolve_existing_model_authority(model, &config)
                 .map_err(|error| chain_freeze_error(model, error.error))?
         {
+            require_chain_model_artifact_activation(
+                &authority.config,
+                model,
+                Some(&authority.paths),
+                None,
+            )?;
             return Ok(authority);
         }
     }
@@ -57,22 +64,197 @@ pub(crate) async fn resolve_chain_model_authority(
     // only when the in-memory snapshot has no concrete paths, so a long-lived
     // server can self-heal without replacing valid request-local authority.
     let config = crate::model_manager::refresh_config(state).await;
-    crate::model_manager::resolve_existing_model_authority(model, &config)
+    require_chain_model_artifact_activation(&config, model, None, None)?;
+    let authority = crate::model_manager::resolve_existing_model_authority(model, &config)
         .map_err(|error| chain_freeze_error(model, error.error))?
         .ok_or_else(|| {
             chain_freeze_error(
                 model,
                 format!("model '{model}' has no concrete local artifact paths"),
             )
-        })
+        })?;
+    require_chain_model_artifact_activation(
+        &authority.config,
+        model,
+        Some(&authority.paths),
+        None,
+    )?;
+    Ok(authority)
 }
 
 pub(crate) fn freeze_chain_model(
     authority: ExistingModelAuthority,
     model: &str,
 ) -> Result<mold_core::chain_job::FrozenChainModel, ApiError> {
-    crate::execution_plan::freeze_chain_model_with_paths(&authority.config, model, authority.paths)
-        .map_err(|error| chain_freeze_error(model, error))
+    require_chain_model_artifact_activation(
+        &authority.config,
+        model,
+        Some(&authority.paths),
+        None,
+    )?;
+    let frozen = crate::execution_plan::freeze_chain_model_with_paths(
+        &authority.config,
+        model,
+        authority.paths,
+    )
+    .map_err(|error| chain_freeze_error(model, error))?;
+    require_chain_model_artifact_activation(&authority.config, model, None, Some(&frozen))?;
+    Ok(frozen)
+}
+
+fn require_chain_artifact_path_activation(
+    path: &std::path::Path,
+    artifact_root: &std::path::Path,
+    family: Option<&str>,
+) -> Result<(), ApiError> {
+    if path.as_os_str().is_empty() {
+        return Ok(());
+    }
+    mold_core::require_model_artifact_activation(path, Some(artifact_root), family)
+        .map_err(ApiError::model_activation)?;
+
+    // A neutral-looking symlink or relative path may still resolve into a
+    // gated artifact tree. Check the concrete target against the concrete
+    // trusted root as well; missing files remain covered by the raw identity
+    // above and are diagnosed separately by ordinary model resolution.
+    if let Ok(canonical_path) = std::fs::canonicalize(path) {
+        let canonical_root =
+            std::fs::canonicalize(artifact_root).unwrap_or_else(|_| artifact_root.to_path_buf());
+        mold_core::require_model_artifact_activation(
+            &canonical_path,
+            Some(&canonical_root),
+            family,
+        )
+        .map_err(ApiError::model_activation)?;
+    }
+    Ok(())
+}
+
+fn require_chain_config_artifact_activation(
+    config: &mold_core::ModelConfig,
+    artifact_root: &std::path::Path,
+    fallback_family: Option<&str>,
+) -> Result<(), ApiError> {
+    let family = config.family.as_deref().or(fallback_family);
+    for path in config.all_file_paths() {
+        require_chain_artifact_path_activation(std::path::Path::new(&path), artifact_root, family)?;
+    }
+    Ok(())
+}
+
+fn require_chain_manifest_artifact_activation(
+    manifest: &mold_core::manifest::ModelManifest,
+    artifact_root: &std::path::Path,
+) -> Result<(), ApiError> {
+    let family = Some(manifest.family.as_str());
+    mold_core::require_model_activation(&manifest.name, family)
+        .map_err(ApiError::model_activation)?;
+    for file in &manifest.files {
+        mold_core::require_model_activation(&file.hf_repo, family)
+            .map_err(ApiError::model_activation)?;
+        mold_core::require_model_activation(&file.hf_filename, family)
+            .map_err(ApiError::model_activation)?;
+        let storage_path = mold_core::manifest::storage_path(manifest, file);
+        require_chain_artifact_path_activation(&storage_path, artifact_root, family)?;
+        require_chain_artifact_path_activation(
+            &artifact_root.join(storage_path),
+            artifact_root,
+            family,
+        )?;
+    }
+    Ok(())
+}
+
+/// Fail closed over every model/config/manifest identity that can become the
+/// immutable authority of a chain job. Both raw and canonicalized artifact
+/// paths are checked before they can be frozen into a durable manifest.
+fn require_chain_model_artifact_activation(
+    config: &mold_core::Config,
+    model: &str,
+    paths: Option<&mold_core::ModelPaths>,
+    frozen: Option<&mold_core::chain_job::FrozenChainModel>,
+) -> Result<(), ApiError> {
+    let artifact_root = config.resolved_models_dir();
+    let canonical_model = mold_core::manifest::resolve_model_name(model);
+    let manifest = mold_core::manifest::find_manifest(&canonical_model);
+    let configured = config.resolved_model_config(model);
+    let family = configured
+        .family
+        .as_deref()
+        .or_else(|| manifest.map(|entry| entry.family.as_str()));
+
+    mold_core::require_model_activation(model, family).map_err(ApiError::model_activation)?;
+    mold_core::require_model_activation(&canonical_model, family)
+        .map_err(ApiError::model_activation)?;
+    require_chain_config_artifact_activation(&configured, &artifact_root, family)?;
+
+    if let Some(paths) = paths {
+        for path in paths.all_file_paths() {
+            require_chain_artifact_path_activation(path, &artifact_root, family)?;
+        }
+    }
+
+    if let Some(frozen) = frozen {
+        let frozen_family = frozen.config.family.as_deref().or(family);
+        mold_core::require_model_activation(model, frozen_family)
+            .map_err(ApiError::model_activation)?;
+        if !frozen.runtime_model_id.is_empty() {
+            mold_core::require_model_activation(&frozen.runtime_model_id, frozen_family)
+                .map_err(ApiError::model_activation)?;
+        }
+        require_chain_config_artifact_activation(&frozen.config, &artifact_root, frozen_family)?;
+    }
+
+    if let Some(manifest) = manifest {
+        require_chain_manifest_artifact_activation(manifest, &artifact_root)?;
+    }
+    Ok(())
+}
+
+/// Extend the primary-model fence to request-local executable artifacts.
+/// Stage LoRA paths are not part of `ModelPaths`, so they must be checked
+/// independently before validation, control downloads, persistence, or a
+/// persisted job's transition back to `Queued`.
+pub(crate) fn require_chain_artifact_activation(
+    config: &mold_core::Config,
+    request: &ChainRequest,
+    paths: Option<&mold_core::ModelPaths>,
+    frozen: Option<&mold_core::chain_job::FrozenChainModel>,
+) -> Result<(), ApiError> {
+    require_chain_model_artifact_activation(config, &request.model, paths, frozen)?;
+    let canonical_model = mold_core::manifest::resolve_model_name(&request.model);
+    let family = frozen
+        .and_then(|snapshot| snapshot.config.family.clone())
+        .or_else(|| config.resolved_model_config(&request.model).family)
+        .or_else(|| {
+            mold_core::manifest::find_manifest(&canonical_model).map(|entry| entry.family.clone())
+        });
+    let artifact_root = config.resolved_models_dir();
+
+    for stage in &request.stages {
+        if let Some(model) = stage.model.as_deref() {
+            mold_core::require_model_activation(model, family.as_deref())
+                .map_err(ApiError::model_activation)?;
+        }
+        for lora in &stage.loras {
+            let path = std::path::Path::new(&lora.path);
+            require_chain_artifact_path_activation(path, &artifact_root, family.as_deref())?;
+
+            // Built-in camera controls materialize a hidden manifest before
+            // the job is persisted. Include that manifest and its target path
+            // in this same pre-mutation authority boundary.
+            if let Some(alias) = lora.path.strip_prefix("camera-control:") {
+                if let Ok(preset) = mold_core::ltx2_camera::resolve_camera_control_preset(alias) {
+                    if let Some(manifest) =
+                        mold_core::manifest::find_manifest(preset.download_model)
+                    {
+                        require_chain_manifest_artifact_activation(manifest, &artifact_root)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Internal wire event used by the chain SSE stream before per-event
@@ -123,6 +305,10 @@ async fn shim_start_job(state: &AppState, req: ChainRequest) -> Result<ShimJob, 
     })?;
 
     let mut req = req;
+    {
+        let config = state.config.read().await;
+        require_chain_artifact_activation(&config, &req, None, None)?;
+    }
     validate_chain_build_features(&req)?;
     let authority = resolve_chain_model_authority(state, &req.model).await?;
     validate_and_normalize_chain_family(&authority.config, &mut req)?;
@@ -594,8 +780,7 @@ pub(crate) fn validate_and_normalize_chain_family(
     config: &mold_core::Config,
     req: &mut ChainRequest,
 ) -> Result<(), ApiError> {
-    validate_chain_build_features(req)?;
-
+    require_chain_artifact_activation(config, req, None, None)?;
     let resolved_model = config.resolved_model_config(&req.model);
     let canonical_model = mold_core::manifest::resolve_model_name(&req.model);
     let manifest = mold_core::manifest::find_manifest(&canonical_model);
@@ -604,6 +789,12 @@ pub(crate) fn validate_and_normalize_chain_family(
         .clone()
         .or_else(|| manifest.map(|model| model.family.clone()))
         .unwrap_or_default();
+    mold_core::require_model_activation(
+        &req.model,
+        (!family.is_empty()).then_some(family.as_str()),
+    )
+    .map_err(ApiError::model_activation)?;
+    validate_chain_build_features(req)?;
     // A clip is one generation, so the composed ceiling applies here exactly
     // as it does to a single shot. `resolved_model.spatial_upscaler` is the
     // config-supplied override; the shared resolver reads the manifest, so a
@@ -1530,6 +1721,44 @@ mod tests {
     }
 
     #[test]
+    fn chain_artifact_gate_ignores_a_gated_name_in_the_trusted_models_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_root = dir.path().join("minimax-h3-uat/models");
+        let ordinary = models_root.join("ordinary-ltx2");
+        std::fs::create_dir_all(&ordinary).unwrap();
+        let transformer = ordinary.join("transformer.safetensors");
+        let vae = ordinary.join("vae.safetensors");
+        let lora = ordinary.join("style.safetensors");
+        for path in [&transformer, &vae, &lora] {
+            std::fs::write(path, b"ordinary fixture").unwrap();
+        }
+        let mut config = mold_core::Config {
+            models_dir: models_root.display().to_string(),
+            ..mold_core::Config::default()
+        };
+        config.models.insert(
+            "ordinary-chain-model".into(),
+            mold_core::ModelConfig {
+                family: Some("ltx2".into()),
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                lora: Some(lora.display().to_string()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "ordinary-chain-model".into();
+        request.stages[0].loras.push(mold_core::chain::LoraSpec {
+            path: lora.display().to_string(),
+            scale: 1.0,
+            name: None,
+        });
+
+        require_chain_artifact_activation(&config, &request, None, None)
+            .expect("the trusted root's name is storage placement, not model identity");
+    }
+
+    #[test]
     fn chain_preflight_rejects_ltx2_dimensions_aligned_only_to_16() {
         let mut request = req(OutputFormat::Mp4);
         request.width = 1008;
@@ -1868,6 +2097,66 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "rejection must happen before the shim creates or schedules a job"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_chain_shim_rejects_configured_h3_before_job_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let handle = Arc::new(crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests());
+        let state = state_with_db_and_handle(db, handle, &dir.path().join("gallery"));
+        state
+            .config
+            .write()
+            .await
+            .models
+            .get_mut("ltx-2-19b-distilled:mock")
+            .unwrap()
+            .family = Some("minimax-h3".into());
+
+        let error = match shim_start_job(&state, req(OutputFormat::Mp4)).await {
+            Ok(_) => panic!("compliance-gated chain must not create a shim job"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        assert!(
+            chain_jobs::list_jobs(state.metadata_db.as_ref().as_ref().unwrap())
+                .unwrap()
+                .is_empty(),
+            "H3 rejection must happen before the legacy shim persists a job"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_chain_shim_rejects_h3_stage_lora_before_job_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let handle = Arc::new(crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests());
+        let state = state_with_db_and_handle(db, handle, &dir.path().join("gallery"));
+        let mut request = req(OutputFormat::Mp4);
+        request.stages[0].loras.push(mold_core::chain::LoraSpec {
+            path: "/models/MiniMax-H3/legacy-shim.safetensors".into(),
+            scale: 1.0,
+            name: None,
+        });
+
+        let error = match shim_start_job(&state, request).await {
+            Ok(_) => panic!("compliance-gated LoRA must not create a shim job"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
+        );
+        assert!(
+            chain_jobs::list_jobs(state.metadata_db.as_ref().as_ref().unwrap())
+                .unwrap()
+                .is_empty(),
+            "H3 LoRA rejection must happen before the shim persists a job"
         );
     }
 

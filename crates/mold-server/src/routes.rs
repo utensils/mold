@@ -46,6 +46,14 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    pub fn model_activation(error: mold_core::ModelActivationError) -> Self {
+        Self::with_code(
+            error.to_string(),
+            mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED,
+            StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
+        )
+    }
+
     pub fn validation(msg: impl Into<String>) -> Self {
         Self {
             error: msg.into(),
@@ -669,6 +677,76 @@ impl RequestWarnings {
     }
 }
 
+async fn require_server_model_activation(
+    state: &AppState,
+    model_name: &str,
+) -> Result<Option<String>, ApiError> {
+    let family = model_manager::family_for_model(state, model_name).await;
+    mold_core::require_model_activation(model_name, family.as_deref())
+        .map_err(ApiError::model_activation)?;
+
+    let resolved = mold_core::manifest::resolve_model_name(model_name);
+    let config = state.config.read().await;
+    let artifact_root = config.resolved_models_dir();
+    if let Some(model) = config
+        .models
+        .get(&resolved)
+        .or_else(|| config.models.get(model_name))
+    {
+        mold_core::require_model_activation(&resolved, model.family.as_deref())
+            .map_err(ApiError::model_activation)?;
+        for path in model.all_file_paths() {
+            mold_core::require_model_artifact_activation(
+                std::path::Path::new(&path),
+                Some(&artifact_root),
+                model.family.as_deref(),
+            )
+            .map_err(ApiError::model_activation)?;
+        }
+    }
+    if let Some(paths) = mold_core::config::ModelPaths::resolve(model_name, &config) {
+        for path in paths.all_file_paths() {
+            mold_core::require_model_artifact_activation(
+                path,
+                Some(&artifact_root),
+                family.as_deref(),
+            )
+            .map_err(ApiError::model_activation)?;
+        }
+    }
+    drop(config);
+
+    if let Some(manifest) = mold_core::manifest::find_manifest(&resolved) {
+        mold_core::require_model_activation(&manifest.name, Some(&manifest.family))
+            .map_err(ApiError::model_activation)?;
+        for file in &manifest.files {
+            mold_core::require_model_activation(&file.hf_repo, Some(&manifest.family))
+                .map_err(ApiError::model_activation)?;
+            mold_core::require_model_activation(&file.hf_filename, Some(&manifest.family))
+                .map_err(ApiError::model_activation)?;
+        }
+    }
+    Ok(family)
+}
+
+async fn require_server_generation_request_activation(
+    state: &AppState,
+    request: &mold_core::GenerateRequest,
+    family: Option<&str>,
+) -> Result<(), ApiError> {
+    let models_root = state.config.read().await.resolved_models_dir();
+    mold_core::require_generate_request_model_activation(request, Some(&models_root), family)
+        .map_err(ApiError::model_activation)?;
+
+    if let Some(control_model) = request.control_model.as_deref() {
+        require_server_model_activation(state, control_model).await?;
+    }
+    if let Some(upscale_model) = request.upscale_model.as_deref() {
+        require_server_model_activation(state, upscale_model).await?;
+    }
+    Ok(())
+}
+
 async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
@@ -683,6 +761,18 @@ async fn prepare_generation(
             "hdr_exr_dir is local-only and cannot be set through the server API; \
              re-run the CLI with --local so the EXR sidecar is written on your machine",
         ));
+    }
+    let family = require_server_model_activation(state, &request.model).await?;
+    require_server_generation_request_activation(state, request, family.as_deref()).await?;
+    if request.expand == Some(true) && !request.prompt.trim().is_empty() {
+        let settings = state
+            .config
+            .read()
+            .await
+            .expand
+            .clone()
+            .with_env_overrides();
+        require_expand_model_activation(&settings)?;
     }
     ensure_schedulable_device(state)?;
     // NOTE: the capacity check is enforced inside `state.queue.submit(...)` so
@@ -706,12 +796,10 @@ async fn prepare_generation(
     if let Err(e) = model_manager::install_catalog_model(state, &request.model).await {
         return Err(model_manager::install_error_to_api_error(&e));
     }
-    let family_hint = model_manager::catalog_family_for(state, &request.model).await;
-
     // Resolve the model family for normalisation. `family_for_model` checks the
-    // static manifest first (covers all built-in models), then falls back to the
-    // catalog DB entry (covers `cv:*` / `hf:*` models installed above).
-    let resolved_family = model_manager::family_for_model(state, &request.model).await;
+    // static manifest first (covers all built-in models), then configured
+    // models, and finally catalog metadata (`cv:*` / `hf:*` installed above).
+    let resolved_family = require_server_model_activation(state, &request.model).await?;
     // Expand only after live catalog resolution, so opaque cv:/hf: IDs use
     // their authoritative family and conditioning-aware task template.
     maybe_expand_prompt(state, request, preferred_gpu, resolved_family.as_deref()).await?;
@@ -739,7 +827,7 @@ async fn prepare_generation(
     } else {
         &*request
     };
-    if let Err(e) = validate_generate_request(validation_request, family_hint.as_deref()) {
+    if let Err(e) = validate_generate_request(validation_request, resolved_family.as_deref()) {
         return Err(ApiError::validation(e));
     }
 
@@ -1299,12 +1387,14 @@ async fn schedule_standalone_upscale(
     let estimated_vram_bytes = std::fs::metadata(&weights_path)
         .map(|metadata| metadata.len().saturating_add(2 << 30))
         .unwrap_or(2 << 30);
-    let utility_plans = crate::scheduler::upscale_candidates(state, &model, &weights_path)
-        .map_err(|error| {
-            ApiError::generation_unavailable(format!(
-                "upscaler execution plan could not be frozen: {error}"
-            ))
-        })?;
+    let artifact_root = state.config.read().await.resolved_models_dir();
+    let utility_plans =
+        crate::scheduler::upscale_candidates(state, &model, &weights_path, Some(&artifact_root))
+            .map_err(|error| {
+                ApiError::generation_unavailable(format!(
+                    "upscaler execution plan could not be frozen: {error}"
+                ))
+            })?;
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     let job = crate::gpu_pool::StandaloneUpscaleJob {
         id: id.clone(),
@@ -1339,6 +1429,7 @@ async fn schedule_local_expansion(
     expand_config: mold_core::ExpandConfig,
     preferred_gpu: Option<usize>,
 ) -> Result<mold_core::ExpandResult, ApiError> {
+    require_expand_model_activation(&settings)?;
     let id = format!("prompt-expansion-{}", uuid::Uuid::new_v4());
     let estimated_vram_bytes = 6_000_000_000;
     let model = settings.model.clone();
@@ -1387,6 +1478,11 @@ async fn schedule_local_expansion(
         .await
         .map_err(|_| ApiError::internal("prompt expansion owner worker dropped its result"))?
         .map_err(|error| ApiError::internal(format!("prompt expansion failed: {error}")))
+}
+
+fn require_expand_model_activation(settings: &mold_core::ExpandSettings) -> Result<(), ApiError> {
+    mold_core::require_model_activation(settings.active_model(), None)
+        .map_err(ApiError::model_activation)
 }
 
 // ── /api/generate ─────────────────────────────────────────────────────────────
@@ -1733,6 +1829,7 @@ async fn maybe_expand_prompt(
     let config = state.config.read().await;
     let config_snapshot = config.clone();
     let expand_settings = config.expand.clone().with_env_overrides();
+    require_expand_model_activation(&expand_settings)?;
     if (state.scheduled_work.v2_authoritative() || state.gpu_pool.worker_count() > 0)
         && expand_settings.is_local()
     {
@@ -1790,7 +1887,11 @@ fn create_server_expander(
     _gpu_selection: GpuSelection,
     _preferred_gpu: Option<usize>,
 ) -> Result<Box<dyn mold_core::PromptExpander>, ApiError> {
-    if let Some(api_expander) = settings.create_api_expander() {
+    require_expand_model_activation(settings)?;
+    if let Some(api_expander) = settings
+        .create_api_expander()
+        .map_err(ApiError::model_activation)?
+    {
         return Ok(Box::new(api_expander));
     }
 
@@ -1987,19 +2088,65 @@ fn validate_expand_variations(variations: usize) -> Result<(), ApiError> {
 
 // ── /api/upscale ────────────────────────────────────────────────────────────
 
+async fn require_upscale_model_activation(
+    state: &AppState,
+    requested_model: &str,
+    resolved_model: &str,
+) -> Result<(), ApiError> {
+    let advertised_family = require_server_model_activation(state, requested_model).await?;
+    let (configured_family, configured_weights, artifact_root) = {
+        let config = state.config.read().await;
+        let configured = config.models.get(resolved_model);
+        (
+            configured.and_then(|model| model.family.clone()),
+            configured.and_then(|model| model.transformer.clone()),
+            config.resolved_models_dir(),
+        )
+    };
+    let manifest = mold_core::manifest::find_manifest(resolved_model);
+    let family = configured_family
+        .as_deref()
+        .or(advertised_family.as_deref())
+        .or_else(|| manifest.map(|model| model.family.as_str()));
+
+    mold_core::require_model_activation(requested_model, family)
+        .map_err(ApiError::model_activation)?;
+    mold_core::require_model_activation(resolved_model, family)
+        .map_err(ApiError::model_activation)?;
+    if let Some(weights) = configured_weights.as_deref() {
+        mold_core::require_model_artifact_activation(
+            std::path::Path::new(weights),
+            Some(&artifact_root),
+            family,
+        )
+        .map_err(ApiError::model_activation)?;
+    }
+    if let Some(manifest) = manifest {
+        mold_core::require_model_activation(&manifest.name, Some(&manifest.family))
+            .map_err(ApiError::model_activation)?;
+        for file in &manifest.files {
+            mold_core::require_model_activation(&file.hf_repo, Some(&manifest.family))
+                .map_err(ApiError::model_activation)?;
+            mold_core::require_model_activation(&file.hf_filename, Some(&manifest.family))
+                .map_err(ApiError::model_activation)?;
+        }
+    }
+    Ok(())
+}
+
 async fn upscale(
     State(state): State<AppState>,
     Json(req): Json<mold_core::UpscaleRequest>,
 ) -> Result<Json<mold_core::UpscaleResponse>, ApiError> {
     ensure_generation_available(&state)?;
+    let model_name = mold_core::manifest::resolve_model_name(&req.model);
+    require_upscale_model_activation(&state, &req.model, &model_name).await?;
     if !state.scheduled_work.v2_authoritative() {
         ensure_schedulable_device(&state)?;
     }
     if let Err(msg) = mold_core::validate_upscale_request(&req) {
         return Err(ApiError::validation(msg));
     }
-
-    let model_name = mold_core::manifest::resolve_model_name(&req.model);
 
     // Auto-pull upscaler model if not downloaded
     let needs_pull = {
@@ -2032,6 +2179,7 @@ async fn upscale(
             ))
         })?;
     let weights_path = std::path::PathBuf::from(weights_path);
+    let artifact_root = config.resolved_models_dir();
     let model_name_owned = model_name.clone();
     drop(config);
 
@@ -2050,6 +2198,7 @@ async fn upscale(
                 let new_engine = mold_inference::create_upscale_engine(
                     model_name_owned,
                     weights_path,
+                    Some(&artifact_root),
                     mold_inference::LoadStrategy::Eager,
                     0,
                 )?;
@@ -2076,14 +2225,14 @@ async fn upscale_stream(
     Json(req): Json<mold_core::UpscaleRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
     ensure_generation_available(&state)?;
+    let model_name = mold_core::manifest::resolve_model_name(&req.model);
+    require_upscale_model_activation(&state, &req.model, &model_name).await?;
     if !state.scheduled_work.v2_authoritative() {
         ensure_schedulable_device(&state)?;
     }
     if let Err(msg) = mold_core::validate_upscale_request(&req) {
         return Err(ApiError::validation(msg));
     }
-
-    let model_name = mold_core::manifest::resolve_model_name(&req.model);
 
     // Check if model needs pulling before spawning the SSE stream
     let needs_pull = {
@@ -2189,13 +2338,16 @@ async fn upscale_stream(
         }
 
         // Read weights path after potential pull
-        let weights_path = {
+        let (weights_path, artifact_root) = {
             let config = state_clone.config.read().await;
-            config
-                .models
-                .get(&model_name_owned)
-                .and_then(|c| c.transformer.as_ref())
-                .map(std::path::PathBuf::from)
+            (
+                config
+                    .models
+                    .get(&model_name_owned)
+                    .and_then(|c| c.transformer.as_ref())
+                    .map(std::path::PathBuf::from),
+                config.resolved_models_dir(),
+            )
         };
 
         let Some(weights_path) = weights_path else {
@@ -2262,6 +2414,7 @@ async fn upscale_stream(
                     match mold_inference::create_upscale_engine(
                         model_name_for_cache,
                         weights_path_for_cache,
+                        Some(&artifact_root),
                         mold_inference::LoadStrategy::Eager,
                         0,
                     ) {
@@ -2624,6 +2777,11 @@ pub(crate) async fn placement_preview_for_request(
         response.authoritative = true;
         return response;
     }
+    if let Err(error) = require_server_model_activation(state, &request.model).await {
+        let mut response = unavailable("infeasible", error.error);
+        response.authoritative = true;
+        return response;
+    }
     let planned_control = match plan_builtin_ltx2_control(state, &mut request).await {
         Ok(control) => control,
         Err(error) => {
@@ -2838,6 +2996,7 @@ async fn load_model(
     State(state): State<AppState>,
     Json(body): Json<LoadModelBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    require_server_model_activation(&state, &body.model).await?;
     ensure_schedulable_device(&state)?;
     if let Err(e) = model_manager::install_catalog_model(&state, &body.model).await {
         return Err(model_manager::install_error_to_api_error(&e));
@@ -2922,6 +3081,7 @@ async fn pull_model_endpoint(
     headers: HeaderMap,
     Json(body): Json<LoadModelBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    require_server_model_activation(&state, &body.model).await?;
     let wants_sse = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -2931,14 +3091,17 @@ async fn pull_model_endpoint(
         if let Err(e) = model_manager::install_catalog_model(&state, &body.model).await {
             return Err(model_manager::install_error_to_api_error(&e));
         }
-        if model_manager::check_model_available(&state, &body.model)
-            .await
-            .is_ok()
-        {
-            return Ok(PullResponse::Text(format!(
-                "model '{}' is already present",
-                body.model
-            )));
+        match model_manager::check_model_available(&state, &body.model).await {
+            Ok(_) => {
+                return Ok(PullResponse::Text(format!(
+                    "model '{}' is already present",
+                    body.model
+                )));
+            }
+            Err(error) if error.code == mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED => {
+                return Err(error);
+            }
+            Err(_) => {}
         }
         let companion_names = {
             let intents = state.catalog_intents.read().await;
@@ -2962,9 +3125,8 @@ async fn pull_model_endpoint(
             None,
         )
         .await;
-        let primary_job = crate::catalog_api::enqueue_catalog_primary_repair(&state, &body.model)
-            .await
-            .map_err(|(status, msg)| ApiError::internal_with_status(msg, status))?;
+        let primary_job =
+            crate::catalog_api::enqueue_catalog_primary_repair(&state, &body.model).await?;
         if !companion_jobs.is_empty() || primary_job.is_some() {
             let primary_count = usize::from(primary_job.is_some());
             return Ok(PullResponse::Text(format!(
@@ -2984,6 +3146,9 @@ async fn pull_model_endpoint(
     // Enqueue via the queue. Treat idempotent AlreadyPresent as success.
     let (job_id, _position) = match state.downloads.enqueue(body.model.clone()).await {
         Ok((id, pos, _)) => (id, pos),
+        Err(crate::downloads::EnqueueError::ModelActivation(error)) => {
+            return Err(ApiError::model_activation(error));
+        }
         Err(crate::downloads::EnqueueError::UnknownModel(_)) => {
             return Err(ApiError::unknown_model(format!(
                 "unknown model '{}'. Run 'mold list' to see available models.",
@@ -4271,6 +4436,7 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
                 .map(|s| s.to_string())
                 .collect::<Vec<_>>(),
         },
+        model_access: mold_core::model_access_capabilities(),
         discovery: mold_core::DiscoveryCapabilities {
             can_browse: state.discovery.can_browse(),
         },
@@ -6699,6 +6865,9 @@ pub async fn create_download(
     Json(body): Json<CreateDownloadBody>,
 ) -> axum::response::Response {
     use crate::downloads::{EnqueueError, EnqueueOutcome};
+    if let Err(error) = require_server_model_activation(&state, &body.model).await {
+        return error.into_response();
+    }
     match state.downloads.enqueue(body.model.clone()).await {
         Ok((id, position, EnqueueOutcome::Created)) => (
             StatusCode::OK,
@@ -6710,6 +6879,9 @@ pub async fn create_download(
             Json(CreateDownloadResponse { id, position }),
         )
             .into_response(),
+        Err(EnqueueError::ModelActivation(error)) => {
+            ApiError::model_activation(error).into_response()
+        }
         Err(EnqueueError::UnknownModel(_)) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -8079,6 +8251,85 @@ mod tests {
         assert!(request.original_prompt.is_none());
         // Cleared so scheduler-owned local expansion doesn't re-plan it.
         assert_eq!(request.expand, Some(false));
+    }
+
+    #[tokio::test]
+    async fn generation_expansion_rejects_h3_before_scheduling() {
+        let state = AppState::for_tests();
+        state.config.write().await.expand.model = "MiniMax-H3".to_string();
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a quiet desert sunrise",
+            "model": "flux-schnell:q8",
+            "width": 512,
+            "height": 512,
+            "steps": 4,
+            "guidance": 0.0,
+            "batch_size": 1,
+            "expand": true
+        }))
+        .unwrap();
+
+        let error = maybe_expand_prompt(&state, &mut request, None, Some("flux"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+        assert_eq!(error.code, mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        assert_eq!(request.prompt, "a quiet desert sunrise");
+        assert!(request.original_prompt.is_none());
+    }
+
+    #[tokio::test]
+    async fn generation_preflight_gates_nested_models_and_root_relative_artifacts() {
+        let state = AppState::for_tests();
+        let root = "/Volumes/ExternalStorage/mold-uat/minimax-h3/models";
+        state.config.write().await.models_dir = root.to_string();
+        let request = || {
+            serde_json::from_value::<mold_core::GenerateRequest>(serde_json::json!({
+                "prompt": "a quiet desert sunrise",
+                "model": "flux-schnell:q8",
+                "width": 512,
+                "height": 512,
+                "steps": 4,
+                "guidance": 0.0,
+                "batch_size": 1
+            }))
+            .unwrap()
+        };
+
+        let mut ordinary = request();
+        ordinary.lora = Some(mold_core::LoraWeight {
+            path: format!("{root}/flux/ordinary.safetensors"),
+            scale: 1.0,
+        });
+        require_server_generation_request_activation(&state, &ordinary, Some("flux"))
+            .await
+            .unwrap();
+
+        let mut nested_lora = request();
+        nested_lora.lora = Some(mold_core::LoraWeight {
+            path: format!("{root}/custom/MiniMax-H3/adapter.safetensors"),
+            scale: 1.0,
+        });
+        let error =
+            require_server_generation_request_activation(&state, &nested_lora, Some("flux"))
+                .await
+                .unwrap_err();
+        assert_eq!(error.status, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+
+        for (control_model, upscale_model) in [
+            (Some("MiniMax-H3-FL2VA"), None),
+            (None, Some("hf:MiniMaxAI/MiniMax-H3")),
+        ] {
+            let mut nested_model = request();
+            nested_model.control_model = control_model.map(str::to_string);
+            nested_model.upscale_model = upscale_model.map(str::to_string);
+            let error =
+                require_server_generation_request_activation(&state, &nested_model, Some("flux"))
+                    .await
+                    .unwrap_err();
+            assert_eq!(error.status, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+            assert_eq!(error.code, mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        }
     }
 
     #[test]
