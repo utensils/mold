@@ -648,6 +648,7 @@ impl ChainRequest {
             scheduler: None,
             cfg_plus: None,
             edit_images: None,
+            references: None,
             source_image: first.source_image.clone(),
             source_image_name: None,
             strength: self.strength,

@@ -2782,6 +2782,37 @@ pub(crate) async fn placement_preview_for_request(
         response.authoritative = true;
         return response;
     }
+    if let Some(task) = mold_core::minimax_h3::task_for_model(&request.model) {
+        match (task, request.references.as_deref()) {
+            (mold_core::minimax_h3::Task::Ref2va, Some(references)) => {
+                if let Err(error) =
+                    mold_core::minimax_h3::validate_reference_descriptors(references)
+                {
+                    let mut response = unavailable("infeasible", error.to_string());
+                    response.authoritative = true;
+                    return response;
+                }
+            }
+            (mold_core::minimax_h3::Task::Ref2va, None) => {
+                let mut response = unavailable(
+                    "infeasible",
+                    "MiniMax H3 Ref2VA placement preview requires ordered reference descriptors"
+                        .to_string(),
+                );
+                response.authoritative = true;
+                return response;
+            }
+            (mold_core::minimax_h3::Task::Fl2va, Some(_)) => {
+                let mut response = unavailable(
+                    "infeasible",
+                    "MiniMax H3 FL2VA does not accept Ref2VA ordered references".to_string(),
+                );
+                response.authoritative = true;
+                return response;
+            }
+            (mold_core::minimax_h3::Task::Fl2va, None) => {}
+        }
+    }
     let planned_control = match plan_builtin_ltx2_control(state, &mut request).await {
         Ok(control) => control,
         Err(error) => {

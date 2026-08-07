@@ -22,6 +22,20 @@ describe("expansionTaskForRequest", () => {
     ).toBe("image-to-video");
   });
 
+  it("distinguishes H3 ordered-reference resynthesis from FL2VA", () => {
+    expect(expansionTaskForRequest("minimax-h3", {})).toBe("text-to-video");
+    expect(
+      expansionTaskForRequest("minimax-h3", {
+        source_image: "opening-frame",
+      }),
+    ).toBe("image-to-video");
+    expect(
+      expansionTaskForRequest("minimax-h3", {
+        references: [{ kind: "image" }, { kind: "audio" }],
+      }),
+    ).toBe("reference-to-audio-video");
+  });
+
   it("prioritizes retake, keyframes, and audio conditioning", () => {
     expect(
       expansionTaskForRequest("ltx2", {

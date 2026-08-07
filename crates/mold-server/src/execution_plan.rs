@@ -1300,6 +1300,19 @@ pub(crate) fn preparation_authority_fingerprint(
     normalized_request.prompt.clear();
     normalized_request.original_prompt = None;
     normalized_request.expand = None;
+    // Bind ordered reference content and probed shape without ever feeding
+    // inline bytes, request-scoped upload handles, or server-local paths into
+    // the serialized preparation authority. The content digest deliberately
+    // makes equivalent authorities converge while vector order remains part
+    // of the frozen identity.
+    let ordered_references = normalized_request.references.as_ref().map(|references| {
+        references
+            .iter()
+            .enumerate()
+            .map(|(index, reference)| reference.redacted_metadata(index))
+            .collect::<Vec<_>>()
+    });
+    normalized_request.references = None;
 
     let mut hash = Sha256::new();
     hash.update(format!("{paths:?}").as_bytes());
@@ -1315,6 +1328,12 @@ pub(crate) fn preparation_authority_fingerprint(
     hash.update(
         serde_json::to_vec(&normalized_request)
             .expect("GenerateRequest serialization is infallible")
+            .as_slice(),
+    );
+    hash.update(b"\0ordered-generation-references-v1\0");
+    hash.update(
+        serde_json::to_vec(&ordered_references)
+            .expect("redacted reference serialization is infallible")
             .as_slice(),
     );
     format!("{:x}", hash.finalize())
@@ -3560,7 +3579,10 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mold_core::{AdvancedPlacement, ModelConfig};
+    use mold_core::{
+        AdvancedPlacement, GenerationReference, GenerationReferenceAuthority,
+        GenerationReferenceProvenance, ModelConfig,
+    };
     use tempfile::TempDir;
 
     #[test]
@@ -3638,6 +3660,69 @@ mod tests {
         .unwrap();
         request.placement = placement;
         request
+    }
+
+    #[test]
+    fn preparation_authority_binds_reference_order_without_transport_secrets() {
+        let root = TempDir::new().unwrap();
+        let config = config(root.path(), "minimax-h3", None);
+        let paths = ModelPaths::resolve("test:q4", &config).unwrap();
+        let engine_config = mold_inference::FrozenEngineConfig::resolve("test:q4", &config);
+        let make_inline = |name: &str, data: Vec<u8>| GenerationReference::Image {
+            media: GenerationReferenceAuthority::Inline { data },
+            provenance: GenerationReferenceProvenance {
+                name: Some(name.to_string()),
+                sha256: None,
+            },
+            mime_type: "image/png".to_string(),
+            width: 640,
+            height: 480,
+        };
+
+        let first = make_inline(" first.png ", vec![1, 2, 3, 4]);
+        let second = make_inline("second.png", vec![5, 6, 7, 8]);
+        let mut request = request(None);
+        request.references = Some(vec![first.clone(), second.clone()]);
+        let forward = preparation_authority_fingerprint(&config, &request, &paths, &engine_config);
+        request.references = Some(vec![second, first.clone()]);
+        let reversed = preparation_authority_fingerprint(&config, &request, &paths, &engine_config);
+        assert_ne!(forward, reversed, "reference order is admission authority");
+
+        let digest = first.content_sha256().unwrap().to_ascii_uppercase();
+        request.references = Some(vec![GenerationReference::Image {
+            media: GenerationReferenceAuthority::ServerPath {
+                path: "/private/never-serialize-this.png".to_string(),
+            },
+            provenance: GenerationReferenceProvenance {
+                name: Some("first.png".to_string()),
+                sha256: Some(digest),
+            },
+            mime_type: "image/png".to_string(),
+            width: 640,
+            height: 480,
+        }]);
+        let path_authority =
+            preparation_authority_fingerprint(&config, &request, &paths, &engine_config);
+        request.references = Some(vec![first]);
+        let inline_authority =
+            preparation_authority_fingerprint(&config, &request, &paths, &engine_config);
+        assert_eq!(
+            path_authority, inline_authority,
+            "transport authority must converge on the same normalized content identity"
+        );
+
+        let projection = request
+            .references
+            .as_ref()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(index, reference)| reference.redacted_metadata(index))
+            .collect::<Vec<_>>();
+        let json = serde_json::to_string(&projection).unwrap();
+        assert!(!json.contains("private"));
+        assert!(!json.contains("authority"));
+        assert!(!json.contains("AQIDBA"));
     }
 
     fn indexed_paths(

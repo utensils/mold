@@ -367,6 +367,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         scheduler: None,
         cfg_plus: None,
         edit_images: None,
+        references: None,
         source_image: params.source_image,
         source_image_name: None,
         strength: params.strength.unwrap_or(0.75),

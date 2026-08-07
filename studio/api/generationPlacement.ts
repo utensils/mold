@@ -1,4 +1,8 @@
 import { apiJsonTo, type ApiTarget } from "./client";
+import {
+  redactGenerationReference,
+  type GenerationReference,
+} from "../lib/generationReferences";
 
 export interface GenerationPlacementCandidate {
   device_id: string;
@@ -229,6 +233,15 @@ export function redactGenerationForPlacement<T extends Record<string, unknown>>(
   }
   if (Array.isArray(request.edit_images)) {
     redacted.edit_images = request.edit_images.map(() => "");
+  }
+  if (Array.isArray(request.references)) {
+    redacted.references = request.references.map((reference) =>
+      typeof reference === "object" &&
+      reference !== null &&
+      !Array.isArray(reference)
+        ? redactGenerationReference(reference as GenerationReference)
+        : reference,
+    );
   }
   if (Array.isArray(request.keyframes)) {
     redacted.keyframes = request.keyframes.map((value) => {
