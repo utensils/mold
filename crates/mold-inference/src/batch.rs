@@ -419,8 +419,10 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
             vae_cpu: false,
             audio_components_cpu: false,
         },
-        // Block streaming is not wired for the Wan DiT yet; the 1.3B and 5B
-        // checkpoints fit a 24 GB card whole once the encoder is gone.
+        // Block streaming is not wired for the Wan DiT. The 1.3B and 5B
+        // checkpoints fit a 24 GB card whole once the encoder is gone, and A14B
+        // fits because only one expert is resident at a time — the pair's VRAM
+        // demand is the max over the two, not their sum.
         block_offload: false,
         tiled_vae: TiledVaeCapability::Unsupported,
         execution: SINGLETON,
@@ -429,11 +431,12 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
         media: MediaKind::Video,
         workflows: WorkflowCapabilities {
             // Single-image conditioning is live (TI2V latent inpaint and the
-            // I2V channel concat); chained clips, generated audio, and LoRA
-            // arrive later.
+            // I2V channel concat). LoRA is live on all three weight sources:
+            // merged at load for bf16, and as a parallel low-rank branch for
+            // GGUF, which is how the A14B fast tier applies its distill pair.
             source: true,
             edit_references: false,
-            lora: false,
+            lora: true,
             generated_audio: false,
             chain: false,
         },

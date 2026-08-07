@@ -2265,6 +2265,20 @@ pub fn estimate_peak_memory(paths: &mold_core::ModelPaths, strategy: LoadStrateg
     } else {
         file_size(&paths.transformer)
     };
+    // A two-expert pair is resident one expert at a time, so its demand is the
+    // **max** over the two, not their sum. Taking the max rather than the first
+    // expert matters because the pair need not be symmetric: a config or a
+    // `MOLD_LOW_NOISE_TRANSFORMER_PATH` override can put a Q8 low expert behind
+    // a Q5 high one, and both pass the architecture check. Sizing only the high
+    // expert would admit ~10.8 GB for a plan that needs ~15.4 GB after the
+    // swap, which OOMs mid-generation rather than at admission.
+    let transformer_size = transformer_size.max(
+        paths
+            .low_noise_transformer
+            .as_deref()
+            .map(file_size)
+            .unwrap_or(0),
+    );
     // Single-file: transformer & vae point at the same on-disk file. Keys are
     // extracted from one mmap, so the file's bytes are paged in once. Don't
     // double-count. Use same-file identity rather than path-string equality
@@ -3772,6 +3786,8 @@ mod tests {
         let single = write_dummy_file(dir.path(), "single.safetensors", 44_000_000_000);
         let te = write_dummy_file(dir.path(), "te.safetensors", 24_000_000_000);
         let paths = mold_core::ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: single.clone(),
             transformer_shards: vec![],
             vae: single, // Same file as transformer — single-file path
@@ -3803,6 +3819,75 @@ mod tests {
         );
     }
 
+    /// A two-expert pair is resident one expert at a time, so admission sizes
+    /// the **larger** of the two — not the first, and not their sum.
+    ///
+    /// Sizing the first expert is the dangerous direction: an asymmetric pair
+    /// (a Q8 low expert behind a Q5 high one, which the architecture check
+    /// accepts and a `MOLD_LOW_NOISE_TRANSFORMER_PATH` override can produce)
+    /// would admit against the smaller number and then OOM at the swap,
+    /// halfway through a generation.
+    #[test]
+    fn estimate_peak_memory_sizes_the_larger_expert_of_a_pair() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let high = write_dummy_file(dir.path(), "high.gguf", 10_800_000_000);
+        let low = write_dummy_file(dir.path(), "low.gguf", 15_400_000_000);
+        let vae = write_dummy_file(dir.path(), "vae.safetensors", 250_000_000);
+        let te = write_dummy_file(dir.path(), "umt5.safetensors", 11_400_000_000);
+
+        let paths = |low_noise: Option<std::path::PathBuf>| mold_core::ModelPaths {
+            low_noise_transformer: low_noise,
+            low_noise_distilled_lora: None,
+            transformer: high.clone(),
+            transformer_shards: vec![],
+            vae: vae.clone(),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![te.clone()],
+            text_tokenizer: None,
+            decoder: None,
+        };
+
+        let high_alone = estimate_peak_memory(&paths(None), LoadStrategy::Sequential);
+        let paired = estimate_peak_memory(&paths(Some(low.clone())), LoadStrategy::Sequential);
+
+        // The invariant: a pair costs exactly what its larger expert would cost
+        // on its own. Stated as an equality against that model rather than as a
+        // byte delta, because the sequential peak is a max over phases and the
+        // 11.4 GB encoder can dominate the smaller expert.
+        let mut larger_alone = paths(None);
+        larger_alone.transformer = low.clone();
+        assert_eq!(
+            paired,
+            estimate_peak_memory(&larger_alone, LoadStrategy::Sequential),
+            "a pair must be sized as its larger expert alone"
+        );
+        assert!(
+            paired > high_alone,
+            "the larger expert must raise the estimate above the smaller one's"
+        );
+        // And emphatically not their sum: one expert is resident at a time.
+        assert!(
+            paired < high_alone + 15_400_000_000,
+            "the pair must not be sized as high + low"
+        );
+
+        // Order-independent: the max does not care which slot the big one is in.
+        let mut swapped = paths(Some(high.clone()));
+        swapped.transformer = low;
+        assert_eq!(
+            estimate_peak_memory(&swapped, LoadStrategy::Sequential),
+            paired
+        );
+    }
+
     #[test]
     fn estimate_peak_memory_separate_vae_file_still_sums() {
         // Sanity: when transformer and vae are distinct files (e.g. FLUX with
@@ -3812,6 +3897,8 @@ mod tests {
         let vae = write_dummy_file(dir.path(), "vae.safetensors", 1_000_000_000);
         let te = write_dummy_file(dir.path(), "te.safetensors", 9_000_000_000);
         let paths = mold_core::ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer,
             transformer_shards: vec![],
             vae,
@@ -3847,6 +3934,8 @@ mod tests {
         let s2 = write_dummy_file(dir.path(), "tx-2.safetensors", 4_000_000_000);
         let vae = write_dummy_file(dir.path(), "vae.safetensors", 1_000_000_000);
         let paths = mold_core::ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: s1.clone(), // primary shard
             transformer_shards: vec![s1, s2],
             vae,
@@ -3881,6 +3970,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let single = write_dummy_file(dir.path(), "single.safetensors", 14_000_000_000);
         let paths = mold_core::ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: single.clone(),
             transformer_shards: vec![single.clone()],
             vae: single,
@@ -3915,6 +4006,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let single = write_dummy_file(dir.path(), "single.safetensors", 14_000_000_000);
         let paths = mold_core::ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: single.clone(),
             transformer_shards: vec![],
             vae: single.clone(),

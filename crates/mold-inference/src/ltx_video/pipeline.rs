@@ -730,6 +730,8 @@ impl LtxVideoEngine {
         };
 
         let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: checkpoint.clone(),
             transformer_shards: Vec::new(),
             vae: resolved_vae,
@@ -1899,6 +1901,8 @@ mod tests {
 
     fn ltx_video_model_paths(dir: &Path, vae: PathBuf) -> ModelPaths {
         ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: dir.join("transformer.safetensors"),
             transformer_shards: vec![],
             vae,

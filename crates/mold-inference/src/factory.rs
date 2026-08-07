@@ -643,6 +643,8 @@ mod tests {
 
     fn dummy_paths() -> ModelPaths {
         ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: PathBuf::from("/tmp/transformer"),
             transformer_shards: vec![],
             vae: PathBuf::from("/tmp/vae"),
@@ -1094,6 +1096,8 @@ mod tests {
         // companion-pulled tokenizer / encoder assets the factory does
         // not consult when picking the constructor.
         ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
             transformer: checkpoint.to_path_buf(),
             transformer_shards: vec![],
             vae: checkpoint.to_path_buf(),

@@ -116,6 +116,15 @@ impl VarBuilder {
         &self.device
     }
 
+    /// The full key `name` resolves to under the current path.
+    ///
+    /// Callers that key side-tables (LoRA patches, per-tensor overrides) on the
+    /// checkpoint's own names need the same string `get` would look up, and
+    /// rebuilding it from a borrowed prefix is how the two drift apart.
+    pub fn key(&self, name: &str) -> String {
+        self.path(name)
+    }
+
     pub fn contains_key(&self, key: &str) -> bool {
         self.data.contains_key(&self.path(key))
     }
@@ -144,6 +153,22 @@ mod tests {
         let quantized = quantize_onto(&tensor, GgmlDType::Q8_0, &Device::Cpu)?;
         assert_eq!(quantized.shape(), tensor.shape());
         assert_eq!(quantized.dtype(), GgmlDType::Q8_0);
+        Ok(())
+    }
+
+    #[test]
+    fn key_matches_what_get_looks_up() -> Result<()> {
+        let tensor = Tensor::from_vec(vec![1f32; 32], (1, 32), &Device::Cpu)?;
+        let tensor = Arc::new(QTensor::quantize(&tensor, GgmlDType::Q8_0)?);
+        let mut tensors = HashMap::new();
+        tensors.insert("block.0.attn.weight".to_string(), tensor);
+
+        let builder = VarBuilder::from_qtensors(tensors, &Device::Cpu);
+        assert_eq!(builder.key("weight"), "weight");
+        let nested = builder.pp("block").pp("0").pp("attn");
+        assert_eq!(nested.key("weight"), "block.0.attn.weight");
+        assert!(nested.contains_key("weight"));
+        assert!(nested.get((1, 32), "weight").is_ok());
         Ok(())
     }
 }
