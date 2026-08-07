@@ -57,6 +57,11 @@ jobs:
               - 'scripts/tests/local-multi-gpu-qualification-contract.sh'
               - 'scripts/tests/local_multi_gpu_qualification_test.py'
               - 'docs/qualification/local-multi-gpu-report.schema.json'
+              - 'scripts/minimax-h3-conformance.py'
+              - 'scripts/tests/minimax-h3-conformance-contract.py'
+              - 'tests/fixtures/minimax_h3/**'
+              - 'docs/qualification/minimax-h3-*.json'
+              - 'docs/qualification/minimax-h3-conformance.md'
               - 'docs/qualification/README.md'
               - '.github/workflows/ci.yml'
             # Forced-local checks exist to compile backend-specific code that
@@ -290,6 +295,8 @@ jobs:
         run: cargo test --workspace
       - name: Test local multi-GPU qualification contract
         run: bash scripts/tests/local-multi-gpu-qualification-contract.sh
+      - name: Test MiniMax H3 conformance contract
+        run: python3 scripts/tests/minimax-h3-conformance-contract.py
       - name: Check with all optional features
         run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns
 

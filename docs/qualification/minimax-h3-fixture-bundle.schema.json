@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://utensils.io/mold/schemas/minimax-h3-fixture-bundle-v1.json",
+  "title": "Mold MiniMax H3 external fixture bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "manifest_sha256",
+    "authorization_document_sha256",
+    "capture_environment",
+    "fixtures"
+  ],
+  "properties": {
+    "schema_version": { "const": "mold.minimax-h3.fixture-bundle.v1" },
+    "manifest_sha256": { "$ref": "#/$defs/sha256" },
+    "authorization_document_sha256": { "$ref": "#/$defs/sha256" },
+    "capture_environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "framework",
+        "framework_revision",
+        "device",
+        "dtype",
+        "attention_backend",
+        "command",
+        "forbidden_accelerations_disabled"
+      ],
+      "properties": {
+        "framework": { "type": "string", "minLength": 1 },
+        "framework_revision": { "$ref": "#/$defs/commit" },
+        "device": { "type": "string", "minLength": 1 },
+        "dtype": { "type": "string", "minLength": 1 },
+        "attention_backend": { "type": "string", "minLength": 1 },
+        "command": { "type": "string", "minLength": 1 },
+        "forbidden_accelerations_disabled": { "const": true }
+      }
+    },
+    "fixtures": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/fixture" }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "layer",
+        "authority_tier",
+        "relative_path",
+        "sha256",
+        "component_index_sha256",
+        "tensor",
+        "tolerance"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "layer": { "type": "string", "minLength": 1 },
+        "authority_tier": {
+          "enum": ["exact-full-bf16", "quantized-structural", "synthetic"]
+        },
+        "relative_path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "component_index_sha256": { "$ref": "#/$defs/sha256" },
+        "tensor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["shape", "dtype", "min", "max", "mean", "std", "sampled_values"],
+          "properties": {
+            "shape": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "integer", "minimum": 0 }
+            },
+            "dtype": { "type": "string", "minLength": 1 },
+            "min": { "type": "number" },
+            "max": { "type": "number" },
+            "mean": { "type": "number" },
+            "std": { "type": "number", "minimum": 0 },
+            "sampled_values": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "number" }
+            }
+          }
+        },
+        "tolerance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["absolute", "relative", "metric"],
+          "properties": {
+            "absolute": { "type": "number", "minimum": 0 },
+            "relative": { "type": "number", "minimum": 0 },
+            "metric": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://utensils.io/mold/schemas/minimax-h3-conformance-manifest-v1.json",
+  "title": "Mold MiniMax H3 conformance manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "family",
+    "numerical_authority",
+    "sources",
+    "component_indexes",
+    "capture_policy",
+    "fixture_layers",
+    "day_zero_contract",
+    "synthetic_fixture"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "mold.minimax-h3.conformance-manifest.v1"
+    },
+    "family": {
+      "const": "minimax-h3"
+    },
+    "numerical_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "precision", "excluded_accelerations"],
+      "properties": {
+        "source_id": { "const": "diffusers" },
+        "precision": { "const": "official-bf16-fp32-mixed" },
+        "excluded_accelerations": {
+          "type": "array",
+          "minItems": 6,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 7,
+      "items": { "$ref": "#/$defs/source" }
+    },
+    "component_indexes": {
+      "type": "array",
+      "minItems": 7,
+      "items": { "$ref": "#/$defs/component_index" }
+    },
+    "capture_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "external_fixture_root_required",
+        "authorization_record_required",
+        "weights_in_repository_forbidden",
+        "generated_media_in_repository_forbidden",
+        "authorization_issue",
+        "fixture_root_environment",
+        "authorization_record_environment"
+      ],
+      "properties": {
+        "external_fixture_root_required": { "type": "boolean" },
+        "authorization_record_required": { "type": "boolean" },
+        "weights_in_repository_forbidden": { "type": "boolean" },
+        "generated_media_in_repository_forbidden": { "type": "boolean" },
+        "authorization_issue": {
+          "const": "https://github.com/utensils/mold/issues/831"
+        },
+        "fixture_root_environment": { "const": "MOLD_H3_FIXTURE_ROOT" },
+        "authorization_record_environment": {
+          "const": "MOLD_H3_AUTHORIZATION_RECORD"
+        }
+      }
+    },
+    "fixture_layers": {
+      "type": "array",
+      "minItems": 12,
+      "items": { "$ref": "#/$defs/fixture_layer" }
+    },
+    "day_zero_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fps",
+        "frame_step",
+        "frame_offset",
+        "nominal_15_second_frames",
+        "nominal_15_second_actual_duration",
+        "mold_decision",
+        "diffusers_discrepancy"
+      ],
+      "properties": {
+        "fps": { "const": 24 },
+        "frame_step": { "const": 17 },
+        "frame_offset": { "const": 5 },
+        "nominal_15_second_frames": { "const": 362 },
+        "nominal_15_second_actual_duration": { "const": 15.083333333333334 },
+        "mold_decision": { "const": "accept-aligned-362" },
+        "diffusers_discrepancy": { "const": "aligns-to-362-then-rejects-over-15s" }
+      }
+    },
+    "synthetic_fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "sha256", "weights_required"],
+      "properties": {
+        "relative_path": { "const": "synthetic-v1.json" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "weights_required": { "const": false }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "repository", "revision", "role", "authority"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "repository": { "type": "string", "pattern": "^https://" },
+        "revision": { "$ref": "#/$defs/commit" },
+        "role": { "type": "string", "minLength": 1 },
+        "authority": {
+          "enum": ["numerical", "semantic", "deployment", "performance"]
+        }
+      }
+    },
+    "component_index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source_id", "relative_path", "sha256"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "source_id": { "const": "minimax-official-model" },
+        "relative_path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "fixture_layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "authority_tier", "required_provenance", "required_measurements"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "authority_tier": {
+          "enum": ["exact-full-bf16", "quantized-structural", "synthetic"]
+        },
+        "required_provenance": {
+          "type": "array",
+          "minItems": 5,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "required_measurements": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}
