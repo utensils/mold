@@ -6,6 +6,7 @@ use super::visual_condition::{
     H3_LATENTS_STD,
 };
 use super::visual_geometry::{SpatialTilePlan, VisualTemporalGeometry};
+use super::visual_weights::ValidatedVisualVaeWeights;
 use candle::{bail, DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::{ops, Conv2d, Conv2dConfig, GroupNorm, Init, VarBuilder};
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,14 @@ const TEST_WEIGHT_INIT: Init = Init::Randn {
     mean: 0.0,
     stdev: 0.02,
 };
+
+fn detach_mmap_storage(tensor: Tensor) -> Result<Tensor> {
+    if tensor.device().is_cpu() {
+        tensor.copy()
+    } else {
+        Ok(tensor)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -260,9 +269,18 @@ pub enum WeightLayout {
     OfficialComfySource,
 }
 
-/// FP32 parameter storage is invariant. The released CUDA decode executes
-/// autocast-eligible projections/convolutions in FP16 while norms and rotary
-/// construction stay FP32. CPU and Metal remain FP32.
+impl WeightLayout {
+    pub(crate) const fn artifact_dtype(self) -> DType {
+        match self {
+            Self::Diffusers => DType::F32,
+            Self::OfficialComfySource => DType::F16,
+        }
+    }
+}
+
+/// The artifact dtype remains the sole resident parameter dtype. The released
+/// CUDA decode executes autocast-eligible projections/convolutions in FP16
+/// while norms and rotary construction stay FP32. CPU and Metal remain FP32.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DecodeComputePolicy {
     #[default]
@@ -279,13 +297,26 @@ impl DecodeComputePolicy {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VisualAttentionBackend {
+    /// Fused FlashAttention v2 on eligible CUDA builds, fused SDPA on Metal,
+    /// and bounded exact math everywhere else.
+    #[default]
+    Auto,
+    /// Exact bounded math attention, useful for parity and deterministic UAT.
+    Math,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VisualVaePhase {
+    LoadWeights,
     EncodeChunk,
     EncodeTile,
     DecodeChunk,
     DecodeTile,
+    DecodeAssembly,
     DecoderBlock,
+    AttentionChunk,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -318,38 +349,24 @@ pub trait DecodeSink {
 
 #[derive(Clone, Debug)]
 struct MixedLinear {
-    stored_weight: Tensor,
-    stored_bias: Option<Tensor>,
-    compute_weight: Option<Tensor>,
-    compute_bias: Option<Tensor>,
+    resident_weight: Tensor,
+    resident_bias: Option<Tensor>,
     compute_dtype: DType,
 }
 
 impl MixedLinear {
     fn new(weight: Tensor, bias: Option<Tensor>, compute_dtype: DType) -> Result<Self> {
-        let stored_weight = weight.to_dtype(DType::F32)?;
-        let stored_bias = match bias {
-            Some(bias) => Some(bias.to_dtype(DType::F32)?),
-            None => None,
-        };
-        let compute_weight = if compute_dtype == DType::F32 {
-            None
-        } else {
-            Some(stored_weight.to_dtype(compute_dtype)?)
-        };
-        let compute_bias = if compute_dtype == DType::F32 {
-            None
-        } else {
-            stored_bias
-                .as_ref()
-                .map(|bias| bias.to_dtype(compute_dtype))
-                .transpose()?
-        };
+        if bias
+            .as_ref()
+            .is_some_and(|bias| bias.dtype() != weight.dtype())
+        {
+            bail!("H3 resident linear weight and bias dtypes must match")
+        }
+        let weight = detach_mmap_storage(weight)?;
+        let bias = bias.map(detach_mmap_storage).transpose()?;
         Ok(Self {
-            stored_weight,
-            stored_bias,
-            compute_weight,
-            compute_bias,
+            resident_weight: weight,
+            resident_bias: bias,
             compute_dtype,
         })
     }
@@ -361,10 +378,15 @@ impl MixedLinear {
     }
 
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        let (weight, bias) = match &self.compute_weight {
-            Some(weight) => (weight, self.compute_bias.as_ref()),
-            None => (&self.stored_weight, self.stored_bias.as_ref()),
-        };
+        // Official Diffusers files remain resident F32 and are autocast at
+        // each eligible operation. Comfy files remain resident F16. Never
+        // retain a second full decoder copy merely to change compute dtype.
+        let weight = self.resident_weight.to_dtype(self.compute_dtype)?;
+        let bias = self
+            .resident_bias
+            .as_ref()
+            .map(|bias| bias.to_dtype(self.compute_dtype))
+            .transpose()?;
         let input = input.to_dtype(self.compute_dtype)?;
         let mut output_shape = input.dims().to_vec();
         let input_dim = output_shape
@@ -382,31 +404,31 @@ impl MixedLinear {
         output_shape.pop();
         output_shape.push(weight.dim(0)?);
         let output = output.reshape(output_shape.as_slice())?;
-        match bias {
+        match &bias {
             Some(bias) => output.broadcast_add(bias),
             None => Ok(output),
         }
     }
 
     fn stored_dtype(&self) -> DType {
-        self.stored_weight.dtype()
+        self.resident_weight.dtype()
     }
 }
 
 #[derive(Clone, Debug)]
-struct Fp32Vector {
-    stored: Tensor,
+struct ResidentVector {
+    resident: Tensor,
 }
 
-impl Fp32Vector {
-    fn new(stored: Tensor) -> Result<Self> {
+impl ResidentVector {
+    fn new(resident: Tensor) -> Result<Self> {
         Ok(Self {
-            stored: stored.to_dtype(DType::F32)?,
+            resident: detach_mmap_storage(resident)?,
         })
     }
 
-    fn value(&self) -> &Tensor {
-        &self.stored
+    fn value(&self, dtype: DType) -> Result<Tensor> {
+        self.resident.to_dtype(dtype)
     }
 }
 
@@ -428,7 +450,7 @@ impl PointwiseConv3d {
 
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
         let (batch, channels, frames, height, width) = input.dims5()?;
-        let output_channels = self.linear.stored_weight.dim(0)?;
+        let output_channels = self.linear.resident_weight.dim(0)?;
         self.linear
             .forward(
                 &input
@@ -462,8 +484,9 @@ where
 struct H3CausalConv3d {
     temporal_kernel: usize,
     temporal_stride: usize,
+    spatial_stride: usize,
     spatial_padding: usize,
-    slices: Vec<Conv2d>,
+    slices: Vec<Tensor>,
     bias: Tensor,
 }
 
@@ -485,28 +508,27 @@ impl H3CausalConv3d {
         let bias = vb.get_with_hints(output_channels, "bias", Init::Const(0.0))?;
         let mut slices = Vec::with_capacity(kernel);
         for temporal in 0..kernel {
-            slices.push(Conv2d::new(
+            slices.push(detach_mmap_storage(
                 weight.i((.., .., temporal, .., ..))?.contiguous()?,
-                None,
-                Conv2dConfig {
-                    stride: spatial_stride,
-                    ..Default::default()
-                },
-            ));
+            )?);
         }
         Ok(Self {
             temporal_kernel: kernel,
             temporal_stride,
+            spatial_stride,
             spatial_padding,
             slices,
-            bias,
+            bias: detach_mmap_storage(bias)?,
         })
     }
 
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
         let (batch, channels, _frames, height, width) = input.dims5()?;
-        if input.dtype() != DType::F32 {
-            bail!("H3 causal encoder convolutions require FP32 activations")
+        if !matches!(
+            input.dtype(),
+            DType::F16 | DType::BF16 | DType::F32 | DType::F64
+        ) {
+            bail!("H3 causal encoder convolutions require floating-point activations")
         }
         let front = self.temporal_kernel.saturating_sub(1);
         let input = if front == 0 {
@@ -516,7 +538,7 @@ impl H3CausalConv3d {
                 &[
                     &Tensor::zeros(
                         (batch, channels, front, height, width),
-                        DType::F32,
+                        input.dtype(),
                         input.device(),
                     )?,
                     input,
@@ -539,7 +561,15 @@ impl H3CausalConv3d {
                     .squeeze(2)?
                     .contiguous()?;
                 let frame = reflect_pad_4d(&frame, self.spatial_padding, self.spatial_padding)?;
-                let projected = frame.apply(&self.slices[kernel_frame])?;
+                let conv = Conv2d::new(
+                    self.slices[kernel_frame].to_dtype(frame.dtype())?,
+                    None,
+                    Conv2dConfig {
+                        stride: self.spatial_stride,
+                        ..Default::default()
+                    },
+                );
+                let projected = frame.apply(&conv)?;
                 accumulated = Some(match accumulated {
                     Some(previous) => previous.add(&projected)?,
                     None => projected,
@@ -554,7 +584,13 @@ impl H3CausalConv3d {
             );
         }
         let output = cat_tensors(&outputs, 2)?;
-        output.broadcast_add(&self.bias.reshape((1, self.bias.dim(0)?, 1, 1, 1))?)
+        output.broadcast_add(&self.bias.to_dtype(output.dtype())?.reshape((
+            1,
+            self.bias.dim(0)?,
+            1,
+            1,
+            1,
+        ))?)
     }
 }
 
@@ -598,20 +634,38 @@ fn pad_bottom_right_reflect(input: &Tensor) -> Result<Tensor> {
 
 #[derive(Clone, Debug)]
 struct TemporalIsolatedGroupNorm {
-    norm: GroupNorm,
+    weight: Tensor,
+    bias: Tensor,
+    channels: usize,
+    groups: usize,
+    eps: f64,
 }
 
 impl TemporalIsolatedGroupNorm {
     fn load(vb: VarBuilder, groups: usize, channels: usize, eps: f64) -> Result<Self> {
-        let weight = vb.get_with_hints(channels, "weight", Init::Const(1.0))?;
-        let bias = vb.get_with_hints(channels, "bias", Init::Const(0.0))?;
         Ok(Self {
-            norm: GroupNorm::new(weight, bias, channels, groups, eps)?,
+            weight: detach_mmap_storage(vb.get_with_hints(
+                channels,
+                "weight",
+                Init::Const(1.0),
+            )?)?,
+            bias: detach_mmap_storage(vb.get_with_hints(channels, "bias", Init::Const(0.0))?)?,
+            channels,
+            groups,
+            eps,
         })
     }
 
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        map_frames(input, |frame| frame.apply(&self.norm))
+        let dtype = input.dtype();
+        let norm = GroupNorm::new(
+            self.weight.to_dtype(dtype)?,
+            self.bias.to_dtype(dtype)?,
+            self.channels,
+            self.groups,
+            self.eps,
+        )?;
+        map_frames(input, |frame| frame.apply(&norm))
     }
 }
 
@@ -858,10 +912,11 @@ struct Fp32RmsNorm {
 impl Fp32RmsNorm {
     fn load_affine(vb: VarBuilder, dim: usize, eps: f64) -> Result<Self> {
         Ok(Self {
-            weight: Some(
-                vb.get_with_hints(dim, "weight", Init::Const(1.0))?
-                    .to_dtype(DType::F32)?,
-            ),
+            weight: Some(detach_mmap_storage(vb.get_with_hints(
+                dim,
+                "weight",
+                Init::Const(1.0),
+            )?)?),
             eps,
         })
     }
@@ -875,7 +930,7 @@ impl Fp32RmsNorm {
         let variance = input32.sqr()?.mean_keepdim(D::Minus1)?;
         let normalized = input32.broadcast_div(&variance.affine(1.0, self.eps)?.sqrt()?)?;
         let normalized = match &self.weight {
-            Some(weight) => normalized.broadcast_mul(weight)?,
+            Some(weight) => normalized.broadcast_mul(&weight.to_dtype(DType::F32)?)?,
             None => normalized,
         };
         normalized.to_dtype(output_dtype)
@@ -892,12 +947,8 @@ struct Fp32LayerNorm {
 impl Fp32LayerNorm {
     fn load(vb: VarBuilder, dim: usize, eps: f64) -> Result<Self> {
         Ok(Self {
-            weight: vb
-                .get_with_hints(dim, "weight", Init::Const(1.0))?
-                .to_dtype(DType::F32)?,
-            bias: vb
-                .get_with_hints(dim, "bias", Init::Const(0.0))?
-                .to_dtype(DType::F32)?,
+            weight: detach_mmap_storage(vb.get_with_hints(dim, "weight", Init::Const(1.0))?)?,
+            bias: detach_mmap_storage(vb.get_with_hints(dim, "bias", Init::Const(0.0))?)?,
             eps,
         })
     }
@@ -909,8 +960,8 @@ impl Fp32LayerNorm {
         let variance = centered.sqr()?.mean_keepdim(D::Minus1)?;
         centered
             .broadcast_div(&variance.affine(1.0, self.eps)?.sqrt()?)?
-            .broadcast_mul(&self.weight)?
-            .broadcast_add(&self.bias)?
+            .broadcast_mul(&self.weight.to_dtype(DType::F32)?)?
+            .broadcast_add(&self.bias.to_dtype(DType::F32)?)?
             .to_dtype(output_dtype)
     }
 }
@@ -987,6 +1038,7 @@ struct H3Attention {
     heads: usize,
     head_dim: usize,
     compute_dtype: DType,
+    backend: VisualAttentionBackend,
 }
 
 impl H3Attention {
@@ -998,6 +1050,7 @@ impl H3Attention {
         head_dim: usize,
         eps: f64,
         compute_dtype: DType,
+        backend: VisualAttentionBackend,
     ) -> Result<Self> {
         let qkv = match layout {
             WeightLayout::Diffusers => {
@@ -1037,10 +1090,17 @@ impl H3Attention {
             heads,
             head_dim,
             compute_dtype,
+            backend,
         })
     }
 
-    fn forward(&self, input: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+    fn forward(
+        &self,
+        input: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        observer: &mut dyn VisualVaeObserver,
+    ) -> Result<Tensor> {
         let (batch, sequence, dim) = input.dims3()?;
         let qkv = self.qkv.forward(input)?;
         let (query, key, value) =
@@ -1051,17 +1111,175 @@ impl H3Attention {
         let rotary_dim = cos.dim(D::Minus1)?;
         query = apply_rope(&query, cos, sin, rotary_dim)?;
         key = apply_rope(&key, cos, sin, rotary_dim)?;
-        let scores = query
-            .matmul(&key.transpose(2, 3)?)?
-            .affine(1.0 / (self.head_dim as f64).sqrt(), 0.0)?;
-        let attention = ops::softmax_last_dim(&scores)?;
-        let hidden = attention
-            .matmul(&value)?
-            .permute((0, 2, 1, 3))?
-            .contiguous()?
-            .reshape((batch, sequence, dim))?;
+        let hidden = visual_attention(
+            &query,
+            &key,
+            &value,
+            1.0 / (self.head_dim as f64).sqrt() as f32,
+            self.backend,
+            observer,
+        )?
+        .permute((0, 2, 1, 3))?
+        .contiguous()?
+        .reshape((batch, sequence, dim))?;
         self.output.forward(&hidden)
     }
+}
+
+const DEFAULT_ATTENTION_QUERY_CHUNK: usize = 256;
+
+fn visual_attention(
+    query: &Tensor,
+    key: &Tensor,
+    value: &Tensor,
+    scale: f32,
+    backend: VisualAttentionBackend,
+    observer: &mut dyn VisualVaeObserver,
+) -> Result<Tensor> {
+    if backend == VisualAttentionBackend::Auto && query.device().is_metal() {
+        observer.checkpoint(VisualVaeEvent {
+            phase: VisualVaePhase::AttentionChunk,
+            completed: 0,
+            total: 1,
+        })?;
+        let output = ops::sdpa(query, key, value, None, false, scale, 1.0)?;
+        observer.checkpoint(VisualVaeEvent {
+            phase: VisualVaePhase::AttentionChunk,
+            completed: 1,
+            total: 1,
+        })?;
+        return Ok(output);
+    }
+    if backend == VisualAttentionBackend::Auto && flash_attention_eligible(query) {
+        observer.checkpoint(VisualVaeEvent {
+            phase: VisualVaePhase::AttentionChunk,
+            completed: 0,
+            total: 1,
+        })?;
+        if let Some(output) = try_flash_attention(query, key, value, scale)? {
+            observer.checkpoint(VisualVaeEvent {
+                phase: VisualVaePhase::AttentionChunk,
+                completed: 1,
+                total: 1,
+            })?;
+            return Ok(output);
+        }
+    }
+    bounded_math_attention(
+        query,
+        key,
+        value,
+        scale,
+        DEFAULT_ATTENTION_QUERY_CHUNK,
+        observer,
+    )
+}
+
+fn bounded_math_attention(
+    query: &Tensor,
+    key: &Tensor,
+    value: &Tensor,
+    scale: f32,
+    chunk_size: usize,
+    observer: &mut dyn VisualVaeObserver,
+) -> Result<Tensor> {
+    if chunk_size == 0 {
+        bail!("H3 attention query chunk must be positive")
+    }
+    let (batch, heads, query_len, head_dim) = query.dims4()?;
+    let (key_batch, key_heads, key_len, key_dim) = key.dims4()?;
+    let (value_batch, value_heads, value_len, value_dim) = value.dims4()?;
+    if (batch, heads, head_dim) != (key_batch, key_heads, key_dim)
+        || (batch, heads, key_len) != (value_batch, value_heads, value_len)
+    {
+        bail!("H3 attention QKV shapes do not agree")
+    }
+    attention_score_element_bound(batch, heads, query_len, key_len, chunk_size)?;
+    let query = query.reshape((batch * heads, query_len, head_dim))?;
+    let key_t = key
+        .reshape((batch * heads, key_len, key_dim))?
+        .transpose(1, 2)?;
+    let value = value.reshape((batch * heads, value_len, value_dim))?;
+    let total = query_len.div_ceil(chunk_size);
+    let mut chunks = Vec::with_capacity(total);
+    for chunk in 0..total {
+        observer.checkpoint(VisualVaeEvent {
+            phase: VisualVaePhase::AttentionChunk,
+            completed: chunk,
+            total,
+        })?;
+        let start = chunk * chunk_size;
+        let len = (query_len - start).min(chunk_size);
+        let scores = query
+            .narrow(1, start, len)?
+            .matmul(&key_t)?
+            .affine(scale as f64, 0.0)?;
+        chunks.push(ops::softmax_last_dim(&scores)?.matmul(&value)?);
+    }
+    observer.checkpoint(VisualVaeEvent {
+        phase: VisualVaePhase::AttentionChunk,
+        completed: total,
+        total,
+    })?;
+    cat_tensors(&chunks, 1)?.reshape((batch, heads, query_len, value_dim))
+}
+
+fn attention_score_element_bound(
+    batch: usize,
+    heads: usize,
+    query_len: usize,
+    key_len: usize,
+    chunk_size: usize,
+) -> Result<usize> {
+    [batch, heads, query_len.min(chunk_size), key_len]
+        .into_iter()
+        .try_fold(1usize, |total, value| {
+            total.checked_mul(value).ok_or_else(|| {
+                candle::Error::Msg("H3 attention workspace element count overflow".into())
+            })
+        })
+}
+
+fn flash_attention_eligible(query: &Tensor) -> bool {
+    query.device().is_cuda()
+        && matches!(query.dtype(), DType::F16 | DType::BF16)
+        && query
+            .dim(D::Minus1)
+            .is_ok_and(|dim| dim > 0 && dim.is_multiple_of(8) && dim <= 512)
+}
+
+#[cfg(feature = "flash-attn")]
+fn try_flash_attention(
+    query: &Tensor,
+    key: &Tensor,
+    value: &Tensor,
+    scale: f32,
+) -> Result<Option<Tensor>> {
+    let query = to_flash_layout(query)?;
+    let key = to_flash_layout(key)?;
+    let value = to_flash_layout(value)?;
+    let output = candle_flash_attn::flash_attn(&query, &key, &value, scale, false)?;
+    Ok(Some(output.transpose(1, 2)?.contiguous()?))
+}
+
+#[cfg(feature = "flash-attn")]
+fn to_flash_layout(tensor: &Tensor) -> Result<Tensor> {
+    let tensor = tensor.transpose(1, 2)?;
+    if tensor.stride().last() == Some(&1) {
+        Ok(tensor)
+    } else {
+        tensor.contiguous()
+    }
+}
+
+#[cfg(not(feature = "flash-attn"))]
+fn try_flash_attention(
+    _query: &Tensor,
+    _key: &Tensor,
+    _value: &Tensor,
+    _scale: f32,
+) -> Result<Option<Tensor>> {
+    Ok(None)
 }
 
 fn split_qkv_layout(
@@ -1203,10 +1421,11 @@ fn split_gate_value(
 struct H3TransformerBlock {
     norm1: Fp32RmsNorm,
     attention: H3Attention,
-    scale1: Fp32Vector,
+    scale1: ResidentVector,
     norm2: Fp32RmsNorm,
     feed_forward: H3FeedForward,
-    scale2: Fp32Vector,
+    scale2: ResidentVector,
+    residual_dtype: DType,
 }
 
 impl H3TransformerBlock {
@@ -1219,6 +1438,8 @@ impl H3TransformerBlock {
         ffn_mult: usize,
         eps: f64,
         compute_dtype: DType,
+        residual_dtype: DType,
+        attention_backend: VisualAttentionBackend,
     ) -> Result<Self> {
         Ok(Self {
             norm1: Fp32RmsNorm::load_affine(vb.pp("norm1"), dim, eps)?,
@@ -1230,32 +1451,37 @@ impl H3TransformerBlock {
                 head_dim,
                 eps,
                 compute_dtype,
+                attention_backend,
             )?,
-            scale1: Fp32Vector::new(vb.get_with_hints(dim, "scale1", Init::Const(0.0))?)?,
+            scale1: ResidentVector::new(vb.get_with_hints(dim, "scale1", Init::Const(0.0))?)?,
             norm2: Fp32RmsNorm::load_affine(vb.pp("norm2"), dim, eps)?,
             feed_forward: H3FeedForward::load(vb.pp("ff"), layout, dim, ffn_mult, compute_dtype)?,
-            scale2: Fp32Vector::new(vb.get_with_hints(dim, "scale2", Init::Const(0.0))?)?,
+            scale2: ResidentVector::new(vb.get_with_hints(dim, "scale2", Init::Const(0.0))?)?,
+            residual_dtype,
         })
     }
 
-    fn forward(&self, input: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
-        // Autocast lowers the projection sites, but the released learned
-        // scales are FP32. Their pointwise products promote the residual
-        // stream back to FP32 after every branch.
-        let norm = self.norm1.forward(input, DType::F32)?;
+    fn forward(
+        &self,
+        input: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        observer: &mut dyn VisualVaeObserver,
+    ) -> Result<Tensor> {
+        let norm = self.norm1.forward(input, self.residual_dtype)?;
         let attention = self
             .attention
-            .forward(&norm, cos, sin)?
-            .to_dtype(DType::F32)?
-            .broadcast_mul(self.scale1.value())?;
-        let hidden = input.to_dtype(DType::F32)?.add(&attention)?;
-        let norm = self.norm2.forward(&hidden, DType::F32)?;
+            .forward(&norm, cos, sin, observer)?
+            .to_dtype(self.residual_dtype)?
+            .broadcast_mul(&self.scale1.value(self.residual_dtype)?)?;
+        let hidden = input.to_dtype(self.residual_dtype)?.add(&attention)?;
+        let norm = self.norm2.forward(&hidden, self.residual_dtype)?;
         hidden.add(
             &self
                 .feed_forward
                 .forward(&norm)?
-                .to_dtype(DType::F32)?
-                .broadcast_mul(self.scale2.value())?,
+                .to_dtype(self.residual_dtype)?
+                .broadcast_mul(&self.scale2.value(self.residual_dtype)?)?,
         )
     }
 }
@@ -1263,7 +1489,7 @@ impl H3TransformerBlock {
 #[derive(Clone, Debug)]
 struct H3VitDecoder3d {
     projection_in: MixedLinear,
-    register_tokens: Fp32Vector,
+    register_tokens: ResidentVector,
     blocks: Vec<H3TransformerBlock>,
     norm_out: Fp32LayerNorm,
     projection_out: MixedLinear,
@@ -1275,6 +1501,7 @@ struct H3VitDecoder3d {
     patch_size_t: usize,
     out_channels: usize,
     compute_dtype: DType,
+    residual_dtype: DType,
 }
 
 impl H3VitDecoder3d {
@@ -1283,14 +1510,26 @@ impl H3VitDecoder3d {
         vb: VarBuilder,
         layout: WeightLayout,
         compute_dtype: DType,
+        attention_backend: VisualAttentionBackend,
+        observer: &mut dyn VisualVaeObserver,
     ) -> Result<Self> {
         let dim = config.decoder_num_attention_heads * config.decoder_attention_head_dim;
+        let residual_dtype = match layout {
+            WeightLayout::Diffusers => DType::F32,
+            WeightLayout::OfficialComfySource => compute_dtype,
+        };
         let projection_in_name = match layout {
             WeightLayout::Diffusers => "proj_in",
             WeightLayout::OfficialComfySource => "x_embedder",
         };
         let mut blocks = Vec::with_capacity(config.decoder_num_layers);
+        let load_total = config.decoder_num_layers + 1;
         for block in 0..config.decoder_num_layers {
+            observer.checkpoint(VisualVaeEvent {
+                phase: VisualVaePhase::LoadWeights,
+                completed: block + 1,
+                total: load_total,
+            })?;
             blocks.push(H3TransformerBlock::load(
                 vb.pp(format!("transformer_blocks.{block}")),
                 layout,
@@ -1300,8 +1539,15 @@ impl H3VitDecoder3d {
                 config.decoder_ffn_mult,
                 config.decoder_norm_eps,
                 compute_dtype,
+                residual_dtype,
+                attention_backend,
             )?);
         }
+        observer.checkpoint(VisualVaeEvent {
+            phase: VisualVaePhase::LoadWeights,
+            completed: load_total,
+            total: load_total,
+        })?;
         let patch_size = config.spatial_compression_ratio();
         let patch_size_t = config.temporal_compression_ratio();
         let output = config.out_channels * patch_size_t * patch_size * patch_size;
@@ -1312,7 +1558,7 @@ impl H3VitDecoder3d {
                 dim,
                 compute_dtype,
             )?,
-            register_tokens: Fp32Vector::new(vb.get_with_hints(
+            register_tokens: ResidentVector::new(vb.get_with_hints(
                 (1, config.decoder_num_register_tokens, dim),
                 "register_tokens",
                 TEST_WEIGHT_INIT,
@@ -1331,6 +1577,7 @@ impl H3VitDecoder3d {
             patch_size_t,
             out_channels: config.out_channels,
             compute_dtype,
+            residual_dtype,
         })
     }
 
@@ -1343,13 +1590,14 @@ impl H3VitDecoder3d {
                 .contiguous()?
                 .reshape((batch, patches, channels))?,
         )?;
-        // `proj_in` is autocast-eligible, then concatenation with the released
-        // FP32 register parameters promotes the decoder residual stream.
-        hidden = hidden.to_dtype(DType::F32)?;
-        let registers = self.register_tokens.value().repeat((batch, 1, 1))?;
+        hidden = hidden.to_dtype(self.residual_dtype)?;
+        let registers = self
+            .register_tokens
+            .value(self.residual_dtype)?
+            .repeat((batch, 1, 1))?;
         let zero = Tensor::zeros(
             (batch, 1, self.heads * self.head_dim),
-            DType::F32,
+            self.residual_dtype,
             input.device(),
         )?;
         hidden = Tensor::cat(&[&hidden, &registers, &zero], 1)?;
@@ -1368,7 +1616,7 @@ impl H3VitDecoder3d {
                 completed: index,
                 total: self.blocks.len(),
             })?;
-            hidden = block.forward(&hidden, &cos, &sin)?;
+            hidden = block.forward(&hidden, &cos, &sin, observer)?;
         }
         observer.checkpoint(VisualVaeEvent {
             phase: VisualVaePhase::DecoderBlock,
@@ -1410,45 +1658,117 @@ pub struct MiniMaxH3VisualVae {
     quant_conv: PointwiseConv3d,
     post_quant_conv: PointwiseConv3d,
     decoder: H3VitDecoder3d,
+    encoder_compute_dtype: DType,
     compute_dtype: DType,
+    attention_backend: VisualAttentionBackend,
 }
 
 impl MiniMaxH3VisualVae {
-    pub fn new(
+    /// Construct from an opaque artifact proof. This is the only public model
+    /// loader: callers cannot validate one path and mmap an unrelated builder.
+    /// Authorization must precede creation of `validated`.
+    pub fn from_validated(
+        config: MiniMaxH3VisualVaeConfig,
+        validated: &ValidatedVisualVaeWeights,
+        device: &Device,
+        decode_policy: DecodeComputePolicy,
+        attention_backend: VisualAttentionBackend,
+        observer: &mut dyn VisualVaeObserver,
+    ) -> Result<Self> {
+        config.validate_production_contract()?;
+        validated.revalidate_files()?;
+        let vb = validated.mmap_var_builder(device)?;
+        let model = Self::load(
+            config,
+            vb,
+            validated.layout(),
+            decode_policy,
+            attention_backend,
+            observer,
+        )?;
+        validated.revalidate_files()?;
+        Ok(model)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new(
         config: MiniMaxH3VisualVaeConfig,
         vb: VarBuilder,
         layout: WeightLayout,
         decode_policy: DecodeComputePolicy,
     ) -> Result<Self> {
+        Self::load(
+            config,
+            vb,
+            layout,
+            decode_policy,
+            VisualAttentionBackend::Auto,
+            &mut NoopVisualVaeObserver,
+        )
+    }
+
+    fn load(
+        config: MiniMaxH3VisualVaeConfig,
+        vb: VarBuilder,
+        layout: WeightLayout,
+        decode_policy: DecodeComputePolicy,
+        attention_backend: VisualAttentionBackend,
+        observer: &mut dyn VisualVaeObserver,
+    ) -> Result<Self> {
         config.validate()?;
-        if vb.dtype() != DType::F32 {
+        if vb.dtype() != layout.artifact_dtype() {
             bail!(
-                "H3 visual VAE VarBuilder must expose FP32 stored weights, got {:?}",
-                vb.dtype()
+                "H3 visual VAE {:?} VarBuilder must preserve {:?} artifact weights, got {:?}",
+                layout,
+                layout.artifact_dtype(),
+                vb.dtype(),
             )
         }
         let compute_dtype = decode_policy.effective_dtype(vb.device());
+        let encoder_compute_dtype = match layout {
+            WeightLayout::Diffusers => DType::F32,
+            WeightLayout::OfficialComfySource => compute_dtype,
+        };
+        observer.checkpoint(VisualVaeEvent {
+            phase: VisualVaePhase::LoadWeights,
+            completed: 0,
+            total: config.decoder_num_layers + 1,
+        })?;
         let encoder = H3Encoder3d::load(&config, vb.clone(), layout)?;
         let quant_conv = PointwiseConv3d::load(
             vb.pp("quant_conv"),
             config.latent_channels * 2,
             config.latent_channels * 2,
-            DType::F32,
+            encoder_compute_dtype,
         )?;
+        observer.checkpoint(VisualVaeEvent {
+            phase: VisualVaePhase::LoadWeights,
+            completed: 1,
+            total: config.decoder_num_layers + 1,
+        })?;
         let post_quant_conv = PointwiseConv3d::load(
             vb.pp("post_quant_conv"),
             config.latent_channels,
             config.latent_channels,
             compute_dtype,
         )?;
-        let decoder = H3VitDecoder3d::load(&config, vb.pp("decoder"), layout, compute_dtype)?;
+        let decoder = H3VitDecoder3d::load(
+            &config,
+            vb.pp("decoder"),
+            layout,
+            compute_dtype,
+            attention_backend,
+            observer,
+        )?;
         Ok(Self {
             config,
             encoder,
             quant_conv,
             post_quant_conv,
             decoder,
+            encoder_compute_dtype,
             compute_dtype,
+            attention_backend,
         })
     }
 
@@ -1462,6 +1782,10 @@ impl MiniMaxH3VisualVae {
 
     pub fn decode_compute_dtype(&self) -> DType {
         self.compute_dtype
+    }
+
+    pub fn attention_backend(&self) -> VisualAttentionBackend {
+        self.attention_backend
     }
 
     pub fn encode_condition_u8(
@@ -1557,7 +1881,11 @@ impl MiniMaxH3VisualVae {
         if !self.config.tiling {
             return self
                 .quant_conv
-                .forward(&self.encoder.forward(pixels)?)
+                .forward(
+                    &self
+                        .encoder
+                        .forward(&pixels.to_dtype(self.encoder_compute_dtype)?)?,
+                )
                 .and_then(|tensor| tensor.to_dtype(DType::F32));
         }
         let height_plan = SpatialTilePlan::new(
@@ -1583,7 +1911,10 @@ impl MiniMaxH3VisualVae {
                     completed,
                     total,
                 })?;
-                let tile = pixels.narrow(3, y, tile_height)?.narrow(4, x, tile_width)?;
+                let tile = pixels
+                    .narrow(3, y, tile_height)?
+                    .narrow(4, x, tile_width)?
+                    .to_dtype(self.encoder_compute_dtype)?;
                 row.push(self.quant_conv.forward(&self.encoder.forward(&tile)?)?);
                 completed += 1;
             }
@@ -1607,7 +1938,8 @@ impl MiniMaxH3VisualVae {
                 .iter()
                 .map(|overlap| overlap / ratio)
                 .collect::<Vec<_>>(),
-        )
+        )?
+        .to_dtype(DType::F32)
     }
 
     pub fn decode_normalized(
@@ -1764,9 +2096,10 @@ impl MiniMaxH3VisualVae {
             .enumerate()
         {
             let mut new_row_tails = Vec::with_capacity(width_plan.starts.len());
+            let mut row_bodies = Vec::with_capacity(width_plan.starts.len());
             let mut left_tail: Option<Tensor> = None;
             let mut output_x = 0;
-            let mut written_height = 0;
+            let mut written_height: Option<usize> = None;
             for (column_index, (&x, &tile_width)) in width_plan
                 .starts
                 .iter()
@@ -1788,8 +2121,8 @@ impl MiniMaxH3VisualVae {
                     .forward(&self.post_quant_conv.forward(&tile)?, observer)?;
 
                 // Preserve raw tails before blending, exactly as ComfyUI's
-                // preallocated tiled decoder does. No full decoded tile row is
-                // retained after its cropped body is copied into the canvas.
+                // preallocated tiled decoder does. Cropped bodies retain only
+                // one bounded output row before one strided canvas insertion.
                 if row_index < height_plan.starts.len() - 1 {
                     let overlap = height_plan.overlaps[row_index];
                     new_row_tails.push(
@@ -1832,31 +2165,49 @@ impl MiniMaxH3VisualVae {
                     tile = tile.narrow(4, 0, tile.dim(4)? - width_plan.overlaps[column_index])?;
                 }
                 let tile = tile.contiguous()?;
-                written_height = tile.dim(3)?;
-                let output = match &canvas {
-                    Some(canvas) => canvas,
-                    None => canvas.insert(Tensor::zeros(
-                        (
-                            tile.dim(0)?,
-                            tile.dim(1)?,
-                            tile.dim(2)?,
-                            pixel_height,
-                            pixel_width,
-                        ),
-                        tile.dtype(),
-                        tile.device(),
-                    )?),
-                };
-                copy_spatial_tile(output, &tile, output_y, output_x)?;
+                let tile_height = tile.dim(3)?;
+                if written_height.is_some_and(|height| height != tile_height) {
+                    bail!("H3 tiled decode row produced inconsistent tile heights")
+                }
+                written_height = Some(tile_height);
                 output_x += tile.dim(4)?;
+                row_bodies.push(tile);
                 completed += 1;
             }
             if output_x != pixel_width {
                 bail!("H3 tiled decode row wrote {output_x}px, expected {pixel_width}px")
             }
+            observer.checkpoint(VisualVaeEvent {
+                phase: VisualVaePhase::DecodeAssembly,
+                completed: row_index,
+                total: height_plan.starts.len(),
+            })?;
+            let row = cat_tensors(&row_bodies, 4)?.contiguous()?;
+            let output = match &canvas {
+                Some(canvas) => canvas,
+                None => canvas.insert(Tensor::zeros(
+                    (
+                        row.dim(0)?,
+                        row.dim(1)?,
+                        row.dim(2)?,
+                        pixel_height,
+                        pixel_width,
+                    ),
+                    row.dtype(),
+                    row.device(),
+                )?),
+            };
+            copy_spatial_row(output, &row, output_y)?;
             row_tails = new_row_tails;
-            output_y += written_height;
+            output_y += written_height.ok_or_else(|| {
+                candle::Error::Msg("H3 tiled decode produced an empty tile row".into())
+            })?;
         }
+        observer.checkpoint(VisualVaeEvent {
+            phase: VisualVaePhase::DecodeAssembly,
+            completed: height_plan.starts.len(),
+            total: height_plan.starts.len(),
+        })?;
         observer.checkpoint(VisualVaeEvent {
             phase: VisualVaePhase::DecodeTile,
             completed,
@@ -1869,36 +2220,16 @@ impl MiniMaxH3VisualVae {
     }
 }
 
-fn copy_spatial_tile(canvas: &Tensor, tile: &Tensor, y: usize, x: usize) -> Result<()> {
+fn copy_spatial_row(canvas: &Tensor, row: &Tensor, y: usize) -> Result<()> {
     let (batch, channels, frames, canvas_height, canvas_width) = canvas.dims5()?;
-    let (tile_batch, tile_channels, tile_frames, tile_height, tile_width) = tile.dims5()?;
-    if (batch, channels, frames) != (tile_batch, tile_channels, tile_frames)
-        || y + tile_height > canvas_height
-        || x + tile_width > canvas_width
+    let (row_batch, row_channels, row_frames, row_height, row_width) = row.dims5()?;
+    if (batch, channels, frames) != (row_batch, row_channels, row_frames)
+        || y + row_height > canvas_height
+        || row_width != canvas_width
     {
-        bail!("H3 decoded tile does not fit its output canvas")
+        bail!("H3 decoded tile row does not fit its output canvas")
     }
-    let flat_canvas = canvas.flatten_all()?;
-    for batch_index in 0..batch {
-        for channel in 0..channels {
-            for frame in 0..frames {
-                for row in 0..tile_height {
-                    let destination = (((batch_index * channels + channel) * frames + frame)
-                        * canvas_height
-                        + y
-                        + row)
-                        * canvas_width
-                        + x;
-                    let source = tile
-                        .i((batch_index, channel, frame, row, ..))?
-                        .contiguous()?
-                        .flatten_all()?;
-                    flat_canvas.slice_set(&source, 0, destination)?;
-                }
-            }
-        }
-    }
-    Ok(())
+    canvas.slice_set(row, 3, y)
 }
 
 fn blend(a: &Tensor, b: &Tensor, extent: usize, dim: usize) -> Result<Tensor> {
@@ -2088,6 +2419,69 @@ mod tests {
     }
 
     #[test]
+    fn bounded_math_attention_matches_dense_reference() {
+        #[derive(Default)]
+        struct CountChunks(usize);
+        impl VisualVaeObserver for CountChunks {
+            fn checkpoint(&mut self, event: VisualVaeEvent) -> Result<()> {
+                if event.phase == VisualVaePhase::AttentionChunk && event.completed < event.total {
+                    self.0 += 1;
+                }
+                Ok(())
+            }
+        }
+
+        let query = Tensor::arange(0u32, 40, &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .affine(0.01, -0.2)
+            .unwrap()
+            .reshape((1, 2, 5, 4))
+            .unwrap();
+        let key = query.affine(0.7, 0.1).unwrap();
+        let value = query.affine(-0.3, 0.4).unwrap();
+        let scale = 0.5f32;
+        let dense = ops::softmax_last_dim(
+            &query
+                .matmul(&key.transpose(2, 3).unwrap())
+                .unwrap()
+                .affine(scale as f64, 0.0)
+                .unwrap(),
+        )
+        .unwrap()
+        .matmul(&value)
+        .unwrap();
+        let mut observer = CountChunks::default();
+        let bounded =
+            bounded_math_attention(&query, &key, &value, scale, 2, &mut observer).unwrap();
+        let max_error = dense
+            .sub(&bounded)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(max_error < 1e-6, "bounded attention error {max_error}");
+        assert_eq!(observer.0, 3);
+    }
+
+    #[test]
+    fn production_attention_workspace_is_bounded_below_dense_scores() {
+        let sequence = 7 * 16 * 16 + 5;
+        assert_eq!(sequence, 1797);
+        let bounded =
+            attention_score_element_bound(1, 32, sequence, sequence, DEFAULT_ATTENTION_QUERY_CHUNK)
+                .unwrap();
+        let dense = 32 * sequence * sequence;
+        assert_eq!(bounded, 14_721_024);
+        assert_eq!(dense, 103_334_688);
+        assert!(bounded * 7 < dense);
+    }
+
+    #[test]
     fn tiny_decoder_executes_released_temporal_frame_counts() {
         let mut config = MiniMaxH3VisualVaeConfig::tiny_for_tests();
         config.tiling = false;
@@ -2109,11 +2503,17 @@ mod tests {
     #[test]
     fn comfy_style_tiled_decode_streams_into_the_exact_canvas() {
         #[derive(Default)]
-        struct CountTiles(usize);
+        struct CountTiles {
+            tiles: usize,
+            assembly_rows: usize,
+        }
         impl VisualVaeObserver for CountTiles {
             fn checkpoint(&mut self, event: VisualVaeEvent) -> Result<()> {
                 if event.phase == VisualVaePhase::DecodeTile && event.completed < event.total {
-                    self.0 += 1;
+                    self.tiles += 1;
+                }
+                if event.phase == VisualVaePhase::DecodeAssembly && event.completed < event.total {
+                    self.assembly_rows += 1;
                 }
                 Ok(())
             }
@@ -2124,7 +2524,18 @@ mod tests {
         let mut observer = CountTiles::default();
         let decoded = model.decode_normalized(&latents, &mut observer).unwrap();
         assert_eq!(decoded.dims5().unwrap(), (1, 3, 5, 36, 36));
-        assert_eq!(observer.0, 4);
+        assert_eq!(observer.tiles, 4);
+        assert_eq!(observer.assembly_rows, 2);
+    }
+
+    #[test]
+    fn production_canvas_assembly_uses_one_copy_per_bounded_row() {
+        let plan = SpatialTilePlan::new(2048, 256, 64, 16).unwrap();
+        assert_eq!(plan.starts.len(), 11);
+        let canvas_copy_operations = plan.starts.len();
+        let former_row_copy_operations = 3 * 28 * 2048 * 11;
+        assert_eq!(canvas_copy_operations, 11);
+        assert_eq!(former_row_copy_operations, 1_892_352);
     }
 
     #[test]
@@ -2174,6 +2585,11 @@ mod tests {
 
     #[test]
     fn dtype_policy_separates_storage_from_backend_compute() {
+        assert_eq!(WeightLayout::Diffusers.artifact_dtype(), DType::F32);
+        assert_eq!(
+            WeightLayout::OfficialComfySource.artifact_dtype(),
+            DType::F16
+        );
         assert_eq!(
             DecodeComputePolicy::Reference.effective_dtype(&Device::Cpu),
             DType::F32
@@ -2182,6 +2598,43 @@ mod tests {
             DecodeComputePolicy::FullF32.effective_dtype(&Device::Cpu),
             DType::F32
         );
+
+        let weight = Tensor::ones((2, 2), DType::F16, &Device::Cpu).unwrap();
+        let bias = Tensor::zeros(2, DType::F16, &Device::Cpu).unwrap();
+        let linear = MixedLinear::new(weight, Some(bias), DType::F32).unwrap();
+        assert_eq!(linear.resident_weight.dtype(), DType::F16);
+        assert_eq!(linear.resident_bias.as_ref().unwrap().dtype(), DType::F16);
+        let output = linear
+            .forward(&Tensor::ones((1, 2), DType::F32, &Device::Cpu).unwrap())
+            .unwrap();
+        assert_eq!(output.dtype(), DType::F32);
+    }
+
+    #[test]
+    fn model_load_is_cancellable_between_weight_components() {
+        struct Cancel;
+        impl VisualVaeObserver for Cancel {
+            fn checkpoint(&mut self, event: VisualVaeEvent) -> Result<()> {
+                if event.phase == VisualVaePhase::LoadWeights {
+                    bail!("synthetic load cancellation")
+                }
+                Ok(())
+            }
+        }
+        let config = MiniMaxH3VisualVaeConfig::tiny_for_tests();
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
+        let error = MiniMaxH3VisualVae::load(
+            config,
+            vb,
+            WeightLayout::Diffusers,
+            DecodeComputePolicy::Reference,
+            VisualAttentionBackend::Math,
+            &mut Cancel,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("synthetic load cancellation"));
     }
 
     #[cfg(feature = "cuda")]
@@ -2209,22 +2662,30 @@ mod tests {
         .unwrap();
         assert_eq!(cuda_model.decode_compute_dtype(), DType::F16);
         assert_eq!(
-            cuda_model.decoder.register_tokens.value().dtype(),
+            cuda_model
+                .decoder
+                .register_tokens
+                .value(DType::F32)
+                .unwrap()
+                .dtype(),
             DType::F32
         );
         assert_eq!(
-            cuda_model.decoder.blocks[0].scale1.value().dtype(),
+            cuda_model.decoder.blocks[0]
+                .scale1
+                .value(DType::F32)
+                .unwrap()
+                .dtype(),
             DType::F32
         );
         assert_eq!(
             cuda_model.decoder.blocks[0]
                 .attention
                 .qkv
-                .compute_weight
-                .as_ref()
-                .expect("CUDA reference policy keeps an FP16 compute copy")
+                .resident_weight
                 .dtype(),
-            DType::F16
+            DType::F32,
+            "official weights remain one resident F32 copy"
         );
         // 9x9 latents map to 36x36 pixels, forcing the 32px/8px-overlap
         // synthetic configuration through four streamed decode tiles.

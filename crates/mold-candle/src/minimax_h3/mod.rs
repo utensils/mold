@@ -11,11 +11,11 @@ mod model;
 mod presentation;
 mod processor;
 mod text;
+mod vision;
 mod visual_condition;
 mod visual_geometry;
 mod visual_vae;
 mod visual_weights;
-mod vision;
 
 pub mod audio;
 pub mod audio_config;
@@ -68,11 +68,14 @@ pub use visual_geometry::{
 };
 pub use visual_vae::{
     DecodeComputePolicy, DecodeSink, MiniMaxH3VisualVae, MiniMaxH3VisualVaeConfig,
-    NoopVisualVaeObserver, VisualVaeEvent, VisualVaeObserver, VisualVaePhase, WeightLayout,
+    NoopVisualVaeObserver, VisualAttentionBackend, VisualVaeEvent, VisualVaeObserver,
+    VisualVaePhase, WeightLayout,
 };
 pub use visual_weights::{
-    comfy_tensor_transforms, component_fingerprint, expected_diffusers_weight_shapes,
-    inspect_safetensors_header, inspect_visual_vae_config, validate_diffusers_weight_index,
-    ComfyTensorTransform, DiffusersWeightIndex, SafetensorsHeader, SafetensorsTensorHeader,
-    VisualVaeComponentRole, VisualVaeWeightInspection,
+    comfy_tensor_transforms, component_fingerprint, component_fingerprint_with_observer,
+    expected_comfy_weight_shapes, expected_diffusers_weight_shapes, inspect_safetensors_header,
+    inspect_visual_vae_config, validate_comfy_weight_file, validate_diffusers_weight_index,
+    ComfyTensorTransform, DiffusersWeightIndex, NoopVisualWeightReadObserver, SafetensorsHeader,
+    SafetensorsTensorHeader, ValidatedVisualVaeWeights, VisualVaeComponentRole,
+    VisualVaeWeightInspection, VisualWeightReadObserver, COMFY_VISUAL_VAE_FILENAME,
 };

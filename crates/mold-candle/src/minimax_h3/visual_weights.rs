@@ -1,11 +1,16 @@
-use super::visual_vae::MiniMaxH3VisualVaeConfig;
-use candle::{bail, Result};
+use super::visual_vae::{MiniMaxH3VisualVaeConfig, WeightLayout};
+use candle::{bail, DType, Device, Result};
+use candle_nn::VarBuilder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VisualVaeComponentRole {
@@ -41,6 +46,45 @@ pub struct SafetensorsHeader {
     pub file_len: u64,
 }
 
+struct UniqueSafetensorsHeader(BTreeMap<String, serde_json::Value>);
+
+impl<'de> Deserialize<'de> for UniqueSafetensorsHeader {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct UniqueHeaderVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for UniqueHeaderVisitor {
+            type Value = UniqueSafetensorsHeader;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a safetensors header with unique tensor names")
+            }
+
+            fn visit_map<A>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<UniqueSafetensorsHeader, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut entries = BTreeMap::new();
+                while let Some((name, value)) = map.next_entry::<String, serde_json::Value>()? {
+                    if entries.insert(name.clone(), value).is_some() {
+                        return Err(serde::de::Error::custom(format!(
+                            "duplicate safetensors tensor {name}"
+                        )));
+                    }
+                }
+                Ok(UniqueSafetensorsHeader(entries))
+            }
+        }
+
+        deserializer.deserialize_map(UniqueHeaderVisitor)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VisualVaeWeightInspection {
     pub role: &'static str,
@@ -50,6 +94,103 @@ pub struct VisualVaeWeightInspection {
     /// Header/index identity only. Use [`component_fingerprint`] when a full
     /// content fingerprint is required after authorization.
     pub header_identity_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct VisualWeightFileIdentity {
+    canonical_path: PathBuf,
+    len: u64,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    modified_seconds: i64,
+    #[cfg(unix)]
+    modified_nanoseconds: i64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+    #[cfg(not(unix))]
+    modified: Option<std::time::SystemTime>,
+}
+
+/// Opaque proof that one exact visual-VAE artifact set passed its complete
+/// layout, dtype, key, shape, and immutable-file inspection. Creating this
+/// token opens model artifacts, so callers must cross Mold's authorization
+/// gate before invoking either validator that returns it.
+#[derive(Clone, Debug)]
+pub struct ValidatedVisualVaeWeights {
+    layout: WeightLayout,
+    inspection: VisualVaeWeightInspection,
+    files: Vec<VisualWeightFileIdentity>,
+}
+
+impl ValidatedVisualVaeWeights {
+    pub fn layout(&self) -> WeightLayout {
+        self.layout
+    }
+
+    pub fn artifact_dtype(&self) -> DType {
+        self.layout.artifact_dtype()
+    }
+
+    pub fn inspection(&self) -> &VisualVaeWeightInspection {
+        &self.inspection
+    }
+
+    pub fn component_fingerprint(
+        &self,
+        observer: &mut dyn VisualWeightReadObserver,
+    ) -> Result<String> {
+        self.revalidate_files()?;
+        fingerprint_identities(&self.files, observer)
+    }
+
+    pub(crate) fn revalidate_files(&self) -> Result<()> {
+        for expected in &self.files {
+            let current = visual_weight_file_identity(&expected.canonical_path)?;
+            if &current != expected {
+                bail!(
+                    "validated H3 visual VAE artifact changed after inspection: {}",
+                    expected.canonical_path.display()
+                )
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn mmap_var_builder<'a>(&self, device: &Device) -> Result<VarBuilder<'a>> {
+        self.revalidate_files()?;
+        let paths = self
+            .files
+            .iter()
+            .map(|identity| identity.canonical_path.as_path())
+            .collect::<Vec<_>>();
+        // SAFETY: every canonical regular file was fully schema-validated and
+        // its immutable file identity was rechecked immediately before mmap.
+        // The returned backend owns its mappings; a second identity check
+        // below rejects replacement or mutation racing the open operation.
+        let builder =
+            unsafe { VarBuilder::from_mmaped_safetensors(&paths, self.artifact_dtype(), device)? };
+        self.revalidate_files()?;
+        Ok(builder)
+    }
+}
+
+pub trait VisualWeightReadObserver {
+    /// Returning an error cancels hashing at the next 1 MiB read boundary.
+    fn checkpoint(&mut self, bytes_read: u64, total_bytes: u64) -> Result<()>;
+}
+
+#[derive(Default)]
+pub struct NoopVisualWeightReadObserver;
+
+impl VisualWeightReadObserver for NoopVisualWeightReadObserver {
+    fn checkpoint(&mut self, _bytes_read: u64, _total_bytes: u64) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -285,6 +426,64 @@ pub fn comfy_tensor_transforms(
     Ok(transforms)
 }
 
+/// Exact tensor contract of Mold's pinned single-file Comfy checkpoint. The
+/// source keeps attention QKV fused per head, stores the feed-forward gate
+/// half first, and includes one unused decoder mask token.
+pub fn expected_comfy_weight_shapes(
+    config: &MiniMaxH3VisualVaeConfig,
+) -> Result<BTreeMap<String, Vec<usize>>> {
+    let diffusers = expected_diffusers_weight_shapes(config)?;
+    let mut source = BTreeMap::new();
+    let mut insert = |name: String, shape: Vec<usize>| -> Result<()> {
+        if source.insert(name.clone(), shape).is_some() {
+            bail!("duplicate H3 Comfy source weight key {name}")
+        }
+        Ok(())
+    };
+    for transform in comfy_tensor_transforms(config)? {
+        match transform {
+            ComfyTensorTransform::Direct {
+                source: source_name,
+                target,
+            }
+            | ComfyTensorTransform::SwapFeedForwardHalves {
+                source: source_name,
+                target,
+                ..
+            } => insert(source_name, diffusers[&target].clone())?,
+            ComfyTensorTransform::ReorderAndSplitQkv {
+                source: source_name,
+                query,
+                key,
+                value,
+                ..
+            } => {
+                let query_shape = &diffusers[&query];
+                if diffusers[&key] != *query_shape || diffusers[&value] != *query_shape {
+                    bail!("H3 Diffusers QKV target shapes disagree")
+                }
+                let mut fused_shape = query_shape.clone();
+                fused_shape[0] = fused_shape[0]
+                    .checked_mul(3)
+                    .ok_or_else(|| candle::Error::Msg("H3 fused QKV shape overflow".into()))?;
+                insert(source_name, fused_shape)?;
+            }
+            ComfyTensorTransform::Drop {
+                source: source_name,
+            } => {
+                let dim = config
+                    .decoder_num_attention_heads
+                    .checked_mul(config.decoder_attention_head_dim)
+                    .ok_or_else(|| {
+                        candle::Error::Msg("H3 decoder width overflow for mask token".into())
+                    })?;
+                insert(source_name, vec![1, 1, dim])?;
+            }
+        }
+    }
+    Ok(source)
+}
+
 fn diffusers_to_comfy_direct_key(target: &str) -> String {
     let mut source = target
         .replace("encoder.down_blocks.", "encoder.down.")
@@ -305,21 +504,28 @@ fn diffusers_to_comfy_direct_key(target: &str) -> String {
 }
 
 pub fn inspect_safetensors_header(path: &Path) -> Result<SafetensorsHeader> {
+    let identity = visual_weight_file_identity(path)?;
+    inspect_safetensors_header_for_identity(&identity)
+}
+
+fn inspect_safetensors_header_for_identity(
+    identity: &VisualWeightFileIdentity,
+) -> Result<SafetensorsHeader> {
     const MAX_HEADER: u64 = 100_000_000;
-    let mut file = File::open(path)?;
-    let file_len = file.metadata()?.len();
+    let mut file = open_expected_file(identity, "before header inspection")?;
+    let file_len = identity.len;
     let mut len_bytes = [0u8; 8];
     file.read_exact(&mut len_bytes)?;
     let header_len = u64::from_le_bytes(len_bytes);
     if header_len == 0 || header_len > MAX_HEADER || header_len + 8 > file_len {
         bail!(
             "invalid safetensors header length {header_len} for {}",
-            path.display()
+            identity.canonical_path.display()
         )
     }
     let mut header_bytes = vec![0u8; header_len as usize];
     file.read_exact(&mut header_bytes)?;
-    let raw: BTreeMap<String, serde_json::Value> =
+    let UniqueSafetensorsHeader(raw) =
         serde_json::from_slice(&header_bytes).map_err(candle::Error::wrap)?;
     let data_len = file_len - header_len - 8;
     let mut tensors = BTreeMap::new();
@@ -337,7 +543,7 @@ pub fn inspect_safetensors_header(path: &Path) -> Result<SafetensorsHeader> {
         if entry.data_offsets[0] > entry.data_offsets[1] || entry.data_offsets[1] > data_len {
             bail!(
                 "invalid safetensors offsets for {name} in {}",
-                path.display()
+                identity.canonical_path.display()
             )
         }
         let elements = entry
@@ -376,7 +582,7 @@ pub fn inspect_safetensors_header(path: &Path) -> Result<SafetensorsHeader> {
         if offsets[0] != cursor {
             bail!(
                 "non-contiguous or overlapping safetensors data before {name} in {}",
-                path.display()
+                identity.canonical_path.display()
             )
         }
         cursor = offsets[1];
@@ -385,9 +591,11 @@ pub fn inspect_safetensors_header(path: &Path) -> Result<SafetensorsHeader> {
         bail!(
             "safetensors data section has {} unclaimed bytes in {}",
             data_len - cursor,
-            path.display()
+            identity.canonical_path.display()
         )
     }
+    ensure_open_file_unchanged(&file, identity, "during header inspection")?;
+    ensure_identity_unchanged(identity, "during header inspection")?;
     Ok(SafetensorsHeader {
         tensors,
         header_len,
@@ -450,7 +658,7 @@ pub fn validate_diffusers_weight_index(
     config: &MiniMaxH3VisualVaeConfig,
     index_path: &Path,
     component_dir: &Path,
-) -> Result<VisualVaeWeightInspection> {
+) -> Result<ValidatedVisualVaeWeights> {
     config.validate_production_contract()?;
     let index_bytes = std::fs::read(index_path)?;
     let index: DiffusersWeightIndex =
@@ -501,11 +709,14 @@ pub fn validate_diffusers_weight_index(
     }
     let mut total_size = 0u64;
     let mut identity = Sha256::new();
+    let mut files = Vec::with_capacity(by_shard.len());
     identity.update(VisualVaeComponentRole::F16T4D24.stable_id().as_bytes());
+    identity.update(b"diffusers-f32");
     identity.update(&index_bytes);
     for (shard, assigned) in &by_shard {
         let path = component_dir.join(shard);
-        let header = inspect_safetensors_header(&path)?;
+        let file_identity = visual_weight_file_identity(&path)?;
+        let header = inspect_safetensors_header_for_identity(&file_identity)?;
         let present = header.tensors.keys().cloned().collect::<BTreeSet<_>>();
         if &present != assigned {
             bail!("H3 visual VAE shard {shard} contents do not match the weight index")
@@ -532,18 +743,113 @@ pub fn validate_diffusers_weight_index(
         identity.update(shard.as_bytes());
         identity.update(header.header_len.to_le_bytes());
         identity.update(header.file_len.to_le_bytes());
-        let mut file = File::open(&path)?;
+        let mut file = open_expected_file(&file_identity, "before header identity read")?;
         let mut bytes = vec![0u8; (header.header_len + 8) as usize];
         file.read_exact(&mut bytes)?;
         identity.update(bytes);
+        ensure_open_file_unchanged(&file, &file_identity, "during header identity read")?;
+        ensure_identity_unchanged(&file_identity, "during validation")?;
+        files.push(file_identity);
     }
-    Ok(VisualVaeWeightInspection {
-        role: VisualVaeComponentRole::F16T4D24.stable_id(),
-        shard_count: by_shard.len(),
-        tensor_count: expected.len(),
-        total_size,
-        header_identity_sha256: hex_digest(identity.finalize()),
+    Ok(ValidatedVisualVaeWeights {
+        layout: WeightLayout::Diffusers,
+        inspection: VisualVaeWeightInspection {
+            role: VisualVaeComponentRole::F16T4D24.stable_id(),
+            shard_count: by_shard.len(),
+            tensor_count: expected.len(),
+            total_size,
+            header_identity_sha256: hex_digest(identity.finalize()),
+        },
+        files,
     })
+}
+
+pub const COMFY_VISUAL_VAE_FILENAME: &str = "minimax_h3_video_vae_fp16.safetensors";
+
+/// Validate the exact pinned Comfy single-file source layout. Unlike the
+/// Diffusers conversion, this artifact is genuinely FP16 and must remain FP16
+/// in resident storage.
+pub fn validate_comfy_weight_file(
+    config: &MiniMaxH3VisualVaeConfig,
+    weight_path: &Path,
+) -> Result<ValidatedVisualVaeWeights> {
+    config.validate_production_contract()?;
+    let basename = weight_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| candle::Error::Msg("H3 Comfy VAE path has no UTF-8 basename".into()))?;
+    if basename != COMFY_VISUAL_VAE_FILENAME {
+        bail!(
+            "H3 Comfy visual VAE must use canonical filename {COMFY_VISUAL_VAE_FILENAME}, got {basename}"
+        )
+    }
+    let file_identity = visual_weight_file_identity(weight_path)?;
+    let canonical_basename = file_identity
+        .canonical_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            candle::Error::Msg("H3 Comfy VAE canonical path has no UTF-8 basename".into())
+        })?;
+    if canonical_basename != COMFY_VISUAL_VAE_FILENAME {
+        bail!(
+            "H3 Comfy visual VAE canonical file must be named {COMFY_VISUAL_VAE_FILENAME}, got {canonical_basename}"
+        )
+    }
+    let expected = expected_comfy_weight_shapes(config)?;
+    let header = inspect_safetensors_header_for_identity(&file_identity)?;
+    validate_tensor_headers(&header, &expected, "F16", "Comfy")?;
+
+    let mut identity = Sha256::new();
+    identity.update(VisualVaeComponentRole::F16T4D24.stable_id().as_bytes());
+    identity.update(b"comfy-source-f16");
+    identity.update(basename.as_bytes());
+    identity.update(header.header_len.to_le_bytes());
+    identity.update(header.file_len.to_le_bytes());
+    let mut file = open_expected_file(&file_identity, "before header identity read")?;
+    let mut bytes = vec![0u8; (header.header_len + 8) as usize];
+    file.read_exact(&mut bytes)?;
+    identity.update(bytes);
+    ensure_open_file_unchanged(&file, &file_identity, "during header identity read")?;
+    ensure_identity_unchanged(&file_identity, "during validation")?;
+
+    Ok(ValidatedVisualVaeWeights {
+        layout: WeightLayout::OfficialComfySource,
+        inspection: VisualVaeWeightInspection {
+            role: VisualVaeComponentRole::F16T4D24.stable_id(),
+            shard_count: 1,
+            tensor_count: expected.len(),
+            total_size: header.file_len,
+            header_identity_sha256: hex_digest(identity.finalize()),
+        },
+        files: vec![file_identity],
+    })
+}
+
+fn validate_tensor_headers(
+    header: &SafetensorsHeader,
+    expected: &BTreeMap<String, Vec<usize>>,
+    expected_dtype: &str,
+    label: &str,
+) -> Result<()> {
+    validate_weight_map_keys(expected.keys(), header.tensors.keys())?;
+    for (name, shape) in expected {
+        let tensor = &header.tensors[name];
+        if tensor.dtype != expected_dtype {
+            bail!(
+                "H3 {label} visual VAE tensor {name} must be stored {expected_dtype}, got {}",
+                tensor.dtype
+            )
+        }
+        if tensor.shape != *shape {
+            bail!(
+                "H3 {label} visual VAE tensor {name} shape mismatch: {:?} != {:?}",
+                tensor.shape,
+                shape
+            )
+        }
+    }
+    Ok(())
 }
 
 fn validate_weight_map_keys<'a>(
@@ -568,51 +874,207 @@ fn validate_weight_map_keys<'a>(
     Ok(())
 }
 
-/// Full content fingerprint. This intentionally reads every byte and must only
-/// be called after Mold's H3 authorization gate permits artifact access.
+/// Full content fingerprint. This intentionally reads every byte on the first
+/// immutable file identity and must only be called after Mold's H3
+/// authorization gate permits artifact access.
 pub fn component_fingerprint(paths: &[PathBuf]) -> Result<String> {
+    component_fingerprint_with_observer(paths, &mut NoopVisualWeightReadObserver)
+}
+
+pub fn component_fingerprint_with_observer(
+    paths: &[PathBuf],
+    observer: &mut dyn VisualWeightReadObserver,
+) -> Result<String> {
     if paths.is_empty() {
         bail!("cannot fingerprint an empty H3 visual VAE component")
     }
-    let mut sorted = paths
+    let identities = paths
         .iter()
-        .map(|path| {
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| {
-                    candle::Error::Msg("H3 fingerprint path has no UTF-8 basename".into())
-                })?;
-            validate_shard_basename(name)?;
-            Ok((name.to_owned(), path.clone()))
-        })
+        .map(|path| visual_weight_file_identity(path))
         .collect::<Result<Vec<_>>>()?;
-    sorted.sort_by(|(left, _), (right, _)| left.cmp(right));
+    fingerprint_identities(&identities, observer)
+}
+
+fn fingerprint_identities(
+    identities: &[VisualWeightFileIdentity],
+    observer: &mut dyn VisualWeightReadObserver,
+) -> Result<String> {
+    let mut sorted = identities.to_vec();
+    sorted.sort_by(|left, right| left.canonical_path.cmp(&right.canonical_path));
     if sorted
         .windows(2)
-        .any(|pair| pair[0].0.as_str() == pair[1].0.as_str())
+        .any(|pair| pair[0].canonical_path == pair[1].canonical_path)
     {
-        bail!("H3 fingerprint paths contain duplicate shard basenames")
+        bail!("H3 fingerprint paths contain duplicate canonical files")
     }
+    let total_bytes = sorted.iter().try_fold(0u64, |total, identity| {
+        total
+            .checked_add(identity.len)
+            .ok_or_else(|| candle::Error::Msg("H3 fingerprint byte count overflow".into()))
+    })?;
+    observer.checkpoint(0, total_bytes)?;
     let mut digest = Sha256::new();
     digest.update(VisualVaeComponentRole::F16T4D24.stable_id().as_bytes());
-    let mut buffer = vec![0u8; 1024 * 1024];
-    for (name, path) in sorted {
-        let file_len = std::fs::metadata(&path)?.len();
+    let mut completed = 0u64;
+    for identity in sorted {
+        let name = identity
+            .canonical_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                candle::Error::Msg("H3 fingerprint path has no UTF-8 basename".into())
+            })?;
+        validate_shard_basename(name)?;
         digest.update((name.len() as u64).to_le_bytes());
         digest.update(name.as_bytes());
-        digest.update(file_len.to_le_bytes());
-        let mut file = File::open(&path)?;
-        file.seek(SeekFrom::Start(0))?;
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            digest.update(&buffer[..read]);
-        }
+        digest.update(identity.len.to_le_bytes());
+        let file_digest = fingerprint_file(&identity, completed, total_bytes, observer)?;
+        digest.update(file_digest);
+        completed = completed
+            .checked_add(identity.len)
+            .ok_or_else(|| candle::Error::Msg("H3 fingerprint progress overflow".into()))?;
+        observer.checkpoint(completed, total_bytes)?;
     }
     Ok(hex_digest(digest.finalize()))
+}
+
+fn fingerprint_file(
+    identity: &VisualWeightFileIdentity,
+    completed_before: u64,
+    total_bytes: u64,
+    observer: &mut dyn VisualWeightReadObserver,
+) -> Result<[u8; 32]> {
+    static CACHE: OnceLock<Mutex<BTreeMap<VisualWeightFileIdentity, [u8; 32]>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Some(digest) = cache
+        .lock()
+        .map_err(|_| candle::Error::Msg("H3 fingerprint cache mutex is poisoned".into()))?
+        .get(identity)
+        .copied()
+    {
+        observer.checkpoint(completed_before, total_bytes)?;
+        return Ok(digest);
+    }
+
+    let mut file = File::open(&identity.canonical_path)?;
+    let opened = visual_weight_file_identity_from_metadata(
+        identity.canonical_path.clone(),
+        &file.metadata()?,
+    )?;
+    if &opened != identity {
+        bail!(
+            "H3 visual VAE artifact changed before fingerprinting: {}",
+            identity.canonical_path.display()
+        )
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut read_total = 0u64;
+    loop {
+        observer.checkpoint(completed_before + read_total, total_bytes)?;
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        read_total = read_total
+            .checked_add(read as u64)
+            .ok_or_else(|| candle::Error::Msg("H3 fingerprint progress overflow".into()))?;
+        digest.update(&buffer[..read]);
+    }
+    if read_total != identity.len {
+        bail!(
+            "H3 visual VAE artifact length changed while fingerprinting: {}",
+            identity.canonical_path.display()
+        )
+    }
+    let closed_identity = visual_weight_file_identity_from_metadata(
+        identity.canonical_path.clone(),
+        &file.metadata()?,
+    )?;
+    if &closed_identity != identity
+        || visual_weight_file_identity(&identity.canonical_path)? != *identity
+    {
+        bail!(
+            "H3 visual VAE artifact changed while fingerprinting: {}",
+            identity.canonical_path.display()
+        )
+    }
+    let digest: [u8; 32] = digest.finalize().into();
+    cache
+        .lock()
+        .map_err(|_| candle::Error::Msg("H3 fingerprint cache mutex is poisoned".into()))?
+        .insert(identity.clone(), digest);
+    Ok(digest)
+}
+
+fn visual_weight_file_identity(path: &Path) -> Result<VisualWeightFileIdentity> {
+    let canonical_path = std::fs::canonicalize(path)?;
+    let metadata = std::fs::metadata(&canonical_path)?;
+    visual_weight_file_identity_from_metadata(canonical_path, &metadata)
+}
+
+fn ensure_identity_unchanged(expected: &VisualWeightFileIdentity, operation: &str) -> Result<()> {
+    if visual_weight_file_identity(&expected.canonical_path)? != *expected {
+        bail!(
+            "H3 visual VAE artifact changed {operation}: {}",
+            expected.canonical_path.display()
+        )
+    }
+    Ok(())
+}
+
+fn open_expected_file(expected: &VisualWeightFileIdentity, operation: &str) -> Result<File> {
+    let file = File::open(&expected.canonical_path)?;
+    ensure_open_file_unchanged(&file, expected, operation)?;
+    Ok(file)
+}
+
+fn ensure_open_file_unchanged(
+    file: &File,
+    expected: &VisualWeightFileIdentity,
+    operation: &str,
+) -> Result<()> {
+    let opened = visual_weight_file_identity_from_metadata(
+        expected.canonical_path.clone(),
+        &file.metadata()?,
+    )?;
+    if &opened != expected {
+        bail!(
+            "H3 visual VAE artifact changed {operation}: {}",
+            expected.canonical_path.display()
+        )
+    }
+    Ok(())
+}
+
+fn visual_weight_file_identity_from_metadata(
+    canonical_path: PathBuf,
+    metadata: &std::fs::Metadata,
+) -> Result<VisualWeightFileIdentity> {
+    if !metadata.is_file() {
+        bail!(
+            "H3 visual VAE artifact must be a regular file: {}",
+            canonical_path.display()
+        )
+    }
+    Ok(VisualWeightFileIdentity {
+        canonical_path,
+        len: metadata.len(),
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+        #[cfg(unix)]
+        modified_seconds: metadata.mtime(),
+        #[cfg(unix)]
+        modified_nanoseconds: metadata.mtime_nsec(),
+        #[cfg(unix)]
+        changed_seconds: metadata.ctime(),
+        #[cfg(unix)]
+        changed_nanoseconds: metadata.ctime_nsec(),
+        #[cfg(not(unix))]
+        modified: metadata.modified().ok(),
+    })
 }
 
 fn expected_f32_data_size(expected: &BTreeMap<String, Vec<usize>>) -> Result<u64> {
@@ -712,6 +1174,79 @@ mod tests {
             vec![16384, 2048]
         );
         assert_eq!(shapes["decoder.proj_out.weight"], vec![3072, 2048]);
+    }
+
+    #[test]
+    fn comfy_contract_has_exact_560_source_tensors_and_fp16_payload() {
+        let shapes = expected_comfy_weight_shapes(&MiniMaxH3VisualVaeConfig::production()).unwrap();
+        assert_eq!(shapes.len(), 560);
+        assert_eq!(
+            shapes["decoder.transformer_blocks.35.attn.to_qkv.weight"],
+            vec![6144, 2048]
+        );
+        assert_eq!(
+            shapes["decoder.transformer_blocks.35.ff.w1.weight"],
+            vec![16384, 2048]
+        );
+        assert_eq!(shapes["decoder.mask_token"], vec![1, 1, 2048]);
+        let elements = shapes
+            .values()
+            .map(|shape| shape.iter().product::<usize>() as u64)
+            .sum::<u64>();
+        assert_eq!(elements * 2, 5_207_742_064);
+    }
+
+    #[test]
+    fn comfy_header_contract_rejects_key_dtype_and_shape_drift() {
+        let expected =
+            expected_comfy_weight_shapes(&MiniMaxH3VisualVaeConfig::tiny_for_tests()).unwrap();
+        let mut offset = 0u64;
+        let tensors = expected
+            .iter()
+            .map(|(name, shape)| {
+                let bytes = shape.iter().product::<usize>() as u64 * 2;
+                let tensor = SafetensorsTensorHeader {
+                    dtype: "F16".into(),
+                    shape: shape.clone(),
+                    data_offsets: [offset, offset + bytes],
+                };
+                offset += bytes;
+                (name.clone(), tensor)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let header = SafetensorsHeader {
+            tensors,
+            header_len: 1,
+            file_len: offset + 9,
+        };
+        validate_tensor_headers(&header, &expected, "F16", "Comfy").unwrap();
+
+        let mut bad_dtype = header.clone();
+        bad_dtype
+            .tensors
+            .get_mut("decoder.mask_token")
+            .unwrap()
+            .dtype = "F32".into();
+        assert!(validate_tensor_headers(&bad_dtype, &expected, "F16", "Comfy").is_err());
+
+        let mut bad_shape = header.clone();
+        bad_shape
+            .tensors
+            .get_mut("decoder.mask_token")
+            .unwrap()
+            .shape = vec![1, 2, 8];
+        assert!(validate_tensor_headers(&bad_shape, &expected, "F16", "Comfy").is_err());
+
+        let mut unexpected = header;
+        unexpected.tensors.insert(
+            "decoder.unplanned".into(),
+            SafetensorsTensorHeader {
+                dtype: "F16".into(),
+                shape: vec![1],
+                data_offsets: [offset, offset + 2],
+            },
+        );
+        assert!(validate_tensor_headers(&unexpected, &expected, "F16", "Comfy").is_err());
     }
 
     #[test]
@@ -840,6 +1375,16 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         assert!(inspect_safetensors_header(&path).is_err());
 
+        let duplicate = br#"{"x":{"dtype":"F32","shape":[1],"data_offsets":[0,4]},"x":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+        let mut bytes = (duplicate.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(duplicate);
+        bytes.extend_from_slice(&[0u8; 4]);
+        std::fs::write(&path, bytes).unwrap();
+        assert!(inspect_safetensors_header(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate safetensors tensor x"));
+
         let overlapping = br#"{"x":{"dtype":"F32","shape":[2],"data_offsets":[0,8]},"y":{"dtype":"F32","shape":[1],"data_offsets":[4,8]}}"#;
         let mut bytes = (overlapping.len() as u64).to_le_bytes().to_vec();
         bytes.extend_from_slice(overlapping);
@@ -874,5 +1419,72 @@ mod tests {
         .into_iter()
         .collect();
         assert!(validate_canonical_shard_names(&incomplete).is_err());
+    }
+
+    #[test]
+    fn fingerprint_is_cancellable_cached_and_invalidates_on_file_change() {
+        struct CancelAfter {
+            limit: u64,
+            calls: Vec<u64>,
+        }
+        impl VisualWeightReadObserver for CancelAfter {
+            fn checkpoint(&mut self, bytes_read: u64, _total_bytes: u64) -> Result<()> {
+                self.calls.push(bytes_read);
+                if bytes_read >= self.limit {
+                    bail!("synthetic fingerprint cancellation")
+                }
+                Ok(())
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "mold-h3-fingerprint-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("weights.safetensors");
+        std::fs::write(&path, vec![7u8; 2 * 1024 * 1024 + 17]).unwrap();
+
+        let mut cancel = CancelAfter {
+            limit: 1024 * 1024,
+            calls: Vec::new(),
+        };
+        let error = component_fingerprint_with_observer(std::slice::from_ref(&path), &mut cancel)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("synthetic fingerprint cancellation"));
+        assert!(cancel.calls.contains(&(1024 * 1024)));
+
+        let fingerprint = component_fingerprint(std::slice::from_ref(&path)).unwrap();
+        let mut cached = CancelAfter {
+            limit: u64::MAX,
+            calls: Vec::new(),
+        };
+        assert_eq!(
+            component_fingerprint_with_observer(std::slice::from_ref(&path), &mut cached).unwrap(),
+            fingerprint
+        );
+        assert!(
+            cached.calls.len() <= 3,
+            "cached fingerprint reread the file"
+        );
+
+        let token = ValidatedVisualVaeWeights {
+            layout: WeightLayout::OfficialComfySource,
+            inspection: VisualVaeWeightInspection {
+                role: VisualVaeComponentRole::F16T4D24.stable_id(),
+                shard_count: 1,
+                tensor_count: 0,
+                total_size: std::fs::metadata(&path).unwrap().len(),
+                header_identity_sha256: "test".into(),
+            },
+            files: vec![visual_weight_file_identity(&path).unwrap()],
+        };
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.push(9);
+        std::fs::write(&path, bytes).unwrap();
+        assert!(token.revalidate_files().is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
