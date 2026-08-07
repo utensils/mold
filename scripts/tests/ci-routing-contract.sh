@@ -44,6 +44,10 @@ require_text "$ci" \
   "if: github.event_name == 'push' && needs.changes.outputs.rust == 'true'" \
   "coverage is not deferred to the post-merge main run"
 release_filter="$(sed -n '/^            release:/,/^  release:/p' "$ci")"
+for manifest in Cargo.toml Cargo.lock desktop/src-tauri/Cargo.toml desktop/src-tauri/Cargo.lock; do
+  grep -Fxq "              - '$manifest'" <<< "$release_filter" \
+    || fail "release classifier does not run the desktop Candle lock guard for $manifest changes"
+done
 for workflow in desktop.yml ios.yml; do
   grep -Fq ".github/workflows/$workflow" <<< "$release_filter" \
     || fail "release classifier does not run the routing contract for $workflow changes"

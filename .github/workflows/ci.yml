@@ -104,6 +104,8 @@ jobs:
               - 'nix/**'
               - '.github/workflows/ci.yml'
             release:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - 'Dockerfile'
               - 'flake.nix'
               - 'install.sh'
