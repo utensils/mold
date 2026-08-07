@@ -8,11 +8,12 @@ pinned numerical authorities, synthetic CI fixture, and external evidence
 schema are documented separately in
 [MiniMax H3 conformance evidence](./minimax-h3-conformance.md).
 
-The status record distinguishes code merged through main `b5ea538a`, pending
-surface PRs, and the release-excluded attention candidate. It also records why
-the requested `/Volumes/ExternalStorage` UAT home is currently excluded. None
-of those engineering states overrides the open authorization gate in issue
-#831.
+The status record distinguishes code merged through main `b5ea538a`, the exact
+remote and local states of pending surface work, and the dirty,
+release-excluded attention candidate. It also records why nominal mount
+metadata does not make the requested `/Volumes/ExternalStorage` UAT home usable.
+None of those engineering states overrides the open authorization gate in issue
+#831, and none records binary model-artifact access or licensed H3 UAT.
 
 The schema and runner define the deferred real RTX 3090 acceptance gate. No
 passing hardware report is checked in, and the runner never provisions cloud

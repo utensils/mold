@@ -14,6 +14,11 @@ and component index files. Diffusers BF16/FP32 mixed execution is authoritative
 for numerical comparisons; approximate or non-bit-stable acceleration is
 excluded from ground-truth capture.
 
+Here, model-repository pins and component hashes refer only to small public
+text metadata. They do not establish that a binary checkpoint shard,
+safetensors header range, or generated output was downloaded or opened. No such
+artifact is part of the current evidence.
+
 Validate the repository contract and weight-free fixture:
 
 ```bash
@@ -59,7 +64,8 @@ python3 scripts/minimax-h3-conformance.py print-synthetic-output --role oracle
 python3 scripts/minimax-h3-conformance.py print-synthetic-output --role mold
 ```
 
-Verify pinned local metadata/source clones without executing a checkpoint:
+`verify-sources` can verify pinned code checkouts and metadata-only model
+checkouts without executing a checkpoint:
 
 ```bash
 python3 scripts/minimax-h3-conformance.py verify-sources \
@@ -72,6 +78,14 @@ python3 scripts/minimax-h3-conformance.py verify-sources \
   --source vllm-omni=/absolute/path/to/vllm-omni
 ```
 
+This record does not claim that command was run against a populated model
+checkout. While the authorization gate is closed, model-repository paths must
+contain only Git metadata and the named small text files, with Git LFS smudge
+disabled. Do not run `git lfs pull`, fetch checkpoint objects, open
+`.safetensors` files, or populate these paths merely to satisfy the verifier.
+If that metadata-only precondition cannot be proven, defer `verify-sources`
+until checkpoint access is authorized.
+
 ## External real-checkpoint fixtures
 
 Real checkpoint execution and fixture capture remain unavailable until the
@@ -80,6 +94,10 @@ absolute fixture root outside the Mold checkout. The authorization record must
 also live outside the repository and content-address the reviewed source
 document. The validator is an accidental-bypass guard: it does not authenticate
 the issuer or replace legal review.
+
+Everything in this section is a deferred runbook. No authorization record,
+real-checkpoint fixture bundle, generated H3 output, or passing licensed UAT is
+reported by this document.
 
 The external authorization record has this exact shape:
 
