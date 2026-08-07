@@ -45,7 +45,23 @@ EXPECTED_REVISIONS = {
     "vllm-omni": "3d7fc3b9ba3cac88d579d4dc35b78b0b641675fc",
 }
 
+EXPECTED_LICENSE_SHA256 = "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44"
+
+EXPECTED_EXCLUDED_ACCELERATIONS = {
+    "torch-compile",
+    "fp8",
+    "cache-dit",
+    "sageattention",
+    "stochastic-sampling",
+    "approximate-attention",
+    "tf32",
+}
+
 EXPECTED_COMPONENT_INDEXES = {
+    "official-license": (
+        "LICENSE",
+        EXPECTED_LICENSE_SHA256,
+    ),
     "official-model-index": (
         "model_index.json",
         "5a587fe13b2371427415ac892463142683aefcd8d322e274a3a095eac37ac7d2",
@@ -306,18 +322,29 @@ def validate_manifest() -> dict[str, Any]:
         fail("unexpected conformance manifest schema version")
 
     revisions = {source["id"]: source["revision"] for source in manifest["sources"]}
-    if revisions != EXPECTED_REVISIONS:
+    if len(manifest["sources"]) != len(EXPECTED_REVISIONS) or revisions != EXPECTED_REVISIONS:
         fail("source revisions drifted from the reviewed H3 authority set")
+
+    excluded = set(manifest["numerical_authority"]["excluded_accelerations"])
+    if (
+        len(manifest["numerical_authority"]["excluded_accelerations"])
+        != len(EXPECTED_EXCLUDED_ACCELERATIONS)
+        or excluded != EXPECTED_EXCLUDED_ACCELERATIONS
+    ):
+        fail("ground-truth acceleration exclusions drifted")
 
     indexes = {
         item["id"]: (item["relative_path"], item["sha256"])
         for item in manifest["component_indexes"]
     }
-    if indexes != EXPECTED_COMPONENT_INDEXES:
+    if (
+        len(manifest["component_indexes"]) != len(EXPECTED_COMPONENT_INDEXES)
+        or indexes != EXPECTED_COMPONENT_INDEXES
+    ):
         fail("official component index fingerprints drifted")
 
     layers = {layer["id"] for layer in manifest["fixture_layers"]}
-    if layers != EXPECTED_LAYERS:
+    if len(manifest["fixture_layers"]) != len(EXPECTED_LAYERS) or layers != EXPECTED_LAYERS:
         fail("fixture layer coverage is incomplete or contains an unreviewed layer")
 
     policy = manifest["capture_policy"]
@@ -387,6 +414,7 @@ def validate_authorization(record_path: pathlib.Path) -> dict[str, Any]:
         "family",
         "decision",
         "license_revision",
+        "license_sha256",
         "approved_scopes",
         "source_document_path",
         "source_document_sha256",
@@ -400,6 +428,8 @@ def validate_authorization(record_path: pathlib.Path) -> dict[str, Any]:
         fail("authorization record does not approve MiniMax H3")
     if record["license_revision"] != EXPECTED_REVISIONS["minimax-official-model"]:
         fail("authorization record covers a different H3 license revision")
+    if record["license_sha256"] != EXPECTED_LICENSE_SHA256:
+        fail("authorization record covers different H3 license bytes")
     scopes = record["approved_scopes"]
     if not isinstance(scopes, list) or not {
         "checkpoint-execution",

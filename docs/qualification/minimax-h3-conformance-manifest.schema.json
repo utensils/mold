@@ -31,7 +31,7 @@
         "precision": { "const": "official-bf16-fp32-mixed" },
         "excluded_accelerations": {
           "type": "array",
-          "minItems": 6,
+          "minItems": 7,
           "items": { "type": "string", "minLength": 1 }
         }
       }
@@ -43,7 +43,7 @@
     },
     "component_indexes": {
       "type": "array",
-      "minItems": 7,
+      "minItems": 8,
       "items": { "$ref": "#/$defs/component_index" }
     },
     "capture_policy": {

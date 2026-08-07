@@ -51,6 +51,7 @@ The external authorization record has this exact shape:
   "family": "minimax-h3",
   "decision": "approved",
   "license_revision": "bfc8ed0353f5a9733be73e6b2c98ec0948195b86",
+  "license_sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44",
   "approved_scopes": [
     "checkpoint-execution",
     "fixture-capture",

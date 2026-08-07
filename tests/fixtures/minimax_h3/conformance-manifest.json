@@ -67,6 +67,12 @@
   ],
   "component_indexes": [
     {
+      "id": "official-license",
+      "source_id": "minimax-official-model",
+      "relative_path": "LICENSE",
+      "sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44"
+    },
+    {
       "id": "official-model-index",
       "source_id": "minimax-official-model",
       "relative_path": "model_index.json",

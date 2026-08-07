@@ -77,6 +77,7 @@ def valid_authorization(tool, temporary: pathlib.Path) -> tuple[pathlib.Path, di
         "family": "minimax-h3",
         "decision": "approved",
         "license_revision": tool.EXPECTED_REVISIONS["minimax-official-model"],
+        "license_sha256": tool.EXPECTED_LICENSE_SHA256,
         "approved_scopes": [
             "checkpoint-execution",
             "fixture-capture",
