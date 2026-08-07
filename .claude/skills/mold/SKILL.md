@@ -263,6 +263,10 @@ mold run wan22-ti2v-5b "waves on a black sand beach" --width 1280 --height 704 -
 mold run wan22-t2v-a14b:q5 "a paper boat drifting down a rain gutter"
 mold run wan22-i2v-a14b:q5 "the balloon lifts off" --image balloon.png
 
+# Low-VRAM tiers: Q4_K_M A14B keeps the same Lightning recipe; Q8_0 5B reaches small cards
+mold run wan22-t2v-a14b:q4 "a paper boat drifting down a rain gutter"
+mold run wan22-ti2v-5b:q8 "waves on a black sand beach" --width 1280 --height 704
+
 # WebP animated output
 mold run ltx-video-0.9.6-distilled:bf16 "a waterfall" --frames 9 --format webp -o waterfall.webp
 ```
