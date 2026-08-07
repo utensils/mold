@@ -21,6 +21,44 @@ python3 scripts/minimax-h3-conformance.py check-contract
 python3 scripts/tests/minimax-h3-conformance-contract.py
 ```
 
+Compare the checked-in, weight-free per-layer producer pair:
+
+```bash
+python3 scripts/minimax-h3-conformance.py compare \
+  --oracle tests/fixtures/minimax_h3/synthetic-oracle-v1.json \
+  --mold tests/fixtures/minimax_h3/synthetic-mold-v1.json
+```
+
+The two documents conform to
+`docs/qualification/minimax-h3-layer-output.schema.json`. Each document names
+one case and primitive layer, the producer role and exact source revision, the
+adapter command and tensor-hash encoding, the input/component fingerprints,
+the execution environment, and a keyed tensor set. Tensor records carry exact
+shape, dtype, content hash, min/max/mean/std, and coordinate-addressed stable
+samples. Only the oracle declares comparison policy, so a Mold producer cannot
+weaken its own acceptance threshold.
+
+The comparator requires the same case, layer, authority tier, input, output
+keys, sample coordinates, shapes, dtypes, and hash encoding. It rejects every
+NaN or infinity before schema comparison. Numeric statistics and samples pass
+only when
+`abs(mold - oracle) <= absolute + relative * abs(oracle)`. An `exact` hash
+policy makes a content-hash difference fatal; `record-only` retains both hashes
+as an explicit diagnostic while numerical tolerances remain authoritative.
+Failures aggregate the missing/extra keys and every comparable shape, dtype,
+hash, statistic, sample-coordinate, and tolerance discrepancy.
+
+The synthetic pair deliberately includes a small within-tolerance delta and a
+record-only hash difference. Contract mutation tests deterministically prove
+shape, dtype, output-key, sample-key, missing/extra, NaN, infinity, exact-hash,
+and tolerance failures without loading H3 artifacts. Recreate either checked
+document for review with:
+
+```bash
+python3 scripts/minimax-h3-conformance.py print-synthetic-output --role oracle
+python3 scripts/minimax-h3-conformance.py print-synthetic-output --role mold
+```
+
 Verify pinned local metadata/source clones without executing a checkpoint:
 
 ```bash
@@ -71,6 +109,24 @@ python3 scripts/minimax-h3-conformance.py validate-bundle \
   --bundle "$MOLD_H3_FIXTURE_ROOT/bundle.json" \
   --authorization-record "$MOLD_H3_AUTHORIZATION_RECORD"
 ```
+
+After authorization and capture, compare any external per-layer pair under the
+same approved root:
+
+```bash
+python3 scripts/minimax-h3-conformance.py compare \
+  --oracle "$MOLD_H3_FIXTURE_ROOT/layers/<case>/oracle.json" \
+  --mold "$MOLD_H3_FIXTURE_ROOT/layers/<case>/mold.json" \
+  --fixture-root "$MOLD_H3_FIXTURE_ROOT" \
+  --authorization-record "$MOLD_H3_AUTHORIZATION_RECORD"
+```
+
+Without those last two arguments, `compare` accepts only the exact checked-in
+synthetic pair. Any other paths—even files labeled synthetic—must be inside the
+external root and pass the existing authorization gate. Non-synthetic producer
+documents must additionally bind the authorization source-document hash. The
+comparison command consumes adapter JSON only; it never opens checkpoints or
+media itself.
 
 The bundle schema is
 `docs/qualification/minimax-h3-fixture-bundle.schema.json`. Every fixture names
