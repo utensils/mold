@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://utensils.io/mold/schemas/minimax-h3-layer-output-v1.json",
+  "title": "Mold MiniMax H3 per-layer producer and adapter output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "family",
+    "case_id",
+    "layer",
+    "authority_tier",
+    "authorization_document_sha256",
+    "input",
+    "producer",
+    "adapter",
+    "environment",
+    "outputs"
+  ],
+  "properties": {
+    "schema_version": { "const": "mold.minimax-h3.layer-output.v1" },
+    "family": { "const": "minimax-h3" },
+    "case_id": { "$ref": "#/$defs/key" },
+    "layer": { "$ref": "#/$defs/key" },
+    "authority_tier": {
+      "enum": ["exact-full-bf16", "quantized-structural", "synthetic"]
+    },
+    "authorization_document_sha256": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "input": { "$ref": "#/$defs/input" },
+    "producer": { "$ref": "#/$defs/producer" },
+    "adapter": { "$ref": "#/$defs/adapter" },
+    "environment": { "$ref": "#/$defs/environment" },
+    "outputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/tensor" }
+    },
+    "comparison": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/comparison" }
+    }
+  },
+  "$defs": {
+    "key": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256", "component_index_sha256"],
+      "properties": {
+        "id": { "$ref": "#/$defs/key" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "component_index_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "implementation", "source_id", "revision"],
+      "properties": {
+        "role": { "enum": ["oracle", "mold"] },
+        "implementation": { "$ref": "#/$defs/key" },
+        "source_id": { "$ref": "#/$defs/key" },
+        "revision": { "$ref": "#/$defs/commit" }
+      }
+    },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "id", "command", "tensor_hash_encoding"],
+      "properties": {
+        "schema_version": { "const": "mold.minimax-h3.layer-adapter.v1" },
+        "id": { "$ref": "#/$defs/key" },
+        "command": { "type": "string", "minLength": 1 },
+        "tensor_hash_encoding": { "$ref": "#/$defs/key" }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "device",
+        "dtype",
+        "attention_backend",
+        "forbidden_accelerations_disabled"
+      ],
+      "properties": {
+        "device": { "type": "string", "minLength": 1 },
+        "dtype": { "type": "string", "minLength": 1 },
+        "attention_backend": { "type": "string", "minLength": 1 },
+        "forbidden_accelerations_disabled": { "const": true }
+      }
+    },
+    "statistics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "max", "mean", "std"],
+      "properties": {
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "mean": { "type": "number" },
+        "std": { "type": "number", "minimum": 0 }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "value"],
+      "properties": {
+        "index": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "value": { "type": "number" }
+      }
+    },
+    "tensor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "shape",
+        "dtype",
+        "content_sha256",
+        "statistics",
+        "samples"
+      ],
+      "properties": {
+        "key": { "$ref": "#/$defs/key" },
+        "shape": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "integer", "minimum": 1 }
+        },
+        "dtype": { "type": "string", "minLength": 1 },
+        "content_sha256": { "$ref": "#/$defs/sha256" },
+        "statistics": { "$ref": "#/$defs/statistics" },
+        "samples": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/sample" }
+        }
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "absolute", "relative", "metric", "hash_policy"],
+      "properties": {
+        "key": { "$ref": "#/$defs/key" },
+        "absolute": { "type": "number", "minimum": 0 },
+        "relative": { "type": "number", "minimum": 0 },
+        "metric": { "const": "elementwise-atol-plus-rtol" },
+        "hash_policy": { "enum": ["exact", "record-only"] }
+      }
+    }
+  }
+}

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -69,9 +70,107 @@ def test_synthetic_drift(tool, temporary: pathlib.Path) -> None:
         tool.SYNTHETIC_PATH = original_path
 
 
-def valid_authorization(tool, temporary: pathlib.Path) -> tuple[pathlib.Path, dict[str, object]]:
+def checked_comparison_pair(tool) -> tuple[dict[str, object], dict[str, object]]:
+    return (
+        json.loads(tool.SYNTHETIC_ORACLE_PATH.read_text(encoding="utf-8")),
+        json.loads(tool.SYNTHETIC_MOLD_PATH.read_text(encoding="utf-8")),
+    )
+
+
+def output_with_key(document: dict[str, object], key: str) -> dict[str, object]:
+    outputs = document["outputs"]
+    assert isinstance(outputs, list)
+    return next(output for output in outputs if output["key"] == key)
+
+
+def test_comparison_diagnostics(tool) -> None:
+    oracle, mold = checked_comparison_pair(tool)
+    notes = tool.compare_layer_outputs(oracle, mold)
+    assert len(notes) == 1
+    assert "hash mismatch" in notes[0]
+    assert "policy=record-only" in notes[0]
+
+    shape_mold = copy.deepcopy(mold)
+    output_with_key(shape_mold, "audio_next")["shape"] = [5]
+    expect_failure(
+        lambda: tool.compare_layer_outputs(oracle, shape_mold),
+        "shape mismatch: oracle=[4], mold=[5]",
+    )
+
+    dtype_mold = copy.deepcopy(mold)
+    output_with_key(dtype_mold, "audio_next")["dtype"] = "float16"
+    expect_failure(
+        lambda: tool.compare_layer_outputs(oracle, dtype_mold),
+        "dtype mismatch: oracle='float32', mold='float16'",
+    )
+
+    keys_mold = copy.deepcopy(mold)
+    renamed = output_with_key(keys_mold, "audio_next")
+    renamed["key"] = "unexpected_output"
+    expect_failure(
+        lambda: tool.compare_layer_outputs(oracle, keys_mold),
+        "missing Mold outputs=['audio_next'], extra Mold outputs=['unexpected_output']",
+    )
+
+    samples_mold = copy.deepcopy(mold)
+    sampled_output = output_with_key(samples_mold, "audio_next")
+    sampled_output["shape"] = [5]
+    sampled_output["samples"][0]["index"] = [4]
+    expect_failure(
+        lambda: tool.compare_layer_outputs(oracle, samples_mold),
+        "sample key mismatch: missing Mold indexes=[[0]], extra Mold indexes=[[4]]",
+    )
+
+    hash_mold = copy.deepcopy(mold)
+    output_with_key(hash_mold, "video_next")["content_sha256"] = "f" * 64
+    expect_failure(
+        lambda: tool.compare_layer_outputs(oracle, hash_mold),
+        "hash mismatch: oracle=cfff2f665b33397e84a33853fc786e9597ebead599161a3e00d7d2a6761fbf9e",
+    )
+
+    tolerance_mold = copy.deepcopy(mold)
+    output_with_key(tolerance_mold, "audio_next")["samples"][0]["value"] = 0.25
+    expect_failure(
+        lambda: tool.compare_layer_outputs(oracle, tolerance_mold),
+        "sample=[0] tolerance exceeded",
+    )
+
+    nan_mold = copy.deepcopy(mold)
+    output_with_key(nan_mold, "audio_next")["statistics"]["mean"] = float("nan")
+    expect_failure(
+        lambda: tool.compare_layer_outputs(oracle, nan_mold),
+        "is NaN",
+    )
+
+    infinity_mold = copy.deepcopy(mold)
+    output_with_key(infinity_mold, "audio_next")["samples"][0]["value"] = float("inf")
+    expect_failure(
+        lambda: tool.compare_layer_outputs(oracle, infinity_mold),
+        "is Inf",
+    )
+
+    missing_field = copy.deepcopy(mold)
+    del missing_field["producer"]["revision"]
+    expect_failure(
+        lambda: tool.compare_layer_outputs(oracle, missing_field),
+        "missing required keys ['revision']",
+    )
+
+    drifted_oracle = copy.deepcopy(oracle)
+    drifted_oracle["producer"]["revision"] = "0" * 40
+    expect_failure(
+        lambda: tool.compare_layer_outputs(drifted_oracle, mold),
+        "oracle source revision is not pinned",
+    )
+
+
+def valid_authorization(
+    tool, temporary: pathlib.Path
+) -> tuple[pathlib.Path, dict[str, object]]:
     source_document = temporary / "minimax-authorization.txt"
-    source_document.write_text("synthetic external authorization evidence\n", encoding="utf-8")
+    source_document.write_text(
+        "synthetic external authorization evidence\n", encoding="utf-8"
+    )
     record = {
         "schema_version": tool.AUTHORIZATION_SCHEMA_VERSION,
         "family": "minimax-h3",
@@ -109,7 +208,9 @@ def test_authorization_and_external_root(tool, temporary: pathlib.Path) -> None:
         "does not cover every conformance activity",
     )
 
-    pathlib.Path(record["source_document_path"]).write_text("mutated\n", encoding="utf-8")
+    pathlib.Path(record["source_document_path"]).write_text(
+        "mutated\n", encoding="utf-8"
+    )
     expect_failure(
         lambda: tool.validate_authorization(record_path),
         "hash does not match",
@@ -167,9 +268,73 @@ def test_external_bundle_hashes(tool, temporary: pathlib.Path) -> None:
 
     evidence.write_text("mutated\n", encoding="utf-8")
     expect_failure(
-        lambda: tool.validate_bundle(manifest, str(root), str(bundle_path), str(record_path)),
+        lambda: tool.validate_bundle(
+            manifest, str(root), str(bundle_path), str(record_path)
+        ),
         "fixture evidence hash mismatch",
     )
+
+
+def test_comparison_authorization_boundary(tool, temporary: pathlib.Path) -> None:
+    root = temporary / "comparison-fixtures"
+    root.mkdir()
+    oracle, mold = checked_comparison_pair(tool)
+    oracle_path = root / "oracle.json"
+    mold_path = root / "mold.json"
+    write_json(oracle_path, oracle)
+    write_json(mold_path, mold)
+
+    expect_failure(
+        lambda: tool.compare_output_files(str(oracle_path), str(mold_path)),
+        "requires an approved external fixture root and authorization record",
+    )
+    authorization_path, _ = valid_authorization(tool, temporary)
+    notes = tool.compare_output_files(
+        str(oracle_path),
+        str(mold_path),
+        str(root),
+        str(authorization_path),
+    )
+    assert len(notes) == 1
+
+    expect_failure(
+        lambda: tool.compare_output_files(
+            str(tool.SYNTHETIC_ORACLE_PATH),
+            str(tool.SYNTHETIC_MOLD_PATH),
+            str(root),
+        ),
+        "must be supplied together",
+    )
+
+    authorization = tool.validate_authorization(authorization_path)
+    unauthorized_oracle = copy.deepcopy(oracle)
+    unauthorized_mold = copy.deepcopy(mold)
+    for document in (unauthorized_oracle, unauthorized_mold):
+        document["authority_tier"] = "exact-full-bf16"
+        document["authorization_document_sha256"] = "0" * 64
+    write_json(oracle_path, unauthorized_oracle)
+    write_json(mold_path, unauthorized_mold)
+    expect_failure(
+        lambda: tool.compare_output_files(
+            str(oracle_path),
+            str(mold_path),
+            str(root),
+            str(authorization_path),
+        ),
+        "oracle output is not bound to the authorization evidence",
+    )
+    assert authorization["source_document_sha256"] != "0" * 64
+
+
+def test_ci_routing() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "'scripts/minimax-h3-conformance.py'" in workflow
+    assert "'scripts/tests/minimax-h3-conformance-contract.py'" in workflow
+    assert "'tests/fixtures/minimax_h3/**'" in workflow
+    assert "'docs/qualification/minimax-h3-*.json'" in workflow
+    assert "python3 scripts/tests/minimax-h3-conformance-contract.py" in workflow
 
 
 def main() -> int:
@@ -182,11 +347,31 @@ def main() -> int:
         capture_output=True,
     ).stdout
     assert json.loads(printed) == json.loads(tool.SYNTHETIC_PATH.read_bytes())
+    compared = subprocess.run(
+        [
+            sys.executable,
+            str(TOOL_PATH),
+            "compare",
+            "--oracle",
+            str(tool.SYNTHETIC_ORACLE_PATH),
+            "--mold",
+            str(tool.SYNTHETIC_MOLD_PATH),
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "policy=record-only" in compared
+    assert "MiniMax H3 conformance compare passed" in compared
+    test_ci_routing()
 
     with tempfile.TemporaryDirectory(prefix="mold-h3-contract-") as value:
         temporary = pathlib.Path(value).resolve()
         test_manifest_drift(tool, temporary)
         test_synthetic_drift(tool, temporary)
+        test_comparison_diagnostics(tool)
+        test_comparison_authorization_boundary(tool, temporary)
         test_authorization_and_external_root(tool, temporary)
         test_external_bundle_hashes(tool, temporary)
 
