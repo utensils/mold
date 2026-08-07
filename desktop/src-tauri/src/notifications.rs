@@ -61,6 +61,27 @@ fn macos_bundle_identifier() -> Option<String> {
         .map(|id| id.to_string())
 }
 
+/// What `delegate::install` may do given the process it finds itself in.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DelegateInstall {
+    Run,
+    SkipUnbundled,
+    SkipOffMainThread,
+}
+
+/// Bundle identity is checked before the thread, because touching
+/// `UNUserNotificationCenter` at all from an unbundled process aborts it — and
+/// the abort happens on the main thread, where the delegate would be installed.
+#[cfg(target_os = "macos")]
+fn delegate_install_decision(has_bundle_identity: bool, on_main_thread: bool) -> DelegateInstall {
+    match (has_bundle_identity, on_main_thread) {
+        (false, _) => DelegateInstall::SkipUnbundled,
+        (true, false) => DelegateInstall::SkipOffMainThread,
+        (true, true) => DelegateInstall::Run,
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn wait_for_callback<T>(
     receiver: std::sync::mpsc::Receiver<T>,
@@ -148,7 +169,10 @@ fn action_from_identifier(identifier: &str) -> Option<NotificationAction> {
 
 #[cfg(target_os = "macos")]
 mod delegate {
-    use super::{action_from_identifier, NotificationAction, PENDING_ACTION};
+    use super::{
+        action_from_identifier, delegate_install_decision, macos_bundle_identifier,
+        DelegateInstall, NotificationAction, PENDING_ACTION,
+    };
     use block2::DynBlock;
     use objc2::runtime::ProtocolObject;
     use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
@@ -206,11 +230,22 @@ mod delegate {
     }
 
     pub fn install(app: &tauri::AppHandle) {
+        let mtm = MainThreadMarker::new();
+        match delegate_install_decision(macos_bundle_identifier().is_some(), mtm.is_some()) {
+            DelegateInstall::SkipUnbundled => {
+                tracing::warn!(
+                    "skipping notification delegate: not running from an app bundle (dev mode)"
+                );
+                return;
+            }
+            DelegateInstall::SkipOffMainThread => {
+                tracing::warn!("notification delegate must be installed on the main thread");
+                return;
+            }
+            DelegateInstall::Run => {}
+        }
+        let Some(mtm) = mtm else { return };
         let _ = APP.set(app.clone());
-        let Some(mtm) = MainThreadMarker::new() else {
-            tracing::warn!("notification delegate must be installed on the main thread");
-            return;
-        };
         let delegate = MoldNotificationDelegate::new(mtm);
         let center = UNUserNotificationCenter::currentNotificationCenter();
         center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -228,9 +263,41 @@ pub fn install_notification_delegate(app: &tauri::AppHandle) {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::{
-        action_from_identifier, macos_bundle_identifier, wait_for_callback, NotificationAction,
+        action_from_identifier, delegate_install_decision, macos_bundle_identifier,
+        wait_for_callback, DelegateInstall, NotificationAction,
     };
     use base64::Engine;
+
+    /// Regression: installing the delegate touches
+    /// `UNUserNotificationCenter.currentNotificationCenter`, which aborts the
+    /// process outside an .app bundle. Being on the main thread is exactly the
+    /// case `tauri dev` hits, so the bundle check must be decided first.
+    #[test]
+    fn delegate_install_is_skipped_without_bundle_identity() {
+        assert_eq!(
+            delegate_install_decision(false, true),
+            DelegateInstall::SkipUnbundled
+        );
+        assert_eq!(
+            delegate_install_decision(false, false),
+            DelegateInstall::SkipUnbundled
+        );
+        assert_eq!(
+            delegate_install_decision(true, false),
+            DelegateInstall::SkipOffMainThread
+        );
+        assert_eq!(delegate_install_decision(true, true), DelegateInstall::Run);
+    }
+
+    /// The bare test binary stands in for `tauri dev`: the real environment must
+    /// resolve to a skip, not merely the synthetic `false` above.
+    #[test]
+    fn bare_binary_never_installs_the_delegate() {
+        assert_eq!(
+            delegate_install_decision(macos_bundle_identifier().is_some(), true),
+            DelegateInstall::SkipUnbundled
+        );
+    }
 
     #[test]
     fn callback_wait_returns_the_delivered_value() {
