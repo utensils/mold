@@ -342,13 +342,19 @@ impl H3PipelineObserver for H3EngineProgressObserver<'_> {
                 .remove(&event.phase)
                 .map_or(Duration::ZERO, |started| started.elapsed());
             match event.phase {
-                H3PipelinePhase::PromptEncode => self.progress.phase_done(
+                H3PipelinePhase::QwenEncode
+                | H3PipelinePhase::QwenEncodeChunk
+                | H3PipelinePhase::PromptEncode => self.progress.phase_done(
                     ProgressPhase::PromptEncode,
                     pipeline_phase_name(event.phase),
                     elapsed,
                 ),
                 H3PipelinePhase::VisualConditionEncode
                 | H3PipelinePhase::VisualConditionEncodeChunk
+                | H3PipelinePhase::ReferenceVisualEncode
+                | H3PipelinePhase::ReferenceVisualEncodeChunk
+                | H3PipelinePhase::ReferenceAudioEncode
+                | H3PipelinePhase::ReferenceAudioEncodeChunk
                 | H3PipelinePhase::VisualDecode
                 | H3PipelinePhase::VisualDecodeChunk => self.progress.phase_done(
                     ProgressPhase::Vae,
@@ -368,9 +374,19 @@ fn pipeline_phase_name(phase: H3PipelinePhase) -> &'static str {
     match phase {
         H3PipelinePhase::Validate => "Validating MiniMax H3 request",
         H3PipelinePhase::EndpointPreprocess => "Preparing MiniMax H3 endpoints",
+        H3PipelinePhase::ReferenceDecode => "Decoding MiniMax H3 references",
+        H3PipelinePhase::ReferenceDecodeChunk => "Decoding MiniMax H3 reference chunk",
+        H3PipelinePhase::ReferencePreprocess => "Preparing MiniMax H3 references",
+        H3PipelinePhase::ReferencePreprocessChunk => "Preparing MiniMax H3 reference chunk",
+        H3PipelinePhase::QwenEncode => "Encoding MiniMax H3 multimodal conditioning",
+        H3PipelinePhase::QwenEncodeChunk => "Encoding MiniMax H3 conditioning chunk",
         H3PipelinePhase::PromptEncode => "Encoding MiniMax H3 prompt",
         H3PipelinePhase::VisualConditionEncode => "Encoding MiniMax H3 visual conditions",
         H3PipelinePhase::VisualConditionEncodeChunk => "Encoding MiniMax H3 visual condition chunk",
+        H3PipelinePhase::ReferenceVisualEncode => "Encoding MiniMax H3 visual references",
+        H3PipelinePhase::ReferenceVisualEncodeChunk => "Encoding MiniMax H3 visual reference chunk",
+        H3PipelinePhase::ReferenceAudioEncode => "Encoding MiniMax H3 audio references",
+        H3PipelinePhase::ReferenceAudioEncodeChunk => "Encoding MiniMax H3 audio reference chunk",
         H3PipelinePhase::NoiseAllocation => "Allocating MiniMax H3 synchronized noise",
         H3PipelinePhase::Denoise => "Denoising MiniMax H3 audio-video latents",
         H3PipelinePhase::TransformerBlock => "Streaming MiniMax H3 transformer blocks",
