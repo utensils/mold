@@ -16,6 +16,7 @@ pub enum Family {
     LtxVideo,
     Ltx2,
     Wan,
+    MinimaxH3,
     QwenImage,
     Wuerstchen,
 }
@@ -29,9 +30,22 @@ pub const ALL_FAMILIES: &[Family] = &[
     Family::LtxVideo,
     Family::Ltx2,
     Family::Wan,
+    Family::MinimaxH3,
     Family::QwenImage,
     Family::Wuerstchen,
 ];
+
+/// Families permitted in ordinary discovery surfaces for this build.
+///
+/// `ALL_FAMILIES` remains the exhaustive internal taxonomy so classification
+/// and exhaustive matches know about contract-only families. Public catalog
+/// endpoints must consume this filtered iterator instead: its predicate is a
+/// direct view of mold-core's single activation authority.
+pub fn active_families() -> impl Iterator<Item = Family> {
+    ALL_FAMILIES.iter().copied().filter(|family| {
+        mold_core::model_activation_available(family.as_str(), Some(family.as_str()))
+    })
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("unknown family: {0:?}")]
@@ -51,6 +65,7 @@ impl Family {
             Family::LtxVideo => "ltx-video",
             Family::Ltx2 => "ltx2",
             Family::Wan => "wan",
+            Family::MinimaxH3 => "minimax-h3",
             Family::QwenImage => "qwen-image",
             Family::Wuerstchen => "wuerstchen",
         }
@@ -68,7 +83,7 @@ impl Family {
     /// count. One predicate is what keeps the four in step.
     pub fn is_video(&self) -> bool {
         match self {
-            Family::LtxVideo | Family::Ltx2 | Family::Wan => true,
+            Family::LtxVideo | Family::Ltx2 | Family::Wan | Family::MinimaxH3 => true,
             Family::Flux
             | Family::Flux2
             | Family::Sd15
@@ -90,6 +105,7 @@ impl Family {
             "ltx-video" => Family::LtxVideo,
             "ltx2" => Family::Ltx2,
             "wan" => Family::Wan,
+            "minimax-h3" | "minimax_h3" | "minimaxh3" => Family::MinimaxH3,
             "qwen-image" => Family::QwenImage,
             "wuerstchen" => Family::Wuerstchen,
             other => return Err(UnknownFamily(other.to_string())),
@@ -100,5 +116,27 @@ impl Family {
 impl fmt::Display for Family {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minimax_h3_aliases_are_canonical_video_taxonomy() {
+        for alias in ["minimax-h3", "minimax_h3", "minimaxh3"] {
+            let family = Family::from_str(alias).unwrap();
+            assert_eq!(family, Family::MinimaxH3);
+            assert_eq!(family.as_str(), "minimax-h3");
+            assert!(family.is_video());
+        }
+    }
+
+    #[test]
+    fn compliance_gated_families_stay_out_of_public_discovery() {
+        let families = active_families().collect::<Vec<_>>();
+        assert!(!families.contains(&Family::MinimaxH3));
+        assert!(families.contains(&Family::Flux));
     }
 }

@@ -4,8 +4,10 @@ import {
   formatVideoDuration,
   framesForVideoDuration,
   maxVideoFrames,
+  minVideoFrames,
   snapVideoFrames,
   videoFrameStep,
+  videoFrameOffset,
 } from "./videoDuration";
 
 const ltx2 = {
@@ -64,6 +66,30 @@ describe("video duration controls", () => {
     expect(videoFrameStep({ family: "wan", frame_step: 8 })).toBe(8);
     expect(videoFrameStep({ family: "flux" })).toBe(8);
     expect(videoFrameStep(null)).toBe(8);
+  });
+
+  it("supports MiniMax H3's 17n+5 frame grid", () => {
+    const h3 = {
+      family: "minimax-h3",
+      frame_step: 17,
+      frame_offset: 5,
+      min_frames: 124,
+      max_frames: 362,
+    };
+    expect(videoFrameStep(h3)).toBe(17);
+    expect(videoFrameOffset(h3)).toBe(5);
+    expect(minVideoFrames(h3)).toBe(124);
+    expect(snapVideoFrames(124, h3)).toBe(124);
+    expect(snapVideoFrames(243, h3)).toBe(243);
+    expect(maxVideoFrames(h3, 24)).toBe(362);
+    expect(clampVideoFrames(5, 24, h3)).toBe(124);
+    expect(framesForVideoDuration(1, 24, h3)).toBe(124);
+  });
+
+  it("prefers the server-advertised minimum over the family fallback", () => {
+    expect(minVideoFrames({ family: "minimax-h3", min_frames: 141 })).toBe(141);
+    expect(minVideoFrames({ family: "flux", min_frames: 9 })).toBe(9);
+    expect(minVideoFrames({ family: "flux" })).toBe(1);
   });
 
   it("gives wan the flat 257 ceiling on a host that advertises no max", () => {

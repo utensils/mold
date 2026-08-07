@@ -28,6 +28,10 @@ async fn families_endpoint_returns_static_taxonomy() {
             "family {expected:?} missing from sidebar list, got {names:?}",
         );
     }
+    assert!(
+        !names.contains(&"minimax-h3"),
+        "compliance-gated H3 must stay out of ordinary taxonomy: {names:?}"
+    );
     // Per-family counts are gone from the wire — live search hits one
     // family at a time, so the SPA's sidebar shows just the family name.
     let flux = families
@@ -46,4 +50,17 @@ async fn capabilities_includes_catalog_block() {
     let v: serde_json::Value = serde_json::from_str(&resp.body).unwrap();
     assert_eq!(v["catalog"]["available"], serde_json::Value::Bool(true));
     assert!(v["catalog"]["families"].is_array());
+    assert!(!v["catalog"]["families"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|family| family == "minimax-h3"));
+    assert!(v["model_access"]["restrictions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|restriction| {
+            restriction["family"] == "minimax-h3"
+                && restriction["code"] == mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
+        }));
 }

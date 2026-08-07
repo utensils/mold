@@ -47,7 +47,14 @@ fn resolve_file_path(
         ModelComponent::ClipTokenizer2 => mcfg.clip_tokenizer_2.clone(),
         ModelComponent::TextTokenizer => mcfg.text_tokenizer.clone(),
         ModelComponent::Decoder => mcfg.decoder.clone(),
-        ModelComponent::TransformerShard | ModelComponent::TextEncoder => None,
+        ModelComponent::TransformerShard
+        | ModelComponent::TextEncoder
+        | ModelComponent::AudioVae
+        | ModelComponent::Processor
+        | ModelComponent::VideoScheduler
+        | ModelComponent::AudioScheduler
+        | ModelComponent::ModelConfig
+        | ModelComponent::TaskConfig => None,
         ModelComponent::Upscaler => mcfg.transformer.clone(),
     }
 }
@@ -79,6 +86,12 @@ fn resolve_verify_path(
             // Shards, text encoder files, and upscaler weights; fall through to config
             ModelComponent::TransformerShard
             | ModelComponent::TextEncoder
+            | ModelComponent::AudioVae
+            | ModelComponent::Processor
+            | ModelComponent::VideoScheduler
+            | ModelComponent::AudioScheduler
+            | ModelComponent::ModelConfig
+            | ModelComponent::TaskConfig
             | ModelComponent::Upscaler => None,
         };
         if let Some(p) = path {
@@ -95,6 +108,12 @@ fn component_label(component: &ModelComponent) -> &'static str {
         ModelComponent::TransformerShard => "Transformer Shard",
         ModelComponent::LowNoiseTransformer => "Low-Noise Transformer",
         ModelComponent::Vae => "VAE",
+        ModelComponent::AudioVae => "Audio VAE",
+        ModelComponent::Processor => "Processor",
+        ModelComponent::VideoScheduler => "Video Scheduler",
+        ModelComponent::AudioScheduler => "Audio Scheduler",
+        ModelComponent::ModelConfig => "Model Config",
+        ModelComponent::TaskConfig => "Task Config",
         ModelComponent::SpatialUpscaler => "Spatial Upscaler",
         ModelComponent::TemporalUpscaler => "Temporal Upscaler",
         ModelComponent::DistilledLora => "Distilled LoRA",

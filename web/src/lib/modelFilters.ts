@@ -57,6 +57,9 @@ const FAMILY_ORDER = [
   "ltx2",
   "ltx-2",
   "wan",
+  "minimax-h3",
+  "minimax_h3",
+  "minimaxh3",
 ];
 
 const FAMILY_LABELS: Record<string, string> = {
@@ -76,6 +79,9 @@ const FAMILY_LABELS: Record<string, string> = {
   ltx2: "LTX-2",
   "ltx-2": "LTX-2",
   wan: "Wan Video",
+  "minimax-h3": "MiniMax H3",
+  minimax_h3: "MiniMax H3",
+  minimaxh3: "MiniMax H3",
 };
 
 const VARIANT_RANKS: Record<string, number> = {

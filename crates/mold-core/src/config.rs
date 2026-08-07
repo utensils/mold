@@ -1777,6 +1777,15 @@ fn resolved_manifest_paths_exist(
             .text_tokenizer
             .as_ref()
             .is_some_and(|path| path.exists()),
+        // H3 remains contract-only. ModelPaths does not yet carry these
+        // components, so a manifest can never be mistaken for runnable merely
+        // because the legacy transformer/VAE subset exists.
+        ModelComponent::AudioVae
+        | ModelComponent::Processor
+        | ModelComponent::VideoScheduler
+        | ModelComponent::AudioScheduler
+        | ModelComponent::ModelConfig
+        | ModelComponent::TaskConfig => false,
         ModelComponent::Decoder => paths.decoder.as_ref().is_some_and(|path| path.exists()),
         ModelComponent::Upscaler => paths.transformer.exists(),
     })

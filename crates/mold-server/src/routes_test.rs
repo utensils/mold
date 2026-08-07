@@ -3901,6 +3901,9 @@ mod tests {
             body["catalog"]["sort"],
             serde_json::json!(["downloads", "recent", "rating"])
         );
+        assert!(body["catalog"]["families"]
+            .as_array()
+            .is_some_and(|families| families.iter().all(|family| family != "minimax-h3")));
         assert_eq!(
             body["model_access"]["restrictions"][0]["code"],
             mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED

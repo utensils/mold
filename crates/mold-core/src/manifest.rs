@@ -47,8 +47,21 @@ pub enum ModelComponent {
     ClipTokenizer2, // CLIP-G tokenizer (SDXL)
     TextEncoder,    // Generic text encoder shard (Qwen3 for Z-Image)
     TextTokenizer,  // Generic text encoder tokenizer
-    Decoder,        // Stage B decoder weights (Wuerstchen)
-    Upscaler,       // Upscaler model weights (Real-ESRGAN, etc.)
+    /// MiniMax H3 synchronized-audio VAE. Kept distinct from the video VAE.
+    AudioVae,
+    /// Tokenizer / multimodal processor data owned by a model family.
+    Processor,
+    /// Video-side scheduler configuration for a dual-modality model.
+    VideoScheduler,
+    /// Audio-side scheduler configuration for a dual-modality model.
+    AudioScheduler,
+    /// Shared architecture/configuration metadata.
+    ModelConfig,
+    /// Task-transformer configuration. Never shared across tasks; compatible
+    /// layouts of the same task may reuse one pinned config identity.
+    TaskConfig,
+    Decoder,  // Stage B decoder weights (Wuerstchen)
+    Upscaler, // Upscaler model weights (Real-ESRGAN, etc.)
 }
 
 #[derive(Debug, Clone)]
@@ -296,6 +309,7 @@ fn is_model_specific_component(component: ModelComponent) -> bool {
             | ModelComponent::LowNoiseTransformer
             | ModelComponent::DistilledLora
             | ModelComponent::LowNoiseDistilledLora
+            | ModelComponent::TaskConfig
             | ModelComponent::Upscaler
     )
 }
@@ -310,6 +324,20 @@ fn is_model_specific_component(component: ModelComponent) -> bool {
 /// creating subdirectories under the target directory.
 pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
     let sanitized_name = manifest.name.replace(':', "-");
+
+    // H3's official and Comfy transformers use the same task architecture
+    // config. Keep one copy per task across layouts while the task-specific
+    // source path (`transformer` vs `transformer_ref`) prevents cross-task
+    // substitution. The Comfy manifests intentionally omit official sharded
+    // weight indexes because those do not describe their single-file weights.
+    if manifest.family == crate::minimax_h3::FAMILY
+        && file.component == ModelComponent::TaskConfig
+        && file.hf_repo == crate::minimax_h3::OFFICIAL_REPO
+    {
+        return PathBuf::from("shared")
+            .join(crate::minimax_h3::FAMILY)
+            .join(&file.hf_filename);
+    }
 
     if is_model_specific_component(file.component) {
         PathBuf::from(&sanitized_name).join(&file.hf_filename)
@@ -1249,6 +1277,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(ltx_video_manifests());
     manifests.extend(ltx2_manifests());
     manifests.extend(wan_manifests());
+    manifests.extend(crate::minimax_h3::manifests());
     manifests.extend(ltx2_control_manifests());
     manifests.extend(ltx2_camera_control_manifests());
     manifests.extend(controlnet_manifests());
@@ -3497,6 +3526,9 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
 /// - `flux-dev:q4` → `flux-dev:q4` (unchanged)
 /// - `flux-dev-q4` → `flux-dev:q4` (legacy format)
 pub fn resolve_model_name(input: &str) -> String {
+    if let Some(name) = crate::minimax_h3::resolve_model_name(input) {
+        return name.to_string();
+    }
     // Already has a tag
     if input.contains(':') {
         return input.to_string();
@@ -6447,7 +6479,7 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 6 Wan + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 140
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 6 Wan + 4 compliance-hidden MiniMax H3 contracts + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 144
         // Wan bump: +wan22-{t2v,i2v}-a14b:{q5,q8} — the two-expert A14B tiers.
         // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
         // catalog bridge (single-file Civitai Flux.2 fine-tunes); +z-image-te
@@ -6455,7 +6487,7 @@ mod tests {
         // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
         // Gemma 3 12B text encoder); +wan-umt5, +wan21-vae, +wan22-vae for
         // single-file Wan checkpoints.
-        assert_eq!(known_manifests().len(), 140);
+        assert_eq!(known_manifests().len(), 144);
     }
 
     #[test]

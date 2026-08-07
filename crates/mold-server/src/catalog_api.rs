@@ -384,10 +384,8 @@ pub async fn list_families(State(_state): State<crate::state::AppState>) -> impl
     // Live search hits one family per request, so the sidebar just gets
     // the static taxonomy. No per-family counts — that line is gone from
     // the SPA too.
-    use mold_catalog::families::{Family, ALL_FAMILIES};
-    let merged: Vec<serde_json::Value> = ALL_FAMILIES
-        .iter()
-        .map(|f: &Family| serde_json::json!({ "family": f.as_str() }))
+    let merged: Vec<serde_json::Value> = mold_catalog::families::active_families()
+        .map(|family| serde_json::json!({ "family": family.as_str() }))
         .collect();
     Json(serde_json::json!({ "families": merged })).into_response()
 }
@@ -778,6 +776,22 @@ pub async fn live_search_catalog(
         },
         None => None,
     };
+    if let Some(family) = family {
+        if let Err(error) =
+            mold_core::require_model_activation(family.as_str(), Some(family.as_str()))
+        {
+            return model_activation_response(error);
+        }
+    }
+    if let Some(query) =
+        q.q.as_deref()
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+    {
+        if let Err(error) = mold_core::require_model_activation(query, None) {
+            return model_activation_response(error);
+        }
+    }
     let kind = match q.kind.as_deref().filter(|s| !s.is_empty()) {
         Some(s) => match parse_kind(s) {
             Some(k) => Some(k),

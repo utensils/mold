@@ -13,6 +13,11 @@ pub const MINIMAX_H3_AUTHORIZATION_ISSUE_URL: &str = "https://github.com/utensil
 pub const MINIMAX_H3_LICENSE_URL: &str = "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/\
 bfc8ed0353f5a9733be73e6b2c98ec0948195b86/LICENSE";
 
+/// Content identity of the reviewed license bytes, pinned by the H3
+/// conformance manifest and required by any future authorization record.
+pub const MINIMAX_H3_LICENSE_SHA256: &str =
+    "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelActivation {
     Available,
@@ -81,6 +86,16 @@ pub fn model_activation(identifier: &str, family: Option<&str>) -> ModelActivati
     } else {
         ModelActivation::Available
     }
+}
+
+/// Whether an identity may appear in ordinary model-discovery surfaces.
+///
+/// This is a convenience view over [`model_activation`], not a second policy
+/// table. Catalog-family lists and other non-error-producing discovery paths
+/// use it so a compliance-gated family cannot leak through static taxonomy
+/// while mutating ingress paths continue to use [`require_model_activation`].
+pub fn model_activation_available(identifier: &str, family: Option<&str>) -> bool {
+    model_activation(identifier, family) == ModelActivation::Available
 }
 
 pub fn require_model_activation(
@@ -217,6 +232,15 @@ mod tests {
                 "{identifier}"
             );
         }
+    }
+
+    #[test]
+    fn discovery_availability_is_a_view_of_the_activation_authority() {
+        assert!(!model_activation_available(
+            "minimax-h3",
+            Some("minimax-h3")
+        ));
+        assert!(model_activation_available("flux", Some("flux")));
     }
 
     #[test]

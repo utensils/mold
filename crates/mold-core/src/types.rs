@@ -196,7 +196,8 @@ impl ExpandTask {
     /// Backward-compatible policy for callers that only send a family.
     pub fn for_family(family: &str) -> Self {
         match family.trim().to_ascii_lowercase().as_str() {
-            "ltx2" | "ltx-2" | "ltx-video" | "wan" | "wan2.1" | "wan2.2" => Self::TextToVideo,
+            "ltx2" | "ltx-2" | "ltx-video" | "wan" | "wan2.1" | "wan2.2" | "minimax-h3"
+            | "minimax_h3" | "minimaxh3" => Self::TextToVideo,
             _ => Self::TextToImage,
         }
     }
@@ -242,7 +243,15 @@ impl ExpandTask {
     ) -> Self {
         if !matches!(
             family.trim().to_ascii_lowercase().as_str(),
-            "ltx2" | "ltx-2" | "ltx-video" | "wan" | "wan2.1" | "wan2.2"
+            "ltx2"
+                | "ltx-2"
+                | "ltx-video"
+                | "wan"
+                | "wan2.1"
+                | "wan2.2"
+                | "minimax-h3"
+                | "minimax_h3"
+                | "minimaxh3"
         ) {
             return Self::TextToImage;
         }
@@ -797,7 +806,8 @@ impl GenerateRequest {
             return self;
         }
         self.output_format = Some(match family {
-            Some("ltx2") | Some("ltx-video") | Some("wan") => OutputFormat::Mp4,
+            Some("ltx2") | Some("ltx-video") | Some("wan") | Some("minimax-h3")
+            | Some("minimax_h3") | Some("minimaxh3") => OutputFormat::Mp4,
             _ => OutputFormat::Png,
         });
         self
@@ -1577,6 +1587,11 @@ pub struct ModelDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 24)]
     pub default_fps: Option<u32>,
+    /// Minimum requestable video frame count (additive; absent when the
+    /// historical one-frame floor applies).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 124)]
+    pub min_frames: Option<u32>,
     /// Maximum frames a single request may ask for at `default_fps`
     /// (additive; absent for image models). For families whose ceiling is a
     /// duration — see `max_runtime_seconds` — this scalar moves with fps, so
@@ -1599,11 +1614,17 @@ pub struct ModelDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 604)]
     pub max_frames_absolute: Option<u32>,
-    /// Valid frame counts are `k * frame_step + 1` (additive; absent for
-    /// image models). 8 for the LTX families.
+    /// Step of the valid frame grid (additive; absent for image models).
+    /// Combine with `frame_offset`, whose backward-compatible default is 1:
+    /// valid counts are `k * frame_step + frame_offset`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 8)]
     pub frame_step: Option<u32>,
+    /// Offset of the valid frame grid. Omitted by older servers and families
+    /// whose grid is `k * frame_step + 1`; MiniMax H3 advertises 5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = 5)]
+    pub frame_offset: Option<u32>,
     /// Server-authoritative total-pixel ceiling for generation requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 1800000)]
@@ -1781,8 +1802,10 @@ mod model_defaults_frame_tests {
         let parsed: ModelDefaults = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.default_frames, None);
         assert_eq!(parsed.default_fps, None);
+        assert_eq!(parsed.min_frames, None);
         assert_eq!(parsed.max_frames, None);
         assert_eq!(parsed.frame_step, None);
+        assert_eq!(parsed.frame_offset, None);
         assert_eq!(parsed.max_pixels, None);
         assert!(parsed.recommended_dimensions.is_empty());
         assert_eq!(parsed.dimension_alignment, None);
@@ -1790,8 +1813,10 @@ mod model_defaults_frame_tests {
         let out = serde_json::to_value(&parsed).unwrap();
         assert!(out.get("default_frames").is_none());
         assert!(out.get("default_fps").is_none());
+        assert!(out.get("min_frames").is_none());
         assert!(out.get("max_frames").is_none());
         assert!(out.get("frame_step").is_none());
+        assert!(out.get("frame_offset").is_none());
         assert!(out.get("max_pixels").is_none());
         assert!(out.get("recommended_dimensions").is_none());
         assert!(out.get("dimension_alignment").is_none());
@@ -1799,23 +1824,29 @@ mod model_defaults_frame_tests {
         let video = ModelDefaults {
             default_frames: Some(97),
             default_fps: Some(24),
+            min_frames: Some(1),
             max_frames: Some(484),
             max_runtime_seconds: Some(20),
             frame_step: Some(8),
+            frame_offset: Some(1),
             ..parsed
         };
         let out = serde_json::to_value(&video).unwrap();
         assert_eq!(out["default_frames"], 97);
         assert_eq!(out["default_fps"], 24);
+        assert_eq!(out["min_frames"], 1);
         assert_eq!(out["max_frames"], 484);
         assert_eq!(out["max_runtime_seconds"], 20);
         assert_eq!(out["frame_step"], 8);
+        assert_eq!(out["frame_offset"], 1);
 
         let back: ModelDefaults = serde_json::from_value(out).unwrap();
         assert_eq!(back.default_frames, Some(97));
         assert_eq!(back.default_fps, Some(24));
+        assert_eq!(back.min_frames, Some(1));
         assert_eq!(back.max_frames, Some(484));
         assert_eq!(back.max_runtime_seconds, Some(20));
+        assert_eq!(back.frame_offset, Some(1));
         assert_eq!(back.frame_step, Some(8));
     }
 }
