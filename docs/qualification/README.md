@@ -1,5 +1,10 @@
 # CUDA distribution qualification
 
+MiniMax H3 uses a separate, weight-free conformance contract before any CUDA
+qualification is allowed. Its pinned authorities, synthetic CI fixture, and
+external evidence boundary are documented in
+[MiniMax H3 conformance evidence](./minimax-h3-conformance.md).
+
 The schema and runner define the deferred real RTX 3090 acceptance gate. No
 passing hardware report is checked in, and the runner never provisions cloud
 hardware.

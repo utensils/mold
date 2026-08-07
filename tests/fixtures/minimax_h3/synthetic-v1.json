@@ -1,0 +1,133 @@
+{
+  "schema_version": "mold.minimax-h3.synthetic.v1",
+  "authority": {
+    "source": "diffusers-minimax-h3",
+    "revision": "9c6a68c32b3b2a64db91800b624d33cec6e25ab8",
+    "execution": "weight-free-python-float32-emulation"
+  },
+  "frame_grid": [
+    {
+      "nominal_seconds": 5,
+      "requested_frames": 120,
+      "aligned_frames": 124,
+      "video_latent_frames": 37,
+      "audio_latents_per_channel": 207,
+      "actual_duration_seconds": 5.166666666666667
+    },
+    {
+      "nominal_seconds": 10,
+      "requested_frames": 240,
+      "aligned_frames": 243,
+      "video_latent_frames": 72,
+      "audio_latents_per_channel": 405,
+      "actual_duration_seconds": 10.125
+    },
+    {
+      "nominal_seconds": 15,
+      "requested_frames": 360,
+      "aligned_frames": 362,
+      "video_latent_frames": 107,
+      "audio_latents_per_channel": 603,
+      "actual_duration_seconds": 15.083333333333334
+    }
+  ],
+  "scheduler": {
+    "grid_points": 4,
+    "transformer_evaluations": 3,
+    "video_shift": 12.0,
+    "audio_shift": 3.0,
+    "video_sigmas": [
+      1.0,
+      0.9599999189376831,
+      0.8571428060531616,
+      0.0
+    ],
+    "audio_sigmas": [
+      1.0,
+      0.8571428060531616,
+      0.5999999642372131,
+      0.0
+    ],
+    "video_timesteps": [
+      0.0,
+      0.040000081062316895,
+      0.14285719394683838
+    ],
+    "audio_timesteps": [
+      0.0,
+      0.14285719394683838,
+      0.40000003576278687
+    ],
+    "terminal_zero_included": true,
+    "ancestral_noise_reinjected": false
+  },
+  "coupled_update": {
+    "step_index": 1,
+    "sample": [0.25, -0.5, 1.0, -2.0],
+    "video_velocity": [0.5, 0.25, -1.5, 2.0],
+    "audio_velocity": [-0.25, 0.75, 0.5, -1.0],
+    "video_next": [
+      0.30142855644226074,
+      -0.47428572177886963,
+      0.8457143902778625,
+      -1.794285774230957
+    ],
+    "audio_next": [
+      0.18571428954601288,
+      -0.30714285373687744,
+      1.1285715103149414,
+      -2.257143020629883
+    ],
+    "velocity_sign": "data-ward-plus",
+    "update_dtype": "float32"
+  },
+  "packed_layout": {
+    "order": [
+      "text",
+      "reference-audio",
+      "reference-video",
+      "target-audio",
+      "target-video"
+    ],
+    "row_counts": [3, 4, 6, 8, 10],
+    "row_offsets": [0, 3, 7, 13, 21, 31],
+    "modality_tags": {
+      "video": 0,
+      "text": 1,
+      "audio": 2
+    },
+    "video_soundtrack_precedes_visual_rows": true
+  },
+  "temporal_rope": {
+    "origin": 3.0,
+    "frame_rescale": 1.6666666666666667,
+    "frames_per_latent_pattern": [1, 4, 4, 4, 4],
+    "positions_for_seven_latents": [
+      3.0,
+      4.666666666666667,
+      11.333333333333334,
+      18.0,
+      24.666666666666668,
+      31.333333333333336,
+      33.0
+    ]
+  },
+  "noise_allocation_order": [
+    {
+      "domain": "condition-posterior",
+      "shape": [1, 24, 1, 2, 2]
+    },
+    {
+      "domain": "condition-noise",
+      "shape": [1, 24, 1, 2, 2]
+    },
+    {
+      "domain": "target-video",
+      "shape": [1, 24, 2, 2, 2]
+    },
+    {
+      "domain": "target-audio",
+      "shape": [2, 3, 32]
+    }
+  ]
+}

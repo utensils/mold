@@ -1,0 +1,329 @@
+{
+  "schema_version": "mold.minimax-h3.conformance-manifest.v1",
+  "family": "minimax-h3",
+  "numerical_authority": {
+    "source_id": "diffusers",
+    "precision": "official-bf16-fp32-mixed",
+    "excluded_accelerations": [
+      "torch-compile",
+      "fp8",
+      "cache-dit",
+      "sageattention",
+      "stochastic-sampling",
+      "approximate-attention",
+      "tf32"
+    ]
+  },
+  "sources": [
+    {
+      "id": "minimax-official-code",
+      "repository": "https://github.com/MiniMax-AI/MiniMax-H3",
+      "revision": "8d8824efaf94586c0cc9ac7ad8d0723d4d6420ea",
+      "role": "official architecture and semantic contract",
+      "authority": "semantic"
+    },
+    {
+      "id": "minimax-official-model",
+      "repository": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+      "revision": "bfc8ed0353f5a9733be73e6b2c98ec0948195b86",
+      "role": "official checkpoint configuration and component indexes",
+      "authority": "numerical"
+    },
+    {
+      "id": "diffusers",
+      "repository": "https://github.com/huggingface/diffusers",
+      "revision": "9c6a68c32b3b2a64db91800b624d33cec6e25ab8",
+      "role": "official full-precision executable oracle",
+      "authority": "numerical"
+    },
+    {
+      "id": "comfyui",
+      "repository": "https://github.com/Comfy-Org/ComfyUI",
+      "revision": "a464ac33588ae182f81a090d910cfbf21e255b73",
+      "role": "pruned and quantized runtime reference",
+      "authority": "deployment"
+    },
+    {
+      "id": "comfy-checkpoints",
+      "repository": "https://huggingface.co/Comfy-Org/MiniMax-H3",
+      "revision": "eb8a16107c595128b3a578f82d2ce2f75920c355",
+      "role": "pruned and quantized checkpoint schema reference",
+      "authority": "deployment"
+    },
+    {
+      "id": "sglang",
+      "repository": "https://github.com/sgl-project/sglang",
+      "revision": "0c3a76fa0a5bfab410b645f4143e7e8e3cc25c77",
+      "role": "truncated conditioner and distributed performance reference",
+      "authority": "performance"
+    },
+    {
+      "id": "vllm-omni",
+      "repository": "https://github.com/vllm-project/vllm-omni",
+      "revision": "3d7fc3b9ba3cac88d579d4dc35b78b0b641675fc",
+      "role": "loader, offload, and CUDA kernel reference",
+      "authority": "performance"
+    }
+  ],
+  "component_indexes": [
+    {
+      "id": "official-license",
+      "source_id": "minimax-official-model",
+      "relative_path": "LICENSE",
+      "sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44"
+    },
+    {
+      "id": "official-model-index",
+      "source_id": "minimax-official-model",
+      "relative_path": "model_index.json",
+      "sha256": "5a587fe13b2371427415ac892463142683aefcd8d322e274a3a095eac37ac7d2"
+    },
+    {
+      "id": "official-modular-index",
+      "source_id": "minimax-official-model",
+      "relative_path": "modular_model_index.json",
+      "sha256": "a2b6a210e482ffb78e613b553f570c44e101afce6741bd4ed91429d0559af031"
+    },
+    {
+      "id": "official-fl2va-transformer-index",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+      "sha256": "ac30a3b58963f2e735d493475fbb81853a5735ec947619648b3e045acda6783e"
+    },
+    {
+      "id": "official-ref2va-transformer-index",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/diffusion_pytorch_model.safetensors.index.json",
+      "sha256": "ac30a3b58963f2e735d493475fbb81853a5735ec947619648b3e045acda6783e"
+    },
+    {
+      "id": "official-text-encoder-index",
+      "source_id": "minimax-official-model",
+      "relative_path": "text_encoder/model.safetensors.index.json",
+      "sha256": "06c952c569285870b811989b794b9766493e280fb77fbcb957fc4e5fcf25403a"
+    },
+    {
+      "id": "official-video-vae-index",
+      "source_id": "minimax-official-model",
+      "relative_path": "vae/diffusion_pytorch_model.safetensors.index.json",
+      "sha256": "15f6d44553c3c616b0dc999920aa784f92ecee7e4201f1f99ac405cfbf3061ca"
+    },
+    {
+      "id": "official-audio-vae-config",
+      "source_id": "minimax-official-model",
+      "relative_path": "audio_vae/config.json",
+      "sha256": "9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6"
+    }
+  ],
+  "capture_policy": {
+    "external_fixture_root_required": true,
+    "authorization_record_required": true,
+    "weights_in_repository_forbidden": true,
+    "generated_media_in_repository_forbidden": true,
+    "authorization_issue": "https://github.com/utensils/mold/issues/831",
+    "fixture_root_environment": "MOLD_H3_FIXTURE_ROOT",
+    "authorization_record_environment": "MOLD_H3_AUTHORIZATION_RECORD"
+  },
+  "fixture_layers": [
+    {
+      "id": "tokenizer-processor",
+      "authority_tier": "exact-full-bf16",
+      "required_provenance": [
+        "source-revision",
+        "tokenizer-hash",
+        "processor-hash",
+        "device",
+        "capture-command"
+      ],
+      "required_measurements": [
+        "token-ids",
+        "special-token-presentation",
+        "processor-shapes",
+        "sampled-values"
+      ]
+    },
+    {
+      "id": "qwen-layer-50",
+      "authority_tier": "exact-full-bf16",
+      "required_provenance": [
+        "source-revision",
+        "component-index-hash",
+        "device",
+        "dtype",
+        "capture-command"
+      ],
+      "required_measurements": ["shape", "dtype", "statistics", "sampled-values", "tolerance"]
+    },
+    {
+      "id": "visual-vae",
+      "authority_tier": "exact-full-bf16",
+      "required_provenance": [
+        "source-revision",
+        "component-index-hash",
+        "device",
+        "dtype",
+        "capture-command"
+      ],
+      "required_measurements": [
+        "pixel-normalization",
+        "posterior-seed-42",
+        "latent-statistics",
+        "sampled-values",
+        "tile-seams"
+      ]
+    },
+    {
+      "id": "audio-vae",
+      "authority_tier": "exact-full-bf16",
+      "required_provenance": [
+        "source-revision",
+        "component-index-hash",
+        "device",
+        "dtype",
+        "capture-command"
+      ],
+      "required_measurements": [
+        "stereo-packing",
+        "latent-rate",
+        "waveform-statistics",
+        "phase-polarity",
+        "sampled-values"
+      ]
+    },
+    {
+      "id": "token-refiner",
+      "authority_tier": "exact-full-bf16",
+      "required_provenance": [
+        "source-revision",
+        "component-index-hash",
+        "device",
+        "dtype",
+        "capture-command"
+      ],
+      "required_measurements": ["shape", "statistics", "sampled-values", "tolerance"]
+    },
+    {
+      "id": "transformer-block",
+      "authority_tier": "exact-full-bf16",
+      "required_provenance": [
+        "source-revision",
+        "component-index-hash",
+        "device",
+        "dtype",
+        "attention-backend",
+        "capture-command"
+      ],
+      "required_measurements": [
+        "qk-rms",
+        "partial-mm-rope",
+        "adaln",
+        "video-head",
+        "audio-head",
+        "tolerance"
+      ]
+    },
+    {
+      "id": "packed-layout",
+      "authority_tier": "exact-full-bf16",
+      "required_provenance": [
+        "source-revision",
+        "workflow",
+        "reference-order",
+        "device",
+        "capture-command"
+      ],
+      "required_measurements": [
+        "row-order",
+        "modality-tags",
+        "rotary-coordinates",
+        "timestep-indices"
+      ]
+    },
+    {
+      "id": "dual-sampler",
+      "authority_tier": "synthetic",
+      "required_provenance": [
+        "source-revision",
+        "float-policy",
+        "video-shift",
+        "audio-shift",
+        "capture-command"
+      ],
+      "required_measurements": ["sigma-arrays", "timesteps", "coupled-update", "evaluation-count"]
+    },
+    {
+      "id": "noise-allocation",
+      "authority_tier": "exact-full-bf16",
+      "required_provenance": [
+        "source-revision",
+        "seed",
+        "generator-device",
+        "allocation-version",
+        "capture-command"
+      ],
+      "required_measurements": ["draw-order", "tensor-shapes", "sampled-values", "hash"]
+    },
+    {
+      "id": "end-to-end-t2va",
+      "authority_tier": "exact-full-bf16",
+      "required_provenance": [
+        "source-revision",
+        "component-index-hashes",
+        "device",
+        "dtype",
+        "capture-command"
+      ],
+      "required_measurements": ["latent-statistics", "av-timing", "video-metrics", "audio-metrics"]
+    },
+    {
+      "id": "end-to-end-fl2va",
+      "authority_tier": "exact-full-bf16",
+      "required_provenance": [
+        "source-revision",
+        "component-index-hashes",
+        "endpoint-signature",
+        "device",
+        "capture-command"
+      ],
+      "required_measurements": [
+        "condition-latents",
+        "latent-statistics",
+        "av-timing",
+        "video-metrics",
+        "audio-metrics"
+      ]
+    },
+    {
+      "id": "end-to-end-ref2va",
+      "authority_tier": "exact-full-bf16",
+      "required_provenance": [
+        "source-revision",
+        "component-index-hashes",
+        "reference-order",
+        "device",
+        "capture-command"
+      ],
+      "required_measurements": [
+        "packed-order",
+        "latent-statistics",
+        "av-timing",
+        "video-metrics",
+        "audio-metrics"
+      ]
+    }
+  ],
+  "day_zero_contract": {
+    "fps": 24,
+    "frame_step": 17,
+    "frame_offset": 5,
+    "nominal_15_second_frames": 362,
+    "nominal_15_second_actual_duration": 15.083333333333334,
+    "mold_decision": "accept-aligned-362",
+    "diffusers_discrepancy": "aligns-to-362-then-rejects-over-15s"
+  },
+  "synthetic_fixture": {
+    "relative_path": "synthetic-v1.json",
+    "sha256": "bddf9a6b821015094aedba95dd58a7634a783c9338dd6d488e66bd8d5fcd182a",
+    "weights_required": false
+  }
+}
