@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Native AAC/MP4 output muxing is now shared across audio-capable video families.** The inference-owned API offers an explicit exact-timeline policy that trims or zero-pads decoded mono/stereo PCM and shortens the final AAC sample without accumulating frame-rounding drift, plus atomic path publication and phase-aware cancellation. Existing LTX-2 callers retain their supplied-PCM/full-AAC-frame container contract through compatibility wrappers, while server model metadata asks an inference capability registry instead of hard-coding the LTX-2 family.
 - **Mold no longer consumes renamed Candle crates.** Upstream's official `candle-core`, `candle-nn`, and `candle-transformers` package identities now flow through the entire graph, so ecosystem crates such as `candle-flash-attn` share the same `Tensor` type and Flash Attention no longer needs a hidden `RUSTFLAGS` gate. Mold-owned LTX-Video code, Stable Diffusion component factories, GGUF in-memory builders, and efficient public-API quantization helpers now live in the `mold-ai-candle` workspace crate. The remaining backend-only changes use a narrow same-name `[patch.crates-io]` compatibility branch and are documented with upstream exit criteria in `docs/architecture/candle-extension.md`. The Candle 0.11 migration also changes LTX-Video STG to the transformer's hard skip list, avoiding execution of blocks whose old per-layer mask was zero.
 
 ### Fixed

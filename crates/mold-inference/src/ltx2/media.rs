@@ -7,13 +7,6 @@ use std::fs;
 use std::io::{BufReader, Cursor, Read, Seek};
 use std::path::Path;
 
-#[cfg(feature = "mp4")]
-use fdk_aac::enc::{
-    AudioObjectType as FdkAudioObjectType, BitRate as FdkBitRate, ChannelMode as FdkChannelMode,
-    Encoder as FdkEncoder, EncoderParams as FdkEncoderParams, Transport as FdkTransport,
-};
-#[cfg(feature = "mp4")]
-use mp4_rs::{AacConfig, AudioObjectType, Bytes, Mp4Sample, SampleFreqIndex};
 use mp4_rs::{
     AvcConfig, ChannelConfig, MediaConfig, MediaType, Mp4Config, Mp4Reader, Mp4Writer, TrackConfig,
     TrackType,
@@ -22,6 +15,10 @@ use openh264::decoder::{Decoder, DecoderConfig, Flush};
 use openh264::formats::YUVSource;
 
 use crate::ltx_video::video_enc;
+
+// Compatibility exports for downstream callers. The implementation and all
+// new call sites live at the family-neutral `crate::av_media` boundary.
+pub use crate::av_media::{attach_aac_track_from_f32_interleaved, attach_aac_track_to_mp4_bytes};
 
 #[derive(Debug, Default)]
 pub struct ProbeMetadata {
@@ -495,135 +492,6 @@ fn copy_video_only_mp4(input_mp4: &Path, out_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Bytes-in / bytes-out wrapper around
-/// [`attach_aac_track_from_f32_interleaved`]. Encapsulates the tempfile
-/// dance so callers (server, CLI) don't need their own tempfile dependency
-/// just to mux a chain audio track into an in-memory MP4 buffer.
-#[cfg(feature = "mp4")]
-pub fn attach_aac_track_to_mp4_bytes(
-    video_only_mp4: &[u8],
-    samples: &[f32],
-    sample_rate: u32,
-    channels: u16,
-) -> Result<Vec<u8>> {
-    let work_dir = tempfile::tempdir().context("attach_aac_track_to_mp4_bytes: tempdir")?;
-    let mp4_path = work_dir.path().join("video-only.mp4");
-    let muxed_path = work_dir.path().join("video-with-audio.mp4");
-    fs::write(&mp4_path, video_only_mp4)
-        .with_context(|| format!("write {}", mp4_path.display()))?;
-    attach_aac_track_from_f32_interleaved(&mp4_path, &muxed_path, samples, sample_rate, channels)?;
-    fs::read(&muxed_path).with_context(|| format!("read {}", muxed_path.display()))
-}
-
-#[cfg(feature = "mp4")]
-pub fn attach_aac_track_from_f32_interleaved(
-    input_mp4: &Path,
-    out_path: &Path,
-    samples: &[f32],
-    sample_rate: u32,
-    channels: u16,
-) -> Result<()> {
-    if samples.is_empty() {
-        bail!("native LTX-2 AAC mux received an empty audio track");
-    }
-    let mut reader = read_mp4(input_mp4)?;
-    let video = find_video_track(&reader)?;
-    let bitrate = recommended_aac_bitrate(sample_rate, channels);
-    let encoder = FdkEncoder::new(FdkEncoderParams {
-        bit_rate: FdkBitRate::Cbr(bitrate),
-        sample_rate,
-        transport: FdkTransport::Raw,
-        channels: fdk_channel_mode(channels)?,
-        audio_object_type: FdkAudioObjectType::Mpeg4LowComplexity,
-    })
-    .map_err(|err| anyhow!("failed to create native AAC encoder for LTX-2 audio export: {err}"))?;
-    let encoder_info = encoder
-        .info()
-        .map_err(|err| anyhow!("failed to query native AAC encoder info: {err}"))?;
-    let mut writer = Mp4Writer::write_start(Cursor::new(Vec::new()), &mp4_config()?)
-        .context("failed to start MP4 writer for AAC mux")?;
-    writer
-        .add_track(&video_only_track_config(&video))
-        .context("failed to add video track to AAC mux output")?;
-    writer
-        .add_track(&TrackConfig {
-            track_type: TrackType::Audio,
-            timescale: sample_rate,
-            language: "und".to_string(),
-            media_conf: MediaConfig::AacConfig(AacConfig {
-                bitrate,
-                profile: AudioObjectType::AacLowComplexity,
-                freq_index: sample_freq_index(sample_rate)?,
-                chan_conf: channel_config(channels)?,
-            }),
-        })
-        .context("failed to add AAC audio track to MP4")?;
-
-    for sample_id in 1..=video.frames.unwrap_or_default() {
-        let Some(sample) = reader.read_sample(video.track_id, sample_id)? else {
-            continue;
-        };
-        writer
-            .write_sample(1, &sample)
-            .with_context(|| format!("failed to copy video sample {sample_id} into AAC MP4"))?;
-    }
-
-    let pcm = pcm_i16_from_f32_interleaved(samples);
-    let samples_per_channel = encoder_info.frameLength as usize;
-    let input_channels = encoder_info.inputChannels as usize;
-    let frame_samples = samples_per_channel
-        .checked_mul(input_channels)
-        .context("AAC encoder frame size overflowed")?;
-    let sample_duration = u32::try_from(samples_per_channel)
-        .context("AAC encoder frame length exceeded MP4 sample duration range")?;
-    let mut out_buf = vec![0u8; encoder_info.maxOutBufBytes as usize];
-    let mut start_time = 0u64;
-    let mut offset = 0usize;
-    while offset < pcm.len() {
-        let end = (offset + frame_samples).min(pcm.len());
-        let mut frame = vec![0i16; frame_samples];
-        frame[..(end - offset)].copy_from_slice(&pcm[offset..end]);
-        let encoded = encoder.encode(&frame, &mut out_buf).map_err(|err| {
-            anyhow!("failed to encode AAC frame from native LTX-2 waveform: {err}")
-        })?;
-        if encoded.output_size != 0 {
-            writer
-                .write_sample(
-                    2,
-                    &Mp4Sample {
-                        start_time,
-                        duration: sample_duration,
-                        rendering_offset: 0,
-                        is_sync: true,
-                        bytes: Bytes::copy_from_slice(&out_buf[..encoded.output_size]),
-                    },
-                )
-                .context("failed to write AAC sample")?;
-            start_time += samples_per_channel as u64;
-        }
-        offset = end;
-    }
-
-    writer
-        .write_end()
-        .context("failed to finalize AAC MP4 output")?;
-    fs::write(out_path, writer.into_writer().into_inner())
-        .with_context(|| format!("failed to write {}", out_path.display()))?;
-    Ok(())
-}
-
-#[cfg(not(feature = "mp4"))]
-#[allow(dead_code)]
-pub(crate) fn attach_aac_track_from_f32_interleaved(
-    _input_mp4: &Path,
-    _out_path: &Path,
-    _samples: &[f32],
-    _sample_rate: u32,
-    _channels: u16,
-) -> Result<()> {
-    bail!("MP4 output requires the 'mp4' feature");
-}
-
 #[allow(dead_code)]
 pub(crate) fn transcode_output(
     input_mp4: &Path,
@@ -925,68 +793,6 @@ pub(crate) fn render_waveform_thumbnail_png(
     Ok(png)
 }
 
-#[cfg(feature = "mp4")]
-fn recommended_aac_bitrate(sample_rate: u32, channels: u16) -> u32 {
-    match (sample_rate, channels) {
-        (_, 1) => 96_000,
-        (48_000, 2) => 192_000,
-        (_, 2) => 160_000,
-        _ => 128_000,
-    }
-}
-
-#[cfg(feature = "mp4")]
-fn fdk_channel_mode(channels: u16) -> Result<FdkChannelMode> {
-    Ok(match channels {
-        1 => FdkChannelMode::Mono,
-        2 => FdkChannelMode::Stereo,
-        _ => bail!("unsupported FDK AAC channel count for native LTX-2 export: {channels}"),
-    })
-}
-
-#[cfg(feature = "mp4")]
-fn sample_freq_index(sample_rate: u32) -> Result<SampleFreqIndex> {
-    Ok(match sample_rate {
-        96_000 => SampleFreqIndex::Freq96000,
-        88_200 => SampleFreqIndex::Freq88200,
-        64_000 => SampleFreqIndex::Freq64000,
-        48_000 => SampleFreqIndex::Freq48000,
-        44_100 => SampleFreqIndex::Freq44100,
-        32_000 => SampleFreqIndex::Freq32000,
-        24_000 => SampleFreqIndex::Freq24000,
-        22_050 => SampleFreqIndex::Freq22050,
-        16_000 => SampleFreqIndex::Freq16000,
-        12_000 => SampleFreqIndex::Freq12000,
-        11_025 => SampleFreqIndex::Freq11025,
-        8_000 => SampleFreqIndex::Freq8000,
-        7_350 => SampleFreqIndex::Freq7350,
-        _ => bail!("unsupported AAC sample rate for native LTX-2 export: {sample_rate}"),
-    })
-}
-
-#[cfg(feature = "mp4")]
-fn channel_config(channels: u16) -> Result<ChannelConfig> {
-    Ok(match channels {
-        1 => ChannelConfig::Mono,
-        2 => ChannelConfig::Stereo,
-        3 => ChannelConfig::Three,
-        4 => ChannelConfig::Four,
-        5 => ChannelConfig::Five,
-        6 => ChannelConfig::FiveOne,
-        8 => ChannelConfig::SevenOne,
-        _ => bail!("unsupported AAC channel count for native LTX-2 export: {channels}"),
-    })
-}
-
-#[cfg(feature = "mp4")]
-fn pcm_i16_from_f32_interleaved(samples: &[f32]) -> Vec<i16> {
-    let mut out = Vec::with_capacity(samples.len());
-    for sample in samples {
-        out.push((sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16);
-    }
-    out
-}
-
 fn contact_sheet_image(frames: &[RgbImage]) -> Result<RgbImage> {
     anyhow::ensure!(!frames.is_empty(), "no frames for contact sheet");
 
@@ -1181,7 +987,7 @@ mod tests {
 
     #[cfg(feature = "mp4")]
     #[test]
-    fn attach_aac_track_from_native_waveform_writes_audio_metadata() {
+    fn ltx2_compat_mux_preserves_legacy_pcm_and_full_aac_packets() {
         let frames = sample_frames();
         let (_dir, source_path) = write_mp4(&frames, 12).unwrap();
         let out_dir = tempdir().unwrap();
@@ -1190,7 +996,7 @@ mod tests {
         attach_aac_track_from_f32_interleaved(
             &source_path,
             &out_path,
-            &sample_audio_track(2_048),
+            &sample_audio_track(2_050),
             48_000,
             2,
         )
@@ -1200,6 +1006,33 @@ mod tests {
         assert!(metadata.has_audio);
         assert_eq!(metadata.audio_sample_rate, Some(48_000));
         assert_eq!(metadata.audio_channels, Some(2));
+
+        let bytes = fs::read(&out_path).unwrap();
+        let size = bytes.len() as u64;
+        let mut reader = Mp4Reader::read_header(Cursor::new(bytes), size).unwrap();
+        let (audio_track_id, duration, sample_count) = {
+            let (track_id, track) = reader
+                .tracks()
+                .iter()
+                .find(|(_, track)| matches!(track.track_type(), Ok(TrackType::Audio)))
+                .unwrap();
+            (
+                *track_id,
+                track.trak.mdia.mdhd.duration,
+                track.sample_count(),
+            )
+        };
+        let sample_durations: Vec<_> = (1..=sample_count)
+            .map(|sample_id| {
+                reader
+                    .read_sample(audio_track_id, sample_id)
+                    .unwrap()
+                    .unwrap()
+                    .duration
+            })
+            .collect();
+        assert_eq!(duration, 3_072);
+        assert_eq!(sample_durations, [1_024, 1_024, 1_024]);
     }
 
     #[cfg(feature = "mp4")]
