@@ -2319,6 +2319,7 @@ async fn run_queue_dispatcher_with_tuning(
             id: job.id.clone(),
             model: model_name.clone(),
             request: job.request,
+            resolved_references: job.resolved_references,
             completion_payload: job.completion_payload,
             progress_tx: job.progress_tx,
             result_tx: job.result_tx,
@@ -3575,6 +3576,7 @@ mod tests {
             id: "legacy-sibling-post-upscale".to_string(),
             model: request.model.clone(),
             request,
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -4828,6 +4830,7 @@ mod tests {
             id: String::new(),
             model: "busy-model".to_string(),
             request: fake_request("busy-model"),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: filler_result_tx,
@@ -4857,6 +4860,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: String::new(),
             request: fake_request("flux-dev:q4"),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -4905,6 +4909,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: String::new(),
             request: fake_request("flux-dev:q4"),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -4984,6 +4989,7 @@ mod tests {
         BufferedJob::new(crate::state::GenerationJob {
             id: String::new(),
             request: fake_request(model),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: tx,
@@ -4997,6 +5003,7 @@ mod tests {
         BufferedJob::new(crate::state::GenerationJob {
             id: id.to_string(),
             request: fake_request(model),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: tx,
@@ -5253,6 +5260,7 @@ mod tests {
             let job = crate::state::GenerationJob {
                 id: String::new(),
                 request: fake_request(model),
+                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -5324,6 +5332,7 @@ mod tests {
             let job = crate::state::GenerationJob {
                 id: id.to_string(),
                 request: fake_request(&format!("model-{id}")),
+                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -5380,6 +5389,7 @@ mod tests {
             let job = GenerationJob {
                 id: String::new(),
                 request: fake_request(&format!("model-{i}")),
+                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -5483,6 +5493,7 @@ mod tests {
             let job = crate::state::GenerationJob {
                 id: String::new(),
                 request: fake_request(&format!("model-{i}")),
+                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -5615,6 +5626,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: String::new(),
             request,
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -5654,6 +5666,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: "auto-job".to_string(),
             request: fake_request("flux-dev:q4"),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -5702,6 +5715,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: "paused-job".to_string(),
             request: fake_request("flux-dev:q4"),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -5759,6 +5773,7 @@ mod tests {
                     crate::state::GenerationJob {
                         id: id.to_string(),
                         request: fake_request("flux-dev:q4"),
+                        resolved_references: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
                         result_tx,
@@ -5818,6 +5833,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: "parked-job".to_string(),
             request: fake_request("flux-dev:q4"),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,

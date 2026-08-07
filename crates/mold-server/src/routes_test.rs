@@ -3733,6 +3733,17 @@ mod tests {
         assert_eq!(body["devices"]["stable_pins"], true);
         assert_eq!(body["devices"]["planned_lanes"], true);
         assert_eq!(body["devices"]["learned_eta"], true);
+        assert_eq!(body["reference_uploads"]["available"], true);
+        assert_eq!(body["reference_uploads"]["protocol_version"], 1);
+        assert_eq!(body["reference_uploads"]["requires_api_key"], true);
+        assert_eq!(
+            body["reference_uploads"]["upload_handle_header"],
+            crate::reference_uploads::UPLOAD_HANDLE_HEADER
+        );
+        assert_eq!(
+            body["reference_uploads"]["max_file_bytes"],
+            crate::reference_uploads::MAX_REFERENCE_UPLOAD_FILE_BYTES
+        );
     }
 
     #[tokio::test]
@@ -5898,6 +5909,18 @@ mod tests {
             "spec should document POST /api/generate/placement-preview"
         );
         assert!(
+            spec["paths"]["/api/generate/reference-upload-sessions"]["post"].is_object(),
+            "spec should document reference upload session creation"
+        );
+        assert!(
+            spec["paths"]["/api/generate/reference-upload-sessions"]["delete"].is_object(),
+            "spec should document reference upload session cancellation"
+        );
+        assert!(
+            spec["paths"]["/api/generate/reference-upload"]["put"].is_object(),
+            "spec should document streaming reference upload"
+        );
+        assert!(
             spec["paths"]["/api/chain-jobs/placement-preview"]["post"].is_object(),
             "spec should document POST /api/chain-jobs/placement-preview"
         );
@@ -5968,6 +5991,67 @@ mod tests {
             .reason
             .unwrap()
             .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[tokio::test]
+    async fn reference_upload_session_requires_explicit_auth_then_451s_before_staging() {
+        let state = AppState::for_tests();
+        let app = app_with_state(state.clone());
+        let body = serde_json::json!({
+            "request": {
+                "prompt": "reference print",
+                "model": mold_core::minimax_h3::REF2VA_COMFY,
+                "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+                "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+                "steps": mold_core::minimax_h3::DEFAULT_STEPS,
+                "guidance": 0.0,
+                "batch_size": 1,
+                "frames": mold_core::minimax_h3::MIN_FRAMES,
+                "fps": mold_core::minimax_h3::FIXED_FPS,
+                "output_format": "mp4",
+                "references": [{
+                    "kind": "image",
+                    "media": { "authority": "descriptor" },
+                    "provenance": { "name": "anchor.png", "sha256": "11".repeat(32) },
+                    "mime_type": "image/png",
+                    "width": 1024,
+                    "height": 1024
+                }]
+            },
+            "upload_references": [1]
+        })
+        .to_string();
+
+        let unauthenticated = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate/reference-upload-sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        assert!(!state.reference_uploads.staging_exists());
+
+        let mut request = Request::post("/api/generate/reference-upload-sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(crate::auth::ApiKeyAuthenticated {
+                identity: "test-key".to_string(),
+            });
+        let blocked = app.oneshot(request).await.unwrap();
+        assert_eq!(blocked.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+        let blocked = json_body(blocked).await;
+        assert_eq!(
+            blocked["code"],
+            mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
+        );
+        assert!(!state.reference_uploads.staging_exists());
     }
 
     #[tokio::test]
@@ -6593,6 +6677,7 @@ mod tests {
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
+            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: true,
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -6664,6 +6749,7 @@ mod tests {
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
+            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: true,
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -6938,6 +7024,7 @@ mod tests {
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
+            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: true,
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),

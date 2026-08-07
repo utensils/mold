@@ -686,6 +686,77 @@ pub struct GenerationReferenceMetadata {
     pub sample_rate: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channels: Option<u16>,
+    /// Exact payload-free v1 preprocessing result used for placement and
+    /// admission. Older metadata remains compatible when this is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_shape: Option<crate::minimax_h3::GenerationReferencePreparedShape>,
+}
+
+pub fn generation_reference_fingerprint(references: &[GenerationReferenceMetadata]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"mold.minimax-h3.references.v1\0");
+    hash.update(
+        serde_json::to_vec(references)
+            .expect("generation reference metadata serialization is infallible"),
+    );
+    format!("{:x}", hash.finalize())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ReferenceUploadSessionRequest {
+    /// Complete payload-free request used to bind every upload handle. Every
+    /// reference authority must be `descriptor` at this stage.
+    pub request: GenerateRequest,
+    /// One-based entries whose bytes will arrive through the streaming upload
+    /// route. The remaining entries retain inline/server-path authority only in
+    /// the final request and are still part of the immutable scope hash.
+    pub upload_references: Vec<u32>,
+}
+
+#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ReferenceUploadSlot {
+    pub reference: u32,
+    pub handle: String,
+}
+
+impl std::fmt::Debug for ReferenceUploadSlot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferenceUploadSlot")
+            .field("reference", &self.reference)
+            .field("handle", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ReferenceUploadSessionResponse {
+    pub instance_id: String,
+    pub expires_at_ms: u64,
+    pub request_scope_sha256: String,
+    pub session_handle: String,
+    pub uploads: Vec<ReferenceUploadSlot>,
+}
+
+impl std::fmt::Debug for ReferenceUploadSessionResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferenceUploadSessionResponse")
+            .field("instance_id", &self.instance_id)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("request_scope_sha256", &self.request_scope_sha256)
+            .field("session_handle", &"<redacted>")
+            .field("uploads", &self.uploads)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ReferenceUploadCompleteResponse {
+    pub instance_id: String,
+    pub reference: u32,
+    pub metadata: GenerationReferenceMetadata,
 }
 
 impl GenerationReference {
@@ -732,13 +803,8 @@ impl GenerationReference {
     pub fn redacted_metadata(&self, index: usize) -> Option<GenerationReferenceMetadata> {
         let sha256 = self.content_sha256()?;
         let index = u32::try_from(index).ok()?.checked_add(1)?;
-        let name = self
-            .provenance()
-            .name
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned);
+        let prepared_shape = crate::minimax_h3::reference_prepared_shape(self).ok();
+        let name = redacted_reference_name(self.provenance());
         Some(match self {
             Self::Image {
                 mime_type,
@@ -759,6 +825,7 @@ impl GenerationReference {
                 audio_duration_ms: None,
                 sample_rate: None,
                 channels: None,
+                prepared_shape,
             },
             Self::Video {
                 mime_type,
@@ -783,6 +850,7 @@ impl GenerationReference {
                 audio_duration_ms: *audio_duration_ms,
                 sample_rate: None,
                 channels: None,
+                prepared_shape,
             },
             Self::Audio {
                 mime_type,
@@ -804,9 +872,112 @@ impl GenerationReference {
                 audio_duration_ms: None,
                 sample_rate: Some(*sample_rate),
                 channels: Some(*channels),
+                prepared_shape,
             },
         })
     }
+
+    /// Preserve ordered reference metadata even if an internal caller bypassed
+    /// request validation. Public ingress rejects a missing digest; this
+    /// fallback keeps the offending entry visible instead of silently dropping
+    /// the entire list from durable metadata.
+    pub fn redacted_metadata_lossless(&self, index: usize) -> GenerationReferenceMetadata {
+        if let Some(metadata) = self.redacted_metadata(index) {
+            return metadata;
+        }
+        let index = u32::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .unwrap_or(u32::MAX);
+        let name = redacted_reference_name(self.provenance());
+        let prepared_shape = crate::minimax_h3::reference_prepared_shape(self).ok();
+        match self {
+            Self::Image {
+                mime_type,
+                width,
+                height,
+                ..
+            } => GenerationReferenceMetadata {
+                kind: GenerationReferenceKind::Image,
+                index,
+                name,
+                sha256: String::new(),
+                mime_type: mime_type.clone(),
+                width: Some(*width),
+                height: Some(*height),
+                duration_ms: None,
+                fps: None,
+                has_audio: false,
+                audio_duration_ms: None,
+                sample_rate: None,
+                channels: None,
+                prepared_shape,
+            },
+            Self::Video {
+                mime_type,
+                width,
+                height,
+                duration_ms,
+                fps,
+                has_audio,
+                audio_duration_ms,
+                ..
+            } => GenerationReferenceMetadata {
+                kind: GenerationReferenceKind::Video,
+                index,
+                name,
+                sha256: String::new(),
+                mime_type: mime_type.clone(),
+                width: Some(*width),
+                height: Some(*height),
+                duration_ms: Some(*duration_ms),
+                fps: Some(*fps),
+                has_audio: *has_audio,
+                audio_duration_ms: *audio_duration_ms,
+                sample_rate: None,
+                channels: None,
+                prepared_shape,
+            },
+            Self::Audio {
+                mime_type,
+                duration_ms,
+                sample_rate,
+                channels,
+                ..
+            } => GenerationReferenceMetadata {
+                kind: GenerationReferenceKind::Audio,
+                index,
+                name,
+                sha256: String::new(),
+                mime_type: mime_type.clone(),
+                width: None,
+                height: None,
+                duration_ms: Some(*duration_ms),
+                fps: None,
+                has_audio: false,
+                audio_duration_ms: None,
+                sample_rate: Some(*sample_rate),
+                channels: Some(*channels),
+                prepared_shape,
+            },
+        }
+    }
+}
+
+fn redacted_reference_name(provenance: &GenerationReferenceProvenance) -> Option<String> {
+    provenance
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| {
+            !name.is_empty()
+                && name.len() <= crate::minimax_h3::MAX_REFERENCE_NAME_BYTES
+                && *name != "."
+                && *name != ".."
+                && !name.contains(['/', '\\'])
+                && !name.chars().any(char::is_control)
+        })
+        .map(str::to_owned)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -1649,6 +1820,15 @@ impl OutputMetadata {
             }
             None => (None, None),
         };
+        let references = req.references.as_ref().and_then(|references| {
+            (!references.is_empty()).then(|| {
+                references
+                    .iter()
+                    .enumerate()
+                    .map(|(index, reference)| reference.redacted_metadata_lossless(index))
+                    .collect::<Vec<_>>()
+            })
+        });
         Self {
             prompt: req.prompt.clone(),
             negative_prompt: req.negative_prompt.clone(),
@@ -1689,15 +1869,7 @@ impl OutputMetadata {
                         .collect()
                 })
             }),
-            references: req.references.as_ref().and_then(|references| {
-                (!references.is_empty()).then(|| {
-                    references
-                        .iter()
-                        .enumerate()
-                        .map(|(index, reference)| reference.redacted_metadata(index))
-                        .collect::<Option<Vec<_>>>()
-                })?
-            }),
+            references,
             scheduler,
             output_format: req.output_format,
             cfg_plus: req.cfg_plus,
@@ -6010,6 +6182,23 @@ pub struct QueueCapabilities {
     pub server_batch_max_outputs: Option<u32>,
 }
 
+/// Authenticated, stable-URL reference-media ingress advertised by current
+/// servers. Handles remain bearer secrets and therefore travel only in the
+/// named headers, never in URLs, logs, or durable request metadata.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReferenceUploadCapabilities {
+    pub available: bool,
+    pub protocol_version: u32,
+    pub requires_api_key: bool,
+    pub session_path: String,
+    pub upload_path: String,
+    pub session_handle_header: String,
+    pub upload_handle_header: String,
+    pub max_file_bytes: u64,
+    pub max_session_bytes: u64,
+    pub session_ttl_ms: u64,
+}
+
 /// Prompt-expansion backend category. The API intentionally reports the
 /// category rather than the configured URL so capabilities never disclose
 /// credentials or internal network details.
@@ -6241,6 +6430,11 @@ pub struct ServerCapabilities {
     /// of their responses working (can_pause = can_cancel_all = false).
     #[serde(default)]
     pub queue: QueueCapabilities,
+    /// Absent on older servers. Availability advertises the ingress protocol,
+    /// not MiniMax H3 model/license activation; model_access remains the
+    /// authority for whether a request may run.
+    #[serde(default)]
+    pub reference_uploads: ReferenceUploadCapabilities,
     /// Absent on older servers. Missing means the read-only device resource
     /// and lifecycle controls are unavailable. `devices.lifecycle` is a
     /// runtime authority flag, not merely endpoint presence.
@@ -6335,6 +6529,8 @@ mod device_types_tests {
         assert!(!caps.dispatch.v2_authoritative);
         assert!(!caps.dispatch.observes_v2_decisions);
         assert!(caps.model_access.restrictions.is_empty());
+        assert!(!caps.reference_uploads.available);
+        assert_eq!(caps.reference_uploads.protocol_version, 0);
     }
 }
 

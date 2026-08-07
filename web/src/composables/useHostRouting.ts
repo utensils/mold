@@ -43,6 +43,7 @@ import {
   previewChainPlacement,
   previewGenerationPlacement,
   previewRequestForSiblingFanout,
+  requiresAuthoritativePlacement,
   type GenerationPlacementPreview,
   type PlacementMissingComponent,
 } from "@studio/api/generationPlacement";
@@ -519,6 +520,7 @@ function resolve(model: string | null): HostRoute | null {
 async function resolveFeasibleWithPreview(
   model: string,
   previewFor: (target: ApiTarget) => Promise<GenerationPlacementPreview>,
+  requireAuthoritative = false,
   authorityRetry = 0,
 ): Promise<FeasibilityResult> {
   readRegistry();
@@ -600,7 +602,12 @@ async function resolveFeasibleWithPreview(
   readTarget();
   if (routingAuthorityGeneration !== authorityGeneration) {
     if (authorityRetry === 0) {
-      return resolveFeasibleWithPreview(model, previewFor, 1);
+      return resolveFeasibleWithPreview(
+        model,
+        previewFor,
+        requireAuthoritative,
+        1,
+      );
     }
     return {
       kind: "transient",
@@ -657,7 +664,7 @@ async function resolveFeasibleWithPreview(
       unsupportedIds.includes(candidate.id) &&
       (candidate.id === ORIGIN_HOST_ID || candidate.status === "ready"),
   );
-  if (legacy.length > 0) {
+  if (!requireAuthoritative && legacy.length > 0) {
     const originRoutable = legacy.map((host) =>
       host.id === ORIGIN_HOST_ID ? { ...host, status: "ready" as const } : host,
     );
@@ -702,18 +709,25 @@ async function resolveFeasibleWithPreview(
     ];
   });
   const unreachable = probes
-    .filter(
-      (probe) =>
-        !probe.legacyUnsupported &&
+    .filter((probe) => {
+      const classification = classifyPlacementPreview(probe.preview);
+      return (
+        (requireAuthoritative || !probe.legacyUnsupported) &&
         (!probe.preview ||
-          classifyPlacementPreview(probe.preview) === "invalid"),
-    )
+          classification === "invalid" ||
+          (requireAuthoritative && classification === "unsupported"))
+      );
+    })
     .map((probe) => ({
       hostId: probe.candidate.id,
       label: probe.candidate.label,
       error:
-        probe.error ??
-        "returned an invalid authoritative placement-preview response",
+        requireAuthoritative &&
+        (probe.legacyUnsupported ||
+          classifyPlacementPreview(probe.preview) === "unsupported")
+          ? "does not provide the authoritative placement preview required for reference media"
+          : (probe.error ??
+            "returned an invalid authoritative placement-preview response"),
     }));
   if (transient.length > 0) {
     return {
@@ -754,14 +768,19 @@ async function resolveFeasible(
   request: GenerateRequestWire,
   copies = 1,
 ): Promise<FeasibilityResult> {
-  return resolveFeasibleWithPreview(request.model, (target) =>
-    previewGenerationPlacement(
-      target,
-      previewRequestForSiblingFanout(
-        request as unknown as Record<string, unknown>,
+  return resolveFeasibleWithPreview(
+    request.model,
+    (target) =>
+      previewGenerationPlacement(
+        target,
+        previewRequestForSiblingFanout(
+          request as unknown as Record<string, unknown>,
+          copies,
+        ),
         copies,
       ),
-      copies,
+    requiresAuthoritativePlacement(
+      request as unknown as Record<string, unknown>,
     ),
   );
 }
@@ -786,6 +805,7 @@ async function revalidateFeasibleWithPreview(
   route: HostRoute,
   model: string,
   previewFor: (target: ApiTarget) => Promise<GenerationPlacementPreview>,
+  requireAuthoritative = false,
   authorityRetry = 0,
 ): Promise<FeasibilityResult> {
   readRegistry();
@@ -854,7 +874,13 @@ async function revalidateFeasibleWithPreview(
   }
   if (routingAuthorityGeneration !== authorityGeneration) {
     if (authorityRetry === 0) {
-      return revalidateFeasibleWithPreview(route, model, previewFor, 1);
+      return revalidateFeasibleWithPreview(
+        route,
+        model,
+        previewFor,
+        requireAuthoritative,
+        1,
+      );
     }
     return { kind: "transient", perHost: [] };
   }
@@ -908,6 +934,19 @@ async function revalidateFeasibleWithPreview(
       ],
     };
   }
+  if (classification === "unsupported" && requireAuthoritative) {
+    return {
+      kind: "unreachable",
+      perHost: [
+        {
+          hostId: route.hostId,
+          label: route.label,
+          error:
+            "does not provide the authoritative placement preview required for reference media",
+        },
+      ],
+    };
+  }
   return {
     kind: "route",
     route: {
@@ -924,14 +963,20 @@ async function revalidateFeasible(
   request: GenerateRequestWire,
   copies = 1,
 ): Promise<FeasibilityResult> {
-  return revalidateFeasibleWithPreview(route, request.model, (target) =>
-    previewGenerationPlacement(
-      target,
-      previewRequestForSiblingFanout(
-        request as unknown as Record<string, unknown>,
+  return revalidateFeasibleWithPreview(
+    route,
+    request.model,
+    (target) =>
+      previewGenerationPlacement(
+        target,
+        previewRequestForSiblingFanout(
+          request as unknown as Record<string, unknown>,
+          copies,
+        ),
         copies,
       ),
-      copies,
+    requiresAuthoritativePlacement(
+      request as unknown as Record<string, unknown>,
     ),
   );
 }

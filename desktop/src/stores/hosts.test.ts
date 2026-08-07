@@ -853,6 +853,54 @@ describe("hosts store", () => {
     },
   );
 
+  it.each([404, 405])(
+    "fails closed for reference requests when placement HTTP %s is unsupported",
+    async (status) => {
+      previewGenerationPlacement.mockRejectedValueOnce(new ApiError("unsupported", status));
+      const hosts = useHostsStore();
+      const request = {
+        ...placementRequest,
+        model: "minimax-h3-ref2va:comfy-pruned-int8",
+        references: [],
+      } as GenerateRequest;
+
+      await expect(hosts.resolveFeasible("local", request)).resolves.toMatchObject({
+        kind: "unreachable",
+        perHost: [
+          expect.objectContaining({
+            error:
+              "does not provide the authoritative placement preview required for reference media",
+          }),
+        ],
+      });
+    },
+  );
+
+  it("fails closed for an explicit unsupported reference preview", async () => {
+    previewGenerationPlacement.mockResolvedValueOnce({
+      ...plannedPlacement(),
+      authoritative: false,
+      outcome: "unsupported",
+      candidate: null,
+    });
+    const hosts = useHostsStore();
+    const request = {
+      ...placementRequest,
+      model: "minimax-h3-ref2va:comfy-pruned-int8",
+      references: [],
+    } as GenerateRequest;
+
+    await expect(hosts.resolveFeasible("local", request)).resolves.toMatchObject({
+      kind: "unreachable",
+      perHost: [
+        expect.objectContaining({
+          error:
+            "does not provide the authoritative placement preview required for reference media",
+        }),
+      ],
+    });
+  });
+
   it("keeps the connecting local origin eligible for a legacy placement fallback", async () => {
     useConnectionStore().status = "starting";
     previewGenerationPlacement.mockRejectedValueOnce(new ApiError("unsupported", 404));

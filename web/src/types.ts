@@ -157,6 +157,20 @@ export interface ServerCapabilities {
     extend_default_overlap_frames?: number | null;
   };
   discovery?: { can_browse: boolean };
+  /** Stable-URL, header-secret reference ingress. H3 activation remains a
+   * separate model_access decision. */
+  reference_uploads?: {
+    available: boolean;
+    protocol_version: number;
+    requires_api_key: boolean;
+    session_path: string;
+    upload_path: string;
+    session_handle_header: string;
+    upload_handle_header: string;
+    max_file_bytes: number;
+    max_session_bytes: number;
+    session_ttl_ms: number;
+  };
   devices?: {
     available?: boolean;
     lifecycle?: boolean;

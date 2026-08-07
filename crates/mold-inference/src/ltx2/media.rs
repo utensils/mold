@@ -69,6 +69,11 @@ fn read_mp4(input_video: &Path) -> Result<Mp4Reader<BufReader<fs::File>>> {
     })
 }
 
+fn read_mp4_file(file: fs::File) -> Result<Mp4Reader<BufReader<fs::File>>> {
+    let size = file.metadata()?.len();
+    Mp4Reader::read_header(BufReader::new(file), size).context("failed to parse MP4 container")
+}
+
 fn read_mp4_slice(bytes: &[u8]) -> Result<Mp4Reader<Cursor<&[u8]>>> {
     Mp4Reader::read_header(Cursor::new(bytes), bytes.len() as u64)
         .context("failed to parse MP4 container from the request body")
@@ -612,6 +617,13 @@ pub fn write_contact_sheet(input_video: &Path, output_png: &Path) -> Result<()> 
 
 pub fn probe_video(input_video: &Path) -> Result<ProbeMetadata> {
     probe_reader(read_mp4(input_video)?)
+}
+
+/// Probe an already safely-opened regular file. Server ingress uses this
+/// overload so a pathname cannot be exchanged for a symlink between allowlist
+/// resolution and media parsing.
+pub fn probe_video_file(file: fs::File) -> Result<ProbeMetadata> {
+    probe_reader(read_mp4_file(file)?)
 }
 
 /// [`probe_video`] for a clip that has not been written to disk yet — the

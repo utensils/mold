@@ -54,6 +54,15 @@ export type PlacementPreviewClassification =
   | "temporarily_unavailable"
   | "invalid";
 
+/** Reference-conditioned requests require the v1 authoritative preview.
+ * Property presence is deliberate: `references: null` and `references: []`
+ * are still an H3/reference wire shape and must never reach legacy routing. */
+export function requiresAuthoritativePlacement(
+  request: Record<string, unknown>,
+): boolean {
+  return Object.prototype.hasOwnProperty.call(request, "references");
+}
+
 function nonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }

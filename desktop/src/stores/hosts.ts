@@ -8,6 +8,7 @@ import {
   previewChainPlacement,
   previewGenerationPlacement,
   previewRequestForSiblingFanout,
+  requiresAuthoritativePlacement,
   type PlacementMissingComponent,
 } from "@studio/api/generationPlacement";
 import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
@@ -571,6 +572,9 @@ export const useHostsStore = defineStore("hosts", {
       request: GenerateRequest | ChainRequest | AutoChainRequest,
       copies = 1,
     ): Promise<FeasibleRouteResult> {
+      const requireAuthoritative = requiresAuthoritativePlacement(
+        request as unknown as Record<string, unknown>,
+      );
       const intentSignature = () =>
         JSON.stringify({
           requestedSelection: selection,
@@ -764,7 +768,7 @@ export const useHostsStore = defineStore("hosts", {
             ...host,
             gpu: strongestRoutableGpu(this.telemetry[host.id]),
           }));
-        if (legacy.length > 0) {
+        if (!requireAuthoritative && legacy.length > 0) {
           const modelHostIds = useHostModelsStore()
             .hostsFor(request.model)
             .filter((id) => unsupportedIds.includes(id));
@@ -782,6 +786,21 @@ export const useHostsStore = defineStore("hosts", {
         }
 
         const failures = probes.flatMap<HostFeasibilityFailure>((probe) => {
+          const classification = classifyPlacementPreview(probe.preview);
+          if (
+            requireAuthoritative &&
+            (probe.legacyUnsupported || classification === "unsupported")
+          ) {
+            return [
+              {
+                kind: "unreachable",
+                hostId: probe.host.id,
+                label: probe.host.label,
+                error:
+                  "does not provide the authoritative placement preview required for reference media",
+              },
+            ];
+          }
           if (probe.error && !probe.legacyUnsupported) {
             return [
               {
@@ -792,7 +811,6 @@ export const useHostsStore = defineStore("hosts", {
               },
             ];
           }
-          const classification = classifyPlacementPreview(probe.preview);
           if (classification === "infeasible" && probe.preview) {
             const route = hostRoute(probe.host);
             if (!route) return [];

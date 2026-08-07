@@ -31,6 +31,7 @@ pub mod model_cache;
 pub mod model_manager;
 pub mod queue;
 pub mod rate_limit;
+pub mod reference_uploads;
 pub mod request_id;
 pub mod resources;
 pub mod routes;
@@ -1198,6 +1199,7 @@ fn build_cors_layer() -> Result<CorsLayer> {
                     axum::http::Method::HEAD,
                     axum::http::Method::POST,
                     axum::http::Method::PATCH,
+                    axum::http::Method::PUT,
                     axum::http::Method::DELETE,
                 ])
                 .allow_headers(tower_http::cors::Any)
