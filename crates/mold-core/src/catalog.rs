@@ -464,6 +464,47 @@ mod tests {
         }
     }
 
+    /// The low-VRAM Wan tiers (#794) surface in the catalog with their
+    /// manifests' own recipes — the Q4_K_M A14B pair keeps the Lightning
+    /// 4-step contract and the TI2V-5B Q8_0 keeps the 5B's 121@24 — and the
+    /// quality sort keeps them behind the higher-precision variants of the
+    /// same base name (bare-name defaults are unchanged).
+    #[test]
+    fn wan_low_vram_tiers_surface_in_catalog_with_manifest_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let catalog = build_model_catalog(&Config::default(), None, false);
+        let position = |name: &str| {
+            catalog
+                .iter()
+                .position(|model| model.name == name)
+                .unwrap_or_else(|| panic!("{name} must be in the catalog"))
+        };
+
+        let ti2v_q8 = &catalog[position("wan22-ti2v-5b:q8")];
+        assert_eq!(ti2v_q8.family, "wan");
+        assert_eq!(ti2v_q8.defaults.default_steps, 20);
+        assert_eq!(ti2v_q8.defaults.default_guidance, 5.0);
+        assert_eq!(ti2v_q8.defaults.default_frames, Some(121));
+        assert_eq!(ti2v_q8.defaults.default_fps, Some(24));
+        assert_eq!(ti2v_q8.info.hf_repo, "QuantStack/Wan2.2-TI2V-5B-GGUF");
+
+        for base in ["wan22-t2v-a14b", "wan22-i2v-a14b"] {
+            let q4 = &catalog[position(&format!("{base}:q4"))];
+            assert_eq!(q4.family, "wan");
+            assert_eq!(q4.defaults.default_steps, 4);
+            assert_eq!(q4.defaults.default_guidance, 1.0);
+            assert_eq!(q4.defaults.default_frames, Some(53));
+            assert_eq!(q4.defaults.default_fps, Some(16));
+
+            // Quality order within the base name: q8 > q5 > q4.
+            assert!(position(&format!("{base}:q8")) < position(&format!("{base}:q5")));
+            assert!(position(&format!("{base}:q5")) < position(&format!("{base}:q4")));
+        }
+
+        // fp16 stays the 5B's lead (and bare-name default) variant.
+        assert!(position("wan22-ti2v-5b:fp16") < position("wan22-ti2v-5b:q8"));
+    }
+
     #[test]
     fn model_catalog_advertises_default_ltx_guidance_recipe() {
         let catalog = build_model_catalog(&Config::default(), None, false);
