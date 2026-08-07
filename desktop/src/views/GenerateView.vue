@@ -1510,6 +1510,15 @@ const previewFrameStyle = computed(() => ({
   width: `min(100cqw, ${(100 * previewWidth.value) / previewHeight.value}cqh)`,
 }));
 
+const liveGenerationStatus = computed(() => {
+  const j = job.value;
+  if (!j || j.status === "complete" || j.status === "error") return "";
+  if (j.status === "queued") return "Queued";
+  if (j.status === "loading") return `${j.stage ?? "Preparing"}…`;
+  if (j.status === "finishing") return `Fixing — ${j.stage ?? "finishing"}…`;
+  return `Developing ${j.step}/${j.total}`;
+});
+
 const edgeCode = computed(() => {
   const j = job.value;
   if (!j) return "";
@@ -3085,35 +3094,26 @@ onBeforeUnmount(() => {
                       : '1',
                   }"
                 />
-                <!-- Grain is the signature; the ring overlays it with the
-                     percent + stage until the first latent preview arrives,
-                     after which the forming print itself takes over. -->
+                <!-- Grain is the signature; the ring overlays it until the
+                     first latent preview arrives, after which the forming
+                     print itself takes over. The status stays below the frame
+                     where the grain cannot obscure it. -->
                 <div
                   v-if="job && job.status !== 'complete' && !job.previewUrl"
                   data-test="develop-progress"
-                  class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3"
+                  class="pointer-events-none absolute inset-0 flex items-center justify-center"
                 >
                   <ProgressRing :value="jobProgress(job) * 100" :size="96" show-label />
-                  <span class="edge-code text-safelight">
-                    {{
-                      job.status === "finishing"
-                        ? `fixing — ${job.stage ?? "finishing"}…`
-                        : job.status === "loading"
-                          ? `${job.stage ?? "Preparing"}…`
-                          : "developing…"
-                    }}
-                  </span>
-                </div>
-                <div
-                  v-if="job && (job.status === 'denoising' || job.status === 'finishing')"
-                  class="edge-code absolute bottom-2 left-3"
-                >
-                  <template v-if="job.status === 'denoising'">
-                    {{ job.step }}/{{ job.total }}
-                  </template>
-                  <template v-else>Fixing — {{ job.stage ?? "finishing" }}…</template>
                 </div>
               </div>
+            </div>
+
+            <div
+              v-if="liveGenerationStatus"
+              data-test="generation-live-status"
+              class="edge-code mt-2 max-w-full text-center text-safelight"
+            >
+              {{ liveGenerationStatus }}
             </div>
 
             <div

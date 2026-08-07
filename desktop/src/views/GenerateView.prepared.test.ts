@@ -842,6 +842,35 @@ describe("GenerateView prepared expansion batches", () => {
     expect(chrome.text()).not.toContain("cv:1759168");
   });
 
+  it("keeps the live generation status below the developing image", async () => {
+    const job = newJob({
+      model: catalogModel.name,
+      prompt: "a camera",
+      width: 1024,
+      height: 1024,
+      steps: 25,
+      guidance: 7,
+      batch_size: 1,
+      output_format: "png",
+    });
+    job.status = "denoising";
+    job.step = 20;
+    job.total = 25;
+    job.previewUrl = "blob:latent-preview";
+    useGenerationStore().jobs = [job];
+
+    const wrapper = mountView();
+    await flushPromises();
+
+    const frame = wrapper.get("[data-test='preview-frame']");
+    const status = wrapper.get("[data-test='generation-live-status']");
+    expect(status.text()).toBe("Developing 20/25");
+    expect(frame.find("[data-test='generation-live-status']").exists()).toBe(false);
+    expect(
+      frame.element.compareDocumentPosition(status.element) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("cancels a deferred Batch 1 submission when the expansion is restored", async () => {
     const form = useGenerateFormStore().form;
     form.batchSize = 1;
