@@ -30,8 +30,8 @@ pub use audio_weights::{
 };
 
 pub use artifacts::{
-    validate_checkpoint_keys, ArtifactFingerprint, ArtifactRole, CheckpointKeyReport,
-    ConditionerArtifacts, FrozenArtifact,
+    validate_checkpoint_keys, ArtifactError, ArtifactFingerprint, ArtifactRole,
+    ArtifactVerificationProgress, CheckpointKeyReport, ConditionerArtifacts, FrozenArtifact,
 };
 pub use config::{
     H3ConditionerConfig, H3TextConfig, H3VisionConfig, H3_BF16_PARAMETER_BYTES,
@@ -40,7 +40,8 @@ pub use config::{
 };
 pub use loader::{
     load_bf16_conditioner, load_prepared_bf16_conditioner, prepare_conditioner_assets,
-    validate_processor_assets, H3LoadError, LoadedH3Conditioner, PreparedH3ConditionerAssets,
+    prepare_conditioner_assets_with_progress, validate_processor_assets, H3LoadError,
+    LoadedH3Conditioner, PreparedH3ConditionerAssets,
 };
 pub use model::{
     ConditionerCheckpoint, H3ConditionerInput, H3DTypeProfile, H3Layer50Conditioner, H3VisionInput,

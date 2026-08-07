@@ -9,9 +9,9 @@ pub(crate) mod sampler;
 use anyhow::{anyhow, Result};
 use candle_core::{Device, Tensor};
 use mold_candle::minimax_h3::{
-    load_prepared_bf16_conditioner, prepare_conditioner_assets, ConditionerArtifacts,
-    ConditionerCheckpoint, H3ConditionerInput, H3DTypeProfile, H3Layer50Conditioner,
-    PreparedH3ConditionerAssets, H3_BF16_PARAMETER_BYTES,
+    load_prepared_bf16_conditioner, prepare_conditioner_assets_with_progress, ArtifactError,
+    ConditionerArtifacts, ConditionerCheckpoint, H3ConditionerInput, H3DTypeProfile,
+    H3Layer50Conditioner, H3LoadError, PreparedH3ConditionerAssets, H3_BF16_PARAMETER_BYTES,
 };
 use std::time::Instant;
 use tokenizers::Tokenizer;
@@ -175,7 +175,30 @@ impl H3ConditionerLifecycle {
         progress.checkpoint()?;
         let started = Instant::now();
         progress.stage_start("Validating H3 Qwen3-VL tokenizer, processor, and checkpoint");
-        let prepared = prepare_conditioner_assets(artifacts)?;
+        let mut last_reported = None;
+        let prepared = prepare_conditioner_assets_with_progress(artifacts, &mut |verification| {
+            progress
+                .checkpoint()
+                .map_err(|_| ArtifactError::VerificationCancelled)?;
+            let should_report = last_reported.is_none_or(|previous| {
+                verification.total_bytes_verified.saturating_sub(previous) >= 64 * 1024 * 1024
+            }) || verification.total_bytes_verified == verification.total_bytes;
+            if should_report {
+                progress.weight_load(
+                    "Authenticating H3 Qwen3-VL artifacts",
+                    verification.total_bytes_verified,
+                    verification.total_bytes,
+                );
+                last_reported = Some(verification.total_bytes_verified);
+            }
+            Ok(())
+        });
+        let prepared = match prepared {
+            Err(H3LoadError::Artifact(ArtifactError::VerificationCancelled)) => {
+                return Err(InferenceCancelled.into());
+            }
+            result => result?,
+        };
         progress.checkpoint()?;
         progress.stage_done(
             "Validating H3 Qwen3-VL tokenizer, processor, and checkpoint",

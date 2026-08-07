@@ -19,8 +19,6 @@ metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
 candle = { package = "candle-core", version = "0.11" }
 candle-nn = "0.11"
 candle-transformers = "0.11"
-memmap2 = "0.9"
-safetensors = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

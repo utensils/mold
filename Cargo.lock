@@ -3139,8 +3139,6 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
- "memmap2",
- "safetensors 0.4.5",
  "serde",
  "serde_json",
  "sha2",
