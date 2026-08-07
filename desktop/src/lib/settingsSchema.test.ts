@@ -73,6 +73,7 @@ describe("Settings accordion sections", () => {
     expect(ACCORDION_SECTIONS.map((s) => s.id)).toEqual([
       "performance",
       "generation",
+      "media",
       "expansion",
       "accounts",
       "profiles",
@@ -89,6 +90,12 @@ describe("Settings accordion sections", () => {
       expect(section.icon, section.id).toBeTruthy();
       expect(section.summary, section.id).toBeTruthy();
     }
+  });
+
+  it("finds the saved-media section using the user's save-location language", () => {
+    const media = ACCORDION_SECTIONS.find((section) => section.id === "media")!;
+    expect(sectionMatchesSearch("save location", media)).toBe(true);
+    expect(sectionMatchesSearch("default save location", media)).toBe(true);
   });
 
   it("collects the curated schemas that belong to a section", () => {

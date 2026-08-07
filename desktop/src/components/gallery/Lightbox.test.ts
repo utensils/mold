@@ -2,17 +2,34 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 
+const { saveGalleryMedia, apiJsonTo } = vi.hoisted(() => ({
+  saveGalleryMedia: vi.fn(),
+  apiJsonTo: vi.fn(),
+}));
+
 vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("../../lib/ipc", () => ({
+  inTauri: () => true,
   ipc: {
     getOutputDir: vi.fn().mockResolvedValue(null),
     revealOutputFile: vi.fn(),
+    revealSavedMedia: vi.fn(),
   },
+}));
+vi.mock("../../lib/mediaSave", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/mediaSave")>()),
+  saveGalleryMedia,
+}));
+vi.mock("../../lib/api/client", () => ({
+  currentTarget: vi.fn(() => ({ baseUrl: "http://local", apiKey: "key" })),
+  apiJson: vi.fn(),
+  apiJsonTo,
 }));
 
 import Lightbox from "./Lightbox.vue";
 import { useContextMenuStore } from "../../stores/contextMenu";
 import { useComposerStore } from "../../stores/composer";
+import { useToastStore } from "../../stores/toasts";
 import type { GalleryImage } from "../../lib/api/types";
 
 const item: GalleryImage = {
@@ -32,6 +49,17 @@ const item: GalleryImage = {
 
 beforeEach(() => {
   setActivePinia(createPinia());
+  saveGalleryMedia.mockReset();
+  saveGalleryMedia.mockResolvedValue({
+    filename: "print-0001.png",
+    path: "/Users/test/Downloads/print-0001.png",
+    directory: "/Users/test/Downloads",
+  });
+  apiJsonTo.mockResolvedValue({
+    formats: ["gif", "apng"],
+    gif_playback: ["loop", "bounce"],
+    gif_repeat: ["forever", "once"],
+  });
 });
 
 function mountLightbox(
@@ -243,5 +271,42 @@ describe("Lightbox save action", () => {
     const wrapper = mountLightbox(video, true);
     expect(wrapper.get("[data-test='save-media']").text()).toBe("Save video");
     expect(wrapper.get("[data-test='export-video']").text()).toContain("Export format");
+  });
+
+  it("confirms the exact saved file and folder", async () => {
+    const wrapper = mountLightbox(item, false, {
+      target: { baseUrl: "http://hal", apiKey: "secret" },
+    });
+
+    await wrapper.get("[data-test='save-media']").trigger("click");
+    await vi.waitFor(() => expect(saveGalleryMedia).toHaveBeenCalledOnce());
+
+    const toast = useToastStore().items.at(-1)!;
+    expect(toast.message).toBe("Saved print-0001.png");
+    expect(toast.description).toBe("To /Users/test/Downloads");
+    expect(toast.action?.label).toBe("Show in folder");
+  });
+
+  it("closes export options after saving and confirms the converted filename", async () => {
+    const video: GalleryImage = { ...item, filename: "print-0001.mp4", format: "mp4" };
+    saveGalleryMedia.mockResolvedValueOnce({
+      filename: "print-0001.gif",
+      path: "/Users/test/Exports/print-0001.gif",
+      directory: "/Users/test/Exports",
+    });
+    const wrapper = mountLightbox(video, true, {
+      target: { baseUrl: "http://hal", apiKey: "secret" },
+    });
+
+    await wrapper.get("[data-test='export-video']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper.find("[data-test='video-export-dialog']").exists()).toBe(true),
+    );
+    await wrapper.get("[data-test='video-export-dialog'] form").trigger("submit");
+    await vi.waitFor(() =>
+      expect(wrapper.find("[data-test='video-export-dialog']").exists()).toBe(false),
+    );
+
+    expect(useToastStore().items.at(-1)?.message).toBe("Saved print-0001.gif");
   });
 });

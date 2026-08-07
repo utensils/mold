@@ -126,12 +126,11 @@ import { randomSeed } from "../stores/generation";
 import type { CompleteEvent, GenerateRequest, OutputMetadata } from "../lib/api/types";
 import {
   DEFAULT_VIDEO_EXPORT_CAPABILITIES,
-  downloadVideoExport,
   videoExportFilename,
-  videoExportPath,
   type VideoExportCapabilities,
   type VideoExportOptions,
 } from "@studio/lib/videoExport";
+import { saveGalleryMedia, showSavedMediaToast } from "../lib/mediaSave";
 import {
   metadataReferencesSource,
   restoreEditImages,
@@ -1597,7 +1596,7 @@ function canvasMenu(): MenuEntry[] {
       },
     },
     {
-      label: "Save image…",
+      label: "Save image",
       disabled: !j.result || !!j.result.video_frames || isAudioResult(j) || !j.result.image,
       action: () => {
         if (!j.result?.image) return;
@@ -1610,10 +1609,8 @@ function canvasMenu(): MenuEntry[] {
             j.submittedAtUnixMs,
           );
         void ipc
-          .saveImageAs(filename, j.result.image)
-          .then((path) => {
-            if (path) toasts.push(`Saved ${path}`);
-          })
+          .saveMediaBytes(filename, j.result.image)
+          .then((saved) => showSavedMediaToast(toasts, saved))
           .catch((error) =>
             toasts.push(error instanceof Error ? error.message : String(error), "error"),
           );
@@ -1678,15 +1675,14 @@ async function exportGeneratedVideo(options: VideoExportOptions): Promise<void> 
   videoExportBusy.value = true;
   videoExportError.value = "";
   try {
-    const { apiFetchTo } = await import("../lib/api/client");
-    const response = await apiFetchTo(target, videoExportPath(filename), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(options),
-    });
-    downloadVideoExport(await response.blob(), videoExportFilename(filename, options.format));
+    const saved = await saveGalleryMedia(
+      target,
+      filename,
+      videoExportFilename(filename, options.format),
+      options,
+    );
     videoExportJob.value = null;
-    toasts.push("Video exported");
+    showSavedMediaToast(toasts, saved);
   } catch (error) {
     videoExportError.value = error instanceof Error ? error.message : String(error);
   } finally {

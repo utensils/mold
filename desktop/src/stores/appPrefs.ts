@@ -26,6 +26,7 @@ export const useAppPrefsStore = defineStore("appPrefs", {
     updateChannel: (s): UpdateChannel => s.settings?.updateChannel ?? "stable",
     engineEnv: (s): Record<string, string> => s.settings?.engineEnv ?? {},
     saveRemoteOutputs: (s) => s.settings?.saveRemoteOutputs ?? true,
+    mediaSaveDir: (s) => s.settings?.mediaSaveDir ?? null,
     navRailWidth: (s) => normalizePanelWidth("navRail", s.settings?.navRailWidth),
     generateParamsWidth: (s) =>
       normalizePanelWidth("generateParams", s.settings?.generateParamsWidth),

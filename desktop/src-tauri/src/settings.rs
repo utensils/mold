@@ -256,6 +256,9 @@ pub struct AppSettings {
     /// Also save generations from remote hosts into this Mac's gallery.
     #[serde(default = "default_true")]
     pub save_remote_outputs: bool,
+    /// User-selected destination for explicit Save / Export actions. `None`
+    /// follows the operating system's Downloads directory.
+    pub media_save_dir: Option<String>,
     /// Persisted sidebar width in px; `None` uses the panel default.
     pub nav_rail_width: Option<u32>,
     /// Persisted Generate-inspector width in px; `None` uses the panel default.
@@ -289,6 +292,7 @@ impl Default for AppSettings {
             connected_host_ids: Vec::new(),
             generate_target_host: None,
             save_remote_outputs: true,
+            media_save_dir: None,
             nav_rail_width: None,
             generate_params_width: None,
             history_drawer_width: None,
@@ -359,6 +363,7 @@ mod tests {
             connected_host_ids: vec!["hal9000-7680".into()],
             generate_target_host: Some("hal9000-7680".into()),
             save_remote_outputs: false,
+            media_save_dir: Some("/Users/test/Exports".into()),
             nav_rail_width: Some(240),
             generate_params_width: Some(360),
             history_drawer_width: Some(680),

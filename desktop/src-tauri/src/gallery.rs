@@ -1,9 +1,11 @@
 use std::io::{Read, Seek, SeekFrom};
 
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tauri::http::{header, Request, Response, StatusCode};
+use tauri::Manager;
 
-use crate::commands::{AppState, LocalServer, LocalServerInfo};
+use crate::commands::{AppState, LocalServer, LocalServerInfo, SettingsStore};
 
 const MAX_SOURCE_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const GALLERY_IMPORT_CONTENT_TYPE: &str = "application/vnd.mold.gallery-import";
@@ -505,48 +507,240 @@ pub async fn save_output_bytes(
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaSaveTarget {
+    base_url: String,
+    api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedMedia {
+    filename: String,
+    path: String,
+    directory: String,
+}
+
+fn effective_media_save_dir(
+    app: &tauri::AppHandle,
+    store: &SettingsStore,
+) -> Result<std::path::PathBuf, String> {
+    let configured = store
+        .current
+        .lock()
+        .map_err(|_| "Settings are temporarily unavailable.".to_string())?
+        .media_save_dir
+        .clone();
+    let dir = match configured {
+        Some(path) if !path.trim().is_empty() => std::path::PathBuf::from(path),
+        _ => app
+            .path()
+            .download_dir()
+            .map_err(|error| format!("Couldn't find the Downloads folder: {error}"))?,
+    };
+    if !dir.is_dir() {
+        return Err(format!(
+            "The save folder no longer exists: {}. Choose a new folder in Settings.",
+            dir.display()
+        ));
+    }
+    Ok(dir)
+}
+
+fn available_media_path(dir: &std::path::Path, filename: &str, index: u32) -> std::path::PathBuf {
+    if index == 0 {
+        return dir.join(filename);
+    }
+    let path = std::path::Path::new(filename);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Mold export");
+    let suffix = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    dir.join(format!("{stem} ({index}){suffix}"))
+}
+
+fn persist_media(
+    mut temp: tempfile::NamedTempFile,
+    dir: &std::path::Path,
+    filename: &str,
+) -> Result<SavedMedia, String> {
+    temp.as_file_mut()
+        .sync_all()
+        .map_err(|error| format!("Couldn't finish saving {filename}: {error}"))?;
+    for index in 0..10_000 {
+        let path = available_media_path(dir, filename, index);
+        match temp.persist_noclobber(&path) {
+            Ok(_) => {
+                let saved_filename = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(filename)
+                    .to_string();
+                return Ok(SavedMedia {
+                    filename: saved_filename,
+                    path: path.display().to_string(),
+                    directory: dir.display().to_string(),
+                });
+            }
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                temp = error.file;
+            }
+            Err(error) => return Err(format!("Couldn't save {filename}: {}", error.error)),
+        }
+    }
+    Err(format!("Couldn't find an available name for {filename}."))
+}
+
 #[tauri::command]
-pub async fn save_image_as(
+pub fn media_save_directory(
     app: tauri::AppHandle,
+    store: tauri::State<'_, SettingsStore>,
+) -> Result<String, String> {
+    effective_media_save_dir(&app, &store).map(|path| path.display().to_string())
+}
+
+#[tauri::command]
+pub fn reveal_saved_media(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, SettingsStore>,
+    path: String,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = effective_media_save_dir(&app, &store)?
+        .canonicalize()
+        .map_err(|error| format!("Couldn't open the save folder: {error}"))?;
+    let path = std::path::PathBuf::from(path)
+        .canonicalize()
+        .map_err(|_| "The saved file is no longer on disk.".to_string())?;
+    if path.parent() != Some(dir.as_path()) || !path.is_file() {
+        return Err("That file isn't in the configured save folder.".into());
+    }
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn save_media_bytes(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, SettingsStore>,
     filename: String,
     data_b64: String,
-) -> Result<Option<String>, String> {
+) -> Result<SavedMedia, String> {
     use base64::Engine;
-    use tauri_plugin_dialog::DialogExt;
-
     if !valid_filename(&filename) {
         return Err("Invalid filename.".into());
     }
-    let extension = std::path::Path::new(&filename)
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("png")
-        .to_ascii_lowercase();
-    let filter_name = match extension.as_str() {
-        "jpg" | "jpeg" => "JPEG image",
-        "webp" => "WebP image",
-        "gif" => "GIF image",
-        "apng" => "Animated PNG",
-        _ => "PNG image",
-    };
-    let selected = app
-        .dialog()
-        .file()
-        .set_title("Save image")
-        .set_file_name(&filename)
-        .add_filter(filter_name, &[extension.as_str()])
-        .blocking_save_file();
-    let Some(path) = selected else {
-        return Ok(None);
-    };
-    let path = path
-        .into_path()
-        .map_err(|error| format!("Invalid save location: {error}"))?;
+    let dir = effective_media_save_dir(&app, &store)?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data_b64.as_bytes())
-        .map_err(|error| format!("Invalid image data: {error}"))?;
-    std::fs::write(&path, bytes).map_err(|error| format!("Couldn't save image: {error}"))?;
-    Ok(Some(path.display().to_string()))
+        .map_err(|error| format!("Invalid media data: {error}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut temp = tempfile::Builder::new()
+            .prefix(".mold-save-")
+            .tempfile_in(&dir)
+            .map_err(|error| format!("Couldn't create a file in {}: {error}", dir.display()))?;
+        std::io::Write::write_all(&mut temp, &bytes)
+            .map_err(|error| format!("Couldn't save {filename}: {error}"))?;
+        persist_media(temp, &dir, &filename)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn save_gallery_media(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    store: tauri::State<'_, SettingsStore>,
+    target: Option<MediaSaveTarget>,
+    filename: String,
+    output_filename: String,
+    export_options: Option<serde_json::Value>,
+) -> Result<SavedMedia, String> {
+    if !valid_filename(&filename) || !valid_filename(&output_filename) {
+        return Err("Invalid filename.".into());
+    }
+    let dir = effective_media_save_dir(&app, &store)?;
+    let target = match target {
+        Some(target) => target,
+        None if export_options.is_some() => {
+            return Err("The video's host is no longer connected.".into());
+        }
+        None => match local_gallery_authority(&state).await {
+            LocalGalleryAuthority::Server(info) => MediaSaveTarget {
+                base_url: info.base_url,
+                api_key: info.api_key,
+            },
+            LocalGalleryAuthority::Offline(_guard) => {
+                let source_dir =
+                    output_dir().ok_or_else(|| "This device's gallery is disabled.".to_string())?;
+                let root = source_dir
+                    .canonicalize()
+                    .map_err(|error| format!("Couldn't open this device's gallery: {error}"))?;
+                let source = source_dir
+                    .join(&filename)
+                    .canonicalize()
+                    .map_err(|_| "The gallery file is no longer on disk.".to_string())?;
+                if !source.starts_with(&root) || !source.is_file() {
+                    return Err("Invalid gallery filename.".into());
+                }
+                let mut input = std::fs::File::open(&source)
+                    .map_err(|error| format!("Couldn't read {filename}: {error}"))?;
+                let mut temp = tempfile::Builder::new()
+                    .prefix(".mold-save-")
+                    .tempfile_in(&dir)
+                    .map_err(|error| {
+                        format!("Couldn't create a file in {}: {error}", dir.display())
+                    })?;
+                std::io::copy(&mut input, &mut temp)
+                    .map_err(|error| format!("Couldn't save {output_filename}: {error}"))?;
+                return persist_media(temp, &dir, &output_filename);
+            }
+        },
+    };
+    let encoded =
+        percent_encoding::utf8_percent_encode(&filename, percent_encoding::NON_ALPHANUMERIC);
+    let path = if export_options.is_some() {
+        format!("/api/gallery/export/{encoded}")
+    } else {
+        format!("/api/gallery/image/{encoded}")
+    };
+    let url = format!("{}{}", target.base_url.trim_end_matches('/'), path);
+    let client = reqwest::Client::new();
+    let mut request = if let Some(options) = export_options {
+        client.post(url).json(&options)
+    } else {
+        client.get(url)
+    };
+    if let Some(key) = target.api_key.filter(|key| !key.is_empty()) {
+        request = request.header("X-Api-Key", key);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("Couldn't reach the media host: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response).await);
+    }
+    let mut temp = tempfile::Builder::new()
+        .prefix(".mold-save-")
+        .tempfile_in(&dir)
+        .map_err(|error| format!("Couldn't create a file in {}: {error}", dir.display()))?;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|error| format!("The media transfer was interrupted: {error}"))?;
+        std::io::Write::write_all(&mut temp, &chunk)
+            .map_err(|error| format!("Couldn't save {output_filename}: {error}"))?;
+    }
+    persist_media(temp, &dir, &output_filename)
 }
 
 #[tauri::command]
@@ -934,6 +1128,30 @@ mod tests {
         assert_eq!(
             unique_output_path(dir.path(), "raw"),
             dir.path().join("raw-2")
+        );
+    }
+
+    #[test]
+    fn media_save_paths_keep_extensions_and_never_clobber() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            available_media_path(dir.path(), "clip.gif", 0),
+            dir.path().join("clip.gif")
+        );
+        assert_eq!(
+            available_media_path(dir.path(), "clip.gif", 2),
+            dir.path().join("clip (2).gif")
+        );
+
+        std::fs::write(dir.path().join("clip.gif"), b"old").unwrap();
+        let mut temp = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        std::io::Write::write_all(&mut temp, b"new").unwrap();
+        let saved = persist_media(temp, dir.path(), "clip.gif").unwrap();
+        assert_eq!(saved.filename, "clip (1).gif");
+        assert_eq!(std::fs::read(dir.path().join("clip.gif")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(dir.path().join("clip (1).gif")).unwrap(),
+            b"new"
         );
     }
 

@@ -59,6 +59,12 @@ export interface UpdateProgress {
   totalBytes: number | null;
 }
 
+export interface SavedMedia {
+  filename: string;
+  path: string;
+  directory: string;
+}
+
 /** A remote host the app has connected to before (most recent first). */
 export interface SavedHost {
   /** URL-derived slug; its API key lives at secret `remote-api-key.<id>`. */
@@ -97,6 +103,8 @@ export interface AppSettings {
   generateTargetHost: string | null;
   /** Also save generations from remote hosts into this Mac's gallery. */
   saveRemoteOutputs: boolean;
+  /** Explicit Save / Export destination; null follows the OS Downloads folder. */
+  mediaSaveDir?: string | null;
   /** Persisted sidebar width in px; null uses the panel default. */
   navRailWidth: number | null;
   /** Persisted Generate-inspector width in px; null uses the panel default. */
@@ -164,6 +172,7 @@ const browserFallbackSettings = (): AppSettings => ({
   connectedHostIds: [],
   generateTargetHost: null,
   saveRemoteOutputs: true,
+  mediaSaveDir: null,
   navRailWidth: null,
   generateParamsWidth: null,
   historyDrawerWidth: null,
@@ -305,8 +314,8 @@ export const ipc = {
     if (!inTauri()) return Promise.reject(new Error("Local saves require the desktop app."));
     return invoke<string>("save_output_bytes", { filename, dataB64, metadata: metadata ?? null });
   },
-  /** Ask for a destination and save one rendered still outside Mold's gallery. */
-  saveImageAs(filename: string, dataB64: string): Promise<string | null> {
+  /** Save rendered bytes to the configured media folder. */
+  saveMediaBytes(filename: string, dataB64: string): Promise<SavedMedia> {
     if (!inTauri()) {
       try {
         const bytes = Uint8Array.from(atob(dataB64), (character) => character.charCodeAt(0));
@@ -316,12 +325,38 @@ export const ipc = {
         anchor.download = filename;
         anchor.click();
         setTimeout(() => URL.revokeObjectURL(url), 0);
-        return Promise.resolve(filename);
+        return Promise.resolve({ filename, path: filename, directory: "Downloads" });
       } catch (error) {
         return Promise.reject(error);
       }
     }
-    return invoke<string | null>("save_image_as", { filename, dataB64 });
+    return invoke<SavedMedia>("save_media_bytes", { filename, dataB64 });
+  },
+  /** Stream an original gallery file or converted video into the configured folder. */
+  saveGalleryMedia(
+    target: ApiTarget | null,
+    filename: string,
+    outputFilename = filename,
+    exportOptions?: Record<string, unknown> | null,
+  ): Promise<SavedMedia> {
+    if (!inTauri()) {
+      return Promise.reject(new Error("Native media saves require the desktop app."));
+    }
+    return invoke<SavedMedia>("save_gallery_media", {
+      target,
+      filename,
+      outputFilename,
+      exportOptions: exportOptions ?? null,
+    });
+  },
+  /** Effective save folder, including the OS Downloads default. */
+  mediaSaveDirectory(): Promise<string> {
+    if (!inTauri()) return Promise.resolve("Downloads");
+    return invoke<string>("media_save_directory");
+  },
+  revealSavedMedia(path: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("reveal_saved_media", { path });
   },
   /** Exact path only when that gallery identity exists on this Mac. */
   localOutputFilePath(filename: string): Promise<string | null> {
