@@ -66,7 +66,8 @@ Comfy's NVFP4 storage consists of:
 - high-nibble-first E2M1 values, two weights per U8;
 - one FP8-E4M3 block scale per 16 logical input values, stored in cuBLAS
   `SWIZZLE_32_4_4` order;
-- one F32 tensor scale (`weight_scale_2`); and
+- one F32 tensor scale (`weight_scale_2`), encoded by comfy-kitchen as either
+  rank-0 `[]` or one-element `[1]`; and
 - an optional ModelOpt AWQ-style `pre_quant_scale` applied to the input.
 
 The H3 Comfy conditioner contract is the AWQ variant, so Mold requires an

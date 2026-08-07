@@ -448,8 +448,10 @@ impl H3ComfyNvfp4AwqLinear {
                 block_scales.dtype()
             )
         }
-        if tensor_scale.dtype() != DType::F32 || tensor_scale.rank() != 0 {
-            candle::bail!("MiniMax H3 NVFP4 tensor scale must be an F32 scalar")
+        if tensor_scale.dtype() != DType::F32
+            || !(tensor_scale.rank() == 0 || tensor_scale.dims() == [1])
+        {
+            candle::bail!("MiniMax H3 NVFP4 tensor scale must be F32 with source shape [] or [1]")
         }
         ensure_floating(pre_quant_scale.dtype(), "NVFP4 AWQ pre_quant_scale")?;
         if pre_quant_scale.dims() != [in_features] {
@@ -477,7 +479,7 @@ impl H3ComfyNvfp4AwqLinear {
                 block_scales.dims()
             )
         }
-        let tensor_scale = tensor_scale.to_scalar::<f32>()?;
+        let tensor_scale = tensor_scale.flatten_all()?.to_vec1::<f32>()?[0];
         if !tensor_scale.is_finite() || tensor_scale <= 0.0 {
             candle::bail!("MiniMax H3 NVFP4 tensor scale must be finite and positive")
         }
@@ -924,7 +926,9 @@ mod tests {
         natural_scales[1] = 0.5;
         let swizzled = swizzle_scales(&natural_scales, padded_rows, blocks_per_row);
         let scales = Tensor::from_vec(swizzled, (128, 4), &device)?.to_dtype(DType::F8E4M3)?;
-        let tensor_scale = Tensor::new(0.5f32, &device)?;
+        // comfy-kitchen's pinned loader/sample uses the one-element source
+        // encoding; the constructor also accepts an actual rank-0 scalar.
+        let tensor_scale = Tensor::from_vec(vec![0.5f32], 1, &device)?;
         let awq = Tensor::from_vec(
             (0..in_features)
                 .map(|column| if column == 0 { 2.0f32 } else { 1.0f32 })
@@ -933,6 +937,14 @@ mod tests {
             &device,
         )?
         .to_dtype(DType::F16)?;
+        let scalar_linear = H3ComfyNvfp4AwqLinear::new(
+            packed.clone(),
+            scales.clone(),
+            Tensor::new(0.5f32, &device)?,
+            awq.clone(),
+            out_features,
+            in_features,
+        )?;
         let linear = H3ComfyNvfp4AwqLinear::new(
             packed,
             scales,
@@ -942,6 +954,13 @@ mod tests {
             in_features,
         )?;
         let dense = linear.dequantize_weight(DType::F32, &device, 1)?;
+        assert_eq!(
+            max_error(
+                &dense,
+                &scalar_linear.dequantize_weight(DType::F32, &device, 1)?
+            )?,
+            0.0
+        );
         let dense = dense.to_vec2::<f32>()?;
         assert_eq!(dense[0][0], 6.0);
         assert_eq!(dense[0][1], 0.5);
@@ -1028,6 +1047,18 @@ mod tests {
         .to_string()
         .contains("pre_quant_scale"));
         let awq = Tensor::ones(16, DType::F32, &device)?;
+        let rank_two_tensor_scale = Tensor::ones((1, 1), DType::F32, &device)?;
+        assert!(H3ComfyNvfp4AwqLinear::new(
+            packed.clone(),
+            block_scales.clone(),
+            rank_two_tensor_scale,
+            awq.clone(),
+            2,
+            16,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("source shape [] or [1]"));
         let zero_tensor_scale = Tensor::new(0.0f32, &device)?;
         assert!(H3ComfyNvfp4AwqLinear::new(
             packed.clone(),
@@ -1057,7 +1088,7 @@ mod tests {
             H3ComfyNvfp4AwqLinear::new(packed, block_scales, scalar_int8, awq, 2, 16,)
                 .unwrap_err()
                 .to_string()
-                .contains("F32 scalar")
+                .contains("source shape [] or [1]")
         );
         Ok(())
     }
