@@ -214,18 +214,45 @@ impl H3ArtifactInventory {
     }
 
     fn validate_landed(&self) -> Result<(), H3AdmissionError> {
-        if self.artifacts.is_empty() {
+        let expected = Self::pending_from_manifest(&self.model)?;
+        if self.model != expected.model
+            || self.task != expected.task
+            || self.layout != expected.layout
+            || self.source_revision != expected.source_revision
+        {
             return Err(H3AdmissionError::InvalidArtifactFacts(
-                "H3 artifact inventory is empty".to_string(),
+                "H3 artifact inventory metadata differs from the pinned manifest".to_string(),
             ));
+        }
+        if self.artifacts.len() != expected.artifacts.len() {
+            return Err(H3AdmissionError::InvalidArtifactFacts(format!(
+                "H3 artifact inventory has {} entries, expected exactly {}",
+                self.artifacts.len(),
+                expected.artifacts.len()
+            )));
         }
         let mut roles = BTreeSet::new();
         let mut pending = Vec::new();
-        for artifact in &self.artifacts {
+        for (index, (artifact, expected)) in self
+            .artifacts
+            .iter()
+            .zip(expected.artifacts.iter())
+            .enumerate()
+        {
             if !roles.insert(artifact.role.clone()) {
                 return Err(H3AdmissionError::InvalidArtifactFacts(format!(
                     "duplicate H3 artifact role {:?}",
                     artifact.role
+                )));
+            }
+            if artifact.role != expected.role
+                || artifact.source_path != expected.source_path
+                || artifact.content_sha256 != expected.content_sha256
+                || artifact.bytes != expected.bytes
+            {
+                return Err(H3AdmissionError::InvalidArtifactFacts(format!(
+                    "H3 artifact inventory entry {} differs from the pinned manifest",
+                    index + 1
                 )));
             }
             require_sha256(&artifact.content_sha256, "artifact content")?;
@@ -411,6 +438,7 @@ pub(crate) struct H3PreparedRequestShape {
     pub audio_samples_per_channel: u64,
     pub reference_shapes: Vec<GenerationReferencePreparedShape>,
     pub reference_fingerprint: String,
+    pub conditioning_fingerprint: String,
     pub rows: H3PreparedRows,
 }
 
@@ -492,10 +520,20 @@ impl H3PreparedRequestShape {
             .collect::<Result<Vec<_>, _>>()?;
         let reference_fingerprint =
             mold_core::generation_reference_fingerprint(&reference_metadata);
+        let conditioning_fingerprint = match contract.task {
+            minimax_h3::Task::Fl2va => fl2va_conditioning_fingerprint(request),
+            minimax_h3::Task::Ref2va => reference_fingerprint.clone(),
+        };
         let condition_visual_rows = match contract.task {
             minimax_h3::Task::Fl2va => {
-                u64::try_from(request.keyframes.as_deref().unwrap_or_default().len())
-                    .map_err(|_| H3AdmissionError::ArithmeticOverflow("keyframe count"))?
+                let keyframe_count =
+                    u64::try_from(request.keyframes.as_deref().unwrap_or_default().len())
+                        .map_err(|_| H3AdmissionError::ArithmeticOverflow("keyframe count"))?
+                        .checked_add(u64::from(request.source_image.is_some()))
+                        .ok_or(H3AdmissionError::ArithmeticOverflow(
+                            "FL2VA boundary frame count",
+                        ))?;
+                keyframe_count
                     .checked_mul(rows_per_video_latent)
                     .ok_or(H3AdmissionError::ArithmeticOverflow("FL2VA condition rows"))?
             }
@@ -530,6 +568,7 @@ impl H3PreparedRequestShape {
                 audio_samples_per_channel,
                 reference_shapes,
                 reference_fingerprint,
+                conditioning_fingerprint,
                 rows: H3PreparedRows {
                     qwen_output_text_rows,
                     qwen_vision_rows,
@@ -542,6 +581,156 @@ impl H3PreparedRequestShape {
             },
         ))
     }
+
+    fn validate_for(&self, task: H3FrozenTask) -> Result<(), H3AdmissionError> {
+        if self.width == 0
+            || self.height == 0
+            || !self.width.is_multiple_of(minimax_h3::DIMENSION_ALIGNMENT)
+            || !self.height.is_multiple_of(minimax_h3::DIMENSION_ALIGNMENT)
+            || u64::from(self.width) * u64::from(self.height) > minimax_h3::MAX_PIXELS
+            || !(minimax_h3::MIN_ASPECT_RATIO..=minimax_h3::MAX_ASPECT_RATIO)
+                .contains(&(self.width as f64 / self.height as f64))
+            || !minimax_h3::valid_frame_count(self.frames)
+        {
+            return Err(H3AdmissionError::RequestContract(
+                "prepared H3 geometry is outside the fixed request grid".to_string(),
+            ));
+        }
+        require_sha256(&self.reference_fingerprint, "reference")?;
+        require_sha256(&self.conditioning_fingerprint, "conditioning")?;
+        if self.rows.qwen_output_text_rows == 0
+            || self.rows.qwen_output_text_rows > H3_QWEN_MODEL_MAX_ROWS
+        {
+            return Err(H3AdmissionError::RequestContract(format!(
+                "prepared H3 Qwen output rows must be 1..={H3_QWEN_MODEL_MAX_ROWS}"
+            )));
+        }
+
+        let frames = u64::from(self.frames);
+        let expected_video_latent_frames = frames
+            .checked_sub(u64::from(minimax_h3::FRAME_OFFSET))
+            .ok_or(H3AdmissionError::ArithmeticOverflow("video latent frames"))?
+            / u64::from(minimax_h3::FRAME_STEP)
+            * 5
+            + 2;
+        let rows_per_video_latent = u64::from(self.width / 32)
+            .checked_mul(u64::from(self.height / 32))
+            .ok_or(H3AdmissionError::ArithmeticOverflow(
+                "video rows per latent",
+            ))?;
+        let expected_target_video_rows = expected_video_latent_frames
+            .checked_mul(rows_per_video_latent)
+            .ok_or(H3AdmissionError::ArithmeticOverflow("target video rows"))?;
+        let expected_audio_latents = frames
+            .checked_mul(5)
+            .and_then(|value| value.checked_add(1))
+            .ok_or(H3AdmissionError::ArithmeticOverflow("target audio latents"))?
+            / 3;
+        let expected_target_audio_rows = expected_audio_latents
+            .checked_mul(u64::from(minimax_h3::AUDIO_CHANNELS))
+            .ok_or(H3AdmissionError::ArithmeticOverflow("target audio rows"))?;
+        let expected_audio_samples = frames
+            .checked_mul(4_000)
+            .and_then(|value| value.checked_add(1))
+            .ok_or(H3AdmissionError::ArithmeticOverflow("target audio samples"))?
+            / 3;
+        if self.video_latent_frames != expected_video_latent_frames
+            || self.audio_latents_per_channel != expected_audio_latents
+            || self.audio_samples_per_channel != expected_audio_samples
+            || self.rows.target_video_rows != expected_target_video_rows
+            || self.rows.target_audio_rows != expected_target_audio_rows
+        {
+            return Err(H3AdmissionError::RequestContract(
+                "prepared H3 target row counts do not match the fixed 17n+5 geometry".to_string(),
+            ));
+        }
+
+        match task {
+            H3FrozenTask::Fl2va => {
+                let condition_count = self
+                    .rows
+                    .condition_visual_rows
+                    .checked_div(rows_per_video_latent)
+                    .ok_or(H3AdmissionError::ArithmeticOverflow(
+                        "FL2VA condition count",
+                    ))?;
+                if !self.reference_shapes.is_empty()
+                    || self.rows.condition_audio_rows != 0
+                    || !self
+                        .rows
+                        .condition_visual_rows
+                        .is_multiple_of(rows_per_video_latent)
+                    || condition_count > 2
+                {
+                    return Err(H3AdmissionError::RequestContract(
+                        "prepared FL2VA rows are not zero, one, or two boundary frames".to_string(),
+                    ));
+                }
+            }
+            H3FrozenTask::Ref2va => {
+                if self.reference_shapes.is_empty()
+                    || self.reference_shapes.iter().any(|shape| {
+                        shape.version != minimax_h3::REFERENCE_PREPROCESS_VERSION
+                            || (shape.visual_rows == 0 && shape.audio_rows == 0)
+                    })
+                {
+                    return Err(H3AdmissionError::RequestContract(
+                        "prepared Ref2VA shapes are missing or use another preprocessing version"
+                            .to_string(),
+                    ));
+                }
+                let visual = checked_sum(
+                    self.reference_shapes.iter().map(|shape| shape.visual_rows),
+                    "reference visual rows",
+                )?;
+                let audio = checked_sum(
+                    self.reference_shapes.iter().map(|shape| shape.audio_rows),
+                    "reference audio rows",
+                )?;
+                if self.rows.condition_visual_rows != visual
+                    || self.rows.condition_audio_rows != audio
+                    || self.conditioning_fingerprint != self.reference_fingerprint
+                {
+                    return Err(H3AdmissionError::RequestContract(
+                        "prepared Ref2VA row or fingerprint authority is inconsistent".to_string(),
+                    ));
+                }
+            }
+        }
+        let total = checked_sum(
+            [
+                self.rows.qwen_output_text_rows,
+                self.rows.condition_visual_rows,
+                self.rows.condition_audio_rows,
+                self.rows.target_video_rows,
+                self.rows.target_audio_rows,
+            ],
+            "packed rows",
+        )?;
+        if self.rows.total_packed_rows != total {
+            return Err(H3AdmissionError::RequestContract(
+                "prepared H3 packed-row total is inconsistent".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn fl2va_conditioning_fingerprint(request: &GenerateRequest) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"mold.minimax-h3.fl2va-conditioning.v1\0");
+    if let Some(source) = request.source_image.as_deref() {
+        hash.update(b"source-image\0");
+        hash.update((source.len() as u64).to_le_bytes());
+        hash.update(Sha256::digest(source));
+    }
+    for keyframe in request.keyframes.as_deref().unwrap_or_default() {
+        hash.update(b"keyframe\0");
+        hash.update(keyframe.frame.to_le_bytes());
+        hash.update((keyframe.image.len() as u64).to_le_bytes());
+        hash.update(Sha256::digest(&keyframe.image));
+    }
+    format!("{:x}", hash.finalize())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -649,12 +838,27 @@ pub(crate) struct H3HostMemory {
 
 impl H3HostMemory {
     pub(crate) fn safety_floor_bytes(self) -> u64 {
-        (self.total_bytes.saturating_mul(15) / 100).max(8 * GIB)
+        let whole = self.total_bytes / 100;
+        let remainder = self.total_bytes % 100;
+        whole
+            .saturating_mul(15)
+            .saturating_add(remainder.saturating_mul(15) / 100)
+            .max(8 * GIB)
     }
 
     pub(crate) fn headroom_bytes(self) -> u64 {
         self.available_bytes
             .saturating_sub(self.safety_floor_bytes())
+    }
+
+    fn validate(self) -> Result<(), H3AdmissionError> {
+        if self.total_bytes == 0 || self.available_bytes > self.total_bytes {
+            return Err(H3AdmissionError::InvalidHostMemory {
+                total_bytes: self.total_bytes,
+                available_bytes: self.available_bytes,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -730,6 +934,7 @@ pub(crate) struct H3FrozenExecutionPlan {
     pub header_fingerprint: String,
     pub artifact_fingerprint: String,
     pub reference_fingerprint: String,
+    pub conditioning_fingerprint: String,
     pub shape: H3PreparedRequestShape,
     pub qwen_language_layers: u32,
     pub qwen_truncation: H3QwenTruncationPolicy,
@@ -743,6 +948,33 @@ pub(crate) struct H3FrozenExecutionPlan {
     pub audio: H3FrozenAudioPolicy,
     pub memory: H3MemoryBreakdown,
     pub execution_fingerprint: String,
+}
+
+impl H3FrozenExecutionPlan {
+    /// Recheck immediately before worker dispatch. The fingerprint is computed
+    /// over the complete frozen plan with this field cleared, so no hot/reload
+    /// path may mutate placement or memory facts behind the scheduler grant.
+    pub(crate) fn validate_execution_fingerprint(&self) -> Result<(), H3AdmissionError> {
+        if self.execution_fingerprint.len() != 64
+            || !self
+                .execution_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(H3AdmissionError::InvalidRuntimeFacts(
+                "H3 execution fingerprint is not SHA-256".to_string(),
+            ));
+        }
+        let expected = self.execution_fingerprint.clone();
+        let mut canonical = self.clone();
+        canonical.execution_fingerprint.clear();
+        if fingerprint(&canonical)? != expected {
+            return Err(H3AdmissionError::InvalidRuntimeFacts(
+                "H3 frozen execution plan changed after admission".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -774,6 +1006,13 @@ pub(crate) enum H3AdmissionError {
     SingleGpuRequired { device_count: usize },
     #[error("MiniMax H3 device is unsupported: {0}")]
     DeviceUnsupported(String),
+    #[error(
+        "MiniMax H3 host-memory facts are invalid: {available_bytes} available bytes exceeds {total_bytes} total bytes or total is zero"
+    )]
+    InvalidHostMemory {
+        total_bytes: u64,
+        available_bytes: u64,
+    },
     #[error(
         "MiniMax H3 product-size packed attention ({packed_rows} rows) requires a qualified lossless CUDA runtime"
     )]
@@ -840,12 +1079,14 @@ pub(crate) fn plan_h3_admission(
             "request task and artifact task differ".to_string(),
         ));
     }
+    shape.validate_for(task)?;
     if policy.prefetch_depth > H3_MAX_PREFETCH_DEPTH {
         return Err(H3AdmissionError::InvalidRuntimeFacts(format!(
             "H3 prefetch depth {} exceeds bounded maximum {H3_MAX_PREFETCH_DEPTH}",
             policy.prefetch_depth
         )));
     }
+    host.validate()?;
     artifacts.validate_landed()?;
     checkpoint.validate(artifacts)?;
     let runtime = runtime.ok_or(H3AdmissionError::QualifiedAttentionRequired {
@@ -895,21 +1136,19 @@ pub(crate) fn plan_h3_admission(
     let qwen_gpu_peak = runtime
         .fixed_vram_bytes
         .checked_add(checkpoint.qwen_device_bytes)
-        .and_then(|value| value.checked_add(qwen_activation_bytes));
+        .and_then(|value| value.checked_add(qwen_activation_bytes))
+        .ok_or(H3AdmissionError::ArithmeticOverflow("Qwen phase"))?;
     let (qwen_placement, qwen_phase_vram) = match qwen_gpu_peak {
-        Some(peak) if peak <= device.available_vram_bytes => {
-            (H3QwenPlacement::AssignedGpuThenDrop, peak)
-        }
+        peak if peak <= device.available_vram_bytes => (H3QwenPlacement::AssignedGpuThenDrop, peak),
         _ if runtime.qwen_cpu_supported => {
             (H3QwenPlacement::HostCpuThenDrop, runtime.fixed_vram_bytes)
         }
-        Some(peak) => {
+        peak => {
             return Err(H3AdmissionError::InsufficientVram {
                 required_bytes: peak,
                 available_bytes: device.available_vram_bytes,
             });
         }
-        None => return Err(H3AdmissionError::ArithmeticOverflow("Qwen phase")),
     };
 
     let denoise_workspace = checked_sum(
@@ -992,15 +1231,19 @@ pub(crate) fn plan_h3_admission(
     // This deliberately rejects the 134 GiB full stack on a 128 GiB host even
     // when the filesystem is sparse or mmap would initially fault few pages.
     let artifact_host_bytes = artifacts.total_file_bytes()?;
+    let qwen_host_workspace = if qwen_placement == H3QwenPlacement::HostCpuThenDrop {
+        checkpoint
+            .qwen_device_bytes
+            .checked_add(qwen_activation_bytes)
+            .ok_or(H3AdmissionError::ArithmeticOverflow("Qwen host workspace"))?
+    } else {
+        0
+    };
     let runtime_host_workspace = checked_sum(
         [
             runtime.fixed_host_bytes,
             aac_mux_staging,
-            if qwen_placement == H3QwenPlacement::HostCpuThenDrop {
-                qwen_activation_bytes
-            } else {
-                0
-            },
+            qwen_host_workspace,
         ],
         "runtime host workspace",
     )?;
@@ -1017,7 +1260,7 @@ pub(crate) fn plan_h3_admission(
         });
     }
 
-    let artifact_fingerprint = fingerprint(&artifacts.artifacts)?;
+    let artifact_fingerprint = fingerprint(artifacts)?;
     let mut plan = H3FrozenExecutionPlan {
         schema_version: H3_ADMISSION_SCHEMA_VERSION,
         task,
@@ -1028,6 +1271,7 @@ pub(crate) fn plan_h3_admission(
         header_fingerprint: checkpoint.header_fingerprint.clone(),
         artifact_fingerprint,
         reference_fingerprint: shape.reference_fingerprint.clone(),
+        conditioning_fingerprint: shape.conditioning_fingerprint.clone(),
         shape,
         qwen_language_layers: H3_QWEN_SELECTED_LANGUAGE_LAYERS,
         qwen_truncation: H3QwenTruncationPolicy::RejectAboveModelMaximum {
@@ -1089,6 +1333,7 @@ pub(crate) fn plan_h3_admission(
         execution_fingerprint: String::new(),
     };
     plan.execution_fingerprint = fingerprint(&plan)?;
+    plan.validate_execution_fingerprint()?;
     Ok(plan)
 }
 
@@ -1124,7 +1369,11 @@ fn choose_streaming(
             .into_iter()
             .max()
             .unwrap_or(0);
-        let dequantization_bytes = streamed
+        // Resident blocks also require their dequantization scratch while
+        // they are materialized. Charging only the streamed suffix would make
+        // the all-resident hot path report zero scratch and could understate
+        // the preparation peak when an early resident block is the largest.
+        let dequantization_bytes = blocks
             .iter()
             .map(|block| block.dequantization_workspace_bytes)
             .max()
@@ -1435,6 +1684,26 @@ mod tests {
     }
 
     #[test]
+    fn fl2va_source_image_is_charged_as_one_visual_condition() {
+        let mut request = request(minimax_h3::FL2VA_COMFY, 124);
+        request.source_image = Some(vec![1, 2, 3, 4]);
+        let (task, shape) =
+            H3PreparedRequestShape::from_prepared_request(&request, 128, 1_024).unwrap();
+        assert_eq!(task, H3FrozenTask::Fl2va);
+        assert_eq!(shape.rows.condition_visual_rows, 42 * 24);
+        assert_eq!(shape.rows.condition_audio_rows, 0);
+        assert_eq!(shape.rows.total_packed_rows, 37_838 + 42 * 24);
+
+        request.source_image = Some(vec![1, 2, 3, 5]);
+        let (_, changed) =
+            H3PreparedRequestShape::from_prepared_request(&request, 128, 1_024).unwrap();
+        assert_ne!(
+            shape.conditioning_fingerprint,
+            changed.conditioning_fingerprint
+        );
+    }
+
+    #[test]
     fn prepared_ref2va_mix_prices_visual_audio_and_qwen_rows_in_order() {
         let mut request = request(minimax_h3::REF2VA_COMFY, 124);
         request.references = Some(vec![
@@ -1570,6 +1839,14 @@ mod tests {
         };
         assert_eq!(eighty.safety_floor_bytes(), 12 * GIB);
         assert_eq!(eighty.headroom_bytes(), 68 * GIB);
+        let enormous = H3HostMemory {
+            total_bytes: u64::MAX,
+            available_bytes: u64::MAX,
+        };
+        assert_eq!(
+            enormous.safety_floor_bytes(),
+            (u64::MAX / 100) * 15 + ((u64::MAX % 100) * 15 / 100)
+        );
         assert_eq!(H3_CURATED_HOST_RAM_RECOMMENDATION_BYTES, 128 * GIB);
 
         let inventory = landed_inventory(minimax_h3::FL2VA_OFFICIAL);
@@ -1594,6 +1871,150 @@ mod tests {
             error,
             H3AdmissionError::InsufficientHostRam { .. }
         ));
+    }
+
+    #[test]
+    fn malformed_host_and_incomplete_inventory_fail_before_admission() {
+        let mut inventory = landed_inventory(minimax_h3::FL2VA_COMFY);
+        let checkpoint = checkpoint(&inventory);
+        let runtime = qualified_runtime();
+        let (task, shape) = prepared(minimax_h3::FL2VA_COMFY, 124);
+        let error = plan_h3_admission(
+            task,
+            shape.clone(),
+            &inventory,
+            &checkpoint,
+            Some(&runtime),
+            &[cuda(24 * GIB)],
+            H3HostMemory {
+                total_bytes: 96 * GIB,
+                available_bytes: 96 * GIB + 1,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, H3AdmissionError::InvalidHostMemory { .. }));
+
+        inventory.artifacts.pop();
+        let error = plan_h3_admission(
+            task,
+            shape,
+            &inventory,
+            &checkpoint,
+            Some(&runtime),
+            &[cuda(24 * GIB)],
+            H3HostMemory {
+                total_bytes: 96 * GIB,
+                available_bytes: 96 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, H3AdmissionError::InvalidArtifactFacts(_)));
+    }
+
+    #[test]
+    fn qwen_cpu_fallback_charges_parameters_and_never_masks_overflow() {
+        let inventory = landed_inventory(minimax_h3::FL2VA_COMFY);
+        let mut checkpoint = checkpoint(&inventory);
+        checkpoint.qwen_device_bytes = 30 * GIB;
+        let runtime = qualified_runtime();
+        let (task, shape) = prepared(minimax_h3::FL2VA_COMFY, 124);
+        let plan = plan_h3_admission(
+            task,
+            shape.clone(),
+            &inventory,
+            &checkpoint,
+            Some(&runtime),
+            &[cuda(24 * GIB)],
+            H3HostMemory {
+                total_bytes: 160 * GIB,
+                available_bytes: 160 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(plan.qwen_placement, H3QwenPlacement::HostCpuThenDrop);
+        assert!(
+            plan.memory.runtime_host_workspace_bytes
+                >= checkpoint.qwen_device_bytes + plan.memory.qwen_activation_bytes
+        );
+
+        checkpoint.qwen_device_bytes = u64::MAX;
+        let error = plan_h3_admission(
+            task,
+            shape,
+            &inventory,
+            &checkpoint,
+            Some(&runtime),
+            &[cuda(24 * GIB)],
+            H3HostMemory {
+                total_bytes: 160 * GIB,
+                available_bytes: 160 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error, H3AdmissionError::ArithmeticOverflow("Qwen phase"));
+    }
+
+    #[test]
+    fn linear_workspace_overflow_and_resident_dequant_scratch_fail_closed() {
+        let inventory = landed_inventory(minimax_h3::FL2VA_COMFY);
+        let checkpoint = checkpoint(&inventory);
+        let mut runtime = qualified_runtime();
+        let (task, shape) = prepared(minimax_h3::FL2VA_COMFY, 124);
+        runtime.attention_workspace.bytes_per_row = u64::MAX;
+        let error = plan_h3_admission(
+            task,
+            shape.clone(),
+            &inventory,
+            &checkpoint,
+            Some(&runtime),
+            &[cuda(24 * GIB)],
+            H3HostMemory {
+                total_bytes: 96 * GIB,
+                available_bytes: 96 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            H3AdmissionError::ArithmeticOverflow("attention workspace")
+        );
+
+        runtime = qualified_runtime();
+        runtime.ffn_workspace.bytes_per_row = u64::MAX;
+        let error = plan_h3_admission(
+            task,
+            shape,
+            &inventory,
+            &checkpoint,
+            Some(&runtime),
+            &[cuda(24 * GIB)],
+            H3HostMemory {
+                total_bytes: 96 * GIB,
+                available_bytes: 96 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error, H3AdmissionError::ArithmeticOverflow("FFN workspace"));
+
+        let blocks = (0..H3_MAIN_BLOCK_COUNT)
+            .map(|index| H3BlockMemoryFact {
+                index: u16::try_from(index).unwrap(),
+                encoded_host_bytes: 1,
+                resident_device_bytes: 1,
+                dequantization_workspace_bytes: if index == 0 { 1_000 } else { 1 },
+                content_fingerprint: sha(u8::try_from(index + 1).unwrap()),
+            })
+            .collect::<Vec<_>>();
+        let streaming = choose_streaming(&blocks, 0, 1_050, 1).unwrap();
+        assert_eq!(streaming.resident_count, H3_MAIN_BLOCK_COUNT);
+        assert_eq!(streaming.dequantization_bytes, 1_000);
+        assert_eq!(streaming.peak_bytes, 1_050);
     }
 
     #[test]
@@ -1662,6 +2083,11 @@ mod tests {
         )
         .unwrap();
         assert_ne!(plan.execution_fingerprint, alternate.execution_fingerprint);
+        plan.validate_execution_fingerprint().unwrap();
+        let mut tampered = plan.clone();
+        tampered.memory.predicted_vram_peak_bytes -= 1;
+        let error = tampered.validate_execution_fingerprint().unwrap_err();
+        assert!(matches!(error, H3AdmissionError::InvalidRuntimeFacts(_)));
     }
 
     #[test]

@@ -29,9 +29,14 @@ impl FrozenH3BlockStreamingPlan {
     ) -> Result<Self> {
         let device_id = device_id.into();
         let execution_fingerprint = execution_fingerprint.into();
-        if device_id.trim().is_empty() || execution_fingerprint.trim().is_empty() {
+        if device_id.trim().is_empty()
+            || execution_fingerprint.len() != 64
+            || !execution_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
             return Err(anyhow!(
-                "H3 block streaming requires frozen device and execution identities"
+                "H3 block streaming requires a frozen device and SHA-256 execution identity"
             ));
         }
         if resident_block_count > H3_MAIN_BLOCK_COUNT {
@@ -54,10 +59,14 @@ impl FrozenH3BlockStreamingPlan {
 }
 
 /// One Scheduler V2 lease. There is intentionally no sibling-device accessor:
-/// one H3 render has exactly one execution route.
+/// one H3 render has exactly one execution route. The concrete lease is owned
+/// by [`H3BlockStreamState`] for the complete resident-block lifetime and must
+/// release its scheduler grant when dropped.
 pub(crate) trait H3BlockLease {
+    fn lease_id(&self) -> &str;
     fn device_id(&self) -> &str;
     fn execution_fingerprint(&self) -> &str;
+    fn is_active(&self) -> bool;
 }
 
 pub(crate) trait H3BlockLoader {
@@ -123,37 +132,30 @@ pub(crate) enum H3BlockStreamEvent {
 /// Prepared resident blocks survive across denoise steps; streamed/prefetched
 /// blocks are scoped to one step and are dropped on success, cancellation, or
 /// any loader/forward error.
-pub(crate) struct H3BlockStreamState<L: H3BlockLoader> {
+pub(crate) struct H3BlockStreamState<L: H3BlockLoader, A: H3BlockLease> {
     plan: FrozenH3BlockStreamingPlan,
-    loader: L,
+    // Field order is deliberate: resident device allocations and their loader
+    // drop before the owned Scheduler V2 lease releases its grant.
     resident: Vec<L::Block>,
+    loader: L,
     prepared: bool,
+    lease: A,
 }
 
-impl<L: H3BlockLoader> H3BlockStreamState<L> {
-    pub(crate) fn new(
-        plan: FrozenH3BlockStreamingPlan,
-        lease: &impl H3BlockLease,
-        loader: L,
-    ) -> Result<Self> {
-        if lease.device_id() != plan.device_id {
-            return Err(anyhow!(
-                "H3 block lease targets {}, frozen plan targets {}; sibling-device borrowing is forbidden",
-                lease.device_id(),
-                plan.device_id
-            ));
-        }
-        if lease.execution_fingerprint() != plan.execution_fingerprint {
-            return Err(anyhow!(
-                "H3 block lease execution fingerprint differs from the frozen plan"
-            ));
-        }
+impl<L: H3BlockLoader, A: H3BlockLease> H3BlockStreamState<L, A> {
+    pub(crate) fn new(plan: FrozenH3BlockStreamingPlan, lease: A, loader: L) -> Result<Self> {
+        validate_lease(&plan, &lease)?;
         Ok(Self {
             plan,
-            loader,
             resident: Vec::new(),
+            loader,
             prepared: false,
+            lease,
         })
+    }
+
+    fn validate_owned_lease(&self) -> Result<()> {
+        validate_lease(&self.plan, &self.lease)
     }
 
     pub(crate) fn resident_block_count(&self) -> usize {
@@ -165,6 +167,7 @@ impl<L: H3BlockLoader> H3BlockStreamState<L> {
         cancellation: &impl H3StreamCancellation,
         mut observe: impl FnMut(H3BlockStreamEvent),
     ) -> Result<()> {
+        self.validate_owned_lease()?;
         if self.prepared {
             return Ok(());
         }
@@ -191,6 +194,7 @@ impl<L: H3BlockLoader> H3BlockStreamState<L> {
         mut observe: impl FnMut(H3BlockStreamEvent),
         mut forward: impl FnMut(usize, &L::Block) -> Result<()>,
     ) -> Result<()> {
+        self.validate_owned_lease()?;
         if !self.prepared {
             return Err(anyhow!(
                 "H3 block stream must prepare resident blocks before a denoise step"
@@ -264,6 +268,27 @@ impl<L: H3BlockLoader> H3BlockStreamState<L> {
     }
 }
 
+fn validate_lease(plan: &FrozenH3BlockStreamingPlan, lease: &impl H3BlockLease) -> Result<()> {
+    if lease.lease_id().trim().is_empty() || !lease.is_active() {
+        return Err(anyhow!(
+            "H3 block streaming requires one active Scheduler V2 lease"
+        ));
+    }
+    if lease.device_id() != plan.device_id {
+        return Err(anyhow!(
+                "H3 block lease targets {}, frozen plan targets {}; sibling-device borrowing is forbidden",
+                lease.device_id(),
+                plan.device_id
+            ));
+    }
+    if lease.execution_fingerprint() != plan.execution_fingerprint {
+        return Err(anyhow!(
+            "H3 block lease execution fingerprint differs from the frozen plan"
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prefetch_one<L: H3BlockLoader>(
     plan: &FrozenH3BlockStreamingPlan,
@@ -300,10 +325,14 @@ mod tests {
         Arc, Mutex,
     };
 
+    const PLAN_FINGERPRINT: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+
     #[derive(Default)]
     struct Counters {
         live: AtomicUsize,
         peak: AtomicUsize,
+        lease_dropped: AtomicUsize,
         loaded: Mutex<Vec<usize>>,
         dropped: Mutex<Vec<usize>>,
     }
@@ -336,7 +365,7 @@ mod tests {
             execution_fingerprint: &str,
         ) -> Result<Self::Block> {
             assert_eq!(device_id, "gpu-0");
-            assert_eq!(execution_fingerprint, "plan-v1");
+            assert_eq!(execution_fingerprint, PLAN_FINGERPRINT);
             if self.fail_load == Some(index) {
                 return Err(anyhow!("synthetic load failure at block {index}"));
             }
@@ -359,17 +388,39 @@ mod tests {
     }
 
     struct SyntheticLease<'a> {
+        id: &'a str,
         device: &'a str,
         fingerprint: &'a str,
+        active: bool,
+        counters: Arc<Counters>,
     }
 
     impl H3BlockLease for SyntheticLease<'_> {
+        fn lease_id(&self) -> &str {
+            self.id
+        }
+
         fn device_id(&self) -> &str {
             self.device
         }
 
         fn execution_fingerprint(&self) -> &str {
             self.fingerprint
+        }
+
+        fn is_active(&self) -> bool {
+            self.active
+        }
+    }
+
+    impl Drop for SyntheticLease<'_> {
+        fn drop(&mut self) {
+            assert_eq!(
+                self.counters.live.load(Ordering::SeqCst),
+                0,
+                "resident and prefetched blocks must drop before their scheduler lease"
+            );
+            self.counters.lease_dropped.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -391,13 +442,17 @@ mod tests {
         counters: Arc<Counters>,
         fail_load: Option<usize>,
         fail_wait: Option<usize>,
-    ) -> H3BlockStreamState<SyntheticLoader> {
-        let plan = FrozenH3BlockStreamingPlan::new("gpu-0", "plan-v1", resident, prefetch).unwrap();
+    ) -> H3BlockStreamState<SyntheticLoader, SyntheticLease<'static>> {
+        let plan =
+            FrozenH3BlockStreamingPlan::new("gpu-0", PLAN_FINGERPRINT, resident, prefetch).unwrap();
         H3BlockStreamState::new(
             plan,
-            &SyntheticLease {
+            SyntheticLease {
+                id: "lease-1",
                 device: "gpu-0",
-                fingerprint: "plan-v1",
+                fingerprint: PLAN_FINGERPRINT,
+                active: true,
+                counters: Arc::clone(&counters),
             },
             SyntheticLoader {
                 counters,
@@ -449,6 +504,7 @@ mod tests {
         drop(loaded);
         drop(state);
         assert_eq!(counters.live.load(Ordering::SeqCst), 0);
+        assert_eq!(counters.lease_dropped.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -514,7 +570,7 @@ mod tests {
     #[test]
     fn route_and_prefetch_authorities_fail_before_loading() {
         let counters = Arc::new(Counters::default());
-        let plan = FrozenH3BlockStreamingPlan::new("gpu-0", "plan-v1", 1, 1).unwrap();
+        let plan = FrozenH3BlockStreamingPlan::new("gpu-0", PLAN_FINGERPRINT, 1, 1).unwrap();
         let loader = SyntheticLoader {
             counters: Arc::clone(&counters),
             fail_load: None,
@@ -522,9 +578,12 @@ mod tests {
         };
         let error = H3BlockStreamState::new(
             plan.clone(),
-            &SyntheticLease {
+            SyntheticLease {
+                id: "lease-1",
                 device: "gpu-1",
-                fingerprint: "plan-v1",
+                fingerprint: PLAN_FINGERPRINT,
+                active: true,
+                counters: Arc::clone(&counters),
             },
             loader,
         )
@@ -533,9 +592,31 @@ mod tests {
         assert!(error.to_string().contains("sibling-device"));
         assert_eq!(counters.live.load(Ordering::SeqCst), 0);
 
+        let loader = SyntheticLoader {
+            counters: Arc::clone(&counters),
+            fail_load: None,
+            fail_wait: None,
+        };
+        let error = H3BlockStreamState::new(
+            plan.clone(),
+            SyntheticLease {
+                id: "lease-2",
+                device: "gpu-0",
+                fingerprint: PLAN_FINGERPRINT,
+                active: false,
+                counters: Arc::clone(&counters),
+            },
+            loader,
+        )
+        .err()
+        .expect("inactive lease must fail");
+        assert!(error.to_string().contains("active Scheduler V2 lease"));
+
+        assert!(FrozenH3BlockStreamingPlan::new("gpu-0", "not-a-sha256", 1, 1).is_err());
+
         assert!(FrozenH3BlockStreamingPlan::new(
             "gpu-0",
-            "plan-v1",
+            PLAN_FINGERPRINT,
             H3_MAIN_BLOCK_COUNT,
             H3_MAX_PREFETCH_DEPTH + 1,
         )
