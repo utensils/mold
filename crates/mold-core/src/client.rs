@@ -14,6 +14,7 @@ use crate::types::{
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use reqwest::{Client, StatusCode};
+use std::io::{Seek, SeekFrom};
 use std::path::Path;
 use tokio_util::io::ReaderStream;
 
@@ -104,13 +105,74 @@ impl MoldClient {
             "reference upload source is not a non-empty regular file: {}",
             path.display()
         );
-        let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
+        self.upload_reference_body(
+            handle,
+            mime_type,
+            metadata.len(),
+            reqwest::Body::wrap_stream(ReaderStream::new(file)),
+        )
+        .await
+    }
+
+    /// Stream an already-open reference file through a one-use bearer handle.
+    ///
+    /// Keeping the descriptor probe and upload tied to clones of the same file
+    /// descriptor prevents a path or symlink replacement between inspection and
+    /// upload. The local pathname never enters the request or this method's
+    /// errors.
+    pub async fn upload_reference_open_file(
+        &self,
+        handle: &str,
+        mut file: std::fs::File,
+        mime_type: &str,
+    ) -> Result<ReferenceUploadCompleteResponse> {
+        let metadata = file.metadata().context("failed to inspect reference")?;
+        anyhow::ensure!(
+            metadata.is_file() && metadata.len() > 0,
+            "reference upload source is not a non-empty regular file"
+        );
+        file.seek(SeekFrom::Start(0))
+            .context("failed to rewind reference")?;
+        let file = tokio::fs::File::from_std(file);
+        self.upload_reference_body(
+            handle,
+            mime_type,
+            metadata.len(),
+            reqwest::Body::wrap_stream(ReaderStream::new(file)),
+        )
+        .await
+    }
+
+    /// Upload one bounded in-memory attachment through a one-use bearer handle.
+    ///
+    /// Discord already owns attachment bytes in memory after its download-size
+    /// gate. Taking ownership here guarantees the uploaded body is exactly the
+    /// body that was hashed and probed, without a second URL fetch.
+    pub async fn upload_reference_bytes(
+        &self,
+        handle: &str,
+        bytes: Vec<u8>,
+        mime_type: &str,
+    ) -> Result<ReferenceUploadCompleteResponse> {
+        anyhow::ensure!(!bytes.is_empty(), "reference upload source is empty");
+        let length = u64::try_from(bytes.len()).context("reference upload is too large")?;
+        self.upload_reference_body(handle, mime_type, length, reqwest::Body::from(bytes))
+            .await
+    }
+
+    async fn upload_reference_body(
+        &self,
+        handle: &str,
+        mime_type: &str,
+        content_length: u64,
+        body: reqwest::Body,
+    ) -> Result<ReferenceUploadCompleteResponse> {
         let response = self
             .client
             .put(format!("{}/api/generate/reference-upload", self.base_url))
             .header(REFERENCE_UPLOAD_HANDLE_HEADER, handle)
             .header(reqwest::header::CONTENT_TYPE, mime_type)
-            .header(reqwest::header::CONTENT_LENGTH, metadata.len())
+            .header(reqwest::header::CONTENT_LENGTH, content_length)
             .body(body)
             .send()
             .await?;
@@ -1713,6 +1775,53 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/generate/reference-upload"))
+            .and(header("x-api-key", "sekrit"))
+            .and(header(REFERENCE_UPLOAD_HANDLE_HEADER, "mru_open"))
+            .and(header("content-type", "image/png"))
+            .and(header("content-length", "15"))
+            .and(body_string("reference-bytes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "instance_id": "server-1",
+                "reference": 1,
+                "metadata": {
+                    "kind": "image",
+                    "index": 1,
+                    "name": "reference.png",
+                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "mime_type": "image/png",
+                    "width": 16,
+                    "height": 16
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/generate/reference-upload"))
+            .and(header("x-api-key", "sekrit"))
+            .and(header(REFERENCE_UPLOAD_HANDLE_HEADER, "mru_bytes"))
+            .and(header("content-type", "audio/wav"))
+            .and(header("content-length", "5"))
+            .and(body_string("bytes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "instance_id": "server-1",
+                "reference": 2,
+                "metadata": {
+                    "kind": "audio",
+                    "index": 2,
+                    "name": "reference.wav",
+                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "mime_type": "audio/wav",
+                    "duration_ms": 2000,
+                    "sample_rate": 32000,
+                    "channels": 2
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
         Mock::given(method("DELETE"))
             .and(path("/api/generate/reference-upload-sessions"))
             .and(header("x-api-key", "sekrit"))
@@ -1727,7 +1836,9 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reference.png");
+        let open_path = dir.path().join("reference-open.png");
         std::fs::write(&path, b"bytes").unwrap();
+        std::fs::write(&open_path, b"reference-bytes").unwrap();
         let client = MoldClient::with_api_key(&server.uri(), "sekrit".to_string());
         let completed = client
             .upload_reference_file("mru_secret", &path, "image/png")
@@ -1735,6 +1846,22 @@ mod tests {
             .unwrap();
         assert_eq!(completed.instance_id, "server-1");
         assert_eq!(completed.reference, 1);
+        let completed = client
+            .upload_reference_open_file(
+                "mru_open",
+                std::fs::File::open(&open_path).unwrap(),
+                "image/png",
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.instance_id, "server-1");
+        assert_eq!(completed.reference, 1);
+        let completed = client
+            .upload_reference_bytes("mru_bytes", b"bytes".to_vec(), "audio/wav")
+            .await
+            .unwrap();
+        assert_eq!(completed.instance_id, "server-1");
+        assert_eq!(completed.reference, 2);
         client
             .cancel_reference_upload_session("mrs_session_secret")
             .await

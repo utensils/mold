@@ -11,6 +11,8 @@ pub struct ModelCapabilities {
     pub supports_img2img: bool,
     /// Whether the model accepts a source/reference image.
     pub supports_source_image: bool,
+    /// Whether this exact model accepts ordered MiniMax H3 references.
+    pub supports_references: bool,
     /// Whether the model uses a denoising strength control.
     pub supports_strength: bool,
     /// Whether the model supports a mask image.
@@ -42,6 +44,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_scheduler: false,
             supports_img2img: false,
             supports_source_image: false,
+            supports_references: false,
             supports_strength: false,
             supports_mask: false,
             supports_controlnet: false,
@@ -59,6 +62,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_scheduler: true,
             supports_img2img: true,
             supports_source_image: true,
+            supports_references: false,
             supports_strength: true,
             supports_mask: true,
             supports_controlnet: true,
@@ -74,6 +78,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_scheduler: true,
             supports_img2img: true,
             supports_source_image: true,
+            supports_references: false,
             supports_strength: true,
             supports_mask: true,
             supports_controlnet: false,
@@ -89,6 +94,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_scheduler: false,
             supports_img2img: false,
             supports_source_image: false,
+            supports_references: false,
             supports_strength: false,
             supports_mask: false,
             supports_controlnet: false,
@@ -104,6 +110,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_scheduler: false,
             supports_img2img: false,
             supports_source_image: false,
+            supports_references: false,
             supports_strength: false,
             supports_mask: false,
             supports_controlnet: false,
@@ -119,6 +126,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_scheduler: false,
             supports_img2img: true,
             supports_source_image: true,
+            supports_references: false,
             supports_strength: true,
             supports_mask: true,
             supports_controlnet: false, // ControlNet only supported on SD1.5
@@ -134,6 +142,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_scheduler: false,
             supports_img2img: false,
             supports_source_image: false,
+            supports_references: false,
             supports_strength: false,
             supports_mask: false,
             supports_controlnet: false,
@@ -149,6 +158,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_scheduler: false,
             supports_img2img: false,
             supports_source_image: false,
+            supports_references: false,
             supports_strength: false,
             supports_mask: false,
             supports_controlnet: false,
@@ -164,6 +174,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_scheduler: false,
             supports_img2img: false,
             supports_source_image: false,
+            supports_references: false,
             supports_strength: false,
             supports_mask: false,
             supports_controlnet: false,
@@ -179,6 +190,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_scheduler: false,
             supports_img2img: false,
             supports_source_image: true,
+            supports_references: false,
             supports_strength: false,
             supports_mask: false,
             supports_controlnet: false,
@@ -194,6 +206,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_scheduler: false,
             supports_img2img: false,
             supports_source_image: false,
+            supports_references: false,
             supports_strength: false,
             supports_mask: false,
             supports_controlnet: false,
@@ -209,6 +222,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_scheduler: false,
             supports_img2img: false,
             supports_source_image: false,
+            supports_references: false,
             supports_strength: false,
             supports_mask: false,
             supports_controlnet: false,
@@ -229,6 +243,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_scheduler: false,
             supports_img2img: false,
             supports_source_image: true,
+            supports_references: false,
             // Wan's image conditioning is a first-frame anchor, not a
             // strength-weighted blend, so a strength slider would imply a
             // control the engine does not read.
@@ -247,6 +262,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_scheduler: false,
             supports_img2img: false,
             supports_source_image: false,
+            supports_references: false,
             supports_strength: false,
             supports_mask: false,
             supports_controlnet: false,
@@ -271,6 +287,9 @@ pub fn capabilities_for_model(
     advertised_guidance: Option<mold_core::GuidanceCapabilities>,
 ) -> ModelCapabilities {
     let mut caps = capabilities_for_family(family);
+    caps.supports_references = mold_core::minimax_h3::is_family(family)
+        && mold_core::minimax_h3::task_for_model(model)
+            == Some(mold_core::minimax_h3::Task::Ref2va);
     // H3 has no unconditional/CFG branch. Contradictory checkpoint metadata
     // may not expose an editor for conditioning the model cannot consume.
     if !mold_core::minimax_h3::is_family(family) {
@@ -309,6 +328,9 @@ fn wan_model_takes_source_image(model: &str) -> bool {
 
 /// Resolve the family string for a given model name using the config and manifest.
 pub fn family_for_model(model_name: &str, config: &Config) -> String {
+    if mold_core::minimax_h3::task_for_model(model_name).is_some() {
+        return mold_core::minimax_h3::FAMILY.to_string();
+    }
     let model_cfg = config.resolved_model_config(model_name);
     model_cfg
         .family
@@ -325,6 +347,29 @@ mod tests {
     fn flux_does_not_support_controlnet() {
         let caps = capabilities_for_family("flux");
         assert!(!caps.supports_controlnet);
+    }
+
+    #[test]
+    fn h3_references_are_exposed_only_for_an_explicit_ref2va_identity() {
+        let ref2va = capabilities_for_model(
+            mold_core::minimax_h3::FAMILY,
+            mold_core::minimax_h3::REF2VA_COMFY,
+            None,
+            None,
+        );
+        let fl2va = capabilities_for_model(
+            mold_core::minimax_h3::FAMILY,
+            mold_core::minimax_h3::FL2VA_COMFY,
+            None,
+            None,
+        );
+        assert!(ref2va.supports_references);
+        assert!(!fl2va.supports_references);
+        assert_eq!(
+            family_for_model(mold_core::minimax_h3::REF2VA_COMFY, &Config::default()),
+            mold_core::minimax_h3::FAMILY
+        );
+        assert!(!capabilities_for_family("flux").supports_references);
     }
 
     #[test]

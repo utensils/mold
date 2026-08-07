@@ -206,6 +206,7 @@ pub struct BuildParams<'a> {
     pub negative_prompt: Option<&'a str>,
     pub defaults: Option<&'a mold_core::ModelDefaults>,
     pub source_image: Option<Vec<u8>>,
+    pub references: Option<Vec<mold_core::GenerationReference>>,
     pub frames: Option<u32>,
     pub fps: Option<u32>,
     pub strength: Option<f64>,
@@ -458,7 +459,14 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         scheduler: None,
         cfg_plus: None,
         edit_images: None,
-        references: None,
+        references: if is_h3
+            && mold_core::minimax_h3::task_for_model(params.model)
+                == Some(mold_core::minimax_h3::Task::Ref2va)
+        {
+            params.references
+        } else {
+            None
+        },
         source_image: params.source_image,
         source_image_name: None,
         strength: if is_h3 {
@@ -774,7 +782,22 @@ pub async fn generate(
     #[description = "Optional third image for LTX-2 keyframe interpolation"] keyframe_3: Option<
         serenity::Attachment,
     >,
+    #[description = "First ordered H3 reference (image, H.264 MP4, or WAV)"] reference_1: Option<
+        serenity::Attachment,
+    >,
+    #[description = "Second ordered H3 reference (image, H.264 MP4, or WAV)"] reference_2: Option<
+        serenity::Attachment,
+    >,
 ) -> Result<()> {
+    if reference_1.is_none() && reference_2.is_some() {
+        ctx.send(
+            poise::CreateReply::default()
+                .content("Add reference_1 before reference_2 so H3 ordering is unambiguous.")
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
     let keyframe_attachments = [
         keyframe_1.as_ref(),
         keyframe_2.as_ref(),
@@ -783,6 +806,29 @@ pub async fn generate(
     .into_iter()
     .flatten()
     .collect::<Vec<_>>();
+    let reference_attachments = [reference_1.as_ref(), reference_2.as_ref()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if !reference_attachments.is_empty()
+        && (source_image.is_some()
+            || audio_file.is_some()
+            || source_video.is_some()
+            || !keyframe_attachments.is_empty()
+            || retake_start.is_some()
+            || retake_end.is_some()
+            || pipeline.is_some())
+    {
+        ctx.send(
+            poise::CreateReply::default()
+                .content(
+                    "Ordered H3 references cannot be combined with source, retake, keyframe, audio, or pipeline inputs.",
+                )
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
     let specialized = match specialized_pipeline(
         source_image.is_some(),
         audio_file.is_some(),
@@ -815,7 +861,8 @@ pub async fn generate(
         .iter()
         .chain(audio_file.iter())
         .chain(source_video.iter())
-        .chain(keyframe_attachments.iter().copied());
+        .chain(keyframe_attachments.iter().copied())
+        .chain(reference_attachments.iter().copied());
     if let Err(message) = validate_inline_media_size(inline_attachments) {
         ctx.send(
             poise::CreateReply::default()
@@ -874,7 +921,30 @@ pub async fn generate(
         .or(fallback_defaults.as_ref());
     let family = model_entry
         .map(|m| m.info.family.as_str())
-        .or_else(|| fallback_manifest.map(|manifest| manifest.family.as_str()));
+        .or_else(|| fallback_manifest.map(|manifest| manifest.family.as_str()))
+        .or_else(|| {
+            mold_core::minimax_h3::task_for_model(&model_name)
+                .map(|_| mold_core::minimax_h3::FAMILY)
+        });
+    let h3_task = mold_core::minimax_h3::task_for_model(&model_name);
+    if !reference_attachments.is_empty() && h3_task != Some(mold_core::minimax_h3::Task::Ref2va) {
+        ctx.data().quotas.refund(user_id);
+        handler::send_error(
+            ctx,
+            "Ordered references require an explicitly authorized MiniMax H3 Ref2VA model.",
+        )
+        .await?;
+        return Ok(());
+    }
+    if h3_task == Some(mold_core::minimax_h3::Task::Ref2va) && reference_attachments.is_empty() {
+        ctx.data().quotas.refund(user_id);
+        handler::send_error(
+            ctx,
+            "MiniMax H3 Ref2VA requires at least one ordered reference.",
+        )
+        .await?;
+        return Ok(());
+    }
     let (resolved_frames, resolved_fps) =
         match resolve_video_timing(family, model_defaults, frames, fps, duration) {
             Ok(timing) => timing,
@@ -884,6 +954,23 @@ pub async fn generate(
                 return Ok(());
             }
         };
+
+    let prepared_references = if reference_attachments.is_empty() {
+        None
+    } else {
+        match crate::h3_references::prepare_attachments(&reference_attachments).await {
+            Ok(prepared) => Some(prepared),
+            Err(error) => {
+                ctx.data().quotas.refund(user_id);
+                handler::send_error(
+                    ctx,
+                    &format!("MiniMax H3 reference preparation failed: {error}"),
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    };
 
     // Fetch source image bytes if an attachment was supplied. This also covers
     // the LTX-2 image-to-video path — the server forwards a source_image to
@@ -966,7 +1053,7 @@ pub async fn generate(
         }),
         _ => None,
     };
-    let req = build_generate_request(BuildParams {
+    let mut req = build_generate_request(BuildParams {
         prompt: &prompt,
         model: &model_name,
         family,
@@ -978,6 +1065,9 @@ pub async fn generate(
         negative_prompt: negative_prompt.as_deref(),
         defaults: model_defaults,
         source_image: source_bytes,
+        references: prepared_references
+            .as_ref()
+            .map(|prepared| prepared.descriptors.clone()),
         frames: resolved_frames,
         fps: resolved_fps,
         strength,
@@ -990,15 +1080,46 @@ pub async fn generate(
         retake_range,
     });
 
+    let reference_session = if let Some(prepared) = prepared_references {
+        match crate::h3_references::bind_remote_references(&ctx.data().client, &mut req, prepared)
+            .await
+        {
+            Ok(session) => Some(session),
+            Err(error) => {
+                ctx.data().quotas.refund(user_id);
+                handler::send_error(
+                    ctx,
+                    &format!("MiniMax H3 reference authorization/upload failed: {error}"),
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+
     match handler::run_generation(ctx, req).await {
         Ok(()) => {
             // Quota slot was already consumed atomically in check_generate_auth
             ctx.data().cooldowns.record(user_id);
         }
         Err(e) => {
+            if let Some(session) = reference_session {
+                let _ = ctx
+                    .data()
+                    .client
+                    .cancel_reference_upload_session(&session)
+                    .await;
+            }
             // Refund the quota slot consumed during auth check
             ctx.data().quotas.refund(user_id);
-            let msg = if mold_core::MoldClient::is_connection_error(&e) {
+            let msg = if h3_task.is_some() {
+                format!(
+                    "MiniMax H3 runtime/authorization is unavailable: {e} ({})",
+                    mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
+                )
+            } else if mold_core::MoldClient::is_connection_error(&e) {
                 "Could not connect to the mold server. Is it running?".to_string()
             } else if mold_core::MoldClient::is_model_not_found(&e) {
                 format!("Model '{model_name}' is not downloaded. Use `/models` to see available models.")
@@ -1301,6 +1422,34 @@ mod tests {
     }
 
     #[test]
+    fn h3_builder_preserves_ordered_descriptor_authority_for_session_binding() {
+        let references = vec![mold_core::GenerationReference::Image {
+            media: mold_core::GenerationReferenceAuthority::Descriptor,
+            provenance: mold_core::GenerationReferenceProvenance {
+                name: Some("anchor.png".to_string()),
+                sha256: Some("0".repeat(64)),
+            },
+            mime_type: "image/png".to_string(),
+            width: 24,
+            height: 16,
+        }];
+        let req = build_generate_request(BuildParams {
+            family: Some(mold_core::minimax_h3::FAMILY),
+            references: Some(references),
+            ..base_params("animate the anchor", mold_core::minimax_h3::REF2VA_COMFY)
+        });
+        assert!(matches!(
+            req.references.as_deref(),
+            Some([mold_core::GenerationReference::Image {
+                provenance,
+                width: 24,
+                height: 16,
+                ..
+            }]) if provenance.name.as_deref() == Some("anchor.png")
+        ));
+    }
+
+    #[test]
     fn duration_rejects_ambiguous_or_unsupported_requests() {
         assert!(resolve_video_timing(Some("ltx2"), None, Some(97), None, Some(4.0)).is_err());
         assert!(resolve_video_timing(Some("ltx2"), None, None, None, Some(20.1)).is_err());
@@ -1502,12 +1651,14 @@ mod tests {
     #[test]
     fn generate_stays_within_discords_option_limit() {
         let command = generate();
-        assert_eq!(command.parameters.len(), 23);
+        assert_eq!(command.parameters.len(), 25);
         assert!(command.parameters.len() <= 25);
         assert!(command
             .parameters
             .iter()
             .any(|parameter| parameter.name == "duration"));
+        assert_eq!(command.parameters[23].name, "reference_1");
+        assert_eq!(command.parameters[24].name, "reference_2");
     }
 
     #[test]

@@ -172,6 +172,24 @@ pub async fn run_generation(
     let config = mold_core::Config::load_or_default();
     let (params, negative_prompt) =
         canonicalize_generation_authority(params, negative_prompt, &config);
+    let h3_task = mold_core::minimax_h3::task_for_model(&params.model);
+    if h3_task == Some(mold_core::minimax_h3::Task::Ref2va)
+        && (params.reference_paths.is_empty()
+            || params.batch != 1
+            || !params.prepared_prompts.is_empty())
+    {
+        let _ = tx.send(BackgroundEvent::Error(
+            "MiniMax H3 ordered references require at least one reference and Batch 1".to_string(),
+        ));
+        return;
+    }
+    if h3_task != Some(mold_core::minimax_h3::Task::Ref2va) && !params.reference_paths.is_empty() {
+        let _ = tx.send(BackgroundEvent::Error(
+            "Ordered references require an explicitly authorized MiniMax H3 Ref2VA model"
+                .to_string(),
+        ));
+        return;
+    }
     let prepared_prompts = params.prepared_prompts.clone();
     let prepared_transforms = params.prepared_prompt_transforms.clone();
     let batch = if prepared_prompts.is_empty() {
@@ -218,7 +236,10 @@ pub async fn run_generation(
             negative_prompt.clone(),
         );
 
-        if iter_params.inference_mode == InferenceMode::Local {
+        if iter_params.inference_mode == InferenceMode::Local && h3_task.is_some() {
+            let _ = tx.send(BackgroundEvent::Error(h3_runtime_unavailable_message(None)));
+            return;
+        } else if iter_params.inference_mode == InferenceMode::Local {
             run_local_generation_single(
                 iter_params,
                 iter_prompt.clone(),
@@ -233,9 +254,50 @@ pub async fn run_generation(
             let mut fell_through = false;
             if let Some(ref url) = effective_url {
                 let client = crate::hosts::client_for(url, api_key.as_deref());
-                let req = build_request(&iter_params, &iter_prompt, &negative_prompt);
+                let mut req = build_request(&iter_params, &iter_prompt, &negative_prompt);
+                let reference_session = if iter_params.reference_paths.is_empty() {
+                    None
+                } else {
+                    let reference_paths = iter_params.reference_paths.clone();
+                    let prepared = match tokio::task::spawn_blocking(move || {
+                        crate::h3_references::prepare_references(&reference_paths)
+                    })
+                    .await
+                    {
+                        Ok(Ok(prepared)) => prepared,
+                        Ok(Err(error)) => {
+                            let _ = tx.send(BackgroundEvent::Error(format!(
+                                "MiniMax H3 reference preparation failed: {error}"
+                            )));
+                            return;
+                        }
+                        Err(error) => {
+                            let _ = tx.send(BackgroundEvent::Error(format!(
+                                "MiniMax H3 reference preparation task failed: {error}"
+                            )));
+                            return;
+                        }
+                    };
+                    match crate::h3_references::bind_remote_references(&client, &mut req, prepared)
+                        .await
+                    {
+                        Ok(session) => Some(session),
+                        Err(error) => {
+                            let _ = tx.send(BackgroundEvent::Error(format!(
+                                "MiniMax H3 reference authorization/upload failed: {error}"
+                            )));
+                            return;
+                        }
+                    }
+                };
 
-                match try_server_generate(&client, &req, &metadata_snapshot, &tx).await {
+                let result = try_server_generate(&client, &req, &metadata_snapshot, &tx).await;
+                if !matches!(&result, ServerResult::Done) {
+                    if let Some(session) = reference_session {
+                        let _ = client.cancel_reference_upload_session(&session).await;
+                    }
+                }
+                match result {
                     ServerResult::Done => {}
                     ServerResult::FallbackLocal => {
                         fell_through = true;
@@ -250,6 +312,12 @@ pub async fn run_generation(
             }
 
             if fell_through {
+                if h3_task.is_some() {
+                    let _ = tx.send(BackgroundEvent::Error(h3_runtime_unavailable_message(
+                        effective_url.as_deref(),
+                    )));
+                    return;
+                }
                 if iter_params.inference_mode == InferenceMode::Remote {
                     // An explicit target that's down is an error naming the
                     // host + a concrete fix — never a silent local fallback.
@@ -457,6 +525,21 @@ enum ServerResult {
     Error(String),
 }
 
+fn requires_secure_generation_stream(req: &GenerateRequest) -> bool {
+    mold_core::minimax_h3::task_for_model(&req.model).is_some()
+        || req.references.as_ref().is_some_and(|refs| !refs.is_empty())
+}
+
+fn h3_runtime_unavailable_message(url: Option<&str>) -> String {
+    let target = url
+        .map(|url| format!(" on {url}"))
+        .unwrap_or_else(|| " in the local TUI runtime".to_string());
+    format!(
+        "MiniMax H3 runtime is unavailable{target}; select a reachable, authorized mold server. {}",
+        mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
+    )
+}
+
 /// Try generating via the server. If the server says the model isn't downloaded,
 /// auto-pull it and retry once.
 async fn try_server_generate(
@@ -465,6 +548,7 @@ async fn try_server_generate(
     metadata_snapshot: &GenerationMetadataSnapshot,
     tx: &mpsc::UnboundedSender<BackgroundEvent>,
 ) -> ServerResult {
+    let is_h3 = mold_core::minimax_h3::task_for_model(&req.model).is_some();
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<SseProgressEvent>();
 
     let tx_progress = tx.clone();
@@ -483,6 +567,10 @@ async fn try_server_generate(
             });
             ServerResult::Done
         }
+        Err(e) if is_h3 => ServerResult::Error(format!(
+            "MiniMax H3 runtime/authorization unavailable: {e} ({})",
+            mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
+        )),
         Err(e) => match classify_generate_error(&e) {
             GenerateServerAction::FallbackLocal => ServerResult::FallbackLocal,
             GenerateServerAction::PullModelAndRetry => {
@@ -548,6 +636,11 @@ async fn try_server_generate_once(
 ) -> Result<GenerateResponse, anyhow::Error> {
     match client.generate_stream(req, progress_tx).await {
         Ok(Some(response)) => Ok(response),
+        Ok(None) if requires_secure_generation_stream(req) => {
+            anyhow::bail!(
+                "server lacks secure streaming generation required for one-use MiniMax H3 references; update the server"
+            )
+        }
         Ok(None) => {
             // Server doesn't support SSE — try blocking API
             client.generate(req.clone()).await
@@ -569,6 +662,10 @@ async fn run_local_generation(
 
     let mut config = Config::load_or_default();
     let model_name = params.model.clone();
+    if mold_core::minimax_h3::task_for_model(&model_name).is_some() {
+        let _ = tx.send(BackgroundEvent::Error(h3_runtime_unavailable_message(None)));
+        return;
+    }
 
     // Resolve model paths — auto-pull if not downloaded
     let model_paths = match ModelPaths::resolve(&model_name, &config) {
@@ -1158,6 +1255,7 @@ mod tests {
         assert_eq!(snapshot.params.enable_audio, request.enable_audio);
         assert_eq!(snapshot.params.guidance, request.guidance);
         assert_eq!(snapshot.params.strength, request.strength);
+        assert!(requires_secure_generation_stream(&request));
     }
 
     #[test]

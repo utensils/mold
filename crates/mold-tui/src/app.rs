@@ -29,6 +29,8 @@ pub(crate) struct PromptTransformSnapshot {
     pub model: String,
     pub target: crate::hosts::GenTarget,
     pub task: mold_core::ExpandTask,
+    /// Ordered reference identity without retaining any filesystem path.
+    pub reference_fingerprint: String,
     pub source_prompt: String,
     pub current_prompt: String,
     pub root_prompt: Option<String>,
@@ -435,6 +437,7 @@ pub enum ParamField {
     Offload,
     // Advanced — Source
     SourceImage,
+    References,
     Strength,
     MaskImage,
     ControlImage,
@@ -475,6 +478,7 @@ impl ParamField {
             Self::Expand => "Expand prompt",
             Self::Offload => "Offload",
             Self::SourceImage => "Source",
+            Self::References => "References",
             Self::Strength => "Strength",
             Self::MaskImage => "Mask",
             Self::ControlImage => "Control",
@@ -619,6 +623,9 @@ pub struct GenerateParams {
     pub upscale_model: Option<String>,
     // img2img
     pub source_image_path: Option<String>,
+    /// Ordered H3 reference paths. This transient state is deliberately not
+    /// serialized; only basename + digest provenance crosses the wire.
+    pub reference_paths: Vec<crate::h3_references::ReferencePath>,
     pub strength: f64,
     pub mask_image_path: Option<String>,
     // Video
@@ -746,6 +753,7 @@ impl GenerateParams {
             offload: false,
             upscale_model: None,
             source_image_path: None,
+            reference_paths: Vec::new(),
             strength: 0.75,
             mask_image_path: None,
             frames: 25,
@@ -818,6 +826,11 @@ impl GenerateParams {
                         .unwrap_or_else(|| p.to_string())
                 })
                 .unwrap_or_else(|| "\u{27e8}none\u{27e9}".to_string()),
+            ParamField::References => match self.reference_paths.len() {
+                0 => "\u{27e8}none\u{27e9}".to_string(),
+                1 => "1 ordered file".to_string(),
+                count => format!("{count} ordered files"),
+            },
             ParamField::Strength => format!("{:.2}", self.strength),
             ParamField::MaskImage => self
                 .mask_image_path
@@ -1534,6 +1547,11 @@ pub enum Popup {
         input: String,
         error: Option<String>,
     },
+    /// Ordered `kind=path` MiniMax H3 reference input. Paths remain transient.
+    ReferencesInput {
+        input: String,
+        error: Option<String>,
+    },
     HistorySearch {
         filter: String,
         selected: usize,
@@ -2187,6 +2205,9 @@ impl App {
         normalize_generate_params_for_family(&mut self.generate.params, &family);
         if !self.generate.capabilities.supports_audio {
             self.generate.params.enable_audio = None;
+        }
+        if !self.generate.capabilities.supports_references {
+            self.generate.params.reference_paths.clear();
         }
         if !self.generate.capabilities.supports_video_upscale {
             self.generate.params.pipeline = None;
@@ -3244,6 +3265,28 @@ impl App {
                         Err(message) => *error = Some(message),
                     },
                     KeyCode::Char(c) if c.is_ascii_digit() || matches!(c, ',' | ' ') => {
+                        input.push(c);
+                        *error = None;
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        *error = None;
+                    }
+                    _ => {}
+                },
+                Some(Popup::ReferencesInput { input, error }) => match key.code {
+                    KeyCode::Esc => self.close_popup(),
+                    KeyCode::Enter => match crate::h3_references::parse_reference_input(input) {
+                        Ok(references) => {
+                            self.generate.params.reference_paths = references;
+                            self.close_popup();
+                        }
+                        Err(message) => *error = Some(message),
+                    },
+                    KeyCode::Char(c)
+                        if input.len() + c.len_utf8()
+                            <= crate::h3_references::MAX_REFERENCE_INPUT_BYTES =>
+                    {
                         input.push(c);
                         *error = None;
                     }
@@ -4636,6 +4679,7 @@ impl App {
             | ParamField::Lora
             | ParamField::StgBlocks
             | ParamField::SourceImage
+            | ParamField::References
             | ParamField::MaskImage
             | ParamField::ControlImage
             | ParamField::ControlModel => {}
@@ -5210,6 +5254,12 @@ impl App {
                     .unwrap_or_default();
                 self.popup = Some(Popup::StgBlocksInput { input, error: None });
             }
+            ParamField::References => {
+                let input = crate::h3_references::format_reference_input(
+                    &self.generate.params.reference_paths,
+                );
+                self.popup = Some(Popup::ReferencesInput { input, error: None });
+            }
             // Cycle format
             ParamField::Format => self.adjust_field(ParamField::Format, 1),
             // Cycle scheduler
@@ -5302,6 +5352,7 @@ impl App {
         self.generate.params.guidance_overrides = Ltx2GuidanceOverrides::default();
         self.generate.params.strength = 0.75;
         self.generate.params.source_image_path = None;
+        self.generate.params.reference_paths.clear();
         self.generate.params.mask_image_path = None;
         self.generate.params.control_image_path = None;
         self.generate.params.control_model = None;
@@ -6182,6 +6233,30 @@ impl App {
             self.generate.error_message = Some("Prompt is empty".to_string());
             return;
         }
+        let h3_task = mold_core::minimax_h3::task_for_model(&self.generate.params.model);
+        if h3_task == Some(mold_core::minimax_h3::Task::Ref2va) {
+            if self.generate.params.reference_paths.is_empty() {
+                self.generate.error_message = Some(
+                    "MiniMax H3 Ref2VA requires at least one ordered image or video reference"
+                        .to_string(),
+                );
+                return;
+            }
+            if self.generate.params.batch != 1 || !self.generate.params.prepared_prompts.is_empty()
+            {
+                self.generate.error_message = Some(
+                    "MiniMax H3 ordered references require Batch 1; submit each attempt separately"
+                        .to_string(),
+                );
+                return;
+            }
+        } else if !self.generate.params.reference_paths.is_empty() {
+            self.generate.error_message = Some(
+                "Ordered references require an explicitly authorized MiniMax H3 Ref2VA model"
+                    .to_string(),
+            );
+            return;
+        }
 
         let generation_target = if self.generate.params.prepared_prompts.is_empty() {
             if let Some(snapshot) = self.generate.params.quick_transform_snapshot.as_ref() {
@@ -6205,6 +6280,11 @@ impl App {
                 Some("generation target changed")
             } else if self.prompt_transform_task() != snapshot.task {
                 Some("conditioning task changed")
+            } else if crate::h3_references::authority_fingerprint(
+                &self.generate.params.reference_paths,
+            ) != snapshot.reference_fingerprint
+            {
+                Some("ordered references changed")
             } else if self.generate.params.prepared_prompts.len()
                 != self.generate.params.prepared_prompt_transforms.len()
                 || self
@@ -6245,6 +6325,13 @@ impl App {
         let mut api_key = None;
         match &generation_target {
             GenTarget::Auto => {}
+            GenTarget::Local if h3_task.is_some() => {
+                self.generate.error_message = Some(format!(
+                    "MiniMax H3 has no in-process TUI runtime. Select an authorized mold server. {}",
+                    mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
+                ));
+                return;
+            }
             GenTarget::Local => route_mode = Some(InferenceMode::Local),
             GenTarget::Host(id) => match self.machines.registry.get(id) {
                 Some(entry) => {
@@ -6332,6 +6419,9 @@ impl App {
     }
 
     fn prompt_transform_task(&self) -> mold_core::ExpandTask {
+        if !self.generate.params.reference_paths.is_empty() {
+            return mold_core::ExpandTask::ReferenceToAudioVideo;
+        }
         let family = family_for_model(&self.generate.params.model, &self.config);
         mold_core::ExpandTask::for_conditioning(
             &family,
@@ -6345,6 +6435,15 @@ impl App {
     }
 
     fn start_prompt_transform(&mut self, operation: PromptTransformOperation) {
+        if !self.generate.params.reference_paths.is_empty()
+            && operation == PromptTransformOperation::Remix
+        {
+            self.generate.error_message = Some(
+                "MiniMax H3 ordered references are Batch 1 only; use Expand for one reviewed prompt"
+                    .to_string(),
+            );
+            return;
+        }
         let current = self.generate.prompt.lines().join("\n").trim().to_string();
         if current.is_empty() {
             self.generate.error_message = Some("Prompt is empty".to_string());
@@ -6400,6 +6499,9 @@ impl App {
             model: self.generate.params.model.clone(),
             target: self.target.clone(),
             task,
+            reference_fingerprint: crate::h3_references::authority_fingerprint(
+                &self.generate.params.reference_paths,
+            ),
             source_prompt: source_prompt.clone(),
             current_prompt,
             root_prompt: root.clone(),
@@ -6474,6 +6576,13 @@ impl App {
                 "Remix is stale because the conditioning task changed; remix again".into(),
             );
         }
+        if crate::h3_references::authority_fingerprint(&self.generate.params.reference_paths)
+            != snapshot.reference_fingerprint
+        {
+            return Some(
+                "Remix is stale because the ordered references changed; remix again".into(),
+            );
+        }
         let current = self.generate.prompt.lines().join("\n").trim().to_string();
         if current != snapshot.current_prompt {
             return Some("Remix is stale because the current prompt changed; remix again".into());
@@ -6496,6 +6605,11 @@ impl App {
         }
         if self.prompt_transform_task() != snapshot.task {
             return Some("conditioning task changed");
+        }
+        if crate::h3_references::authority_fingerprint(&self.generate.params.reference_paths)
+            != snapshot.reference_fingerprint
+        {
+            return Some("ordered references changed");
         }
         let current = self.generate.prompt.lines().join("\n").trim().to_string();
         if current != snapshot.current_prompt {
@@ -14565,6 +14679,9 @@ mod tests {
             model: app.generate.params.model.clone(),
             target: crate::hosts::GenTarget::Auto,
             task: app.prompt_transform_task(),
+            reference_fingerprint: crate::h3_references::authority_fingerprint(
+                &app.generate.params.reference_paths,
+            ),
             source_prompt: "source idea".into(),
             current_prompt: "source idea".into(),
             root_prompt: None,
@@ -14597,14 +14714,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transform_snapshot_names_model_and_prompt_staleness() {
+    async fn transform_snapshot_names_model_prompt_and_reference_staleness() {
         let mut app = make_settings_test_app();
         app.set_prompt_text("frozen prompt");
+        app.generate
+            .params
+            .reference_paths
+            .push(crate::h3_references::ReferencePath {
+                kind: crate::h3_references::ReferenceKind::Image,
+                path: "/tmp/first.png".into(),
+            });
         let snapshot = PromptTransformSnapshot {
             operation: PromptTransformOperation::Remix,
             model: app.generate.params.model.clone(),
             target: app.target.clone(),
             task: app.prompt_transform_task(),
+            reference_fingerprint: crate::h3_references::authority_fingerprint(
+                &app.generate.params.reference_paths,
+            ),
             source_prompt: "frozen prompt".into(),
             current_prompt: "frozen prompt".into(),
             root_prompt: None,
@@ -14620,6 +14747,34 @@ mod tests {
         assert!(app
             .prompt_transform_staleness(&snapshot)
             .is_some_and(|message| message.contains("current prompt changed")));
+
+        app.set_prompt_text("frozen prompt");
+        app.generate.params.reference_paths[0].path = "/tmp/replacement.png".into();
+        assert!(app
+            .prompt_transform_staleness(&snapshot)
+            .is_some_and(|message| message.contains("ordered references changed")));
+    }
+
+    #[tokio::test]
+    async fn h3_reference_remix_fails_before_creating_an_unusable_batch() {
+        let mut app = make_settings_test_app();
+        app.set_prompt_text("animate the anchor");
+        app.generate
+            .params
+            .reference_paths
+            .push(crate::h3_references::ReferencePath {
+                kind: crate::h3_references::ReferenceKind::Image,
+                path: "/tmp/anchor.png".into(),
+            });
+
+        app.start_prompt_transform(PromptTransformOperation::Remix);
+
+        assert!(app.popup.is_none());
+        assert!(app
+            .generate
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Batch 1")));
     }
 
     #[tokio::test]
@@ -14631,6 +14786,9 @@ mod tests {
             model: app.generate.params.model.clone(),
             target: crate::hosts::GenTarget::Auto,
             task: app.prompt_transform_task(),
+            reference_fingerprint: crate::h3_references::authority_fingerprint(
+                &app.generate.params.reference_paths,
+            ),
             source_prompt: "source idea".into(),
             current_prompt: "source idea".into(),
             root_prompt: None,

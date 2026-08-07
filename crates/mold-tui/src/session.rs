@@ -637,6 +637,7 @@ mod tests {
             offload: true,
             upscale_model: None,
             source_image_path: None,
+            reference_paths: Vec::new(),
             strength: 0.6,
             mask_image_path: None,
             frames: 25,
