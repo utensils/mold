@@ -19,12 +19,12 @@ grep -Fq "cancel-in-progress: \${{ github.event_name == 'pull_request' }}" <<< "
   || fail "workflow-level concurrency does not cancel only superseded PR runs"
 
 rust_job="$(sed -n '/^  desktop-rust:/,/^  desktop-nightly:/p' "$workflow")"
-grep -Fq 'name: Fast bundle proof (debug .app)' <<< "$rust_job" \
-  || fail "PR bundle proof is not clearly marked as a fast debug build"
-grep -Fq "if: github.event_name != 'push'" <<< "$rust_job" \
-  || fail "redundant unsigned bundle proof still runs before main Nightly distribution"
 grep -Fq 'run: bunx tauri build --debug --bundles app --ci' <<< "$rust_job" \
-  || fail "PR bundle proof does not reuse debug test artifacts"
+  || fail "bundle-sensitive macOS PRs have no packaging proof"
+grep -Fq "if: github.event_name == 'pull_request' && needs.changes.outputs.bundle == 'true'" <<< "$rust_job" \
+  || fail "debug bundle is not restricted to bundle-sensitive PRs"
+grep -Fq 'run: cargo test --manifest-path src-tauri/Cargo.toml' <<< "$rust_job" \
+  || fail "macOS PR gate no longer runs the native test suite"
 
 nightly_header="$(sed -n '/^  desktop-nightly:/,/^  publish-desktop-nightly:/p' "$workflow")"
 grep -Fq 'needs: [desktop-frontend, desktop-rust]' <<< "$nightly_header" \

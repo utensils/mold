@@ -133,6 +133,14 @@ env:
 jobs:
   changes:
     name: Classify desktop changes
+    # release-plz only promotes an already-tested main revision and version
+    # metadata. Trust the repository-owned app identity as well as its branch
+    # prefix so a user-created branch cannot bypass native PR checks.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.actor != 'release-plz-mold[bot]' ||
+      startsWith(github.head_ref, 'release-plz-') == false ||
+      github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -141,6 +149,7 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       rust: ${{ steps.filter.outputs.rust }}
       updater: ${{ steps.filter.outputs.updater }}
+      bundle: ${{ steps.filter.outputs.bundle }}
     steps:
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v3
@@ -224,6 +233,22 @@ jobs:
               - 'scripts/tests/verify-desktop-updater-signature.sh'
               - 'scripts/verify-desktop-release.sh'
               - 'scripts/verify-desktop-updater-signature.sh'
+            # The debug bundle has caught macOS packaging/linkage regressions,
+            # but ordinary Rust/frontend changes are already covered by their
+            # focused gates. Run it only when bundle inputs actually change.
+            bundle:
+              - 'desktop/src-tauri/Cargo.toml'
+              - 'desktop/src-tauri/Cargo.lock'
+              - 'desktop/src-tauri/build.rs'
+              - 'desktop/src-tauri/tauri.conf.json'
+              - 'desktop/src-tauri/tauri.macos.conf.json'
+              - 'desktop/src-tauri/Entitlements.plist'
+              - 'desktop/src-tauri/Info.plist'
+              - 'desktop/src-tauri/capabilities/**'
+              - 'desktop/src-tauri/icons/**'
+              - 'desktop/package.json'
+              - 'desktop/vite.config.ts'
+              - 'scripts/fix-desktop-macos-linkage.sh'
 
   desktop-frontend:
     name: Frontend (typecheck, tests, format)
@@ -253,40 +278,49 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: .
       - run: bun run fmt:check
-      - run: bunx vue-tsc -b
       - run: bun run test
+      # `build` already runs vue-tsc before Vite; a separate typecheck compiled
+      # the same project twice on every frontend PR.
       - run: bun run build
 
   desktop-rust:
     name: macOS Rust (fmt, clippy, test)
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
+    if: >-
+      github.event_name != 'pull_request' ||
+      needs.changes.outputs.rust == 'true' ||
+      needs.changes.outputs.bundle == 'true'
     runs-on: macos-14
     defaults:
       run:
         working-directory: desktop
     steps:
       - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
-      - run: bun install --frozen-lockfile
-        working-directory: .
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+        if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
       # CPU-only: the metal feature is deliberately off in CI.
       - run: cargo test --manifest-path src-tauri/Cargo.toml
-      # Reuse the test-profile artifacts for a fast PR packaging smoke test.
-      # Main immediately runs the real signed/notarized release build below.
-      - name: Fast bundle proof (debug .app)
-        if: github.event_name != 'push'
+        if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
+      - uses: oven-sh/setup-bun@v2
+        if: github.event_name == 'pull_request' && needs.changes.outputs.bundle == 'true'
+      - run: bun install --frozen-lockfile
+        if: github.event_name == 'pull_request' && needs.changes.outputs.bundle == 'true'
+        working-directory: .
+      - name: Bundle macOS packaging inputs (debug .app)
+        if: github.event_name == 'pull_request' && needs.changes.outputs.bundle == 'true'
         run: bunx tauri build --debug --bundles app --ci
 
   desktop-linux:
     name: Linux (clippy, test; main AppImage)
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
+    # macOS remains the single native PR gate. Every relevant main push repeats
+    # Linux clippy/tests and adds the stronger CUDA AppImage build + launch.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04
     defaults:
       run:

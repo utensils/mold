@@ -31,7 +31,7 @@ cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4         # 
 
 Inside `nix develop` the devshell exposes shortcuts (`build`, `build-release`, `serve`, `mold`, `clippy`, `run-tests`, `coverage`, `fmt`). Run `type <cmd>` to see the underlying invocation.
 
-**CI gates** (`.github/workflows/ci.yml`): `rust` (fmt + check + clippy-deny-warnings + test + feature-combo check), `cuda-check` and `metal-check` (forced-local + server typechecks for their respective GPU backends), `coverage` (cargo-llvm-cov → Codecov), `web` (architecture + dead-code + Studio/web tests, formatting, and build), `docs` (`bun run fmt:check && bun run verify && bun run build` in `website/`), and a path-gated `release` check for release-plz synchronization scripts. All triggered gates must pass.
+**CI gates** (`.github/workflows/ci.yml`): PRs keep the required `rust` MSRV/fmt/Clippy/deterministic-test/feature gate, relevant CUDA/Metal forced-local checks, the Nix web sandbox, `web`, `docs`, and path-gated release contracts. The live external-catalog monitor and coverage run after relevant changes land on `main`; non-shipping FlashAttention runs on every `main` update. Repository-owned release-plz PRs take an allowlisted fast path through locked-manifest and release-contract validation, bridged into the protected `rust` status. Workflow-only PRs get static routing validation, then exercise every dynamic route after merge. Required jobs fail closed if path classification fails. All triggered gates must pass.
 
 ## Crates
 

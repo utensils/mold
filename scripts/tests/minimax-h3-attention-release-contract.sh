@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # Literal workflow/Nix source is asserted below.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -98,21 +99,21 @@ require_text .github/workflows/ci.yml \
 require_text .github/workflows/ci.yml \
   'cargo clippy -p mold-ai-inference --features h3-attention-rc,dev-bins --bin h3_attention_qualification -- -D warnings' \
   "CI does not compile the synthetic H3 qualification executable"
-flash_filter="$(sed -n '/^            flash:/,/^            website:/p' .github/workflows/ci.yml)"
-for path in \
-  crates/mold-candle/Cargo.toml \
-  crates/mold-candle/src/minimax_h3/attention.rs \
-  crates/mold-candle/src/minimax_h3/mod.rs \
-  crates/mold-candle/src/minimax_h3/dit.rs \
-  crates/mold-candle/src/minimax_h3/visual_vae.rs \
-  crates/mold-inference/src/lib.rs \
-  crates/mold-inference/Cargo.toml \
-  crates/mold-inference/src/bin/h3_attention_qualification.rs; do
-  grep -Fq "'$path'" <<< "$flash_filter" \
-    || fail "FlashAttention CI classifier omits $path"
-done
+flash_job="$(awk '
+  $0 == "  flash-attn-check:" { selected = 1 }
+  selected && $0 ~ /^  [[:alnum:]_-][[:alnum:]_-]*:$/ &&
+    $0 != "  flash-attn-check:" { exit }
+  selected { print }
+' .github/workflows/ci.yml)"
+grep -Fq "if: github.event_name == 'push'" <<< "$flash_job" \
+  || fail "FlashAttention proof is not deferred from PRs to every main update"
 
-release_filter="$(sed -n '/^            release:/,/^[[:space:]]*release:/p' .github/workflows/ci.yml)"
+release_filter="$(awk '
+  $0 == "            release:" { selected = 1 }
+  selected && $0 ~ /^            [[:alnum:]_-][[:alnum:]_-]*:$/ &&
+    $0 != "            release:" { exit }
+  selected { print }
+' .github/workflows/ci.yml)"
 for path in \
   crates/mold-candle/src/minimax_h3/mod.rs \
   crates/mold-candle/src/minimax_h3/dit.rs \
