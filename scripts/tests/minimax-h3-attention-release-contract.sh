@@ -32,9 +32,14 @@ fi
 require_text crates/mold-candle/src/minimax_h3/visual_vae.rs \
   '#[cfg(feature = "flash-attn")]' \
   "Visual VAE no longer keys FlashAttention off the global developer feature"
-require_text crates/mold-candle/src/minimax_h3/dit.rs \
-  '#[cfg(feature = "h3-flash-attn-rc")]' \
-  "the isolated H3 feature does not guard the DiT release-candidate dispatch"
+if ! awk '
+  previous == "#[cfg(feature = \"h3-flash-attn-rc\")]" &&
+    $0 ~ /^fn flash_attention\(q: &Tensor/ { found = 1 }
+  { previous = $0 }
+  END { exit(found ? 0 : 1) }
+' crates/mold-candle/src/minimax_h3/attention.rs; then
+  fail "the isolated H3 feature does not directly guard the production FlashAttention dispatch"
+fi
 require_text crates/mold-inference/Cargo.toml \
   'h3-attention-rc = ["cuda", "mold-candle/h3-flash-attn-rc"]' \
   "mold-inference does not expose the synthetic-only H3 qualification path"
@@ -56,8 +61,34 @@ release_feature_sources="$({
     packaging/aur/mold-ai-git/PKGBUILD
   sed -n '/^[[:space:]]*releaseFeatures =/,/^[[:space:]]*completionFeatures =/p' flake.nix
 } || true)"
-if grep -Eq '(^|[,[:space:]])(h3-attention-rc|h3-flash-attn-rc|flash-attn)([,[:space:]]|$)' \
-  <<< "$release_feature_sources"; then
+
+contains_forbidden_release_feature() {
+  LC_ALL=C tr -cs '[:alnum:]_-' '\n' \
+    | grep -Fx \
+      -e h3-attention-rc \
+      -e h3-flash-attn-rc \
+      -e flash-attn \
+      >/dev/null
+}
+
+for fixture in \
+  'cargo build --release --features=h3-attention-rc' \
+  'cargo build --release --features "cuda,h3-flash-attn-rc"' \
+  'cargo build --release --features "cuda,flash-attn"' \
+  'releaseFeatures = "cuda,h3-attention-rc"' \
+  'releaseFeatures = [ "cuda" "h3-flash-attn-rc" ]'; do
+  contains_forbidden_release_feature <<< "$fixture" \
+    || fail "release feature scanner missed fixture: $fixture"
+done
+for fixture in \
+  'cargo build --release --features=cuda,preview' \
+  'releaseFeatures = "cuda,preview,discord"'; do
+  if contains_forbidden_release_feature <<< "$fixture"; then
+    fail "release feature scanner rejected allowed fixture: $fixture"
+  fi
+done
+
+if contains_forbidden_release_feature <<< "$release_feature_sources"; then
   fail "a published release feature set compiles an H3/FlashAttention candidate"
 fi
 

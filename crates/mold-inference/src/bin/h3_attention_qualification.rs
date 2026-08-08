@@ -16,6 +16,7 @@ const PROBE_ROWS: usize = 257;
 const SHORT_RELEASE_ROWS: usize = 37_296;
 const LONG_RELEASE_ROWS: usize = 107_856;
 const MAX_ABSOLUTE_DIFFERENCE: f32 = 0.02;
+const MIN_QK_SWAP_DIFFERENCE: f32 = MAX_ABSOLUTE_DIFFERENCE;
 
 #[derive(Serialize)]
 struct PlannedShape {
@@ -42,6 +43,8 @@ struct QualificationReport {
     probe: H3AttentionTelemetry,
     max_absolute_difference: f32,
     maximum_allowed_difference: f32,
+    qk_swap_max_absolute_difference: f32,
+    minimum_qk_swap_difference: f32,
     planned_shapes: Vec<PlannedShape>,
     release_activation: &'static str,
     release_requirements: Vec<H3AttentionReleaseRequirement>,
@@ -49,9 +52,15 @@ struct QualificationReport {
     runtime_activated: bool,
 }
 
-fn deterministic_values(count: usize, divisor: f32) -> Vec<f32> {
+fn deterministic_values(count: usize, seed: u64, scale: f32) -> Vec<f32> {
     (0..count)
-        .map(|index| ((index % 509) as f32 - 254.0) / divisor)
+        .map(|index| {
+            let mut value = (index as u64).wrapping_add(seed);
+            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            value ^= value >> 31;
+            (((value >> 48) as i32 - 32_768) as f32 / 65_536.0) * scale
+        })
         .collect()
 }
 
@@ -95,10 +104,29 @@ fn main() -> Result<()> {
         .packed_transformer;
 
     let count = PROBE_ROWS * 56 * 128;
-    let q_cpu = bf16_tensor(deterministic_values(count, 317.0), &Device::Cpu)?;
-    let k_cpu = bf16_tensor(deterministic_values(count, 719.0), &Device::Cpu)?;
-    let v_cpu = bf16_tensor(deterministic_values(count, 997.0), &Device::Cpu)?;
+    let q_cpu = bf16_tensor(
+        deterministic_values(count, 0x243f_6a88_85a3_08d3, 2.0),
+        &Device::Cpu,
+    )?;
+    let k_cpu = bf16_tensor(
+        deterministic_values(count, 0x1319_8a2e_0370_7344, 2.0),
+        &Device::Cpu,
+    )?;
+    let v_cpu = bf16_tensor(
+        deterministic_values(count, 0xa409_3822_299f_31d0, 1.0),
+        &Device::Cpu,
+    )?;
     let expected = execute_h3_attention(&cpu_plan, &q_cpu, &k_cpu, &v_cpu)?.to_dtype(DType::F32)?;
+    let qk_swapped =
+        execute_h3_attention(&cpu_plan, &k_cpu, &q_cpu, &v_cpu)?.to_dtype(DType::F32)?;
+    let qk_swap_max_absolute_difference = max_abs_difference(&expected, &qk_swapped)?;
+    if !qk_swap_max_absolute_difference.is_finite()
+        || qk_swap_max_absolute_difference <= MIN_QK_SWAP_DIFFERENCE
+    {
+        return Err(anyhow!(
+            "MiniMax H3 qualification vectors cannot detect swapped Q/K wiring: max absolute difference {qk_swap_max_absolute_difference} does not exceed {MIN_QK_SWAP_DIFFERENCE}"
+        ));
+    }
 
     let q_cuda = q_cpu.to_device(&cuda)?;
     let k_cuda = k_cpu.to_device(&cuda)?;
@@ -139,6 +167,8 @@ fn main() -> Result<()> {
         probe,
         max_absolute_difference,
         maximum_allowed_difference: MAX_ABSOLUTE_DIFFERENCE,
+        qk_swap_max_absolute_difference,
+        minimum_qk_swap_difference: MIN_QK_SWAP_DIFFERENCE,
         planned_shapes,
         release_activation: "rejected",
         release_requirements,

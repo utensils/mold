@@ -1031,10 +1031,50 @@ fn validate_flash_launch_shape(
     }
     let batch_stride = checked_product("FlashAttention batch stride", &[rows, heads, head_dim])?;
     let total_rows = checked_product("FlashAttention total rows", &[batch_size, rows])?;
-    if batch_stride > u32::MAX as u64 || total_rows > u32::MAX as u64 {
+    let rounded_rows = (rows as u64)
+        .checked_add(127)
+        .map(|value| value / 128 * 128)
+        .ok_or_else(|| {
+            failure(
+                H3AttentionErrorCode::ArithmeticOverflow,
+                "MiniMax H3 FlashAttention rounded sequence length overflows",
+                vec![H3AttentionRequirement::FlashAttentionU32LaunchShape],
+            )
+        })?;
+    if batch_stride > u32::MAX as u64
+        || total_rows > u32::MAX as u64
+        || rounded_rows > u32::MAX as u64
+    {
         return Err(failure(
             H3AttentionErrorCode::InvalidShape,
             "MiniMax H3 attention shape exceeds Candle FlashAttention's u32 launch contract",
+            vec![H3AttentionRequirement::FlashAttentionU32LaunchShape],
+        ));
+    }
+    Ok(())
+}
+
+fn validate_flash_tensor_strides(label: &str, strides: &[usize]) -> InspectionResult<()> {
+    if strides.len() != 4 || strides.last() != Some(&1) {
+        return Err(failure(
+            H3AttentionErrorCode::RuntimePlanMismatch,
+            format!(
+                "MiniMax H3 FlashAttention {label} must be rank-4 BNHD with unit head-dimension stride, got {strides:?}"
+            ),
+            vec![H3AttentionRequirement::ExactModelContract],
+        ));
+    }
+    if let Some((dimension, stride)) = strides
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, stride)| *stride > u32::MAX as usize)
+    {
+        return Err(failure(
+            H3AttentionErrorCode::RuntimePlanMismatch,
+            format!(
+                "MiniMax H3 FlashAttention {label} stride {dimension} value {stride} exceeds Candle FlashAttention's u32 FFI contract"
+            ),
             vec![H3AttentionRequirement::FlashAttentionU32LaunchShape],
         ));
     }
@@ -1314,16 +1354,9 @@ pub fn execute_h3_attention(
     match plan.kernel {
         H3AttentionKernel::CandleDenseF32V011 => dense_attention(q, k, v, scale),
         H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011 => {
-            if q.stride().last() != Some(&1)
-                || k.stride().last() != Some(&1)
-                || v.stride().last() != Some(&1)
-            {
-                return Err(failure(
-                    H3AttentionErrorCode::RuntimePlanMismatch,
-                    "MiniMax H3 FlashAttention Q/K/V must have unit head-dimension stride",
-                    vec![H3AttentionRequirement::ExactModelContract],
-                ));
-            }
+            validate_flash_tensor_strides("query", q.stride())?;
+            validate_flash_tensor_strides("key", k.stride())?;
+            validate_flash_tensor_strides("value", v.stride())?;
             flash_attention(q, k, v, scale)
         }
     }
@@ -1684,6 +1717,40 @@ mod tests {
     }
 
     #[test]
+    fn flash_tensor_strides_are_checked_before_u32_ffi_conversion() {
+        assert!(validate_flash_tensor_strides("query", &[1_048_576, 8_192, 128, 1]).is_ok());
+
+        let non_unit_head_stride =
+            validate_flash_tensor_strides("query", &[16, 8, 2, 2]).unwrap_err();
+        assert_eq!(
+            non_unit_head_stride.code,
+            H3AttentionErrorCode::RuntimePlanMismatch
+        );
+        assert!(non_unit_head_stride
+            .requirements
+            .contains(&H3AttentionRequirement::ExactModelContract));
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            let oversized = u32::MAX as usize + 1;
+            for dimension in 0..3 {
+                let mut strides = [1_048_576, 8_192, 128, 1];
+                strides[dimension] = oversized;
+                let error = validate_flash_tensor_strides("query", &strides).unwrap_err();
+                assert_eq!(error.code, H3AttentionErrorCode::RuntimePlanMismatch);
+                assert!(error
+                    .requirements
+                    .contains(&H3AttentionRequirement::FlashAttentionU32LaunchShape));
+            }
+            assert!(validate_flash_tensor_strides(
+                "query",
+                &[u32::MAX as usize, u32::MAX as usize, u32::MAX as usize, 1]
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
     fn frozen_plan_mutation_and_tensor_shape_mismatch_are_rejected() {
         let authority = H3AttentionRuntimeAuthority::bounded_synthetic_math(
             H3AttentionDevice::Cpu,
@@ -1866,6 +1933,18 @@ mod tests {
     #[cfg(feature = "h3-flash-attn-rc")]
     #[test]
     fn flash_bf16_cpu_reference_cuda_parity() -> candle::Result<()> {
+        fn deterministic_probe_values(count: usize, seed: u64, scale: f32) -> Vec<f32> {
+            (0..count)
+                .map(|index| {
+                    let mut value = (index as u64).wrapping_add(seed);
+                    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                    value ^= value >> 31;
+                    (((value >> 48) as i32 - 32_768) as f32 / 65_536.0) * scale
+                })
+                .collect()
+        }
+
         let Ok(cuda) = Device::new_cuda(0) else {
             return Ok(());
         };
@@ -1884,29 +1963,62 @@ mod tests {
         let flash_plan = flash.freeze_execution(1, 7, 37).unwrap().packed_transformer;
         let dense_plan = dense.freeze_execution(1, 7, 37).unwrap().packed_transformer;
         let count = 37 * H3_RELEASE_HEADS * H3_RELEASE_HEAD_DIM;
-        let values = (0..count)
-            .map(|index| ((index % 251) as f32 - 125.0) / 211.0)
-            .collect::<Vec<_>>();
-        let cpu = Tensor::from_vec(
-            values.clone(),
+        let q_cpu = Tensor::from_vec(
+            deterministic_probe_values(count, 0x243f_6a88_85a3_08d3, 2.0),
             (1, 37, H3_RELEASE_HEADS, H3_RELEASE_HEAD_DIM),
             &Device::Cpu,
         )?
         .to_dtype(DType::BF16)?;
-        let gpu = Tensor::from_vec(
-            values,
+        let k_cpu = Tensor::from_vec(
+            deterministic_probe_values(count, 0x1319_8a2e_0370_7344, 2.0),
+            (1, 37, H3_RELEASE_HEADS, H3_RELEASE_HEAD_DIM),
+            &Device::Cpu,
+        )?
+        .to_dtype(DType::BF16)?;
+        let v_cpu = Tensor::from_vec(
+            deterministic_probe_values(count, 0xa409_3822_299f_31d0, 1.0),
+            (1, 37, H3_RELEASE_HEADS, H3_RELEASE_HEAD_DIM),
+            &Device::Cpu,
+        )?
+        .to_dtype(DType::BF16)?;
+        let q_gpu = Tensor::from_vec(
+            deterministic_probe_values(count, 0x243f_6a88_85a3_08d3, 2.0),
             (1, 37, H3_RELEASE_HEADS, H3_RELEASE_HEAD_DIM),
             &cuda,
         )?
         .to_dtype(DType::BF16)?;
-        let cpu_out = execute_h3_attention(&dense_plan, &cpu, &(&cpu / 3.0)?, &(&cpu / 5.0)?)
+        let k_gpu = Tensor::from_vec(
+            deterministic_probe_values(count, 0x1319_8a2e_0370_7344, 2.0),
+            (1, 37, H3_RELEASE_HEADS, H3_RELEASE_HEAD_DIM),
+            &cuda,
+        )?
+        .to_dtype(DType::BF16)?;
+        let v_gpu = Tensor::from_vec(
+            deterministic_probe_values(count, 0xa409_3822_299f_31d0, 1.0),
+            (1, 37, H3_RELEASE_HEADS, H3_RELEASE_HEAD_DIM),
+            &cuda,
+        )?
+        .to_dtype(DType::BF16)?;
+        let cpu_out = execute_h3_attention(&dense_plan, &q_cpu, &k_cpu, &v_cpu)
             .unwrap()
             .to_dtype(DType::F32)?;
-        let gpu_out = execute_h3_attention(&flash_plan, &gpu, &(&gpu / 3.0)?, &(&gpu / 5.0)?)
+        let swapped_out = execute_h3_attention(&dense_plan, &k_cpu, &q_cpu, &v_cpu)
+            .unwrap()
+            .to_dtype(DType::F32)?;
+        let swap_max = (&cpu_out - swapped_out)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        assert!(
+            swap_max > 0.02,
+            "qualification vectors do not expose swapped Q/K wiring: {swap_max}"
+        );
+        let gpu_out = execute_h3_attention(&flash_plan, &q_gpu, &k_gpu, &v_gpu)
             .unwrap()
             .to_device(&Device::Cpu)?
             .to_dtype(DType::F32)?;
-        let max = (cpu_out - gpu_out)?
+        let max = (&cpu_out - gpu_out)?
             .abs()?
             .flatten_all()?
             .max(0)?
