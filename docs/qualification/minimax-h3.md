@@ -218,6 +218,50 @@ write, repair, or remount attempt. A separate owner must authorize recovery,
 after which a fresh non-H3 storage probe and clean inventory must pass before
 the volume can even be proposed for an authorized campaign.
 
+### Private Plato artifact campaign
+
+After the private authorization decision was accepted on 2026-08-08, the
+campaign moved to the access-controlled `plato` host. Its reviewed root is
+`/storage/jamesbrink/mold-uat/minimax-h3`, with both that directory and its
+`models` child restricted to mode `0700`. The pinned Comfy FL2VA transformer,
+NVFP4-AWQ Qwen3-VL conditioner, FP16 visual VAE, FP32 AudioVAE, and exact small
+official support files were downloaded directly into that root. All complete
+objects matched the sizes and SHA-256 identities in the hidden manifest. No
+artifact or header was copied into the repository, and no real-checkpoint
+report is public evidence.
+
+The development-only qualifier repeats full-content authentication and bounded
+structural inspection before any later runtime qualification. It is hard-bound
+to the authorized host, root, either exact canonical hidden task name, and the
+explicit scope. Qualify the two independently so a shared component cannot
+hide a task-transformer mismatch:
+
+```bash
+for model in \
+  minimax-h3-fl2va:comfy-pruned-int8 \
+  minimax-h3-ref2va:comfy-pruned-int8
+do
+  task=${model#minimax-h3-}
+  task=${task%%:*}
+  nix develop --offline --no-write-lock-file -c \
+    cargo run --locked --offline --release \
+    -p mold-ai-inference \
+    --features dev-bins,h3-private-uat \
+    --bin h3_artifact_qualification -- \
+    --models-root /storage/jamesbrink/mold-uat/minimax-h3/models \
+    --model "$model" \
+    --authorization-scope private-plato-uat \
+    > "/storage/jamesbrink/mold-uat/minimax-h3/evidence/artifact-qualification-$task.json"
+done
+```
+
+Each report contains only relative paths and identities, says explicitly that
+no runtime or generated media was constructed, and remains private with the
+model campaign. The feature is not forwarded by `mold-ai`; every published
+binary is scanned for its claim marker and rejected if the private reader is
+present. This qualifies artifact identity only. It does not satisfy numerical
+parity, CUDA generation UAT, public authorization, or release activation.
+
 No H3 model download, `MOLD_HOME`, fixture bundle, checkpoint shard or header,
 generated output, or other H3 artifact was read from or placed on that volume.
 The storage failure is independent of the license restriction: fixing the

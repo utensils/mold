@@ -8,6 +8,8 @@ pub(crate) mod backend;
 pub(crate) mod engine;
 pub(crate) mod offload;
 pub(crate) mod pipeline;
+#[cfg(feature = "h3-private-uat")]
+pub mod private_qualification;
 pub(crate) mod reference_media;
 pub(crate) mod sampler;
 pub(crate) mod vae_runtime;
