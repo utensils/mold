@@ -1,4 +1,6 @@
 import type { DownloadJob } from "./api/types";
+import { formatBytes, formatEta, percent } from "./format";
+import { modelDisplayNameForId, type DisplayableModel } from "./models";
 
 export type ExpansionPullPhase = "missing" | "connecting" | "starting";
 export type ExpansionPullKind =
@@ -64,6 +66,42 @@ export function resolveExpansionPullStatus(input: ExpansionPullResolutionInput):
 
   if (!job) return { kind: input.phase, job: null };
   return viewForJob(job);
+}
+
+/** Shared desktop/iPhone copy and progress semantics for the pull lifecycle. */
+export function expansionPullPresentation(
+  status: ExpansionPullView,
+  model: string,
+  hostLabel: string,
+  missingError: string,
+  etaSeconds: number | null,
+  models: DisplayableModel[] = [],
+) {
+  const modelLabel = modelDisplayNameForId(model, models);
+  const labels: Record<ExpansionPullKind, string> = {
+    missing: missingError,
+    connecting: `Connecting to ${hostLabel} to pull ${modelLabel}…`,
+    starting: `Starting ${modelLabel} on ${hostLabel}…`,
+    queued: `${modelLabel} queued on ${hostLabel}`,
+    pulling: `Pulling ${modelLabel} on ${hostLabel}`,
+    ready: `${modelLabel} ready on ${hostLabel}`,
+    failed: `${modelLabel} pull failed on ${hostLabel}`,
+    cancelled: `${model} pull cancelled on ${hostLabel}`,
+  };
+  return {
+    label: labels[status.kind],
+    modelLabel,
+    busy: ["connecting", "starting", "queued", "pulling"].includes(status.kind),
+    percent: status.job ? Math.round(percent(status.job.bytes_done, status.job.bytes_total)) : 0,
+    bytes: status.job
+      ? `${formatBytes(status.job.bytes_done)} / ${formatBytes(status.job.bytes_total)}`
+      : "",
+    files:
+      status.job && status.job.files_total > 0
+        ? `${status.job.files_done}/${status.job.files_total} files`
+        : null,
+    eta: formatEta(etaSeconds),
+  };
 }
 
 function viewForJob(job: DownloadJob): ExpansionPullView {
