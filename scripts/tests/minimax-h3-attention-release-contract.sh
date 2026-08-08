@@ -149,6 +149,7 @@ done
 
 omitted_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=omitted'
 claim_marker='mold.minimax-h3.attention-rc.kernel-compiled.v1'
+private_qwen_support_marker='mold.minimax-h3.private-uat-qwen-support-loader.v1'
 compiled_markers=(
   'mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=omitted'
   'mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=compiled'
@@ -166,6 +167,10 @@ fi
 printf '%s\n%s\n' "$omitted_marker" "$claim_marker" > "$scratch_dir/claimed"
 if scripts/verify-h3-release-exclusion.sh "$scratch_dir/claimed" >/dev/null 2>&1; then
   fail "release exclusion verifier accepted an H3 release-candidate claim marker"
+fi
+printf '%s\n%s\n' "$omitted_marker" "$private_qwen_support_marker" > "$scratch_dir/private-qwen-support"
+if scripts/verify-h3-release-exclusion.sh "$scratch_dir/private-qwen-support" >/dev/null 2>&1; then
+  fail "release exclusion verifier accepted the private H3 Qwen support loader"
 fi
 for index in "${!compiled_markers[@]}"; do
   printf '%s\n%s\n' "$omitted_marker" "${compiled_markers[$index]}" \

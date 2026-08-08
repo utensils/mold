@@ -1,7 +1,7 @@
 //! Authorization-bound MiniMax H3 artifact qualification.
 //!
 //! This module is compiled only by the `h3-private-uat` development feature.
-//! It authenticates and structurally inspects the exact private Plato artifact
+//! It authenticates and structurally inspects the exact private-host artifact
 //! set without registering a model, constructing an engine, or changing the
 //! ordinary product policy. Its claim marker is forbidden in published Mold
 //! binaries by `scripts/verify-h3-release-exclusion.sh`.
@@ -30,8 +30,9 @@ use tokenizers::Tokenizer;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 pub const H3_PRIVATE_UAT_CLAIM_MARKER: &str = "mold.minimax-h3.private-uat-artifact-reader.v1";
-pub const H3_PRIVATE_AUTHORIZATION_SCOPE: &str = "private-plato-uat";
-pub const H3_PRIVATE_HOST: &str = "plato";
+pub const H3_PRIVATE_AUTHORIZATION_SCOPE: &str = "private-h3-uat";
+pub const H3_PRIVATE_HOST_AUTHORITY_SHA256: &str =
+    "87e4571bc7b47363d74a65592c50a1eccb5afdc5bd3036d119f8c84c934b37da";
 pub const H3_PRIVATE_MODELS_ROOT: &str = "/storage/jamesbrink/mold-uat/minimax-h3/models";
 
 const MAX_PRIVATE_HEADER_BYTES: u64 = 8 * 1024 * 1024;
@@ -68,7 +69,7 @@ pub struct H3PrivateArtifactQualificationReport {
     pub claim_marker: &'static str,
     pub decision: &'static str,
     pub authorization_scope: &'static str,
-    pub host: &'static str,
+    pub host_authority_sha256: &'static str,
     pub canonical_model: String,
     pub task: &'static str,
     pub layout: &'static str,
@@ -253,7 +254,7 @@ pub fn qualify_private_artifacts(
         claim_marker: H3_PRIVATE_UAT_CLAIM_MARKER,
         decision: "qualified-private-artifacts",
         authorization_scope: H3_PRIVATE_AUTHORIZATION_SCOPE,
-        host: H3_PRIVATE_HOST,
+        host_authority_sha256: H3_PRIVATE_HOST_AUTHORITY_SHA256,
         canonical_model: model.to_string(),
         task: task_id(task),
         layout: "comfy-pruned-int8-convrot-plus-nvfp4-awq",
@@ -284,11 +285,9 @@ fn validate_private_scope(models_root: &Path, authorization_scope: &str) -> Resu
     }
     let hostname = fs::read_to_string("/etc/hostname")
         .context("private H3 qualification requires a readable /etc/hostname")?;
-    if hostname.trim() != H3_PRIVATE_HOST {
-        bail!(
-            "private MiniMax H3 qualification is authorized only on host {H3_PRIVATE_HOST:?}, found {:?}",
-            hostname.trim()
-        )
+    let hostname_authority = format!("{:x}", Sha256::digest(hostname.trim().as_bytes()));
+    if hostname_authority != H3_PRIVATE_HOST_AUTHORITY_SHA256 {
+        bail!("private MiniMax H3 qualification is outside the authorized host scope")
     }
     let canonical = models_root
         .canonicalize()
@@ -851,8 +850,11 @@ mod tests {
             H3_PRIVATE_UAT_CLAIM_MARKER,
             "mold.minimax-h3.private-uat-artifact-reader.v1"
         );
-        assert_eq!(H3_PRIVATE_AUTHORIZATION_SCOPE, "private-plato-uat");
-        assert_eq!(H3_PRIVATE_HOST, "plato");
+        assert_eq!(H3_PRIVATE_AUTHORIZATION_SCOPE, "private-h3-uat");
+        assert_eq!(H3_PRIVATE_HOST_AUTHORITY_SHA256.len(), 64);
+        assert!(H3_PRIVATE_HOST_AUTHORITY_SHA256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
         assert!(H3_PRIVATE_MODELS_ROOT.starts_with("/storage/"));
         assert!(!contract::capabilities(Task::Fl2va).runtime_available);
         assert!(!contract::capabilities(Task::Ref2va).runtime_available);

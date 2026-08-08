@@ -134,7 +134,8 @@ jobs:
               - 'crates/mold-inference/src/lib.rs'
               - 'crates/mold-inference/src/bin/h3_attention_qualification.rs'
               - 'crates/mold-inference/src/bin/h3_artifact_qualification.rs'
-              - 'crates/mold-inference/src/minimax_h3/private_qualification.rs'
+              - 'crates/mold-inference/src/minimax_h3/mod.rs'
+              - 'crates/mold-inference/src/minimax_h3/private_*.rs'
               - 'crates/mold-server/src/lib.rs'
               - 'crates/mold-cli/src/main.rs'
               - 'desktop/src-tauri/src/main.rs'
@@ -331,6 +332,8 @@ jobs:
         run: python3 scripts/tests/minimax-h3-conformance-contract.py
       - name: Clippy the private MiniMax H3 artifact qualifier
         run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_artifact_qualification -- -D warnings
+      - name: Test private MiniMax H3 foundations
+        run: cargo test -p mold-ai-inference --lib --features h3-private-uat minimax_h3
       - name: Check with all optional features
         run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns
 

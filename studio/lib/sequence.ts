@@ -41,7 +41,7 @@ export interface SequenceLimits {
   promptOptional?: boolean;
 }
 
-// Verified on Plato's 48 GB L40S at the catalog model's 1216×704 defaults.
+// Verified on private UAT host's 48 GB L40S at the catalog model's 1216×704 defaults.
 // The server's per-clip cap/recommendation describes a format limit, not a
 // promise that the largest clip fits the active GPU at every resolution.
 export const DEFAULT_SEQUENCE_CLIP_FRAMES = 25;

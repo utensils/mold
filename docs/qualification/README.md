@@ -10,7 +10,7 @@ schema are documented separately in
 
 The status record preserves #868's historical landing at main `50f28de3` and
 records the exact, merged attention release candidate from PR #871, its
-weight-free Plato qualification, and its landing at main `ff927086`. Its
+weight-free private UAT host qualification, and its landing at main `ff927086`. Its
 same-tree ordinary shipping-feature fixture passed the release-candidate
 exclusion checks, but is deliberately non-publishable and is not a public
 release artifact. The record also explains why nominal mount metadata does not
