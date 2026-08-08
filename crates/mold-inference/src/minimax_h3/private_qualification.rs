@@ -207,13 +207,14 @@ pub fn qualify_private_artifacts(
     })?;
 
     let mut verified_before = 0_u64;
+    let mut authenticated_identities = BTreeMap::new();
     let mut qualified = Vec::with_capacity(artifacts.len());
     for artifact in &artifacts {
         let relative_path = portable_path(&artifact.relative_path)?;
         let expected_sha = artifact.file.sha256.ok_or_else(|| {
             anyhow!("private H3 manifest file {relative_path} has no pinned SHA-256")
         })?;
-        let actual_sha = hash_exact_file(
+        let (actual_sha, authenticated_identity) = hash_exact_file(
             artifact,
             expected_sha,
             verified_before,
@@ -221,6 +222,8 @@ pub fn qualify_private_artifacts(
             &mut progress,
         )?;
         let structural = inspect_structure(artifact, task, published_transformer)?;
+        require_artifact_identity(artifact, &authenticated_identity, "structural inspection")?;
+        authenticated_identities.insert(artifact.relative_path.clone(), authenticated_identity);
         qualified.push(H3QualifiedArtifact {
             relative_path,
             component: component_id(artifact.file.component),
@@ -241,7 +244,9 @@ pub fn qualify_private_artifacts(
             .checked_add(artifact.file.size_bytes)
             .ok_or_else(|| anyhow!("private H3 verified byte count overflow"))?;
     }
-    validate_support_assets(&artifacts, task)?;
+    revalidate_artifact_set(&artifacts, &authenticated_identities)?;
+    validate_support_assets(&artifacts, &authenticated_identities, task)?;
+    revalidate_artifact_set(&artifacts, &authenticated_identities)?;
 
     let qualification_identity_sha256 = qualification_identity(model, task, &qualified);
     Ok(H3PrivateArtifactQualificationReport {
@@ -397,8 +402,15 @@ fn hash_exact_file(
     verified_before: u64,
     total_bytes: u64,
     progress: &mut impl FnMut(H3ArtifactHashProgress),
-) -> Result<String> {
+) -> Result<(String, FileIdentity)> {
     let relative_path = portable_path(&artifact.relative_path)?;
+    let before_path_metadata = fs::symlink_metadata(&artifact.canonical_path)
+        .with_context(|| format!("failed to inspect private H3 artifact {relative_path}"))?;
+    if !before_path_metadata.file_type().is_file() || before_path_metadata.file_type().is_symlink()
+    {
+        bail!("private H3 artifact {relative_path} is no longer a regular non-symlink file")
+    }
+    let before_path = FileIdentity::from_metadata(&before_path_metadata);
     let mut file = File::open(&artifact.canonical_path)
         .with_context(|| format!("failed to open private H3 artifact {relative_path}"))?;
     let before = FileIdentity::from_metadata(
@@ -406,6 +418,9 @@ fn hash_exact_file(
             .metadata()
             .with_context(|| format!("failed to stat private H3 artifact {relative_path}"))?,
     );
+    if before != before_path {
+        bail!("private H3 artifact {relative_path} changed while it was opened")
+    }
     if before.len != artifact.file.size_bytes {
         bail!(
             "private H3 artifact {relative_path} has {} bytes, expected {}",
@@ -434,11 +449,14 @@ fn hash_exact_file(
         artifact_bytes_verified = artifact_bytes_verified
             .checked_add(read as u64)
             .ok_or_else(|| anyhow!("private H3 artifact hash byte count overflow"))?;
+        let total_bytes_verified = verified_before
+            .checked_add(artifact_bytes_verified)
+            .ok_or_else(|| anyhow!("private H3 progress byte count overflow"))?;
         progress(H3ArtifactHashProgress {
             relative_path: relative_path.clone(),
             artifact_bytes_verified,
             artifact_bytes_total: before.len,
-            total_bytes_verified: verified_before + artifact_bytes_verified,
+            total_bytes_verified,
             total_bytes,
         });
     }
@@ -460,7 +478,69 @@ fn hash_exact_file(
             "private H3 artifact {relative_path} SHA-256 mismatch: expected {expected_sha}, found {actual}"
         )
     }
-    Ok(actual)
+    Ok((actual, before))
+}
+
+fn require_artifact_identity(
+    artifact: &ResolvedArtifact<'_>,
+    expected: &FileIdentity,
+    phase: &str,
+) -> Result<()> {
+    let relative_path = portable_path(&artifact.relative_path)?;
+    let metadata = fs::symlink_metadata(&artifact.canonical_path).with_context(|| {
+        format!("failed to revalidate private H3 artifact {relative_path} after {phase}")
+    })?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        bail!("private H3 artifact {relative_path} was replaced during {phase}")
+    }
+    if &FileIdentity::from_metadata(&metadata) != expected {
+        bail!("private H3 artifact {relative_path} changed during {phase}")
+    }
+    Ok(())
+}
+
+fn revalidate_artifact_set(
+    artifacts: &[ResolvedArtifact<'_>],
+    authenticated_identities: &BTreeMap<PathBuf, FileIdentity>,
+) -> Result<()> {
+    for artifact in artifacts {
+        let expected = authenticated_identities
+            .get(&artifact.relative_path)
+            .ok_or_else(|| anyhow!("private H3 artifact set contains an unauthenticated path"))?;
+        require_artifact_identity(artifact, expected, "qualification")?;
+    }
+    Ok(())
+}
+
+fn read_authenticated_artifact(
+    artifact: &ResolvedArtifact<'_>,
+    expected: &FileIdentity,
+) -> Result<Vec<u8>> {
+    require_artifact_identity(artifact, expected, "support-asset read")?;
+    let relative_path = portable_path(&artifact.relative_path)?;
+    let mut file = File::open(&artifact.canonical_path)
+        .with_context(|| format!("failed to open private H3 support asset {relative_path}"))?;
+    if FileIdentity::from_metadata(&file.metadata()?) != *expected {
+        bail!("private H3 support asset {relative_path} changed while it was opened")
+    }
+    let capacity = usize::try_from(expected.len)
+        .context("private H3 support asset is too large to buffer on this platform")?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read private H3 support asset {relative_path}"))?;
+    if bytes.len() != capacity || FileIdentity::from_metadata(&file.metadata()?) != *expected {
+        bail!("private H3 support asset {relative_path} changed during its read")
+    }
+    require_artifact_identity(artifact, expected, "support-asset read")?;
+    let expected_sha = artifact
+        .file
+        .sha256
+        .ok_or_else(|| anyhow!("private H3 support asset has no pinned SHA-256"))?;
+    let actual_sha = format!("{:x}", Sha256::digest(&bytes));
+    if !actual_sha.eq_ignore_ascii_case(expected_sha) {
+        bail!("private H3 support asset {relative_path} failed its post-read digest fence")
+    }
+    Ok(bytes)
 }
 
 fn inspect_structure(
@@ -627,14 +707,20 @@ fn hash_safetensors_header(path: &Path) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn validate_support_assets(artifacts: &[ResolvedArtifact<'_>], task: Task) -> Result<()> {
+fn validate_support_assets(
+    artifacts: &[ResolvedArtifact<'_>],
+    authenticated_identities: &BTreeMap<PathBuf, FileIdentity>,
+    task: Task,
+) -> Result<()> {
     let read = |filename: &str| -> Result<Vec<u8>> {
         let artifact = artifacts
             .iter()
             .find(|artifact| artifact.file.hf_filename == filename)
             .ok_or_else(|| anyhow!("private H3 manifest omits support asset {filename}"))?;
-        fs::read(&artifact.canonical_path)
-            .with_context(|| format!("failed to read private H3 support asset {filename}"))
+        let expected = authenticated_identities
+            .get(&artifact.relative_path)
+            .ok_or_else(|| anyhow!("private H3 support asset {filename} was not authenticated"))?;
+        read_authenticated_artifact(artifact, expected)
     };
 
     H3ConditionerConfig::from_json(&read("text_encoder/config.json")?)?;
@@ -642,11 +728,7 @@ fn validate_support_assets(artifacts: &[ResolvedArtifact<'_>], task: Task) -> Re
         &read("processor/preprocessor_config.json")?,
         &read("processor/video_preprocessor_config.json")?,
     )?;
-    let tokenizer_path = artifacts
-        .iter()
-        .find(|artifact| artifact.file.hf_filename == "processor/tokenizer.json")
-        .ok_or_else(|| anyhow!("private H3 manifest omits processor/tokenizer.json"))?;
-    Tokenizer::from_file(&tokenizer_path.canonical_path)
+    Tokenizer::from_bytes(&read("processor/tokenizer.json")?)
         .map_err(|error| anyhow!("invalid pinned H3 tokenizer: {error}"))?;
 
     let visual_value: serde_json::Value = serde_json::from_slice(&read("vae/config.json")?)?;
@@ -840,5 +922,33 @@ mod tests {
             12.0,
         )
         .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authenticated_identity_rejects_replacement_and_symlink_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("artifact.safetensors");
+        let replacement = directory.path().join("replacement.safetensors");
+        fs::write(&path, b"authenticated bytes").unwrap();
+        fs::write(&replacement, b"different replacement bytes").unwrap();
+
+        let manifest = qualification_manifest(contract::FL2VA_COMFY).unwrap().0;
+        let artifact = ResolvedArtifact {
+            file: &manifest.files[0],
+            relative_path: PathBuf::from("artifact.safetensors"),
+            canonical_path: path.clone(),
+        };
+        let expected = FileIdentity::from_metadata(&fs::symlink_metadata(&path).unwrap());
+        require_artifact_identity(&artifact, &expected, "test").unwrap();
+
+        fs::rename(&replacement, &path).unwrap();
+        assert!(require_artifact_identity(&artifact, &expected, "test replacement").is_err());
+
+        fs::remove_file(&path).unwrap();
+        symlink("missing-target", &path).unwrap();
+        assert!(require_artifact_identity(&artifact, &expected, "test symlink").is_err());
     }
 }
