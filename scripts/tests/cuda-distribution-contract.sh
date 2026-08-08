@@ -154,6 +154,60 @@ for release_job in release-latest release-version; do
   require_release_job_need "$release_job" "docker"
   require_release_job_need "$release_job" "build-nix-distribution"
 done
+require_release_job_text "release-latest" \
+  "Pin rolling tag to this release"
+require_release_job_text "release-latest" \
+  'contents: write'
+require_release_job_text "release-latest" \
+  'prerelease: true'
+require_release_job_text "release-latest" \
+  'make_latest: false'
+require_release_job_text "release-latest" \
+  'GH_TOKEN: ${{ github.token }}'
+require_release_job_text "release-latest" \
+  '"repos/${GITHUB_REPOSITORY}/git/refs/tags/latest"'
+require_release_job_text "release-latest" \
+  '"repos/${GITHUB_REPOSITORY}/git/ref/tags/latest"'
+require_release_job_text "release-latest" \
+  '--method PATCH'
+require_release_job_text "release-latest" \
+  '-f "sha=${GITHUB_SHA}"'
+require_release_job_text "release-latest" \
+  '-F force=true'
+require_release_job_text "release-latest" \
+  'if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then'
+main_freshness_guard_count="$(
+  awk '
+    $0 == "  release-latest:" { in_job = 1 }
+    in_job && /^  [[:alnum:]_-]+:$/ && $0 != "  release-latest:" { exit }
+    in_job { print }
+  ' "$repo_root/$release" |
+    grep -Fc 'scripts/check-desktop-nightly-main-head.sh "$GITHUB_SHA"'
+)"
+[[ "$main_freshness_guard_count" -eq 2 ]] \
+  || fail "release-latest must reject stale main before release and tag mutation"
+
+release_guard_lines="$(
+  grep -nF 'scripts/check-desktop-nightly-main-head.sh "$GITHUB_SHA"' \
+    "$repo_root/$release" |
+    cut -d: -f1
+)"
+first_release_guard_line="$(sed -n '1p' <<<"$release_guard_lines")"
+second_release_guard_line="$(sed -n '2p' <<<"$release_guard_lines")"
+release_upload_line="$(
+  grep -n -m1 'uses: softprops/action-gh-release@v2' "$repo_root/$release" |
+    cut -d: -f1
+)"
+rolling_tag_patch_line="$(
+  grep -n -m1 '"repos/${GITHUB_REPOSITORY}/git/refs/tags/latest"' \
+    "$repo_root/$release" |
+    cut -d: -f1
+)"
+[[ "$first_release_guard_line" -lt "$release_upload_line" \
+  && "$second_release_guard_line" -gt "$release_upload_line" \
+  && "$second_release_guard_line" -lt "$rolling_tag_patch_line" ]] \
+  || fail "fresh-main guards must surround release mutation and tag movement"
+require_text "$release" 'tags: ["v*"]'
 require_release_job_text "docker" \
   'type=raw,value=latest${{ matrix.suffix }},enable={{is_default_branch}}'
 require_release_job_text "docker" \

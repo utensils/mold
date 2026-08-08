@@ -632,6 +632,9 @@ jobs:
       - name: Generate checksums
         run: cd artifacts && sha256sum ./*.tar.gz > SHA256SUMS
 
+      - name: Verify rolling release source is current main
+        run: scripts/check-desktop-nightly-main-head.sh "$GITHUB_SHA"
+
       - name: Create/update release
         uses: softprops/action-gh-release@v2
         with:
@@ -683,6 +686,33 @@ jobs:
             tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz  # RTX 50-series
             ./mold version
             ```
+
+      # action-gh-release updates an existing release's body and assets, but it
+      # does not move the already-created tag. Keep the mutable rolling tag as
+      # exact as the commit recorded in the release body and shipped binaries.
+      - name: Pin rolling tag to this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          scripts/check-desktop-nightly-main-head.sh "$GITHUB_SHA"
+
+          gh api \
+            --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/git/refs/tags/latest" \
+            -f "sha=${GITHUB_SHA}" \
+            -F force=true >/dev/null
+
+          tag_sha="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/git/ref/tags/latest" \
+              --jq '.object.sha'
+          )"
+          if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+            echo "::error::latest resolved to $tag_sha instead of $GITHUB_SHA"
+            exit 1
+          fi
 
   # Versioned release + crates.io publish on v* tags
   release-version:
