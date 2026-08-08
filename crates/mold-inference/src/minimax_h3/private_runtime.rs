@@ -6,6 +6,9 @@
 //! connect already-authenticated Candle objects to the runtime-neutral block
 //! streaming contract used by private qualification.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use anyhow::{bail, Result};
 use mold_candle::minimax_h3::{
     H3BlockProgress, H3BlockStack, H3ComfyInt8BlockLoader, H3ForwardInput, H3FrozenPackedLayout,
@@ -99,12 +102,14 @@ impl H3StreamedTransformerExecutor<H3LoadedTransformerBlock> for H3PrivateComfyT
         if self.step.is_some() {
             bail!("private H3 streamed transformer already has an active denoise step");
         }
-        let step = self
+        let error_bridge = H3TransformerCallbackErrorBridge::default();
+        let result = self
             .transformer
             .begin_step_with_observer(input, layout, |event| {
                 private_transformer_checkpoint(checkpoint, event)
-                    .map_err(|error| candle_core::Error::Msg(error.to_string()))
-            })?;
+                    .map_err(|error| error_bridge.capture(error))
+            });
+        let step = error_bridge.finish(result)?;
         self.step = Some(step);
         Ok(())
     }
@@ -130,10 +135,12 @@ impl H3StreamedTransformerExecutor<H3LoadedTransformerBlock> for H3PrivateComfyT
             .step
             .take()
             .ok_or_else(|| anyhow::anyhow!("private H3 streamed step was not started"))?;
-        Ok(self.transformer.finish_step_with_observer(step, |event| {
+        let error_bridge = H3TransformerCallbackErrorBridge::default();
+        let result = self.transformer.finish_step_with_observer(step, |event| {
             private_transformer_checkpoint(checkpoint, event)
-                .map_err(|error| candle_core::Error::Msg(error.to_string()))
-        })?)
+                .map_err(|error| error_bridge.capture(error))
+        });
+        error_bridge.finish(result)
     }
 
     fn abort_step(&mut self) {
@@ -218,9 +225,38 @@ fn private_transformer_checkpoint(
     })
 }
 
+/// Candle observers can return only `candle_core::Error`. Retain the original
+/// pipeline error beside that transport value so cancellation and future typed
+/// failures survive the transformer boundary unchanged.
+#[derive(Clone, Default)]
+struct H3TransformerCallbackErrorBridge {
+    original: Rc<RefCell<Option<anyhow::Error>>>,
+}
+
+impl H3TransformerCallbackErrorBridge {
+    fn capture(&self, error: anyhow::Error) -> candle_core::Error {
+        let message = error.to_string();
+        let mut original = self.original.borrow_mut();
+        if original.is_none() {
+            *original = Some(error);
+        }
+        candle_core::Error::Msg(message)
+    }
+
+    fn finish<T>(&self, result: candle_core::Result<T>) -> Result<T> {
+        let original = self.original.borrow_mut().take();
+        match (result, original) {
+            (Ok(value), None) => Ok(value),
+            (Ok(_), Some(error)) | (Err(_), Some(error)) => Err(error),
+            (Err(error), None) => Err(error.into()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::progress::{is_inference_cancelled, InferenceCancelled};
 
     const FINGERPRINT: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const CHECKPOINT: &str = "2222222222222222222222222222222222222222222222222222222222222222";
@@ -306,5 +342,37 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("zero resident blocks"));
+    }
+
+    struct CancelCheckpoint;
+
+    impl H3PipelineCheckpoint for CancelCheckpoint {
+        fn checkpoint(&mut self, _event: H3PipelineEvent) -> Result<()> {
+            Err(InferenceCancelled.into())
+        }
+    }
+
+    #[test]
+    fn transformer_callback_bridge_preserves_typed_cancellation_and_first_error() {
+        let bridge = H3TransformerCallbackErrorBridge::default();
+        let mut checkpoint = CancelCheckpoint;
+        let transport = private_transformer_checkpoint(
+            &mut checkpoint,
+            H3BlockProgress {
+                stack: H3BlockStack::TokenRefiner,
+                completed: 0,
+                total: 2,
+            },
+        )
+        .map_err(|error| bridge.capture(error))
+        .unwrap_err();
+        let error = bridge.finish::<()>(Err(transport)).unwrap_err();
+        assert!(is_inference_cancelled(&error));
+
+        let bridge = H3TransformerCallbackErrorBridge::default();
+        let _first_transport = bridge.capture(InferenceCancelled.into());
+        let later_transport = bridge.capture(anyhow::anyhow!("later callback failure"));
+        let error = bridge.finish::<()>(Err(later_transport)).unwrap_err();
+        assert!(is_inference_cancelled(&error));
     }
 }
