@@ -109,6 +109,75 @@ describe("AdvancedSettings — capability matrix", () => {
     const titles = accordionTitles(mountSettings(formFor("qwen-image-edit")));
     expect(titles).toEqual(["Source image", "LoRA stack", "Output & seed"]);
   });
+
+  it("gives wan a sampler recipe instead of a second scheduler picker", async () => {
+    const form = reactive({
+      ...newGenerateForm(),
+      family: "wan",
+      model: "wan22-t2v-a14b:q5",
+    });
+    const wrapper = mountSettings(form);
+    const titles = accordionTitles(wrapper);
+    expect(titles).toContain("Sampler recipe");
+    expect(titles).not.toContain("Scheduler & sampling");
+
+    const solver = wrapper.get("[data-test='wan-solver-select']");
+    expect(solver.findAll("option").map((option) => option.text())).toEqual([
+      "Default",
+      "UniPC",
+      "Euler",
+      "DPM++",
+    ]);
+    await solver.setValue("dpm-pp");
+    expect(form.scheduler).toBe("dpm-pp");
+  });
+
+  it("keeps the wan flow shift absent until it is typed into", async () => {
+    const form = reactive({
+      ...newGenerateForm(),
+      family: "wan",
+      model: "wan22-t2v-a14b:q5",
+    });
+    const wrapper = mountSettings(form);
+    const shift = wrapper.get("[data-test='wan-sample-shift']");
+    expect((shift.element as HTMLInputElement).value).toBe("");
+
+    await shift.setValue("12");
+    expect(form.wanRecipe.sampleShift).toBe(12);
+
+    // Clearing returns to absent, never to zero — zero is a value the engine
+    // would apply.
+    await shift.setValue("");
+    expect(form.wanRecipe.sampleShift).toBeNull();
+  });
+
+  it("hides the distill strengths on a wan tier that ships none", () => {
+    const wrapper = mountSettings(
+      reactive({ ...newGenerateForm(), family: "wan", model: "wan22-ti2v-5b:fp16" }),
+    );
+    expect(wrapper.find("[data-test='wan-sample-shift']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='wan-distill-high']").exists()).toBe(false);
+  });
+
+  it("names an out-of-band distill strength inline", async () => {
+    const form = reactive({
+      ...newGenerateForm(),
+      family: "wan",
+      model: "wan22-t2v-a14b:q5",
+    });
+    const wrapper = mountSettings(form);
+    await wrapper.get("[data-test='wan-distill-high']").setValue("9");
+    await flushPromises();
+    expect(wrapper.get("[data-test='wan-recipe-error']").text()).toBe(
+      "High-noise distill strength must be at most 4.",
+    );
+  });
+
+  it("hides the sampler recipe entirely off-family", () => {
+    for (const family of ["sdxl", "ltx2", "flux"]) {
+      expect(accordionTitles(mountSettings(formFor(family)))).not.toContain("Sampler recipe");
+    }
+  });
 });
 
 describe("AdvancedSettings — section ordering contract", () => {
@@ -117,6 +186,7 @@ describe("AdvancedSettings — section ordering contract", () => {
   // placement in Settings instead).
   const SECTION_ORDER = [
     "scheduler",
+    "wan-recipe",
     "negative",
     "source",
     "lora",
@@ -150,7 +220,16 @@ describe("AdvancedSettings — section ordering contract", () => {
   });
 
   it("keeps every family's rendered sections a subsequence of the canon", () => {
-    const families = ["sdxl", "sd15", "sd3.5", "flux", "qwen-image-edit", "ltx-video", "ltx2"];
+    const families = [
+      "sdxl",
+      "sd15",
+      "sd3.5",
+      "flux",
+      "qwen-image-edit",
+      "ltx-video",
+      "ltx2",
+      "wan",
+    ];
     for (const family of families) {
       const rendered = sectionIds(mountSettings(formFor(family), { upscalers: [upscaler] }));
       expect(rendered.length).toBeGreaterThan(0);

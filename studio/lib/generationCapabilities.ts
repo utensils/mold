@@ -5,8 +5,17 @@ import {
 
 export { isMinimaxH3Family } from "./minimaxH3Authoring";
 
+/**
+ * Solver selection, spelled exactly as `mold-core`'s kebab-case `Scheduler`
+ * serializes plus a `"default"` sentinel meaning "omit the field".
+ *
+ * Two disjoint sets share the slot: `ddim` / `euler-ancestral` / `uni-pc` are
+ * the UNet schedulers, and `uni-pc` / `euler` / `dpm-pp` are wan's flow sample
+ * solvers. `schedulerOptions` narrows it per family — validation rejects a
+ * wan solver off-family and a UNet scheduler on wan.
+ */
 export type GenerationScheduler =
-  "default" | "ddim" | "euler-ancestral" | "unipc";
+  "default" | "ddim" | "euler-ancestral" | "uni-pc" | "euler" | "dpm-pp";
 
 export type SourceImageMode =
   | "single"
@@ -15,12 +24,22 @@ export type SourceImageMode =
   | "h3-boundaries"
   | "ordered-references";
 
+/** Whether the resolved model takes the wan sampler-recipe controls. */
+export interface WanRecipeCapabilities {
+  /** Flow shift and the sample-solver picker apply to this model. */
+  supported: boolean;
+  /** The tier ships a Lightning distill, so the per-expert strengths apply. */
+  supportsDistillStrength: boolean;
+}
+
 export interface BaseGenerationCapabilities {
   supportsNegativePrompt: boolean;
   guidanceAdjustable: boolean;
   fixedGuidance: number | null;
   supportsScheduler: boolean;
   schedulerOptions: GenerationScheduler[];
+  /** Wan flow shift / solver / distill strengths (`wanRecipe.ts`). */
+  wanRecipe: WanRecipeCapabilities;
   supportsCfgPlus: boolean;
   supportsVideo: boolean;
   supportsAudio: boolean;
@@ -41,8 +60,31 @@ const SCHEDULER_OPTIONS: GenerationScheduler[] = [
   "default",
   "ddim",
   "euler-ancestral",
-  "unipc",
+  "uni-pc",
 ];
+
+/** Wan's `--sample_solver` choices. `uni-pc` is also the server's own default,
+ * which `"default"` selects by omitting the field. */
+const WAN_SOLVER_OPTIONS: GenerationScheduler[] = [
+  "default",
+  "uni-pc",
+  "euler",
+  "dpm-pp",
+];
+
+/** Display names for every solver, so the three surfaces agree on wording. */
+const SCHEDULER_LABELS: Record<GenerationScheduler, string> = {
+  default: "Default",
+  ddim: "DDIM",
+  "euler-ancestral": "Euler ancestral",
+  "uni-pc": "UniPC",
+  euler: "Euler",
+  "dpm-pp": "DPM++",
+};
+
+export function schedulerLabel(scheduler: string): string {
+  return SCHEDULER_LABELS[scheduler as GenerationScheduler] ?? scheduler;
+}
 
 const NO_NEGATIVE_PROMPT_FAMILIES = new Set([
   "flux",
@@ -112,6 +154,22 @@ const ADVANCED_VIDEO_FAMILIES = new Set(["ltx2", "ltx-2"]);
 const IMAGE_CONDITIONED_VIDEO_FAMILIES = new Set(["ltx2", "ltx-2", "wan"]);
 const CONTROLNET_FAMILIES = new Set(["sd15", "sd1.5", "stable-diffusion-1.5"]);
 
+/**
+ * Wan A14B tiers that ship a Lightning distill adapter, and therefore accept
+ * the per-expert `distill_strength_*` controls.
+ *
+ * `/api/models` advertises no component list, so the tier is read off the
+ * resolved model identity the same way `isFlux2DevModel` reads a checkpoint's.
+ * This mirrors `A14bTier::has_distill` in `mold-core`'s manifest — only the
+ * A14B `:q5` (fast) and `:q4` (compact) tiers pull the distill files; the `:q8`
+ * quality tier and the 1.3B/5B checkpoints have no distill slot at all.
+ *
+ * It fails closed: an opaque `cv:` / `hf:` wan checkpoint gets no strength
+ * controls, which is what the engine's own "ships no distill adapter"
+ * rejection would say anyway.
+ */
+const WAN_DISTILL_TIER = /a14b[:-]q[45]$/;
+
 export const MAX_LORA_STACK = 4;
 
 /**
@@ -149,9 +207,12 @@ export function baseGenerationCapabilities(
   const flux2Dev = isFlux2DevModel(model);
   const h3 = isMinimaxH3Identity(normalized, model);
   const h3Ref2va = h3 && isMinimaxH3Ref2vaModel(model);
-  const schedulerOptions = SCHEDULER_FAMILIES.has(normalized)
-    ? SCHEDULER_OPTIONS.slice()
-    : [];
+  const wan = isWanFamily(normalized);
+  const schedulerOptions = wan
+    ? WAN_SOLVER_OPTIONS.slice()
+    : SCHEDULER_FAMILIES.has(normalized)
+      ? SCHEDULER_OPTIONS.slice()
+      : [];
   const normalizedModel = model.trim().toLowerCase();
   const ltx =
     normalized === "ltx-video" ||
@@ -184,6 +245,10 @@ export function baseGenerationCapabilities(
       : null,
     supportsScheduler: schedulerOptions.length > 0,
     schedulerOptions,
+    wanRecipe: {
+      supported: wan,
+      supportsDistillStrength: wan && WAN_DISTILL_TIER.test(normalizedModel),
+    },
     supportsCfgPlus: CFG_PLUS_FAMILIES.has(normalized),
     supportsVideo: h3 || VIDEO_FAMILIES.has(normalized),
     supportsAudio: h3 || AUDIO_FAMILIES.has(normalized),
@@ -218,6 +283,10 @@ export function isAdvancedVideoFamily(family: string): boolean {
  */
 export function isImageConditionedVideoFamily(family: string): boolean {
   return IMAGE_CONDITIONED_VIDEO_FAMILIES.has(family.trim().toLowerCase());
+}
+
+export function isWanFamily(family: string): boolean {
+  return family.trim().toLowerCase() === "wan";
 }
 
 export function isQwenImageEditFamily(family: string): boolean {

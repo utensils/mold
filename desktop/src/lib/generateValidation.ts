@@ -8,6 +8,7 @@ import {
   type ModelResolutionContract,
 } from "@studio/lib/resolutions";
 import { guidanceOverridesError } from "@studio/lib/guidanceOverrides";
+import { wanRecipeError } from "@studio/lib/wanRecipe";
 
 export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
 // JSON base64 expands bytes by roughly 4/3 and the server body limit is 64
@@ -161,6 +162,21 @@ function keyframePositionValidationError(form: GenerateForm): string | null {
   return new Set(form.keyframes.map((keyframe) => keyframe.frame)).size === form.keyframes.length
     ? null
     : "Each keyframe must use a unique frame position.";
+}
+
+/**
+ * Wan flow shift and distill strengths. Out-of-band values are dropped by the
+ * serializer rather than smuggled onto the wire, so the surface has to report
+ * them or the render would silently fall back to the tier's own values.
+ */
+export function wanRecipeValidationError(form: GenerateForm): string | null {
+  const caps = generationCapabilitiesForFamily(form.family, form.model);
+  if (!caps.wanRecipe.supported) return null;
+  return wanRecipeError(
+    caps.wanRecipe.supportsDistillStrength
+      ? form.wanRecipe
+      : { ...form.wanRecipe, distillStrengthHigh: null, distillStrengthLow: null },
+  );
 }
 
 export function advancedVideoValidationError(form: GenerateForm): string | null {

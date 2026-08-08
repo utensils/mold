@@ -1435,6 +1435,119 @@ describe("useGenerateForm — enableAudio (LTX-2 / LTX-2.3)", () => {
     form.state.value.enableAudio = true;
     expect(form.toRequest().enable_audio).toBe(true);
   });
+
+  it("omits every wan recipe field while the controls are untouched", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "wan22-t2v-a14b:q5",
+      modelFamily: "wan",
+    });
+
+    const wire = form.toRequest();
+    expect("sample_shift" in wire).toBe(false);
+    expect("distill_strength_high" in wire).toBe(false);
+    expect("distill_strength_low" in wire).toBe(false);
+    expect(wire.scheduler).toBeNull();
+  });
+
+  it("sends the wan recipe fields the user touched", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "wan22-t2v-a14b:q5",
+      modelFamily: "wan",
+      scheduler: "dpm-pp",
+      wanRecipe: {
+        sampleShift: 12,
+        distillStrengthHigh: 1.8,
+        distillStrengthLow: null,
+      },
+    });
+
+    const wire = form.toRequest();
+    expect(wire).toMatchObject({
+      scheduler: "dpm-pp",
+      sample_shift: 12,
+      distill_strength_high: 1.8,
+    });
+    expect("distill_strength_low" in wire).toBe(false);
+  });
+
+  it("never ships wan recipe fields for another family", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "ltx-2-19b-dev:fp8",
+      modelFamily: "ltx2",
+      wanRecipe: {
+        sampleShift: 12,
+        distillStrengthHigh: 1.8,
+        distillStrengthLow: 1,
+      },
+    });
+
+    const wire = form.toRequest();
+    expect("sample_shift" in wire).toBe(false);
+    expect("distill_strength_high" in wire).toBe(false);
+  });
+
+  it("drops distill strengths for a wan tier that ships no distill", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "wan22-t2v-a14b:q8",
+      modelFamily: "wan",
+      wanRecipe: {
+        sampleShift: 8,
+        distillStrengthHigh: 1.8,
+        distillStrengthLow: 1,
+      },
+    });
+
+    const wire = form.toRequest();
+    expect(wire.sample_shift).toBe(8);
+    expect("distill_strength_high" in wire).toBe(false);
+    expect("distill_strength_low" in wire).toBe(false);
+  });
+
+  it("clears the wan recipe when the selected model leaves the family", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "wan22-t2v-a14b:q5",
+      modelFamily: "wan",
+      wanRecipe: {
+        sampleShift: 12,
+        distillStrengthHigh: 1.8,
+        distillStrengthLow: 1,
+      },
+    });
+
+    form.applyModelDefaults(makeModel({ name: "sdxl:fp16", family: "sdxl" }));
+    expect(form.state.value.wanRecipe).toEqual({
+      sampleShift: null,
+      distillStrengthHigh: null,
+      distillStrengthLow: null,
+    });
+  });
+
+  it("keeps the shift but drops the strengths when moving to a tier without a distill", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "wan22-t2v-a14b:q5",
+      modelFamily: "wan",
+      wanRecipe: {
+        sampleShift: 12,
+        distillStrengthHigh: 1.8,
+        distillStrengthLow: 1,
+      },
+    });
+
+    form.applyModelDefaults(
+      makeModel({ name: "wan22-t2v-a14b:q8", family: "wan" }),
+    );
+    expect(form.state.value.wanRecipe).toEqual({
+      sampleShift: 12,
+      distillStrengthHigh: null,
+      distillStrengthLow: null,
+    });
+  });
 });
 
 describe("generate form serialization helpers", () => {
@@ -1626,6 +1739,57 @@ describe("generate form serialization helpers", () => {
       { path: "/loras/one.safetensors", scale: 0.8 },
       { path: "/loras/two.safetensors", scale: 1.1 },
     ]);
+  });
+
+  it("applyMetadataToForm restores the wan recipe a print was rendered with", () => {
+    const next = applyMetadataToForm(
+      makeForm(),
+      {
+        prompt: "a courtyard at dusk",
+        model: "wan22-t2v-a14b:q5",
+        seed: 7,
+        steps: 4,
+        guidance: 1,
+        width: 832,
+        height: 480,
+        scheduler: "euler",
+        sample_shift: 12,
+        distill_strength_high: 1.8,
+        distill_strength_low: 0.9,
+        version: "0.12.0",
+      },
+      { models: [makeModel({ name: "wan22-t2v-a14b:q5", family: "wan" })] },
+    );
+
+    expect(next.scheduler).toBe("euler");
+    expect(next.wanRecipe).toEqual({
+      sampleShift: 12,
+      distillStrengthHigh: 1.8,
+      distillStrengthLow: 0.9,
+    });
+  });
+
+  it("applyMetadataToForm leaves the wan recipe untouched for a print without one", () => {
+    const next = applyMetadataToForm(
+      makeForm(),
+      {
+        prompt: "a courtyard at dusk",
+        model: "wan22-t2v-a14b:q5",
+        seed: 7,
+        steps: 4,
+        guidance: 1,
+        width: 832,
+        height: 480,
+        version: "0.12.0",
+      },
+      { models: [makeModel({ name: "wan22-t2v-a14b:q5", family: "wan" })] },
+    );
+
+    expect(next.wanRecipe).toEqual({
+      sampleShift: null,
+      distillStrengthHigh: null,
+      distillStrengthLow: null,
+    });
   });
 
   it("applyMetadataToForm preserves H3 boundary provenance without bytes", () => {

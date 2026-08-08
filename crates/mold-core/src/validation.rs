@@ -1952,6 +1952,66 @@ fn validate_generate_request_after_activation(
         }
     }
 
+    // The scheduler slot is shared by two disjoint solver families (#795):
+    // wan's flow solvers are rejected off-family and the UNet schedulers are
+    // rejected for wan — at admission, not after the model loads.
+    match req.scheduler {
+        Some(crate::Scheduler::Euler | crate::Scheduler::DpmPp) if family != Some("wan") => {
+            return Err(format!(
+                "scheduler '{}' is a Wan sample solver and is only supported for wan models",
+                req.scheduler.expect("matched Some")
+            ));
+        }
+        Some(crate::Scheduler::Ddim | crate::Scheduler::EulerAncestral)
+            if family == Some("wan") =>
+        {
+            return Err(format!(
+                "Wan supports the uni-pc, euler, and dpm-pp sample solvers; '{}' is a UNet \
+                 scheduler",
+                req.scheduler.expect("matched Some")
+            ));
+        }
+        _ => {}
+    }
+
+    // Wan flow shift (#782): rejected, not ignored, off-family — a silently
+    // inert quality knob looks like the knob failing.
+    if let Some(shift) = req.sample_shift {
+        if family != Some("wan") {
+            return Err(
+                "sample_shift is a Wan flow-matching control and is not supported for this model"
+                    .to_string(),
+            );
+        }
+        if !shift.is_finite() || shift <= 0.0 {
+            return Err(format!(
+                "sample_shift must be finite and positive, got {shift}"
+            ));
+        }
+    }
+
+    // Wan Lightning distill strengths (#795): wan only, within the accepted
+    // band. Whether the model actually ships a distill in the addressed slot
+    // is the engine's check — it knows the resolved component paths.
+    for (label, value) in [
+        ("high", req.distill_strength_high),
+        ("low", req.distill_strength_low),
+    ] {
+        if let Some(strength) = value {
+            if family != Some("wan") {
+                return Err(format!(
+                    "distill_strength_{label} is a Wan Lightning control and is not supported \
+                     for this model"
+                ));
+            }
+            if !strength.is_finite() || strength <= 0.0 || strength > 4.0 {
+                return Err(format!(
+                    "distill_strength_{label} must be in (0, 4], got {strength}"
+                ));
+            }
+        }
+    }
+
     if family == Some("ltx2") {
         let audio_only = req.pipeline.is_some_and(Ltx2PipelineMode::is_audio_only);
         match (req.resolved_output_format(), audio_only) {
@@ -3063,6 +3123,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "a red apple".to_string(),
             negative_prompt: None,
             model: "test-model".to_string(),
@@ -4533,6 +4596,71 @@ mod tests {
             ExpandTask::for_generation("wan", &still_req),
             ExpandTask::TextToImage
         );
+    }
+
+    /// #782 / #795: the wan recipe knobs are admitted for wan and rejected —
+    /// never ignored — everywhere else, and the shared scheduler slot's two
+    /// solver families stay disjoint at admission.
+    #[test]
+    fn wan_recipe_knobs_gate_by_family() {
+        use crate::Scheduler;
+
+        // sample_shift: wan takes finite positive values only.
+        let mut wan = valid_req();
+        wan.model = "wan22-t2v-a14b:q8".to_string();
+        wan.output_format = Some(OutputFormat::Mp4);
+        wan.sample_shift = Some(12.0);
+        assert!(validate_generate_request(&wan).is_ok());
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            wan.sample_shift = Some(bad);
+            assert!(
+                validate_generate_request(&wan).is_err(),
+                "shift {bad} must be rejected"
+            );
+        }
+        wan.sample_shift = None;
+
+        // The wan solvers ride the scheduler slot; UNet schedulers are
+        // refused for wan and the wan solvers are refused off-family.
+        for solver in [Scheduler::UniPc, Scheduler::Euler, Scheduler::DpmPp] {
+            wan.scheduler = Some(solver);
+            assert!(
+                validate_generate_request(&wan).is_ok(),
+                "wan must accept {solver}"
+            );
+        }
+        for unet in [Scheduler::Ddim, Scheduler::EulerAncestral] {
+            wan.scheduler = Some(unet);
+            let err = validate_generate_request(&wan).unwrap_err();
+            assert!(err.contains("UNet scheduler"), "got: {err}");
+        }
+        wan.scheduler = None;
+
+        // Distill strengths: the community band is accepted, typos are not.
+        wan.distill_strength_high = Some(1.8);
+        wan.distill_strength_low = Some(1.0);
+        assert!(validate_generate_request(&wan).is_ok());
+        wan.distill_strength_high = Some(4.5);
+        assert!(validate_generate_request(&wan).is_err());
+        wan.distill_strength_high = Some(0.0);
+        assert!(validate_generate_request(&wan).is_err());
+
+        // Every knob is rejected, not ignored, for a non-wan family.
+        let mut flux = valid_req();
+        flux.sample_shift = Some(5.0);
+        let err = validate_generate_request(&flux).unwrap_err();
+        assert!(err.contains("sample_shift"), "got: {err}");
+        flux.sample_shift = None;
+        flux.distill_strength_high = Some(1.5);
+        let err = validate_generate_request(&flux).unwrap_err();
+        assert!(err.contains("distill_strength_high"), "got: {err}");
+        flux.distill_strength_high = None;
+        flux.scheduler = Some(Scheduler::Euler);
+        let err = validate_generate_request(&flux).unwrap_err();
+        assert!(err.contains("Wan sample solver"), "got: {err}");
+        // The UNet schedulers keep working off-family.
+        flux.scheduler = Some(Scheduler::Ddim);
+        assert!(validate_generate_request(&flux).is_ok());
     }
 
     /// Buckets are advertised per checkpoint: the 480p-only 1.3B and the

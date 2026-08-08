@@ -619,6 +619,7 @@ mod tests {
             batch: 3,
             format: mold_core::OutputFormat::Jpeg,
             scheduler: Some(mold_core::Scheduler::EulerAncestral),
+            sample_shift: None,
             inference_mode: crate::app::InferenceMode::Auto,
             host: None,
             target_host_name: None,

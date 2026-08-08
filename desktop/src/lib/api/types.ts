@@ -10,6 +10,7 @@ import type {
   GenerationReferenceMetadata,
 } from "@studio/lib/generationReferences";
 import type { Ltx2GuidanceOverrides } from "@studio/lib/guidanceOverrides";
+import type { GenerationScheduler } from "@studio/lib/generationCapabilities";
 import type { MiniMaxH3Capability } from "@studio/lib/minimaxH3Inventory";
 
 export interface GpuSnapshot {
@@ -218,9 +219,11 @@ export interface ModelEntry {
 
 export type OutputFormat = "png" | "jpeg" | "webp" | "gif" | "apng" | "mp4" | "wav";
 
-/** Scheduler override for UNet families (SD1.5, SDXL). Mirrors mold-core's
- * kebab-case enum; only these string variants are surfaced in the desktop UI. */
-export type Scheduler = "default" | "ddim" | "euler-ancestral" | "unipc";
+/** Solver override, spelled exactly as mold-core's kebab-case enum plus a
+ * `"default"` sentinel meaning "omit the field". `ddim` / `euler-ancestral`
+ * are UNet schedulers (SD1.5, SDXL) and `euler` / `dpm-pp` are wan's flow
+ * sample solvers; only `uni-pc` is accepted by both. */
+export type Scheduler = GenerationScheduler;
 
 // ── LTX-2 advanced video (mold-core `Ltx2*`, kebab-case on the wire) ────────
 
@@ -452,6 +455,12 @@ export interface GenerateRequest {
   temporal_upscale?: Ltx2TemporalUpscale;
   /** Optional LTX-2 guider overrides. Absent fields keep pipeline defaults. */
   guidance_overrides?: Ltx2GuidanceOverrides | null;
+  /** Wan flow shift (upstream `--sample_shift`) and the per-expert Lightning
+   * distill strengths. Absent keeps the resolved tier's own values; the server
+   * rejects — never ignores — any of them off-family. */
+  sample_shift?: number | null;
+  distill_strength_high?: number | null;
+  distill_strength_low?: number | null;
   placement?: DevicePlacement | null;
 }
 
@@ -621,6 +630,11 @@ export interface OutputMetadata {
   spatial_upscale?: Ltx2SpatialUpscale | null;
   temporal_upscale?: Ltx2TemporalUpscale | null;
   guidance_overrides?: Ltx2GuidanceOverrides | null;
+  /** Wan flow shift and per-expert distill strengths, recorded so Reuse
+   * settings restores exactly what the print was rendered with. */
+  sample_shift?: number | null;
+  distill_strength_high?: number | null;
+  distill_strength_low?: number | null;
   frames?: number | null;
   fps?: number | null;
   /** mold version that produced the print. */

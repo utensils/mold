@@ -8,6 +8,7 @@
 import { generationCapabilitiesForFamily } from "./capabilities";
 import type { GenerateForm } from "./generateForm";
 import { guidanceOverridesAreEmpty } from "@studio/lib/guidanceOverrides";
+import { wanRecipeCount } from "@studio/lib/wanRecipe";
 
 export function advancedActiveCount(form: GenerateForm): number {
   const caps = generationCapabilitiesForFamily(
@@ -20,6 +21,7 @@ export function advancedActiveCount(form: GenerateForm): number {
   if (caps.supportsNegativePrompt && form.negativePrompt.trim()) count += 1;
   if (caps.supportsScheduler && form.scheduler !== "default") count += 1;
   if (caps.supportsCfgPlus && form.cfgPlus) count += 1;
+  if (caps.wanRecipe.supported) count += wanRecipeCount(form.wanRecipe);
   if (caps.supportsImg2img && (form.sourceImage || form.imageAttachments.length > 0)) count += 1;
   if (caps.supportsLora && form.loras.length > 0) count += 1;
   if (!caps.supportsVideo && form.upscaleModel) count += 1;

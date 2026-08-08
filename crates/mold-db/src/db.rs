@@ -690,6 +690,9 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationRecord> 
     let scheduler = scheduler_s.as_deref().and_then(scheduler_from_str);
     let legacy_metadata = OutputMetadata {
         guidance_overrides: None,
+        sample_shift: None,
+        distill_strength_high: None,
+        distill_strength_low: None,
         model: row.get(7)?,
         prompt: row.get(8)?,
         negative_prompt: row.get(9)?,
@@ -793,6 +796,8 @@ fn scheduler_to_str(s: &Scheduler) -> &'static str {
         Scheduler::Ddim => "ddim",
         Scheduler::EulerAncestral => "euler-ancestral",
         Scheduler::UniPc => "uni-pc",
+        Scheduler::Euler => "euler",
+        Scheduler::DpmPp => "dpm-pp",
     }
 }
 
@@ -801,6 +806,8 @@ fn scheduler_from_str(s: &str) -> Option<Scheduler> {
         "ddim" => Scheduler::Ddim,
         "euler-ancestral" => Scheduler::EulerAncestral,
         "uni-pc" | "unipc" => Scheduler::UniPc,
+        "euler" => Scheduler::Euler,
+        "dpm-pp" | "dpm++" | "dpmpp" => Scheduler::DpmPp,
         _ => return None,
     })
 }
@@ -842,6 +849,9 @@ mod tests {
     fn meta() -> OutputMetadata {
         OutputMetadata {
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "a cat".into(),
             negative_prompt: Some("blurry".into()),
             original_prompt: None,

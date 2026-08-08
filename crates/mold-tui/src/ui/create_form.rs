@@ -216,6 +216,9 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
                 fields.push(ParamField::ModalityScale);
                 fields.push(ParamField::GuidanceSkip);
             }
+            if caps.supports_flow_shift {
+                fields.push(ParamField::SampleShift);
+            }
             fields
         }
     }
@@ -334,6 +337,9 @@ pub fn section_summary(sec: AdvSection, params: &GenerateParams, negative_empty:
             if guidance_count > 0 {
                 summary.push_str(&format!(" \u{00b7} guidance {guidance_count}"));
             }
+            if let Some(shift) = params.sample_shift {
+                summary.push_str(&format!(" \u{00b7} shift {shift:.1}"));
+            }
             summary
         }
     }
@@ -391,6 +397,9 @@ pub fn advanced_active_count(params: &GenerateParams, negative_empty: bool) -> u
         count += 1;
     }
     if params.temporal_upscale.is_some() {
+        count += 1;
+    }
+    if params.sample_shift.is_some() {
         count += 1;
     }
     count += guidance_override_count(params);
@@ -595,6 +604,34 @@ mod tests {
         assert!(!legacy_fields.contains(&ParamField::RescaleScale));
         assert!(!legacy_fields.contains(&ParamField::ModalityScale));
         assert!(!legacy_fields.contains(&ParamField::GuidanceSkip));
+    }
+
+    /// #782: the flow-shift row is wan's alone — the family upstream calls
+    /// `--sample_shift` its primary quality knob — and never leaks to the LTX
+    /// families or H3.
+    #[test]
+    fn wan_video_section_exposes_flow_shift_without_leaking_to_other_families() {
+        let wan = capabilities_for_family("wan");
+        let wan_fields = section_fields(AdvSection::Video, &wan);
+        assert!(wan_fields.contains(&ParamField::SampleShift));
+        assert!(!wan_fields.contains(&ParamField::StgScale));
+
+        for family in ["ltx2", "ltx-video", mold_core::minimax_h3::FAMILY, "flux"] {
+            let caps = capabilities_for_family(family);
+            assert!(
+                !section_fields(AdvSection::Video, &caps).contains(&ParamField::SampleShift),
+                "{family} must not offer the wan flow-shift row"
+            );
+        }
+
+        // Absent-until-touched: a fresh wan form shows no shift in the
+        // summary or the active count; a touched one shows both.
+        let mut params = fresh_params();
+        assert_eq!(advanced_active_count(&params, true), 0);
+        assert!(!section_summary(AdvSection::Video, &params, true).contains("shift"));
+        params.sample_shift = Some(12.0);
+        assert_eq!(advanced_active_count(&params, true), 1);
+        assert!(section_summary(AdvSection::Video, &params, true).contains("shift 12.0"));
     }
 
     #[test]

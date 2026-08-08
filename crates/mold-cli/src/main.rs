@@ -816,6 +816,36 @@ Examples:
         #[arg(long, value_name = "N", help_heading = "Video")]
         guidance_skip_step: Option<u32>,
 
+        /// Wan sample solver: unipc (default), euler, or dpm++ — upstream's
+        /// --sample_solver. euler is the solver the 4-step Lightning distills
+        /// were tuned for; dpm++ matches upstream's alternative grid.
+        #[arg(
+            long,
+            env = "MOLD_WAN_SOLVER",
+            value_parser = ["unipc", "euler", "dpm++", "dpmpp", "dpm-pp"],
+            help_heading = "Video",
+            conflicts_with = "scheduler"
+        )]
+        sample_solver: Option<String>,
+
+        /// Wan flow shift (upstream --sample_shift): the family's primary
+        /// quality/character knob. Overrides the per-tier default for this
+        /// run. Upstream ships 3.0-16 per task; Lightning wants 5, upstream
+        /// quality A14B T2V wants 12, ComfyUI templates ship 8.
+        #[arg(
+            long,
+            env = "MOLD_WAN_SHIFT",
+            value_name = "SHIFT",
+            help_heading = "Video"
+        )]
+        sample_shift: Option<f64>,
+
+        /// Wan Lightning distill strength: `high=X,low=Y` (either half
+        /// optional) or one number for both experts. The community's
+        /// reduced-motion mitigation runs high=1.5..2.0 with low=1.0.
+        #[arg(long, value_name = "SPEC", help_heading = "Video")]
+        distill_strength: Option<String>,
+
         /// Camera-control LoRA preset name or .safetensors path.
         ///
         /// Preset aliases (dolly-in, dolly-left, dolly-out, dolly-right,
@@ -1756,6 +1786,9 @@ async fn run() -> anyhow::Result<()> {
             rescale_scale,
             modality_scale,
             guidance_skip_step,
+            sample_solver,
+            sample_shift,
+            distill_strength,
             camera_control,
             host,
             format,
@@ -1925,6 +1958,11 @@ async fn run() -> anyhow::Result<()> {
                     rescale_scale,
                     modality_scale,
                     skip_step: guidance_skip_step,
+                },
+                commands::run::WanFlags {
+                    sample_solver,
+                    sample_shift,
+                    distill_strength,
                 },
                 camera_control,
                 host,

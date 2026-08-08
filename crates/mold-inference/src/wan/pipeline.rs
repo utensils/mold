@@ -48,7 +48,9 @@ use crate::wan::lora::WanLoraRegistry;
 use crate::wan::model::transformer::WanTransformer;
 use crate::wan::model::transformer::WanTransformerConfig;
 use crate::wan::model::vae::{WanVaeConfig, WanVideoVae};
-use crate::wan::sampler::{apply_cfg, FlowUniPc, WanSchedule, WanScheduleConfig};
+use crate::wan::sampler::{
+    apply_cfg, FlowDpmPp, FlowEuler, FlowUniPc, WanSchedule, WanScheduleConfig, WanSolver,
+};
 use crate::wan::text::umt5::WanTextEncoder;
 
 /// ComfyUI ships flow shift 8.0 in both its Wan 2.1 and Wan 2.2 templates.
@@ -299,11 +301,19 @@ pub(crate) fn detect_transformer_config(path: &Path) -> Result<WanTransformerCon
 /// value both upstream's own 480p path and the lightx2v four-step recipe use.
 const A14B_FLOW_SHIFT: f64 = 5.0;
 
-/// Resolve the flow shift, honouring `MOLD_WAN_SHIFT`.
+/// Resolve the flow shift: request > `MOLD_WAN_SHIFT` > per-tier default
+/// (#782). The request field arrives validated finite/positive; the env var
+/// is validated here because `mold serve` reads it process-wide.
 ///
 /// `two_expert` picks the A14B value: the pair is a different schedule shape
 /// from the single-expert checkpoints, not merely a bigger one.
-fn resolve_flow_shift(two_expert: bool) -> Result<f64> {
+fn resolve_flow_shift(request_shift: Option<f64>, two_expert: bool) -> Result<f64> {
+    if let Some(shift) = request_shift {
+        if !shift.is_finite() || shift <= 0.0 {
+            bail!("sample_shift must be finite and positive, got {shift}");
+        }
+        return Ok(shift);
+    }
     let default = if two_expert {
         A14B_FLOW_SHIFT
     } else {
@@ -320,6 +330,85 @@ fn resolve_flow_shift(two_expert: bool) -> Result<f64> {
         bail!("{FLOW_SHIFT_ENV} must be finite and positive, got {parsed}");
     }
     Ok(parsed)
+}
+
+/// Env fallback for the solver selection (#795); the request's `scheduler`
+/// slot wins.
+const SOLVER_ENV: &str = "MOLD_WAN_SOLVER";
+
+/// Which flow solver drives the denoise loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WanSolverKind {
+    UniPc,
+    Euler,
+    DpmPp,
+}
+
+impl WanSolverKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::UniPc => "unipc",
+            Self::Euler => "euler",
+            Self::DpmPp => "dpm++",
+        }
+    }
+}
+
+/// Resolve the solver: request `scheduler` > `MOLD_WAN_SOLVER` > FlowUniPC.
+///
+/// The UNet schedulers are rejected by name — admission already refuses them
+/// for wan, but forced-local callers can skip validation and a silently
+/// ignored selection would render with the wrong algorithm.
+fn resolve_wan_solver(
+    requested: Option<mold_core::Scheduler>,
+    _two_expert: bool,
+) -> Result<WanSolverKind> {
+    use mold_core::Scheduler;
+    if let Some(scheduler) = requested {
+        return match scheduler {
+            Scheduler::UniPc => Ok(WanSolverKind::UniPc),
+            Scheduler::Euler => Ok(WanSolverKind::Euler),
+            Scheduler::DpmPp => Ok(WanSolverKind::DpmPp),
+            Scheduler::Ddim | Scheduler::EulerAncestral => bail!(
+                "Wan supports the uni-pc, euler, and dpm-pp sample solvers; '{scheduler}' is a \
+                 UNet scheduler"
+            ),
+        };
+    }
+    let Ok(raw) = std::env::var(SOLVER_ENV) else {
+        return Ok(WanSolverKind::UniPc);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "unipc" | "uni-pc" | "uni_pc" => Ok(WanSolverKind::UniPc),
+        "euler" => Ok(WanSolverKind::Euler),
+        "dpm++" | "dpmpp" | "dpm-pp" | "dpm_pp" => Ok(WanSolverKind::DpmPp),
+        other => bail!("{SOLVER_ENV} must be unipc, euler, or dpm++, got {other:?}"),
+    }
+}
+
+/// Build the selected solver over its own grid: dpm++ uses upstream's
+/// `get_sampling_sigmas` layout, UniPC and euler share the diffusers/
+/// Lightning grid.
+fn build_wan_solver(kind: WanSolverKind, config: WanScheduleConfig) -> Result<WanSolver> {
+    Ok(match kind {
+        WanSolverKind::UniPc => WanSolver::UniPc(FlowUniPc::new(WanSchedule::new(config)?)),
+        WanSolverKind::Euler => WanSolver::Euler(FlowEuler::new(WanSchedule::new(config)?)),
+        WanSolverKind::DpmPp => WanSolver::DpmPp(FlowDpmPp::new(WanSchedule::dpmpp(config)?)),
+    })
+}
+
+/// Validate a distill-strength override (#795). Absent = 1.0; the accepted
+/// band covers the community's documented range with headroom (high 1.5-2.0
+/// is the reduced-motion mitigation) while refusing values that can only be
+/// typos.
+fn resolve_distill_strength(label: &str, requested: Option<f64>) -> Result<f64> {
+    let Some(strength) = requested else {
+        return Ok(1.0);
+    };
+    if !strength.is_finite() || strength <= 0.0 || strength > 4.0 {
+        bail!("distill_strength_{label} must be in (0, 4], got {strength}");
+    }
+    Ok(strength)
 }
 
 /// Reject the conditioning inputs this layer cannot honour.
@@ -544,7 +633,7 @@ struct DenoiseInputs<'a> {
     experts: &'a mut WanExperts,
     conditioning: &'a WanImageConditioning,
     schedule: &'a WanSchedule,
-    solver: &'a mut FlowUniPc,
+    solver: &'a mut WanSolver,
     latents: Tensor,
     cond_embeds: &'a Tensor,
     uncond_embeds: Option<&'a Tensor>,
@@ -839,12 +928,38 @@ impl WanEngine {
     ) -> Result<WanExperts> {
         let paths = &self.base.paths;
         let user_loras = normalize_loras(req);
-        let stack = |distill: Option<&Path>| -> Result<WanLoraRegistry> {
+        // Per-expert distill strengths (#795): the community's reduced-motion
+        // mitigation runs the high-noise adapter above 1.0. A strength on a
+        // model that ships no distill in that slot is refused, not ignored —
+        // a silently inert knob looks like the mitigation failing.
+        let distill_high = resolve_distill_strength("high", req.distill_strength_high)?;
+        let distill_low = resolve_distill_strength("low", req.distill_strength_low)?;
+        if req.distill_strength_high.is_some() && paths.distilled_lora.is_none() {
+            bail!(
+                "distill_strength_high was set, but {} ships no distill adapter (the quality \
+                 tier is undistilled)",
+                self.base.model_name
+            );
+        }
+        if req.distill_strength_low.is_some()
+            && (low_noise_expert.is_none() || paths.low_noise_distilled_lora.is_none())
+        {
+            bail!(
+                "distill_strength_low was set, but {} has no low-noise distill slot",
+                self.base.model_name
+            );
+        }
+        if distill_high != 1.0 || distill_low != 1.0 {
+            progress.info(&format!(
+                "Lightning distill strength: high {distill_high:.2}, low {distill_low:.2}"
+            ));
+        }
+        let stack = |distill: Option<&Path>, distill_scale: f64| -> Result<WanLoraRegistry> {
             let mut weights: Vec<mold_core::LoraWeight> = Vec::new();
             if let Some(path) = distill {
                 weights.push(mold_core::LoraWeight {
                     path: path.to_string_lossy().to_string(),
-                    scale: 1.0,
+                    scale: distill_scale,
                 });
             }
             weights.extend(user_loras.iter().cloned());
@@ -852,7 +967,7 @@ impl WanEngine {
         };
 
         let Some(low_noise_path) = low_noise_expert else {
-            let loras = stack(paths.distilled_lora.as_deref())?;
+            let loras = stack(paths.distilled_lora.as_deref(), distill_high)?;
             if !loras.is_empty() {
                 progress.info(&format!(
                     "Applying {} LoRA patch(es) across {} tensors",
@@ -887,11 +1002,11 @@ impl WanEngine {
         let pair = WanExpertPair {
             high_noise: WanExpertSlot {
                 path: paths.transformer.clone(),
-                loras: stack(paths.distilled_lora.as_deref())?,
+                loras: stack(paths.distilled_lora.as_deref(), distill_high)?,
             },
             low_noise: WanExpertSlot {
                 path: low_noise_path.to_path_buf(),
-                loras: stack(paths.low_noise_distilled_lora.as_deref())?,
+                loras: stack(paths.low_noise_distilled_lora.as_deref(), distill_low)?,
             },
             boundary_timestep: WanExpertPair::boundary_for(
                 shape == WanConditioningShape::ChannelConcat,
@@ -955,7 +1070,8 @@ impl WanEngine {
         let latent_frames = (num_frames as usize - 1) / VAE_TEMPORAL_COMPRESSION + 1;
         let latent_h = height as usize / vae_config.spatial_compression();
         let latent_w = width as usize / vae_config.spatial_compression();
-        let shift = resolve_flow_shift(low_noise_expert.is_some())?;
+        let shift = resolve_flow_shift(req.sample_shift, low_noise_expert.is_some())?;
+        let solver_kind = resolve_wan_solver(req.scheduler, low_noise_expert.is_some())?;
         let channel_concat = shape == WanConditioningShape::ChannelConcat;
         // The model's own advertised default decides whether the request's
         // scale means "I did not choose" — a community pair without a
@@ -982,7 +1098,8 @@ impl WanEngine {
         };
         progress.info(&format!(
             "Wan: {width}x{height} x {num_frames} frames @ {fps} fps, {steps} steps, \
-             guidance {guidance_label}, shift {shift:.1}, seed {seed}"
+             guidance {guidance_label}, shift {shift:.1}, solver {}, seed {seed}",
+            solver_kind.label()
         ));
         if let WanGuidancePlan::PerExpert { guidance, .. } = guidance_plan {
             progress.info(&format!(
@@ -1085,7 +1202,12 @@ impl WanEngine {
         // ------------------------------------------------------------------
         // 2. Denoise
         // ------------------------------------------------------------------
-        let schedule = WanSchedule::new(WanScheduleConfig::new(steps as usize, shift))?;
+        // The solver owns its grid: dpm++ lays sigmas out differently from
+        // the diffusers/Lightning grid UniPC and euler share (#795), so the
+        // schedule must come FROM the solver, never be built beside it.
+        let mut solver =
+            build_wan_solver(solver_kind, WanScheduleConfig::new(steps as usize, shift))?;
+        let schedule = solver.schedule().clone();
         let mut experts = self.resolve_experts(
             req,
             &transformer_config,
@@ -1095,8 +1217,6 @@ impl WanEngine {
             dtype,
             progress,
         )?;
-
-        let mut solver = FlowUniPc::new(schedule.clone());
         let latents = seeded_randn(
             seed,
             &[1, vae_config.z_dim, latent_frames, latent_h, latent_w],
@@ -1478,6 +1598,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "a cat".to_string(),
             negative_prompt: None,
             model: "wan21-t2v-1.3b:bf16".to_string(),
@@ -1810,20 +1933,31 @@ mod tests {
         // The env var is process-global; this test owns it for its duration.
         let previous = std::env::var(FLOW_SHIFT_ENV).ok();
         unsafe { std::env::remove_var(FLOW_SHIFT_ENV) };
-        assert_eq!(resolve_flow_shift(false).unwrap(), DEFAULT_FLOW_SHIFT);
+        assert_eq!(resolve_flow_shift(None, false).unwrap(), DEFAULT_FLOW_SHIFT);
         // The A14B pair is a different schedule shape, not a bigger one.
-        assert_eq!(resolve_flow_shift(true).unwrap(), A14B_FLOW_SHIFT);
+        assert_eq!(resolve_flow_shift(None, true).unwrap(), A14B_FLOW_SHIFT);
         assert_ne!(A14B_FLOW_SHIFT, DEFAULT_FLOW_SHIFT);
 
-        // An explicit override beats both defaults.
+        // A request-level shift (#782) wins outright.
+        assert_eq!(resolve_flow_shift(Some(12.0), true).unwrap(), 12.0);
+        for bad in [0.0, -2.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                resolve_flow_shift(Some(bad), false).is_err(),
+                "request shift {bad} must be rejected"
+            );
+        }
+
+        // The env override beats both defaults…
         unsafe { std::env::set_var(FLOW_SHIFT_ENV, "3.5") };
-        assert_eq!(resolve_flow_shift(false).unwrap(), 3.5);
-        assert_eq!(resolve_flow_shift(true).unwrap(), 3.5);
+        assert_eq!(resolve_flow_shift(None, false).unwrap(), 3.5);
+        assert_eq!(resolve_flow_shift(None, true).unwrap(), 3.5);
+        // …but never the request.
+        assert_eq!(resolve_flow_shift(Some(12.0), false).unwrap(), 12.0);
 
         for bad in ["", "abc", "0", "-2", "inf"] {
             unsafe { std::env::set_var(FLOW_SHIFT_ENV, bad) };
             assert!(
-                resolve_flow_shift(false).is_err(),
+                resolve_flow_shift(None, false).is_err(),
                 "{bad:?} must be rejected"
             );
         }
@@ -1831,6 +1965,76 @@ mod tests {
         match previous {
             Some(value) => unsafe { std::env::set_var(FLOW_SHIFT_ENV, value) },
             None => unsafe { std::env::remove_var(FLOW_SHIFT_ENV) },
+        }
+    }
+
+    /// Solver selection (#795): request wins, env falls back, default stays
+    /// FlowUniPC, and the UNet schedulers are refused by name.
+    #[test]
+    fn wan_solver_resolves_request_env_and_default() {
+        use mold_core::Scheduler;
+        let previous = std::env::var(SOLVER_ENV).ok();
+        unsafe { std::env::remove_var(SOLVER_ENV) };
+
+        assert_eq!(
+            resolve_wan_solver(None, false).unwrap(),
+            WanSolverKind::UniPc
+        );
+        assert_eq!(
+            resolve_wan_solver(Some(Scheduler::Euler), false).unwrap(),
+            WanSolverKind::Euler
+        );
+        assert_eq!(
+            resolve_wan_solver(Some(Scheduler::DpmPp), true).unwrap(),
+            WanSolverKind::DpmPp
+        );
+        assert_eq!(
+            resolve_wan_solver(Some(Scheduler::UniPc), false).unwrap(),
+            WanSolverKind::UniPc
+        );
+        for unet in [Scheduler::Ddim, Scheduler::EulerAncestral] {
+            let error = resolve_wan_solver(Some(unet), false)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("UNet scheduler"), "{error}");
+        }
+
+        unsafe { std::env::set_var(SOLVER_ENV, "euler") };
+        assert_eq!(
+            resolve_wan_solver(None, false).unwrap(),
+            WanSolverKind::Euler
+        );
+        // The request still wins over the env.
+        assert_eq!(
+            resolve_wan_solver(Some(Scheduler::DpmPp), false).unwrap(),
+            WanSolverKind::DpmPp
+        );
+        unsafe { std::env::set_var(SOLVER_ENV, "dpm++") };
+        assert_eq!(
+            resolve_wan_solver(None, false).unwrap(),
+            WanSolverKind::DpmPp
+        );
+        unsafe { std::env::set_var(SOLVER_ENV, "sgd") };
+        assert!(resolve_wan_solver(None, false).is_err());
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var(SOLVER_ENV, value) },
+            None => unsafe { std::env::remove_var(SOLVER_ENV) },
+        }
+    }
+
+    /// Distill strengths: absent = 1.0, the community band is accepted, and
+    /// typo-class values are refused.
+    #[test]
+    fn distill_strength_validates_the_community_band() {
+        assert_eq!(resolve_distill_strength("high", None).unwrap(), 1.0);
+        assert_eq!(resolve_distill_strength("high", Some(1.8)).unwrap(), 1.8);
+        assert_eq!(resolve_distill_strength("low", Some(0.5)).unwrap(), 0.5);
+        for bad in [0.0, -1.0, 4.5, f64::NAN, f64::INFINITY] {
+            assert!(
+                resolve_distill_strength("high", Some(bad)).is_err(),
+                "{bad} must be rejected"
+            );
         }
     }
 
@@ -2181,7 +2385,7 @@ mod tests {
 
         let context = Tensor::zeros((1, 6, 32), dtype, &device).unwrap();
         let schedule = WanSchedule::new(WanScheduleConfig::new(steps as usize, 8.0)).unwrap();
-        let mut solver = FlowUniPc::new(schedule.clone());
+        let mut solver = WanSolver::UniPc(FlowUniPc::new(schedule.clone()));
         let mut latents = seeded_randn(
             7,
             &[1, vae_config.z_dim, latent_frames, latent_h, latent_w],
@@ -2299,7 +2503,7 @@ mod tests {
             .expect("16-channel Wan checkpoints have a preview table")
             .force_enabled()
             .with_min_interval(std::time::Duration::ZERO);
-        let mut solver = FlowUniPc::new(schedule.clone());
+        let mut solver = WanSolver::UniPc(FlowUniPc::new(schedule.clone()));
         run_denoise_loop(DenoiseInputs {
             experts: &mut experts,
             conditioning: &WanImageConditioning::None,
@@ -2404,7 +2608,7 @@ mod tests {
 
         let (latent_frames, latent_h, latent_w) = (2usize, 4usize, 4usize);
         let schedule = WanSchedule::new(WanScheduleConfig::new(4, 8.0)).unwrap();
-        let mut solver = FlowUniPc::new(schedule.clone());
+        let mut solver = WanSolver::UniPc(FlowUniPc::new(schedule.clone()));
         let latents = seeded_randn(
             7,
             &[1, z, latent_frames, latent_h, latent_w],
@@ -2578,7 +2782,7 @@ mod tests {
             let context = Tensor::zeros((1, 6, 32), dtype, &device).unwrap();
             let schedule = WanSchedule::new(WanScheduleConfig::new(4, 8.0)).unwrap();
             // A fresh solver per source: `FlowUniPc` carries multistep history.
-            let mut solver = FlowUniPc::new(schedule.clone());
+            let mut solver = WanSolver::UniPc(FlowUniPc::new(schedule.clone()));
             let latents = seeded_randn(
                 7,
                 &[1, z, latent_frames, latent_h, latent_w],

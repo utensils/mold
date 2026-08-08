@@ -98,6 +98,9 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
 
     OutputMetadata {
         guidance_overrides: None,
+        sample_shift: None,
+        distill_strength_high: None,
+        distill_strength_low: None,
         prompt: String::new(),
         negative_prompt: None,
         original_prompt: None,

@@ -121,9 +121,15 @@ mod base64_required {
     }
 }
 
-/// Scheduler algorithm for UNet-based diffusion models (SD1.5, SDXL).
+/// Scheduler / solver selection.
 ///
-/// Flow-matching models (FLUX, SD3, Z-Image, Flux.2, Qwen-Image) ignore this setting.
+/// Two disjoint families share this wire slot:
+/// - `Ddim` / `EulerAncestral` / `UniPc` — UNet-based image models (SD1.5,
+///   SDXL). Flow-matching image models (FLUX, SD3, Z-Image, Flux.2,
+///   Qwen-Image) ignore those.
+/// - `Euler` / `DpmPp` — Wan's flow-matching sample solvers (upstream
+///   `--sample_solver`), alongside `UniPc` which doubles as Wan's default
+///   FlowUniPC. Validation rejects them for every non-wan family (#795).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Scheduler {
@@ -131,6 +137,13 @@ pub enum Scheduler {
     Ddim,
     EulerAncestral,
     UniPc,
+    /// Plain flow Euler over the diffusers/Lightning sigma grid — the solver
+    /// the lightx2v 4-step recipe specifies (wan only).
+    Euler,
+    /// Wan's `FlowDPMSolverMultistepScheduler` (`fm_solvers.py`), order 2,
+    /// dpmsolver++ midpoint, over upstream's `get_sampling_sigmas` grid
+    /// (wan only).
+    DpmPp,
 }
 
 impl std::fmt::Display for Scheduler {
@@ -139,6 +152,8 @@ impl std::fmt::Display for Scheduler {
             Scheduler::Ddim => write!(f, "ddim"),
             Scheduler::EulerAncestral => write!(f, "euler-ancestral"),
             Scheduler::UniPc => write!(f, "uni-pc"),
+            Scheduler::Euler => write!(f, "euler"),
+            Scheduler::DpmPp => write!(f, "dpm-pp"),
         }
     }
 }
@@ -157,8 +172,12 @@ impl std::str::FromStr for Scheduler {
                 Ok(Scheduler::EulerAncestral)
             }
             "uni-pc" | "unipc" | "uni_pc" => Ok(Scheduler::UniPc),
+            "euler" => Ok(Scheduler::Euler),
+            // `dpm++` is upstream Wan's spelling; kebab-case `dpm-pp` is the
+            // wire form.
+            "dpm-pp" | "dpm++" | "dpmpp" | "dpm_pp" => Ok(Scheduler::DpmPp),
             other => Err(format!(
-                "unknown scheduler: '{other}'. Valid: ddim, euler-ancestral, uni-pc"
+                "unknown scheduler: '{other}'. Valid: ddim, euler-ancestral, uni-pc, euler, dpm-pp"
             )),
         }
     }
@@ -1302,6 +1321,21 @@ pub struct GenerateRequest {
     /// the per-pipeline defaults, so omitting this preserves existing outputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guidance_overrides: Option<Ltx2GuidanceOverrides>,
+    /// Wan flow shift (upstream `--sample_shift`), the family's primary
+    /// quality/character knob (#782). Absent keeps the per-tier pipeline
+    /// defaults authoritative; precedence is request > `MOLD_WAN_SHIFT` >
+    /// per-tier default. Rejected, not ignored, for non-wan families.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_shift: Option<f64>,
+    /// Strength for the manifest-shipped Lightning distill on the A14B
+    /// high-noise expert (or a single-expert checkpoint's distill). Absent
+    /// = 1.0. The community's reduced-motion mitigation runs the high-noise
+    /// adapter at 1.5-2.0 (#795). Wan only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distill_strength_high: Option<f64>,
+    /// Strength for the low-noise expert's distill. Absent = 1.0. Wan only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distill_strength_low: Option<f64>,
     /// Optional per-component device placement override. `None` preserves
     /// the engine's VRAM-aware auto-placement end-to-end. See §3 of the
     /// 2026-04-19 model-ui-overhaul design doc.
@@ -1922,6 +1956,17 @@ pub struct OutputMetadata {
     pub temporal_upscale: Option<Ltx2TemporalUpscale>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guidance_overrides: Option<Ltx2GuidanceOverrides>,
+    /// Wan flow shift as requested (#782). Absent means the per-tier pipeline
+    /// default applied; Reuse settings restoring an absent field reproduces
+    /// the render as long as the defaults are unchanged, which is the same
+    /// contract every other absent knob keeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_shift: Option<f64>,
+    /// Wan Lightning distill strength overrides (#795). Absent = 1.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distill_strength_high: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distill_strength_low: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frames: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2039,6 +2084,9 @@ impl OutputMetadata {
             control_model: req.control_model.clone(),
             control_scale: (req.control_image.is_some() || req.control_model.is_some())
                 .then_some(req.control_scale),
+            sample_shift: req.sample_shift,
+            distill_strength_high: req.distill_strength_high,
+            distill_strength_low: req.distill_strength_low,
             upscale_model: req.upscale_model.clone(),
             gif_preview: req.gif_preview.then_some(true),
             enable_audio: req.enable_audio,
@@ -4055,6 +4103,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "a cat on Mars".to_string(),
             negative_prompt: None,
             model: "flux-schnell".to_string(),
@@ -4251,6 +4302,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "a cat".to_string(),
             negative_prompt: Some("blurry, low quality".to_string()),
             model: "sd15:fp16".to_string(),
@@ -4314,6 +4368,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "test".to_string(),
@@ -4374,6 +4431,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "flux-schnell:q8".to_string(),
@@ -4449,6 +4509,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "flux-dev:q8".to_string(),
@@ -4661,6 +4724,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "a cat".to_string(),
             negative_prompt: Some("blurry, ugly".to_string()),
             model: "sd15:fp16".to_string(),
@@ -4721,6 +4787,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "sd15:fp16".to_string(),
@@ -4784,6 +4853,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "video".to_string(),
             negative_prompt: Some("blur".to_string()),
             model: "ltx-2.3-22b-distilled:fp8".to_string(),
@@ -5397,6 +5469,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "test".to_string(),
@@ -5463,6 +5538,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "qwen-image-edit-2511:q4".to_string(),
@@ -5542,6 +5620,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "test".to_string(),
@@ -5606,6 +5687,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "test".to_string(),
@@ -5733,6 +5817,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "test".to_string(),
             negative_prompt: None,
             model: "test".to_string(),

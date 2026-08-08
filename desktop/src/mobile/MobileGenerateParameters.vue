@@ -32,6 +32,7 @@ import {
   cameraControlValidationError,
   fpsValidationError,
   inlineGenerationMediaBytes,
+  wanRecipeValidationError,
   MAX_INLINE_GENERATION_MEDIA_BYTES,
   MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
   type InlineGenerationMediaField,
@@ -59,6 +60,12 @@ import {
   MAX_GUIDANCE_SKIP_STEP,
   type Ltx2GuidanceOverridesState,
 } from "@studio/lib/guidanceOverrides";
+import { schedulerLabel } from "@studio/lib/generationCapabilities";
+import {
+  MAX_WAN_DISTILL_STRENGTH,
+  wanRecipeCount,
+  type WanRecipeState,
+} from "@studio/lib/wanRecipe";
 import {
   LIP_DUB_TIMING_HINT,
   isControlAdapterPipeline,
@@ -205,12 +212,12 @@ function snapFramesField(): void {
       : Math.max(frameMinimum.value, snapVideoFrames(props.form.frames, videoContract.value));
 }
 
-const schedulerLabels: Record<string, string> = {
-  default: "Default",
-  ddim: "DDIM",
-  "euler-ancestral": "Euler ancestral",
-  unipc: "UniPC",
-};
+const wanRecipe = computed<WanRecipeState>(() => props.form.wanRecipe);
+const wanRecipeActive = computed(() => wanRecipeCount(wanRecipe.value));
+const wanRecipeMessage = computed(() => wanRecipeValidationError(props.form));
+function setWanRecipe(next: Partial<WanRecipeState>): void {
+  props.form.wanRecipe = { ...wanRecipe.value, ...next };
+}
 
 const cameraMode = ref(cameraMotionMode(props.form.cameraControl));
 watch(
@@ -568,14 +575,108 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         </div>
       </div>
 
-      <label v-if="caps.supportsScheduler" class="field mobile-generate-field">
+      <label
+        v-if="caps.supportsScheduler && !caps.wanRecipe.supported"
+        class="field mobile-generate-field"
+      >
         <span>Scheduler</span>
         <select v-model="form.scheduler" class="control" data-test="mobile-scheduler">
           <option v-for="option in caps.schedulerOptions" :key="option" :value="option">
-            {{ schedulerLabels[option] ?? option }}
+            {{ schedulerLabel(option) }}
           </option>
         </select>
       </label>
+
+      <!--
+        Wan's solver writes the same `scheduler` field the generic row above
+        owns, so only one of the two ever renders; it sits with the flow shift
+        and distill strengths it is tuned alongside.
+      -->
+      <template v-if="caps.wanRecipe.supported">
+        <label class="field mobile-generate-field">
+          <span>
+            Sample solver
+            <span
+              v-if="wanRecipeActive"
+              class="mobile-generate-inline-count"
+              data-test="mobile-wan-recipe-count"
+              >{{ wanRecipeActive }}</span
+            >
+          </span>
+          <select v-model="form.scheduler" class="control" data-test="mobile-wan-solver">
+            <option v-for="option in caps.schedulerOptions" :key="option" :value="option">
+              {{ schedulerLabel(option) }}
+            </option>
+          </select>
+        </label>
+        <label class="field mobile-generate-field">
+          <span>Flow shift</span>
+          <input
+            class="control"
+            type="number"
+            inputmode="decimal"
+            step="0.5"
+            min="0"
+            placeholder="Model default"
+            data-test="mobile-wan-sample-shift"
+            :value="wanRecipe.sampleShift ?? ''"
+            @input="
+              setWanRecipe({ sampleShift: numberOrNull(($event.target as HTMLInputElement).value) })
+            "
+          />
+        </label>
+        <p class="mobile-generate-note">
+          Empty keeps this model's own flow shift and distill strengths.
+        </p>
+        <div v-if="caps.wanRecipe.supportsDistillStrength" class="mobile-generate-field-grid">
+          <label class="field mobile-generate-field">
+            <span>High-noise distill</span>
+            <input
+              class="control"
+              type="number"
+              inputmode="decimal"
+              step="0.1"
+              min="0"
+              :max="MAX_WAN_DISTILL_STRENGTH"
+              placeholder="1.0"
+              data-test="mobile-wan-distill-high"
+              :value="wanRecipe.distillStrengthHigh ?? ''"
+              @input="
+                setWanRecipe({
+                  distillStrengthHigh: numberOrNull(($event.target as HTMLInputElement).value),
+                })
+              "
+            />
+          </label>
+          <label class="field mobile-generate-field">
+            <span>Low-noise distill</span>
+            <input
+              class="control"
+              type="number"
+              inputmode="decimal"
+              step="0.1"
+              min="0"
+              :max="MAX_WAN_DISTILL_STRENGTH"
+              placeholder="1.0"
+              data-test="mobile-wan-distill-low"
+              :value="wanRecipe.distillStrengthLow ?? ''"
+              @input="
+                setWanRecipe({
+                  distillStrengthLow: numberOrNull(($event.target as HTMLInputElement).value),
+                })
+              "
+            />
+          </label>
+        </div>
+        <p
+          v-if="wanRecipeMessage"
+          class="mobile-generate-validation"
+          role="alert"
+          data-test="mobile-wan-recipe-error"
+        >
+          {{ wanRecipeMessage }}
+        </p>
+      </template>
 
       <label
         v-if="caps.supportsCfgPlus"

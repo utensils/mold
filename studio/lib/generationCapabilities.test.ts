@@ -3,6 +3,8 @@ import {
   baseGenerationCapabilities,
   isAdvancedVideoFamily,
   isImageConditionedVideoFamily,
+  isWanFamily,
+  schedulerLabel,
 } from "./generationCapabilities";
 
 describe("baseGenerationCapabilities", () => {
@@ -114,8 +116,71 @@ describe("baseGenerationCapabilities", () => {
       "default",
       "ddim",
       "euler-ancestral",
-      "unipc",
+      "uni-pc",
     ]);
+  });
+
+  it("offers wan its sample solvers and no UNet scheduler", () => {
+    // The two sets are disjoint on the server: validation rejects `ddim` /
+    // `euler-ancestral` for wan and rejects `euler` / `dpm-pp` everywhere
+    // else. `uni-pc` is the one solver both sides accept.
+    expect(baseGenerationCapabilities("wan").schedulerOptions).toEqual([
+      "default",
+      "uni-pc",
+      "euler",
+      "dpm-pp",
+    ]);
+    expect(baseGenerationCapabilities("wan").supportsScheduler).toBe(true);
+    for (const family of ["sd15", "sdxl"]) {
+      const options = baseGenerationCapabilities(family).schedulerOptions;
+      expect(options).not.toContain("euler");
+      expect(options).not.toContain("dpm-pp");
+    }
+  });
+
+  it("gates the wan recipe controls on family and distill tier", () => {
+    // Flow shift and the solver apply to every wan checkpoint; the per-expert
+    // distill strengths only to the A14B tiers that actually ship a Lightning
+    // adapter, which is what the engine checks against the resolved paths.
+    for (const model of ["wan22-t2v-a14b:q5", "wan22-i2v-a14b:q4"]) {
+      expect(baseGenerationCapabilities("wan", model).wanRecipe).toEqual({
+        supported: true,
+        supportsDistillStrength: true,
+      });
+    }
+    for (const model of [
+      "wan22-t2v-a14b:q8",
+      "wan22-ti2v-5b:fp16",
+      "wan21-t2v-1.3b:bf16",
+      "hf:opaque/wan-checkpoint",
+    ]) {
+      expect(baseGenerationCapabilities("wan", model).wanRecipe).toEqual({
+        supported: true,
+        supportsDistillStrength: false,
+      });
+    }
+    // Off-family the whole group is unavailable — the server rejects every one
+    // of these fields for a non-wan model rather than ignoring it.
+    for (const family of ["ltx2", "flux", "sdxl", "minimax-h3"]) {
+      expect(baseGenerationCapabilities(family).wanRecipe).toEqual({
+        supported: false,
+        supportsDistillStrength: false,
+      });
+    }
+  });
+
+  it("names every solver the same way on every surface", () => {
+    expect(schedulerLabel("uni-pc")).toBe("UniPC");
+    expect(schedulerLabel("dpm-pp")).toBe("DPM++");
+    expect(schedulerLabel("euler-ancestral")).toBe("Euler ancestral");
+    // An unknown value from a newer server renders verbatim, never blank.
+    expect(schedulerLabel("res-multistep")).toBe("res-multistep");
+  });
+
+  it("recognizes the wan family regardless of casing and padding", () => {
+    expect(isWanFamily(" WAN ")).toBe(true);
+    expect(isWanFamily("wan21")).toBe(false);
+    expect(isWanFamily("")).toBe(false);
   });
 
   it("resolves LTX guidance from both checkpoint and explicit pipeline", () => {

@@ -891,6 +891,9 @@ mod tests {
     fn output_metadata(prompt: &str) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: prompt.into(),
             negative_prompt: None,
             original_prompt: None,
@@ -8123,6 +8126,9 @@ mod tests {
         let db = MetadataDb::open(&db_path).unwrap();
         let metadata = mold_core::OutputMetadata {
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "from db".into(),
             negative_prompt: None,
             original_prompt: None,
@@ -9032,6 +9038,9 @@ mod tests {
         let db = MetadataDb::open(&dir.path().join("mold.db")).unwrap();
         let metadata = mold_core::OutputMetadata {
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "doomed".into(),
             negative_prompt: None,
             original_prompt: None,

@@ -364,6 +364,9 @@ mod tests {
         let tensor = solid_red_tensor(4, 4);
         let metadata = OutputMetadata {
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "hello \u{2603}".to_string(),
             negative_prompt: None,
             original_prompt: None,
@@ -456,6 +459,9 @@ mod tests {
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "a cat".to_string(),
             negative_prompt: None,
             model: "flux-schnell:q8".to_string(),
@@ -514,6 +520,9 @@ mod tests {
     fn test_update_output_metadata_size_overrides_dimensions() {
         let mut metadata = Some(OutputMetadata {
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "a cat".to_string(),
             negative_prompt: None,
             original_prompt: None,
@@ -576,6 +585,9 @@ mod tests {
     fn test_metadata() -> OutputMetadata {
         OutputMetadata {
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "hello world".to_string(),
             negative_prompt: None,
             original_prompt: None,
@@ -731,6 +743,9 @@ mod tests {
         let tensor = solid_red_tensor(8, 8);
         let metadata = OutputMetadata {
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "a cat & a dog <br>".to_string(),
             negative_prompt: None,
             original_prompt: None,

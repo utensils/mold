@@ -10,6 +10,8 @@ import type {
   Ltx2GuidanceOverrides,
   Ltx2GuidanceOverridesState,
 } from "@studio/lib/guidanceOverrides";
+import type { GenerationScheduler } from "@studio/lib/generationCapabilities";
+import type { WanRecipeState } from "@studio/lib/wanRecipe";
 
 export type { SourceFitPolicy } from "@studio/lib/sourceFit";
 
@@ -38,14 +40,15 @@ export interface TimeRange {
   end_seconds: number;
 }
 
+/** Mirrors `mold-core`'s kebab-case `Scheduler` plus a `"default"` sentinel
+ * meaning "omit the field". `ddim` / `euler-ancestral` are UNet schedulers and
+ * `euler` / `dpm-pp` are wan sample solvers; only `uni-pc` is valid for both.
+ * The object forms are the serde-tagged shapes older metadata may carry. */
 export type Scheduler =
-  | "default"
-  | "ddim"
-  | "euler-ancestral"
-  | "unipc"
+  | GenerationScheduler
   | { ddim: unknown }
   | { "euler-ancestral": unknown }
-  | { unipc: unknown };
+  | { "uni-pc": unknown };
 
 export interface OutputMetadata {
   prompt: string;
@@ -100,6 +103,11 @@ export interface OutputMetadata {
   spatial_upscale?: Ltx2SpatialUpscale | null;
   temporal_upscale?: Ltx2TemporalUpscale | null;
   guidance_overrides?: Ltx2GuidanceOverrides | null;
+  /** Wan flow shift and per-expert distill strengths, recorded so Reuse
+   * settings restores exactly what the print was rendered with. */
+  sample_shift?: number | null;
+  distill_strength_high?: number | null;
+  distill_strength_low?: number | null;
   frames?: number | null;
   fps?: number | null;
   version: string;
@@ -309,6 +317,12 @@ export interface GenerateRequestWire {
   spatial_upscale?: Ltx2SpatialUpscale | null;
   temporal_upscale?: Ltx2TemporalUpscale | null;
   guidance_overrides?: Ltx2GuidanceOverrides | null;
+  /** Wan flow shift (upstream `--sample_shift`) and the per-expert Lightning
+   * distill strengths. Absent keeps the resolved tier's own values; the
+   * server rejects — never ignores — any of them off-family. */
+  sample_shift?: number | null;
+  distill_strength_high?: number | null;
+  distill_strength_low?: number | null;
 }
 
 export interface ModelDefaults {
@@ -900,6 +914,11 @@ export interface GenerateFormState {
    * object and the render on its pipeline defaults. Optional because saved
    * templates predate the field and are restored verbatim. */
   guidanceOverrides?: Ltx2GuidanceOverridesState;
+  /** Wan flow shift and per-expert distill strengths. Null until touched for
+   * the same reason as `guidanceOverrides`: the field must stay off the wire
+   * so the resolved tier keeps its own value. Optional because saved
+   * templates predate it. */
+  wanRecipe?: WanRecipeState;
   /** LTX-2 camera preset id or an explicit .safetensors LoRA path. */
   cameraControl: string | null;
   placement: DevicePlacement | null;

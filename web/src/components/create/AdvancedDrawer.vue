@@ -41,6 +41,14 @@ import {
   generationCapabilitiesForFamily,
   isFlux2DevModel,
 } from "../../lib/generateCapabilities";
+import { schedulerLabel } from "@studio/lib/generationCapabilities";
+import {
+  MAX_WAN_DISTILL_STRENGTH,
+  emptyWanRecipe,
+  wanRecipeCount,
+  wanRecipeError,
+  type WanRecipeState,
+} from "@studio/lib/wanRecipe";
 import { outputFormatsForFamily } from "../../composables/useGenerateForm";
 import { blobToBase64 } from "../../lib/base64";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
@@ -225,8 +233,13 @@ function setH3Authoring(value: MinimaxH3AuthoringState) {
 }
 const formats = computed(() => outputFormatsForFamily(props.family));
 
+// Wan puts its solver in the recipe section below, next to the flow shift it
+// belongs with, so the generic section would otherwise render a second picker
+// onto the same field.
 const showScheduler = computed(
-  () => caps.value.supportsScheduler || caps.value.supportsCfgPlus,
+  () =>
+    (caps.value.supportsScheduler && !caps.value.wanRecipe.supported) ||
+    caps.value.supportsCfgPlus,
 );
 const showPlacement = computed(() => props.placementGpus.length > 0);
 
@@ -248,7 +261,7 @@ const schedulerName = computed(() =>
     : "default",
 );
 const schedulerSummary = computed(() =>
-  caps.value.supportsScheduler ? schedulerName.value : "CFG++",
+  caps.value.supportsScheduler ? schedulerLabel(schedulerName.value) : "CFG++",
 );
 
 function patch(next: Partial<GenerateFormState>) {
@@ -258,6 +271,33 @@ function patch(next: Partial<GenerateFormState>) {
 // ── Scheduler & sampling ──────────────────────────────────────────────
 function setScheduler(value: string) {
   patch({ scheduler: value as Scheduler });
+}
+
+// ── Wan sampler recipe ────────────────────────────────────────────────
+// Every control writes null when cleared: the engine keeps the resolved
+// tier's shift and distill strengths only while the field is absent from the
+// request, so a cleared box must not serialize as 0.
+const wanRecipe = computed<WanRecipeState>(
+  () => props.modelValue.wanRecipe ?? emptyWanRecipe(),
+);
+const wanRecipeActive = computed(() => wanRecipeCount(wanRecipe.value));
+const wanRecipeMessage = computed(() => wanRecipeError(wanRecipe.value));
+const wanRecipeSummary = computed(() =>
+  wanRecipeActive.value
+    ? `${wanRecipeActive.value} set · ${schedulerLabel(schedulerName.value)}`
+    : schedulerLabel(schedulerName.value),
+);
+function setWanRecipe(next: Partial<WanRecipeState>) {
+  patch({ wanRecipe: { ...wanRecipe.value, ...next } });
+}
+function resetWanRecipe() {
+  patch({ wanRecipe: emptyWanRecipe() });
+}
+function numberOrNull(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (trimmed === "") return null;
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : null;
 }
 
 // ── Negative prompt ───────────────────────────────────────────────────
@@ -447,6 +487,7 @@ function resetAdvanced() {
     retakeRange: null,
     spatialUpscale: null,
     temporalUpscale: null,
+    wanRecipe: emptyWanRecipe(),
   });
 }
 
@@ -737,7 +778,7 @@ function setSequenceCameraMode(mode: string) {
               @change="setScheduler(($event.target as HTMLSelectElement).value)"
             >
               <option v-for="s in schedulerChoices" :key="s" :value="s">
-                {{ s }}
+                {{ schedulerLabel(s) }}
               </option>
             </select>
           </div>
@@ -750,6 +791,118 @@ function setSequenceCameraMode(mode: string) {
               @update:model-value="patch({ cfgPlus: $event })"
             />
           </div>
+        </AccordionSection>
+
+        <AccordionSection
+          v-if="caps.wanRecipe.supported"
+          icon="scheduler"
+          title="Sampler recipe"
+          :summary="wanRecipeSummary"
+          :open="true"
+          :header-interactive="false"
+          data-test="section-wan-recipe"
+        >
+          <div class="adv__field">
+            <label class="adv__label">Sample solver</label>
+            <select
+              class="adv__select"
+              data-test="wan-solver-select"
+              :value="schedulerName"
+              @change="setScheduler(($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="s in schedulerChoices" :key="s" :value="s">
+                {{ schedulerLabel(s) }}
+              </option>
+            </select>
+          </div>
+          <div class="adv__field">
+            <label class="adv__label">Flow shift</label>
+            <input
+              class="adv__input"
+              type="number"
+              inputmode="decimal"
+              step="0.5"
+              min="0"
+              placeholder="Model default"
+              data-test="wan-sample-shift"
+              :value="wanRecipe.sampleShift ?? ''"
+              @input="
+                setWanRecipe({
+                  sampleShift: numberOrNull(
+                    ($event.target as HTMLInputElement).value,
+                  ),
+                })
+              "
+            />
+            <p class="adv__hint">
+              Higher shift spends more steps on structure. Empty keeps this
+              model's own value.
+            </p>
+          </div>
+          <div
+            v-if="caps.wanRecipe.supportsDistillStrength"
+            class="adv__field adv__pair"
+          >
+            <label class="adv__label">
+              High-noise distill
+              <input
+                class="adv__input"
+                type="number"
+                inputmode="decimal"
+                step="0.1"
+                min="0"
+                :max="MAX_WAN_DISTILL_STRENGTH"
+                placeholder="1.0"
+                data-test="wan-distill-high"
+                :value="wanRecipe.distillStrengthHigh ?? ''"
+                @input="
+                  setWanRecipe({
+                    distillStrengthHigh: numberOrNull(
+                      ($event.target as HTMLInputElement).value,
+                    ),
+                  })
+                "
+              />
+            </label>
+            <label class="adv__label">
+              Low-noise distill
+              <input
+                class="adv__input"
+                type="number"
+                inputmode="decimal"
+                step="0.1"
+                min="0"
+                :max="MAX_WAN_DISTILL_STRENGTH"
+                placeholder="1.0"
+                data-test="wan-distill-low"
+                :value="wanRecipe.distillStrengthLow ?? ''"
+                @input="
+                  setWanRecipe({
+                    distillStrengthLow: numberOrNull(
+                      ($event.target as HTMLInputElement).value,
+                    ),
+                  })
+                "
+              />
+            </label>
+          </div>
+          <p
+            v-if="wanRecipeMessage"
+            class="adv__error"
+            role="alert"
+            data-test="wan-recipe-error"
+          >
+            {{ wanRecipeMessage }}
+          </p>
+          <button
+            v-if="wanRecipeActive"
+            type="button"
+            class="adv__reset"
+            data-test="wan-recipe-reset"
+            @click="resetWanRecipe"
+          >
+            Reset recipe
+          </button>
         </AccordionSection>
 
         <AccordionSection
@@ -1360,6 +1513,30 @@ function setSequenceCameraMode(mode: string) {
   font-size: 10.5px;
   color: var(--ink-3);
   margin-top: 6px;
+}
+.adv__pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.adv__label .adv__input {
+  margin-top: 6px;
+}
+.adv__error {
+  font-size: 11.5px;
+  color: var(--stop);
+  margin-top: 6px;
+}
+.adv__reset {
+  margin-top: 10px;
+  background: transparent;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+  color: var(--ink-2);
+  cursor: pointer;
+  font-size: 11px;
+  height: 28px;
+  padding: 0 10px;
 }
 .adv__controlnet {
   margin-top: 14px;

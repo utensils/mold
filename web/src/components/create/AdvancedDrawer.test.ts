@@ -772,6 +772,77 @@ describe("AdvancedDrawer interactions", () => {
     expect(next.negativePrompt).toBe("");
   });
 
+  it("gives wan its sampler recipe and no second scheduler picker", async () => {
+    const wrapper = factory("wan", { model: "wan22-t2v-a14b:q5" });
+    // The solver writes the same `scheduler` field the generic section owns,
+    // so exactly one picker for it may ever render.
+    expect(wrapper.find("[data-test='scheduler-select']").exists()).toBe(false);
+    const solver = wrapper.get("[data-test='wan-solver-select']");
+    expect(solver.findAll("option").map((o) => o.text())).toEqual([
+      "Default",
+      "UniPC",
+      "Euler",
+      "DPM++",
+    ]);
+    expect(wrapper.find("[data-test='wan-sample-shift']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='wan-distill-high']").exists()).toBe(true);
+
+    await solver.setValue("dpm-pp");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.scheduler).toBe("dpm-pp");
+  });
+
+  it("hides the distill strengths on a wan tier that ships no distill", () => {
+    const wrapper = factory("wan", { model: "wan22-ti2v-5b:fp16" });
+    expect(wrapper.find("[data-test='wan-sample-shift']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='wan-distill-high']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='wan-distill-low']").exists()).toBe(false);
+  });
+
+  it("hides the sampler recipe entirely off-family", () => {
+    for (const family of ["sdxl", "ltx2", "flux"]) {
+      const wrapper = factory(family);
+      expect(wrapper.find("[data-test='section-wan-recipe']").exists()).toBe(
+        false,
+      );
+    }
+  });
+
+  it("leaves the flow shift absent until it is typed into", async () => {
+    const wrapper = factory("wan", { model: "wan22-t2v-a14b:q5" });
+    const shift = wrapper.get("[data-test='wan-sample-shift']");
+    expect((shift.element as HTMLInputElement).value).toBe("");
+
+    await shift.setValue("12");
+    let [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.wanRecipe?.sampleShift).toBe(12);
+
+    // Clearing it must return to absent, not zero — zero is a value the engine
+    // would apply.
+    await wrapper.setProps({ modelValue: next });
+    await wrapper.get("[data-test='wan-sample-shift']").setValue("");
+    [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.wanRecipe?.sampleShift).toBeNull();
+  });
+
+  it("names the out-of-band distill strength inline", async () => {
+    const wrapper = factory("wan", { model: "wan22-t2v-a14b:q5" });
+    await wrapper.get("[data-test='wan-distill-high']").setValue("9");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    await wrapper.setProps({ modelValue: next });
+    expect(wrapper.get("[data-test='wan-recipe-error']").text()).toBe(
+      "High-noise distill strength must be at most 4.",
+    );
+  });
+
   it("emits close from Done in the phone sheet", async () => {
     // Inline (desktop) has no Done — it's always visible. The Done button
     // lives only in the phone Advanced sheet (mobile: true).

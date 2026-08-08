@@ -425,6 +425,9 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         hdr_exr_dir: None,
         hdr_exr_full_float: false,
         guidance_overrides: None,
+        sample_shift: None,
+        distill_strength_high: None,
+        distill_strength_low: None,
         prompt: params.prompt.to_string(),
         negative_prompt: if is_h3 {
             None

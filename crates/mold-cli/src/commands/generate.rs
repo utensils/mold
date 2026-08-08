@@ -299,6 +299,11 @@ pub struct Ltx2Options {
     /// Advanced multimodal-guider overrides. `None` keeps every pipeline
     /// constant, which is what makes existing seeds reproducible.
     pub guidance_overrides: Option<Ltx2GuidanceOverrides>,
+    /// Wan flow shift (#782). `None` keeps the per-tier default.
+    pub sample_shift: Option<f64>,
+    /// Wan Lightning distill strengths (#795). `None` = 1.0.
+    pub distill_strength_high: Option<f64>,
+    pub distill_strength_low: Option<f64>,
     /// Display-safe first-frame provenance. Never a client path.
     pub source_image_name: Option<String>,
     /// Payload-free ordered H3 Ref2VA descriptors.
@@ -378,6 +383,9 @@ pub async fn run(
         spatial_upscale,
         temporal_upscale,
         guidance_overrides,
+        sample_shift,
+        distill_strength_high,
+        distill_strength_low,
         source_image_name,
         references,
         reference_uploads,
@@ -598,6 +606,9 @@ pub async fn run(
                         hdr_exr_dir: Some(dir.clone()),
                         hdr_exr_full_float,
                         guidance_overrides: None,
+                        sample_shift: None,
+                        distill_strength_high: None,
+                        distill_strength_low: None,
                         prompt: prompt.to_string(),
                         negative_prompt: None,
                         model: model.to_string(),
@@ -734,6 +745,9 @@ pub async fn run(
         hdr_exr_dir,
         hdr_exr_full_float,
         guidance_overrides,
+        sample_shift,
+        distill_strength_high,
+        distill_strength_low,
         prompt: prompt.to_string(),
         negative_prompt: effective_negative_prompt.clone(),
         model: model.to_string(),
@@ -3241,6 +3255,9 @@ mod tests {
                 spatial_upscale: None,
                 temporal_upscale: None,
                 guidance_overrides: None,
+                sample_shift: None,
+                distill_strength_high: None,
+                distill_strength_low: None,
                 source_image_name: None,
                 references: None,
                 reference_uploads: Vec::new(),

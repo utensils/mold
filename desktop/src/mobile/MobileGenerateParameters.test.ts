@@ -183,6 +183,51 @@ describe("MobileGenerateParameters", () => {
     );
   });
 
+  it("swaps the scheduler row for wan's sampler recipe", async () => {
+    const { wrapper, form } = mountParameters(formFor("wan", "wan22-t2v-a14b:q5"));
+
+    // One control per wire field: the solver row replaces the generic
+    // scheduler row rather than adding a second writer of `scheduler`.
+    expect(wrapper.find("[data-test='mobile-scheduler']").exists()).toBe(false);
+    const solver = wrapper.get("[data-test='mobile-wan-solver']");
+    expect(solver.findAll("option").map((option) => option.text())).toEqual([
+      "Default",
+      "UniPC",
+      "Euler",
+      "DPM++",
+    ]);
+    await solver.setValue("euler");
+    expect(form.scheduler).toBe("euler");
+
+    const shift = wrapper.get("[data-test='mobile-wan-sample-shift']");
+    expect((shift.element as HTMLInputElement).value).toBe("");
+    await shift.setValue("12");
+    expect(form.wanRecipe.sampleShift).toBe(12);
+    await shift.setValue("");
+    expect(form.wanRecipe.sampleShift).toBeNull();
+
+    await wrapper.get("[data-test='mobile-wan-distill-high']").setValue("1.8");
+    expect(form.wanRecipe.distillStrengthHigh).toBe(1.8);
+    expect(wrapper.get("[data-test='mobile-wan-recipe-count']").text()).toBe("1");
+
+    await wrapper.get("[data-test='mobile-wan-distill-low']").setValue("9");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-wan-recipe-error']").text()).toBe(
+      "Low-noise distill strength must be at most 4.",
+    );
+  });
+
+  it("hides the wan distill strengths on a tier that ships none, and the recipe off-family", () => {
+    const quality = mountParameters(formFor("wan", "wan22-ti2v-5b:fp16"));
+    expect(quality.wrapper.find("[data-test='mobile-wan-sample-shift']").exists()).toBe(true);
+    expect(quality.wrapper.find("[data-test='mobile-wan-distill-high']").exists()).toBe(false);
+    quality.wrapper.unmount();
+
+    const sd15 = mountParameters(formFor("sd15"));
+    expect(sd15.wrapper.find("[data-test='mobile-wan-solver']").exists()).toBe(false);
+    expect(sd15.wrapper.find("[data-test='mobile-wan-sample-shift']").exists()).toBe(false);
+  });
+
   it("validates video frames and explains automatic long-video routing", async () => {
     const chain = mountParameters(formFor("ltx2", "ltx-2-19b-distilled:fp8"));
     const child = chain.wrapper.getComponent(MobileGenerateParameters);

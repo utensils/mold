@@ -102,6 +102,7 @@ import {
   guidanceValidationError,
   resolutionValidationError,
   stepsValidationError,
+  wanRecipeValidationError,
 } from "../lib/generateValidation";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
@@ -519,7 +520,8 @@ const formValidationError = computed(
     (caps.value.supportsVideo ? fpsValidationError(form.fps) : null) ??
     cameraControlValidationError(form) ??
     audioOutputValidationError(form) ??
-    advancedVideoValidationError(form),
+    advancedVideoValidationError(form) ??
+    wanRecipeValidationError(form),
 );
 /** Over-budget video frames on a non-chainable model would fail server-side —
  *  the drawer shows the reason under Frames; this blocks the submit. */

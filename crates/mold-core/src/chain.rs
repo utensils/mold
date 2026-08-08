@@ -687,6 +687,9 @@ impl ChainRequest {
             // wire field to carry an override, so recording one here would
             // claim a setting the render never used.
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             placement: self.placement.clone(),
         }
     }
