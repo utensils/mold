@@ -15,6 +15,10 @@ mod model;
 mod presentation;
 mod processor;
 mod qwen_nvfp4;
+// The private-artifact runtime is intentionally not wired into a public
+// factory until the separate compliance activation lands.
+#[allow(dead_code)]
+mod qwen_nvfp4_runtime;
 mod qwen_quant;
 mod text;
 mod vision;

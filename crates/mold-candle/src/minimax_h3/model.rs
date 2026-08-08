@@ -3,7 +3,7 @@ use candle_nn::VarBuilder;
 
 use super::artifacts::ConditionerWeightLayout;
 use super::config::{H3ConditionerConfig, H3_SELECTED_LANGUAGE_LAYERS};
-use super::text::{Qwen3VlTextDimensions, Qwen3VlTextEncoder};
+use super::text::{Qwen3VlNvfp4Weights, Qwen3VlTextDimensions, Qwen3VlTextEncoder};
 use super::vision::{Qwen3VlVisionDimensions, Qwen3VlVisionModel};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -104,89 +104,155 @@ impl H3Layer50Conditioner {
         input: &H3ConditionerInput,
         checkpoint: &mut dyn FnMut(ConditionerCheckpoint) -> Result<()>,
     ) -> Result<Tensor> {
-        let (input_batch, input_sequence) = input.input_ids.dims2()?;
-        if input_batch != 1 {
-            candle::bail!(
-                "H3 conditioner accepts one packed presentation, got batch {input_batch}"
-            );
-        }
-        if input_sequence == 0 {
-            candle::bail!(
-                "the raw H3 presentation tokenized to an empty sequence; no special token is inserted"
-            );
-        }
-        checkpoint(ConditionerCheckpoint::TokenEmbedding)?;
-        let mut embeddings = self.text.embed_tokens(&input.input_ids)?;
-        let (batch, sequence, hidden) = embeddings.dims3()?;
-        if input.position_ids.dims() != [3, batch, sequence] {
-            candle::bail!(
-                "H3 Qwen position ids have shape {:?}, expected ({}, {}, {})",
-                input.position_ids.dims(),
-                3,
-                batch,
-                sequence
-            );
-        }
-
-        let mut image_deepstack = None;
-        let mut video_deepstack = None;
-        let mut image_indices = Vec::new();
-        let mut video_indices = Vec::new();
-
-        if let Some(image) = &input.image {
-            let (features, deepstack) =
-                self.vision
-                    .forward(&image.pixel_values, &image.grid_thw, checkpoint)?;
-            image_indices = matching_token_indices(&input.input_ids, 151_655)?;
-            embeddings = replace_rows(
-                &embeddings,
-                &image_indices,
-                &features
-                    .to_device(embeddings.device())?
-                    .to_dtype(embeddings.dtype())?,
-                hidden,
-            )?;
-            image_deepstack = Some(deepstack);
-        }
-        if let Some(video) = &input.video {
-            let (features, deepstack) =
-                self.vision
-                    .forward(&video.pixel_values, &video.grid_thw, checkpoint)?;
-            video_indices = matching_token_indices(&input.input_ids, 151_656)?;
-            embeddings = replace_rows(
-                &embeddings,
-                &video_indices,
-                &features
-                    .to_device(embeddings.device())?
-                    .to_dtype(embeddings.dtype())?,
-                hidden,
-            )?;
-            video_deepstack = Some(deepstack);
-        }
-
-        if input.image.is_none() && !matching_token_indices(&input.input_ids, 151_655)?.is_empty() {
-            candle::bail!("H3 presentation contains image pads without image processor tensors");
-        }
-        if input.video.is_none() && !matching_token_indices(&input.input_ids, 151_656)?.is_empty() {
-            candle::bail!("H3 presentation contains video pads without video processor tensors");
-        }
-
-        let (visual_indices, deepstack) = merge_deepstack(
-            embeddings.device(),
-            embeddings.dtype(),
-            image_indices,
-            image_deepstack,
-            video_indices,
-            video_deepstack,
-        )?;
-        self.text.forward_embeds(
-            embeddings,
-            &input.position_ids,
-            &visual_indices,
-            deepstack.as_deref(),
-            checkpoint,
-        )
+        encode_conditioner(&self.text, &self.vision, input, checkpoint)
     }
+}
+
+/// Internal mixed-storage conditioner for the authenticated Comfy Qwen
+/// NVFP4-AWQ object. It is not registered with any Mold engine or capability.
+#[allow(dead_code)]
+pub(super) struct H3QwenNvfp4Layer50Conditioner {
+    text: Qwen3VlTextEncoder,
+    vision: Qwen3VlVisionModel,
+    dtype_profile: H3DTypeProfile,
+}
+
+#[allow(dead_code)]
+impl H3QwenNvfp4Layer50Conditioner {
+    pub(super) fn new(
+        config: &H3ConditionerConfig,
+        dense_vb: VarBuilder,
+        text_weights: Qwen3VlNvfp4Weights,
+    ) -> Result<Self> {
+        config
+            .validate()
+            .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        let vision_dimensions = Qwen3VlVisionDimensions::from_h3(config);
+        let text_dimensions = Qwen3VlTextDimensions::from_h3(config);
+        let parameter_dtype = dense_vb.dtype();
+        let vision = Qwen3VlVisionModel::new(&vision_dimensions, dense_vb.pp("visual"))?;
+        let text =
+            Qwen3VlTextEncoder::new_nvfp4(&text_dimensions, dense_vb.pp("model"), text_weights)?;
+        Ok(Self {
+            text,
+            vision,
+            dtype_profile: H3DTypeProfile {
+                parameter_dtype,
+                vision_input_dtype: DType::F32,
+                rotary_compute_dtype: DType::F32,
+                vision_attention_dtype: parameter_dtype,
+                language_attention_dtype: parameter_dtype,
+                attention_softmax_dtype: DType::F32,
+                output_dtype: parameter_dtype,
+            },
+        })
+    }
+
+    pub fn dtype_profile(&self) -> H3DTypeProfile {
+        self.dtype_profile
+    }
+
+    pub fn resident_language_layers(&self) -> usize {
+        self.text.layer_count()
+    }
+
+    pub fn encode(
+        &self,
+        input: &H3ConditionerInput,
+        checkpoint: &mut dyn FnMut(ConditionerCheckpoint) -> Result<()>,
+    ) -> Result<Tensor> {
+        encode_conditioner(&self.text, &self.vision, input, checkpoint)
+    }
+
+    pub(crate) fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
+        self.text.embed_tokens(input_ids)
+    }
+}
+
+fn encode_conditioner(
+    text: &Qwen3VlTextEncoder,
+    vision: &Qwen3VlVisionModel,
+    input: &H3ConditionerInput,
+    checkpoint: &mut dyn FnMut(ConditionerCheckpoint) -> Result<()>,
+) -> Result<Tensor> {
+    let (input_batch, input_sequence) = input.input_ids.dims2()?;
+    if input_batch != 1 {
+        candle::bail!("H3 conditioner accepts one packed presentation, got batch {input_batch}");
+    }
+    if input_sequence == 0 {
+        candle::bail!(
+            "the raw H3 presentation tokenized to an empty sequence; no special token is inserted"
+        );
+    }
+    checkpoint(ConditionerCheckpoint::TokenEmbedding)?;
+    let mut embeddings = text.embed_tokens(&input.input_ids)?;
+    let (batch, sequence, hidden) = embeddings.dims3()?;
+    if input.position_ids.dims() != [3, batch, sequence] {
+        candle::bail!(
+            "H3 Qwen position ids have shape {:?}, expected ({}, {}, {})",
+            input.position_ids.dims(),
+            3,
+            batch,
+            sequence
+        );
+    }
+
+    let mut image_deepstack = None;
+    let mut video_deepstack = None;
+    let mut image_indices = Vec::new();
+    let mut video_indices = Vec::new();
+
+    if let Some(image) = &input.image {
+        let (features, deepstack) =
+            vision.forward(&image.pixel_values, &image.grid_thw, checkpoint)?;
+        image_indices = matching_token_indices(&input.input_ids, 151_655)?;
+        embeddings = replace_rows(
+            &embeddings,
+            &image_indices,
+            &features
+                .to_device(embeddings.device())?
+                .to_dtype(embeddings.dtype())?,
+            hidden,
+        )?;
+        image_deepstack = Some(deepstack);
+    }
+    if let Some(video) = &input.video {
+        let (features, deepstack) =
+            vision.forward(&video.pixel_values, &video.grid_thw, checkpoint)?;
+        video_indices = matching_token_indices(&input.input_ids, 151_656)?;
+        embeddings = replace_rows(
+            &embeddings,
+            &video_indices,
+            &features
+                .to_device(embeddings.device())?
+                .to_dtype(embeddings.dtype())?,
+            hidden,
+        )?;
+        video_deepstack = Some(deepstack);
+    }
+
+    if input.image.is_none() && !matching_token_indices(&input.input_ids, 151_655)?.is_empty() {
+        candle::bail!("H3 presentation contains image pads without image processor tensors");
+    }
+    if input.video.is_none() && !matching_token_indices(&input.input_ids, 151_656)?.is_empty() {
+        candle::bail!("H3 presentation contains video pads without video processor tensors");
+    }
+
+    let (visual_indices, deepstack) = merge_deepstack(
+        embeddings.device(),
+        embeddings.dtype(),
+        image_indices,
+        image_deepstack,
+        video_indices,
+        video_deepstack,
+    )?;
+    text.forward_embeds(
+        embeddings,
+        &input.position_ids,
+        &visual_indices,
+        deepstack.as_deref(),
+        checkpoint,
+    )
 }
 
 fn matching_token_indices(input_ids: &Tensor, token_id: u32) -> Result<Vec<usize>> {

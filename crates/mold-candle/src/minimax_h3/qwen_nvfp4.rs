@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use super::artifacts::{expected_checkpoint_shapes, expected_materialized_keys};
@@ -222,7 +222,7 @@ pub enum H3QwenNvfp4AwqError {
     Io(String),
 }
 
-fn released_config() -> Result<H3ConditionerConfig, H3QwenNvfp4AwqError> {
+pub(crate) fn released_config() -> Result<H3ConditionerConfig, H3QwenNvfp4AwqError> {
     H3ConditionerConfig::from_json(
         br#"{
           "architectures":["Qwen3VLForConditionalGeneration"],
@@ -660,19 +660,126 @@ fn file_identity(metadata: &Metadata) -> FileIdentity {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct H3SafetensorsTensorHeader {
-    dtype: String,
-    shape: Vec<usize>,
-    data_offsets: [u64; 2],
+pub(crate) struct H3SafetensorsTensorHeader {
+    pub(crate) dtype: String,
+    pub(crate) shape: Vec<usize>,
+    pub(crate) data_offsets: [u64; 2],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct H3SafetensorsHeader {
-    tensors: BTreeMap<String, H3SafetensorsTensorHeader>,
-    header_len: u64,
-    file_len: u64,
+    pub(crate) tensors: BTreeMap<String, H3SafetensorsTensorHeader>,
+    pub(crate) header_len: u64,
+    pub(crate) file_len: u64,
     bytes: Vec<u8>,
     has_metadata: bool,
+}
+
+/// One exact regular-file descriptor bound to a successfully inspected H3
+/// Qwen object. This is crate-internal so schema inspection cannot be mistaken
+/// for public model activation authority.
+pub(crate) struct OpenedH3QwenNvfp4AwqArtifact {
+    file: File,
+    path: PathBuf,
+    identity: FileIdentity,
+    header: H3SafetensorsHeader,
+    policy: H3QwenNvfp4AwqPolicy,
+    inspection: H3QwenNvfp4AwqInspection,
+}
+
+impl OpenedH3QwenNvfp4AwqArtifact {
+    pub(crate) fn inspection(&self) -> &H3QwenNvfp4AwqInspection {
+        &self.inspection
+    }
+
+    pub(crate) fn policy(&self) -> &H3QwenNvfp4AwqPolicy {
+        &self.policy
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn tensors(&self) -> &BTreeMap<String, H3SafetensorsTensorHeader> {
+        &self.header.tensors
+    }
+
+    pub(crate) fn revalidate(&self, operation: &str) -> Result<(), H3QwenNvfp4AwqError> {
+        checked_open_identity(&self.file, &self.identity, operation)?;
+        checked_path_identity(&self.path, Some(&self.identity), operation)?;
+        Ok(())
+    }
+
+    pub(crate) fn authenticate_full_sha256(
+        &mut self,
+        checkpoint: &mut dyn FnMut(u64, u64) -> Result<(), H3QwenNvfp4AwqError>,
+    ) -> Result<(), H3QwenNvfp4AwqError> {
+        const READ_CHUNK_BYTES: usize = 1024 * 1024;
+        self.revalidate("before full artifact authentication")?;
+        self.file
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
+        let mut digest = Sha256::new();
+        let mut buffer = vec![0_u8; READ_CHUNK_BYTES];
+        let mut completed = 0_u64;
+        while completed < self.identity.len {
+            let remaining = self.identity.len - completed;
+            let length = usize::try_from(remaining.min(READ_CHUNK_BYTES as u64))
+                .expect("the read length is bounded to one MiB");
+            self.file
+                .read_exact(&mut buffer[..length])
+                .map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
+            digest.update(&buffer[..length]);
+            completed += length as u64;
+            checkpoint(completed, self.identity.len)?;
+        }
+        self.revalidate("after full artifact authentication")?;
+        let actual = hex_digest(digest.finalize());
+        if actual != H3_QWEN_NVFP4_AWQ_SHA256 {
+            return Err(H3QwenNvfp4AwqError::Accounting(format!(
+                "artifact SHA-256 {actual}, expected {H3_QWEN_NVFP4_AWQ_SHA256}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_tensor_bytes(
+        &mut self,
+        name: &str,
+        checkpoint: &mut dyn FnMut(u64, u64) -> Result<(), H3QwenNvfp4AwqError>,
+    ) -> Result<Vec<u8>, H3QwenNvfp4AwqError> {
+        const READ_CHUNK_BYTES: usize = 1024 * 1024;
+        let tensor =
+            self.header.tensors.get(name).cloned().ok_or_else(|| {
+                H3QwenNvfp4AwqError::TensorSchema(format!("missing tensor {name:?}"))
+            })?;
+        let length_u64 = tensor.data_offsets[1] - tensor.data_offsets[0];
+        let length = usize::try_from(length_u64).map_err(|_| {
+            H3QwenNvfp4AwqError::Io(format!("tensor {name:?} byte length overflows usize"))
+        })?;
+        let offset = 8_u64
+            .checked_add(self.header.header_len)
+            .and_then(|offset| offset.checked_add(tensor.data_offsets[0]))
+            .ok_or_else(|| {
+                H3QwenNvfp4AwqError::Io(format!("tensor {name:?} file offset overflows"))
+            })?;
+        self.revalidate(&format!("before reading tensor {name:?}"))?;
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
+        let mut bytes = vec![0_u8; length];
+        let mut completed = 0_usize;
+        while completed < length {
+            let end = completed.saturating_add(READ_CHUNK_BYTES).min(length);
+            self.file
+                .read_exact(&mut bytes[completed..end])
+                .map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
+            completed = end;
+            checkpoint(completed as u64, length_u64)?;
+        }
+        self.revalidate(&format!("after reading tensor {name:?}"))?;
+        Ok(bytes)
+    }
 }
 
 struct UniqueH3SafetensorsHeader(BTreeMap<String, serde_json::Value>);
@@ -867,13 +974,22 @@ fn read_h3_safetensors_header(
 pub fn inspect_h3_qwen_nvfp4_awq_header(
     path: &Path,
 ) -> Result<H3QwenNvfp4AwqInspection, H3QwenNvfp4AwqError> {
+    open_h3_qwen_nvfp4_awq_artifact(path).map(|artifact| artifact.inspection)
+}
+
+pub(crate) fn open_h3_qwen_nvfp4_awq_artifact(
+    path: &Path,
+) -> Result<OpenedH3QwenNvfp4AwqArtifact, H3QwenNvfp4AwqError> {
     let before = checked_path_identity(path, None, "before bounded inspection")?;
-    let mut file = File::open(path).map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
+    let path =
+        std::fs::canonicalize(path).map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
+    checked_path_identity(&path, Some(&before), "after resolving artifact path")?;
+    let mut file = File::open(&path).map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
     checked_open_identity(&file, &before, "after opening artifact")?;
-    checked_path_identity(path, Some(&before), "after opening artifact")?;
+    checked_path_identity(&path, Some(&before), "after opening artifact")?;
     let header = read_h3_safetensors_header(&mut file, before.len)?;
     checked_open_identity(&file, &before, "after header inspection")?;
-    checked_path_identity(path, Some(&before), "after header inspection")?;
+    checked_path_identity(&path, Some(&before), "after header inspection")?;
     if header.file_len != H3_QWEN_NVFP4_AWQ_FILE_BYTES
         || header.header_len != H3_QWEN_NVFP4_AWQ_HEADER_BYTES
         || header.tensors.len() != H3_QWEN_NVFP4_AWQ_TENSOR_COUNT
@@ -939,8 +1055,8 @@ pub fn inspect_h3_qwen_nvfp4_awq_header(
         ));
     }
     checked_open_identity(&file, &before, "after marker inspection")?;
-    checked_path_identity(path, Some(&before), "after marker inspection")?;
-    Ok(H3QwenNvfp4AwqInspection {
+    checked_path_identity(&path, Some(&before), "after marker inspection")?;
+    let inspection = H3QwenNvfp4AwqInspection {
         stable_id: H3_QWEN_NVFP4_AWQ_STABLE_ID.into(),
         expected_artifact_sha256: H3_QWEN_NVFP4_AWQ_SHA256.into(),
         artifact_file_bytes: header.file_len,
@@ -955,6 +1071,14 @@ pub fn inspect_h3_qwen_nvfp4_awq_header(
             .count(),
         header_identity_sha256: hex_digest(Sha256::digest(&header.bytes)),
         policy_sha256: policy.policy_sha256().into(),
+    };
+    Ok(OpenedH3QwenNvfp4AwqArtifact {
+        file,
+        path,
+        identity: before,
+        header,
+        policy,
+        inspection,
     })
 }
 
@@ -967,7 +1091,7 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
     use std::fs::OpenOptions;
@@ -1074,7 +1198,7 @@ mod tests {
         path
     }
 
-    fn sparse_published_fixture() -> PathBuf {
+    pub(crate) fn sparse_published_fixture() -> PathBuf {
         sparse_published_fixture_with_metadata(false)
     }
 
