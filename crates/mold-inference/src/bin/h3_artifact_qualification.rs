@@ -1,4 +1,4 @@
-//! Private MiniMax H3 artifact qualification on access-controlled Plato.
+//! Private MiniMax H3 artifact qualification on the authorized private host.
 //!
 //! The binary is unreachable without `dev-bins,h3-private-uat`, refuses every
 //! host/root outside the authorization record, never constructs an engine, and
@@ -18,7 +18,7 @@ fn usage() -> &'static str {
     "usage: h3_artifact_qualification --models-root \
      /storage/jamesbrink/mold-uat/minimax-h3/models --model \
      <minimax-h3-fl2va:comfy-pruned-int8|minimax-h3-ref2va:comfy-pruned-int8> \
-     --authorization-scope private-plato-uat"
+     --authorization-scope private-h3-uat"
 }
 
 fn parse_args() -> Result<(PathBuf, String, String)> {

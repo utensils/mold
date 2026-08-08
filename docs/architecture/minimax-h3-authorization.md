@@ -6,7 +6,7 @@ Ordinary Mold builds do not currently activate, advertise, download, or execute
 MiniMax H3. On 2026-08-08, the project maintainer accepted a direct attestation
 that MiniMax granted permission to integrate H3 with Mold. That evidence is
 accepted only for a private, access-controlled implementation and qualification
-campaign on project-controlled Plato storage and compute. It is not accepted as
+campaign on project-controlled private storage and compute. It is not accepted as
 authority for public product activation, distribution, redistribution, hosted
 access, or third-party use.
 
@@ -40,8 +40,8 @@ change the H3 authorization gate.
 The current decision permits:
 
 - direct download of revision-pinned official or Comfy H3 artifacts into the
-  private, access-controlled Plato qualification root;
-- private local inference and benign UAT on Plato by the project maintainer;
+  private qualification root on the authorized host;
+- private local inference and benign UAT on that host by the project maintainer;
 - private conformance outputs and fixtures needed to compare Mold with the
   pinned official and Comfy implementations; and
 - static source review, small textual repository metadata, weight-free
@@ -80,14 +80,14 @@ not the private correspondence itself.
 
 | Field                  | Current record                                                                                                                                                                                           |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Decision               | Private implementation and qualification on access-controlled Plato are authorized; every public product path remains fail-closed                                                                       |
+| Decision               | Private implementation and qualification on the authorized private host are permitted; every public product path remains fail-closed                                                                   |
 | Decision owner         | James Brink, `utensils/mold` maintainer                                                                                                                                                                  |
 | Revocation owner       | James Brink, `utensils/mold` maintainer                                                                                                                                                                  |
 | Last review            | 2026-08-08                                                                                                                                                                                               |
 | License revision       | `bfc8ed0353f5a9733be73e6b2c98ec0948195b86`; LICENSE SHA-256 `59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44`                                                                         |
 | Authorization evidence | Maintainer attestation that MiniMax authorized H3 integration with Mold; corroborating image SHA-256 `8cd4d6e52cff34d7d39721ebab13b8c1187aa87aafc1c4ae2a16609186f22f1d`; direct grant retained privately |
-| Permitted artifacts    | Revision-pinned official and Comfy H3 artifacts downloaded directly to the private Plato qualification root; private benign outputs and conformance evidence                                              |
-| Permitted users        | Project maintainer operating access-controlled Plato only                                                                                                                                               |
+| Permitted artifacts    | Revision-pinned official and Comfy H3 artifacts downloaded directly to the private qualification root; private benign outputs and conformance evidence                                                    |
+| Permitted users        | Project maintainer operating authorized private host only                                                                                                                                               |
 | Prohibited scope       | Third-party access; public/hosted product activation; distribution or redistribution; public weights, headers, outputs, fixtures, manifests, URLs, or release capabilities                               |
 | Expiry/revocation      | Immediate on MiniMax revocation, narrowed authority, license/Q&A change, loss of access control, or maintainer decision                                                                                   |
 | Next mandatory review  | Any upstream license/Q&A revision, scope expansion, proposed public artifact or service, new operator/host/territory, or release touching H3                                                             |

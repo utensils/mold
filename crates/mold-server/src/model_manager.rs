@@ -3513,7 +3513,7 @@ mod tests {
         );
     }
 
-    /// Plato regression: qwen-image:bf16 (≈41 GB sharded transformer) on an
+    /// private UAT host regression: qwen-image:bf16 (≈41 GB sharded transformer) on an
     /// idle 46 GB L40S was rejected — generic sequential peak (~44 GB with
     /// the 2 GB flat headroom + activation) exceeded the 90% cap (~41.4 GB)
     /// even though the denoise phase only co-resides transformer +

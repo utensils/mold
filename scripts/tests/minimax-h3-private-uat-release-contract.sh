@@ -32,8 +32,11 @@ require_text crates/mold-inference/src/minimax_h3/private_qwen_support.rs \
   '"mold.minimax-h3.private-uat-qwen-support-loader.v1"' \
   "the private H3 Qwen support loader has no release-rejectable claim marker"
 require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
-  'pub const H3_PRIVATE_HOST: &str = "plato";' \
-  "private H3 qualification is not bound to the authorized host"
+  'pub const H3_PRIVATE_HOST_AUTHORITY_SHA256: &str =' \
+  "private H3 qualification is not bound to an opaque authorized-host identity"
+require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
+  'pub const H3_PRIVATE_AUTHORIZATION_SCOPE: &str = "private-h3-uat";' \
+  "private H3 qualification does not use the generic private authorization scope"
 require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
   '"/storage/jamesbrink/mold-uat/minimax-h3/models"' \
   "private H3 qualification is not bound to the reviewed storage root"
