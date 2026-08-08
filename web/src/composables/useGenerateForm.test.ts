@@ -658,6 +658,30 @@ describe("useGenerateForm", () => {
     expect(form.state.value.fps).toBe(30);
   });
 
+  it("applyModelDefaults clears a scheduler the new family's options reject", () => {
+    const form = useGenerateForm();
+    // A UNet scheduler carried into wan is a server-side rejection, not a
+    // no-op: both families support "a scheduler", but their option sets are
+    // disjoint apart from uni-pc.
+    form.state.value.scheduler = "ddim";
+    form.applyModelDefaults(
+      makeModel({ name: "wan22-t2v-a14b:q4", family: "wan" }),
+    );
+    expect(form.state.value.scheduler).toBeNull();
+
+    // A wan solver carried back into an SD family is cleared the same way…
+    form.state.value.scheduler = "dpm-pp";
+    form.applyModelDefaults(makeModel({ name: "sdxl:fp16", family: "sdxl" }));
+    expect(form.state.value.scheduler).toBeNull();
+
+    // …while a value both families accept survives the switch.
+    form.state.value.scheduler = "uni-pc";
+    form.applyModelDefaults(
+      makeModel({ name: "wan22-t2v-a14b:q4", family: "wan" }),
+    );
+    expect(form.state.value.scheduler).toBe("uni-pc");
+  });
+
   it("applyModelDefaults enters H3 on its valid minimum frame and fixed-fps contract", () => {
     const form = useGenerateForm();
     form.state.value.frames = 25;

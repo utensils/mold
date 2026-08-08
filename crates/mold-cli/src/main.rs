@@ -819,9 +819,11 @@ Examples:
         /// Wan sample solver: unipc (default), euler, or dpm++ — upstream's
         /// --sample_solver. euler is the solver the 4-step Lightning distills
         /// were tuned for; dpm++ matches upstream's alternative grid.
+        /// (MOLD_WAN_SOLVER is deliberately NOT a clap env binding: it would
+        /// inject a wan-only field into every family's request. The wan
+        /// engine reads it itself, so the env still applies to wan renders.)
         #[arg(
             long,
-            env = "MOLD_WAN_SOLVER",
             value_parser = ["unipc", "euler", "dpm++", "dpmpp", "dpm-pp"],
             help_heading = "Video",
             conflicts_with = "scheduler"
@@ -832,12 +834,8 @@ Examples:
         /// quality/character knob. Overrides the per-tier default for this
         /// run. Upstream ships 3.0-16 per task; Lightning wants 5, upstream
         /// quality A14B T2V wants 12, ComfyUI templates ship 8.
-        #[arg(
-            long,
-            env = "MOLD_WAN_SHIFT",
-            value_name = "SHIFT",
-            help_heading = "Video"
-        )]
+        /// (MOLD_WAN_SHIFT reaches wan renders engine-side, same as above.)
+        #[arg(long, value_name = "SHIFT", help_heading = "Video")]
         sample_shift: Option<f64>,
 
         /// Wan Lightning distill strength: `high=X,low=Y` (either half
@@ -2599,6 +2597,38 @@ mod tests {
         let cli = parse(&["run", "model", "--seed", "42", "a", "cat"]);
         match cli.command {
             Commands::Run { seed, .. } => assert_eq!(seed, Some(42)),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    /// The wan env fallbacks are deliberately NOT clap env bindings: a bound
+    /// env would inject the wan-only fields into every family's request and
+    /// admission would reject e.g. a FLUX run outright (codex review). The
+    /// wan engine reads both vars itself, so they still reach wan renders.
+    #[test]
+    fn wan_env_fallbacks_do_not_populate_cli_flags() {
+        let previous_solver = std::env::var("MOLD_WAN_SOLVER").ok();
+        let previous_shift = std::env::var("MOLD_WAN_SHIFT").ok();
+        std::env::set_var("MOLD_WAN_SOLVER", "euler");
+        std::env::set_var("MOLD_WAN_SHIFT", "12.0");
+        let cli = parse(&["run", "flux-schnell", "a", "cat"]);
+        match previous_solver {
+            Some(value) => std::env::set_var("MOLD_WAN_SOLVER", value),
+            None => std::env::remove_var("MOLD_WAN_SOLVER"),
+        }
+        match previous_shift {
+            Some(value) => std::env::set_var("MOLD_WAN_SHIFT", value),
+            None => std::env::remove_var("MOLD_WAN_SHIFT"),
+        }
+        match cli.command {
+            Commands::Run {
+                sample_solver,
+                sample_shift,
+                ..
+            } => {
+                assert_eq!(sample_solver, None);
+                assert_eq!(sample_shift, None);
+            }
             _ => panic!("expected Run"),
         }
     }

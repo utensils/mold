@@ -217,6 +217,23 @@ describe("MobileGenerateParameters", () => {
     );
   });
 
+  it("holds the develop gate while a wan recipe value is out of band", async () => {
+    const { wrapper, form } = mountParameters(formFor("wan", "wan22-t2v-a14b:q4"));
+    const child = wrapper.getComponent(MobileGenerateParameters);
+    expect(child.emitted("validity-change")?.at(-1)).toEqual([true]);
+
+    // An invalid value must invalidate the form, not be silently dropped
+    // from the wire while the button stays live (codex review).
+    await wrapper.get("[data-test='mobile-wan-sample-shift']").setValue("-3");
+    await flushPromises();
+    expect(child.emitted("validity-change")?.at(-1)).toEqual([false]);
+
+    await wrapper.get("[data-test='mobile-wan-sample-shift']").setValue("12");
+    await flushPromises();
+    expect(child.emitted("validity-change")?.at(-1)).toEqual([true]);
+    expect(form.wanRecipe.sampleShift).toBe(12);
+  });
+
   it("hides the wan distill strengths on a tier that ships none, and the recipe off-family", () => {
     const quality = mountParameters(formFor("wan", "wan22-ti2v-5b:fp16"));
     expect(quality.wrapper.find("[data-test='mobile-wan-sample-shift']").exists()).toBe(true);

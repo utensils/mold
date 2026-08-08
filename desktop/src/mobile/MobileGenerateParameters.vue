@@ -163,6 +163,15 @@ const cameraError = computed(() =>
 );
 const mediaReadError = ref("");
 
+// Declared before `valid`: its immediate validity watch evaluates during
+// setup, so everything the gate reads must already exist.
+const wanRecipe = computed<WanRecipeState>(() => props.form.wanRecipe);
+const wanRecipeActive = computed(() => wanRecipeCount(wanRecipe.value));
+const wanRecipeMessage = computed(() => wanRecipeValidationError(props.form));
+function setWanRecipe(next: Partial<WanRecipeState>): void {
+  props.form.wanRecipe = { ...wanRecipe.value, ...next };
+}
+
 const valid = computed(
   () =>
     !frameError.value &&
@@ -170,6 +179,9 @@ const valid = computed(
     chainDecision.value.kind !== "reject" &&
     !audioFormatError.value &&
     !advancedVideoError.value &&
+    // An out-of-band wan recipe value must hold the Develop button, not be
+    // silently dropped from the wire (codex review).
+    !wanRecipeMessage.value &&
     !cameraError.value,
 );
 
@@ -212,12 +224,6 @@ function snapFramesField(): void {
       : Math.max(frameMinimum.value, snapVideoFrames(props.form.frames, videoContract.value));
 }
 
-const wanRecipe = computed<WanRecipeState>(() => props.form.wanRecipe);
-const wanRecipeActive = computed(() => wanRecipeCount(wanRecipe.value));
-const wanRecipeMessage = computed(() => wanRecipeValidationError(props.form));
-function setWanRecipe(next: Partial<WanRecipeState>): void {
-  props.form.wanRecipe = { ...wanRecipe.value, ...next };
-}
 
 const cameraMode = ref(cameraMotionMode(props.form.cameraControl));
 watch(

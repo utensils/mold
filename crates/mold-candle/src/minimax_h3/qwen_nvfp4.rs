@@ -640,6 +640,12 @@ struct FileIdentity {
     changed_seconds: i64,
     #[cfg(unix)]
     changed_nanoseconds: i64,
+    /// Link count. The held-fd fence's only signal for a rename-over is the
+    /// original inode's ctime bump from the link drop, which kernel timestamp
+    /// granularity can swallow when the swap lands in the creation tick; the
+    /// count itself falls 1 → 0 unconditionally.
+    #[cfg(unix)]
+    links: u64,
 }
 
 fn file_identity(metadata: &Metadata) -> FileIdentity {
@@ -656,6 +662,8 @@ fn file_identity(metadata: &Metadata) -> FileIdentity {
         changed_seconds: metadata.ctime(),
         #[cfg(unix)]
         changed_nanoseconds: metadata.ctime_nsec(),
+        #[cfg(unix)]
+        links: metadata.nlink(),
     }
 }
 

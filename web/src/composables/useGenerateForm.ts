@@ -264,6 +264,14 @@ function modelDefaultsPatch(
     : null;
   if (!capabilities.supportsScheduler) {
     next.scheduler = null;
+  } else if (
+    next.scheduler !== null &&
+    !capabilities.schedulerOptions.includes(next.scheduler)
+  ) {
+    // The UNet schedulers and wan's flow solvers share the wire slot but are
+    // rejected on each other's families — membership in the new model's
+    // options is the test, not mere scheduler support (codex review).
+    next.scheduler = null;
   }
   if (!capabilities.supportsCfgPlus) {
     next.cfgPlus = false;

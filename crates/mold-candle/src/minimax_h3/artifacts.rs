@@ -71,6 +71,10 @@ struct FileMetadataIdentity {
     changed_seconds: i64,
     #[cfg(unix)]
     changed_nanoseconds: i64,
+    /// Link count — the deterministic rename-over signal when the swap lands
+    /// inside the creation timestamp tick (see `qwen_nvfp4::FileIdentity`).
+    #[cfg(unix)]
+    links: u64,
     #[cfg(not(unix))]
     modified: Option<std::time::SystemTime>,
 }
@@ -238,6 +242,7 @@ fn metadata_identity(
             modified_nanoseconds: metadata.mtime_nsec(),
             changed_seconds: metadata.ctime(),
             changed_nanoseconds: metadata.ctime_nsec(),
+            links: metadata.nlink(),
         })
     }
     #[cfg(not(unix))]
