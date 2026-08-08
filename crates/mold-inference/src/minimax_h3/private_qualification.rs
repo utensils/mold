@@ -625,13 +625,7 @@ fn inspect_structure(
 }
 
 fn inspect_qwen_nvfp4_awq(artifact: &ResolvedArtifact<'_>) -> Result<StructuralInspection> {
-    if artifact.file.hf_filename != H3_QWEN_NVFP4_AWQ_FILENAME
-        || artifact
-            .canonical_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            != Some(H3_QWEN_NVFP4_AWQ_FILENAME)
-    {
+    if !qwen_nvfp4_awq_filename_is_canonical(&artifact.file.hf_filename, &artifact.canonical_path) {
         bail!("private H3 Qwen NVFP4-AWQ artifact has a non-canonical filename")
     }
     if artifact.file.size_bytes != H3_QWEN_NVFP4_AWQ_FILE_BYTES
@@ -656,6 +650,12 @@ fn inspect_qwen_nvfp4_awq(artifact: &ResolvedArtifact<'_>) -> Result<StructuralI
         tensor_count: Some(inspection.tensor_count),
         policy_identity_sha256: Some(inspection.policy_sha256),
     })
+}
+
+fn qwen_nvfp4_awq_filename_is_canonical(hf_filename: &str, canonical_path: &Path) -> bool {
+    hf_filename == format!("text_encoders/{H3_QWEN_NVFP4_AWQ_FILENAME}")
+        && canonical_path.file_name().and_then(|name| name.to_str())
+            == Some(H3_QWEN_NVFP4_AWQ_FILENAME)
 }
 
 fn hash_safetensors_header(path: &Path) -> Result<String> {
@@ -856,6 +856,23 @@ mod tests {
         assert!(H3_PRIVATE_MODELS_ROOT.starts_with("/storage/"));
         assert!(!contract::capabilities(Task::Fl2va).runtime_available);
         assert!(!contract::capabilities(Task::Ref2va).runtime_available);
+    }
+
+    #[test]
+    fn qwen_artifact_requires_manifest_directory_and_canonical_basename() {
+        let canonical_path = Path::new("/private/text_encoders").join(H3_QWEN_NVFP4_AWQ_FILENAME);
+        assert!(qwen_nvfp4_awq_filename_is_canonical(
+            &format!("text_encoders/{H3_QWEN_NVFP4_AWQ_FILENAME}"),
+            &canonical_path,
+        ));
+        assert!(!qwen_nvfp4_awq_filename_is_canonical(
+            H3_QWEN_NVFP4_AWQ_FILENAME,
+            &canonical_path,
+        ));
+        assert!(!qwen_nvfp4_awq_filename_is_canonical(
+            &format!("text_encoders/{H3_QWEN_NVFP4_AWQ_FILENAME}"),
+            Path::new("/private/text_encoders/renamed.safetensors"),
+        ));
     }
 
     #[test]
