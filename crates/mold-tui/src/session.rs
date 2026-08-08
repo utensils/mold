@@ -171,10 +171,7 @@ impl TuiSession {
             params.batch = b;
         }
         if let Some(ref f) = self.format {
-            params.format = match f.as_str() {
-                "jpeg" => mold_core::OutputFormat::Jpeg,
-                _ => mold_core::OutputFormat::Png,
-            };
+            params.format = f.parse().unwrap_or(mold_core::OutputFormat::Png);
         }
         if let Some(ref s) = self.scheduler {
             params.scheduler = match s.as_str() {
@@ -219,10 +216,7 @@ impl TuiSession {
             params.batch = b;
         }
         if let Some(ref f) = self.format {
-            params.format = match f.as_str() {
-                "jpeg" => mold_core::OutputFormat::Jpeg,
-                _ => mold_core::OutputFormat::Png,
-            };
+            params.format = f.parse().unwrap_or(mold_core::OutputFormat::Png);
         }
         if let Some(ref lp) = self.lora_path {
             params.lora_path = Some(lp.clone());
@@ -643,6 +637,7 @@ mod tests {
             offload: true,
             upscale_model: None,
             source_image_path: None,
+            reference_paths: Vec::new(),
             strength: 0.6,
             mask_image_path: None,
             frames: 25,
@@ -722,6 +717,25 @@ mod tests {
         assert!(!params.offload);
         assert_eq!(params.strength, 0.3);
         assert_eq!(params.control_scale, 1.5);
+    }
+
+    #[test]
+    fn persisted_video_formats_do_not_fall_back_to_png() {
+        use crate::app::GenerateParams;
+
+        for format in ["gif", "webp", "mp4"] {
+            let session = TuiSession {
+                format: Some(format.into()),
+                ..Default::default()
+            };
+            let mut params = GenerateParams::from_config(&mold_core::Config::default());
+            session.apply_to_params(&mut params);
+            assert_eq!(params.format.to_string(), format);
+
+            params.format = mold_core::OutputFormat::Png;
+            session.apply_non_model_params(&mut params);
+            assert_eq!(params.format.to_string(), format);
+        }
     }
 
     #[test]

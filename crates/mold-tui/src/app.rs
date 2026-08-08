@@ -29,6 +29,8 @@ pub(crate) struct PromptTransformSnapshot {
     pub model: String,
     pub target: crate::hosts::GenTarget,
     pub task: mold_core::ExpandTask,
+    /// Ordered reference identity without retaining any filesystem path.
+    pub reference_fingerprint: String,
     pub source_prompt: String,
     pub current_prompt: String,
     pub root_prompt: Option<String>,
@@ -435,6 +437,7 @@ pub enum ParamField {
     Offload,
     // Advanced — Source
     SourceImage,
+    References,
     Strength,
     MaskImage,
     ControlImage,
@@ -475,6 +478,7 @@ impl ParamField {
             Self::Expand => "Expand prompt",
             Self::Offload => "Offload",
             Self::SourceImage => "Source",
+            Self::References => "References",
             Self::Strength => "Strength",
             Self::MaskImage => "Mask",
             Self::ControlImage => "Control",
@@ -619,6 +623,9 @@ pub struct GenerateParams {
     pub upscale_model: Option<String>,
     // img2img
     pub source_image_path: Option<String>,
+    /// Ordered H3 reference paths. This transient state is deliberately not
+    /// serialized; only basename + digest provenance crosses the wire.
+    pub reference_paths: Vec<crate::h3_references::ReferencePath>,
     pub strength: f64,
     pub mask_image_path: Option<String>,
     // Video
@@ -746,6 +753,7 @@ impl GenerateParams {
             offload: false,
             upscale_model: None,
             source_image_path: None,
+            reference_paths: Vec::new(),
             strength: 0.75,
             mask_image_path: None,
             frames: 25,
@@ -818,6 +826,11 @@ impl GenerateParams {
                         .unwrap_or_else(|| p.to_string())
                 })
                 .unwrap_or_else(|| "\u{27e8}none\u{27e9}".to_string()),
+            ParamField::References => match self.reference_paths.len() {
+                0 => "\u{27e8}none\u{27e9}".to_string(),
+                1 => "1 ordered file".to_string(),
+                count => format!("{count} ordered files"),
+            },
             ParamField::Strength => format!("{:.2}", self.strength),
             ParamField::MaskImage => self
                 .mask_image_path
@@ -966,16 +979,73 @@ fn parse_stg_blocks_input(input: &str) -> std::result::Result<Option<Vec<u32>>, 
 }
 
 /// Mirror `/api/models`' requestable video grid for the TUI's keyboard sliders.
-/// Tuple fields are `(step, runtime_seconds, absolute_frames, fixed_frames)`.
-fn tui_max_video_frames(grid: (u32, Option<u32>, Option<u32>, u32), fps: u32) -> u32 {
-    let (step, runtime_seconds, absolute_frames, fixed_frames) = grid;
-    let cap = if let Some(seconds) = runtime_seconds {
+#[derive(Debug, Clone, Copy)]
+struct TuiVideoGrid {
+    step: u32,
+    offset: u32,
+    min_frames: u32,
+    fixed_fps: Option<u32>,
+    runtime_seconds: Option<u32>,
+    absolute_frames: Option<u32>,
+    fixed_frames: u32,
+}
+
+impl TuiVideoGrid {
+    fn snap_nearest(self, target: u32) -> u32 {
+        if target <= self.offset {
+            return self.offset;
+        }
+        ((target - self.offset + self.step / 2) / self.step)
+            .saturating_mul(self.step)
+            .saturating_add(self.offset)
+    }
+}
+
+fn tui_max_video_frames(grid: TuiVideoGrid, fps: u32) -> u32 {
+    let cap = if let Some(seconds) = grid.runtime_seconds {
         let duration_cap = seconds.saturating_mul(fps.max(1)).saturating_add(4);
-        absolute_frames.map_or(duration_cap, |absolute| duration_cap.min(absolute))
+        grid.absolute_frames
+            .map_or(duration_cap, |absolute| duration_cap.min(absolute))
     } else {
-        fixed_frames
+        grid.fixed_frames
     };
-    cap.saturating_sub(cap.saturating_sub(1) % step).max(1)
+    if cap < grid.offset {
+        return cap;
+    }
+    cap - (cap - grid.offset) % grid.step
+}
+
+/// Repair every legacy/shared TUI field that H3 fixes or does not consume.
+///
+/// This is deliberately applied after persistence/default overlays and again
+/// at submit time. Hidden controls are presentation only; this function is the
+/// request-authority boundary that prevents stale state from weakening H3's
+/// synchronized AV contract. It does not activate the compliance-gated family.
+pub(crate) fn normalize_generate_params_for_family(params: &mut GenerateParams, family: &str) {
+    if !mold_core::minimax_h3::is_family(family) {
+        return;
+    }
+
+    params.frames = mold_core::minimax_h3::recommended_frames(params.frames);
+    params.fps = mold_core::minimax_h3::FIXED_FPS;
+    params.format = OutputFormat::Mp4;
+    params.enable_audio = Some(true);
+    params.guidance = 0.0;
+    params.strength = 1.0;
+
+    params.scheduler = None;
+    params.lora_path = None;
+    params.lora_scale = 1.0;
+    params.source_image_path = None;
+    params.mask_image_path = None;
+    params.control_image_path = None;
+    params.control_model = None;
+    params.control_scale = 1.0;
+    params.pipeline = None;
+    params.spatial_upscale = None;
+    params.temporal_upscale = None;
+    params.guidance_overrides = Ltx2GuidanceOverrides::default();
+    params.upscale_model = None;
 }
 
 /// State for the Generate view.
@@ -1477,6 +1547,11 @@ pub enum Popup {
         input: String,
         error: Option<String>,
     },
+    /// Ordered `kind=path` MiniMax H3 reference input. Paths remain transient.
+    ReferencesInput {
+        input: String,
+        error: Option<String>,
+    },
     HistorySearch {
         filter: String,
         selected: usize,
@@ -1786,6 +1861,7 @@ impl App {
         }
 
         let family = family_for_model(&params.model, &config);
+        normalize_generate_params_for_family(&mut params, &family);
         let capabilities = capabilities_for_model(
             &family,
             &params.model,
@@ -2098,32 +2174,40 @@ impl App {
     /// model clears stale audio plus LTX-2 pipeline and latent-upscale overrides
     /// before they can leak into another family.
     fn sync_generate_capabilities(&mut self) {
-        let model = &self.generate.params.model;
-        let family = family_for_model(model, &self.config);
+        let model = self.generate.params.model.clone();
+        let family = family_for_model(&model, &self.config);
         let advertised_audio_support = self
             .models
             .catalog
             .iter()
-            .find(|entry| entry.name == *model)
+            .find(|entry| entry.name == model)
             .and_then(|entry| entry.supports_audio);
         let advertised_guidance = self
             .models
             .catalog
             .iter()
-            .find(|entry| entry.name == *model)
+            .find(|entry| entry.name == model)
             .and_then(|entry| entry.guidance_capabilities);
         let effective_guidance = self
             .generate
             .params
             .pipeline
             .map(|pipeline| {
-                mold_core::GuidanceCapabilities::for_recipe(&family, model, Some(pipeline))
+                mold_core::GuidanceCapabilities::for_recipe(&family, &model, Some(pipeline))
             })
             .or(advertised_guidance);
-        self.generate.capabilities =
-            capabilities_for_model(&family, model, advertised_audio_support, effective_guidance);
+        self.generate.capabilities = capabilities_for_model(
+            &family,
+            &model,
+            advertised_audio_support,
+            effective_guidance,
+        );
+        normalize_generate_params_for_family(&mut self.generate.params, &family);
         if !self.generate.capabilities.supports_audio {
             self.generate.params.enable_audio = None;
+        }
+        if !self.generate.capabilities.supports_references {
+            self.generate.params.reference_paths.clear();
         }
         if !self.generate.capabilities.supports_video_upscale {
             self.generate.params.pipeline = None;
@@ -2523,14 +2607,16 @@ impl App {
                 }
             }
         }
-        self.sync_generate_capabilities();
-        self.generate.param_index = 0;
-
         // Apply saved per-model prefs last, so a user's explicit choices
         // override the manifest/catalog defaults we just restored. Only
         // generation params move — the prompt textareas stay as-is so a
         // model flip mid-typing doesn't wipe what the user is writing.
         self.apply_prefs_for_model(&model_name);
+        // Capabilities and family-fixed request fields are authoritative over
+        // persistence. In particular, an old H3 preference row may not
+        // restore PNG, CFG guidance, strength, or an off-grid frame count.
+        self.sync_generate_capabilities();
+        self.generate.param_index = 0;
     }
 
     /// Persist the *currently-displayed* generation params under `model`.
@@ -2614,10 +2700,7 @@ impl App {
             p.batch = b;
         }
         if let Some(ref f) = prefs.format {
-            p.format = match f.as_str() {
-                "jpeg" => mold_core::OutputFormat::Jpeg,
-                _ => mold_core::OutputFormat::Png,
-            };
+            p.format = f.parse().unwrap_or(mold_core::OutputFormat::Png);
         }
         if prefs.lora_path.is_some() {
             p.lora_path = prefs.lora_path.clone();
@@ -3182,6 +3265,28 @@ impl App {
                         Err(message) => *error = Some(message),
                     },
                     KeyCode::Char(c) if c.is_ascii_digit() || matches!(c, ',' | ' ') => {
+                        input.push(c);
+                        *error = None;
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        *error = None;
+                    }
+                    _ => {}
+                },
+                Some(Popup::ReferencesInput { input, error }) => match key.code {
+                    KeyCode::Esc => self.close_popup(),
+                    KeyCode::Enter => match crate::h3_references::parse_reference_input(input) {
+                        Ok(references) => {
+                            self.generate.params.reference_paths = references;
+                            self.close_popup();
+                        }
+                        Err(message) => *error = Some(message),
+                    },
+                    KeyCode::Char(c)
+                        if input.len() + c.len_utf8()
+                            <= crate::h3_references::MAX_REFERENCE_INPUT_BYTES =>
+                    {
                         input.push(c);
                         *error = None;
                     }
@@ -4357,23 +4462,32 @@ impl App {
                 .or_else(|| mold_core::validation::frame_step_for_family(&family))
                 .unwrap_or(8)
                 .max(1);
-            Some((
+            let offset = entry
+                .and_then(|entry| entry.defaults.frame_offset)
+                .or_else(|| mold_core::validation::frame_offset_for_family(&family))
+                .unwrap_or(1)
+                .max(1);
+            Some(TuiVideoGrid {
                 step,
-                entry
+                offset,
+                min_frames: mold_core::validation::min_frames_for_family(&family).unwrap_or(offset),
+                fixed_fps: mold_core::validation::fixed_fps_for_family(&family),
+                runtime_seconds: entry
                     .and_then(|entry| entry.defaults.max_runtime_seconds)
                     .or_else(|| mold_core::validation::max_runtime_seconds_for_family(&family)),
-                entry
+                absolute_frames: entry
                     .and_then(|entry| entry.defaults.max_frames_absolute)
                     .or_else(|| mold_core::validation::max_frames_absolute_for_family(&family)),
-                entry
+                fixed_frames: entry
                     .and_then(|entry| entry.defaults.max_frames)
                     .or_else(|| mold_core::validation::max_frames_for_family(&family))
                     .unwrap_or(257),
-            ))
+            })
         } else {
             None
         };
         let guidance_adjustable = self.generate.guidance_adjustable();
+        let audio_required = self.generate.capabilities.audio_required;
         let p = &mut self.generate.params;
         match field {
             ParamField::Size => {
@@ -4416,26 +4530,33 @@ impl App {
             }
             ParamField::Duration => {
                 let grid = video_grid.expect("duration has video grid");
-                let step = grid.0;
                 let fps = p.fps.max(1);
                 let seconds = (p.frames as f64 / fps as f64 + delta as f64).max(0.1);
                 let target = (seconds * fps as f64).round() as u32;
-                let snapped = ((target.saturating_sub(1) + step / 2) / step) * step + 1;
-                p.frames = snapped.min(tui_max_video_frames(grid, fps));
+                p.frames = grid
+                    .snap_nearest(target)
+                    .clamp(grid.min_frames, tui_max_video_frames(grid, fps));
             }
             ParamField::Strength => {
                 p.strength = (p.strength + delta as f64 * 0.05).clamp(0.0, 1.0);
             }
             ParamField::Frames => {
                 let grid = video_grid.expect("frames has video grid");
-                let step = grid.0;
-                p.frames = (p.frames as i64 + delta as i64 * step as i64)
-                    .clamp(1, tui_max_video_frames(grid, p.fps) as i64)
-                    as u32;
+                let current = grid
+                    .snap_nearest(p.frames)
+                    .clamp(grid.min_frames, tui_max_video_frames(grid, p.fps));
+                p.frames = (current as i64 + delta as i64 * grid.step as i64).clamp(
+                    i64::from(grid.min_frames),
+                    i64::from(tui_max_video_frames(grid, p.fps)),
+                ) as u32;
             }
             ParamField::Fps => {
-                p.fps = (p.fps as i32 + delta).clamp(1, 60) as u32;
                 let grid = video_grid.expect("fps has video grid");
+                if let Some(fixed_fps) = grid.fixed_fps {
+                    p.fps = fixed_fps;
+                    return;
+                }
+                p.fps = (p.fps as i32 + delta).clamp(1, 60) as u32;
                 p.frames = p.frames.min(tui_max_video_frames(grid, p.fps));
             }
             ParamField::Pipeline => {
@@ -4521,21 +4642,26 @@ impl App {
                 p.control_scale = (p.control_scale + delta as f64 * 0.1).clamp(0.0, 2.0);
             }
             ParamField::Format => {
-                p.format = match p.format {
-                    OutputFormat::Png => OutputFormat::Jpeg,
-                    OutputFormat::Jpeg => OutputFormat::Gif,
-                    OutputFormat::Gif => OutputFormat::Apng,
-                    OutputFormat::Apng => OutputFormat::Webp,
-                    OutputFormat::Webp => OutputFormat::Mp4,
-                    OutputFormat::Mp4 => OutputFormat::Png,
-                    // `wav` is not in the cycle: it is only valid for the
-                    // LTX-2 text-to-audio pipeline, which the Create form has
-                    // no control for. Cycling exits back to the raster start
-                    // rather than offering a format that would 422.
-                    OutputFormat::Wav => OutputFormat::Png,
-                };
-                if p.enable_audio == Some(true) && p.format != OutputFormat::Mp4 {
-                    p.enable_audio = None;
+                if audio_required {
+                    p.format = OutputFormat::Mp4;
+                    p.enable_audio = Some(true);
+                } else {
+                    p.format = match p.format {
+                        OutputFormat::Png => OutputFormat::Jpeg,
+                        OutputFormat::Jpeg => OutputFormat::Gif,
+                        OutputFormat::Gif => OutputFormat::Apng,
+                        OutputFormat::Apng => OutputFormat::Webp,
+                        OutputFormat::Webp => OutputFormat::Mp4,
+                        OutputFormat::Mp4 => OutputFormat::Png,
+                        // `wav` is not in the cycle: it is only valid for the
+                        // LTX-2 text-to-audio pipeline, which the Create form has
+                        // no control for. Cycling exits back to the raster start
+                        // rather than offering a format that would 422.
+                        OutputFormat::Wav => OutputFormat::Png,
+                    };
+                    if p.enable_audio == Some(true) && p.format != OutputFormat::Mp4 {
+                        p.enable_audio = None;
+                    }
                 }
             }
             ParamField::Expand => {
@@ -4553,6 +4679,7 @@ impl App {
             | ParamField::Lora
             | ParamField::StgBlocks
             | ParamField::SourceImage
+            | ParamField::References
             | ParamField::MaskImage
             | ParamField::ControlImage
             | ParamField::ControlModel => {}
@@ -4743,6 +4870,7 @@ impl App {
         } else {
             self.generate.params.lora_path = None;
         }
+        self.sync_generate_capabilities();
 
         // Switch to Generate view
         self.active_view = View::Create;
@@ -5126,6 +5254,12 @@ impl App {
                     .unwrap_or_default();
                 self.popup = Some(Popup::StgBlocksInput { input, error: None });
             }
+            ParamField::References => {
+                let input = crate::h3_references::format_reference_input(
+                    &self.generate.params.reference_paths,
+                );
+                self.popup = Some(Popup::ReferencesInput { input, error: None });
+            }
             // Cycle format
             ParamField::Format => self.adjust_field(ParamField::Format, 1),
             // Cycle scheduler
@@ -5218,6 +5352,7 @@ impl App {
         self.generate.params.guidance_overrides = Ltx2GuidanceOverrides::default();
         self.generate.params.strength = 0.75;
         self.generate.params.source_image_path = None;
+        self.generate.params.reference_paths.clear();
         self.generate.params.mask_image_path = None;
         self.generate.params.control_image_path = None;
         self.generate.params.control_model = None;
@@ -6088,10 +6223,38 @@ impl App {
     }
 
     fn start_generation(&mut self) {
+        // Persistence, gallery reuse, and future call sites may all mutate the
+        // shared parameter bag without touching the visible rows. Reassert the
+        // selected family's request authority immediately before freezing it.
+        self.sync_generate_capabilities();
         let prompt_text = self.generate.prompt.lines().join("\n").trim().to_string();
         if prompt_text.is_empty() && prompt_required_for_params(&self.generate.params, &self.config)
         {
             self.generate.error_message = Some("Prompt is empty".to_string());
+            return;
+        }
+        let h3_task = mold_core::minimax_h3::task_for_model(&self.generate.params.model);
+        if h3_task == Some(mold_core::minimax_h3::Task::Ref2va) {
+            if self.generate.params.reference_paths.is_empty() {
+                self.generate.error_message = Some(
+                    "MiniMax H3 Ref2VA requires at least one ordered image or video reference"
+                        .to_string(),
+                );
+                return;
+            }
+            if self.generate.params.batch != 1 || !self.generate.params.prepared_prompts.is_empty()
+            {
+                self.generate.error_message = Some(
+                    "MiniMax H3 ordered references require Batch 1; submit each attempt separately"
+                        .to_string(),
+                );
+                return;
+            }
+        } else if !self.generate.params.reference_paths.is_empty() {
+            self.generate.error_message = Some(
+                "Ordered references require an explicitly authorized MiniMax H3 Ref2VA model"
+                    .to_string(),
+            );
             return;
         }
 
@@ -6106,10 +6269,24 @@ impl App {
             }
             self.target.clone()
         } else {
-            let Some(snapshot) = self.generate.params.prepared_transform_snapshot.as_ref() else {
+            let Some(snapshot) = self.generate.params.prepared_transform_snapshot.clone() else {
                 self.generate.error_message =
                     Some("Prepared Remix lost its frozen route; remix again".into());
                 return;
+            };
+            let current_reference_fingerprint = if self.generate.params.model == snapshot.model
+                && self.target == snapshot.target
+                && self.prompt_transform_task() == snapshot.task
+            {
+                match self.reference_fingerprint_for_target(&self.target) {
+                    Ok(fingerprint) => Some(fingerprint),
+                    Err(error) => {
+                        self.generate.error_message = Some(error);
+                        return;
+                    }
+                }
+            } else {
+                None
             };
             let stale_reason = if self.generate.params.model != snapshot.model {
                 Some("model changed")
@@ -6117,6 +6294,10 @@ impl App {
                 Some("generation target changed")
             } else if self.prompt_transform_task() != snapshot.task {
                 Some("conditioning task changed")
+            } else if current_reference_fingerprint.as_deref()
+                != Some(snapshot.reference_fingerprint.as_str())
+            {
+                Some("ordered references changed")
             } else if self.generate.params.prepared_prompts.len()
                 != self.generate.params.prepared_prompt_transforms.len()
                 || self
@@ -6142,7 +6323,7 @@ impl App {
                 ));
                 return;
             }
-            snapshot.target.clone()
+            snapshot.target
         };
 
         // Route by the frozen prepared target or the current sticky Machines target. Auto keeps
@@ -6156,7 +6337,18 @@ impl App {
         let mut route_name = None;
         let mut api_key = None;
         match &generation_target {
-            GenTarget::Auto => {}
+            GenTarget::Auto => {
+                api_key = std::env::var("MOLD_API_KEY")
+                    .ok()
+                    .filter(|key| !key.is_empty());
+            }
+            GenTarget::Local if h3_task.is_some() => {
+                self.generate.error_message = Some(format!(
+                    "MiniMax H3 has no in-process TUI runtime. Select an authorized mold server. {}",
+                    mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
+                ));
+                return;
+            }
             GenTarget::Local => route_mode = Some(InferenceMode::Local),
             GenTarget::Host(id) => match self.machines.registry.get(id) {
                 Some(entry) => {
@@ -6190,7 +6382,12 @@ impl App {
             .join("\n")
             .trim()
             .to_string();
-        let negative_prompt = if neg.is_empty() { None } else { Some(neg) };
+        let negative_prompt =
+            if neg.is_empty() || !self.generate.capabilities.supports_negative_prompt {
+                None
+            } else {
+                Some(neg)
+            };
 
         // Resolve seed based on seed mode
         let resolved_seed = self
@@ -6239,6 +6436,9 @@ impl App {
     }
 
     fn prompt_transform_task(&self) -> mold_core::ExpandTask {
+        if !self.generate.params.reference_paths.is_empty() {
+            return mold_core::ExpandTask::ReferenceToAudioVideo;
+        }
         let family = family_for_model(&self.generate.params.model, &self.config);
         mold_core::ExpandTask::for_conditioning(
             &family,
@@ -6251,7 +6451,58 @@ impl App {
         )
     }
 
+    /// Hash ordered reference content only after the selected route proves it
+    /// has a syntactically valid API-key header. This keeps transform
+    /// staleness exact without letting UI snapshotting read media before the
+    /// same authentication precondition used by upload binding.
+    fn reference_fingerprint_for_target(
+        &self,
+        target: &crate::hosts::GenTarget,
+    ) -> std::result::Result<String, String> {
+        let references = &self.generate.params.reference_paths;
+        if references.is_empty() {
+            return crate::h3_references::authority_fingerprint(None, references)
+                .map_err(|error| error.to_string());
+        }
+
+        use crate::hosts::GenTarget;
+        let (url, api_key) = match target {
+            GenTarget::Host(id) => {
+                let entry = self.machines.registry.get(id).ok_or_else(|| {
+                    format!("Machine '{id}' is no longer saved. Pick a target in Machines (4).")
+                })?;
+                (entry.url.clone(), crate::hosts::api_key_for(id))
+            }
+            GenTarget::Auto => {
+                let url = self.server_url.clone().ok_or_else(|| {
+                    "MiniMax H3 references require an authorized remote Mold target".to_string()
+                })?;
+                let api_key = std::env::var("MOLD_API_KEY")
+                    .ok()
+                    .filter(|key| !key.is_empty());
+                (url, api_key)
+            }
+            GenTarget::Local => {
+                return Err(
+                    "MiniMax H3 references require an authorized remote Mold target".to_string(),
+                );
+            }
+        };
+        let client = crate::hosts::client_for(&url, api_key.as_deref());
+        crate::h3_references::authority_fingerprint(Some(&client), references)
+            .map_err(|error| error.to_string())
+    }
+
     fn start_prompt_transform(&mut self, operation: PromptTransformOperation) {
+        if !self.generate.params.reference_paths.is_empty()
+            && operation == PromptTransformOperation::Remix
+        {
+            self.generate.error_message = Some(
+                "MiniMax H3 ordered references are Batch 1 only; use Expand for one reviewed prompt"
+                    .to_string(),
+            );
+            return;
+        }
         let current = self.generate.prompt.lines().join("\n").trim().to_string();
         if current.is_empty() {
             self.generate.error_message = Some("Prompt is empty".to_string());
@@ -6302,11 +6553,19 @@ impl App {
             .filter(|root| !root.trim().is_empty());
         let family = family_for_model(&self.generate.params.model, &self.config);
         let task = self.prompt_transform_task();
+        let reference_fingerprint = match self.reference_fingerprint_for_target(&self.target) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                self.generate.error_message = Some(error);
+                return;
+            }
+        };
         let snapshot = PromptTransformSnapshot {
             operation,
             model: self.generate.params.model.clone(),
             target: self.target.clone(),
             task,
+            reference_fingerprint,
             source_prompt: source_prompt.clone(),
             current_prompt,
             root_prompt: root.clone(),
@@ -6339,7 +6598,12 @@ impl App {
                 }
             },
             GenTarget::Local => (None, None),
-            GenTarget::Auto => (self.server_url.clone(), None),
+            GenTarget::Auto => (
+                self.server_url.clone(),
+                std::env::var("MOLD_API_KEY")
+                    .ok()
+                    .filter(|key| !key.is_empty()),
+            ),
         };
         self.generate.prompt_transform_token = self.generate.prompt_transform_token.wrapping_add(1);
         let token = self.generate.prompt_transform_token;
@@ -6381,6 +6645,15 @@ impl App {
                 "Remix is stale because the conditioning task changed; remix again".into(),
             );
         }
+        let reference_fingerprint = match self.reference_fingerprint_for_target(&self.target) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => return Some(error),
+        };
+        if reference_fingerprint != snapshot.reference_fingerprint {
+            return Some(
+                "Remix is stale because the ordered references changed; remix again".into(),
+            );
+        }
         let current = self.generate.prompt.lines().join("\n").trim().to_string();
         if current != snapshot.current_prompt {
             return Some("Remix is stale because the current prompt changed; remix again".into());
@@ -6394,22 +6667,26 @@ impl App {
     /// Validate reviewed Batch-1 semantics while deliberately ignoring the
     /// snapshotted host. Quick work may be submitted on the current target;
     /// prepared Batch N remains route-frozen in `start_generation`.
-    fn quick_transform_staleness(
-        &self,
-        snapshot: &PromptTransformSnapshot,
-    ) -> Option<&'static str> {
+    fn quick_transform_staleness(&self, snapshot: &PromptTransformSnapshot) -> Option<String> {
         if self.generate.params.model != snapshot.model {
-            return Some("model changed");
+            return Some("model changed".into());
         }
         if self.prompt_transform_task() != snapshot.task {
-            return Some("conditioning task changed");
+            return Some("conditioning task changed".into());
+        }
+        let reference_fingerprint = match self.reference_fingerprint_for_target(&self.target) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => return Some(error),
+        };
+        if reference_fingerprint != snapshot.reference_fingerprint {
+            return Some("ordered references changed".into());
         }
         let current = self.generate.prompt.lines().join("\n").trim().to_string();
         if current != snapshot.current_prompt {
-            return Some("reviewed prompt changed");
+            return Some("reviewed prompt changed".into());
         }
         let Some(provenance) = self.generate.params.prompt_transform.as_ref() else {
-            return Some("transform provenance changed");
+            return Some("transform provenance changed".into());
         };
         if provenance.operation != snapshot.operation
             || provenance.source_prompt != snapshot.source_prompt
@@ -6417,7 +6694,7 @@ impl App {
             || provenance.source_kind != snapshot.source_kind
             || provenance.task != snapshot.task
         {
-            return Some("transform provenance changed");
+            return Some("transform provenance changed".into());
         }
         None
     }
@@ -10868,11 +11145,48 @@ mod tests {
 
     #[test]
     fn video_duration_ceiling_tracks_fps_and_the_absolute_guard() {
-        let ltx2_grid = (8, Some(20), Some(604), 481);
+        let ltx2_grid = TuiVideoGrid {
+            step: 8,
+            offset: 1,
+            min_frames: 1,
+            fixed_fps: None,
+            runtime_seconds: Some(20),
+            absolute_frames: Some(604),
+            fixed_frames: 481,
+        };
         assert_eq!(tui_max_video_frames(ltx2_grid, 12), 241);
         assert_eq!(tui_max_video_frames(ltx2_grid, 24), 481);
         assert_eq!(tui_max_video_frames(ltx2_grid, 48), 601);
-        assert_eq!(tui_max_video_frames((8, None, None, 1), 24), 1);
+        assert_eq!(
+            tui_max_video_frames(
+                TuiVideoGrid {
+                    runtime_seconds: None,
+                    absolute_frames: None,
+                    fixed_frames: 1,
+                    ..ltx2_grid
+                },
+                24,
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn h3_video_grid_keeps_the_five_offset_and_fixed_fps() {
+        let h3_grid = TuiVideoGrid {
+            step: mold_core::minimax_h3::FRAME_STEP,
+            offset: mold_core::minimax_h3::FRAME_OFFSET,
+            min_frames: mold_core::minimax_h3::MIN_FRAMES,
+            fixed_fps: Some(mold_core::minimax_h3::FIXED_FPS),
+            runtime_seconds: Some(mold_core::minimax_h3::MAX_DURATION_SECONDS),
+            absolute_frames: Some(mold_core::minimax_h3::MAX_FRAMES),
+            fixed_frames: mold_core::minimax_h3::MAX_FRAMES,
+        };
+
+        assert_eq!(h3_grid.snap_nearest(120), 124);
+        assert_eq!(h3_grid.snap_nearest(240), 243);
+        assert_eq!(h3_grid.snap_nearest(360), 362);
+        assert_eq!(tui_max_video_frames(h3_grid, 24), 362);
     }
 
     #[tokio::test]
@@ -10937,6 +11251,154 @@ mod tests {
 
         app.dispatch_action(Action::Confirm);
         assert_eq!(app.generate.params.enable_audio, Some(true));
+    }
+
+    #[tokio::test]
+    async fn h3_capability_sync_freezes_mandatory_av_wire_defaults() {
+        use crate::ui::create_form::CreateRow;
+
+        let mut app = make_settings_test_app();
+        app.generate.params.model = mold_core::minimax_h3::FL2VA_COMFY.into();
+        app.generate.params.enable_audio = Some(false);
+        app.generate.params.format = OutputFormat::Gif;
+        app.generate.params.guidance = 7.5;
+        app.generate.params.strength = 0.25;
+        app.generate.params.frames = 25;
+        app.generate.params.fps = 30;
+        app.generate.params.scheduler = Some(Scheduler::Ddim);
+        app.generate.params.lora_path = Some("stale.safetensors".into());
+        app.generate.params.source_image_path = Some("stale.png".into());
+        app.generate.params.mask_image_path = Some("stale-mask.png".into());
+        app.generate.params.control_image_path = Some("stale-control.png".into());
+        app.generate.params.control_model = Some("stale-control".into());
+        app.config.models.insert(
+            app.generate.params.model.clone(),
+            mold_core::ModelConfig {
+                family: Some(mold_core::minimax_h3::FAMILY.into()),
+                ..Default::default()
+            },
+        );
+
+        app.sync_generate_capabilities();
+
+        assert!(app.generate.capabilities.audio_required);
+        assert_eq!(app.generate.params.enable_audio, Some(true));
+        assert_eq!(app.generate.params.format, OutputFormat::Mp4);
+        assert_eq!(app.generate.params.guidance, 0.0);
+        assert_eq!(app.generate.params.strength, 1.0);
+        assert_eq!(
+            app.generate.params.frames,
+            mold_core::minimax_h3::MIN_FRAMES
+        );
+        assert_eq!(app.generate.params.fps, mold_core::minimax_h3::FIXED_FPS);
+        assert_eq!(app.generate.params.scheduler, None);
+        assert_eq!(app.generate.params.lora_path, None);
+        assert_eq!(app.generate.params.source_image_path, None);
+        assert_eq!(app.generate.params.mask_image_path, None);
+        assert_eq!(app.generate.params.control_image_path, None);
+        assert_eq!(app.generate.params.control_model, None);
+        assert!(!app.generate.rows.iter().any(|row| matches!(
+            row,
+            CreateRow::Field(ParamField::Audio) | CreateRow::SectionField(_, ParamField::Audio)
+        )));
+
+        app.adjust_field(ParamField::Format, 1);
+        assert_eq!(app.generate.params.format, OutputFormat::Mp4);
+        assert_eq!(app.generate.params.enable_audio, Some(true));
+
+        app.generate.params.frames = mold_core::minimax_h3::MIN_FRAMES;
+        app.adjust_field(ParamField::Frames, -1);
+        assert_eq!(
+            app.generate.params.frames,
+            mold_core::minimax_h3::MIN_FRAMES
+        );
+        app.generate.params.fps = 12;
+        app.adjust_field(ParamField::Fps, 1);
+        assert_eq!(app.generate.params.fps, mold_core::minimax_h3::FIXED_FPS);
+
+        app.generate.params.frames = 25;
+        app.adjust_field(ParamField::Frames, 1);
+        assert_eq!(
+            app.generate.params.frames,
+            mold_core::minimax_h3::MIN_FRAMES + mold_core::minimax_h3::FRAME_STEP
+        );
+    }
+
+    #[test]
+    fn h3_boot_session_overlay_is_repaired_before_form_construction() {
+        let mut params = GenerateParams::from_config(&Config::default());
+        params.model = mold_core::minimax_h3::FL2VA_COMFY.into();
+        params.frames = 25;
+        params.fps = 30;
+        params.source_image_path = Some("stale.png".into());
+        let session = crate::session::TuiSession {
+            guidance: Some(7.5),
+            format: Some("png".into()),
+            scheduler: Some("ddim".into()),
+            lora_path: Some("stale.safetensors".into()),
+            strength: Some(0.25),
+            ..Default::default()
+        };
+
+        session.apply_to_params(&mut params);
+        normalize_generate_params_for_family(&mut params, "minimax_h3");
+
+        assert_eq!(params.frames, mold_core::minimax_h3::MIN_FRAMES);
+        assert_eq!(params.fps, mold_core::minimax_h3::FIXED_FPS);
+        assert_eq!(params.format, OutputFormat::Mp4);
+        assert_eq!(params.enable_audio, Some(true));
+        assert_eq!(params.guidance, 0.0);
+        assert_eq!(params.strength, 1.0);
+        assert_eq!(params.scheduler, None);
+        assert_eq!(params.lora_path, None);
+        assert_eq!(params.source_image_path, None);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn h3_switch_away_and_back_cannot_restore_invalid_preferences() {
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.config.models.insert(
+                mold_core::minimax_h3::FL2VA_COMFY.into(),
+                mold_core::ModelConfig {
+                    family: Some("minimax_h3".into()),
+                    default_frames: Some(25),
+                    default_fps: Some(30),
+                    ..Default::default()
+                },
+            );
+            app.config.models.insert(
+                "flux-dev:q4".into(),
+                mold_core::ModelConfig {
+                    family: Some("flux".into()),
+                    ..Default::default()
+                },
+            );
+
+            app.update_model(mold_core::minimax_h3::FL2VA_COMFY);
+            app.generate.params.format = OutputFormat::Png;
+            app.generate.params.guidance = 7.5;
+            app.generate.params.strength = 0.25;
+            app.generate.params.scheduler = Some(Scheduler::Ddim);
+            app.generate.params.lora_path = Some("stale.safetensors".into());
+            app.generate.params.source_image_path = Some("stale.png".into());
+            app.update_model("flux-dev:q4");
+            app.update_model(mold_core::minimax_h3::FL2VA_COMFY);
+
+            assert_eq!(
+                app.generate.params.frames,
+                mold_core::minimax_h3::MIN_FRAMES
+            );
+            assert_eq!(app.generate.params.fps, mold_core::minimax_h3::FIXED_FPS);
+            assert_eq!(app.generate.params.format, OutputFormat::Mp4);
+            assert_eq!(app.generate.params.enable_audio, Some(true));
+            assert_eq!(app.generate.params.guidance, 0.0);
+            assert_eq!(app.generate.params.strength, 1.0);
+            assert_eq!(app.generate.params.scheduler, None);
+            assert_eq!(app.generate.params.lora_path, None);
+            assert_eq!(app.generate.params.source_image_path, None);
+        });
     }
 
     #[tokio::test]
@@ -14287,6 +14749,11 @@ mod tests {
             model: app.generate.params.model.clone(),
             target: crate::hosts::GenTarget::Auto,
             task: app.prompt_transform_task(),
+            reference_fingerprint: crate::h3_references::authority_fingerprint(
+                None,
+                &app.generate.params.reference_paths,
+            )
+            .unwrap(),
             source_prompt: "source idea".into(),
             current_prompt: "source idea".into(),
             root_prompt: None,
@@ -14319,29 +14786,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transform_snapshot_names_model_and_prompt_staleness() {
-        let mut app = make_settings_test_app();
-        app.set_prompt_text("frozen prompt");
-        let snapshot = PromptTransformSnapshot {
-            operation: PromptTransformOperation::Remix,
-            model: app.generate.params.model.clone(),
-            target: app.target.clone(),
-            task: app.prompt_transform_task(),
-            source_prompt: "frozen prompt".into(),
-            current_prompt: "frozen prompt".into(),
-            root_prompt: None,
-            source_kind: mold_core::RemixSourceKind::Direct,
-        };
-        app.generate.params.model = "different-model".into();
-        assert!(app
-            .prompt_transform_staleness(&snapshot)
-            .is_some_and(|message| message.contains("model changed")));
+    #[serial_test::serial(mold_env)]
+    async fn transform_snapshot_names_model_prompt_and_reference_staleness() {
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.machines
+                .registry
+                .add(machines_test_host("reference-host"))
+                .unwrap();
+            crate::hosts::save_api_key("reference-host", "sekrit");
+            app.target = crate::hosts::GenTarget::Host("reference-host".into());
+            app.set_prompt_text("frozen prompt");
+            app.generate
+                .params
+                .reference_paths
+                .push(crate::h3_references::ReferencePath {
+                    kind: crate::h3_references::ReferenceKind::Image,
+                    path: "/tmp/first.png".into(),
+                });
+            let snapshot = PromptTransformSnapshot {
+                operation: PromptTransformOperation::Remix,
+                model: app.generate.params.model.clone(),
+                target: app.target.clone(),
+                task: app.prompt_transform_task(),
+                reference_fingerprint: app.reference_fingerprint_for_target(&app.target).unwrap(),
+                source_prompt: "frozen prompt".into(),
+                current_prompt: "frozen prompt".into(),
+                root_prompt: None,
+                source_kind: mold_core::RemixSourceKind::Direct,
+            };
+            app.generate.params.model = "different-model".into();
+            assert!(app
+                .prompt_transform_staleness(&snapshot)
+                .is_some_and(|message| message.contains("model changed")));
 
-        app.generate.params.model = snapshot.model.clone();
-        app.set_prompt_text("edited prompt");
+            app.generate.params.model = snapshot.model.clone();
+            app.set_prompt_text("edited prompt");
+            assert!(app
+                .prompt_transform_staleness(&snapshot)
+                .is_some_and(|message| message.contains("current prompt changed")));
+
+            app.set_prompt_text("frozen prompt");
+            app.generate.params.reference_paths[0].path = "/tmp/replacement.png".into();
+            assert!(app
+                .prompt_transform_staleness(&snapshot)
+                .is_some_and(|message| message.contains("ordered references changed")));
+        });
+    }
+
+    #[tokio::test]
+    async fn h3_reference_remix_fails_before_creating_an_unusable_batch() {
+        let mut app = make_settings_test_app();
+        app.set_prompt_text("animate the anchor");
+        app.generate
+            .params
+            .reference_paths
+            .push(crate::h3_references::ReferencePath {
+                kind: crate::h3_references::ReferenceKind::Image,
+                path: "/tmp/anchor.png".into(),
+            });
+
+        app.start_prompt_transform(PromptTransformOperation::Remix);
+
+        assert!(app.popup.is_none());
         assert!(app
-            .prompt_transform_staleness(&snapshot)
-            .is_some_and(|message| message.contains("current prompt changed")));
+            .generate
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Batch 1")));
     }
 
     #[tokio::test]
@@ -14353,6 +14865,11 @@ mod tests {
             model: app.generate.params.model.clone(),
             target: crate::hosts::GenTarget::Auto,
             task: app.prompt_transform_task(),
+            reference_fingerprint: crate::h3_references::authority_fingerprint(
+                None,
+                &app.generate.params.reference_paths,
+            )
+            .unwrap(),
             source_prompt: "source idea".into(),
             current_prompt: "source idea".into(),
             root_prompt: None,

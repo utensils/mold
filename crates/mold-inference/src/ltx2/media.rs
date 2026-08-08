@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use image::{GenericImage, Rgb, RgbImage};
 use mold_core::OutputFormat;
 use std::fs;
-use std::io::{BufReader, Cursor, Read, Seek};
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use mp4_rs::{
@@ -54,6 +54,25 @@ pub fn probe_decoded_mp4_audio_file(path: &Path) -> Result<Option<DecodedAudioPr
         samples_per_channel: u64::try_from(decoded.sample_count())
             .context("decoded reference audio sample count exceeded u64")?,
     }))
+}
+
+/// Decode the exact soundtrack authority from an already-open regular file.
+///
+/// TUI reference ingestion opens with no-follow semantics before probing. Keep
+/// that file descriptor authoritative by copying its bytes into private
+/// temporary storage instead of reopening the user-controlled pathname.
+pub fn probe_decoded_mp4_audio_open_file(mut file: fs::File) -> Result<Option<DecodedAudioProbe>> {
+    file.seek(SeekFrom::Start(0))
+        .context("failed to rewind the open MP4 reference")?;
+    let mut staged = tempfile::NamedTempFile::new()
+        .context("failed to create private MP4 audio-probe storage")?;
+    std::io::copy(&mut file, staged.as_file_mut())
+        .context("failed to stage the open MP4 reference for audio probing")?;
+    staged
+        .as_file_mut()
+        .flush()
+        .context("failed to flush the staged MP4 reference")?;
+    probe_decoded_mp4_audio_file(staged.path())
 }
 
 #[derive(Debug)]

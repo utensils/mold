@@ -7,33 +7,44 @@ use crate::error::MoldError;
 use crate::types::{
     AudioData, DeviceState, ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest,
     GenerateResponse, ImageData, LoraInfo, ModelInfo, ModelInfoExtended, OutputFormat,
-    QueueListingWire, ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent, VideoData,
+    QueueListingWire, ReferenceUploadCompleteResponse, ReferenceUploadSessionRequest,
+    ReferenceUploadSessionResponse, ServerStatus, SseCompleteEvent, SseErrorEvent,
+    SseProgressEvent, VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use reqwest::{Client, StatusCode};
+use std::io::{Seek, SeekFrom};
+use std::path::Path;
+use tokio_util::io::ReaderStream;
+
+const REFERENCE_UPLOAD_HANDLE_HEADER: &str = "x-mold-reference-upload";
+const REFERENCE_UPLOAD_SESSION_HEADER: &str = "x-mold-reference-upload-session";
 
 #[derive(Clone)]
 pub struct MoldClient {
     base_url: String,
     client: Client,
+    api_key_configured: bool,
 }
 
 impl MoldClient {
     pub fn new(base_url: &str) -> Self {
-        let client = build_client(None);
+        let (client, api_key_configured) = build_client(None);
         Self {
             base_url: normalize_host(base_url),
             client,
+            api_key_configured,
         }
     }
 
     /// Create a client with an explicit API key for authentication.
     pub fn with_api_key(base_url: &str, api_key: String) -> Self {
-        let client = build_client(Some(&api_key));
+        let (client, api_key_configured) = build_client(Some(&api_key));
         Self {
             base_url: normalize_host(base_url),
             client,
+            api_key_configured,
         }
     }
 
@@ -41,11 +52,158 @@ impl MoldClient {
         let base_url =
             std::env::var("MOLD_HOST").unwrap_or_else(|_| "http://localhost:7680".to_string());
         let api_key = std::env::var("MOLD_API_KEY").ok().filter(|k| !k.is_empty());
-        let client = build_client(api_key.as_deref());
+        let (client, api_key_configured) = build_client(api_key.as_deref());
         Self {
             base_url: normalize_host(&base_url),
             client,
+            api_key_configured,
         }
+    }
+
+    /// Whether this client actually installed a non-empty API-key header.
+    pub fn has_api_key(&self) -> bool {
+        self.api_key_configured
+    }
+
+    /// Create a request-bound MiniMax H3 reference upload session.
+    ///
+    /// The server applies authentication and legal activation before it
+    /// allocates staging. Error bodies (including HTTP 451 policy details) are
+    /// retained verbatim for callers instead of being collapsed to a generic
+    /// reqwest status error.
+    pub async fn create_reference_upload_session(
+        &self,
+        request: &ReferenceUploadSessionRequest,
+    ) -> Result<ReferenceUploadSessionResponse> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/generate/reference-upload-sessions",
+                self.base_url
+            ))
+            .json(request)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(response)
+            .await?
+            .json::<ReferenceUploadSessionResponse>()
+            .await?)
+    }
+
+    /// Stream one local reference file through a one-use bearer handle.
+    ///
+    /// The handle stays in a header, while the opened file's exact length is
+    /// sent as `Content-Length`. `ReaderStream` keeps large video references
+    /// out of process-sized buffers; the server independently hashes, probes,
+    /// and checks the declared descriptor before admission.
+    pub async fn upload_reference_file(
+        &self,
+        handle: &str,
+        path: &Path,
+        mime_type: &str,
+    ) -> Result<ReferenceUploadCompleteResponse> {
+        let file = tokio::fs::File::open(path)
+            .await
+            .with_context(|| format!("failed to open reference '{}'", path.display()))?;
+        let metadata = file
+            .metadata()
+            .await
+            .with_context(|| format!("failed to inspect reference '{}'", path.display()))?;
+        anyhow::ensure!(
+            metadata.is_file() && metadata.len() > 0,
+            "reference upload source is not a non-empty regular file: {}",
+            path.display()
+        );
+        self.upload_reference_body(
+            handle,
+            mime_type,
+            metadata.len(),
+            reqwest::Body::wrap_stream(ReaderStream::new(file)),
+        )
+        .await
+    }
+
+    /// Stream an already-open reference file through a one-use bearer handle.
+    ///
+    /// Keeping the descriptor probe and upload tied to clones of the same file
+    /// descriptor prevents a path or symlink replacement between inspection and
+    /// upload. The local pathname never enters the request or this method's
+    /// errors.
+    pub async fn upload_reference_open_file(
+        &self,
+        handle: &str,
+        mut file: std::fs::File,
+        mime_type: &str,
+    ) -> Result<ReferenceUploadCompleteResponse> {
+        let metadata = file.metadata().context("failed to inspect reference")?;
+        anyhow::ensure!(
+            metadata.is_file() && metadata.len() > 0,
+            "reference upload source is not a non-empty regular file"
+        );
+        file.seek(SeekFrom::Start(0))
+            .context("failed to rewind reference")?;
+        let file = tokio::fs::File::from_std(file);
+        self.upload_reference_body(
+            handle,
+            mime_type,
+            metadata.len(),
+            reqwest::Body::wrap_stream(ReaderStream::new(file)),
+        )
+        .await
+    }
+
+    /// Upload one bounded in-memory attachment through a one-use bearer handle.
+    ///
+    /// Discord already owns attachment bytes in memory after its download-size
+    /// gate. Taking ownership here guarantees the uploaded body is exactly the
+    /// body that was hashed and probed, without a second URL fetch.
+    pub async fn upload_reference_bytes(
+        &self,
+        handle: &str,
+        bytes: Vec<u8>,
+        mime_type: &str,
+    ) -> Result<ReferenceUploadCompleteResponse> {
+        anyhow::ensure!(!bytes.is_empty(), "reference upload source is empty");
+        let length = u64::try_from(bytes.len()).context("reference upload is too large")?;
+        self.upload_reference_body(handle, mime_type, length, reqwest::Body::from(bytes))
+            .await
+    }
+
+    async fn upload_reference_body(
+        &self,
+        handle: &str,
+        mime_type: &str,
+        content_length: u64,
+        body: reqwest::Body,
+    ) -> Result<ReferenceUploadCompleteResponse> {
+        let response = self
+            .client
+            .put(format!("{}/api/generate/reference-upload", self.base_url))
+            .header(REFERENCE_UPLOAD_HANDLE_HEADER, handle)
+            .header(reqwest::header::CONTENT_TYPE, mime_type)
+            .header(reqwest::header::CONTENT_LENGTH, content_length)
+            .body(body)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(response)
+            .await?
+            .json::<ReferenceUploadCompleteResponse>()
+            .await?)
+    }
+
+    /// Best-effort cleanup for an unconsumed reference upload session.
+    pub async fn cancel_reference_upload_session(&self, handle: &str) -> Result<()> {
+        let response = self
+            .client
+            .delete(format!(
+                "{}/api/generate/reference-upload-sessions",
+                self.base_url
+            ))
+            .header(REFERENCE_UPLOAD_SESSION_HEADER, handle)
+            .send()
+            .await?;
+        error_for_status_with_body(response).await?;
+        Ok(())
     }
 
     /// Generate an image. Returns raw image bytes (PNG or JPEG).
@@ -1348,15 +1506,17 @@ fn parse_sse_event(event_text: &str) -> (String, String) {
 }
 
 /// Build a reqwest Client, optionally with a default `X-Api-Key` header.
-fn build_client(api_key: Option<&str>) -> Client {
+fn build_client(api_key: Option<&str>) -> (Client, bool) {
     let mut builder = Client::builder();
+    let mut api_key_configured = false;
     if let Some(key) = api_key {
         let mut headers = reqwest::header::HeaderMap::new();
         match reqwest::header::HeaderValue::from_str(key) {
-            Ok(val) => {
+            Ok(val) if !key.trim().is_empty() => {
                 headers.insert("x-api-key", val);
+                api_key_configured = true;
             }
-            Err(_) => {
+            _ => {
                 eprintln!(
                     "warning: MOLD_API_KEY contains characters invalid for an HTTP header; \
                      authentication header will not be sent"
@@ -1365,7 +1525,10 @@ fn build_client(api_key: Option<&str>) -> Client {
         }
         builder = builder.default_headers(headers);
     }
-    builder.build().unwrap_or_else(|_| Client::new())
+    match builder.build() {
+        Ok(client) => (client, api_key_configured),
+        Err(_) => (Client::new(), false),
+    }
 }
 
 /// Normalize a host string into a full URL.
@@ -1417,10 +1580,57 @@ mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
 
+    fn reference_session_request() -> ReferenceUploadSessionRequest {
+        let request = serde_json::from_value(serde_json::json!({
+            "prompt": "match the reference",
+            "model": crate::minimax_h3::REF2VA_COMFY,
+            "width": crate::minimax_h3::DEFAULT_WIDTH,
+            "height": crate::minimax_h3::DEFAULT_HEIGHT,
+            "steps": crate::minimax_h3::DEFAULT_STEPS,
+            "guidance": 0.0,
+            "seed": 7,
+            "batch_size": 1,
+            "output_format": "mp4",
+            "strength": 1.0,
+            "frames": crate::minimax_h3::MIN_FRAMES,
+            "fps": crate::minimax_h3::FIXED_FPS,
+            "enable_audio": true,
+            "references": [{
+                "kind": "image",
+                "media": { "authority": "descriptor" },
+                "provenance": {
+                    "name": "reference.png",
+                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+                },
+                "mime_type": "image/png",
+                "width": 1,
+                "height": 1
+            }]
+        }))
+        .unwrap();
+        ReferenceUploadSessionRequest {
+            request,
+            upload_references: vec![1],
+        }
+    }
+
     #[test]
     fn test_new_trims_trailing_slash() {
         let client = MoldClient::new("http://localhost:7680/");
         assert_eq!(client.host(), "http://localhost:7680");
+    }
+
+    #[test]
+    fn api_key_state_tracks_only_an_installed_header() {
+        assert!(!MoldClient::new("http://localhost:7680").has_api_key());
+        assert!(
+            MoldClient::with_api_key("http://localhost:7680", "sekrit".to_string()).has_api_key()
+        );
+        assert!(!MoldClient::with_api_key("http://localhost:7680", "".to_string()).has_api_key());
+        assert!(
+            !MoldClient::with_api_key("http://localhost:7680", "bad\nkey".to_string())
+                .has_api_key()
+        );
     }
 
     #[test]
@@ -1535,6 +1745,160 @@ mod tests {
     fn test_is_connection_error_via_mold_error() {
         let err: anyhow::Error = MoldError::Client("connection refused".to_string()).into();
         assert!(MoldClient::is_connection_error(&err));
+    }
+
+    #[tokio::test]
+    async fn reference_session_preserves_authenticated_http_451_body() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate/reference-upload-sessions"))
+            .and(header("x-api-key", "sekrit"))
+            .respond_with(ResponseTemplate::new(451).set_body_json(serde_json::json!({
+                "error": "MiniMax H3 legal activation is unavailable",
+                "code": crate::MINIMAX_H3_AUTHORIZATION_REQUIRED
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = MoldClient::with_api_key(&server.uri(), "sekrit".to_string())
+            .create_reference_upload_session(&reference_session_request())
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("451 Unavailable For Legal Reasons"));
+        assert!(message.contains(crate::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[tokio::test]
+    async fn reference_file_streams_with_secret_headers_and_cancels_by_session_header() {
+        use wiremock::matchers::{body_string, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/generate/reference-upload"))
+            .and(header("x-api-key", "sekrit"))
+            .and(header(REFERENCE_UPLOAD_HANDLE_HEADER, "mru_secret"))
+            .and(header("content-type", "image/png"))
+            .and(header("content-length", "5"))
+            .and(body_string("bytes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "instance_id": "server-1",
+                "reference": 1,
+                "metadata": {
+                    "kind": "image",
+                    "index": 1,
+                    "name": "reference.png",
+                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "mime_type": "image/png",
+                    "width": 1,
+                    "height": 1
+                },
+                "request_scope_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "session_complete": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/generate/reference-upload"))
+            .and(header("x-api-key", "sekrit"))
+            .and(header(REFERENCE_UPLOAD_HANDLE_HEADER, "mru_open"))
+            .and(header("content-type", "image/png"))
+            .and(header("content-length", "15"))
+            .and(body_string("reference-bytes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "instance_id": "server-1",
+                "reference": 1,
+                "metadata": {
+                    "kind": "image",
+                    "index": 1,
+                    "name": "reference.png",
+                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "mime_type": "image/png",
+                    "width": 16,
+                    "height": 16
+                },
+                "request_scope_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "session_complete": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/generate/reference-upload"))
+            .and(header("x-api-key", "sekrit"))
+            .and(header(REFERENCE_UPLOAD_HANDLE_HEADER, "mru_bytes"))
+            .and(header("content-type", "audio/wav"))
+            .and(header("content-length", "5"))
+            .and(body_string("bytes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "instance_id": "server-1",
+                "reference": 2,
+                "metadata": {
+                    "kind": "audio",
+                    "index": 2,
+                    "name": "reference.wav",
+                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "mime_type": "audio/wav",
+                    "duration_ms": 2000,
+                    "sample_rate": 32000,
+                    "channels": 2
+                },
+                "request_scope_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "session_complete": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/generate/reference-upload-sessions"))
+            .and(header("x-api-key", "sekrit"))
+            .and(header(
+                REFERENCE_UPLOAD_SESSION_HEADER,
+                "mrs_session_secret",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reference.png");
+        let open_path = dir.path().join("reference-open.png");
+        std::fs::write(&path, b"bytes").unwrap();
+        std::fs::write(&open_path, b"reference-bytes").unwrap();
+        let client = MoldClient::with_api_key(&server.uri(), "sekrit".to_string());
+        let completed = client
+            .upload_reference_file("mru_secret", &path, "image/png")
+            .await
+            .unwrap();
+        assert_eq!(completed.instance_id, "server-1");
+        assert_eq!(completed.reference, 1);
+        let completed = client
+            .upload_reference_open_file(
+                "mru_open",
+                std::fs::File::open(&open_path).unwrap(),
+                "image/png",
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.instance_id, "server-1");
+        assert_eq!(completed.reference, 1);
+        let completed = client
+            .upload_reference_bytes("mru_bytes", b"bytes".to_vec(), "audio/wav")
+            .await
+            .unwrap();
+        assert_eq!(completed.instance_id, "server-1");
+        assert_eq!(completed.reference, 2);
+        client
+            .cancel_reference_upload_session("mrs_session_secret")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

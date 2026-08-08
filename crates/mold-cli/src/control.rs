@@ -18,10 +18,7 @@ pub(crate) struct CliContext {
 
 impl CliContext {
     pub(crate) fn new(host: Option<&str>) -> Self {
-        let client = match host {
-            Some(host) => MoldClient::new(host),
-            None => MoldClient::from_env(),
-        };
+        let client = client_for_host(host);
         let config = Config::load_or_default();
         Self { client, config }
     }
@@ -48,6 +45,23 @@ impl CliContext {
 
     pub(crate) async fn stream_server_pull(&self, model: &str) -> Result<()> {
         stream_server_pull(&self.client, model).await
+    }
+}
+
+/// Build the exact CLI target client without contacting the host.
+///
+/// H3 authoring uses this before opening reference media so a missing or
+/// invalid API-key header fails before local bytes are read.
+pub(crate) fn client_for_host(host: Option<&str>) -> MoldClient {
+    match host {
+        Some(host) => std::env::var("MOLD_API_KEY")
+            .ok()
+            .filter(|key| !key.is_empty())
+            .map_or_else(
+                || MoldClient::new(host),
+                |key| MoldClient::with_api_key(host, key),
+            ),
+        None => MoldClient::from_env(),
     }
 }
 

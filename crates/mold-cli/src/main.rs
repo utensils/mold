@@ -625,10 +625,10 @@ Examples:
         #[arg(short, long, help_heading = "Output", value_hint = ValueHint::FilePath)]
         output: Option<String>,
 
-        /// Output format
-        #[arg(long, default_value_t = OutputFormat::Png, help_heading = "Output",
+        /// Output format (default: PNG; MiniMax H3 always emits MP4)
+        #[arg(long, help_heading = "Output",
               value_parser = output_format_parser(&["png", "jpeg", "jpg", "gif", "apng", "webp", "mp4", "wav"]))]
-        format: OutputFormat,
+        format: Option<OutputFormat>,
 
         /// Disable embedded generation metadata in PNG output for this run
         #[arg(long, help_heading = "Output")]
@@ -674,6 +674,11 @@ Examples:
         /// Only used with --frames or video model families.
         #[arg(long, help_heading = "Video")]
         fps: Option<u32>,
+
+        /// MiniMax H3 duration in seconds (5 through 15). Resolves to the
+        /// nearest exact 17n+5 frame count on H3's fixed 24 FPS clock.
+        #[arg(long, conflicts_with = "frames", help_heading = "Video")]
+        duration: Option<f64>,
 
         /// Per-clip frame cap for chained video. When --frames exceeds this,
         /// the CLI splits into multiple chained clips stitched at render time.
@@ -726,6 +731,26 @@ Examples:
         /// Keyframe conditioning in the form <frame:path>. Repeat for multiple keyframes.
         #[arg(long, help_heading = "Video")]
         keyframe: Vec<String>,
+
+        /// MiniMax H3 FL2VA opening-frame condition.
+        #[arg(
+            long,
+            conflicts_with = "image",
+            help_heading = "MiniMax H3",
+            value_hint = ValueHint::FilePath
+        )]
+        first_frame: Option<std::path::PathBuf>,
+
+        /// MiniMax H3 FL2VA closing-frame condition. It is bound to the final
+        /// frame after --duration/--frames resolves onto H3's exact frame grid.
+        #[arg(long, help_heading = "MiniMax H3", value_hint = ValueHint::FilePath)]
+        last_frame: Option<std::path::PathBuf>,
+
+        /// Ordered MiniMax H3 Ref2VA input as KIND=PATH, where KIND is image,
+        /// video, or audio. Repeat in semantic order. Files use authenticated,
+        /// request-bound streaming upload and are never placed inline in JSON.
+        #[arg(long, value_name = "KIND=PATH", help_heading = "MiniMax H3")]
+        reference: Vec<commands::h3::ReferenceArg>,
 
         /// LTX-2 pipeline mode.
         #[arg(long, help_heading = "Video", value_enum)]
@@ -947,9 +972,10 @@ Examples:
         #[arg(short = 'i', long, help_heading = "img2img", value_hint = ValueHint::FilePath)]
         image: Vec<String>,
 
-        /// Denoising strength for img2img (0.0 = no change, 1.0 = full noise)
-        #[arg(long, default_value = "0.75", help_heading = "img2img")]
-        strength: f64,
+        /// Denoising strength for img2img (default: 0.75; 0.0 = no change,
+        /// 1.0 = full noise)
+        #[arg(long, help_heading = "img2img")]
+        strength: Option<f64>,
 
         /// Mask image for inpainting (file path; white = repaint, black = preserve)
         #[arg(long, requires = "image", help_heading = "img2img", value_hint = ValueHint::FilePath)]
@@ -1700,6 +1726,7 @@ async fn run() -> anyhow::Result<()> {
             batch,
             frames,
             fps,
+            duration,
             clip_frames,
             motion_tail,
             audio,
@@ -1709,6 +1736,9 @@ async fn run() -> anyhow::Result<()> {
             extend,
             extend_overlap,
             keyframe,
+            first_frame,
+            last_frame,
+            reference,
             pipeline,
             ic_lora_control,
             hdr_exr_dir,
@@ -1803,6 +1833,20 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
 
+            if prompt.len() > 1
+                && (model_or_prompt
+                    .as_deref()
+                    .and_then(mold_core::minimax_h3::resolve_model_name)
+                    .is_some()
+                    || duration.is_some()
+                    || first_frame.is_some()
+                    || last_frame.is_some()
+                    || !reference.is_empty())
+            {
+                anyhow::bail!(
+                    "MiniMax H3 endpoint/reference authoring is single-clip; use one prompt"
+                );
+            }
             if prompt.len() > 1 {
                 return commands::chain::run_from_sugar(
                     model_or_prompt.clone(),
@@ -1850,6 +1894,7 @@ async fn run() -> anyhow::Result<()> {
                 batch,
                 frames,
                 fps,
+                duration,
                 clip_frames,
                 motion_tail,
                 audio,
@@ -1859,6 +1904,9 @@ async fn run() -> anyhow::Result<()> {
                 extend,
                 extend_overlap,
                 keyframe,
+                first_frame,
+                last_frame,
+                reference,
                 pipeline,
                 ic_lora_control,
                 hdr_exr_dir,
@@ -2628,7 +2676,7 @@ mod tests {
     fn run_format_jpeg() {
         let cli = parse(&["run", "model", "test", "--format", "jpeg"]);
         match cli.command {
-            Commands::Run { format, .. } => assert_eq!(format, OutputFormat::Jpeg),
+            Commands::Run { format, .. } => assert_eq!(format, Some(OutputFormat::Jpeg)),
             _ => panic!("expected Run"),
         }
     }
@@ -2741,7 +2789,7 @@ mod tests {
                 assert_eq!(width, Some(512));
                 assert_eq!(height, Some(768));
                 assert_eq!(guidance, Some(4.0));
-                assert_eq!(format, OutputFormat::Jpeg);
+                assert_eq!(format, Some(OutputFormat::Jpeg));
                 assert!(!no_metadata);
                 assert_eq!(batch, 2);
                 assert_eq!(output.as_deref(), Some("/tmp/test.jpg"));
@@ -2775,7 +2823,7 @@ mod tests {
                 assert_eq!(width, None);
                 assert_eq!(height, None);
                 assert_eq!(guidance, None);
-                assert_eq!(format, OutputFormat::Png);
+                assert_eq!(format, None);
                 assert!(!no_metadata);
                 assert_eq!(batch, 1);
                 assert_eq!(output, None);
@@ -2812,7 +2860,7 @@ mod tests {
         // "gif" is in the new format list [png, jpeg, gif, apng, webp, mp4]
         let cli = parse(&["run", "model", "test", "--format", "gif"]);
         match cli.command {
-            Commands::Run { format, .. } => assert_eq!(format, OutputFormat::Gif),
+            Commands::Run { format, .. } => assert_eq!(format, Some(OutputFormat::Gif)),
             _ => panic!("expected Run"),
         }
     }
@@ -2875,7 +2923,7 @@ mod tests {
     fn run_strength_flag() {
         let cli = parse(&["run", "model", "test", "--strength", "0.5"]);
         match cli.command {
-            Commands::Run { strength, .. } => assert_eq!(strength, 0.5),
+            Commands::Run { strength, .. } => assert_eq!(strength, Some(0.5)),
             _ => panic!("expected Run"),
         }
     }
@@ -2884,7 +2932,7 @@ mod tests {
     fn run_strength_default() {
         let cli = parse(&["run", "model", "test"]);
         match cli.command {
-            Commands::Run { strength, .. } => assert_eq!(strength, 0.75),
+            Commands::Run { strength, .. } => assert_eq!(strength, None),
             _ => panic!("expected Run"),
         }
     }
@@ -3071,6 +3119,73 @@ mod tests {
             }
             _ => panic!("expected Run"),
         }
+    }
+
+    #[test]
+    fn run_h3_authoring_flags_preserve_reference_order() {
+        let cli = parse(&[
+            "run",
+            "minimax-h3-ref2va",
+            "match the cast",
+            "--duration",
+            "8.5",
+            "--reference",
+            "image=/tmp/cast.png",
+            "--reference",
+            "video=/tmp/motion.mp4",
+            "--reference",
+            "audio=/tmp/voice.wav",
+        ]);
+        match cli.command {
+            Commands::Run {
+                duration,
+                reference,
+                format,
+                strength,
+                ..
+            } => {
+                assert_eq!(duration, Some(8.5));
+                assert_eq!(reference.len(), 3);
+                assert_eq!(reference[0].kind, commands::h3::ReferenceKind::Image);
+                assert_eq!(reference[1].kind, commands::h3::ReferenceKind::Video);
+                assert_eq!(reference[2].kind, commands::h3::ReferenceKind::Audio);
+                assert_eq!(format, None);
+                assert_eq!(strength, None);
+            }
+            _ => panic!("expected Run command"),
+        }
+    }
+
+    #[test]
+    fn run_h3_duration_conflicts_with_explicit_frames() {
+        let error = try_parse(&[
+            "run",
+            "minimax-h3",
+            "a synchronized shot",
+            "--duration",
+            "5",
+            "--frames",
+            "124",
+        ])
+        .err()
+        .expect("duration and frames must conflict");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn run_h3_first_frame_conflicts_with_legacy_image_flag() {
+        let error = try_parse(&[
+            "run",
+            "minimax-h3",
+            "animate",
+            "--first-frame",
+            "/tmp/first.png",
+            "--image",
+            "/tmp/other.png",
+        ])
+        .err()
+        .expect("first-frame and image must conflict");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

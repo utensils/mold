@@ -14,6 +14,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::SeedInput { .. }) => render_seed_input(frame, app),
         Some(Popup::SizeInput { .. }) => render_size_input(frame, app),
         Some(Popup::StgBlocksInput { .. }) => render_stg_blocks_input(frame, app),
+        Some(Popup::ReferencesInput { .. }) => render_references_input(frame, app),
         Some(Popup::HistorySearch { .. }) => render_history_search(frame, app),
         Some(Popup::CommandPalette { .. }) => render_command_palette(frame, app),
         Some(Popup::Confirm { message, .. }) => render_confirm(frame, app, message.clone()),
@@ -627,6 +628,60 @@ fn render_stg_blocks_input(frame: &mut Frame, app: &mut App) {
             },
         );
     }
+}
+
+fn render_references_input(frame: &mut Frame, app: &mut App) {
+    let theme = &app.theme;
+    let area = centered_rect(frame.area(), 72, 24);
+    frame.render_widget(Clear, area);
+
+    let Some(Popup::ReferencesInput { input, error }) = &app.popup else {
+        return;
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.popup_border())
+        .title(" Ordered H3 References ")
+        .title_style(theme.title_focused())
+        .style(theme.popup_bg());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height < 5 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new("Semicolon order is semantic: image=/a.png; video=/b.mp4; audio=/c.wav")
+            .style(theme.dim()),
+        Rect { height: 1, ..inner },
+    );
+    frame.render_widget(
+        Paragraph::new(format!("{input}\u{2588}"))
+            .style(Style::default().fg(theme.text))
+            .wrap(Wrap { trim: false }),
+        Rect {
+            y: inner.y + 2,
+            height: inner.height.saturating_sub(4),
+            ..inner
+        },
+    );
+    if let Some(error) = error {
+        frame.render_widget(
+            Paragraph::new(error.as_str()).style(theme.error()),
+            Rect {
+                y: inner.y + inner.height.saturating_sub(2),
+                height: 1,
+                ..inner
+            },
+        );
+    }
+    frame.render_widget(
+        action_hints(theme, &[("Enter", "Confirm"), ("Esc", "Cancel")]),
+        Rect {
+            y: inner.y + inner.height.saturating_sub(1),
+            height: 1,
+            ..inner
+        },
+    );
 }
 
 /// Render the stepped connect-a-machine flow (Machines workspace).

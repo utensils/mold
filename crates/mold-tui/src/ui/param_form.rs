@@ -191,6 +191,7 @@ fn adjustable(field: ParamField) -> bool {
             | ParamField::Lora
             | ParamField::StgBlocks
             | ParamField::SourceImage
+            | ParamField::References
             | ParamField::MaskImage
             | ParamField::ControlImage
             | ParamField::ControlModel

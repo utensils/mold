@@ -3,6 +3,7 @@ pub mod checks;
 pub mod commands;
 pub mod cooldown;
 pub mod format;
+mod h3_references;
 pub mod handler;
 pub mod quota;
 pub mod state;

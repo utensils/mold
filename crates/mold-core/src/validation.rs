@@ -316,12 +316,22 @@ pub fn fixed_fps_for_family(family: &str) -> Option<u32> {
 /// Single-request runtime ceiling in seconds for families whose real limit is
 /// a duration. `None` means the family's ceiling is a plain frame count.
 pub fn max_runtime_seconds_for_family(family: &str) -> Option<u32> {
-    (family == "ltx2").then_some(LTX2_MAX_RUNTIME_SECONDS)
+    match family {
+        "ltx2" => Some(LTX2_MAX_RUNTIME_SECONDS),
+        family if crate::minimax_h3::is_family(family) => {
+            Some(crate::minimax_h3::MAX_DURATION_SECONDS)
+        }
+        _ => None,
+    }
 }
 
 /// fps-independent frame guard, paired with `max_runtime_seconds_for_family`.
 pub fn max_frames_absolute_for_family(family: &str) -> Option<u32> {
-    (family == "ltx2").then_some(LTX2_MAX_FRAMES_ABSOLUTE)
+    match family {
+        "ltx2" => Some(LTX2_MAX_FRAMES_ABSOLUTE),
+        family if crate::minimax_h3::is_family(family) => Some(crate::minimax_h3::MAX_FRAMES),
+        _ => None,
+    }
 }
 
 /// Step of the frame-count grid for a family. Pair with
@@ -4341,6 +4351,14 @@ mod tests {
         );
         assert_eq!(
             max_frames_for_family(crate::minimax_h3::FAMILY),
+            Some(crate::minimax_h3::MAX_FRAMES)
+        );
+        assert_eq!(
+            max_runtime_seconds_for_family(crate::minimax_h3::FAMILY),
+            Some(crate::minimax_h3::MAX_DURATION_SECONDS)
+        );
+        assert_eq!(
+            max_frames_absolute_for_family(crate::minimax_h3::FAMILY),
             Some(crate::minimax_h3::MAX_FRAMES)
         );
 

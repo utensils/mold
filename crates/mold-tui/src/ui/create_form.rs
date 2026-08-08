@@ -143,6 +143,7 @@ pub fn advanced_sections(caps: &ModelCapabilities) -> Vec<AdvSection> {
         sections.push(AdvSection::Negative);
     }
     if caps.supports_source_image
+        || caps.supports_references
         || caps.supports_strength
         || caps.supports_mask
         || caps.supports_controlnet
@@ -176,6 +177,9 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
         AdvSection::Negative => Vec::new(),
         AdvSection::Source => {
             let mut fields = Vec::new();
+            if caps.supports_references {
+                fields.push(ParamField::References);
+            }
             if caps.supports_source_image {
                 fields.push(ParamField::SourceImage);
             }
@@ -200,7 +204,7 @@ pub fn section_fields(sec: AdvSection, caps: &ModelCapabilities) -> Vec<ParamFie
             if caps.supports_video_upscale {
                 fields.push(ParamField::Pipeline);
             }
-            if caps.supports_audio {
+            if caps.supports_audio && !caps.audio_required {
                 fields.push(ParamField::Audio);
             }
             if caps.supports_video_upscale {
@@ -289,6 +293,9 @@ pub fn section_summary(sec: AdvSection, params: &GenerateParams, negative_empty:
                 "on".into()
             }
         }
+        AdvSection::Source if !params.reference_paths.is_empty() => {
+            format!("{} ordered", params.reference_paths.len())
+        }
         AdvSection::Source => params
             .source_image_path
             .as_deref()
@@ -352,7 +359,8 @@ pub fn advanced_active_count(params: &GenerateParams, negative_empty: bool) -> u
     if !negative_empty {
         count += 1;
     }
-    if params.source_image_path.is_some()
+    if !params.reference_paths.is_empty()
+        || params.source_image_path.is_some()
         || params.mask_image_path.is_some()
         || params.control_image_path.is_some()
     {
@@ -489,6 +497,20 @@ mod tests {
     }
 
     #[test]
+    fn h3_ref2va_source_section_exposes_only_the_ordered_reference_editor() {
+        let caps = crate::model_info::capabilities_for_model(
+            mold_core::minimax_h3::FAMILY,
+            mold_core::minimax_h3::REF2VA_COMFY,
+            None,
+            None,
+        );
+        assert_eq!(
+            section_fields(AdvSection::Source, &caps),
+            vec![ParamField::References]
+        );
+    }
+
+    #[test]
     fn visible_rows_expanding_one_section_collapses_other() {
         let caps = capabilities_for_family("sd15");
         let rows = visible_rows(&caps, &open_state(Some(AdvSection::Sampling)));
@@ -573,6 +595,19 @@ mod tests {
         assert!(!legacy_fields.contains(&ParamField::RescaleScale));
         assert!(!legacy_fields.contains(&ParamField::ModalityScale));
         assert!(!legacy_fields.contains(&ParamField::GuidanceSkip));
+    }
+
+    #[test]
+    fn h3_video_section_does_not_offer_an_audio_disable_control() {
+        let h3 = capabilities_for_family(mold_core::minimax_h3::FAMILY);
+        let fields = section_fields(AdvSection::Video, &h3);
+
+        assert!(fields.contains(&ParamField::Frames));
+        assert!(fields.contains(&ParamField::Fps));
+        assert!(!fields.contains(&ParamField::Audio));
+        assert!(!fields.contains(&ParamField::Pipeline));
+        assert!(!fields.contains(&ParamField::SpatialUpscale));
+        assert!(!fields.contains(&ParamField::TemporalUpscale));
     }
 
     #[test]
