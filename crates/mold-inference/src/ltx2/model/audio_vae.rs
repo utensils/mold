@@ -303,8 +303,14 @@ impl DecodedAudio {
         let decoded = match Self::decode_with_probe_with_checkpoint(path, checkpoint) {
             Ok(Some(decoded)) => Some(decoded),
             Ok(None) => Self::decode_aac_from_mp4_with_checkpoint(path, checkpoint)?,
+            Err(probe_err) if crate::progress::is_inference_cancelled(&probe_err) => {
+                return Err(probe_err);
+            }
             Err(probe_err) => match Self::decode_aac_from_mp4_with_checkpoint(path, checkpoint) {
                 Ok(decoded) => decoded,
+                Err(fallback_err) if crate::progress::is_inference_cancelled(&fallback_err) => {
+                    return Err(fallback_err);
+                }
                 Err(fallback_err) => {
                     return Err(anyhow!(
                         "failed to decode source audio '{}' via probe ({probe_err:#}) or native MP4 fallback ({fallback_err:#})",
