@@ -1,10 +1,12 @@
-use candle::{DType, IndexOp, Result, Tensor, D};
+use candle::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::{
     embedding, linear_b, rms_norm, Activation, Embedding, Linear, Module, RmsNorm, VarBuilder,
 };
 
+use super::comfy_quant::{H3ComfyInt8TensorwiseEmbedding, H3ComfyNvfp4AwqLinear};
 use super::config::{H3ConditionerConfig, H3_SELECTED_LANGUAGE_LAYERS};
 use super::model::ConditionerCheckpoint;
+use super::H3_COMFY_PORTABLE_ROW_CHUNK;
 
 #[derive(Clone, Debug)]
 pub(super) struct Qwen3VlTextDimensions {
@@ -73,34 +75,99 @@ impl Qwen3VlTextDimensions {
     }
 }
 
+enum Qwen3VlEmbedding {
+    Dense(Embedding),
+    Int8Tensorwise {
+        embedding: H3ComfyInt8TensorwiseEmbedding,
+        output_dtype: DType,
+        device: Device,
+    },
+}
+
+impl Qwen3VlEmbedding {
+    fn forward(&self, input_ids: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Dense(embedding) => embedding.forward(input_ids),
+            Self::Int8Tensorwise {
+                embedding,
+                output_dtype,
+                device,
+            } => embedding.forward(input_ids, *output_dtype, device),
+        }
+    }
+}
+
+enum Qwen3VlLinear {
+    Dense(Linear),
+    Nvfp4(H3ComfyNvfp4AwqLinear),
+}
+
+impl Qwen3VlLinear {
+    fn forward(&self, input: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Dense(linear) => linear.forward(input),
+            Self::Nvfp4(linear) => {
+                linear.forward_dequantized(input, None, input.dtype(), H3_COMFY_PORTABLE_ROW_CHUNK)
+            }
+        }
+    }
+}
+
+pub(super) struct Qwen3VlNvfp4LayerWeights {
+    pub(super) q_proj: H3ComfyNvfp4AwqLinear,
+    pub(super) k_proj: H3ComfyNvfp4AwqLinear,
+    pub(super) v_proj: H3ComfyNvfp4AwqLinear,
+    pub(super) o_proj: H3ComfyNvfp4AwqLinear,
+    pub(super) gate_proj: H3ComfyNvfp4AwqLinear,
+    pub(super) up_proj: H3ComfyNvfp4AwqLinear,
+    pub(super) down_proj: H3ComfyNvfp4AwqLinear,
+}
+
+pub(super) struct Qwen3VlNvfp4Weights {
+    pub(super) embed_tokens: H3ComfyInt8TensorwiseEmbedding,
+    pub(super) layers: Vec<Qwen3VlNvfp4LayerWeights>,
+}
+
 struct Mlp {
-    gate_proj: Linear,
-    up_proj: Linear,
-    down_proj: Linear,
+    gate_proj: Qwen3VlLinear,
+    up_proj: Qwen3VlLinear,
+    down_proj: Qwen3VlLinear,
 }
 
 impl Mlp {
     fn new(config: &Qwen3VlTextDimensions, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
-            gate_proj: linear_b(
+            gate_proj: Qwen3VlLinear::Dense(linear_b(
                 config.hidden_size,
                 config.intermediate_size,
                 false,
                 vb.pp("gate_proj"),
-            )?,
-            up_proj: linear_b(
+            )?),
+            up_proj: Qwen3VlLinear::Dense(linear_b(
                 config.hidden_size,
                 config.intermediate_size,
                 false,
                 vb.pp("up_proj"),
-            )?,
-            down_proj: linear_b(
+            )?),
+            down_proj: Qwen3VlLinear::Dense(linear_b(
                 config.intermediate_size,
                 config.hidden_size,
                 false,
                 vb.pp("down_proj"),
-            )?,
+            )?),
         })
+    }
+
+    fn new_nvfp4(
+        gate_proj: H3ComfyNvfp4AwqLinear,
+        up_proj: H3ComfyNvfp4AwqLinear,
+        down_proj: H3ComfyNvfp4AwqLinear,
+    ) -> Self {
+        Self {
+            gate_proj: Qwen3VlLinear::Nvfp4(gate_proj),
+            up_proj: Qwen3VlLinear::Nvfp4(up_proj),
+            down_proj: Qwen3VlLinear::Nvfp4(down_proj),
+        }
     }
 
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
@@ -190,10 +257,10 @@ fn apply_rotary(input: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
 }
 
 struct Attention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
+    q_proj: Qwen3VlLinear,
+    k_proj: Qwen3VlLinear,
+    v_proj: Qwen3VlLinear,
+    o_proj: Qwen3VlLinear,
     q_norm: RmsNorm,
     k_norm: RmsNorm,
     num_heads: usize,
@@ -208,10 +275,53 @@ impl Attention {
         let q_width = config.num_attention_heads * config.head_dim;
         let kv_width = config.num_key_value_heads * config.head_dim;
         Ok(Self {
-            q_proj: linear_b(config.hidden_size, q_width, false, vb.pp("q_proj"))?,
-            k_proj: linear_b(config.hidden_size, kv_width, false, vb.pp("k_proj"))?,
-            v_proj: linear_b(config.hidden_size, kv_width, false, vb.pp("v_proj"))?,
-            o_proj: linear_b(q_width, config.hidden_size, false, vb.pp("o_proj"))?,
+            q_proj: Qwen3VlLinear::Dense(linear_b(
+                config.hidden_size,
+                q_width,
+                false,
+                vb.pp("q_proj"),
+            )?),
+            k_proj: Qwen3VlLinear::Dense(linear_b(
+                config.hidden_size,
+                kv_width,
+                false,
+                vb.pp("k_proj"),
+            )?),
+            v_proj: Qwen3VlLinear::Dense(linear_b(
+                config.hidden_size,
+                kv_width,
+                false,
+                vb.pp("v_proj"),
+            )?),
+            o_proj: Qwen3VlLinear::Dense(linear_b(
+                q_width,
+                config.hidden_size,
+                false,
+                vb.pp("o_proj"),
+            )?),
+            q_norm: rms_norm(config.head_dim, config.rms_norm_eps, vb.pp("q_norm"))?,
+            k_norm: rms_norm(config.head_dim, config.rms_norm_eps, vb.pp("k_norm"))?,
+            num_heads: config.num_attention_heads,
+            num_key_value_heads: config.num_key_value_heads,
+            head_dim: config.head_dim,
+            kv_groups: config.num_attention_heads / config.num_key_value_heads,
+            scale: 1.0 / (config.head_dim as f64).sqrt(),
+        })
+    }
+
+    fn new_nvfp4(
+        config: &Qwen3VlTextDimensions,
+        vb: VarBuilder,
+        q_proj: H3ComfyNvfp4AwqLinear,
+        k_proj: H3ComfyNvfp4AwqLinear,
+        v_proj: H3ComfyNvfp4AwqLinear,
+        o_proj: H3ComfyNvfp4AwqLinear,
+    ) -> Result<Self> {
+        Ok(Self {
+            q_proj: Qwen3VlLinear::Nvfp4(q_proj),
+            k_proj: Qwen3VlLinear::Nvfp4(k_proj),
+            v_proj: Qwen3VlLinear::Nvfp4(v_proj),
+            o_proj: Qwen3VlLinear::Nvfp4(o_proj),
             q_norm: rms_norm(config.head_dim, config.rms_norm_eps, vb.pp("q_norm"))?,
             k_norm: rms_norm(config.head_dim, config.rms_norm_eps, vb.pp("k_norm"))?,
             num_heads: config.num_attention_heads,
@@ -289,6 +399,43 @@ impl DecoderLayer {
         })
     }
 
+    fn new_nvfp4(
+        config: &Qwen3VlTextDimensions,
+        vb: VarBuilder,
+        weights: Qwen3VlNvfp4LayerWeights,
+    ) -> Result<Self> {
+        let Qwen3VlNvfp4LayerWeights {
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            gate_proj,
+            up_proj,
+            down_proj,
+        } = weights;
+        Ok(Self {
+            attention: Attention::new_nvfp4(
+                config,
+                vb.pp("self_attn"),
+                q_proj,
+                k_proj,
+                v_proj,
+                o_proj,
+            )?,
+            mlp: Mlp::new_nvfp4(gate_proj, up_proj, down_proj),
+            input_layernorm: rms_norm(
+                config.hidden_size,
+                config.rms_norm_eps,
+                vb.pp("input_layernorm"),
+            )?,
+            post_attention_layernorm: rms_norm(
+                config.hidden_size,
+                config.rms_norm_eps,
+                vb.pp("post_attention_layernorm"),
+            )?,
+        })
+    }
+
     fn forward(
         &self,
         input: &Tensor,
@@ -308,7 +455,7 @@ impl DecoderLayer {
 }
 
 pub(super) struct Qwen3VlTextEncoder {
-    embed_tokens: Embedding,
+    embed_tokens: Qwen3VlEmbedding,
     layers: Vec<DecoderLayer>,
     rotary: MultimodalRotaryEmbedding,
     hidden_size: usize,
@@ -324,7 +471,52 @@ impl Qwen3VlTextEncoder {
             layers.push(DecoderLayer::new(config, vb.pp("layers").pp(index))?);
         }
         Ok(Self {
-            embed_tokens,
+            embed_tokens: Qwen3VlEmbedding::Dense(embed_tokens),
+            layers,
+            rotary,
+            hidden_size: config.hidden_size,
+        })
+    }
+
+    pub(super) fn new_nvfp4(
+        config: &Qwen3VlTextDimensions,
+        vb: VarBuilder,
+        weights: Qwen3VlNvfp4Weights,
+    ) -> Result<Self> {
+        config.validate()?;
+        if weights.layers.len() != config.num_layers {
+            candle::bail!(
+                "H3 NVFP4 Qwen supplied {} layers, expected exactly {}",
+                weights.layers.len(),
+                config.num_layers
+            );
+        }
+        if weights.embed_tokens.vocabulary() != config.vocab_size
+            || weights.embed_tokens.hidden_size() != config.hidden_size
+        {
+            candle::bail!(
+                "H3 NVFP4 Qwen embedding is {}x{}, expected {}x{}",
+                weights.embed_tokens.vocabulary(),
+                weights.embed_tokens.hidden_size(),
+                config.vocab_size,
+                config.hidden_size
+            );
+        }
+        let rotary = MultimodalRotaryEmbedding::new(config, &vb)?;
+        let mut layers = Vec::with_capacity(config.num_layers);
+        for (index, weights) in weights.layers.into_iter().enumerate() {
+            layers.push(DecoderLayer::new_nvfp4(
+                config,
+                vb.pp("layers").pp(index),
+                weights,
+            )?);
+        }
+        Ok(Self {
+            embed_tokens: Qwen3VlEmbedding::Int8Tensorwise {
+                embedding: weights.embed_tokens,
+                output_dtype: vb.dtype(),
+                device: vb.device().clone(),
+            },
             layers,
             rotary,
             hidden_size: config.hidden_size,
@@ -426,6 +618,144 @@ mod tests {
     use super::*;
     use candle::{DType, Device};
     use candle_nn::VarMap;
+    use std::collections::HashMap;
+
+    fn round_up(value: usize, multiple: usize) -> usize {
+        value.div_ceil(multiple) * multiple
+    }
+
+    fn synthetic_nvfp4(
+        out_features: usize,
+        in_features: usize,
+        with_awq: bool,
+    ) -> H3ComfyNvfp4AwqLinear {
+        let padded_out = round_up(out_features, 16);
+        let padded_in = round_up(in_features, 16);
+        let scale_rows = round_up(padded_out, 128);
+        let scale_columns = round_up(padded_in / 16, 4);
+        // 0x11 is two +0.5 E2M1 values. With unit block scales and a
+        // 1/16 tensor scale this represents a dense 1/32 matrix exactly.
+        let packed = Tensor::from_vec(
+            vec![0x11_u8; padded_out * padded_in / 2],
+            (padded_out, padded_in / 2),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let block_scales = Tensor::ones((scale_rows, scale_columns), DType::F32, &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let tensor_scale = Tensor::new(0.0625_f32, &Device::Cpu).unwrap();
+        let awq = with_awq.then(|| Tensor::ones((in_features,), DType::F32, &Device::Cpu).unwrap());
+        H3ComfyNvfp4AwqLinear::new_with_optional_awq(
+            packed,
+            block_scales,
+            tensor_scale,
+            awq,
+            out_features,
+            in_features,
+        )
+        .unwrap()
+    }
+
+    fn synthetic_nvfp4_weights(config: &Qwen3VlTextDimensions) -> Qwen3VlNvfp4Weights {
+        let mut raw_embedding = Vec::with_capacity(config.vocab_size * config.hidden_size);
+        for row in 0..config.vocab_size {
+            for column in 0..config.hidden_size {
+                let value = ((row * config.hidden_size + column) % 7) as i8 - 3;
+                raw_embedding.push(value as u8);
+            }
+        }
+        let embed_tokens = H3ComfyInt8TensorwiseEmbedding::new(
+            Tensor::from_vec(
+                raw_embedding,
+                (config.vocab_size, config.hidden_size),
+                &Device::Cpu,
+            )
+            .unwrap(),
+            Tensor::ones((config.vocab_size, 1), DType::F32, &Device::Cpu).unwrap(),
+        )
+        .unwrap();
+        let q_width = config.num_attention_heads * config.head_dim;
+        let kv_width = config.num_key_value_heads * config.head_dim;
+        let layers = (0..config.num_layers)
+            .map(|_| Qwen3VlNvfp4LayerWeights {
+                q_proj: synthetic_nvfp4(q_width, config.hidden_size, false),
+                k_proj: synthetic_nvfp4(kv_width, config.hidden_size, false),
+                v_proj: synthetic_nvfp4(kv_width, config.hidden_size, false),
+                o_proj: synthetic_nvfp4(config.hidden_size, q_width, true),
+                gate_proj: synthetic_nvfp4(config.intermediate_size, config.hidden_size, false),
+                up_proj: synthetic_nvfp4(config.intermediate_size, config.hidden_size, false),
+                down_proj: synthetic_nvfp4(config.hidden_size, config.intermediate_size, true),
+            })
+            .collect();
+        Qwen3VlNvfp4Weights {
+            embed_tokens,
+            layers,
+        }
+    }
+
+    fn synthetic_dense_weights(config: &Qwen3VlTextDimensions) -> HashMap<String, Tensor> {
+        let mut tensors = HashMap::new();
+        let embedding = (0..config.vocab_size * config.hidden_size)
+            .map(|index| (index % 7) as f32 - 3.0)
+            .collect::<Vec<_>>();
+        tensors.insert(
+            "embed_tokens.weight".into(),
+            Tensor::from_vec(
+                embedding,
+                (config.vocab_size, config.hidden_size),
+                &Device::Cpu,
+            )
+            .unwrap(),
+        );
+        let q_width = config.num_attention_heads * config.head_dim;
+        let kv_width = config.num_key_value_heads * config.head_dim;
+        for layer in 0..config.num_layers {
+            let prefix = format!("layers.{layer}");
+            for (suffix, out_features, in_features) in [
+                ("self_attn.q_proj.weight", q_width, config.hidden_size),
+                ("self_attn.k_proj.weight", kv_width, config.hidden_size),
+                ("self_attn.v_proj.weight", kv_width, config.hidden_size),
+                ("self_attn.o_proj.weight", config.hidden_size, q_width),
+                (
+                    "mlp.gate_proj.weight",
+                    config.intermediate_size,
+                    config.hidden_size,
+                ),
+                (
+                    "mlp.up_proj.weight",
+                    config.intermediate_size,
+                    config.hidden_size,
+                ),
+                (
+                    "mlp.down_proj.weight",
+                    config.hidden_size,
+                    config.intermediate_size,
+                ),
+            ] {
+                tensors.insert(
+                    format!("{prefix}.{suffix}"),
+                    Tensor::ones((out_features, in_features), DType::F32, &Device::Cpu)
+                        .unwrap()
+                        .affine(0.03125, 0.0)
+                        .unwrap(),
+                );
+            }
+            for (suffix, width) in [
+                ("self_attn.q_norm.weight", config.head_dim),
+                ("self_attn.k_norm.weight", config.head_dim),
+                ("input_layernorm.weight", config.hidden_size),
+                ("post_attention_layernorm.weight", config.hidden_size),
+            ] {
+                tensors.insert(
+                    format!("{prefix}.{suffix}"),
+                    Tensor::ones((width,), DType::F32, &Device::Cpu).unwrap(),
+                );
+            }
+        }
+        tensors
+    }
 
     #[test]
     fn tiny_encoder_returns_full_unnormalized_sequence_without_tail_keys() {
@@ -491,6 +821,86 @@ mod tests {
         let values = cos.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         assert!((values[0] - 2.0_f32.cos()).abs() < 1e-6);
         assert!((values[1] - (3.0_f32 / 100.0).cos()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mixed_int8_nvfp4_stack_matches_dense_numerical_oracle() {
+        let config = Qwen3VlTextDimensions::tiny();
+        let dense_weights = synthetic_dense_weights(&config);
+        let dense = Qwen3VlTextEncoder::new(
+            &config,
+            VarBuilder::from_tensors(dense_weights.clone(), DType::F32, &Device::Cpu),
+        )
+        .unwrap();
+        let quantized = Qwen3VlTextEncoder::new_nvfp4(
+            &config,
+            VarBuilder::from_tensors(dense_weights, DType::F32, &Device::Cpu),
+            synthetic_nvfp4_weights(&config),
+        )
+        .unwrap();
+        let ids = Tensor::new(&[[1_u32, 7, 19]], &Device::Cpu).unwrap();
+        let positions = Tensor::new(
+            &[[[0_u32, 1, 2]], [[0_u32, 1, 2]], [[0_u32, 1, 2]]],
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let dense_embeds = dense.embed_tokens(&ids).unwrap();
+        let quantized_embeds = quantized.embed_tokens(&ids).unwrap();
+        let dense_output = dense
+            .forward_embeds(dense_embeds.clone(), &positions, &[], None, &mut |_| Ok(()))
+            .unwrap();
+        let quantized_output = quantized
+            .forward_embeds(quantized_embeds.clone(), &positions, &[], None, &mut |_| {
+                Ok(())
+            })
+            .unwrap();
+
+        for (role, dense, quantized) in [
+            ("embedding", dense_embeds, quantized_embeds),
+            (
+                "unnormalized hidden-state contract",
+                dense_output,
+                quantized_output,
+            ),
+        ] {
+            let dense = dense.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            let quantized = quantized.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            let max_difference = dense
+                .iter()
+                .zip(&quantized)
+                .map(|(left, right)| (left - right).abs())
+                .fold(0_f32, f32::max);
+            assert!(max_difference <= 2e-5, "{role} drifted by {max_difference}");
+        }
+    }
+
+    #[test]
+    fn mixed_stack_rejects_any_layer_tail_or_truncation() {
+        let config = Qwen3VlTextDimensions::tiny();
+        for supplied in [config.num_layers - 1, config.num_layers + 1] {
+            let mut weights = synthetic_nvfp4_weights(&config);
+            weights.layers.truncate(supplied.min(config.num_layers));
+            if supplied > config.num_layers {
+                weights.layers.push(Qwen3VlNvfp4LayerWeights {
+                    q_proj: synthetic_nvfp4(12, 12, false),
+                    k_proj: synthetic_nvfp4(4, 12, false),
+                    v_proj: synthetic_nvfp4(4, 12, false),
+                    o_proj: synthetic_nvfp4(12, 12, true),
+                    gate_proj: synthetic_nvfp4(24, 12, false),
+                    up_proj: synthetic_nvfp4(24, 12, false),
+                    down_proj: synthetic_nvfp4(12, 24, true),
+                });
+            }
+            let error = Qwen3VlTextEncoder::new_nvfp4(
+                &config,
+                VarBuilder::zeros(DType::F32, &Device::Cpu),
+                weights,
+            )
+            .err()
+            .expect("mismatched layer count must fail");
+            assert!(error.to_string().contains("expected exactly 3"));
+        }
     }
 
     #[cfg(feature = "cuda")]
