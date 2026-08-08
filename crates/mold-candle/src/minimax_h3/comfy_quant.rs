@@ -10,9 +10,10 @@
 //! Four representations/execution policies intentionally remain distinct:
 //!
 //! - The pruned DiT stores INT8 weights after a regular, normalized, 256-wide
-//!   ConvRot transform and carries one F32 scale per output row. A portable
-//!   forward rotates the activation in F32, streams output-row chunks, and
-//!   multiplies by the stored row scale without retaining a dense weight.
+//!   ConvRot transform and carries one F32 scale per output row. Its source
+//!   reference rotates activations in the input dtype, performs dynamic
+//!   per-row INT8 QDQ, streams output-row chunks, and applies both F32 scales
+//!   without retaining a dense weight.
 //! - The pruned DiT's scaled FP8 matrices retain E4M3 weights plus scalar F32
 //!   weight/input scales. Their reference path preserves the source QDQ order
 //!   and accumulates against bounded, reconstructed F32 weight chunks.
@@ -163,6 +164,23 @@ fn regular_hadamard(device: &Device) -> Result<Tensor> {
         (H3_COMFY_CONVROT_GROUP_SIZE, H3_COMFY_CONVROT_GROUP_SIZE),
         device,
     )
+}
+
+/// Match `torch.round`: nearest integer with half-way values rounded to even.
+///
+/// Candle's built-in `round` follows Rust/C `round` and sends half-way values
+/// away from zero. Comfy's dynamic INT8 QDQ uses PyTorch's ties-to-even rule,
+/// so that primitive is not source-equivalent at exact half steps.
+fn round_ties_even(input: &Tensor) -> Result<Tensor> {
+    ensure_floating(input.dtype(), "ties-to-even input")?;
+    let lower = input.floor()?;
+    let fraction = input.broadcast_sub(&lower)?;
+    let greater_than_half = fraction.gt(0.5)?.to_dtype(input.dtype())?;
+    let exactly_half = fraction.eq(0.5)?.to_dtype(input.dtype())?;
+    let even_below = lower.affine(0.5, 0.0)?.floor()?.affine(2.0, 0.0)?;
+    let odd_lower = lower.broadcast_sub(&even_below)?;
+    let increment = greater_than_half.broadcast_add(&exactly_half.broadcast_mul(&odd_lower)?)?;
+    lower.broadcast_add(&increment)
 }
 
 /// CPU-backed per-tensor FP8-E4M3 linear used by Comfy's scaled H3 DiT.
@@ -572,6 +590,81 @@ impl H3ComfyInt8ConvRotLinear {
                 rotated
                     .matmul(&quantized.t()?.contiguous()?)?
                     .broadcast_mul(&scales)?,
+            );
+        }
+        finish_linear(
+            chunks,
+            bias,
+            output_dtype,
+            output_shape,
+            self.out_features,
+            device,
+        )
+    }
+
+    /// Execute Comfy's source-defined INT8 ConvRot W8A8 reference order.
+    ///
+    /// Activations are rotated in their input dtype, dynamically quantized
+    /// per row with `absmax / 127`, rounded and clamped to signed INT8, then
+    /// accumulated against the checkpoint's packed signed bytes. Scales are
+    /// applied in F32 before each bounded output-row chunk is converted to the
+    /// requested output dtype. This mirrors comfy-kitchen's eager fallback
+    /// while retaining neither a dense block weight nor the full output-width
+    /// accumulator.
+    pub fn forward_reference(
+        &self,
+        input: &Tensor,
+        bias: Option<&Tensor>,
+        output_dtype: DType,
+        rows_per_chunk: usize,
+    ) -> Result<Tensor> {
+        ensure_output_dtype(output_dtype)?;
+        if rows_per_chunk == 0 {
+            candle::bail!("MiniMax H3 INT8 row chunk must be positive")
+        }
+        let device = input.device();
+        let input_dtype = input.dtype();
+        ensure_floating(input_dtype, "INT8 ConvRot activation")?;
+        let (flat, output_shape) = flattened_input(input, self.in_features)?;
+        let rows = flat.dim(0)?;
+        let groups = self.in_features / H3_COMFY_CONVROT_GROUP_SIZE;
+        let grouped_rows = rows.checked_mul(groups).ok_or_else(|| {
+            candle::Error::Msg("MiniMax H3 INT8 grouped activation rows overflow".into())
+        })?;
+        let hadamard = regular_hadamard(device)?.to_dtype(input_dtype)?;
+        let rotated = flat
+            .to_dtype(input_dtype)?
+            .reshape((grouped_rows, H3_COMFY_CONVROT_GROUP_SIZE))?
+            .matmul(&hadamard)?
+            .reshape((rows, self.in_features))?;
+        let input_scale = rotated
+            .abs()?
+            .max_keepdim(1)?
+            .to_dtype(DType::F32)?
+            .affine(1.0 / 127.0, 0.0)?
+            .clamp(1e-30f32, f32::MAX)?;
+        // comfy-kitchen casts the F32 scale back to the activation dtype for
+        // the division before PyTorch's ties-to-even rounding and clamping to
+        // the signed-I8 interval.
+        let scaled_input = rotated.broadcast_div(&input_scale.to_dtype(input_dtype)?)?;
+        let quantized_input = round_ties_even(&scaled_input)?
+            .clamp(-128.0f32, 127.0f32)?
+            .to_dtype(DType::F32)?;
+        let mut chunks = Vec::new();
+        for start in (0..self.out_features).step_by(rows_per_chunk) {
+            let width = rows_per_chunk.min(self.out_features - start);
+            let quantized_weight = self.signed_rows(start, width, device)?;
+            let weight_scale = self
+                .weight_scale
+                .narrow(0, start, width)?
+                .to_device(device)?
+                .reshape((1, width))?;
+            let scale = input_scale.broadcast_mul(&weight_scale)?;
+            chunks.push(
+                quantized_input
+                    .matmul(&quantized_weight.t()?.contiguous()?)?
+                    .broadcast_mul(&scale)?
+                    .to_dtype(output_dtype)?,
             );
         }
         finish_linear(
@@ -1189,7 +1282,7 @@ mod tests {
             .map(|index| (index as f32 % 17.0 - 8.0) / 5.0)
             .collect::<Vec<_>>();
         linear
-            .forward_dequantized(
+            .forward_reference(
                 &Tensor::from_vec(input_values, (2, columns), device)?,
                 None,
                 DType::F32,
@@ -1274,6 +1367,30 @@ mod tests {
     }
 
     #[test]
+    fn ties_to_even_rounding_matches_pytorch_half_step_contract() -> Result<()> {
+        let input = Tensor::new(
+            &[-3.5f32, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5],
+            &Device::Cpu,
+        )?;
+        let expected = vec![-4.0, -2.0, -2.0, 0.0, 0.0, 2.0, 2.0, 4.0];
+        for dtype in [DType::F32, DType::F16, DType::BF16] {
+            assert_eq!(
+                round_ties_even(&input.to_dtype(dtype)?)?
+                    .to_dtype(DType::F32)?
+                    .to_vec1::<f32>()?,
+                expected,
+                "ties-to-even mismatch for {dtype:?}"
+            );
+        }
+        assert_ne!(
+            input.round()?.to_vec1::<f32>()?,
+            round_ties_even(&input)?.to_vec1::<f32>()?,
+            "the regression must distinguish Candle's half-away-from-zero primitive"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn int8_convrot_forward_matches_explicit_dequantized_weight() -> Result<()> {
         let device = Device::Cpu;
         let rows = 3;
@@ -1306,6 +1423,54 @@ mod tests {
         assert!(linear
             .forward_dequantized(&input, Some(&bias), DType::F32, 0)
             .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn int8_convrot_reference_matches_comfy_dynamic_row_qdq_order() -> Result<()> {
+        let device = Device::Cpu;
+        let rows = 3;
+        let columns = H3_COMFY_CONVROT_GROUP_SIZE;
+        let raw = (0..rows * columns)
+            .map(|index| (((index * 29 + 5) % 37) as i8 - 18).to_ne_bytes()[0])
+            .collect::<Vec<_>>();
+        let scales = Tensor::from_vec(vec![0.015625f32, 0.03125, 0.0625], (rows, 1), &device)?;
+        let linear = H3ComfyInt8ConvRotLinear::new(
+            Tensor::from_vec(raw, (rows, columns), &device)?,
+            scales.clone(),
+        )?;
+        let input = Tensor::from_vec(
+            (0..2 * columns)
+                .map(|index| ((index * 13 % 97) as f32 - 48.0) / 31.0)
+                .collect::<Vec<_>>(),
+            (2, columns),
+            &device,
+        )?;
+        let actual = linear.forward_reference(&input, None, DType::F32, 2)?;
+
+        let rotated = input
+            .reshape((2, columns))?
+            .matmul(&regular_hadamard(&device)?)?
+            .reshape((2, columns))?;
+        let input_scale = rotated
+            .abs()?
+            .max_keepdim(1)?
+            .affine(1.0 / 127.0, 0.0)?
+            .clamp(1e-30f32, f32::MAX)?;
+        let scaled = rotated.broadcast_div(&input_scale)?;
+        let quantized = round_ties_even(&scaled)?.clamp(-128.0f32, 127.0f32)?;
+        let signed = linear.signed_rows(0, rows, &device)?;
+        let expected = quantized
+            .matmul(&signed.t()?.contiguous()?)?
+            .broadcast_mul(&input_scale.broadcast_mul(&scales.t()?)?)?;
+        assert_eq!(max_error(&actual, &expected)?, 0.0);
+        assert!(
+            max_error(
+                &actual,
+                &linear.forward_dequantized(&input, None, DType::F32, 2)?
+            )? > 0.0,
+            "dynamic activation quantization must remain distinct from dense dequantization"
+        );
         Ok(())
     }
 
