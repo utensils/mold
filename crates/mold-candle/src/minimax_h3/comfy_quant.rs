@@ -166,6 +166,23 @@ fn regular_hadamard(device: &Device) -> Result<Tensor> {
     )
 }
 
+/// Match `torch.round`: nearest integer with half-way values rounded to even.
+///
+/// Candle's built-in `round` follows Rust/C `round` and sends half-way values
+/// away from zero. Comfy's dynamic INT8 QDQ uses PyTorch's ties-to-even rule,
+/// so that primitive is not source-equivalent at exact half steps.
+fn round_ties_even(input: &Tensor) -> Result<Tensor> {
+    ensure_floating(input.dtype(), "ties-to-even input")?;
+    let lower = input.floor()?;
+    let fraction = input.broadcast_sub(&lower)?;
+    let greater_than_half = fraction.gt(0.5)?.to_dtype(input.dtype())?;
+    let exactly_half = fraction.eq(0.5)?.to_dtype(input.dtype())?;
+    let even_below = lower.affine(0.5, 0.0)?.floor()?.affine(2.0, 0.0)?;
+    let odd_lower = lower.broadcast_sub(&even_below)?;
+    let increment = greater_than_half.broadcast_add(&exactly_half.broadcast_mul(&odd_lower)?)?;
+    lower.broadcast_add(&increment)
+}
+
 /// CPU-backed per-tensor FP8-E4M3 linear used by Comfy's scaled H3 DiT.
 ///
 /// Both scales use the source convention, not its reciprocal:
@@ -627,11 +644,10 @@ impl H3ComfyInt8ConvRotLinear {
             .affine(1.0 / 127.0, 0.0)?
             .clamp(1e-30f32, f32::MAX)?;
         // comfy-kitchen casts the F32 scale back to the activation dtype for
-        // the division before rounding to nearest (ties-to-even in both
-        // PyTorch and Candle) and clamping to the signed-I8 interval.
-        let quantized_input = rotated
-            .broadcast_div(&input_scale.to_dtype(input_dtype)?)?
-            .round_to(0)?
+        // the division before PyTorch's ties-to-even rounding and clamping to
+        // the signed-I8 interval.
+        let scaled_input = rotated.broadcast_div(&input_scale.to_dtype(input_dtype)?)?;
+        let quantized_input = round_ties_even(&scaled_input)?
             .clamp(-128.0f32, 127.0f32)?
             .to_dtype(DType::F32)?;
         let mut chunks = Vec::new();
@@ -1351,6 +1367,30 @@ mod tests {
     }
 
     #[test]
+    fn ties_to_even_rounding_matches_pytorch_half_step_contract() -> Result<()> {
+        let input = Tensor::new(
+            &[-3.5f32, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5],
+            &Device::Cpu,
+        )?;
+        let expected = vec![-4.0, -2.0, -2.0, 0.0, 0.0, 2.0, 2.0, 4.0];
+        for dtype in [DType::F32, DType::F16, DType::BF16] {
+            assert_eq!(
+                round_ties_even(&input.to_dtype(dtype)?)?
+                    .to_dtype(DType::F32)?
+                    .to_vec1::<f32>()?,
+                expected,
+                "ties-to-even mismatch for {dtype:?}"
+            );
+        }
+        assert_ne!(
+            input.round()?.to_vec1::<f32>()?,
+            round_ties_even(&input)?.to_vec1::<f32>()?,
+            "the regression must distinguish Candle's half-away-from-zero primitive"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn int8_convrot_forward_matches_explicit_dequantized_weight() -> Result<()> {
         let device = Device::Cpu;
         let rows = 3;
@@ -1417,10 +1457,8 @@ mod tests {
             .max_keepdim(1)?
             .affine(1.0 / 127.0, 0.0)?
             .clamp(1e-30f32, f32::MAX)?;
-        let quantized = rotated
-            .broadcast_div(&input_scale)?
-            .round_to(0)?
-            .clamp(-128.0f32, 127.0f32)?;
+        let scaled = rotated.broadcast_div(&input_scale)?;
+        let quantized = round_ties_even(&scaled)?.clamp(-128.0f32, 127.0f32)?;
         let signed = linear.signed_rows(0, rows, &device)?;
         let expected = quantized
             .matmul(&signed.t()?.contiguous()?)?
