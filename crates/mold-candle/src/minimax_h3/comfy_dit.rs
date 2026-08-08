@@ -8,11 +8,10 @@
 //! below. No model tensor data is needed by this inspector.
 //!
 //! This module deliberately produces a *candidate* strategy, not a runnable
-//! checkpoint. The current legal gate forbids capturing the production headers
-//! or verifying the full content digest in this repository's deployment
-//! territory. A future compliance-approved change must pin those header
-//! identities and qualify the runtime before any candidate can become an
-//! execution authority.
+//! checkpoint. Private integration authorization allowed Mold to authenticate
+//! the curated INT8 artifacts and pin their shared released header identity.
+//! Public discovery, execution, and distribution remain independently gated;
+//! a header candidate is never an execution authority by itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error as StdError;
@@ -37,12 +36,26 @@ pub const H3_COMFY_ORG_SOURCE_REVISION: &str = "eb8a16107c595128b3a578f82d2ce2f7
 pub const H3_COMFY_KITCHEN_REPOSITORY: &str = "Comfy-Org/comfy-kitchen";
 pub const H3_COMFY_KITCHEN_VERSION: &str = "0.2.26";
 pub const H3_COMFY_KITCHEN_SOURCE_REVISION: &str = "255a43879fe57bbcbecfdb273b46d772b00c5a90";
+/// JSON header length shared by the published FL2VA and Ref2VA INT8 ConvRot
+/// artifacts at [`H3_COMFY_ORG_SOURCE_REVISION`]. The safetensors length prefix
+/// is not included.
+pub const H3_COMFY_PUBLISHED_INT8_HEADER_LEN: u64 = 95_416;
+/// SHA-256 of the eight-byte little-endian safetensors length prefix followed
+/// by the exact published JSON header bytes.
+pub const H3_COMFY_PUBLISHED_INT8_HEADER_SHA256: &str =
+    "8232b3c428e54591c286b5eee3eaba840f03d2cd2cb359ec09dd2558974ddc74";
+/// Tensor entries in the exact released header; there is no `__metadata__`
+/// entry to subtract.
+pub const H3_COMFY_PUBLISHED_INT8_TENSOR_COUNT: usize = 932;
 
 const MAX_HEADER_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_TENSORS: usize = 4_096;
 const MAX_TENSOR_KEY_BYTES: usize = 4_096;
 const MAX_TENSOR_RANK: usize = 8;
 const CONVROT_GROUP_SIZE: usize = 256;
+const PUBLISHED_INT8_CURVE_GRID: usize = 1_025;
+const PUBLISHED_INT8_CURVE_BASIS: usize = 8;
+const PUBLISHED_INT8_COMFY_QUANT_BYTES: usize = 72;
 const QUANTIZED_BLOCK_WEIGHT_SUFFIXES: &[&str] = &[
     "attn.qkv_proj.weight",
     "attn.out_proj.weight",
@@ -681,27 +694,39 @@ fn inspect_parsed_header(
         grid: table.shape[0],
         basis_dim: table.shape[1],
     };
-    let config_json = parsed.metadata.get("config").ok_or_else(|| {
-        failure(
+    let published_int8_artifact =
+        published_artifact.filter(|artifact| artifact.format() == H3ComfyPrunedFormat::Int8ConvRot);
+    let (quantization, detected_format, embedded_quantization_tensors) = if let Some(artifact) =
+        published_int8_artifact
+    {
+        validate_published_int8_header_authority(&parsed, artifact, mode)?;
+        (
+            Some(published_int8_quantization(&config, mode)?),
+            H3ComfyPrunedFormat::Int8ConvRot,
+            true,
+        )
+    } else if let Some(config_json) = parsed.metadata.get("config") {
+        let config_value = parse_strict_json(config_json.as_bytes(), "H3 Comfy config metadata")?;
+        let config_envelope: ConfigEnvelope = from_value(config_value, "H3 Comfy config metadata")?;
+        config_envelope.transformer.validate(&config, mode)?;
+        let quantization = match parsed.metadata.get("_quantization_metadata") {
+            Some(raw) => {
+                let value = parse_strict_json(raw.as_bytes(), "H3 Comfy quantization metadata")?;
+                Some(from_value::<QuantizationMetadata>(
+                    value,
+                    "H3 Comfy quantization metadata",
+                )?)
+            }
+            None => None,
+        };
+        let detected = detect_format(quantization.as_ref())?;
+        (quantization, detected, false)
+    } else {
+        return Err(failure(
             H3ComfyCheckpointErrorCode::InvalidMetadata,
             "H3 Comfy checkpoint is missing __metadata__.config",
-        )
-    })?;
-    let config_value = parse_strict_json(config_json.as_bytes(), "H3 Comfy config metadata")?;
-    let config_envelope: ConfigEnvelope = from_value(config_value, "H3 Comfy config metadata")?;
-    config_envelope.transformer.validate(&config, mode)?;
-
-    let quantization = match parsed.metadata.get("_quantization_metadata") {
-        Some(raw) => {
-            let value = parse_strict_json(raw.as_bytes(), "H3 Comfy quantization metadata")?;
-            Some(from_value::<QuantizationMetadata>(
-                value,
-                "H3 Comfy quantization metadata",
-            )?)
-        }
-        None => None,
+        ));
     };
-    let detected_format = detect_format(quantization.as_ref())?;
     if detected_format != expected_format {
         return Err(failure(
             H3ComfyCheckpointErrorCode::FormatMismatch,
@@ -710,8 +735,12 @@ fn inspect_parsed_header(
             ),
         ));
     }
-    let (expected, policy) =
+    let (mut expected, policy) =
         expected_schema(&config, mode, detected_format, quantization.as_ref())?;
+    if embedded_quantization_tensors {
+        apply_published_int8_storage_overrides(&mut expected, &config)?;
+        add_published_int8_quantization_tensors(&mut expected, &policy)?;
+    }
     validate_tensor_schema(&parsed.tensors, &expected)?;
 
     let tensor_bytes = parsed.file_len - parsed.header_len - 8;
@@ -771,6 +800,144 @@ fn inspect_parsed_header(
             memory,
         },
     })
+}
+
+fn validate_published_int8_header_authority(
+    parsed: &ParsedHeader,
+    artifact: H3ComfyPublishedArtifact,
+    mode: H3AdaLnMode,
+) -> InspectionResult<()> {
+    if artifact.format() != H3ComfyPrunedFormat::Int8ConvRot {
+        return Err(failure(
+            H3ComfyCheckpointErrorCode::InvalidMetadata,
+            "only the source-pinned published INT8 ConvRot header may omit safetensors metadata",
+        ));
+    }
+    if !parsed.metadata.is_empty() {
+        return Err(failure(
+            H3ComfyCheckpointErrorCode::InvalidMetadata,
+            "published H3 INT8 header authority requires the released empty metadata map",
+        ));
+    }
+    if parsed.file_len != artifact.file_bytes() {
+        return Err(failure(
+            H3ComfyCheckpointErrorCode::SourceSizeMismatch,
+            "published H3 INT8 artifact length differs from its source authority",
+        ));
+    }
+    if parsed.header_len != H3_COMFY_PUBLISHED_INT8_HEADER_LEN
+        || parsed.header_identity_sha256 != H3_COMFY_PUBLISHED_INT8_HEADER_SHA256
+        || parsed.tensors.len() != H3_COMFY_PUBLISHED_INT8_TENSOR_COUNT
+    {
+        return Err(failure(
+            H3ComfyCheckpointErrorCode::InvalidHeader,
+            "published H3 INT8 header identity differs from the authenticated released object",
+        ));
+    }
+    if mode
+        != (H3AdaLnMode::Curve {
+            grid: PUBLISHED_INT8_CURVE_GRID,
+            basis_dim: PUBLISHED_INT8_CURVE_BASIS,
+        })
+    {
+        return Err(failure(
+            H3ComfyCheckpointErrorCode::ConfigMismatch,
+            "published H3 INT8 curve shape differs from the authenticated released object",
+        ));
+    }
+    Ok(())
+}
+
+fn published_int8_quantization(
+    config: &H3TransformerConfig,
+    mode: H3AdaLnMode,
+) -> InspectionResult<QuantizationMetadata> {
+    let base = expected_h3_weight_specs(config, mode, H3PrecisionProfile::OfficialMixedBf16F32)
+        .map_err(|error| {
+            failure(
+                H3ComfyCheckpointErrorCode::ConfigMismatch,
+                error.to_string(),
+            )
+        })?;
+    let layers = published_quantized_layers(config, &base)?
+        .into_iter()
+        .map(|name| {
+            (
+                name,
+                QuantizedLayerMetadata {
+                    format: "int8_tensorwise".to_owned(),
+                    full_precision_matrix_mult: None,
+                    convrot: Some(true),
+                    convrot_groupsize: Some(CONVROT_GROUP_SIZE),
+                },
+            )
+        })
+        .collect();
+    Ok(QuantizationMetadata {
+        format_version: "1.0".to_owned(),
+        layers,
+    })
+}
+
+fn add_published_int8_quantization_tensors(
+    expected: &mut BTreeMap<String, ExpectedTensor>,
+    policy: &H3ComfyQuantizationPolicy,
+) -> InspectionResult<()> {
+    for layer in &policy.quantized_layers {
+        let name = format!("{layer}.comfy_quant");
+        if expected
+            .insert(
+                name.clone(),
+                ExpectedTensor {
+                    dtype: "U8",
+                    shape: vec![PUBLISHED_INT8_COMFY_QUANT_BYTES],
+                },
+            )
+            .is_some()
+        {
+            return Err(failure(
+                H3ComfyCheckpointErrorCode::TensorSchemaMismatch,
+                format!("published H3 INT8 quantization tensor {name:?} collides with a weight"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn apply_published_int8_storage_overrides(
+    expected: &mut BTreeMap<String, ExpectedTensor>,
+    config: &H3TransformerConfig,
+) -> InspectionResult<()> {
+    let block_tensors = (0..config.num_layers).flat_map(|index| {
+        [
+            format!("blocks.{index}.adaln_proj.linear.weight"),
+            format!("blocks.{index}.adaln_proj.linear.bias"),
+        ]
+    });
+    let final_tensors = [
+        "final_layer.adaln_proj.linear.weight".to_owned(),
+        "final_layer.adaln_proj.linear.bias".to_owned(),
+    ];
+    for name in block_tensors.chain(final_tensors) {
+        let tensor = expected.get_mut(&name).ok_or_else(|| {
+            failure(
+                H3ComfyCheckpointErrorCode::ConfigMismatch,
+                format!("published H3 INT8 storage override references missing tensor {name:?}"),
+            )
+        })?;
+        if tensor.dtype != "F32" {
+            return Err(failure(
+                H3ComfyCheckpointErrorCode::ConfigMismatch,
+                format!("published H3 INT8 storage override expected F32 source tensor {name:?}"),
+            ));
+        }
+        // The released Comfy INT8 conversion stores the curve projections in
+        // F16 even though the logical H3 curve computation remains an
+        // FP32-sensitive island. A runtime must upcast these values; this is a
+        // source-pinned storage fact, not permission to lower compute precision.
+        tensor.dtype = "F16";
+    }
+    Ok(())
 }
 
 fn detect_format(
@@ -846,9 +1013,11 @@ fn expected_schema(
     // The published H3 conversions quantize exactly the four large matrix
     // weights in each of the 50 denoising blocks. Input projections, the text
     // token refiner, all norms/biases, the FP32 patch/output islands, and the
-    // FP32 curve AdaLN projections remain protected. Deriving this set from
-    // "every BF16 matrix" would silently admit nine layers that the published
-    // artifacts intentionally retain in BF16.
+    // curve AdaLN projections remain protected from INT8. The source-pinned
+    // published INT8 path later applies its observed F16 curve-projection
+    // storage while preserving the logical FP32 compute contract. Deriving the
+    // quantized set from "every BF16 matrix" would silently admit nine layers
+    // that the published artifacts intentionally retain in BF16.
     let quantizable = published_quantized_layers(config, &base)?;
     let quantized_layers = if format == H3ComfyPrunedFormat::Bf16 {
         if quantization.is_some() {
@@ -1297,6 +1466,54 @@ mod tests {
         (Value::Object(header), data)
     }
 
+    fn published_int8_parsed_header(artifact: H3ComfyPublishedArtifact) -> ParsedHeader {
+        assert_eq!(artifact.format(), H3ComfyPrunedFormat::Int8ConvRot);
+        let config = H3TransformerConfig::default();
+        let mode = H3AdaLnMode::Curve {
+            grid: PUBLISHED_INT8_CURVE_GRID,
+            basis_dim: PUBLISHED_INT8_CURVE_BASIS,
+        };
+        let quantization = published_int8_quantization(&config, mode).unwrap();
+        let (mut expected, policy) = expected_schema(
+            &config,
+            mode,
+            H3ComfyPrunedFormat::Int8ConvRot,
+            Some(&quantization),
+        )
+        .unwrap();
+        apply_published_int8_storage_overrides(&mut expected, &config).unwrap();
+        add_published_int8_quantization_tensors(&mut expected, &policy).unwrap();
+        let mut cursor = 0_u64;
+        let tensors = expected
+            .into_iter()
+            .map(|(name, tensor)| {
+                let elements = tensor.shape.iter().product::<usize>() as u64;
+                let bytes = elements * dtype_size(tensor.dtype).unwrap();
+                let offsets = [cursor, cursor + bytes];
+                cursor += bytes;
+                (
+                    name,
+                    HeaderTensor {
+                        dtype: tensor.dtype.to_owned(),
+                        shape: tensor.shape,
+                        data_offsets: offsets,
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(
+            cursor,
+            artifact.file_bytes() - H3_COMFY_PUBLISHED_INT8_HEADER_LEN - 8
+        );
+        ParsedHeader {
+            metadata: BTreeMap::new(),
+            tensors,
+            header_len: H3_COMFY_PUBLISHED_INT8_HEADER_LEN,
+            file_len: artifact.file_bytes(),
+            header_identity_sha256: H3_COMFY_PUBLISHED_INT8_HEADER_SHA256.to_owned(),
+        }
+    }
+
     fn write_fixture(header: &Value, data: &[u8], tag: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
             "mold-h3-comfy-{tag}-{}-{}.safetensors",
@@ -1356,6 +1573,149 @@ mod tests {
                 .filter(|item| item.task() == H3TransformerTask::Ref2Va)
                 .count(),
             3
+        );
+    }
+
+    #[test]
+    fn published_int8_headers_use_source_pinned_embedded_quantization() {
+        for artifact in [
+            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
+        ] {
+            let candidate = inspect_parsed_header(
+                published_int8_parsed_header(artifact),
+                H3TransformerConfig::default(),
+                artifact.task(),
+                artifact.format(),
+                Some(artifact),
+            )
+            .unwrap();
+
+            assert_eq!(candidate.artifact, artifact);
+            assert_eq!(candidate.strategy.task, artifact.task());
+            assert_eq!(candidate.strategy.format, H3ComfyPrunedFormat::Int8ConvRot);
+            assert_eq!(
+                candidate.strategy.adaln_mode,
+                H3AdaLnMode::Curve {
+                    grid: PUBLISHED_INT8_CURVE_GRID,
+                    basis_dim: PUBLISHED_INT8_CURVE_BASIS,
+                }
+            );
+            assert_eq!(candidate.expected_content_sha256, artifact.content_sha256());
+            assert_eq!(
+                candidate.header_identity_sha256,
+                H3_COMFY_PUBLISHED_INT8_HEADER_SHA256
+            );
+            assert_eq!(candidate.tensor_count, H3_COMFY_PUBLISHED_INT8_TENSOR_COUNT);
+            assert_eq!(
+                candidate
+                    .strategy
+                    .quantization_policy
+                    .quantized_layers
+                    .len(),
+                200
+            );
+            assert_eq!(
+                candidate.strategy.memory.header_bytes,
+                H3_COMFY_PUBLISHED_INT8_HEADER_LEN + 8
+            );
+            assert_eq!(
+                candidate.strategy.memory.encoded_tensor_bytes,
+                artifact.file_bytes() - H3_COMFY_PUBLISHED_INT8_HEADER_LEN - 8
+            );
+            assert_eq!(candidate.strategy.memory.resident_device_weight_bytes, None);
+        }
+    }
+
+    #[test]
+    fn published_int8_header_identity_and_schema_mutations_fail_closed() {
+        let artifact = H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot;
+        let inspect = |parsed| {
+            inspect_parsed_header(
+                parsed,
+                H3TransformerConfig::default(),
+                artifact.task(),
+                artifact.format(),
+                Some(artifact),
+            )
+        };
+
+        let mut parsed = published_int8_parsed_header(artifact);
+        parsed.header_identity_sha256 = "0".repeat(64);
+        assert_eq!(
+            inspect(parsed).unwrap_err().code,
+            H3ComfyCheckpointErrorCode::InvalidHeader
+        );
+
+        let mut parsed = published_int8_parsed_header(artifact);
+        parsed.metadata.insert(
+            "config".to_owned(),
+            config_metadata(
+                &H3TransformerConfig::default(),
+                PUBLISHED_INT8_CURVE_GRID,
+                PUBLISHED_INT8_CURVE_BASIS,
+            ),
+        );
+        assert_eq!(
+            inspect(parsed).unwrap_err().code,
+            H3ComfyCheckpointErrorCode::InvalidMetadata
+        );
+
+        let mut parsed = published_int8_parsed_header(artifact);
+        parsed.tensors.get_mut("adaln_t_table").unwrap().shape[0] = PUBLISHED_INT8_CURVE_GRID - 1;
+        assert_eq!(
+            inspect(parsed).unwrap_err().code,
+            H3ComfyCheckpointErrorCode::ConfigMismatch
+        );
+
+        let mut parsed = published_int8_parsed_header(artifact);
+        let sidecar = parsed
+            .tensors
+            .keys()
+            .find(|name| name.ends_with(".comfy_quant"))
+            .unwrap()
+            .clone();
+        parsed.tensors.get_mut(&sidecar).unwrap().shape = vec![71];
+        assert_eq!(
+            inspect(parsed).unwrap_err().code,
+            H3ComfyCheckpointErrorCode::TensorSchemaMismatch
+        );
+
+        let mut parsed = published_int8_parsed_header(artifact);
+        parsed.tensors.remove(&sidecar);
+        assert_eq!(
+            inspect(parsed).unwrap_err().code,
+            H3ComfyCheckpointErrorCode::InvalidHeader
+        );
+    }
+
+    #[test]
+    fn missing_metadata_is_allowed_only_for_pinned_published_int8_artifacts() {
+        let artifact = H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot;
+        assert_eq!(
+            inspect_parsed_header(
+                published_int8_parsed_header(artifact),
+                H3TransformerConfig::default(),
+                artifact.task(),
+                artifact.format(),
+                None,
+            )
+            .unwrap_err()
+            .code,
+            H3ComfyCheckpointErrorCode::InvalidMetadata
+        );
+
+        assert_eq!(
+            inspect_parsed_header(
+                published_int8_parsed_header(artifact),
+                H3TransformerConfig::default(),
+                H3TransformerTask::T2VaFl2Va,
+                H3ComfyPrunedFormat::Bf16,
+                Some(H3ComfyPublishedArtifact::Fl2VaPrunedBf16),
+            )
+            .unwrap_err()
+            .code,
+            H3ComfyCheckpointErrorCode::InvalidMetadata
         );
     }
 
