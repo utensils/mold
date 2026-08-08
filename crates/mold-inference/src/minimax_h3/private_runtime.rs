@@ -8,13 +8,16 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{bail, Result};
 use mold_candle::minimax_h3::{
-    H3BlockProgress, H3BlockStack, H3ComfyInt8BlockLoader, H3ForwardInput, H3FrozenPackedLayout,
-    H3LoadedTransformerBlock, H3StreamedTransformer, H3TransformerOutput, H3TransformerStep,
-    H3TransformerTask,
+    H3BlockProgress, H3BlockStack, H3ComfyInt8BlockLoader, H3ComfyInt8Cancellation, H3ForwardInput,
+    H3FrozenPackedLayout, H3LoadedTransformerBlock, H3StreamedTransformer, H3TransformerOutput,
+    H3TransformerStep, H3TransformerTask,
 };
+
+use crate::progress::{InferenceCancellationObserver, InferenceCancelled, ProgressReporter};
 
 use super::engine::H3StreamedTransformerExecutor;
 use super::offload::{FrozenH3BlockStreamingPlan, H3BlockLoader};
@@ -22,16 +25,222 @@ use super::pipeline::{H3PipelineCheckpoint, H3PipelineEvent, H3PipelinePhase};
 
 const H3_MAIN_BLOCK_COUNT: usize = 50;
 
+#[derive(Default)]
+struct H3PrivateComfyCancellationState {
+    next_attempt_id: u64,
+    active_attempt_id: Option<u64>,
+    attempt_guard_alive: bool,
+    observer: Option<InferenceCancellationObserver>,
+    active_operation_attempt_id: Option<u64>,
+    candle_was_polled: bool,
+    candle_observed_cancellation: bool,
+}
+
+/// One cached Candle loader can serve multiple serialized inference attempts.
+/// This slot refreshes its read-only cancellation authority for each attempt
+/// instead of retaining the token that happened to load the model initially.
+#[derive(Clone, Default)]
+pub(crate) struct H3PrivateComfyCancellationSlot {
+    state: Arc<Mutex<H3PrivateComfyCancellationState>>,
+}
+
+impl H3PrivateComfyCancellationSlot {
+    pub(crate) fn install(
+        &self,
+        progress: &ProgressReporter,
+    ) -> Result<H3PrivateComfyCancellationGuard> {
+        let mut state = lock_cancellation_state(&self.state);
+        if state.active_attempt_id.is_some() {
+            bail!("private H3 Comfy cancellation authority already has an active attempt");
+        }
+        state.next_attempt_id = state
+            .next_attempt_id
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("private H3 Comfy attempt identity overflow"))?;
+        let attempt_id = state.next_attempt_id;
+        state.active_attempt_id = Some(attempt_id);
+        state.attempt_guard_alive = true;
+        state.observer = progress.cancellation_observer();
+        state.active_operation_attempt_id = None;
+        state.candle_was_polled = false;
+        state.candle_observed_cancellation = false;
+        Ok(H3PrivateComfyCancellationGuard {
+            slot: self.clone(),
+            attempt_id,
+        })
+    }
+
+    /// Run one Candle load operation and prove that it polled this exact slot.
+    /// This closes the otherwise-untyped trait-object seam between the cached
+    /// Candle loader and the attempt authority retained by this adapter.
+    pub(crate) fn run_candle_operation<T>(
+        &self,
+        operation: impl FnOnce() -> candle_core::Result<T>,
+    ) -> Result<T> {
+        let operation_guard = H3PrivateComfyOperationGuard::begin(self)?;
+        let result = operation();
+        operation_guard.finish(result)
+    }
+
+    #[cfg(test)]
+    fn has_active_attempt(&self) -> bool {
+        lock_cancellation_state(&self.state)
+            .active_attempt_id
+            .is_some()
+    }
+}
+
+impl H3ComfyInt8Cancellation for H3PrivateComfyCancellationSlot {
+    fn is_cancelled(&self) -> bool {
+        let mut state = lock_cancellation_state(&self.state);
+        if state.active_attempt_id.is_none()
+            || state.active_operation_attempt_id != state.active_attempt_id
+        {
+            return false;
+        }
+        let cancelled = state
+            .observer
+            .as_ref()
+            .is_some_and(InferenceCancellationObserver::is_cancelled);
+        state.candle_was_polled = true;
+        state.candle_observed_cancellation |= cancelled;
+        cancelled
+    }
+}
+
+#[must_use = "dropping the guard clears the cached runtime's attempt authority"]
+pub(crate) struct H3PrivateComfyCancellationGuard {
+    slot: H3PrivateComfyCancellationSlot,
+    attempt_id: u64,
+}
+
+impl Drop for H3PrivateComfyCancellationGuard {
+    fn drop(&mut self) {
+        let mut state = lock_cancellation_state(&self.slot.state);
+        if state.active_attempt_id == Some(self.attempt_id) {
+            state.attempt_guard_alive = false;
+            if state.active_operation_attempt_id != Some(self.attempt_id) {
+                clear_cancellation_attempt(&mut state, self.attempt_id);
+            }
+        }
+    }
+}
+
+struct H3PrivateComfyOperationGuard {
+    slot: H3PrivateComfyCancellationSlot,
+    attempt_id: u64,
+    finished: bool,
+}
+
+impl H3PrivateComfyOperationGuard {
+    fn begin(slot: &H3PrivateComfyCancellationSlot) -> Result<Self> {
+        let mut state = lock_cancellation_state(&slot.state);
+        let attempt_id = state
+            .active_attempt_id
+            .filter(|_| state.attempt_guard_alive)
+            .ok_or_else(|| {
+                anyhow::anyhow!("private H3 Comfy load has no active cancellation attempt")
+            })?;
+        if state.active_operation_attempt_id.is_some() {
+            bail!("private H3 Comfy cancellation authority already has an active load");
+        }
+        state.active_operation_attempt_id = Some(attempt_id);
+        state.candle_was_polled = false;
+        state.candle_observed_cancellation = false;
+        Ok(Self {
+            slot: slot.clone(),
+            attempt_id,
+            finished: false,
+        })
+    }
+
+    fn finish<T>(mut self, result: candle_core::Result<T>) -> Result<T> {
+        let (identity_matches, guard_alive, polled, observed) = {
+            let mut state = lock_cancellation_state(&self.slot.state);
+            let identity_matches = state.active_attempt_id == Some(self.attempt_id)
+                && state.active_operation_attempt_id == Some(self.attempt_id);
+            let guard_alive = identity_matches && state.attempt_guard_alive;
+            let polled = identity_matches && std::mem::take(&mut state.candle_was_polled);
+            let observed =
+                identity_matches && std::mem::take(&mut state.candle_observed_cancellation);
+            if identity_matches {
+                state.active_operation_attempt_id = None;
+                if !guard_alive {
+                    clear_cancellation_attempt(&mut state, self.attempt_id);
+                }
+            }
+            (identity_matches, guard_alive, polled, observed)
+        };
+        self.finished = true;
+        if !identity_matches {
+            bail!("private H3 Comfy cancellation attempt changed during a load");
+        }
+        if !polled {
+            bail!("private H3 Comfy loader did not poll its bound cancellation authority");
+        }
+        if observed {
+            return Err(InferenceCancelled.into());
+        }
+        if !guard_alive {
+            bail!("private H3 Comfy cancellation authority ended during a load");
+        }
+        result.map_err(Into::into)
+    }
+}
+
+impl Drop for H3PrivateComfyOperationGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let mut state = lock_cancellation_state(&self.slot.state);
+        if state.active_attempt_id == Some(self.attempt_id)
+            && state.active_operation_attempt_id == Some(self.attempt_id)
+        {
+            state.active_operation_attempt_id = None;
+            state.candle_was_polled = false;
+            state.candle_observed_cancellation = false;
+            if !state.attempt_guard_alive {
+                clear_cancellation_attempt(&mut state, self.attempt_id);
+            }
+        }
+    }
+}
+
+fn clear_cancellation_attempt(state: &mut H3PrivateComfyCancellationState, attempt_id: u64) {
+    if state.active_attempt_id == Some(attempt_id) {
+        state.active_attempt_id = None;
+        state.attempt_guard_alive = false;
+        state.observer = None;
+        state.active_operation_attempt_id = None;
+        state.candle_was_polled = false;
+        state.candle_observed_cancellation = false;
+    }
+}
+
+fn lock_cancellation_state(
+    state: &Mutex<H3PrivateComfyCancellationState>,
+) -> MutexGuard<'_, H3PrivateComfyCancellationState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Route-fenced adapter over the exact Comfy block loader returned alongside
 /// one resident streamed transformer.
 pub(crate) struct H3PrivateComfyBlockLoader {
     inner: H3ComfyInt8BlockLoader,
     device_id: String,
     execution_fingerprint: String,
+    cancellation: H3PrivateComfyCancellationSlot,
 }
 
 impl H3PrivateComfyBlockLoader {
-    fn new(inner: H3ComfyInt8BlockLoader, plan: &FrozenH3BlockStreamingPlan) -> Result<Self> {
+    fn new(
+        inner: H3ComfyInt8BlockLoader,
+        plan: &FrozenH3BlockStreamingPlan,
+        cancellation: H3PrivateComfyCancellationSlot,
+    ) -> Result<Self> {
         plan.validate()?;
         if plan.resident_block_count != 0 || plan.prefetch_depth != 0 {
             bail!(
@@ -48,6 +257,7 @@ impl H3PrivateComfyBlockLoader {
             inner,
             device_id: plan.device_id.clone(),
             execution_fingerprint: plan.execution_fingerprint.clone(),
+            cancellation,
         })
     }
 
@@ -72,7 +282,8 @@ impl H3BlockLoader for H3PrivateComfyBlockLoader {
         if device_id != self.device_id || execution_fingerprint != self.execution_fingerprint {
             bail!("private H3 Comfy block load differs from the frozen execution route");
         }
-        Ok(self.inner.load_block(index)?)
+        self.cancellation
+            .run_candle_operation(|| self.inner.load_block(index))
     }
 }
 
@@ -156,6 +367,7 @@ pub(crate) fn pair_private_comfy_stream(
     loader: H3ComfyInt8BlockLoader,
     plan: &FrozenH3BlockStreamingPlan,
     expected_task: H3TransformerTask,
+    cancellation: H3PrivateComfyCancellationSlot,
 ) -> Result<(H3PrivateComfyBlockLoader, H3PrivateComfyTransformerExecutor)> {
     let exact_open_pair = loader.is_exact_pair_for(&transformer);
     validate_stream_pair(
@@ -170,7 +382,7 @@ pub(crate) fn pair_private_comfy_stream(
         exact_open_pair,
     )?;
     Ok((
-        H3PrivateComfyBlockLoader::new(loader, plan)?,
+        H3PrivateComfyBlockLoader::new(loader, plan, cancellation)?,
         H3PrivateComfyTransformerExecutor::new(transformer),
     ))
 }
@@ -256,7 +468,7 @@ impl H3TransformerCallbackErrorBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::progress::{is_inference_cancelled, InferenceCancelled};
+    use crate::progress::{is_inference_cancelled, InferenceCancellationToken};
 
     const FINGERPRINT: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const CHECKPOINT: &str = "2222222222222222222222222222222222222222222222222222222222222222";
@@ -342,6 +554,140 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("zero resident blocks"));
+    }
+
+    #[test]
+    fn comfy_cancellation_slot_refreshes_attempts_and_preserves_typed_cancel() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<H3PrivateComfyCancellationSlot>();
+
+        let slot = H3PrivateComfyCancellationSlot::default();
+        let first_token = InferenceCancellationToken::default();
+        let mut progress = ProgressReporter::default();
+        progress.set_cancellation_token(first_token.clone());
+        let first_guard = slot.install(&progress).unwrap();
+
+        assert!(slot.has_active_attempt());
+        assert!(!H3ComfyInt8Cancellation::is_cancelled(&slot));
+        first_token.cancel();
+        let error = slot
+            .run_candle_operation::<()>(|| {
+                assert!(H3ComfyInt8Cancellation::is_cancelled(&slot));
+                Err(candle_core::Error::Msg(
+                    "Candle cancellation transport".into(),
+                ))
+            })
+            .unwrap_err();
+        assert!(is_inference_cancelled(&error));
+        assert!(slot.install(&progress).is_err());
+        drop(first_guard);
+        assert!(!slot.has_active_attempt());
+
+        let second_token = InferenceCancellationToken::default();
+        progress.set_cancellation_token(second_token);
+        let _second_guard = slot.install(&progress).unwrap();
+        assert!(!H3ComfyInt8Cancellation::is_cancelled(&slot));
+        let error = slot
+            .run_candle_operation::<()>(|| {
+                assert!(!H3ComfyInt8Cancellation::is_cancelled(&slot));
+                Err(candle_core::Error::Msg("unrelated loader failure".into()))
+            })
+            .unwrap_err();
+        assert!(!is_inference_cancelled(&error));
+        assert!(error.to_string().contains("unrelated loader failure"));
+
+        let error = slot
+            .run_candle_operation::<()>(|| {
+                Err(candle_core::Error::Msg(
+                    "loader used a different authority".into(),
+                ))
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("did not poll its bound"));
+    }
+
+    #[test]
+    fn comfy_cancellation_guard_clears_attempt_state_during_unwind() {
+        let slot = H3PrivateComfyCancellationSlot::default();
+        let progress = ProgressReporter::default();
+        let guard = slot.install(&progress).unwrap();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = slot.run_candle_operation::<()>(|| {
+                assert!(!H3ComfyInt8Cancellation::is_cancelled(&slot));
+                panic!("synthetic load panic");
+            });
+        }));
+
+        assert!(panic.is_err());
+        assert!(slot.has_active_attempt());
+        slot.run_candle_operation(|| {
+            assert!(!H3ComfyInt8Cancellation::is_cancelled(&slot));
+            Ok(())
+        })
+        .unwrap();
+        drop(guard);
+        assert!(!slot.has_active_attempt());
+        assert!(slot.install(&progress).is_ok());
+    }
+
+    #[test]
+    fn guard_drop_during_load_fences_replacement_attempt() {
+        let slot = H3PrivateComfyCancellationSlot::default();
+        let progress = ProgressReporter::default();
+        let guard = slot.install(&progress).unwrap();
+        let worker_slot = slot.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            worker_slot.run_candle_operation(|| {
+                assert!(!H3ComfyInt8Cancellation::is_cancelled(&worker_slot));
+                started_tx.send(()).unwrap();
+                resume_rx.recv().unwrap();
+                Ok(())
+            })
+        });
+
+        started_rx.recv().unwrap();
+        drop(guard);
+        assert!(slot.install(&progress).is_err());
+        resume_tx.send(()).unwrap();
+        let error = worker.join().unwrap().unwrap_err();
+        assert!(error.to_string().contains("ended during a load"));
+        assert!(!slot.has_active_attempt());
+
+        let _next_guard = slot.install(&progress).unwrap();
+        assert!(!H3ComfyInt8Cancellation::is_cancelled(&slot));
+    }
+
+    #[test]
+    fn overlapping_candle_operations_fail_before_running_the_second_load() {
+        let slot = H3PrivateComfyCancellationSlot::default();
+        let progress = ProgressReporter::default();
+        let _guard = slot.install(&progress).unwrap();
+        let worker_slot = slot.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            worker_slot.run_candle_operation(|| {
+                assert!(!H3ComfyInt8Cancellation::is_cancelled(&worker_slot));
+                started_tx.send(()).unwrap();
+                resume_rx.recv().unwrap();
+                Ok(())
+            })
+        });
+
+        started_rx.recv().unwrap();
+        let mut second_ran = false;
+        let error = slot
+            .run_candle_operation::<()>(|| {
+                second_ran = true;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("already has an active load"));
+        assert!(!second_ran);
+        resume_tx.send(()).unwrap();
+        worker.join().unwrap().unwrap();
     }
 
     struct CancelCheckpoint;
