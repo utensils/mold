@@ -30,6 +30,10 @@ expand = []
 webp = ["webp-animation"]
 mp4 = ["dep:fdk-aac"]
 dev-bins = []
+# Development-only access to the authorization-bound MiniMax H3 artifact
+# qualifier. This feature is intentionally not forwarded by mold-ai or any
+# shipping surface; release verification rejects its embedded claim marker.
+h3-private-uat = []
 
 [[bin]]
 name = "ltx2_checkpoint_probe"
@@ -62,6 +66,11 @@ required-features = ["dev-bins", "cuda"]
 name = "h3_attention_qualification"
 path = "src/bin/h3_attention_qualification.rs"
 required-features = ["dev-bins", "h3-attention-rc"]
+
+[[bin]]
+name = "h3_artifact_qualification"
+path = "src/bin/h3_artifact_qualification.rs"
+required-features = ["dev-bins", "h3-private-uat"]
 
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.21.0" }

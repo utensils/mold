@@ -32,6 +32,8 @@ pub mod ltx_video;
 // future pipeline to consume.
 #[allow(dead_code)]
 pub(crate) mod minimax_h3;
+#[cfg(feature = "h3-private-uat")]
+pub use minimax_h3::private_qualification;
 pub mod model_registry;
 pub(crate) mod nvfp4;
 pub mod progress;
