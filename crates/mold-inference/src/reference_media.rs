@@ -268,6 +268,8 @@ fn torchaudio_hann_resample_channel(
 ) -> Result<Vec<f32>> {
     const LOWPASS_FILTER_WIDTH: f64 = 6.0;
     const ROLLOFF: f64 = 0.99;
+    const MAX_KERNEL_COEFFICIENTS: usize = 4 * 1024 * 1024;
+    const MAX_MULTIPLY_ADDS: usize = 512 * 1024 * 1024;
 
     if source.is_empty() || source_rate == 0 || target_rate == 0 {
         bail!("reference audio resampling requires samples and positive rates");
@@ -292,6 +294,17 @@ fn torchaudio_hann_resample_channel(
         .checked_mul(2)
         .and_then(|length| length.checked_add(source_rate))
         .context("reference audio resample kernel length overflowed")?;
+    let kernel_coefficients = kernel_len
+        .checked_mul(target_rate)
+        .context("reference audio resample kernel size overflowed")?;
+    let multiply_adds = kernel_len
+        .checked_mul(expected_samples)
+        .context("reference audio resample work estimate overflowed")?;
+    if kernel_coefficients > MAX_KERNEL_COEFFICIENTS || multiply_adds > MAX_MULTIPLY_ADDS {
+        bail!(
+            "reference audio sample-rate ratio requires an unsafe sinc-resample kernel; use a standard PCM rate"
+        );
+    }
     let scale = base_rate / source_rate as f64;
     let mut kernels = Vec::with_capacity(target_rate);
     for phase in 0..target_rate {
@@ -554,6 +567,17 @@ mod tests {
         };
         let error = normalize_audio(&decoded, 8, 32_000, 16, &mut || Ok(())).unwrap_err();
         assert!(error.to_string().contains("mono/stereo"));
+    }
+
+    #[test]
+    fn pathological_coprime_audio_rate_fails_before_kernel_allocation() {
+        let decoded = DecodedAudio {
+            sample_rate: 47_999,
+            channels: vec![vec![0.0; 48]],
+        };
+        let expected = 48_usize.checked_mul(32_000).unwrap().div_ceil(47_999);
+        let error = normalize_audio(&decoded, 48, 32_000, expected, &mut || Ok(())).unwrap_err();
+        assert!(error.to_string().contains("unsafe sinc-resample kernel"));
     }
 
     #[test]
