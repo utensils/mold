@@ -14,6 +14,7 @@ mod loader;
 mod model;
 mod presentation;
 mod processor;
+mod qwen_nvfp4;
 mod qwen_quant;
 mod text;
 mod vision;
@@ -65,8 +66,9 @@ pub use comfy_dit::{
     H3_COMFY_ORG_SOURCE_REVISION,
 };
 pub use comfy_quant::{
-    H3ComfyFp8ScaledLinear, H3ComfyInt8ConvRotLinear, H3ComfyNvfp4AwqLinear,
-    H3_COMFY_CONVROT_GROUP_SIZE, H3_COMFY_NVFP4_BLOCK_SIZE, H3_COMFY_PORTABLE_ROW_CHUNK,
+    H3ComfyFp8ScaledLinear, H3ComfyInt8ConvRotLinear, H3ComfyInt8TensorwiseEmbedding,
+    H3ComfyNvfp4AwqLinear, H3_COMFY_CONVROT_GROUP_SIZE, H3_COMFY_NVFP4_BLOCK_SIZE,
+    H3_COMFY_PORTABLE_ROW_CHUNK,
 };
 pub use config::{
     H3ConditionerConfig, H3TextConfig, H3VisionConfig, H3_BF16_PARAMETER_BYTES,
@@ -99,6 +101,16 @@ pub use presentation::{
 pub use processor::{
     create_mm_token_type_ids, pack_qwen_vision_u8, qwen_mrope_positions, sample_video_frames,
     GridThw, PackedVisionPatches, QwenMmTokenType, SampledVideo,
+};
+pub use qwen_nvfp4::{
+    expected_h3_qwen_nvfp4_awq_schema, inspect_h3_qwen_nvfp4_awq_header,
+    validate_h3_qwen_nvfp4_awq_schema, H3QwenNvfp4AwqError, H3QwenNvfp4AwqExecution,
+    H3QwenNvfp4AwqInspection, H3QwenNvfp4AwqMemoryAccounting, H3QwenNvfp4AwqPolicy,
+    H3QwenNvfp4AwqSchema, H3QwenQuantMarker, H3_QWEN_NVFP4_AWQ_FILENAME,
+    H3_QWEN_NVFP4_AWQ_FILE_BYTES, H3_QWEN_NVFP4_AWQ_HEADER_BYTES, H3_QWEN_NVFP4_AWQ_PAYLOAD_BYTES,
+    H3_QWEN_NVFP4_AWQ_POLICY_SHA256, H3_QWEN_NVFP4_AWQ_SHA256, H3_QWEN_NVFP4_AWQ_STABLE_ID,
+    H3_QWEN_NVFP4_AWQ_TENSOR_COUNT, H3_QWEN_NVFP4_LINEAR_COUNT,
+    H3_QWEN_NVFP4_PRE_QUANT_SCALE_COUNT, H3_QWEN_QUANT_MARKER_COUNT,
 };
 pub use qwen_quant::{
     expected_h3_qwen_int8_weight_only_schema, validate_h3_qwen_int8_weight_only_schema,
