@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { promptPlaceholder, promptRequired } from "@studio/lib/promptRequirement";
+import { minimaxH3AuthoringError } from "@studio/lib/minimaxH3Authoring";
 import Keycap from "@ui/components/Keycap.vue";
 import Icon from "@ui/components/Icon.vue";
 import ExpandControl from "../generate/ExpandControl.vue";
@@ -53,9 +54,13 @@ const emit = defineEmits<{
 // and Generate must not stay disabled on a request the server would admit —
 // the view's `generate()` early return moves with this in lockstep.
 const promptMissing = computed(() => promptRequired(props.form) && !props.form.prompt.trim());
+const h3AuthoringError = computed(() =>
+  minimaxH3AuthoringError(props.form.family, props.form.model, props.form.h3Authoring),
+);
 const generateDisabled = computed(
   () =>
     promptMissing.value ||
+    !!h3AuthoringError.value ||
     !props.form.model ||
     props.chainReject ||
     props.hasPrepared ||
@@ -165,10 +170,10 @@ defineExpose({ focus, expand, record });
       />
       <div class="ms-composer__right">
         <span
-          v-if="preprocessingStatus"
+          v-if="h3AuthoringError || preprocessingStatus"
           class="ms-composer__status"
-          data-test="preprocessing-status"
-          >{{ preprocessingStatus }}</span
+          :data-test="h3AuthoringError ? 'h3-authoring-error' : 'preprocessing-status'"
+          >{{ h3AuthoringError || preprocessingStatus }}</span
         >
         <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
         <button

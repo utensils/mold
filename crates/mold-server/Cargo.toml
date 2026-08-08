@@ -88,6 +88,7 @@ windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 filetime = "0.2"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
+mp4-rs = { package = "mp4", version = "0.14" }
 # Chain route tests build a synthetic motion-tail Tensor via the same
 # candle APIs the inference crate uses — keep this in lockstep with
 # Keep server tests on the same patched official Candle identity as inference.

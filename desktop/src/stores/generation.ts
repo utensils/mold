@@ -33,6 +33,12 @@ import {
   newJob,
   type Job,
 } from "../lib/generationJob";
+import {
+  prepareReferenceUploads,
+  requestNeedsReferenceUpload,
+  type ReferenceUploadCapabilities,
+  type ReferenceUploadLease,
+} from "@studio/api/referenceUploads";
 
 export {
   applyChainProgress,
@@ -66,6 +72,15 @@ export interface JobRoute {
   retainEncodedResult?: boolean;
   /** iPhone asks the host for saved-file metadata instead of encoded media bytes. */
   metadataOnlyCompletion?: boolean;
+  /** Exact server installation and upload protocol captured at submit time. */
+  instanceId?: string | null;
+  referenceUploads?: ReferenceUploadCapabilities | null;
+}
+
+interface ReferenceUploadAuthority {
+  target: ApiTarget;
+  instanceId: string;
+  capabilities: ReferenceUploadCapabilities | null;
 }
 
 /** Filesystem-safe local filename for a saved output. */
@@ -422,6 +437,13 @@ export const useGenerationStore = defineStore("generation", {
           job.retainEncodedResult = route.retainEncodedResult ?? true;
           job.metadataOnlyCompletion = route.metadataOnlyCompletion ?? false;
           targets.set(job.clientId, route.target);
+          if (requestNeedsReferenceUpload(plan)) {
+            referenceUploadAuthorities.set(job.clientId, {
+              target: { ...route.target },
+              instanceId: route.instanceId ?? "",
+              capabilities: route.referenceUploads ?? null,
+            });
+          }
         } else {
           // Unrouted = the local primary engine — its prints are already in
           // this device's gallery, so they never trigger the remote auto-save.
@@ -592,6 +614,7 @@ export const useGenerationStore = defineStore("generation", {
         if (job.resultUrl && job.resultUrlIsObjectUrl) URL.revokeObjectURL(job.resultUrl);
         if (job.previewUrl) URL.revokeObjectURL(job.previewUrl);
         targets.delete(job.clientId);
+        referenceUploadAuthorities.delete(job.clientId);
         chainRoutes.delete(job.clientId);
       }
       this.jobs = this.jobs.filter((j) => !drop.has(j.clientId));
@@ -683,6 +706,7 @@ export const useGenerationStore = defineStore("generation", {
       }
       aborts.clear();
       targets.clear();
+      referenceUploadAuthorities.clear();
       chainRoutes.clear();
       this.pendingConsumerBatchIds = [];
       this.selectedClientId = null;
@@ -713,10 +737,45 @@ export const useGenerationStore = defineStore("generation", {
       }
 
       let streamError: unknown = null;
-      job.streamStarted = true;
+      let lease: ReferenceUploadLease<GenerateRequest> | null = null;
       const chainRoute = chainRoutes.get(job.clientId);
       const path = chainRoute ? "/api/generate/chain/stream" : "/api/generate/stream";
-      const body = chainRoute ? buildAutoChainRequest(req, chainRoute) : req;
+      let transportRequest = req;
+      if (requestNeedsReferenceUpload(req)) {
+        try {
+          if (chainRoute) {
+            throw new Error(
+              "MiniMax H3 reference media cannot be submitted through a chain route.",
+            );
+          }
+          const authority = referenceUploadAuthorities.get(job.clientId);
+          if (!authority) {
+            throw new Error(
+              "MiniMax H3 reference uploads require a frozen authenticated host route.",
+            );
+          }
+          const prepared = await prepareReferenceUploads({
+            target: authority.target,
+            expectedInstanceId: authority.instanceId,
+            capabilities: authority.capabilities,
+            request: req,
+            signal: abort.signal,
+          });
+          lease = prepared;
+          transportRequest = prepared.request;
+        } catch (error) {
+          if (!abort.signal.aborted && !jobHasSettled(job)) {
+            settleJob(job, "error");
+            job.interrupted = false;
+            job.error = error instanceof Error ? error.message : String(error);
+          }
+          releaseStreamSlot();
+          aborts.delete(job.clientId);
+          return;
+        }
+      }
+      job.streamStarted = true;
+      const body = chainRoute ? buildAutoChainRequest(req, chainRoute) : transportRequest;
       await sseStream(path, {
         method: "POST",
         body,
@@ -883,6 +942,7 @@ export const useGenerationStore = defineStore("generation", {
       }).catch((error: unknown) => {
         streamError = error;
       });
+      if (lease) void lease.cancel().catch(() => undefined);
       if (!abort.signal.aborted && !jobHasSettled(job)) {
         settleJob(job, "error");
         job.interrupted = streamError === null || streamError instanceof TypeError;
@@ -910,6 +970,9 @@ const aborts = new Map<number, AbortController>();
  * jobs without an entry use the primary connection.
  */
 const targets = new Map<number, ApiTarget>();
+
+/** Per-attempt authority for one-use H3 ingress, never Pinia/persistence. */
+const referenceUploadAuthorities = new Map<number, ReferenceUploadAuthority>();
 
 /** Automatic-chain routing snapshot for endpoint selection and cancellation. */
 const chainRoutes = new Map<number, AutoChainRoutingDecision>();

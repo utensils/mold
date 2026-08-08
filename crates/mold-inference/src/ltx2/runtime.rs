@@ -9061,10 +9061,12 @@ mod tests {
             mold_core::KeyframeCondition {
                 frame: 8,
                 image: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+                name: None,
             },
             mold_core::KeyframeCondition {
                 frame: 48,
                 image: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+                name: None,
             },
         ]);
     }
@@ -10432,10 +10434,12 @@ mod tests {
             mold_core::KeyframeCondition {
                 frame: 8,
                 image: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+                name: None,
             },
             mold_core::KeyframeCondition {
                 frame: 48,
                 image: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+                name: None,
             },
         ]);
         let temp_dir = tempfile::tempdir().unwrap();

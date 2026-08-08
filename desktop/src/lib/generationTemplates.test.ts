@@ -73,6 +73,70 @@ describe("save / load round-trip", () => {
     expect(persistence.records.size).toBe(0);
   });
 
+  it("restores H3 endpoint and mixed-reference bytes in authoritative order", async () => {
+    const persistence = memoryMedia();
+    const saved = await saveGenerationTemplateWithMedia(
+      "H3 portable",
+      formWith({
+        model: "minimax-h3-ref2va:official-bf16",
+        family: "minimax-h3",
+        h3Authoring: {
+          firstFrame: null,
+          lastFrame: {
+            filename: "last.png",
+            mimeType: "image/png",
+            width: 1280,
+            height: 720,
+            data: "H3_LAST_BYTES",
+          },
+          references: [
+            {
+              reference: {
+                kind: "audio",
+                media: { authority: "inline", data: "H3_AUDIO_BYTES" },
+                provenance: { name: "voice.wav", sha256: "a".repeat(64) },
+                mime_type: "audio/wav",
+                duration_ms: 2_500,
+                sample_rate: 48_000,
+                channels: 2,
+                sample_count: 120_000,
+              },
+            },
+            {
+              reference: {
+                kind: "image",
+                media: { authority: "inline", data: "H3_IMAGE_BYTES" },
+                provenance: { name: "subject.png", sha256: "b".repeat(64) },
+                mime_type: "image/png",
+                width: 1024,
+                height: 768,
+              },
+            },
+          ],
+        },
+      }),
+      GENERATION_TEMPLATES_STORAGE_KEY,
+      "host-a",
+      persistence,
+    );
+
+    expect(JSON.stringify(saved)).not.toContain("H3_LAST_BYTES");
+    expect(saved.mediaReferences).toEqual(["h3LastFrame", "h3References"]);
+    const hydrated = await hydrateGenerationTemplate(saved, persistence);
+    expect(hydrated.missingMediaReferences).toEqual([]);
+    expect(hydrated.form.h3Authoring?.lastFrame?.data).toBe("H3_LAST_BYTES");
+    expect(
+      hydrated.form.h3Authoring?.references.map((draft) => [
+        draft.reference.kind,
+        draft.reference.provenance?.name,
+        draft.reference.media.authority === "inline" ? draft.reference.media.data : null,
+      ]),
+    ).toEqual([
+      ["audio", "voice.wav", "H3_AUDIO_BYTES"],
+      ["image", "subject.png", "H3_IMAGE_BYTES"],
+    ]);
+  });
+
   it("keeps the legacy re-add warning when no durable source asset exists", async () => {
     const legacy = saveGenerationTemplate("Legacy", formWith({ sourceImage: B64 }));
     const hydrated = await hydrateGenerationTemplate(legacy, memoryMedia());

@@ -40,6 +40,18 @@ import {
 } from "@studio/lib/guidanceOverrides";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
 import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
+import {
+  MINIMAX_H3_MIN_FRAMES,
+  cloneMinimaxH3AuthoringState,
+  emptyMinimaxH3AuthoringState,
+  isMinimaxH3Family,
+  minimaxH3BoundaryFromSourceMetadata,
+  minimaxH3ClosingBoundaryFromMetadata,
+  minimaxH3ReferenceDraftsFromMetadata,
+  minimaxH3TaskForModel,
+  serializeMinimaxH3Authoring,
+  type MinimaxH3AuthoringState,
+} from "@studio/lib/minimaxH3Authoring";
 
 /** A LoRA row in the stack: wire fields plus display metadata (name, triggers). */
 export interface FormLora {
@@ -145,6 +157,8 @@ export interface GenerateForm {
    * look-and-feel modifier composed into the outgoing prompt at submit — never
    * mutates the textarea and carries no dedicated wire field. */
   stylePreset: string;
+  /** Dedicated H3 contract; never projected through edit_images. */
+  h3Authoring?: MinimaxH3AuthoringState;
 }
 
 export function newGenerateForm(): GenerateForm {
@@ -193,6 +207,7 @@ export function newGenerateForm(): GenerateForm {
     audioFile: null,
     cameraControl: null,
     stylePreset: "",
+    h3Authoring: emptyMinimaxH3AuthoringState(),
   };
 }
 
@@ -223,6 +238,7 @@ export function cloneGenerateForm(form: GenerateForm): GenerateForm {
     retakeRange: form.retakeRange ? { ...form.retakeRange } : null,
     guidanceOverrides: { ...form.guidanceOverrides },
     audioFile: form.audioFile ? { ...form.audioFile } : null,
+    h3Authoring: cloneMinimaxH3AuthoringState(form.h3Authoring),
   };
 }
 
@@ -240,6 +256,9 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
   form.steps = m.default_steps;
   form.guidance = m.default_guidance;
   form.guidanceCapabilities = m.guidance_capabilities ?? null;
+  if (isMinimaxH3Family(m.family)) {
+    form.frames = m.default_frames ?? MINIMAX_H3_MIN_FRAMES;
+  }
   // The model's advertised rate is applied like steps/guidance — it is only
   // absent-server/absent-field that leaves the current value in place.
   form.fps = defaultVideoFps(m, form.fps);
@@ -479,6 +498,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
       req.keyframes = form.keyframes.map<KeyframeConditionWire>((k) => ({
         frame: k.frame,
         image: k.image.base64,
+        name: k.image.filename,
       }));
     }
     if (form.icLoraControl) {
@@ -499,7 +519,14 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   // so every conditioning input, upscaler, and a `false` audio flag is
   // something the server refuses. Stripping here rather than on the pipeline
   // transition keeps the user's source media intact if they switch back.
-  return stripAudioOnlyIncompatibleFields(pruneRequestForFamily(req, form.family, form.model));
+  return stripAudioOnlyIncompatibleFields(
+    serializeMinimaxH3Authoring(
+      pruneRequestForFamily(req, form.family, form.model),
+      form.family,
+      form.model,
+      form.h3Authoring ?? emptyMinimaxH3AuthoringState(),
+    ),
+  );
 }
 
 const KNOWN_SCHEDULERS: readonly Scheduler[] = ["default", "ddim", "euler-ancestral", "unipc"];
@@ -608,6 +635,24 @@ export function applyMetadataToForm(
   form.sourceVideo = null;
   form.keyframes = [];
   form.audioFile = null;
+  form.h3Authoring = {
+    ...emptyMinimaxH3AuthoringState(),
+    firstFrame:
+      minimaxH3TaskForModel(metadata.model) === "fl2va"
+        ? minimaxH3BoundaryFromSourceMetadata(
+            metadata.source_image_name,
+            metadata.source_image_sha256,
+          )
+        : null,
+    lastFrame:
+      minimaxH3TaskForModel(metadata.model) === "fl2va"
+        ? minimaxH3ClosingBoundaryFromMetadata(
+            metadata.frames ?? metadata.video_frames,
+            metadata.keyframes,
+          )
+        : null,
+    references: minimaxH3ReferenceDraftsFromMetadata(metadata.references),
+  };
 }
 
 /** Lossy scalar prefill used by non-gallery callers (palette, history, jobs). */
@@ -688,7 +733,10 @@ export function applyRequestToForm(
     : null;
   form.keyframes = (request.keyframes ?? []).map((keyframe) => ({
     frame: keyframe.frame,
-    image: { filename: `Keyframe ${keyframe.frame}`, base64: keyframe.image },
+    image: {
+      filename: keyframe.name ?? `Keyframe ${keyframe.frame}`,
+      base64: keyframe.image,
+    },
   }));
   form.pipeline = request.pipeline ?? null;
   form.icLoraControl = request.ic_lora_control ?? null;
@@ -696,6 +744,32 @@ export function applyRequestToForm(
   form.spatialUpscale = request.spatial_upscale ?? null;
   form.temporalUpscale = request.temporal_upscale ?? null;
   form.guidanceOverrides = guidanceOverridesFromWire(request.guidance_overrides);
+  if (isMinimaxH3Family(form.family) || minimaxH3TaskForModel(request.model)) {
+    form.h3Authoring ??= emptyMinimaxH3AuthoringState();
+    form.h3Authoring.references = (request.references ?? []).map((reference) => ({
+      reference: JSON.parse(JSON.stringify(reference)),
+    }));
+    if (request.source_image) {
+      form.h3Authoring.firstFrame = {
+        filename: request.source_image_name ?? "First frame",
+        mimeType: "image/*",
+        width: 0,
+        height: 0,
+        data: request.source_image,
+      };
+    }
+    const finalFrame = (request.frames ?? form.frames) - 1;
+    const last = request.keyframes?.find((keyframe) => keyframe.frame === finalFrame);
+    if (last) {
+      form.h3Authoring.lastFrame = {
+        filename: last.name ?? "Last frame",
+        mimeType: "image/*",
+        width: 0,
+        height: 0,
+        data: last.image,
+      };
+    }
+  }
 }
 
 /**

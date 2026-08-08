@@ -88,6 +88,7 @@ struct StoreInner {
 struct UploadSession {
     identity: String,
     scope_sha256: String,
+    request: mold_core::GenerateRequest,
     expires_at_ms: u64,
     dir: PathBuf,
     cancel: CancellationToken,
@@ -473,6 +474,7 @@ impl ReferenceUploadStore {
             UploadSession {
                 identity: identity.to_string(),
                 scope_sha256: scope_sha256.clone(),
+                request: payload.request,
                 expires_at_ms,
                 dir: session_dir,
                 cancel: CancellationToken::new(),
@@ -592,7 +594,13 @@ impl ReferenceUploadStore {
         let probe_path = path.clone();
         let probe_descriptor = descriptor.clone();
         let probe = tokio::task::spawn_blocking(move || {
-            probe_reference(&probe_path, &probe_descriptor, reference, &digest)
+            probe_reference(
+                &probe_path,
+                &probe_descriptor,
+                reference,
+                &digest,
+                ReferenceProbePolicy::CanonicalUpload,
+            )
         })
         .await
         .map_err(|error| ApiError::internal(format!("reference probe task failed: {error}")));
@@ -606,27 +614,72 @@ impl ReferenceUploadStore {
         };
 
         let mut inner = self.inner.lock().await;
-        let session = inner
-            .sessions
-            .get_mut(&session_digest)
-            .ok_or_else(unknown_upload)?;
-        let slot = session
-            .slots
-            .get_mut(&upload_digest)
-            .ok_or_else(unknown_upload)?;
-        let reserved_bytes = match slot.state {
-            UploadState::Uploading { reserved_bytes } => reserved_bytes,
-            _ => return Err(unknown_upload()),
-        };
-        slot.state = UploadState::Complete {
-            size_bytes: reserved_bytes,
-            metadata: Box::new(metadata.clone()),
-        };
-        Ok(ReferenceUploadCompleteResponse {
-            instance_id: instance_id.to_string(),
-            reference: slot.reference,
-            metadata,
-        })
+        let finalized = (|| -> Result<ReferenceUploadCompleteResponse, ApiError> {
+            let session = inner
+                .sessions
+                .get_mut(&session_digest)
+                .ok_or_else(unknown_upload)?;
+            let (slot_reference, reserved_bytes) = {
+                let slot = session
+                    .slots
+                    .get(&upload_digest)
+                    .ok_or_else(unknown_upload)?;
+                let reserved_bytes = match slot.state {
+                    UploadState::Uploading { reserved_bytes } => reserved_bytes,
+                    _ => return Err(unknown_upload()),
+                };
+                (slot.reference, reserved_bytes)
+            };
+
+            let canonical_descriptor = reference_from_metadata(&metadata);
+            let mut canonical_request = session.request.clone();
+            let references = canonical_request.references.as_mut().ok_or_else(|| {
+                ApiError::internal("reference upload session lost its bound descriptors")
+            })?;
+            let target = references
+                .get_mut(slot_reference.saturating_sub(1) as usize)
+                .ok_or_else(unknown_upload)?;
+            *target = canonical_descriptor.clone();
+            let session_complete = session.slots.iter().all(|(digest, slot)| {
+                digest == &upload_digest || matches!(slot.state, UploadState::Complete { .. })
+            });
+            if session_complete {
+                minimax_h3::validate_reference_descriptors(references)
+                    .map_err(ApiError::reference)?;
+            }
+            let request_scope_sha256 = request_scope_sha256(&canonical_request)?;
+
+            // The canonical descriptor, scope, and completed slot become
+            // visible under one store lock. A generation can therefore never
+            // consume canonical bytes under the earlier provisional scope.
+            session.request = canonical_request;
+            session.scope_sha256 = request_scope_sha256.clone();
+            let slot = session
+                .slots
+                .get_mut(&upload_digest)
+                .ok_or_else(unknown_upload)?;
+            slot.descriptor = canonical_descriptor;
+            slot.state = UploadState::Complete {
+                size_bytes: reserved_bytes,
+                metadata: Box::new(metadata.clone()),
+            };
+            Ok(ReferenceUploadCompleteResponse {
+                instance_id: instance_id.to_string(),
+                reference: slot_reference,
+                metadata,
+                request_scope_sha256,
+                session_complete,
+            })
+        })();
+        drop(inner);
+        match finalized {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                self.rollback_upload(&session_digest, &upload_digest).await;
+                let _ = tokio::fs::remove_file(&path).await;
+                Err(error)
+            }
+        }
     }
 
     async fn rollback_upload(&self, session_digest: &str, upload_digest: &str) {
@@ -921,7 +974,13 @@ async fn resolve_all_references(
                 tokio::task::spawn_blocking(move || {
                     write_private_bytes(&target_clone, &bytes)?;
                     let digest = format!("{:x}", Sha256::digest(&bytes));
-                    probe_reference(&target_clone, &reference_clone, one_based, &digest)
+                    probe_reference(
+                        &target_clone,
+                        &reference_clone,
+                        one_based,
+                        &digest,
+                        ReferenceProbePolicy::Strict,
+                    )
                 })
                 .await
                 .map_err(|error| {
@@ -964,7 +1023,13 @@ async fn resolve_all_references(
                 let reference_clone = reference.clone();
                 tokio::task::spawn_blocking(move || {
                     let digest = copy_private_bounded(source, &target_clone)?;
-                    probe_reference(&target_clone, &reference_clone, one_based, &digest)
+                    probe_reference(
+                        &target_clone,
+                        &reference_clone,
+                        one_based,
+                        &digest,
+                        ReferenceProbePolicy::Strict,
+                    )
                 })
                 .await
                 .map_err(|error| {
@@ -1220,11 +1285,23 @@ fn copy_private_bounded(mut source: std::fs::File, target: &Path) -> Result<Stri
     Ok(format!("{:x}", digest.finalize()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReferenceProbePolicy {
+    /// Direct inline and server-path authorities must already carry exact
+    /// descriptors; probing only verifies that frozen authority.
+    Strict,
+    /// Authenticated upload descriptors are provisional UI facts. The staged
+    /// bytes and content decoder replace them before the request scope can be
+    /// consumed.
+    CanonicalUpload,
+}
+
 fn probe_reference(
     path: &Path,
     expected: &GenerationReference,
     reference: u32,
     digest: &str,
+    policy: ReferenceProbePolicy,
 ) -> Result<GenerationReferenceMetadata, ApiError> {
     let declared_digest = expected.provenance().sha256.as_deref();
     if declared_digest.is_some_and(|declared| !declared.eq_ignore_ascii_case(digest)) {
@@ -1262,8 +1339,10 @@ fn probe_reference(
                 .into_dimensions()
                 .map_err(|error| unsupported_media(reference, error))?;
             require_equal(reference, "mime_type", mime_type.as_str(), observed_mime)?;
-            require_equal(reference, "width", *width, observed_width)?;
-            require_equal(reference, "height", *height, observed_height)?;
+            if policy == ReferenceProbePolicy::Strict {
+                require_equal(reference, "width", *width, observed_width)?;
+                require_equal(reference, "height", *height, observed_height)?;
+            }
             GenerationReference::Image {
                 media: GenerationReferenceAuthority::Descriptor,
                 provenance,
@@ -1293,23 +1372,30 @@ fn probe_reference(
                 })?;
             let probe = mold_inference::ltx2::media::probe_video_file(file)
                 .map_err(|error| unsupported_media(reference, error))?;
-            require_equal(reference, "width", *width, probe.width)?;
-            require_equal(reference, "height", *height, probe.height)?;
+            if policy == ReferenceProbePolicy::Strict {
+                require_equal(reference, "width", *width, probe.width)?;
+                require_equal(reference, "height", *height, probe.height)?;
+            }
             let observed_frame_count = probe
                 .frames
                 .filter(|frames| *frames > 0)
                 .ok_or_else(|| unsupported_media(reference, "video frame count is unavailable"))?;
-            if let Some(declared) = *frame_count {
-                require_equal(reference, "frame_count", declared, observed_frame_count)?;
+            if policy == ReferenceProbePolicy::Strict {
+                if let Some(declared) = *frame_count {
+                    require_equal(reference, "frame_count", declared, observed_frame_count)?;
+                }
             }
-            if (*fps - f64::from(probe.fps)).abs() > 0.51 {
+            if policy == ReferenceProbePolicy::Strict && (*fps - f64::from(probe.fps)).abs() > 0.51
+            {
                 return Err(drift_error(reference, "fps", *fps, probe.fps));
             }
             let observed_duration = probe
                 .duration_ms
                 .ok_or_else(|| unsupported_media(reference, "video duration is unavailable"))?;
             let tolerance = (1_000_u64 / u64::from(probe.fps.max(1))).max(50);
-            if duration_ms.abs_diff(observed_duration) > tolerance {
+            if policy == ReferenceProbePolicy::Strict
+                && duration_ms.abs_diff(observed_duration) > tolerance
+            {
                 return Err(drift_error(
                     reference,
                     "duration_ms",
@@ -1317,7 +1403,9 @@ fn probe_reference(
                     observed_duration,
                 ));
             }
-            require_equal(reference, "has_audio", *has_audio, probe.has_audio)?;
+            if policy == ReferenceProbePolicy::Strict {
+                require_equal(reference, "has_audio", *has_audio, probe.has_audio)?;
+            }
             let observed_audio = if probe.has_audio {
                 Some(
                     mold_inference::ltx2::media::probe_decoded_mp4_audio_file(path)
@@ -1338,31 +1426,36 @@ fn probe_reference(
                     .saturating_mul(1_000)
                     .div_ceil(u64::from(audio.sample_rate))
             });
-            if let (Some(declared), Some(observed)) = (*audio_duration_ms, observed_audio_duration)
-            {
-                if declared.abs_diff(observed) > tolerance {
-                    return Err(drift_error(
-                        reference,
-                        "audio_duration_ms",
-                        declared,
-                        observed,
-                    ));
+            if policy == ReferenceProbePolicy::Strict {
+                if let (Some(declared), Some(observed)) =
+                    (*audio_duration_ms, observed_audio_duration)
+                {
+                    if declared.abs_diff(observed) > tolerance {
+                        return Err(drift_error(
+                            reference,
+                            "audio_duration_ms",
+                            declared,
+                            observed,
+                        ));
+                    }
                 }
             }
-            if let Some(audio) = observed_audio {
-                if let Some(declared) = *audio_sample_count {
-                    require_equal(
-                        reference,
-                        "audio_sample_count",
-                        declared,
-                        audio.samples_per_channel,
-                    )?;
-                }
-                if let Some(declared) = *audio_sample_rate {
-                    require_equal(reference, "audio_sample_rate", declared, audio.sample_rate)?;
-                }
-                if let Some(declared) = *audio_channels {
-                    require_equal(reference, "audio_channels", declared, audio.channels)?;
+            if policy == ReferenceProbePolicy::Strict {
+                if let Some(audio) = observed_audio {
+                    if let Some(declared) = *audio_sample_count {
+                        require_equal(
+                            reference,
+                            "audio_sample_count",
+                            declared,
+                            audio.samples_per_channel,
+                        )?;
+                    }
+                    if let Some(declared) = *audio_sample_rate {
+                        require_equal(reference, "audio_sample_rate", declared, audio.sample_rate)?;
+                    }
+                    if let Some(declared) = *audio_channels {
+                        require_equal(reference, "audio_channels", declared, audio.channels)?;
+                    }
                 }
             }
             GenerationReference::Video {
@@ -1403,18 +1496,20 @@ fn probe_reference(
                     ApiError::validation(format!("failed to safely open reference: {error:#}"))
                 })?;
             let wav = probe_wav(file).map_err(|error| unsupported_media(reference, error))?;
-            require_equal(reference, "sample_rate", *sample_rate, wav.sample_rate)?;
-            require_equal(reference, "channels", *channels, wav.channels)?;
-            if let Some(declared) = *sample_count {
-                require_equal(reference, "sample_count", declared, wav.sample_count)?;
-            }
-            if duration_ms.abs_diff(wav.duration_ms) > 2 {
-                return Err(drift_error(
-                    reference,
-                    "duration_ms",
-                    *duration_ms,
-                    wav.duration_ms,
-                ));
+            if policy == ReferenceProbePolicy::Strict {
+                require_equal(reference, "sample_rate", *sample_rate, wav.sample_rate)?;
+                require_equal(reference, "channels", *channels, wav.channels)?;
+                if let Some(declared) = *sample_count {
+                    require_equal(reference, "sample_count", declared, wav.sample_count)?;
+                }
+                if duration_ms.abs_diff(wav.duration_ms) > 2 {
+                    return Err(drift_error(
+                        reference,
+                        "duration_ms",
+                        *duration_ms,
+                        wav.duration_ms,
+                    ));
+                }
             }
             GenerationReference::Audio {
                 media: GenerationReferenceAuthority::Descriptor,
@@ -1749,7 +1844,7 @@ pub(crate) async fn create_reference_upload_session(
         ("Content-Type" = String, Header, description = "Declared media type, verified by content probe"),
     ),
     responses(
-        (status = 200, description = "Content-sniffed reference metadata", body = ReferenceUploadCompleteResponse),
+        (status = 200, description = "Content-sniffed canonical metadata and rebound request scope", body = ReferenceUploadCompleteResponse),
         (status = 401, description = "Explicit API-key authentication is required"),
         (status = 404, description = "Unknown, expired, or unauthorized upload handle"),
         (status = 413, description = "Upload exceeds a file, session, or host quota"),
@@ -1867,7 +1962,47 @@ mod tests {
         bytes.into_inner()
     }
 
-    fn request(reference: GenerationReference) -> mold_core::GenerateRequest {
+    fn wav_bytes(sample_rate: u32, channels: u16, sample_count: u32) -> Vec<u8> {
+        let block_align = channels * 2;
+        let data_bytes = sample_count * u32::from(block_align);
+        let mut bytes = Vec::with_capacity(44 + data_bytes as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&(sample_rate * u32::from(block_align)).to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_bytes.to_le_bytes());
+        bytes.resize(44 + data_bytes as usize, 0);
+        bytes
+    }
+
+    fn wav_reference(
+        media: GenerationReferenceAuthority,
+        sha256: String,
+        duration_ms: u64,
+        sample_count: u64,
+    ) -> GenerationReference {
+        GenerationReference::Audio {
+            media,
+            provenance: GenerationReferenceProvenance {
+                name: Some("timing.wav".to_string()),
+                sha256: Some(sha256),
+            },
+            mime_type: "audio/wav".to_string(),
+            duration_ms,
+            sample_rate: 24_000,
+            channels: 1,
+            sample_count: Some(sample_count),
+        }
+    }
+
+    fn request_with_references(references: Vec<GenerationReference>) -> mold_core::GenerateRequest {
         let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
             "prompt": "reference print",
             "model": minimax_h3::REF2VA_COMFY,
@@ -1882,8 +2017,131 @@ mod tests {
             "output_format": "mp4"
         }))
         .unwrap();
-        request.references = Some(vec![reference]);
+        request.references = Some(references);
         request
+    }
+
+    fn request(reference: GenerationReference) -> mold_core::GenerateRequest {
+        request_with_references(vec![reference])
+    }
+
+    fn with_media(
+        mut reference: GenerationReference,
+        authority: GenerationReferenceAuthority,
+    ) -> GenerationReference {
+        match &mut reference {
+            GenerationReference::Image { media, .. }
+            | GenerationReference::Video { media, .. }
+            | GenerationReference::Audio { media, .. } => *media = authority,
+        }
+        reference
+    }
+
+    #[cfg(feature = "mp4")]
+    const AAC_LC_SAMPLES_PER_PACKET: u64 = 1_024;
+
+    #[cfg(feature = "mp4")]
+    fn aac_video_bytes() -> Vec<u8> {
+        let frames = (0..50)
+            .map(|index| image::RgbImage::from_pixel(32, 32, image::Rgb([index as u8, 64, 192])))
+            .collect::<Vec<_>>();
+        let video = mold_inference::ltx_video::video_enc::encode_mp4(&frames, 24).unwrap();
+        let samples_per_channel = 92_610_usize;
+        let stereo = (0..samples_per_channel)
+            .flat_map(|index| {
+                let sample =
+                    ((index as f32 / 44_100.0) * std::f32::consts::TAU * 440.0).sin() * 0.1;
+                [sample, sample]
+            })
+            .collect::<Vec<_>>();
+        mold_inference::av_media::attach_aac_track_to_mp4_bytes(&video, &stereo, 44_100, 2).unwrap()
+    }
+
+    #[cfg(feature = "mp4")]
+    fn browser_aac_packet_sample_hint(bytes: &[u8]) -> u64 {
+        use mp4_rs::{Mp4Reader, TrackType};
+        use std::io::Cursor;
+
+        let reader = Mp4Reader::read_header(Cursor::new(bytes), bytes.len() as u64).unwrap();
+        let audio_tracks = reader
+            .tracks()
+            .values()
+            .filter(|track| matches!(track.track_type(), Ok(TrackType::Audio)))
+            .collect::<Vec<_>>();
+        let [audio] = audio_tracks.as_slice() else {
+            panic!("fixture must contain exactly one AAC track");
+        };
+        // `Track::sample_count` reads the MP4 stsz sample count used by the
+        // browser probe. AAC-LC with frameLengthFlag=0 carries 1,024 decoded
+        // samples per packet, so this is the exact provisional UI arithmetic.
+        u64::from(audio.sample_count()) * AAC_LC_SAMPLES_PER_PACKET
+    }
+
+    #[cfg(feature = "mp4")]
+    fn corrupt_one_aac_packet(mut bytes: Vec<u8>) -> Vec<u8> {
+        use mp4_rs::{Mp4Reader, TrackType};
+        use std::io::Cursor;
+
+        let mut reader =
+            Mp4Reader::read_header(Cursor::new(bytes.as_slice()), bytes.len() as u64).unwrap();
+        let (track_id, packet_count) = reader
+            .tracks()
+            .iter()
+            .find_map(|(track_id, track)| {
+                matches!(track.track_type(), Ok(TrackType::Audio))
+                    .then_some((*track_id, track.sample_count()))
+            })
+            .expect("fixture must contain an AAC track");
+        let packet_id = (packet_count / 2).max(1);
+        let packet = reader
+            .read_sample(track_id, packet_id)
+            .unwrap()
+            .expect("fixture AAC packet must exist")
+            .bytes
+            .to_vec();
+        drop(reader);
+
+        let offsets = bytes
+            .windows(packet.len())
+            .enumerate()
+            .filter_map(|(offset, candidate)| (candidate == packet).then_some(offset))
+            .collect::<Vec<_>>();
+        let [offset] = offsets.as_slice() else {
+            panic!("fixture AAC packet payload must occur exactly once");
+        };
+        // Payload-only corruption keeps stsz and every other container fact
+        // intact. The browser therefore retains the same packet hint while
+        // Symphonia skips this undecodable AAC frame.
+        bytes[*offset..*offset + packet.len()].fill(0);
+        bytes
+    }
+
+    #[cfg(feature = "mp4")]
+    fn provisional_video_reference(
+        media: GenerationReferenceAuthority,
+        sha256: String,
+        audio_sample_count: u64,
+    ) -> GenerationReference {
+        GenerationReference::Video {
+            media,
+            provenance: GenerationReferenceProvenance {
+                name: Some("motion.mp4".to_string()),
+                sha256: Some(sha256),
+            },
+            mime_type: "video/mp4".to_string(),
+            width: 32,
+            height: 32,
+            frame_count: Some(50),
+            duration_ms: 2_083,
+            fps: 24.0,
+            has_audio: true,
+            audio_duration_ms: Some(audio_sample_count.saturating_mul(1_000).div_ceil(44_100)),
+            // Provisional stsz packet arithmetic. Only decoded PCM returned by
+            // canonical upload probing may enter the final request scope.
+            audio_sample_count: Some(audio_sample_count),
+            audio_sample_rate: Some(44_100),
+            audio_channels: Some(2),
+        }
     }
 
     #[tokio::test]
@@ -2003,6 +2261,295 @@ mod tests {
         drop(bindings);
         drop(resolved);
         assert_eq!(store.resolved_bytes.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn canonical_scope_waits_for_every_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReferenceUploadStore::at(dir.path().join("cache"));
+        let image = png_bytes();
+        let image_digest = format!("{:x}", Sha256::digest(&image));
+        let valid_audio = wav_bytes(24_000, 1, 48_000);
+        let audio_digest = format!("{:x}", Sha256::digest(&valid_audio));
+        let provisional_audio = wav_reference(
+            GenerationReferenceAuthority::Descriptor,
+            audio_digest.clone(),
+            2_001,
+            48_001,
+        );
+        let session = store
+            .create_session(
+                "auth-a",
+                "instance-a",
+                ReferenceUploadSessionRequest {
+                    request: request_with_references(vec![
+                        png_reference(GenerationReferenceAuthority::Descriptor, Some(image_digest)),
+                        provisional_audio,
+                    ]),
+                    upload_references: vec![1, 2],
+                },
+            )
+            .await
+            .unwrap();
+        let initial_scope = session.request_scope_sha256.clone();
+        let first = store
+            .upload(
+                "auth-a",
+                "instance-a",
+                &session.uploads[0].handle,
+                "image/png",
+                image.len() as u64,
+                Body::from(image),
+            )
+            .await
+            .unwrap();
+        assert!(!first.session_complete);
+
+        let final_complete = store
+            .upload(
+                "auth-a",
+                "instance-a",
+                &session.uploads[1].handle,
+                "audio/wav",
+                valid_audio.len() as u64,
+                Body::from(valid_audio),
+            )
+            .await
+            .unwrap();
+        assert!(final_complete.session_complete);
+        assert_eq!(final_complete.metadata.sample_count, Some(48_000));
+        assert_eq!(final_complete.metadata.duration_ms, Some(2_000));
+        assert_ne!(final_complete.request_scope_sha256, initial_scope);
+
+        let mut canonical_image = reference_from_metadata(&first.metadata);
+        canonical_image = with_media(
+            canonical_image,
+            GenerationReferenceAuthority::Upload {
+                handle: session.uploads[0].handle.clone(),
+            },
+        );
+        let mut canonical_audio = reference_from_metadata(&final_complete.metadata);
+        canonical_audio = with_media(
+            canonical_audio,
+            GenerationReferenceAuthority::Upload {
+                handle: session.uploads[1].handle.clone(),
+            },
+        );
+        let final_request = request_with_references(vec![canonical_image, canonical_audio]);
+        assert_eq!(
+            request_scope_sha256(&final_request).unwrap(),
+            final_complete.request_scope_sha256
+        );
+    }
+
+    #[tokio::test]
+    async fn final_canonical_validation_failure_rolls_back_upload_state_and_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReferenceUploadStore::at(dir.path().join("cache"));
+        let image = png_bytes();
+        let image_digest = format!("{:x}", Sha256::digest(&image));
+        let short_audio = wav_bytes(24_000, 1, 24_000);
+        let short_audio_digest = format!("{:x}", Sha256::digest(&short_audio));
+        let session = store
+            .create_session(
+                "auth-a",
+                "instance-a",
+                ReferenceUploadSessionRequest {
+                    request: request_with_references(vec![
+                        png_reference(GenerationReferenceAuthority::Descriptor, Some(image_digest)),
+                        // The provisional browser descriptor is structurally
+                        // valid, but canonical probing will reveal a one-second
+                        // WAV that violates H3's 2–15 second audio contract.
+                        wav_reference(
+                            GenerationReferenceAuthority::Descriptor,
+                            short_audio_digest,
+                            2_001,
+                            48_001,
+                        ),
+                    ]),
+                    upload_references: vec![1, 2],
+                },
+            )
+            .await
+            .unwrap();
+        let session_dir = {
+            let inner = store.inner.lock().await;
+            inner
+                .sessions
+                .get(&store.session_digest(&session.session_handle))
+                .unwrap()
+                .dir
+                .clone()
+        };
+        store
+            .upload(
+                "auth-a",
+                "instance-a",
+                &session.uploads[0].handle,
+                "image/png",
+                image.len() as u64,
+                Body::from(image.clone()),
+            )
+            .await
+            .unwrap();
+
+        // Final validation failure releases only the failed upload's quota and
+        // restores its slot to Empty. Retrying the identical, digest-bound
+        // bytes reaches the same validation error rather than ALREADY_USED.
+        for _ in 0..2 {
+            let error = store
+                .upload(
+                    "auth-a",
+                    "instance-a",
+                    &session.uploads[1].handle,
+                    "audio/wav",
+                    short_audio.len() as u64,
+                    Body::from(short_audio.clone()),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.reference, Some(2));
+            assert_eq!(error.field.as_deref(), Some("duration_ms"));
+            let inner = store.inner.lock().await;
+            let stored = inner
+                .sessions
+                .get(&store.session_digest(&session.session_handle))
+                .unwrap();
+            assert_eq!(inner.reserved_bytes, image.len() as u64);
+            assert_eq!(stored.reserved_bytes, image.len() as u64);
+            assert!(matches!(
+                stored
+                    .slots
+                    .get(&store.upload_digest(&session.uploads[1].handle))
+                    .unwrap()
+                    .state,
+                UploadState::Empty
+            ));
+        }
+
+        store
+            .cancel_session("auth-a", &session.session_handle)
+            .await
+            .unwrap();
+        assert_eq!(store.inner.lock().await.reserved_bytes, 0);
+        assert!(!session_dir.exists());
+    }
+
+    #[cfg(feature = "mp4")]
+    #[tokio::test]
+    async fn decoded_aac_metadata_rebinds_upload_scope_while_direct_authorities_stay_strict() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReferenceUploadStore::at(dir.path().join("cache"));
+        let bytes = corrupt_one_aac_packet(aac_video_bytes());
+        let browser_sample_hint = browser_aac_packet_sample_hint(&bytes);
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let provisional = provisional_video_reference(
+            GenerationReferenceAuthority::Descriptor,
+            digest.clone(),
+            browser_sample_hint,
+        );
+        let session = store
+            .create_session(
+                "auth-a",
+                "instance-a",
+                ReferenceUploadSessionRequest {
+                    request: request(provisional.clone()),
+                    upload_references: vec![1],
+                },
+            )
+            .await
+            .unwrap();
+        let initial_scope = session.request_scope_sha256.clone();
+        let complete = store
+            .upload(
+                "auth-a",
+                "instance-a",
+                &session.uploads[0].handle,
+                "video/mp4",
+                bytes.len() as u64,
+                Body::from(bytes.clone()),
+            )
+            .await
+            .unwrap();
+        assert!(complete.session_complete);
+        let decoded_sample_count = complete
+            .metadata
+            .audio_sample_count
+            .expect("canonical host metadata must include decoded AAC samples");
+        assert!(
+            decoded_sample_count < browser_sample_hint,
+            "the corrupted AAC packet must make decoded PCM ({decoded_sample_count}) shorter than the container hint ({browser_sample_hint})"
+        );
+        assert_eq!(
+            decoded_sample_count,
+            browser_sample_hint - AAC_LC_SAMPLES_PER_PACKET,
+            "exactly the zeroed AAC packet must be absent from canonical decoded PCM"
+        );
+        assert_ne!(complete.request_scope_sha256, initial_scope);
+
+        let mut final_reference = reference_from_metadata(&complete.metadata);
+        final_reference = with_media(
+            final_reference,
+            GenerationReferenceAuthority::Upload {
+                handle: session.uploads[0].handle.clone(),
+            },
+        );
+        let mut final_request = request(final_reference);
+        assert_eq!(
+            request_scope_sha256(&final_request).unwrap(),
+            complete.request_scope_sha256
+        );
+
+        // The earlier provisional scope cannot consume the now-canonical
+        // session, even with its correct one-use handle.
+        let mut stale = request(with_media(
+            provisional.clone(),
+            GenerationReferenceAuthority::Upload {
+                handle: session.uploads[0].handle.clone(),
+            },
+        ));
+        assert!(store
+            .resolve_request("auth-a", &mut stale, &[], Some(&initial_scope))
+            .await
+            .is_err());
+
+        // Direct inline and allowlisted server-path authorities do not get the
+        // upload protocol's canonicalization privilege.
+        let mut inline = request(with_media(
+            provisional.clone(),
+            GenerationReferenceAuthority::Inline {
+                data: bytes.clone(),
+            },
+        ));
+        assert!(store
+            .resolve_request("auth-a", &mut inline, &[], None)
+            .await
+            .is_err());
+        let media_root = dir.path().join("media");
+        std::fs::create_dir(&media_root).unwrap();
+        std::fs::write(media_root.join("motion.mp4"), &bytes).unwrap();
+        let mut server_path = request(with_media(
+            provisional,
+            GenerationReferenceAuthority::ServerPath {
+                path: "motion.mp4".to_string(),
+            },
+        ));
+        assert!(store
+            .resolve_request("auth-a", &mut server_path, &[media_root], None)
+            .await
+            .is_err());
+
+        let resolved = store
+            .resolve_request(
+                "auth-a",
+                &mut final_request,
+                &[],
+                Some(&complete.request_scope_sha256),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.entries()[0].metadata, complete.metadata);
     }
 
     #[test]

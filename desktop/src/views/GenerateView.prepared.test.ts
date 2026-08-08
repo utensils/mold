@@ -573,6 +573,7 @@ describe("GenerateView prepared expansion batches", () => {
       kind: "local" as const,
       target: { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
       instanceId: null,
+      referenceUploads: null,
     };
     const remoteRoute = {
       hostId: "remote-one",

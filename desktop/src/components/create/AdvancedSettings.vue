@@ -27,7 +27,16 @@ import {
   defaultOutputFormat,
   outputFormatsForFamily,
 } from "../../lib/capabilities";
-import { snapVideoFrames, videoFramesError, videoFrameStep } from "@studio/lib/videoDuration";
+import {
+  clampVideoFrames,
+  fixedVideoFps,
+  minVideoFrames,
+  videoFrameGridLabel,
+  videoFrameGridError,
+  videoFramesError,
+  videoFrameStep,
+  snapVideoFrames,
+} from "@studio/lib/videoDuration";
 import {
   autoChainFieldList,
   decideGenerateRequestRouting,
@@ -73,6 +82,13 @@ import { AUDIO_ONLY_PIPELINE, isAudioOnlyPipeline } from "@studio/lib/ltx2Pipeli
 import SourceImageWell from "../generate/SourceImageWell.vue";
 import LoraStack from "../generate/LoraStack.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
+import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
+import {
+  emptyMinimaxH3AuthoringState,
+  isMinimaxH3Identity,
+  minimaxH3TaskForModel,
+  type MinimaxH3AuthoringState,
+} from "@studio/lib/minimaxH3Authoring";
 
 const props = withDefaults(
   defineProps<{
@@ -108,6 +124,14 @@ const caps = computed(() =>
 const audioOutputSupported = computed(() => props.selectedModel?.supports_audio !== false);
 const formats = computed(() => outputFormatsForFamily(props.form.family));
 const advancedCount = computed(() => advancedActiveCount(props.form));
+const h3Task = computed(() =>
+  props.selectedModel ? minimaxH3TaskForModel(props.form.model) : null,
+);
+const h3Family = computed(() => isMinimaxH3Identity(props.form.family, props.form.model));
+const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3AuthoringState());
+function setH3Authoring(value: MinimaxH3AuthoringState): void {
+  props.form.h3Authoring = value;
+}
 
 // ── Scheduler & sampling ─────────────────────────────────────────────────────
 const schedulerLabels: Record<string, string> = {
@@ -149,9 +173,26 @@ function swapSize() {
 }
 const seedFixed = computed(() => seedMode(props.form.seed) === "fixed");
 
-// ── Video (ltx families) ─────────────────────────────────────────────────────
-const videoFrameContract = computed(() => props.selectedModel ?? { family: props.form.family });
-const framesError = computed(() => videoFramesError(props.form.frames, videoFrameContract.value));
+// ── Video ────────────────────────────────────────────────────────────────────
+const videoContract = computed(() => props.selectedModel ?? { family: props.form.family });
+const frameGridLabel = computed(() => videoFrameGridLabel(videoContract.value));
+const frameStep = computed(() => videoFrameStep(videoContract.value));
+const frameMinimum = computed(() => minVideoFrames(videoContract.value));
+const fixedFps = computed(() => fixedVideoFps(videoContract.value));
+const framesError = computed(() =>
+  caps.value.supportsVideo
+    ? fixedFps.value !== null
+      ? videoFramesError(props.form.frames, videoContract.value)
+      : videoFrameGridError(props.form.frames, videoContract.value)
+    : null,
+);
+watch(
+  [fixedFps, () => props.form.fps] as const,
+  ([fixed, current]) => {
+    if (fixed !== null && current !== fixed) props.form.fps = fixed;
+  },
+  { immediate: true },
+);
 const generationRequest = computed(() => buildRequest(props.form));
 const chainDecision = computed<ChainRoutingDecision>(() =>
   caps.value.supportsVideo
@@ -164,7 +205,11 @@ const singleShotPreservationNote = computed(() => {
   return `Will render as one ${props.form.frames}-frame clip to preserve ${autoChainFieldList(decision.preservedAutoChainFields)}. This may use more GPU memory than automatic chaining.`;
 });
 const fpsError = computed(() =>
-  caps.value.supportsVideo ? fpsValidationError(props.form.fps) : null,
+  caps.value.supportsVideo
+    ? fixedFps.value !== null && props.form.fps !== fixedFps.value
+      ? `FPS is fixed at ${fixedFps.value} for this model.`
+      : fpsValidationError(props.form.fps)
+    : null,
 );
 const cameraError = computed(() =>
   cameraControlValidationError(
@@ -350,7 +395,10 @@ function clearAudioFile() {
   props.form.audioFile = null;
 }
 function snapFramesField() {
-  props.form.frames = snapVideoFrames(props.form.frames, videoFrameContract.value);
+  props.form.frames =
+    fixedFps.value !== null
+      ? clampVideoFrames(props.form.frames, fixedFps.value, videoContract.value)
+      : Math.max(frameMinimum.value, snapVideoFrames(props.form.frames, videoContract.value));
 }
 
 // ── Reset — restore the model's defaults, preserve prompt + prepared state ────
@@ -440,9 +488,29 @@ function reset() {
         </div>
       </AccordionSection>
 
+      <AccordionSection
+        v-if="h3Task"
+        icon="video"
+        :title="h3Task === 'fl2va' ? 'Frame endpoints' : 'Ordered references'"
+        :summary="
+          h3Task === 'fl2va'
+            ? 'First, last, both, or text only'
+            : `${h3Authoring.references.length} in semantic order`
+        "
+        :open="true"
+        :header-interactive="false"
+        data-test="section-h3-authoring"
+      >
+        <MinimaxH3AuthoringPanel
+          :model-value="h3Authoring"
+          :task="h3Task"
+          @update:model-value="setH3Authoring"
+        />
+      </AccordionSection>
+
       <!-- 3 · Source image -->
       <AccordionSection
-        v-if="caps.supportsImg2img"
+        v-if="caps.supportsImg2img && !h3Family"
         icon="image"
         title="Source image"
         summary="Image-to-image &amp; inpainting"
@@ -564,12 +632,12 @@ function reset() {
           @update:frames="form.frames = $event"
         />
 
-        <label class="ms-label">Frames</label>
+        <label class="ms-label">Frames ({{ frameGridLabel }})</label>
         <input
           v-model.number="form.frames"
           type="number"
-          :step="videoFrameStep(videoFrameContract)"
-          min="1"
+          :step="frameStep"
+          :min="frameMinimum"
           aria-label="Frames"
           :aria-invalid="framesError ? 'true' : undefined"
           class="ms-input data-mono"
@@ -606,6 +674,7 @@ function reset() {
           type="number"
           min="1"
           max="60"
+          :disabled="fixedFps !== null"
           aria-label="Frames per second"
           class="ms-input data-mono"
         />
@@ -657,7 +726,7 @@ function reset() {
           </p>
         </template>
 
-        <div v-if="caps.supportsAudio" class="ms-switch-row ms-switch-row--mt">
+        <div v-if="caps.supportsAudio && !h3Family" class="ms-switch-row ms-switch-row--mt">
           <div class="ms-switch-row__title">Generate audio</div>
           <SwitchToggle
             :model-value="form.enableAudio"
@@ -666,7 +735,7 @@ function reset() {
             @update:model-value="form.enableAudio = $event"
           />
         </div>
-        <p v-if="caps.supportsAudio && !audioOutputSupported" class="ms-hint">
+        <p v-if="caps.supportsAudio && !h3Family && !audioOutputSupported" class="ms-hint">
           Audio assets are not included with this checkpoint. Video generation remains available.
         </p>
         <p v-if="audioFormatError" class="ms-error" role="alert">{{ audioFormatError }}</p>

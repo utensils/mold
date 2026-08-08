@@ -37,10 +37,18 @@ const props = withDefaults(
     busy?: boolean;
     /** The visual conditioning lets this render go out undescribed. */
     promptOptional?: boolean;
+    /** Model-specific required-prompt wording. */
+    requiredPlaceholder?: string;
     /** Prompt history (newest first) for ↑/↓ recall. */
     history?: string[];
   }>(),
-  { expanded: false, busy: false, promptOptional: false, history: () => [] },
+  {
+    expanded: false,
+    busy: false,
+    promptOptional: false,
+    requiredPlaceholder: "Describe the image you want to create…",
+    history: () => [],
+  },
 );
 
 const emit = defineEmits<{
@@ -66,7 +74,7 @@ const summaryLine = computed(() => {
 const placeholder = computed(() =>
   props.promptOptional
     ? OPTIONAL_PROMPT_PLACEHOLDER
-    : "Describe the image you want to create…",
+    : props.requiredPlaceholder,
 );
 
 const expandLabel = computed(() =>

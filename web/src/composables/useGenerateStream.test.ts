@@ -863,6 +863,45 @@ describe("live latent preview", () => {
       vi.useRealTimers();
     }
   });
+
+  it("persists only reference descriptors, never inline bytes or one-use secrets", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    job.request = singleGen({
+      model: "minimax-h3-ref2va",
+      frames: 124,
+      references: [
+        {
+          kind: "image",
+          media: { authority: "inline", data: "PRIVATE-IMAGE-BYTES" },
+          provenance: { name: "identity.png", sha256: "a".repeat(64) },
+          mime_type: "image/png",
+          width: 32,
+          height: 24,
+        },
+        {
+          kind: "audio",
+          media: { authority: "upload", handle: "ONE-USE-HANDLE" },
+          provenance: { name: "timing.wav", sha256: "b".repeat(64) },
+          mime_type: "audio/wav",
+          duration_ms: 2_000,
+          sample_rate: 24_000,
+          channels: 1,
+        },
+      ],
+    });
+
+    __testing__.persistJobs([job]);
+    const raw = localStorage.getItem(__testing__.STORAGE_KEY)!;
+    expect(raw).not.toContain("PRIVATE-IMAGE-BYTES");
+    expect(raw).not.toContain("ONE-USE-HANDLE");
+    const restored = __testing__.loadPersistedJobs(raw)[0]!;
+    expect((restored.request as GenerateRequestWire).references).toEqual([
+      expect.objectContaining({ media: { authority: "descriptor" } }),
+      expect.objectContaining({ media: { authority: "descriptor" } }),
+    ]);
+  });
 });
 
 // ── Active-canvas job selection ─────────────────────────────────────────────

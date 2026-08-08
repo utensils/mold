@@ -40,6 +40,7 @@ import type { DevelopPhase } from "@ui/lib/grain";
 import type { ClipRailMedia } from "@ui/components/types";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { requestNeedsReferenceUpload } from "@studio/api/referenceUploads";
 import {
   expansionTaskForRequest,
   type ExpandTask,
@@ -163,6 +164,13 @@ import {
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
 import { canOfferExtend, serverExtendOverlapDefault } from "@studio/lib/extend";
 import { promptOptional } from "@studio/lib/promptRequirement";
+import {
+  MINIMAX_H3_PROMPT_PLACEHOLDER,
+  emptyMinimaxH3AuthoringState,
+  isMinimaxH3Identity,
+  minimaxH3AuthoringError,
+  minimaxH3TaskForModel,
+} from "@studio/lib/minimaxH3Authoring";
 import {
   modelDisplayName,
   modelDisplayNameForId,
@@ -299,8 +307,14 @@ function cloneRoute(route: HostRoute | null): HostRoute | null {
   return route ? { ...route, target: { ...route.target } } : null;
 }
 
-function normalizeSubmitRoute(route: HostRoute | null): HostRoute | null {
-  return route?.hostId === "origin" ? null : route;
+function normalizeSubmitRoute(
+  route: HostRoute | null,
+  request?: GenerateRequestWire,
+): HostRoute | null {
+  return route?.hostId === "origin" &&
+    !(request && requestNeedsReferenceUpload(request))
+    ? null
+    : route;
 }
 
 function sameRoute(
@@ -1154,7 +1168,10 @@ const currentModelLabel = computed(() =>
 );
 
 const currentFamily = computed(
-  () => currentModel.value?.family ?? form.state.value.modelFamily,
+  () =>
+    currentModel.value?.family ??
+    form.state.value.modelFamily ??
+    (isMinimaxH3Identity(null, form.state.value.model) ? "minimax-h3" : ""),
 );
 
 const capabilities = computed(() =>
@@ -1178,6 +1195,11 @@ const canSkipPrompt = computed(() =>
     extendVideo: form.state.value.extendVideo,
     extendVideoPath: form.state.value.extendVideoPath,
   }),
+);
+const requiredPromptPlaceholder = computed(() =>
+  isMinimaxH3Identity(currentFamily.value, form.state.value.model)
+    ? MINIMAX_H3_PROMPT_PLACEHOLDER
+    : "Describe the image you want to create…",
 );
 
 // Continuation rides the selected model's own `/api/models` row, which the
@@ -2160,6 +2182,16 @@ function validateSubmit(): boolean {
     composerError.value = "Pick a model to start.";
     return false;
   }
+  const h3Error = minimaxH3AuthoringError(
+    currentFamily.value,
+    form.state.value.model,
+    form.state.value.h3Authoring,
+  );
+  if (h3Error) {
+    composerError.value = h3Error;
+    showAdvanced.value = true;
+    return false;
+  }
   const pixels = form.state.value.width * form.state.value.height;
   const maxPixels = currentModel.value?.max_pixels ?? MAX_GENERATION_PIXELS;
   if (pixels > maxPixels) {
@@ -2372,7 +2404,7 @@ function submitRequestCopies(
 ): void {
   const copies = requestCopyCount(request);
   if (copies === 1) {
-    stream.submit(request, decision, normalizeSubmitRoute(route));
+    stream.submit(request, decision, normalizeSubmitRoute(route, request));
     return;
   }
 
@@ -2392,7 +2424,7 @@ function submitRequestCopies(
         seed: baseSeed + index,
       },
       decision,
-      normalizeSubmitRoute(route),
+      normalizeSubmitRoute(route, request),
     );
   }
 }
@@ -2467,7 +2499,13 @@ async function onSubmit(allowStaleQuick = false) {
   const finalizedCopies = requestCopyCount(req);
   if (quick) req.original_prompt = quick.originalPrompt;
   if (quick?.promptTransform) req.prompt_transform = quick.promptTransform;
-  if ("source_image" in req) {
+  // H3's dedicated FL2VA panel owns first/last endpoints. The legacy still
+  // preprocessor has no corresponding attachment and must never erase that
+  // serialized first-frame authority.
+  if (
+    "source_image" in req &&
+    !isMinimaxH3Identity(currentFamily.value, form.state.value.model)
+  ) {
     req.source_image = preparedSource.source?.base64 ?? null;
     if (preparedSource.mask) req.mask_image = preparedSource.mask.base64;
     else delete req.mask_image;
@@ -2870,32 +2908,33 @@ async function queueVariations() {
       // prompt — override the base request's prompt rather than re-appending.
       // Each is one print; the batch size drove the variation count, not the
       // per-job image count.
+      const request: GenerateRequestWire = {
+        ...prepared.baseRequest,
+        prompt,
+        batch_size: 1,
+        original_prompt: prepared.rootPrompt ?? prepared.sourcePrompt,
+        ...(prepared.kind === "remix"
+          ? {
+              prompt_transform: {
+                operation: "remix" as const,
+                ...(prepared.rootPrompt
+                  ? { root_prompt: prepared.rootPrompt }
+                  : {}),
+                source_prompt: prepared.sourcePrompt,
+                source_kind: prepared.sourceKind ?? "direct",
+                task: prepared.task,
+                dimensions: [...(prepared.remixDimensions?.[index] ?? [])],
+              },
+            }
+          : {}),
+        batch_id: prepared.batchId,
+        batch_index: index + 1,
+        batch_count: list.length,
+      };
       stream.submit(
-        {
-          ...prepared.baseRequest,
-          prompt,
-          batch_size: 1,
-          original_prompt: prepared.rootPrompt ?? prepared.sourcePrompt,
-          ...(prepared.kind === "remix"
-            ? {
-                prompt_transform: {
-                  operation: "remix" as const,
-                  ...(prepared.rootPrompt
-                    ? { root_prompt: prepared.rootPrompt }
-                    : {}),
-                  source_prompt: prepared.sourcePrompt,
-                  source_kind: prepared.sourceKind ?? "direct",
-                  task: prepared.task,
-                  dimensions: [...(prepared.remixDimensions?.[index] ?? [])],
-                },
-              }
-            : {}),
-          batch_id: prepared.batchId,
-          batch_index: index + 1,
-          batch_count: list.length,
-        },
+        request,
         prepared.decision,
-        normalizeSubmitRoute(revalidated.route),
+        normalizeSubmitRoute(revalidated.route, request),
       );
     }
     variations.value = [];
@@ -3085,7 +3124,7 @@ function openJob(job: Job) {
   form.state.value.sourceVideoPath = request.source_video_path ?? "";
   form.state.value.keyframes = (request.keyframes ?? []).map((keyframe) => ({
     frame: keyframe.frame,
-    image: image(keyframe.image, `Keyframe ${keyframe.frame}`),
+    image: image(keyframe.image, keyframe.name ?? `Keyframe ${keyframe.frame}`),
   }));
   form.state.value.pipeline = request.pipeline ?? null;
   form.state.value.icLoraControl = request.ic_lora_control ?? null;
@@ -3095,6 +3134,36 @@ function openJob(job: Job) {
   form.state.value.guidanceOverrides = guidanceOverridesFromWire(
     request.guidance_overrides,
   );
+  if (minimaxH3TaskForModel(request.model)) {
+    form.state.value.h3Authoring = emptyMinimaxH3AuthoringState();
+    form.state.value.h3Authoring.references = (request.references ?? []).map(
+      (reference) => ({
+        reference: JSON.parse(JSON.stringify(reference)),
+      }),
+    );
+    if (request.source_image) {
+      form.state.value.h3Authoring.firstFrame = {
+        filename: request.source_image_name ?? "First frame",
+        mimeType: "image/*",
+        width: 0,
+        height: 0,
+        data: request.source_image,
+      };
+    }
+    const finalFrame = (request.frames ?? 1) - 1;
+    const last = request.keyframes?.find(
+      (keyframe) => keyframe.frame === finalFrame,
+    );
+    if (last) {
+      form.state.value.h3Authoring.lastFrame = {
+        filename: last.name ?? "Last frame",
+        mimeType: "image/*",
+        width: 0,
+        height: 0,
+        data: last.image,
+      };
+    }
+  }
 }
 
 function closeDrawer() {
@@ -3491,6 +3560,7 @@ onBeforeUnmount(() => {
             :busy="ordinarySubmitBlocked"
             :expanded="expanded"
             :prompt-optional="canSkipPrompt"
+            :required-placeholder="requiredPromptPlaceholder"
             :history="promptHistory"
             @submit="onSubmit"
             @expand="onExpand"

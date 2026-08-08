@@ -4106,6 +4106,11 @@ mod tests {
         let mut req = fake_request("ltx-video:fp16");
         req.frames = Some(25);
         req.fps = Some(24);
+        req.keyframes = Some(vec![mold_core::KeyframeCondition {
+            frame: 24,
+            image: b"private closing-frame bytes".to_vec(),
+            name: Some("closing-frame.png".to_string()),
+        }]);
         let meta = OutputMetadata::from_generate_request(&req, 99, None, "test-version");
 
         // Minimal MP4-ish bytes: an `ftyp` box header. The helper writes
@@ -4145,6 +4150,14 @@ mod tests {
         assert_eq!(rows[0].format, OutputFormat::Mp4);
         assert_eq!(rows[0].metadata.frames, Some(25));
         assert_eq!(rows[0].metadata.fps, Some(24));
+        assert_eq!(rows[0].metadata.keyframes, meta.keyframes);
+        assert_eq!(rows[0].metadata.keyframes.as_ref().unwrap()[0].frame, 24);
+        assert_eq!(
+            rows[0].metadata.keyframes.as_ref().unwrap()[0]
+                .name
+                .as_deref(),
+            Some("closing-frame.png")
+        );
         assert_eq!(rows[0].generation_time_ms, Some(5000));
         let archived = gallery_gate.committed_archive_index(tmp.path()).unwrap();
         assert_eq!(
@@ -4715,12 +4728,21 @@ mod tests {
             height: video.height,
             index: 0,
         };
+        let mut req = fake_request("minimax-h3-ref2va:bf16");
+        req.frames = Some(124);
+        req.keyframes = Some(vec![mold_core::KeyframeCondition {
+            frame: 123,
+            image: b"private closing-frame bytes".to_vec(),
+            name: Some("closing-frame.png".to_string()),
+        }]);
+        let metadata =
+            OutputMetadata::from_generate_request(&req, resp.seed_used, None, "test-version");
 
         let event = build_sse_complete_event(
             &resp,
             &thumb_img,
             None,
-            None,
+            Some(&metadata),
             &SavedOutputNames::default(),
             SseCompletionPayload::Full,
         );
@@ -4738,6 +4760,15 @@ mod tests {
         assert!(event.video_has_audio);
         assert_eq!(event.video_duration_ms, Some(1040));
         assert_eq!(event.gpu, Some(0));
+        let event_metadata = event.metadata.expect("metadata rides the complete event");
+        assert_eq!(event_metadata.keyframes, metadata.keyframes);
+        assert_eq!(event_metadata.keyframes.as_ref().unwrap()[0].frame, 123);
+        assert_eq!(
+            event_metadata.keyframes.as_ref().unwrap()[0]
+                .name
+                .as_deref(),
+            Some("closing-frame.png")
+        );
 
         let saved = SavedOutputNames {
             output: Some("generated-video.mp4".to_string()),
@@ -4747,7 +4778,7 @@ mod tests {
             &resp,
             &thumb_img,
             None,
-            None,
+            Some(&metadata),
             &saved,
             SseCompletionPayload::MetadataOnly,
         );
@@ -4758,6 +4789,10 @@ mod tests {
         assert_eq!(
             metadata_only.filename.as_deref(),
             Some("generated-video.mp4")
+        );
+        assert_eq!(
+            metadata_only.metadata.unwrap().keyframes,
+            metadata.keyframes
         );
     }
 

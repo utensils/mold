@@ -84,13 +84,18 @@ export function isModelAccessRestricted(
 
 /** Filter model rows using both their request identity and resolved family. */
 export function filterRestrictedModels<
-  T extends { name: string; family?: string | null },
+  T extends {
+    name: string;
+    family?: string | null;
+    runtime_available?: boolean | null;
+  },
 >(
   models: readonly T[],
   capabilities: ModelAccessCapabilityRecord | null | undefined,
 ): T[] {
   return models.filter(
     (model) =>
+      model.runtime_available !== false &&
       !isModelAccessRestricted(capabilities, {
         model: model.name,
         family: model.family,

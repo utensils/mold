@@ -159,6 +159,7 @@ mod tests {
             source_image_sha256: None,
             edit_image_sha256s: None,
             references: None,
+            keyframes: None,
             scheduler: None,
             output_format: Some(OutputFormat::Png),
             cfg_plus: None,

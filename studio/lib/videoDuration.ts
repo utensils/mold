@@ -1,4 +1,10 @@
 import { maxFramesForFamilyAtFps } from "./videoBudget";
+import {
+  MINIMAX_H3_FIXED_FPS,
+  MINIMAX_H3_FRAME_OFFSET,
+  MINIMAX_H3_FRAME_STEP,
+  MINIMAX_H3_MIN_FRAMES,
+} from "./minimaxH3Authoring";
 
 /** Additive `/api/models` fields that describe a model's requestable video grid. */
 export interface VideoFrameContract {
@@ -32,21 +38,27 @@ const FAMILY_FRAME_STEP: ReadonlyMap<string, number> = new Map([
   ["ltx-2", 8],
   ["ltx-video", 8],
   ["wan", 4],
-  ["minimax-h3", 17],
-  ["minimax_h3", 17],
-  ["minimaxh3", 17],
+  ["minimax-h3", MINIMAX_H3_FRAME_STEP],
+  ["minimax_h3", MINIMAX_H3_FRAME_STEP],
+  ["minimaxh3", MINIMAX_H3_FRAME_STEP],
 ]);
 
 const FAMILY_FRAME_OFFSET: ReadonlyMap<string, number> = new Map([
-  ["minimax-h3", 5],
-  ["minimax_h3", 5],
-  ["minimaxh3", 5],
+  ["minimax-h3", MINIMAX_H3_FRAME_OFFSET],
+  ["minimax_h3", MINIMAX_H3_FRAME_OFFSET],
+  ["minimaxh3", MINIMAX_H3_FRAME_OFFSET],
 ]);
 
 const FAMILY_MIN_FRAMES: ReadonlyMap<string, number> = new Map([
-  ["minimax-h3", 124],
-  ["minimax_h3", 124],
-  ["minimaxh3", 124],
+  ["minimax-h3", MINIMAX_H3_MIN_FRAMES],
+  ["minimax_h3", MINIMAX_H3_MIN_FRAMES],
+  ["minimaxh3", MINIMAX_H3_MIN_FRAMES],
+]);
+
+const FAMILY_FIXED_FPS: ReadonlyMap<string, number> = new Map([
+  ["minimax-h3", MINIMAX_H3_FIXED_FPS],
+  ["minimax_h3", MINIMAX_H3_FIXED_FPS],
+  ["minimaxh3", MINIMAX_H3_FIXED_FPS],
 ]);
 
 export function videoFrameStep(model?: VideoFrameContract | null): number {
@@ -80,24 +92,6 @@ export function snapVideoFrames(
   const scaled = (Math.max(offset, frames) - offset) / step;
   const grid = direction === "down" ? Math.floor(scaled) : Math.round(scaled);
   return Math.max(offset, grid * step + offset);
-}
-
-/** Validate a frame count against the selected model's advertised grid. */
-export function videoFramesError(
-  frames: number,
-  model?: VideoFrameContract | null,
-): string | null {
-  const step = videoFrameStep(model);
-  if (Number.isInteger(frames) && frames > 0 && (frames - 1) % step === 0) {
-    return null;
-  }
-  const requested = Number.isFinite(frames)
-    ? frames
-    : (model?.default_frames ?? 1);
-  const down = snapVideoFrames(requested, model, "down");
-  const up = down >= requested ? down : down + step;
-  const suggestion = down === up ? String(down) : `${down} or ${up}`;
-  return `Frames must be ${step}n+1 — try ${suggestion}.`;
 }
 
 /**
@@ -134,6 +128,60 @@ export function minVideoFrames(model?: VideoFrameContract | null): number {
   }
   const family = (model?.family ?? "").trim().toLowerCase();
   return FAMILY_MIN_FRAMES.get(family) ?? 1;
+}
+
+export function fixedVideoFps(
+  model?: VideoFrameContract | null,
+): number | null {
+  const family = (model?.family ?? "").trim().toLowerCase();
+  return FAMILY_FIXED_FPS.get(family) ?? null;
+}
+
+export function videoFrameGridLabel(model?: VideoFrameContract | null): string {
+  return `${videoFrameStep(model)}n+${videoFrameOffset(model)}`;
+}
+
+export function videoFramesError(
+  frames: number,
+  model?: VideoFrameContract | null,
+): string | null {
+  const rounded = Math.round(frames);
+  const minimum = minVideoFrames(model);
+  const maximum = maxVideoFrames(
+    model,
+    fixedVideoFps(model) ?? model?.default_fps ?? 24,
+  );
+  if (rounded < minimum || rounded > maximum) {
+    return `Frames must be between ${minimum} and ${maximum}.`;
+  }
+  return videoFrameGridError(frames, model);
+}
+
+/** Validate only the model's discrete grid, preserving above-ceiling exact
+ * values that a chain-capable family routes into an automatic sequence. */
+export function videoFrameGridError(
+  frames: number,
+  model?: VideoFrameContract | null,
+): string | null {
+  const rounded = Math.round(frames);
+  const minimum = minVideoFrames(model);
+  const step = videoFrameStep(model);
+  const offset = videoFrameOffset(model);
+  if (rounded < minimum) return `Frames must be at least ${minimum}.`;
+  if (
+    !Number.isInteger(frames) ||
+    rounded < offset ||
+    (rounded - offset) % step !== 0
+  ) {
+    const requested = Number.isFinite(frames)
+      ? frames
+      : (model?.default_frames ?? minimum);
+    const down = snapVideoFrames(requested, model, "down");
+    const up = down >= requested ? down : down + step;
+    const suggestion = down === up ? String(down) : `${down} or ${up}`;
+    return `Frames must be ${videoFrameGridLabel(model)} — try ${suggestion}.`;
+  }
+  return null;
 }
 
 export function clampVideoFrames(

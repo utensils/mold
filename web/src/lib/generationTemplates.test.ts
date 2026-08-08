@@ -119,6 +119,75 @@ describe("generation templates", () => {
     expect(persistence.records.size).toBe(0);
   });
 
+  it("restores H3 endpoints and ordered heterogeneous references without localStorage bytes", async () => {
+    const persistence = memoryMedia();
+    const saved = await saveGenerationTemplateWithMedia(
+      "H3 shot",
+      makeForm({
+        model: "minimax-h3-ref2va:official-bf16",
+        modelFamily: "minimax-h3",
+        h3Authoring: {
+          firstFrame: {
+            filename: "first.png",
+            mimeType: "image/png",
+            width: 1024,
+            height: 576,
+            data: "H3_FIRST_BYTES",
+            sha256: "a".repeat(64),
+          },
+          lastFrame: null,
+          references: [
+            {
+              reference: {
+                kind: "image",
+                media: { authority: "inline", data: "H3_IMAGE_BYTES" },
+                provenance: { name: "subject.png", sha256: "b".repeat(64) },
+                mime_type: "image/png",
+                width: 800,
+                height: 600,
+              },
+            },
+            {
+              reference: {
+                kind: "audio",
+                media: { authority: "inline", data: "H3_AUDIO_BYTES" },
+                provenance: { name: "voice.wav", sha256: "c".repeat(64) },
+                mime_type: "audio/wav",
+                duration_ms: 3_000,
+                sample_rate: 48_000,
+                channels: 2,
+                sample_count: 144_000,
+              },
+            },
+          ],
+        },
+      }),
+      persistence,
+    );
+
+    expect(JSON.stringify(saved)).not.toContain("H3_FIRST_BYTES");
+    expect(JSON.stringify(saved)).not.toContain("H3_IMAGE_BYTES");
+    expect(
+      saved.form.h3Authoring?.references.map((draft) => draft.reference.media),
+    ).toEqual([{ authority: "descriptor" }, { authority: "descriptor" }]);
+
+    const hydrated = await hydrateGenerationTemplate(saved, persistence);
+    expect(hydrated.sourceMissing).toBe(false);
+    expect(hydrated.form.h3Authoring?.firstFrame?.data).toBe("H3_FIRST_BYTES");
+    expect(
+      hydrated.form.h3Authoring?.references.map((draft) => [
+        draft.reference.kind,
+        draft.reference.provenance?.name,
+        draft.reference.media.authority === "inline"
+          ? draft.reference.media.data
+          : null,
+      ]),
+    ).toEqual([
+      ["image", "subject.png", "H3_IMAGE_BYTES"],
+      ["audio", "voice.wav", "H3_AUDIO_BYTES"],
+    ]);
+  });
+
   it("does not expose byte-free legacy source markers as usable images", async () => {
     const legacy = saveGenerationTemplate(
       "Legacy",

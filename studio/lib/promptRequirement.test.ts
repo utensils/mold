@@ -152,6 +152,12 @@ describe("copy helpers", () => {
         "Describe the print…",
       ),
     ).toBe(OPTIONAL_PROMPT_PLACEHOLDER);
+    expect(
+      promptPlaceholder(
+        { model: "minimax-h3-fl2va:official-bf16" },
+        "Describe the print…",
+      ),
+    ).toContain("synchronized shot");
   });
 
   // Two things the copy must never imply: that a blank prompt saves memory

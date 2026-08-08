@@ -4571,7 +4571,10 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
         },
         reference_uploads: mold_core::ReferenceUploadCapabilities {
             available: true,
-            protocol_version: 1,
+            // V2 rebinds the request scope to content-probed canonical
+            // descriptors as each upload completes. V1 trusted provisional
+            // browser AAC packet arithmetic and is intentionally not offered.
+            protocol_version: 2,
             requires_api_key: true,
             session_path: "/api/generate/reference-upload-sessions".to_string(),
             upload_path: "/api/generate/reference-upload".to_string(),

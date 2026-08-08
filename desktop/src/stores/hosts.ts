@@ -32,6 +32,7 @@ import type {
   ServerCapabilities,
   ServerStatus,
 } from "../lib/api/types";
+import type { ReferenceUploadCapabilities } from "@studio/api/referenceUploads";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useDownloadsStore } from "./downloads";
@@ -156,6 +157,8 @@ export interface HostRoute {
   /** Optional stable server identity used by remote-only clients to detect
    * when one saved endpoint now reaches a different Mold installation. */
   instanceId?: string | null;
+  /** Frozen authenticated reference-ingress contract for this exact host. */
+  referenceUploads?: ReferenceUploadCapabilities | null;
 }
 
 export interface HostPlacementFailure {
@@ -183,7 +186,7 @@ export type FeasibleRouteResult =
   | { kind: "transient"; perHost: HostProbeFailure[] }
   | { kind: "mixed"; perHost: HostFeasibilityFailure[] };
 
-function hostRoute(host: HostView): HostRoute | null {
+function hostRoute(host: HostView, capabilities?: ServerCapabilities): HostRoute | null {
   if (!host.baseUrl) return null;
   return {
     hostId: host.id,
@@ -191,6 +194,7 @@ function hostRoute(host: HostView): HostRoute | null {
     kind: host.kind,
     target: { baseUrl: host.baseUrl, apiKey: host.apiKey },
     instanceId: host.instanceId,
+    referenceUploads: capabilities?.reference_uploads ?? null,
   };
 }
 
@@ -565,6 +569,7 @@ export const useHostsStore = defineStore("hosts", {
         kind: chosen.kind,
         target: { baseUrl: chosen.baseUrl, apiKey: chosen.apiKey },
         instanceId: chosen.instanceId,
+        referenceUploads: this.capabilities[chosen.id]?.reference_uploads ?? null,
       };
     },
     async resolveFeasible(
@@ -624,7 +629,7 @@ export const useHostsStore = defineStore("hosts", {
             request.model,
             this.capabilities[host.id],
           );
-          const route = hostRoute(host);
+          const route = hostRoute(host, this.capabilities[host.id]);
           return restriction && route
             ? [
                 {
@@ -752,7 +757,7 @@ export const useHostsStore = defineStore("hosts", {
           .sort(comparePlacementPreviews);
         if (planned.length > 0) {
           const chosen = candidates.find((host) => host.id === planned[0]!.hostId);
-          const route = chosen ? hostRoute(chosen) : null;
+          const route = chosen ? hostRoute(chosen, this.capabilities[chosen.id]) : null;
           if (route) return { kind: "route", route };
         }
 
@@ -781,7 +786,7 @@ export const useHostsStore = defineStore("hosts", {
             const withModel = legacy.filter((host) => modelHostIds.includes(host.id));
             chosen = pickAutoHost(withModel.length > 0 ? withModel : legacy);
           }
-          const route = chosen ? hostRoute(chosen) : null;
+          const route = chosen ? hostRoute(chosen, this.capabilities[chosen.id]) : null;
           if (route) return { kind: "route", route };
         }
 
@@ -812,7 +817,7 @@ export const useHostsStore = defineStore("hosts", {
             ];
           }
           if (classification === "infeasible" && probe.preview) {
-            const route = hostRoute(probe.host);
+            const route = hostRoute(probe.host, this.capabilities[probe.host.id]);
             if (!route) return [];
             return [
               {

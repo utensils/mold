@@ -31,6 +31,17 @@ describe("expansionTaskForRequest", () => {
     ).toBe("image-to-video");
     expect(
       expansionTaskForRequest("minimax-h3", {
+        keyframes: [{ frame: 361, image: "closing-frame" }],
+      }),
+    ).toBe("image-to-video");
+    expect(
+      expansionTaskForRequest("minimax-h3", {
+        source_image: "opening-frame",
+        keyframes: [{ frame: 361, image: "closing-frame" }],
+      }),
+    ).toBe("keyframe-interpolation");
+    expect(
+      expansionTaskForRequest("minimax-h3", {
         references: [{ kind: "image" }, { kind: "audio" }],
       }),
     ).toBe("reference-to-audio-video");

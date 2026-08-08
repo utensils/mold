@@ -55,4 +55,16 @@ describe("model access policy", () => {
     expect(filterRestrictedModels(models, undefined)).toEqual(models);
     expect(filterRestrictedModels(models, capabilities)).toEqual([models[0]]);
   });
+
+  it("hides models whose runtime contract is explicitly unavailable", () => {
+    const models = [
+      { name: "flux-dev:q8", family: "flux" },
+      {
+        name: "minimax-h3-fl2va:official-bf16",
+        family: "minimax-h3",
+        runtime_available: false,
+      },
+    ];
+    expect(filterRestrictedModels(models, undefined)).toEqual([models[0]]);
+  });
 });

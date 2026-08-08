@@ -3142,6 +3142,7 @@ mod tests {
         req.keyframes = Some(vec![crate::KeyframeCondition {
             frame: crate::minimax_h3::MIN_FRAMES - 1,
             image: jpeg_bytes(),
+            name: None,
         }]);
 
         assert!(
@@ -3176,6 +3177,7 @@ mod tests {
         req.keyframes = Some(vec![crate::KeyframeCondition {
             frame: 17,
             image: png_bytes(),
+            name: None,
         }]);
 
         let error =
@@ -3650,6 +3652,7 @@ mod tests {
         req.keyframes = Some(vec![crate::KeyframeCondition {
             frame: 0,
             image: png_bytes(),
+            name: None,
         }]);
         assert!(validate_generate_request(&req)
             .unwrap_err()
@@ -3665,10 +3668,12 @@ mod tests {
             crate::KeyframeCondition {
                 frame: 0,
                 image: png_bytes(),
+                name: None,
             },
             crate::KeyframeCondition {
                 frame: 16,
                 image: png_bytes(),
+                name: None,
             },
         ]);
         let err = validate_generate_request(&req).unwrap_err();
@@ -3896,6 +3901,7 @@ mod tests {
         keyframed.keyframes = Some(vec![KeyframeCondition {
             frame: 0,
             image: png_bytes(),
+            name: None,
         }]);
         validate_generate_request(&keyframed).unwrap();
 
@@ -4216,6 +4222,7 @@ mod tests {
         req.keyframes = Some(vec![KeyframeCondition {
             frame: 0,
             image: png_bytes(),
+            name: None,
         }]);
         assert!(validate_generate_request(&req)
             .unwrap_err()
@@ -6189,6 +6196,7 @@ mod tests {
         req.keyframes = Some(vec![KeyframeCondition {
             frame: 0,
             image: png_bytes(),
+            name: None,
         }]);
         assert!(validate_generate_request(&req)
             .unwrap_err()

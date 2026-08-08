@@ -98,6 +98,21 @@ export function validateRemixVariants(
   });
 }
 
+function referenceFingerprint(reference: unknown): unknown {
+  if (!reference || typeof reference !== "object") return reference;
+  const value = reference as Record<string, unknown>;
+  const media = value.media;
+  if (!media || typeof media !== "object") return value;
+  const authority = (media as Record<string, unknown>).authority;
+  return {
+    ...value,
+    // Provenance digest + exact descriptors carry semantic identity. Raw
+    // video/audio bytes, upload handles, and server paths do not belong in a
+    // synchronous UI fingerprint and can be hundreds of megabytes.
+    media: { authority },
+  };
+}
+
 /** Client-only identity used to stale reviewed work when conditioned media changes. */
 export function conditioningFingerprint(request: ExpansionTaskRequest): string {
   const value = JSON.stringify({
@@ -111,7 +126,7 @@ export function conditioningFingerprint(request: ExpansionTaskRequest): string {
     keyframes: request.keyframes ?? null,
     pipeline: request.pipeline ?? null,
     retake_range: request.retake_range ?? null,
-    references: request.references ?? null,
+    references: request.references?.map(referenceFingerprint) ?? null,
   });
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {

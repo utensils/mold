@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
+import { IDBFactory } from "fake-indexeddb";
 import {
   applyMetadataToForm,
   cloneTemplateForm,
@@ -36,8 +37,27 @@ function makeModel(
   };
 }
 
+async function flushDraftPersistence() {
+  await vi.advanceTimersByTimeAsync(300);
+  // fake-indexeddb schedules request/transaction events as tasks; flush those
+  // deliberately while this suite owns fake timers.
+  await vi.runAllTimersAsync();
+  await __testing__.flushDraftWrites();
+}
+
+async function flushDraftHydration() {
+  const hydration = __testing__.flushHydration();
+  await vi.runAllTimersAsync();
+  await hydration;
+}
+
 describe("useGenerateForm", () => {
   beforeEach(() => {
+    Object.defineProperty(globalThis, "indexedDB", {
+      value: new IDBFactory(),
+      writable: true,
+      configurable: true,
+    });
     localStorage.clear();
     __testing__.resetForTest();
     vi.useFakeTimers();
@@ -73,6 +93,51 @@ describe("useGenerateForm", () => {
       source_video_path: "/guides/trajectory.mp4",
       loras: [{ path: "/loras/style.safetensors", scale: 0.8 }],
     });
+  });
+
+  it("projects Ref2VA through the shared H3 request authority", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "minimax-h3-ref2va:official-bf16";
+    form.state.value.modelFamily = "";
+    form.state.value.prompt = "resynthesize the performance";
+    form.state.value.frames = 130;
+    form.state.value.fps = 30;
+    form.state.value.guidance = 7;
+    form.state.value.outputFormat = "gif";
+    form.state.value.h3Authoring = {
+      firstFrame: null,
+      lastFrame: null,
+      references: [
+        {
+          reference: {
+            kind: "image",
+            media: { authority: "inline", data: "IMAGE" },
+            provenance: { name: "subject.png", sha256: "a".repeat(64) },
+            mime_type: "image/png",
+            width: 1024,
+            height: 768,
+          },
+        },
+      ],
+    };
+
+    const request = form.toRequest();
+    expect(request).toMatchObject({
+      frames: 124,
+      fps: 24,
+      guidance: 0,
+      strength: 1,
+      batch_size: 1,
+      output_format: "mp4",
+      references: [
+        {
+          kind: "image",
+          media: { authority: "inline", data: "IMAGE" },
+        },
+      ],
+    });
+    expect(request.negative_prompt).toBeUndefined();
+    expect(request.enable_audio).toBeUndefined();
   });
 
   it("shares a singleton state across route remounts", () => {
@@ -265,7 +330,7 @@ describe("useGenerateForm", () => {
     // Watch fires but persist is debounced by 300ms.
     expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
 
-    vi.advanceTimersByTime(300);
+    await flushDraftPersistence();
 
     const raw = localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
@@ -295,17 +360,240 @@ describe("useGenerateForm", () => {
       base64: "CONTROL_BYTES",
     };
     await nextTick();
-    vi.advanceTimersByTime(300);
-    await __testing__.flushDraftWrites();
+    await flushDraftPersistence();
 
+    __testing__.clearDraftsForTest();
     __testing__.resetForTest();
     const second = useGenerateForm();
-    await __testing__.flushHydration();
+    await flushDraftHydration();
 
     expect(second.state.value.imageAttachments[0]?.base64).toBe("SOURCE_BYTES");
     expect(second.state.value.maskImage?.base64).toBe("MASK_BYTES");
     expect(second.state.value.controlImage?.base64).toBe("CONTROL_BYTES");
     expect(localStorage.getItem(STORAGE_KEY)).not.toContain("_BYTES");
+  });
+
+  it("persists and hydrates H3 endpoint and ordered-reference bytes outside localStorage", async () => {
+    const first = useGenerateForm();
+    first.state.value.model = "minimax-h3-ref2va:official-bf16";
+    first.state.value.modelFamily = "minimax-h3";
+    first.state.value.h3Authoring = {
+      firstFrame: {
+        filename: "opening.png",
+        mimeType: "image/png",
+        width: 768,
+        height: 512,
+        data: "H3_FIRST_BYTES",
+        sha256: "a".repeat(64),
+      },
+      lastFrame: {
+        filename: "closing.png",
+        mimeType: "image/png",
+        width: 768,
+        height: 512,
+        data: "H3_LAST_BYTES",
+        sha256: "b".repeat(64),
+      },
+      references: [
+        {
+          reference: {
+            kind: "image",
+            media: { authority: "inline", data: "H3_REFERENCE_ONE_BYTES" },
+            provenance: { name: "subject.png", sha256: "c".repeat(64) },
+            mime_type: "image/png",
+            width: 512,
+            height: 512,
+          },
+        },
+        {
+          reference: {
+            kind: "audio",
+            media: { authority: "inline", data: "H3_REFERENCE_TWO_BYTES" },
+            provenance: { name: "voice.wav", sha256: "d".repeat(64) },
+            mime_type: "audio/wav",
+            duration_ms: 2_000,
+            sample_rate: 32_000,
+            channels: 2,
+            sample_count: 64_000,
+          },
+        },
+      ],
+    };
+    await nextTick();
+    await flushDraftPersistence();
+
+    const raw = localStorage.getItem(STORAGE_KEY);
+    expect(raw).not.toBeNull();
+    expect(raw).not.toContain("H3_FIRST_BYTES");
+    expect(raw).not.toContain("H3_LAST_BYTES");
+    expect(raw).not.toContain("H3_REFERENCE_ONE_BYTES");
+    expect(raw).not.toContain("H3_REFERENCE_TWO_BYTES");
+    const persisted = JSON.parse(raw!);
+    expect(persisted.h3Authoring.firstFrame).toMatchObject({
+      data: "",
+      draftId: expect.any(String),
+    });
+    expect(persisted.h3Authoring.lastFrame).toMatchObject({
+      data: "",
+      draftId: expect.any(String),
+    });
+    expect(persisted.h3Authoring.references).toEqual([
+      expect.objectContaining({
+        draftId: expect.any(String),
+        reference: expect.objectContaining({
+          media: { authority: "descriptor" },
+        }),
+      }),
+      expect.objectContaining({
+        draftId: expect.any(String),
+        reference: expect.objectContaining({
+          media: { authority: "descriptor" },
+        }),
+      }),
+    ]);
+
+    // Metadata-only edits must reuse the already durable H3 media instead of
+    // rewriting hundreds of MiB. Making IndexedDB unavailable proves this
+    // second save does not attempt another media transaction.
+    const durableFactory = globalThis.indexedDB;
+    Object.defineProperty(globalThis, "indexedDB", {
+      value: undefined,
+      writable: true,
+      configurable: true,
+    });
+    first.state.value.prompt = "metadata-only edit";
+    await nextTick();
+    await flushDraftPersistence();
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).prompt).toBe(
+      "metadata-only edit",
+    );
+    Object.defineProperty(globalThis, "indexedDB", {
+      value: durableFactory,
+      writable: true,
+      configurable: true,
+    });
+
+    // Prove the reload comes from IndexedDB, not the module's memory cache.
+    __testing__.clearDraftsForTest();
+    __testing__.resetForTest();
+    const second = useGenerateForm();
+    await flushDraftHydration();
+
+    expect(second.state.value.h3Authoring?.firstFrame?.data).toBe(
+      "H3_FIRST_BYTES",
+    );
+    expect(second.state.value.h3Authoring?.lastFrame?.data).toBe(
+      "H3_LAST_BYTES",
+    );
+    expect(
+      second.state.value.h3Authoring?.references.map(
+        (draft) => draft.reference.media,
+      ),
+    ).toEqual([
+      { authority: "inline", data: "H3_REFERENCE_ONE_BYTES" },
+      { authority: "inline", data: "H3_REFERENCE_TWO_BYTES" },
+    ]);
+  });
+
+  it("projects descriptors without JSON-cloning media payloads", () => {
+    const forbiddenPayload = {
+      toJSON() {
+        throw new Error("media payload reached JSON cloning");
+      },
+    } as unknown as string;
+    const form = useGenerateForm();
+    form.state.value.imageAttachments = [
+      {
+        kind: "upload",
+        filename: "ordinary.png",
+        base64: forbiddenPayload,
+      },
+    ];
+    form.state.value.h3Authoring = {
+      firstFrame: {
+        filename: "opening.png",
+        mimeType: "image/png",
+        width: 768,
+        height: 512,
+        data: forbiddenPayload,
+      },
+      lastFrame: null,
+      references: [
+        {
+          reference: {
+            kind: "image",
+            media: { authority: "inline", data: forbiddenPayload },
+            provenance: { name: "reference.png", sha256: "a".repeat(64) },
+            mime_type: "image/png",
+            width: 512,
+            height: 512,
+          },
+        },
+      ],
+    };
+
+    expect(() => sanitizePersistedForm(form.state.value)).not.toThrow();
+    const sanitized = sanitizePersistedForm(form.state.value);
+    expect(sanitized.imageAttachments[0]?.base64).toBeUndefined();
+    expect(sanitized.h3Authoring?.firstFrame?.data).toBe("");
+    expect(sanitized.h3Authoring?.references[0]?.reference.media).toEqual({
+      authority: "descriptor",
+    });
+  });
+
+  it("fails closed without IndexedDB and retries the complete H3 draft on the next change", async () => {
+    const durableFactory = globalThis.indexedDB;
+    Object.defineProperty(globalThis, "indexedDB", {
+      value: undefined,
+      writable: true,
+      configurable: true,
+    });
+
+    const form = useGenerateForm();
+    form.state.value.model = "minimax-h3-fl2va:official-bf16";
+    form.state.value.modelFamily = "minimax-h3";
+    form.state.value.h3Authoring = {
+      firstFrame: {
+        filename: "opening.png",
+        mimeType: "image/png",
+        width: 768,
+        height: 512,
+        data: "H3_RETRY_BYTES",
+      },
+      lastFrame: null,
+      references: [],
+    };
+    await nextTick();
+    await flushDraftPersistence();
+
+    // A durable descriptor must never point at bytes that existed only in the
+    // form singleton. Keep the previous valid snapshot (none here) untouched.
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+
+    Object.defineProperty(globalThis, "indexedDB", {
+      value: durableFactory,
+      writable: true,
+      configurable: true,
+    });
+    form.state.value.prompt = "retry after storage returns";
+    await nextTick();
+    await flushDraftPersistence();
+
+    const raw = localStorage.getItem(STORAGE_KEY);
+    expect(raw).not.toBeNull();
+    expect(raw).not.toContain("H3_RETRY_BYTES");
+    expect(JSON.parse(raw!).h3Authoring.firstFrame).toMatchObject({
+      draftId: expect.any(String),
+      data: "",
+    });
+
+    __testing__.clearDraftsForTest();
+    __testing__.resetForTest();
+    const reloaded = useGenerateForm();
+    await flushDraftHydration();
+    expect(reloaded.state.value.h3Authoring?.firstFrame?.data).toBe(
+      "H3_RETRY_BYTES",
+    );
   });
 
   it("applyModelDefaults copies model defaults and clears video fields for non-video families", () => {
@@ -368,6 +656,24 @@ describe("useGenerateForm", () => {
 
     expect(form.state.value.frames).toBe(49);
     expect(form.state.value.fps).toBe(30);
+  });
+
+  it("applyModelDefaults enters H3 on its valid minimum frame and fixed-fps contract", () => {
+    const form = useGenerateForm();
+    form.state.value.frames = 25;
+
+    form.applyModelDefaults(
+      makeModel({
+        name: "minimax-h3-fl2va:official-bf16",
+        family: "minimax-h3",
+        default_frames: 124,
+        default_fps: 24,
+      }),
+    );
+
+    expect(form.state.value.frames).toBe(124);
+    expect(form.state.value.fps).toBe(24);
+    expect(form.state.value.outputFormat).toBe("mp4");
   });
 
   it("resetSettings restores the selected model's defaults", () => {
@@ -816,8 +1122,8 @@ describe("useGenerateForm", () => {
     expect(wire.source_video).toBe("VIDEO");
     expect(wire.source_video_path).toBeUndefined();
     expect(wire.keyframes).toEqual([
-      { frame: 0, image: "FIRST" },
-      { frame: 24, image: "LAST" },
+      { frame: 0, image: "FIRST", name: "first.png" },
+      { frame: 24, image: "LAST", name: "last.png" },
     ]);
     expect(wire.pipeline).toBe("keyframe");
     expect(wire.retake_range).toEqual({
@@ -1320,6 +1626,34 @@ describe("generate form serialization helpers", () => {
       { path: "/loras/one.safetensors", scale: 0.8 },
       { path: "/loras/two.safetensors", scale: 1.1 },
     ]);
+  });
+
+  it("applyMetadataToForm preserves H3 boundary provenance without bytes", () => {
+    const next = applyMetadataToForm(makeForm(), {
+      prompt: "new synchronized shot",
+      model: "minimax-h3-fl2va:official-bf16",
+      seed: 42,
+      steps: 30,
+      guidance: 0,
+      width: 768,
+      height: 512,
+      output_format: "mp4",
+      source_image_name: "opening.png",
+      source_image_sha256: "a".repeat(64),
+      frames: 124,
+      keyframes: [{ frame: 123, name: "closing.png", sha256: "b".repeat(64) }],
+      version: "0.1.0",
+    });
+    expect(next.h3Authoring?.firstFrame).toMatchObject({
+      filename: "opening.png",
+      data: "",
+      sha256: "a".repeat(64),
+    });
+    expect(next.h3Authoring?.lastFrame).toMatchObject({
+      filename: "closing.png",
+      data: "",
+      sha256: "b".repeat(64),
+    });
   });
 
   it("does not infer camera motion from a metadata LoRA beyond the visible cap", () => {

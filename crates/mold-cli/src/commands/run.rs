@@ -519,6 +519,9 @@ fn parse_keyframes(values: &[String]) -> Result<Option<Vec<KeyframeCondition>>> 
         keyframes.push(KeyframeCondition {
             frame: frame.parse()?,
             image: std::fs::read(path)?,
+            name: path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
         });
     }
 

@@ -3,6 +3,8 @@ import type {
   GenerationReference,
   GenerationReferenceMetadata,
 } from "@studio/lib/generationReferences";
+import type { MinimaxH3AuthoringState } from "@studio/lib/minimaxH3Authoring";
+import type { MiniMaxH3Capability } from "@studio/lib/minimaxH3Inventory";
 import type { SourceFitPolicy } from "@studio/lib/sourceFit";
 import type {
   Ltx2GuidanceOverrides,
@@ -68,6 +70,8 @@ export interface OutputMetadata {
   edit_image_sha256s?: string[] | null;
   /** Redacted ordered H3 reference provenance (newer servers only). */
   references?: GenerationReferenceMetadata[] | null;
+  /** Ordered byte-free keyframe provenance (newer servers only). */
+  keyframes?: KeyframeMetadata[] | null;
   /** Durable sequence job this print was stitched from. Present only for
    * chain jobs with a server-side record — ephemeral chain outputs and
    * pre-#564 rows carry nothing (additive; newer servers only). */
@@ -149,6 +153,9 @@ export interface ServerCapabilities {
       authorization_url: string;
     }>;
   };
+  /** Host-authored, presentation-only H3 inventory. Current servers omit it;
+   * model_access and runtime_available remain independent hard gates. */
+  minimax_h3?: MiniMaxH3Capability | null;
   /** Continuation support. Absent on older servers, which means the Create
    * surfaces must hide the extend controls rather than send a rejected
    * request. */
@@ -373,6 +380,8 @@ export interface ModelInfoExtended extends ModelDefaults {
   frame_step?: number | null;
   /** Frame-grid offset; omitted means 1. MiniMax H3 advertises 5. */
   frame_offset?: number | null;
+  /** Explicit runnable-contract boundary for future gated families. */
+  runtime_available?: boolean | null;
 }
 
 export interface GpuInfo {
@@ -788,6 +797,13 @@ export interface KeyframeConditionState {
 export interface KeyframeConditionWire {
   frame: number;
   image: string;
+  name?: string | null;
+}
+
+export interface KeyframeMetadata {
+  frame: number;
+  name?: string | null;
+  sha256: string;
 }
 
 export interface ExpandFormState {
@@ -897,6 +913,10 @@ export interface GenerateFormState {
    * selected model's family supports audio (LTX-2 / LTX-2.3); otherwise
    * forced to `null` so the wire stays clean. */
   enableAudio: boolean | null;
+  /** MiniMax H3 first/last endpoints or ordered heterogeneous references.
+   * Kept separate from legacy edit/source fields so no surface can flatten
+   * Ref2VA into image-only editing. */
+  h3Authoring?: MinimaxH3AuthoringState;
 }
 
 export interface Ltx2ControlAdapterInfo {
