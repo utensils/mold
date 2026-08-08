@@ -2,11 +2,12 @@
 
 Status: source-only portable primitives; runtime activation remains blocked.
 
-This audit did not access MiniMax H3 model payloads, safetensors headers, or
-generated outputs. It used only public implementation source. The model's
-license gate in `mold-core` remains authoritative, H3 factory registration is
-still absent, and the Comfy checkpoint candidate continues to reject every
-runtime backend.
+This audit did not access MiniMax H3 binary model payloads, safetensors headers,
+or generated outputs. It used only public implementation source and textual
+repository metadata. The model's license gate in `mold-core` remains
+authoritative. Frozen H3 factory authority and FL2VA/Ref2VA dispatch seams now
+exist, but `runtime_available` remains false and the Comfy checkpoint candidate
+continues to reject every production runtime backend.
 
 ## Pinned implementation sources
 
@@ -85,8 +86,8 @@ exactly seven language projection matrices across each of layers 0-49 are
 INT8, for 350 matrices and 24,379,392,000 signed weight bytes. Their per-output
 F32 scales add 14,336,000 bytes. Embeddings, RMS norms, all vision weights and
 biases, and every other materialized tensor retain BF16, adding 2,747,407,840
-bytes. The total tensor payload is therefore 27,141,135,840 bytes and the
-safetensors header is 206,312 bytes.
+bytes. The total tensor payload is therefore 27,141,135,840 bytes, leaving a
+206,312-byte non-tensor residual attributed to the safetensors header.
 
 Comfy's `int8_tensorwise` registration sets `quantize_input=false`. The Qwen
 path is consequently weight-only: reconstruct each ConvRot weight chunk in the
@@ -95,8 +96,14 @@ Mold freezes that distinction in a named loader policy rather than inferring it
 from an I8 dtype or filename. Text/vision rotary math and attention score/
 softmax boundaries remain explicitly F32; language norms, embeddings, and the
 complete vision tower are protected from quantization. The policy accepts only
-the Comfy layer-50 namespace, the exact 350-layer metadata set, I8 matrix
+the Comfy layer-50 namespace, the exact 350-matrix metadata set, I8 matrix
 shapes, `[out_features, 1]` F32 scales, and ConvRot group 256.
+
+The 206,312-byte header figure above is an arithmetic residual between the
+repository-reported object size and the source-derived tensor-payload total. It
+was not obtained by downloading, opening, or range-reading the production
+safetensors object. Likewise, every file size in this audit is metadata for
+planning and validation; it is not an artifact-access record.
 
 At the default 256-row portable chunk, the largest reconstruction peak is
 92,013,568 bytes: signed F32 source rows, scaled F32 rows, reconstructed F32
@@ -158,7 +165,8 @@ The committed tests use tiny deterministic synthetic tensors only. They prove:
 
 Before any production activation, separate authorization and qualification
 work must still provide an approved H3 checkpoint identity, verify its complete
-content digest, connect an immutable loader/frozen placement to these
-primitives, measure real quality and memory, validate representative long
-sequences, and explicitly register the runtime factory. None of those gates is
-satisfied by this source-only change.
+content digest, bind an authorized and qualified loader to the existing frozen
+factory authority, measure real quality and memory, validate representative
+long sequences, and explicitly activate the runtime capability. None of those
+gates is satisfied by these source-only primitives or the fail-closed factory
+and dispatch seams.

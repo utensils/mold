@@ -1,9 +1,23 @@
 # CUDA distribution qualification
 
 MiniMax H3 uses a separate, weight-free conformance contract before any CUDA
-qualification is allowed. Its pinned authorities, synthetic CI fixture, and
-external evidence boundary are documented in
+qualification is allowed. Its current fail-closed status, source/layout facts,
+synthetic evidence boundary, and authorized future UAT matrix are documented
+in [MiniMax H3 qualification and authorization status](./minimax-h3.md). The
+pinned numerical authorities, synthetic CI fixture, and external evidence
+schema are documented separately in
 [MiniMax H3 conformance evidence](./minimax-h3-conformance.md).
+
+The status record preserves #868's historical landing at main `50f28de3` and
+records the exact, merged attention release candidate from PR #871, its
+weight-free Plato qualification, and its landing at main `ff927086`. Its
+same-tree ordinary shipping-feature fixture passed the release-candidate
+exclusion checks, but is deliberately non-publishable and is not a public
+release artifact. The record also explains why nominal mount metadata does not
+make the requested `/Volumes/ExternalStorage` UAT home usable. None of those
+engineering states overrides the open authorization gate in issue #831, and
+none records binary model-artifact access, H3 runtime activation, or licensed
+H3 UAT.
 
 The schema and runner define the deferred real RTX 3090 acceptance gate. No
 passing hardware report is checked in, and the runner never provisions cloud
