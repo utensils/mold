@@ -125,8 +125,11 @@ pub use qwen_nvfp4::{
 #[cfg(feature = "h3-private-uat")]
 #[doc(hidden)]
 pub use qwen_nvfp4_runtime::{
-    load_h3_qwen_nvfp4_conditioner, H3QwenNvfp4LoadEvent, H3QwenNvfp4LoadObserver,
-    H3QwenNvfp4RuntimeError, LoadedH3QwenNvfp4Conditioner, NoopH3QwenNvfp4LoadObserver,
+    load_h3_qwen_nvfp4_conditioner_after_authorization, released_h3_qwen_nvfp4_output_tensor_bytes,
+    released_h3_qwen_nvfp4_runtime_memory_facts,
+    released_h3_qwen_nvfp4_runtime_memory_facts_for_placement, H3QwenNvfp4LoadEvent,
+    H3QwenNvfp4LoadObserver, H3QwenNvfp4RuntimeError, H3QwenNvfp4RuntimeMemoryFacts,
+    H3QwenNvfp4RuntimePlacement, LoadedH3QwenNvfp4Conditioner, NoopH3QwenNvfp4LoadObserver,
 };
 pub use qwen_quant::{
     expected_h3_qwen_int8_weight_only_schema, validate_h3_qwen_int8_weight_only_schema,

@@ -57,6 +57,9 @@ pub(crate) enum H3NormalizedReference {
         /// Exact 2 fps cursor samples consumed by Qwen3-VL.
         qwen_frames: Vec<RgbImage>,
         qwen_source_indices: Vec<usize>,
+        /// Exact normalized-media midpoint authority used to build the Qwen
+        /// video presentation blocks, in presentation order.
+        qwen_block_timestamps_seconds: Vec<f64>,
         audio: Option<NormalizedStereoAudio>,
     },
     Audio {
@@ -321,9 +324,10 @@ impl H3ReferenceMediaAdapter {
                     None => None,
                 };
                 let vision_tokens = vision_tokens_per_temporal_block(width, height)?;
-                let blocks = sampled
-                    .block_timestamps_seconds
-                    .into_iter()
+                let qwen_block_timestamps_seconds = sampled.block_timestamps_seconds;
+                let blocks = qwen_block_timestamps_seconds
+                    .iter()
+                    .copied()
                     .map(|timestamp_seconds| VideoPresentationBlock {
                         timestamp_seconds,
                         vision_tokens,
@@ -334,6 +338,7 @@ impl H3ReferenceMediaAdapter {
                         vae_frames,
                         qwen_frames,
                         qwen_source_indices,
+                        qwen_block_timestamps_seconds,
                         audio,
                     },
                     RefPresentation {
@@ -849,6 +854,7 @@ mod tests {
             vae_frames,
             qwen_frames,
             qwen_source_indices,
+            qwen_block_timestamps_seconds,
             audio: Some(video_audio),
         } = adapter.normalized(2).unwrap()
         else {
@@ -857,6 +863,7 @@ mod tests {
         assert_eq!(vae_frames.len(), 22);
         assert_eq!(qwen_frames.len(), 2);
         assert_eq!(qwen_source_indices, &[0, 12]);
+        assert_eq!(qwen_block_timestamps_seconds, &[0.25]);
         assert_eq!(video_audio.sample_rate, 32_000);
         assert_eq!(
             video_audio.samples_per_channel(),

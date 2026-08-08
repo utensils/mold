@@ -34,7 +34,6 @@ nvml = ["dep:nvml-wrapper"]
 # Exposes test helpers (TestApp, etc.) for integration tests.
 test-support = []
 
-
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.21.0" }
 mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.21.0" }
@@ -85,6 +84,9 @@ async-stream = "0.3"
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+# Test-only feature unification lets the server prove its frozen H3 authority
+# against the private loader without exposing that loader on a runnable feature.
+mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.21.0", features = ["h3-private-uat"] }
 filetime = "0.2"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }

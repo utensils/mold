@@ -1257,7 +1257,11 @@ mod tests {
             execution_fingerprint: EXECUTION.into(),
             conditioner_placement: H3FactoryConditionerPlacement::HostCpuThenDrop,
             qwen_parameter_bytes: 2_048,
+            qwen_host_resident_parameter_bytes: 2_048,
+            qwen_device_resident_parameter_bytes: 0,
             qwen_activation_workspace_bytes: 1_024,
+            qwen_output_text_rows: 1,
+            qwen_vision_rows: 0,
             resident_block_count: 2,
             prefetch_depth: 1,
             attention_backend: frozen.attention_backend,
@@ -2094,6 +2098,8 @@ mod tests {
             Ok(H3TextConditioning {
                 states: Tensor::zeros((1, tags.len(), 5_120), DType::F32, &self.device)?,
                 tags,
+                #[cfg(test)]
+                lifetime_probe: None,
             })
         }
 

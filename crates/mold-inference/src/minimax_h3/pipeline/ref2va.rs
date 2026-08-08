@@ -134,6 +134,9 @@ pub(crate) trait H3Ref2VaBackend {
         checkpoint: &mut dyn H3PipelineCheckpoint,
     ) -> Result<StereoLatents>;
 
+    /// Borrowed inputs are call-scoped. Implementations must not clone or
+    /// retain text states after returning; the orchestrator releases them
+    /// immediately after the final forward to satisfy the frozen phase plan.
     fn denoise(
         &mut self,
         input: H3ForwardInput<'_>,
@@ -546,6 +549,10 @@ pub(crate) fn execute_staged(
             total: after.total_evaluations,
         })?;
     }
+    // Ref2VA has the same text-state lifetime as FL2VA: all transformer
+    // forwards borrow it, while visual/audio decode must begin only after it
+    // has released its device allocation.
+    drop(text);
 
     let generated_video_rows =
         video_rows.narrow(1, packed.condition_video_rows, packed.generated_video_rows)?;
@@ -1240,6 +1247,8 @@ fn ensure_ref_identity(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Weak;
+
     use image::{Rgb, RgbImage};
     use mold_candle::minimax_h3::{AudioSoundtrackAssociation, VideoPresentationBlock};
     use mold_core::{GenerationReference, GenerationReferenceAuthority, OutputFormat};
@@ -1410,6 +1419,7 @@ mod tests {
         condition_audio_checksums: Vec<f32>,
         reroute_after_decode: bool,
         reroute_after_denoise: bool,
+        text_lifetime: Option<Weak<()>>,
     }
 
     impl SyntheticBackend {
@@ -1430,7 +1440,14 @@ mod tests {
                 condition_audio_checksums: Vec::new(),
                 reroute_after_decode: false,
                 reroute_after_denoise: false,
+                text_lifetime: None,
             }
+        }
+
+        fn text_was_dropped(&self) -> bool {
+            self.text_lifetime
+                .as_ref()
+                .is_some_and(|lifetime| lifetime.upgrade().is_none())
         }
     }
 
@@ -1571,9 +1588,12 @@ mod tests {
                     }
                 }
             }
+            let lifetime = std::sync::Arc::new(());
+            self.text_lifetime = Some(std::sync::Arc::downgrade(&lifetime));
             Ok(H3TextConditioning {
                 states: Tensor::zeros((1, tags.len(), TEXT_STATE_WIDTH), DType::F32, &self.device)?,
                 tags,
+                lifetime_probe: Some(lifetime),
             })
         }
 
@@ -1669,6 +1689,7 @@ mod tests {
             sink: &mut H3VideoEncodeSink,
             checkpoint: &mut dyn H3PipelineCheckpoint,
         ) -> Result<()> {
+            assert!(self.text_was_dropped());
             assert_eq!(latents.dims(), [1, 24, 37, 2, 2]);
             checkpoint.checkpoint(H3PipelineEvent {
                 phase: H3PipelinePhase::VisualDecodeChunk,
@@ -1689,6 +1710,7 @@ mod tests {
             latents: &StereoLatents,
             checkpoint: &mut dyn H3PipelineCheckpoint,
         ) -> Result<StereoWaveform> {
+            assert!(self.text_was_dropped());
             assert_eq!(latents.normalized().dims(), [1, 32, 2, 207]);
             checkpoint.checkpoint(H3PipelineEvent {
                 phase: H3PipelinePhase::AudioDecodeChunk,
@@ -1844,6 +1866,7 @@ mod tests {
         assert_eq!(backend.preprocessed_order, [1, 2, 3]);
         assert_eq!(backend.visual_order, [1, 2]);
         assert_eq!(backend.audio_order, [1, 3]);
+        assert!(backend.text_was_dropped());
         assert!(backend
             .condition_video_checksums
             .windows(2)
@@ -1952,15 +1975,19 @@ mod tests {
                 cancellation: Some(cancellation),
                 ..Default::default()
             };
+            let mut backend = SyntheticBackend::new();
             let error = execute_staged(
                 &prepared,
                 &bindings(&prepared),
-                &mut SyntheticBackend::new(),
+                &mut backend,
                 &progress,
                 &mut observer,
             )
             .unwrap_err();
             assert!(is_inference_cancelled(&error), "phase {phase:?}: {error:#}");
+            if phase == H3PipelinePhase::TransformerBlock {
+                assert!(backend.text_was_dropped());
+            }
         }
     }
 

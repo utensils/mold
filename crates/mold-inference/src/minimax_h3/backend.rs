@@ -107,6 +107,16 @@ impl H3ValidatedComponentAuthority {
         require_sha256(&self.content_sha256, "H3 component content")?;
         require_sha256(&self.validation_sha256, "H3 component validation")
     }
+
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn content_sha256(&self) -> &str {
+        &self.content_sha256
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn validation_sha256(&self) -> &str {
+        &self.validation_sha256
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -144,6 +154,16 @@ impl H3ValidatedComponentSet {
 
     pub(crate) fn identity_sha256(&self) -> &str {
         &self.identity_sha256
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn authority(
+        &self,
+        role: H3ComponentRole,
+    ) -> Option<&H3ValidatedComponentAuthority> {
+        self.authorities
+            .iter()
+            .find(|authority| authority.role == role)
     }
 
     fn validate(&self) -> Result<()> {
@@ -610,7 +630,12 @@ where
             total: 1,
         })?;
         self.validate_runtime_authorities()?;
-        Ok(H3TextConditioning { states, tags })
+        Ok(H3TextConditioning {
+            states,
+            tags,
+            #[cfg(test)]
+            lifetime_probe: None,
+        })
     }
 
     fn encode_visual_condition(
@@ -762,7 +787,7 @@ where
     Ok(())
 }
 
-fn prepare_fl2va_conditioner_input(
+pub(super) fn prepare_fl2va_conditioner_input(
     tokenizer: &impl H3RawTokenizer,
     prompt: &str,
     endpoints: &[H3PreparedEndpoint],
@@ -1099,6 +1124,8 @@ mod tests {
                 "cpu",
                 H3ConditionerExecution::CpuOffloaded,
                 EXECUTION,
+                mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES,
+                0,
                 1_024,
             )
             .unwrap(),
@@ -1198,6 +1225,8 @@ mod tests {
                 "cpu",
                 H3ConditionerExecution::CpuOffloaded,
                 EXECUTION,
+                mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES,
+                0,
                 1,
             )
             .unwrap(),
@@ -1219,6 +1248,8 @@ mod tests {
                 "gpu-1",
                 H3ConditionerExecution::CudaResident,
                 EXECUTION,
+                0,
+                mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES,
                 1,
             )
             .unwrap(),
@@ -1238,6 +1269,8 @@ mod tests {
                 "cpu",
                 H3ConditionerExecution::CpuOffloaded,
                 EXECUTION,
+                mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES,
+                0,
                 1,
             )
             .unwrap(),
@@ -1260,6 +1293,8 @@ mod tests {
                 "cpu",
                 H3ConditionerExecution::CpuOffloaded,
                 EXECUTION,
+                mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES,
+                0,
                 1,
             )
             .unwrap(),

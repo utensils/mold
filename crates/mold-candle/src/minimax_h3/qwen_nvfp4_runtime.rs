@@ -16,9 +16,10 @@ use super::comfy_quant::{H3ComfyInt8TensorwiseEmbedding, H3ComfyNvfp4AwqLinear};
 use super::config::{H3ConditionerConfig, H3_SELECTED_LANGUAGE_LAYERS};
 use super::model::H3QwenNvfp4Layer50Conditioner;
 use super::qwen_nvfp4::{
-    open_h3_qwen_nvfp4_awq_artifact, released_config, H3QwenNvfp4AwqError, H3QwenNvfp4AwqExecution,
-    H3QwenNvfp4AwqInspection, H3SafetensorsTensorHeader, OpenedH3QwenNvfp4AwqArtifact,
-    H3_QWEN_NVFP4_AWQ_PAYLOAD_BYTES,
+    expected_h3_qwen_nvfp4_awq_schema, open_h3_qwen_nvfp4_awq_artifact, released_config,
+    validate_h3_qwen_nvfp4_awq_schema, H3QwenNvfp4AwqError, H3QwenNvfp4AwqExecution,
+    H3QwenNvfp4AwqMemoryAccounting, H3SafetensorsTensorHeader, OpenedH3QwenNvfp4AwqArtifact,
+    H3_QWEN_NVFP4_AWQ_FILE_BYTES, H3_QWEN_NVFP4_AWQ_HEADER_BYTES, H3_QWEN_NVFP4_AWQ_PAYLOAD_BYTES,
 };
 use super::text::{Qwen3VlNvfp4LayerWeights, Qwen3VlNvfp4Weights};
 
@@ -61,16 +62,200 @@ pub enum H3QwenNvfp4RuntimeError {
     Candle(#[from] candle::Error),
 }
 
+/// Exact storage and bounded-I/O facts for the released layer-50 runtime.
+///
+/// `effective_parameter_bytes` is the source-encoded sum of every tensor the
+/// runtime loads; marker payloads are authenticated policy metadata and are
+/// not parameters. Host/device residency describes the actual retained
+/// representation after the per-tensor read buffer has been dropped. In
+/// particular, portable NVFP4 block scales expand from authenticated FP8 to
+/// an unswizzled FP32 host cache, so retained bytes intentionally exceed the
+/// source-encoded parameter total. Inspection, authentication, tensor, and
+/// aggregate I/O are exact byte counts; authentication scratch and the maximum
+/// one-at-a-time source tensor buffer are exact loader bounds. Allocator
+/// bookkeeping, transient quantization conversion vectors, and backend
+/// workspaces are not measured by this structure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct H3QwenNvfp4RuntimeMemoryFacts {
+    pub effective_parameter_bytes: u64,
+    pub host_resident_parameter_bytes: u64,
+    pub device_resident_parameter_bytes: u64,
+    pub retained_parameter_bytes: u64,
+    pub retained_raw_header_bytes: u64,
+    pub maximum_tensor_staging_bytes: u64,
+    pub authentication_scratch_bytes: u64,
+    pub bounded_inspection_io_bytes: u64,
+    pub authentication_io_bytes: u64,
+    pub tensor_io_bytes: u64,
+    pub aggregate_io_bytes: u64,
+}
+
+/// Device class used to derive the released runtime's retained parameter
+/// representation without constructing a backend device. The accelerated
+/// route retains portable quantized storage on the host and dense BF16
+/// tensors on the selected device; the CPU route retains both on the host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum H3QwenNvfp4RuntimePlacement {
+    Accelerated,
+    Cpu,
+}
+
+/// Exact BF16 output-copy charge for the released `[1, sequence, hidden]`
+/// conditioner states. The width comes from the same validated runtime config
+/// used to construct the model, so admission tests cannot drift independently.
+pub fn released_h3_qwen_nvfp4_output_tensor_bytes(
+    sequence: u64,
+) -> Result<u64, H3QwenNvfp4RuntimeError> {
+    let config = released_config()?;
+    let width = u64::try_from(config.text_config.hidden_size)
+        .map_err(|_| H3QwenNvfp4RuntimeError::Contract("output width overflows u64".to_string()))?;
+    let dtype_bytes = u64::try_from(DType::BF16.size_in_bytes()).map_err(|_| {
+        H3QwenNvfp4RuntimeError::Contract("output dtype width overflows u64".to_string())
+    })?;
+    sequence
+        .checked_mul(width)
+        .and_then(|elements| elements.checked_mul(dtype_bytes))
+        .ok_or_else(|| {
+            H3QwenNvfp4RuntimeError::Contract("output tensor bytes overflow".to_string())
+        })
+}
+
+/// Derive the released runtime's exact memory facts without opening an
+/// artifact. This is safe to call at an authorization boundary before a
+/// loader callback is allowed to inspect or allocate checkpoint storage.
+pub fn released_h3_qwen_nvfp4_runtime_memory_facts(
+    device: &Device,
+) -> Result<H3QwenNvfp4RuntimeMemoryFacts, H3QwenNvfp4RuntimeError> {
+    released_h3_qwen_nvfp4_runtime_memory_facts_for_placement(if device.is_cpu() {
+        H3QwenNvfp4RuntimePlacement::Cpu
+    } else {
+        H3QwenNvfp4RuntimePlacement::Accelerated
+    })
+}
+
+/// Derive the exact released facts for admission before a concrete CUDA
+/// device is constructed. This is the same authority used by the loader's
+/// device-taking entrypoint above.
+pub fn released_h3_qwen_nvfp4_runtime_memory_facts_for_placement(
+    placement: H3QwenNvfp4RuntimePlacement,
+) -> Result<H3QwenNvfp4RuntimeMemoryFacts, H3QwenNvfp4RuntimeError> {
+    let config = released_config()?;
+    let (tensors, markers) = expected_h3_qwen_nvfp4_awq_schema(&config)?;
+    let policy = validate_h3_qwen_nvfp4_awq_schema(&config, &tensors, &markers)?;
+    runtime_memory_facts(
+        policy.memory(),
+        tensors.iter(),
+        placement == H3QwenNvfp4RuntimePlacement::Cpu,
+    )
+}
+
+fn runtime_memory_facts<'a>(
+    memory: &H3QwenNvfp4AwqMemoryAccounting,
+    tensors: impl Iterator<Item = (&'a String, &'a super::qwen_quant::H3QwenTensorSpec)>,
+    cpu_resident: bool,
+) -> Result<H3QwenNvfp4RuntimeMemoryFacts, H3QwenNvfp4RuntimeError> {
+    let effective_parameter_bytes = memory
+        .tensor_payload_bytes
+        .checked_sub(memory.quant_marker_bytes)
+        .ok_or_else(|| {
+            H3QwenNvfp4RuntimeError::Contract(
+                "Qwen quantization marker bytes exceed the authenticated payload".into(),
+            )
+        })?;
+    let expanded_block_scale_bytes = memory
+        .nvfp4_block_scale_bytes
+        .checked_mul(std::mem::size_of::<f32>() as u64)
+        .ok_or_else(|| {
+            H3QwenNvfp4RuntimeError::Contract("Qwen expanded block-scale bytes overflow".into())
+        })?;
+    let quantized_host_bytes = [
+        memory.nvfp4_packed_weight_bytes,
+        expanded_block_scale_bytes,
+        memory.nvfp4_tensor_scale_bytes,
+        memory.awq_pre_quant_scale_bytes,
+        memory.int8_embedding_weight_bytes,
+        memory.int8_embedding_scale_bytes,
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, bytes| total.checked_add(bytes))
+    .ok_or_else(|| {
+        H3QwenNvfp4RuntimeError::Contract("Qwen host parameter bytes overflow".into())
+    })?;
+    let (host_resident_parameter_bytes, device_resident_parameter_bytes) = if cpu_resident {
+        (
+            quantized_host_bytes
+                .checked_add(memory.dense_bf16_bytes)
+                .ok_or_else(|| {
+                    H3QwenNvfp4RuntimeError::Contract(
+                        "Qwen CPU retained parameter bytes overflow".into(),
+                    )
+                })?,
+            0,
+        )
+    } else {
+        (quantized_host_bytes, memory.dense_bf16_bytes)
+    };
+    let retained_parameter_bytes = host_resident_parameter_bytes
+        .checked_add(device_resident_parameter_bytes)
+        .ok_or_else(|| {
+            H3QwenNvfp4RuntimeError::Contract("Qwen retained parameter bytes overflow".into())
+        })?;
+    let maximum_tensor_staging_bytes = tensors
+        .filter(|(name, _)| !name.ends_with(".comfy_quant"))
+        .map(|(_, spec)| {
+            spec.shape
+                .iter()
+                .try_fold(1_u64, |elements, dimension| {
+                    elements.checked_mul(*dimension as u64)
+                })
+                .and_then(|elements| elements.checked_mul(spec.dtype.byte_width()))
+                .ok_or_else(|| {
+                    H3QwenNvfp4RuntimeError::Contract(
+                        "Qwen tensor staging byte count overflows".into(),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .max()
+        .unwrap_or_default();
+    let retained_raw_header_bytes = H3_QWEN_NVFP4_AWQ_HEADER_BYTES
+        .checked_add(8)
+        .expect("published H3 Qwen header length is bounded");
+    let bounded_inspection_io_bytes = retained_raw_header_bytes
+        .checked_add(memory.quant_marker_bytes)
+        .ok_or_else(|| {
+            H3QwenNvfp4RuntimeError::Contract("Qwen inspection I/O bytes overflow".into())
+        })?;
+    let aggregate_io_bytes = bounded_inspection_io_bytes
+        .checked_add(H3_QWEN_NVFP4_AWQ_FILE_BYTES)
+        .and_then(|bytes| bytes.checked_add(effective_parameter_bytes))
+        .ok_or_else(|| {
+            H3QwenNvfp4RuntimeError::Contract("Qwen aggregate I/O bytes overflow".into())
+        })?;
+    Ok(H3QwenNvfp4RuntimeMemoryFacts {
+        effective_parameter_bytes,
+        host_resident_parameter_bytes,
+        device_resident_parameter_bytes,
+        retained_parameter_bytes,
+        retained_raw_header_bytes,
+        maximum_tensor_staging_bytes,
+        authentication_scratch_bytes: 1024 * 1024,
+        bounded_inspection_io_bytes,
+        authentication_io_bytes: H3_QWEN_NVFP4_AWQ_FILE_BYTES,
+        tensor_io_bytes: effective_parameter_bytes,
+        aggregate_io_bytes,
+    })
+}
+
 pub struct LoadedH3QwenNvfp4Conditioner {
     model: H3QwenNvfp4Layer50Conditioner,
     artifact: OpenedH3QwenNvfp4AwqArtifact,
+    device: Device,
+    memory_facts: H3QwenNvfp4RuntimeMemoryFacts,
 }
 
 impl LoadedH3QwenNvfp4Conditioner {
-    fn model(&self) -> &H3QwenNvfp4Layer50Conditioner {
-        &self.model
-    }
-
     pub fn encode(
         &self,
         input: &super::model::H3ConditionerInput,
@@ -87,15 +272,38 @@ impl LoadedH3QwenNvfp4Conditioner {
         self.model.resident_language_layers()
     }
 
-    pub(crate) fn inspection(&self) -> &H3QwenNvfp4AwqInspection {
-        self.artifact.inspection()
+    pub const fn memory_facts(&self) -> &H3QwenNvfp4RuntimeMemoryFacts {
+        &self.memory_facts
     }
 
-    pub(crate) fn artifact_path(&self) -> &Path {
-        self.artifact.path()
+    /// Device selected when the opened-file-bound runtime was constructed.
+    ///
+    /// NVFP4 payload storage may stage on the host, but every dense tensor and
+    /// execution transfer is bound to this exact device authority.
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
-    pub(crate) fn revalidate_artifact(&self) -> Result<(), H3QwenNvfp4RuntimeError> {
+    /// Full authenticated checkpoint identity retained by this runtime.
+    pub fn artifact_identity_sha256(&self) -> &str {
+        &self.artifact.inspection().expected_artifact_sha256
+    }
+
+    /// Parsed safetensors-header identity used to reject cross-checkpoint
+    /// pairing even when a caller supplies the same display name.
+    pub fn header_identity_sha256(&self) -> &str {
+        &self.artifact.inspection().header_identity_sha256
+    }
+
+    /// Exact NVFP4-AWQ execution-policy identity selected from the opened
+    /// checkpoint rather than from a filename or caller assertion.
+    pub fn policy_identity_sha256(&self) -> &str {
+        &self.artifact.inspection().policy_sha256
+    }
+
+    /// Revalidate the retained descriptor and its path identity before an
+    /// inference callback reads the already-constructed tensor storage.
+    pub fn revalidate_artifact(&self) -> Result<(), H3QwenNvfp4RuntimeError> {
         self.artifact
             .revalidate("while retaining loaded H3 Qwen runtime")?;
         Ok(())
@@ -148,7 +356,18 @@ impl TensorLoadProgress<'_> {
     }
 }
 
-pub fn load_h3_qwen_nvfp4_conditioner(
+/// Open and load the authenticated private Qwen object after the caller has
+/// established the complete attempt authority.
+///
+/// # Safety
+///
+/// Before calling, the consumer must validate one frozen factory authority,
+/// active conditioner/execution/artifact leases, the exact support identity,
+/// route, released quantization policy, and exact runtime memory facts. Those
+/// authorities must be polled by `observer` at every load checkpoint. This is
+/// an unsafe cross-crate implementation seam, not an independently callable
+/// model loader; the safe authority-first entrypoint lives in mold-inference.
+pub unsafe fn load_h3_qwen_nvfp4_conditioner_after_authorization(
     path: &Path,
     config: &H3ConditionerConfig,
     device: &Device,
@@ -163,6 +382,7 @@ pub fn load_h3_qwen_nvfp4_conditioner(
         ));
     }
 
+    let expected_memory_facts = released_h3_qwen_nvfp4_runtime_memory_facts(device)?;
     let mut artifact = open_h3_qwen_nvfp4_awq_artifact(path)?;
     artifact.authenticate_full_sha256(&mut |completed_bytes, total_bytes| {
         let event = H3QwenNvfp4LoadEvent::Authenticating {
@@ -194,6 +414,12 @@ pub fn load_h3_qwen_nvfp4_conditioner(
         return Err(H3QwenNvfp4RuntimeError::Contract(
             "loadable tensor bytes exceed authenticated payload".into(),
         ));
+    }
+    if loadable_bytes != expected_memory_facts.effective_parameter_bytes {
+        return Err(H3QwenNvfp4RuntimeError::Contract(format!(
+            "authenticated loadable parameter bytes {loadable_bytes} differ from released runtime facts {}",
+            expected_memory_facts.effective_parameter_bytes
+        )));
     }
     let mut progress = TensorLoadProgress {
         observer,
@@ -297,7 +523,12 @@ pub fn load_h3_qwen_nvfp4_conditioner(
         )));
     }
     artifact.revalidate("after constructing H3 Qwen layer-50 model")?;
-    Ok(LoadedH3QwenNvfp4Conditioner { model, artifact })
+    Ok(LoadedH3QwenNvfp4Conditioner {
+        model,
+        artifact,
+        device: device.clone(),
+        memory_facts: expected_memory_facts,
+    })
 }
 
 fn load_linear(
@@ -401,6 +632,42 @@ mod tests {
     use super::super::qwen_nvfp4::tests::sparse_published_fixture;
     use super::*;
 
+    #[test]
+    fn released_cpu_runtime_facts_separate_source_residency_and_bounded_io() {
+        let facts = released_h3_qwen_nvfp4_runtime_memory_facts(&Device::Cpu).unwrap();
+        assert_eq!(facts.effective_parameter_bytes, 15_686_891_864);
+        assert_eq!(facts.host_resident_parameter_bytes, 20_258_027_864);
+        assert_eq!(facts.device_resident_parameter_bytes, 0);
+        assert_eq!(facts.retained_parameter_bytes, 20_258_027_864);
+        assert_eq!(facts.retained_raw_header_bytes, 231_408);
+        assert_eq!(facts.maximum_tensor_staging_bytes, 777_912_320);
+        assert_eq!(facts.authentication_scratch_bytes, 1_048_576);
+        assert_eq!(facts.bounded_inspection_io_bytes, 250_687);
+        assert_eq!(facts.authentication_io_bytes, 15_687_142_551);
+        assert_eq!(facts.tensor_io_bytes, 15_686_891_864);
+        assert_eq!(facts.aggregate_io_bytes, 31_374_285_102);
+        assert_ne!(
+            facts.retained_parameter_bytes,
+            facts.effective_parameter_bytes
+        );
+    }
+
+    #[test]
+    fn released_accelerated_runtime_facts_bind_exact_mixed_residency() {
+        let facts = released_h3_qwen_nvfp4_runtime_memory_facts_for_placement(
+            H3QwenNvfp4RuntimePlacement::Accelerated,
+        )
+        .unwrap();
+        assert_eq!(facts.effective_parameter_bytes, 15_686_891_864);
+        assert_eq!(facts.host_resident_parameter_bytes, 19_066_444_664);
+        assert_eq!(facts.device_resident_parameter_bytes, 1_191_583_200);
+        assert_eq!(
+            released_h3_qwen_nvfp4_output_tensor_bytes(7).unwrap(),
+            7 * 5_120 * 2
+        );
+        assert_eq!(facts.retained_parameter_bytes, 20_258_027_864);
+    }
+
     struct CancelAuthentication {
         events: Vec<H3QwenNvfp4LoadEvent>,
     }
@@ -439,12 +706,14 @@ mod tests {
     fn authentication_is_cancellable_at_a_bounded_read_checkpoint() {
         let path = sparse_published_fixture();
         let mut observer = CancelAuthentication { events: Vec::new() };
-        let error = load_h3_qwen_nvfp4_conditioner(
-            &path,
-            &released_config().unwrap(),
-            &Device::Cpu,
-            &mut observer,
-        )
+        let error = unsafe {
+            load_h3_qwen_nvfp4_conditioner_after_authorization(
+                &path,
+                &released_config().unwrap(),
+                &Device::Cpu,
+                &mut observer,
+            )
+        }
         .err()
         .expect("the observer must cancel authentication");
         assert!(error.to_string().contains("authentication cancelled"));
@@ -494,54 +763,17 @@ mod tests {
         let missing = std::env::temp_dir().join("mold-h3-qwen-deliberately-missing.safetensors");
         let mut config = released_config().unwrap();
         config.text_config.max_position_embeddings -= 1;
-        let error = load_h3_qwen_nvfp4_conditioner(
-            &missing,
-            &config,
-            &Device::Cpu,
-            &mut NoopH3QwenNvfp4LoadObserver,
-        )
+        let error = unsafe {
+            load_h3_qwen_nvfp4_conditioner_after_authorization(
+                &missing,
+                &config,
+                &Device::Cpu,
+                &mut NoopH3QwenNvfp4LoadObserver,
+            )
+        }
         .err()
         .expect("frozen config drift must fail");
         assert!(matches!(error, H3QwenNvfp4RuntimeError::Contract(_)));
         assert!(!missing.exists());
-    }
-
-    #[test]
-    #[ignore = "requires the authorized 15.7 GB private H3 Qwen artifact"]
-    fn authorized_real_artifact_constructs_exact_layer_50_runtime() {
-        let path = std::env::var_os("MOLD_H3_QWEN_NVFP4_PATH")
-            .map(std::path::PathBuf::from)
-            .expect("set MOLD_H3_QWEN_NVFP4_PATH to the authorized artifact");
-        let loaded = load_h3_qwen_nvfp4_conditioner(
-            &path,
-            &released_config().unwrap(),
-            &Device::Cpu,
-            &mut NoopH3QwenNvfp4LoadObserver,
-        )
-        .unwrap();
-        assert_eq!(
-            loaded.model().resident_language_layers(),
-            H3_SELECTED_LANGUAGE_LAYERS
-        );
-        assert_eq!(
-            loaded.inspection().expected_artifact_sha256,
-            super::super::qwen_nvfp4::H3_QWEN_NVFP4_AWQ_SHA256
-        );
-        assert_eq!(loaded.artifact_path(), path);
-        loaded.revalidate_artifact().unwrap();
-
-        let ids = Tensor::new(&[[0_u32, 1, 151_935]], &Device::Cpu).unwrap();
-        let embeddings = loaded
-            .model()
-            .embed_tokens(&ids)
-            .unwrap()
-            .to_dtype(DType::F32)
-            .unwrap()
-            .flatten_all()
-            .unwrap()
-            .to_vec1::<f32>()
-            .unwrap();
-        assert_eq!(embeddings.len(), 3 * 5_120);
-        assert!(embeddings.iter().all(|value| value.is_finite()));
     }
 }

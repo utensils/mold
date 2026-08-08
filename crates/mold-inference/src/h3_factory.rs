@@ -19,7 +19,7 @@ use crate::minimax_h3::offload::FrozenH3BlockStreamingPlan;
 use crate::minimax_h3::vae_runtime::expected_h3_comfy_vae_artifact_plan_identity;
 use crate::minimax_h3::{FrozenH3ConditionerPlacement, H3ConditionerExecution};
 
-const H3_FACTORY_AUTHORITY_SCHEMA_VERSION: u32 = 2;
+const H3_FACTORY_AUTHORITY_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum H3FactoryComponentRole {
@@ -126,7 +126,11 @@ pub struct H3FactoryAuthorityInput {
     pub execution_fingerprint: String,
     pub conditioner_placement: H3FactoryConditionerPlacement,
     pub qwen_parameter_bytes: u64,
+    pub qwen_host_resident_parameter_bytes: u64,
+    pub qwen_device_resident_parameter_bytes: u64,
     pub qwen_activation_workspace_bytes: u64,
+    pub qwen_output_text_rows: u64,
+    pub qwen_vision_rows: u64,
     pub resident_block_count: u32,
     pub prefetch_depth: u32,
     pub attention_backend: AttentionBackend,
@@ -155,7 +159,11 @@ pub struct FrozenH3FactoryAuthority {
     device_ordinal: usize,
     conditioner_placement: H3FactoryConditionerPlacement,
     qwen_parameter_bytes: u64,
+    qwen_host_resident_parameter_bytes: u64,
+    qwen_device_resident_parameter_bytes: u64,
     qwen_activation_workspace_bytes: u64,
+    qwen_output_text_rows: u64,
+    qwen_vision_rows: u64,
     attention_backend: AttentionBackend,
     attention_chunk: AttentionChunkPolicy,
     attention_kernel_identity: String,
@@ -197,7 +205,14 @@ impl FrozenH3FactoryAuthority {
             bail!("MiniMax H3 factory authority requires one concrete CUDA route");
         }
         require_sha256(&input.execution_fingerprint, "H3 scheduler execution")?;
-        if input.qwen_parameter_bytes == 0 || input.qwen_activation_workspace_bytes == 0 {
+        if input.qwen_parameter_bytes == 0
+            || input
+                .qwen_host_resident_parameter_bytes
+                .checked_add(input.qwen_device_resident_parameter_bytes)
+                .is_none_or(|bytes| bytes == 0)
+            || input.qwen_activation_workspace_bytes == 0
+            || input.qwen_output_text_rows == 0
+        {
             bail!("MiniMax H3 factory authority requires exact nonzero Qwen memory facts");
         }
         if input.attention_kernel_identity.trim().is_empty()
@@ -251,6 +266,8 @@ impl FrozenH3FactoryAuthority {
             conditioner_device,
             conditioner_execution,
             input.execution_fingerprint.clone(),
+            input.qwen_host_resident_parameter_bytes,
+            input.qwen_device_resident_parameter_bytes,
             input.qwen_activation_workspace_bytes,
         )?;
         let block_streaming = FrozenH3BlockStreamingPlan::new(
@@ -288,7 +305,11 @@ impl FrozenH3FactoryAuthority {
             device_ordinal: input.device_ordinal,
             conditioner_placement: input.conditioner_placement,
             qwen_parameter_bytes: input.qwen_parameter_bytes,
+            qwen_host_resident_parameter_bytes: input.qwen_host_resident_parameter_bytes,
+            qwen_device_resident_parameter_bytes: input.qwen_device_resident_parameter_bytes,
             qwen_activation_workspace_bytes: input.qwen_activation_workspace_bytes,
+            qwen_output_text_rows: input.qwen_output_text_rows,
+            qwen_vision_rows: input.qwen_vision_rows,
             attention_backend: input.attention_backend,
             attention_chunk: input.attention_chunk,
             attention_kernel_identity: input.attention_kernel_identity,
@@ -341,6 +362,21 @@ impl FrozenH3FactoryAuthority {
         })
     }
 
+    /// Exact logical conditioner authority frozen by server admission.
+    ///
+    /// Private runtime adapters use this to cross-check the independently
+    /// authenticated Qwen/support lease. It deliberately exposes only
+    /// digests, never artifact paths or bytes.
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn conditioner_component_authority(&self) -> (&str, &str) {
+        let authority = self
+            .backend_plan
+            .components()
+            .authority(H3ComponentRole::Conditioner)
+            .expect("validated H3 component set always contains the conditioner");
+        (authority.content_sha256(), authority.validation_sha256())
+    }
+
     pub fn canonical_model(&self) -> &str {
         self.backend_plan.canonical_model()
     }
@@ -387,8 +423,24 @@ impl FrozenH3FactoryAuthority {
         self.qwen_parameter_bytes
     }
 
+    pub const fn qwen_host_resident_parameter_bytes(&self) -> u64 {
+        self.qwen_host_resident_parameter_bytes
+    }
+
+    pub const fn qwen_device_resident_parameter_bytes(&self) -> u64 {
+        self.qwen_device_resident_parameter_bytes
+    }
+
     pub const fn qwen_activation_workspace_bytes(&self) -> u64 {
         self.qwen_activation_workspace_bytes
+    }
+
+    pub const fn qwen_output_text_rows(&self) -> u64 {
+        self.qwen_output_text_rows
+    }
+
+    pub const fn qwen_vision_rows(&self) -> u64 {
+        self.qwen_vision_rows
     }
 
     pub fn resident_block_count(&self) -> usize {
@@ -451,6 +503,16 @@ impl FrozenH3FactoryAuthority {
         if self.comfy_vae_artifact_plan_identity_sha256 != expected_vae_plan {
             bail!("MiniMax H3 factory VAE artifact plan changed after admission");
         }
+        let conditioner_memory = &self.backend_plan.conditioner_placement().memory;
+        if conditioner_memory.resident_parameter_bytes
+            != self
+                .qwen_host_resident_parameter_bytes
+                .checked_add(self.qwen_device_resident_parameter_bytes)
+                .ok_or_else(|| anyhow!("MiniMax H3 Qwen resident bytes overflow"))?
+            || conditioner_memory.activation_workspace_bytes != self.qwen_activation_workspace_bytes
+        {
+            bail!("MiniMax H3 conditioner placement differs from frozen Qwen memory facts");
+        }
         if self.backend_plan.block_streaming().resident_block_count > 50
             || self.backend_plan.block_streaming().prefetch_depth > 2
         {
@@ -463,7 +525,12 @@ impl FrozenH3FactoryAuthority {
             || self.attention_head_dim != 128
             || !self.block_offload
             || self.qwen_parameter_bytes == 0
+            || self
+                .qwen_host_resident_parameter_bytes
+                .checked_add(self.qwen_device_resident_parameter_bytes)
+                .is_none_or(|bytes| bytes == 0)
             || self.qwen_activation_workspace_bytes == 0
+            || self.qwen_output_text_rows == 0
         {
             bail!("MiniMax H3 factory attention or offload authority changed after admission");
         }
@@ -516,7 +583,7 @@ impl FrozenH3FactoryAuthority {
 
 fn frozen_identity(authority: &FrozenH3FactoryAuthority) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"mold.minimax-h3.factory-authority.v2\0");
+    hash.update(b"mold.minimax-h3.factory-authority.v3\0");
     hash.update(authority.schema_version.to_le_bytes());
     hash.update(authority.backend_plan.identity_sha256().as_bytes());
     hash.update([0]);
@@ -533,7 +600,11 @@ fn frozen_identity(authority: &FrozenH3FactoryAuthority) -> String {
         H3FactoryConditionerPlacement::HostCpuThenDrop => b"qwen-cpu".as_slice(),
     });
     hash.update(authority.qwen_parameter_bytes.to_le_bytes());
+    hash.update(authority.qwen_host_resident_parameter_bytes.to_le_bytes());
+    hash.update(authority.qwen_device_resident_parameter_bytes.to_le_bytes());
     hash.update(authority.qwen_activation_workspace_bytes.to_le_bytes());
+    hash.update(authority.qwen_output_text_rows.to_le_bytes());
+    hash.update(authority.qwen_vision_rows.to_le_bytes());
     hash.update(match authority.attention_backend {
         AttentionBackend::Math => b"math".as_slice(),
         AttentionBackend::Flash => b"flash".as_slice(),
@@ -585,7 +656,11 @@ mod tests {
             execution_fingerprint: sha('a'),
             conditioner_placement: H3FactoryConditionerPlacement::HostCpuThenDrop,
             qwen_parameter_bytes: 2048,
+            qwen_host_resident_parameter_bytes: 2048,
+            qwen_device_resident_parameter_bytes: 0,
             qwen_activation_workspace_bytes: 1024,
+            qwen_output_text_rows: 1,
+            qwen_vision_rows: 0,
             resident_block_count: 8,
             prefetch_depth: 1,
             attention_backend: AttentionBackend::Flash,
@@ -726,7 +801,11 @@ mod tests {
             execution_fingerprint: sha('a'),
             conditioner_placement: H3FactoryConditionerPlacement::HostCpuThenDrop,
             qwen_parameter_bytes: 2048,
+            qwen_host_resident_parameter_bytes: 2048,
+            qwen_device_resident_parameter_bytes: 0,
             qwen_activation_workspace_bytes: 1024,
+            qwen_output_text_rows: 1,
+            qwen_vision_rows: 0,
             resident_block_count: 8,
             prefetch_depth: 1,
             attention_backend: AttentionBackend::Flash,

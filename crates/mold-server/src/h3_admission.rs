@@ -16,10 +16,12 @@ use thiserror::Error;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
-pub(crate) const H3_ADMISSION_SCHEMA_VERSION: u32 = 2;
+pub(crate) const H3_ADMISSION_SCHEMA_VERSION: u32 = 3;
 pub(crate) const H3_MAIN_BLOCK_COUNT: usize = 50;
 pub(crate) const H3_QWEN_SELECTED_LANGUAGE_LAYERS: u32 = 50;
 pub(crate) const H3_QWEN_MODEL_MAX_ROWS: u64 = 262_144;
+const H3_QWEN_OUTPUT_WIDTH: u64 = 5_120;
+const H3_QWEN_OUTPUT_DTYPE_BYTES: u64 = 2;
 pub(crate) const H3_MAX_PREFETCH_DEPTH: usize = 2;
 pub(crate) const H3_TINY_MATH_MAX_PACKED_ROWS: u64 = 4_096;
 pub(crate) const H3_CURATED_HOST_RAM_RECOMMENDATION_BYTES: u64 = 128 * GIB;
@@ -316,6 +318,94 @@ pub(crate) enum H3QuantizationPolicy {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct H3QwenResidencyFacts {
+    pub host_resident_parameter_bytes: u64,
+    pub device_resident_parameter_bytes: u64,
+}
+
+impl H3QwenResidencyFacts {
+    fn total(self) -> Result<u64, H3AdmissionError> {
+        self.host_resident_parameter_bytes
+            .checked_add(self.device_resident_parameter_bytes)
+            .ok_or(H3AdmissionError::ArithmeticOverflow(
+                "Qwen retained parameter bytes",
+            ))
+    }
+
+    fn validate_for_route(
+        self,
+        route: &'static str,
+        device_required: bool,
+    ) -> Result<(), H3AdmissionError> {
+        let total = self.total()?;
+        if total == 0
+            || device_required && self.device_resident_parameter_bytes == 0
+            || !device_required
+                && (self.host_resident_parameter_bytes == 0
+                    || self.device_resident_parameter_bytes != 0)
+        {
+            return Err(H3AdmissionError::InvalidCheckpointFacts(format!(
+                "H3 Qwen {route} residency is incomplete or cross-routed"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Authenticated source bytes and both possible retained runtime layouts.
+/// Planning selects exactly one layout and freezes it into the execution plan;
+/// no factory bridge may reconstruct residency from artifact size.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct H3QwenCheckpointMemoryFacts {
+    pub source_parameter_bytes: u64,
+    pub cuda: H3QwenResidencyFacts,
+    pub cpu: H3QwenResidencyFacts,
+}
+
+impl H3QwenCheckpointMemoryFacts {
+    fn validate(&self, artifacts: &H3ArtifactInventory) -> Result<(), H3AdmissionError> {
+        let qwen_file_bytes =
+            artifacts.role_bytes(|role| matches!(role, H3ArtifactRole::QwenShard(_)))?;
+        if self.source_parameter_bytes == 0 || self.source_parameter_bytes > qwen_file_bytes {
+            return Err(H3AdmissionError::InvalidCheckpointFacts(format!(
+                "H3 Qwen source parameters {} exceed or omit the {qwen_file_bytes}-byte authenticated artifact payload",
+                self.source_parameter_bytes
+            )));
+        }
+        self.cuda.validate_for_route("CUDA", true)?;
+        self.cpu.validate_for_route("CPU", false)?;
+        if self.cuda.total()? < self.source_parameter_bytes
+            || self.cpu.total()? < self.source_parameter_bytes
+        {
+            return Err(H3AdmissionError::InvalidCheckpointFacts(
+                "H3 Qwen retained representation undercharges authenticated source parameters"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn freeze_for(&self, placement: H3QwenPlacement) -> H3FrozenQwenMemoryFacts {
+        let residency = match placement {
+            H3QwenPlacement::AssignedGpuThenDrop => self.cuda,
+            H3QwenPlacement::HostCpuThenDrop => self.cpu,
+        };
+        H3FrozenQwenMemoryFacts {
+            source_parameter_bytes: self.source_parameter_bytes,
+            host_resident_parameter_bytes: residency.host_resident_parameter_bytes,
+            device_resident_parameter_bytes: residency.device_resident_parameter_bytes,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct H3FrozenQwenMemoryFacts {
+    pub source_parameter_bytes: u64,
+    pub host_resident_parameter_bytes: u64,
+    pub device_resident_parameter_bytes: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct H3CheckpointMemoryFacts {
     pub checkpoint_fingerprint: String,
@@ -326,7 +416,7 @@ pub(crate) struct H3CheckpointMemoryFacts {
     /// Top-level projections, refiners, heads, and other transformer tensors
     /// outside the fifty streamable main blocks.
     pub fixed_transformer_device_bytes: u64,
-    pub qwen_device_bytes: u64,
+    pub qwen: H3QwenCheckpointMemoryFacts,
     pub video_vae_device_bytes: u64,
     pub audio_vae_device_bytes: u64,
     pub blocks: Vec<H3BlockMemoryFact>,
@@ -337,6 +427,7 @@ impl H3CheckpointMemoryFacts {
         require_sha256(&self.checkpoint_fingerprint, "checkpoint")?;
         require_sha256(&self.config_fingerprint, "config")?;
         require_sha256(&self.header_fingerprint, "header")?;
+        self.qwen.validate(artifacts)?;
         if self.blocks.len() != H3_MAIN_BLOCK_COUNT {
             return Err(H3AdmissionError::InvalidCheckpointFacts(format!(
                 "H3 requires {H3_MAIN_BLOCK_COUNT} main block facts, got {}",
@@ -938,12 +1029,22 @@ pub(crate) struct H3MemoryBreakdown {
     pub host_headroom_bytes: u64,
     pub qwen_phase_vram_bytes: u64,
     pub denoise_phase_vram_bytes: u64,
+    /// Maximum of visual-condition encode and post-denoise visual decode.
+    /// Qwen output states overlap only when visual conditioning is present.
     pub video_vae_phase_vram_bytes: u64,
+    /// Maximum of audio-condition encode and post-denoise audio decode.
+    /// Qwen output states overlap only when audio conditioning is present.
     pub audio_decode_phase_vram_bytes: u64,
     pub predicted_vram_peak_bytes: u64,
     pub attention_workspace_bytes: u64,
     pub ffn_workspace_bytes: u64,
     pub qwen_activation_bytes: u64,
+    pub qwen_host_workspace_bytes: u64,
+    /// BF16 `[1, text_rows, 5120]` states whose device residency begins after
+    /// prompt encode and lasts through the final transformer forward for
+    /// either Qwen placement. Decode-only phases run after this allocation.
+    pub qwen_output_state_device_bytes: u64,
+    pub qwen_output_transfer_device_bytes: u64,
     pub condition_vae_workspace_bytes: u64,
     pub condition_latent_workspace_bytes: u64,
     pub target_video_workspace_bytes: u64,
@@ -975,6 +1076,7 @@ pub(crate) struct H3FrozenExecutionPlan {
     pub qwen_language_layers: u32,
     pub qwen_truncation: H3QwenTruncationPolicy,
     pub qwen_placement: H3QwenPlacement,
+    pub qwen_memory: H3FrozenQwenMemoryFacts,
     pub attention: H3FrozenAttentionPolicy,
     pub adaln: H3AdaLnPolicy,
     pub quantization: H3QuantizationPolicy,
@@ -1147,6 +1249,7 @@ pub(crate) fn plan_h3_admission(
         .ok_or(H3AdmissionError::ArithmeticOverflow(
             "Qwen activation workspace",
         ))?;
+    let qwen_output_tensor_bytes = qwen_output_tensor_bytes(shape.rows.qwen_output_text_rows)?;
     let condition_vae_workspace = runtime
         .condition_vae_workspace
         .charge(shape.rows.condition_visual_rows, "condition VAE workspace")?;
@@ -1169,23 +1272,55 @@ pub(crate) fn plan_h3_admission(
         .aac_mux_workspace
         .charge(shape.audio_samples_per_channel, "AAC mux staging")?;
 
-    let qwen_gpu_peak = runtime
-        .fixed_vram_bytes
-        .checked_add(checkpoint.qwen_device_bytes)
-        .and_then(|value| value.checked_add(qwen_activation_bytes))
-        .ok_or(H3AdmissionError::ArithmeticOverflow("Qwen phase"))?;
-    let (qwen_placement, qwen_phase_vram) = match qwen_gpu_peak {
-        peak if peak <= device.available_vram_bytes => (H3QwenPlacement::AssignedGpuThenDrop, peak),
-        _ if runtime.qwen_cpu_supported => {
-            (H3QwenPlacement::HostCpuThenDrop, runtime.fixed_vram_bytes)
-        }
-        peak => {
-            return Err(H3AdmissionError::InsufficientVram {
-                required_bytes: peak,
-                available_bytes: device.available_vram_bytes,
-            });
-        }
-    };
+    let cuda_qwen_memory = checkpoint
+        .qwen
+        .freeze_for(H3QwenPlacement::AssignedGpuThenDrop);
+    let qwen_gpu_peak = checked_sum(
+        [
+            runtime.fixed_vram_bytes,
+            cuda_qwen_memory.device_resident_parameter_bytes,
+            qwen_activation_bytes,
+        ],
+        "Qwen phase",
+    )?;
+    let (qwen_placement, qwen_memory, qwen_phase_vram, qwen_output_transfer_device_bytes) =
+        match qwen_gpu_peak {
+            peak if peak <= device.available_vram_bytes => (
+                H3QwenPlacement::AssignedGpuThenDrop,
+                cuda_qwen_memory,
+                peak,
+                0,
+            ),
+            _ if runtime.qwen_cpu_supported => {
+                let cpu_qwen_memory = checkpoint.qwen.freeze_for(H3QwenPlacement::HostCpuThenDrop);
+                let cpu_peak = checked_sum(
+                    [
+                        runtime.fixed_vram_bytes,
+                        cpu_qwen_memory.device_resident_parameter_bytes,
+                        qwen_output_tensor_bytes,
+                    ],
+                    "CPU Qwen output transfer",
+                )?;
+                if cpu_peak > device.available_vram_bytes {
+                    return Err(H3AdmissionError::InsufficientVram {
+                        required_bytes: cpu_peak,
+                        available_bytes: device.available_vram_bytes,
+                    });
+                }
+                (
+                    H3QwenPlacement::HostCpuThenDrop,
+                    cpu_qwen_memory,
+                    cpu_peak,
+                    qwen_output_tensor_bytes,
+                )
+            }
+            peak => {
+                return Err(H3AdmissionError::InsufficientVram {
+                    required_bytes: peak,
+                    available_bytes: device.available_vram_bytes,
+                });
+            }
+        };
 
     let denoise_workspace = checked_sum(
         [
@@ -1196,6 +1331,7 @@ pub(crate) fn plan_h3_admission(
             condition_latent_workspace,
             target_video_workspace,
             target_audio_workspace,
+            qwen_output_tensor_bytes,
         ],
         "denoise base workspace",
     )?;
@@ -1235,6 +1371,11 @@ pub(crate) fn plan_h3_admission(
             runtime.video_vae_tile_workspace_bytes,
             condition_vae_workspace,
             target_video_workspace,
+            if shape.rows.condition_visual_rows > 0 {
+                qwen_output_tensor_bytes
+            } else {
+                0
+            },
         ],
         "video VAE phase",
     )?;
@@ -1244,6 +1385,11 @@ pub(crate) fn plan_h3_admission(
             checkpoint.audio_vae_device_bytes,
             runtime.audio_decode_workspace_bytes,
             target_audio_workspace,
+            if shape.rows.condition_audio_rows > 0 {
+                qwen_output_tensor_bytes
+            } else {
+                0
+            },
         ],
         "audio decode phase",
     )?;
@@ -1267,14 +1413,17 @@ pub(crate) fn plan_h3_admission(
     // This deliberately rejects the 134 GiB full stack on a 128 GiB host even
     // when the filesystem is sparse or mmap would initially fault few pages.
     let artifact_host_bytes = artifacts.total_file_bytes()?;
-    let qwen_host_workspace = if qwen_placement == H3QwenPlacement::HostCpuThenDrop {
-        checkpoint
-            .qwen_device_bytes
-            .checked_add(qwen_activation_bytes)
-            .ok_or(H3AdmissionError::ArithmeticOverflow("Qwen host workspace"))?
-    } else {
-        0
-    };
+    let qwen_host_workspace = checked_sum(
+        [
+            qwen_memory.host_resident_parameter_bytes,
+            if qwen_placement == H3QwenPlacement::HostCpuThenDrop {
+                qwen_activation_bytes
+            } else {
+                0
+            },
+        ],
+        "Qwen host workspace",
+    )?;
     let runtime_host_workspace = checked_sum(
         [
             runtime.fixed_host_bytes,
@@ -1321,6 +1470,7 @@ pub(crate) fn plan_h3_admission(
             maximum_rows: H3_QWEN_MODEL_MAX_ROWS,
         },
         qwen_placement,
+        qwen_memory,
         attention: H3FrozenAttentionPolicy {
             kernel_identity: runtime.kernel_identity.clone(),
             qualification_fingerprint: runtime.qualification_fingerprint.clone(),
@@ -1362,6 +1512,9 @@ pub(crate) fn plan_h3_admission(
             attention_workspace_bytes: attention_workspace,
             ffn_workspace_bytes: ffn_workspace,
             qwen_activation_bytes,
+            qwen_host_workspace_bytes: qwen_host_workspace,
+            qwen_output_state_device_bytes: qwen_output_tensor_bytes,
+            qwen_output_transfer_device_bytes,
             condition_vae_workspace_bytes: condition_vae_workspace,
             condition_latent_workspace_bytes: condition_latent_workspace,
             target_video_workspace_bytes: target_video_workspace,
@@ -1493,6 +1646,12 @@ pub(crate) fn bind_h3_factory_authority(
             "H3 factory binding requires an exact CUDA compute capability".to_string(),
         )
     })?;
+    let expected_qwen_output_transfer_device_bytes = match plan.qwen_placement {
+        H3QwenPlacement::AssignedGpuThenDrop => 0,
+        H3QwenPlacement::HostCpuThenDrop => {
+            qwen_output_tensor_bytes(plan.shape.rows.qwen_output_text_rows)?
+        }
+    };
     if plan.schema_version != H3_ADMISSION_SCHEMA_VERSION
         || plan.canonical_model != artifacts.model
         || plan.task != artifacts.task
@@ -1506,6 +1665,11 @@ pub(crate) fn bind_h3_factory_authority(
         || plan.header_fingerprint != checkpoint.header_fingerprint
         || plan.adaln != checkpoint.adaln
         || plan.quantization != checkpoint.quantization
+        || plan.qwen_memory != checkpoint.qwen.freeze_for(plan.qwen_placement)
+        || plan.memory.qwen_output_state_device_bytes
+            != qwen_output_tensor_bytes(plan.shape.rows.qwen_output_text_rows)?
+        || plan.memory.qwen_output_transfer_device_bytes
+            != expected_qwen_output_transfer_device_bytes
         || plan.artifact_fingerprint != fingerprint(artifacts)?
     {
         return Err(H3AdmissionError::InvalidRuntimeFacts(
@@ -1557,8 +1721,12 @@ pub(crate) fn bind_h3_factory_authority(
             compute_capability,
             execution_fingerprint: plan.execution_fingerprint.clone(),
             conditioner_placement,
-            qwen_parameter_bytes: checkpoint.qwen_device_bytes,
+            qwen_parameter_bytes: plan.qwen_memory.source_parameter_bytes,
+            qwen_host_resident_parameter_bytes: plan.qwen_memory.host_resident_parameter_bytes,
+            qwen_device_resident_parameter_bytes: plan.qwen_memory.device_resident_parameter_bytes,
             qwen_activation_workspace_bytes: plan.memory.qwen_activation_bytes,
+            qwen_output_text_rows: plan.shape.rows.qwen_output_text_rows,
+            qwen_vision_rows: plan.shape.rows.qwen_vision_rows,
             resident_block_count: plan.resident_block_count,
             prefetch_depth: plan.prefetch_depth,
             attention_backend: engine_config.attention_backend,
@@ -1795,6 +1963,13 @@ fn checked_sum(
     })
 }
 
+fn qwen_output_tensor_bytes(text_rows: u64) -> Result<u64, H3AdmissionError> {
+    text_rows
+        .checked_mul(H3_QWEN_OUTPUT_WIDTH)
+        .and_then(|elements| elements.checked_mul(H3_QWEN_OUTPUT_DTYPE_BYTES))
+        .ok_or(H3AdmissionError::ArithmeticOverflow("Qwen output transfer"))
+}
+
 fn require_sha256(value: &str, label: &'static str) -> Result<(), H3AdmissionError> {
     if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         Ok(())
@@ -1809,7 +1984,7 @@ fn fingerprint(value: &impl Serialize) -> Result<String, H3AdmissionError> {
     let bytes = serde_json::to_vec(value)
         .map_err(|error| H3AdmissionError::InvalidRuntimeFacts(error.to_string()))?;
     let mut hash = Sha256::new();
-    hash.update(b"mold.minimax-h3.admission.v2\0");
+    hash.update(b"mold.minimax-h3.admission.v3\0");
     hash.update(bytes);
     Ok(format!("{:x}", hash.finalize()))
 }
@@ -1822,6 +1997,10 @@ mod tests {
     };
 
     const MIB: u64 = 1024 * 1024;
+    const COMFY_QWEN_SOURCE_PARAMETER_BYTES: u64 = 15_686_891_864;
+    const COMFY_QWEN_CUDA_HOST_PARAMETER_BYTES: u64 = 19_066_444_664;
+    const COMFY_QWEN_CUDA_DEVICE_PARAMETER_BYTES: u64 = 1_191_583_200;
+    const COMFY_QWEN_CPU_HOST_PARAMETER_BYTES: u64 = 20_258_027_864;
 
     fn sha(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)
@@ -1910,7 +2089,31 @@ mod tests {
             adaln,
             quantization,
             fixed_transformer_device_bytes: if quantized { 2 * GIB } else { 10 * GIB },
-            qwen_device_bytes: qwen_bytes,
+            qwen: if quantized {
+                H3QwenCheckpointMemoryFacts {
+                    source_parameter_bytes: COMFY_QWEN_SOURCE_PARAMETER_BYTES,
+                    cuda: H3QwenResidencyFacts {
+                        host_resident_parameter_bytes: COMFY_QWEN_CUDA_HOST_PARAMETER_BYTES,
+                        device_resident_parameter_bytes: COMFY_QWEN_CUDA_DEVICE_PARAMETER_BYTES,
+                    },
+                    cpu: H3QwenResidencyFacts {
+                        host_resident_parameter_bytes: COMFY_QWEN_CPU_HOST_PARAMETER_BYTES,
+                        device_resident_parameter_bytes: 0,
+                    },
+                }
+            } else {
+                H3QwenCheckpointMemoryFacts {
+                    source_parameter_bytes: qwen_bytes,
+                    cuda: H3QwenResidencyFacts {
+                        host_resident_parameter_bytes: 0,
+                        device_resident_parameter_bytes: qwen_bytes,
+                    },
+                    cpu: H3QwenResidencyFacts {
+                        host_resident_parameter_bytes: qwen_bytes,
+                        device_resident_parameter_bytes: 0,
+                    },
+                }
+            },
             video_vae_device_bytes: video_vae_bytes,
             audio_vae_device_bytes: audio_vae_bytes,
             blocks,
@@ -1986,6 +2189,174 @@ mod tests {
 
     fn prepared(model: &str, frames: u32) -> (H3FrozenTask, H3PreparedRequestShape) {
         H3PreparedRequestShape::from_prepared_request(&request(model, frames), 128, 0).unwrap()
+    }
+
+    fn prepared_with_text_rows(
+        model: &str,
+        text_rows: u64,
+    ) -> (H3FrozenTask, H3PreparedRequestShape) {
+        H3PreparedRequestShape::from_prepared_request(&request(model, 124), text_rows, 0).unwrap()
+    }
+
+    fn prepared_ref2va_with_visual_and_audio_rows() -> (H3FrozenTask, H3PreparedRequestShape) {
+        let mut request = request(minimax_h3::REF2VA_COMFY, 124);
+        request.references = Some(vec![GenerationReference::Video {
+            media: GenerationReferenceAuthority::ServerPath {
+                path: "/synthetic/not-read/condition.mp4".to_string(),
+            },
+            provenance: GenerationReferenceProvenance {
+                name: Some("condition.mp4".to_string()),
+                sha256: Some(sha(231)),
+            },
+            mime_type: "video/mp4".to_string(),
+            width: 1280,
+            height: 720,
+            frame_count: Some(120),
+            duration_ms: 4_000,
+            fps: 30.0,
+            has_audio: true,
+            audio_duration_ms: Some(4_000),
+            audio_sample_count: Some(128_000),
+            audio_sample_rate: Some(32_000),
+            audio_channels: Some(2),
+        }]);
+        H3PreparedRequestShape::from_prepared_request(&request, 128, 512).unwrap()
+    }
+
+    fn private_engine_config() -> mold_inference::FrozenEngineConfig {
+        let mut config = mold_inference::FrozenEngineConfig::resolve(
+            minimax_h3::FL2VA_COMFY,
+            &mold_core::Config::default(),
+        );
+        config.family = minimax_h3::FAMILY.to_string();
+        config
+    }
+
+    fn compact_cpu_route_checkpoint(inventory: &H3ArtifactInventory) -> H3CheckpointMemoryFacts {
+        let mut checkpoint = checkpoint(inventory);
+        checkpoint.fixed_transformer_device_bytes = 16 * MIB;
+        checkpoint.video_vae_device_bytes = 64 * MIB;
+        checkpoint.audio_vae_device_bytes = 64 * MIB;
+        for block in &mut checkpoint.blocks {
+            block.resident_device_bytes = MIB;
+            block.dequantization_workspace_bytes = MIB;
+        }
+        checkpoint
+    }
+
+    fn compact_cpu_route_runtime() -> H3QualifiedRuntimeFacts {
+        let mut runtime = qualified_runtime();
+        runtime.fixed_vram_bytes = 128 * MIB;
+        runtime.fixed_host_bytes = 64 * MIB;
+        runtime.attention_workspace = H3LinearWorkspace {
+            fixed_bytes: 8 * MIB,
+            bytes_per_row: 1,
+        };
+        runtime.ffn_workspace = H3LinearWorkspace {
+            fixed_bytes: 8 * MIB,
+            bytes_per_row: 1,
+        };
+        runtime.condition_vae_workspace = H3LinearWorkspace {
+            fixed_bytes: 8 * MIB,
+            bytes_per_row: 1,
+        };
+        runtime.condition_latent_workspace = H3LinearWorkspace {
+            fixed_bytes: 0,
+            bytes_per_row: 1,
+        };
+        runtime.target_video_workspace = H3LinearWorkspace {
+            fixed_bytes: 0,
+            bytes_per_row: 1,
+        };
+        runtime.target_audio_workspace = H3LinearWorkspace {
+            fixed_bytes: 0,
+            bytes_per_row: 1,
+        };
+        runtime.video_vae_tile_workspace_bytes = 64 * MIB;
+        runtime.audio_decode_workspace_bytes = 64 * MIB;
+        runtime.aac_mux_workspace = H3LinearWorkspace {
+            fixed_bytes: MIB,
+            bytes_per_row: 1,
+        };
+        runtime
+    }
+
+    fn assert_exact_denoise_output_charge(
+        plan: &H3FrozenExecutionPlan,
+        runtime: &H3QualifiedRuntimeFacts,
+        checkpoint: &H3CheckpointMemoryFacts,
+    ) {
+        let output_bytes = qwen_output_tensor_bytes(plan.shape.rows.qwen_output_text_rows).unwrap();
+        assert_eq!(plan.memory.qwen_output_state_device_bytes, output_bytes);
+        assert_eq!(
+            output_bytes,
+            mold_inference::released_h3_private_qwen_output_tensor_bytes(
+                plan.shape.rows.qwen_output_text_rows
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            plan.memory.denoise_phase_vram_bytes,
+            checked_sum(
+                [
+                    runtime.fixed_vram_bytes,
+                    checkpoint.fixed_transformer_device_bytes,
+                    plan.memory.attention_workspace_bytes,
+                    plan.memory.ffn_workspace_bytes,
+                    plan.memory.condition_latent_workspace_bytes,
+                    plan.memory.target_video_workspace_bytes,
+                    plan.memory.target_audio_workspace_bytes,
+                    output_bytes,
+                    if plan.audio.keep_vae_resident_during_denoise {
+                        checkpoint.audio_vae_device_bytes
+                    } else {
+                        0
+                    },
+                    plan.memory.resident_block_bytes,
+                    plan.memory.prefetch_device_bytes,
+                    plan.memory.dequantization_workspace_bytes,
+                ],
+                "test denoise peak",
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            plan.memory.video_vae_phase_vram_bytes,
+            checked_sum(
+                [
+                    runtime.fixed_vram_bytes,
+                    checkpoint.video_vae_device_bytes,
+                    runtime.video_vae_tile_workspace_bytes,
+                    plan.memory.condition_vae_workspace_bytes,
+                    plan.memory.target_video_workspace_bytes,
+                    if plan.shape.rows.condition_visual_rows > 0 {
+                        output_bytes
+                    } else {
+                        0
+                    },
+                ],
+                "test video VAE peak",
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            plan.memory.audio_decode_phase_vram_bytes,
+            checked_sum(
+                [
+                    runtime.fixed_vram_bytes,
+                    checkpoint.audio_vae_device_bytes,
+                    runtime.audio_decode_workspace_bytes,
+                    plan.memory.target_audio_workspace_bytes,
+                    if plan.shape.rows.condition_audio_rows > 0 {
+                        output_bytes
+                    } else {
+                        0
+                    },
+                ],
+                "test audio VAE peak",
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -2354,7 +2725,7 @@ mod tests {
     fn qwen_cpu_fallback_charges_parameters_and_never_masks_overflow() {
         let inventory = landed_inventory(minimax_h3::FL2VA_COMFY);
         let mut checkpoint = checkpoint(&inventory);
-        checkpoint.qwen_device_bytes = 30 * GIB;
+        checkpoint.qwen.cuda.device_resident_parameter_bytes = 30 * GIB;
         let runtime = qualified_runtime();
         let (task, shape) = prepared(minimax_h3::FL2VA_COMFY, 124);
         let plan = plan_h3_admission(
@@ -2372,12 +2743,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.qwen_placement, H3QwenPlacement::HostCpuThenDrop);
-        assert!(
-            plan.memory.runtime_host_workspace_bytes
-                >= checkpoint.qwen_device_bytes + plan.memory.qwen_activation_bytes
+        assert_eq!(
+            plan.qwen_memory,
+            checkpoint.qwen.freeze_for(H3QwenPlacement::HostCpuThenDrop)
+        );
+        assert_eq!(
+            plan.memory.qwen_host_workspace_bytes,
+            checkpoint.qwen.cpu.host_resident_parameter_bytes + plan.memory.qwen_activation_bytes
+        );
+        let output_transfer =
+            qwen_output_tensor_bytes(plan.shape.rows.qwen_output_text_rows).unwrap();
+        assert_eq!(
+            plan.memory.qwen_output_transfer_device_bytes,
+            output_transfer
+        );
+        assert_eq!(
+            plan.memory.qwen_phase_vram_bytes,
+            runtime.fixed_vram_bytes + output_transfer
+        );
+        assert_eq!(
+            plan.memory.runtime_host_workspace_bytes,
+            runtime.fixed_host_bytes
+                + plan.memory.aac_mux_staging_bytes
+                + checkpoint.qwen.cpu.host_resident_parameter_bytes
+                + plan.memory.qwen_activation_bytes
         );
 
-        checkpoint.qwen_device_bytes = u64::MAX;
+        checkpoint.qwen.cuda.host_resident_parameter_bytes = 0;
+        checkpoint.qwen.cuda.device_resident_parameter_bytes = u64::MAX;
         let error = plan_h3_admission(
             task,
             shape,
@@ -2393,6 +2786,177 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, H3AdmissionError::ArithmeticOverflow("Qwen phase"));
+    }
+
+    #[test]
+    fn denoise_retains_exact_qwen_output_at_normal_and_max_rows_on_both_routes() {
+        let inventory = landed_inventory(minimax_h3::FL2VA_COMFY);
+        for text_rows in [128, H3_QWEN_MODEL_MAX_ROWS] {
+            let (task, shape) = prepared_with_text_rows(minimax_h3::FL2VA_COMFY, text_rows);
+            assert_eq!(shape.rows.condition_visual_rows, 0);
+            assert_eq!(shape.rows.condition_audio_rows, 0);
+
+            let gpu_checkpoint = checkpoint(&inventory);
+            let mut gpu_runtime = qualified_runtime();
+            gpu_runtime.maximum_packed_rows = shape.rows.total_packed_rows;
+            let gpu_plan = plan_h3_admission(
+                task,
+                shape.clone(),
+                &inventory,
+                &gpu_checkpoint,
+                Some(&gpu_runtime),
+                &[cuda(24 * GIB)],
+                H3HostMemory {
+                    total_bytes: 160 * GIB,
+                    available_bytes: 160 * GIB,
+                },
+                H3AdmissionPolicy::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                gpu_plan.qwen_placement,
+                H3QwenPlacement::AssignedGpuThenDrop
+            );
+            assert_exact_denoise_output_charge(&gpu_plan, &gpu_runtime, &gpu_checkpoint);
+
+            let mut cpu_checkpoint = compact_cpu_route_checkpoint(&inventory);
+            cpu_checkpoint.qwen.cuda.device_resident_parameter_bytes = 30 * GIB;
+            let mut cpu_runtime = compact_cpu_route_runtime();
+            cpu_runtime.maximum_packed_rows = shape.rows.total_packed_rows;
+            let cpu_plan = plan_h3_admission(
+                task,
+                shape,
+                &inventory,
+                &cpu_checkpoint,
+                Some(&cpu_runtime),
+                &[cuda(8 * GIB)],
+                H3HostMemory {
+                    total_bytes: 160 * GIB,
+                    available_bytes: 160 * GIB,
+                },
+                H3AdmissionPolicy::default(),
+            )
+            .unwrap();
+            assert_eq!(cpu_plan.qwen_placement, H3QwenPlacement::HostCpuThenDrop);
+            assert_exact_denoise_output_charge(&cpu_plan, &cpu_runtime, &cpu_checkpoint);
+        }
+    }
+
+    #[test]
+    fn condition_vae_phases_overlap_qwen_output_on_both_routes() {
+        let inventory = landed_inventory(minimax_h3::REF2VA_COMFY);
+        let (task, shape) = prepared_ref2va_with_visual_and_audio_rows();
+        assert!(shape.rows.condition_visual_rows > 0);
+        assert!(shape.rows.condition_audio_rows > 0);
+
+        for cpu_route in [false, true] {
+            let mut checkpoint = if cpu_route {
+                compact_cpu_route_checkpoint(&inventory)
+            } else {
+                checkpoint(&inventory)
+            };
+            if cpu_route {
+                checkpoint.qwen.cuda.device_resident_parameter_bytes = 30 * GIB;
+            }
+            let mut runtime = if cpu_route {
+                compact_cpu_route_runtime()
+            } else {
+                qualified_runtime()
+            };
+            runtime.maximum_packed_rows = shape.rows.total_packed_rows;
+            let plan = plan_h3_admission(
+                task,
+                shape.clone(),
+                &inventory,
+                &checkpoint,
+                Some(&runtime),
+                &[cuda(if cpu_route { 8 * GIB } else { 24 * GIB })],
+                H3HostMemory {
+                    total_bytes: 160 * GIB,
+                    available_bytes: 160 * GIB,
+                },
+                H3AdmissionPolicy::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                plan.qwen_placement,
+                if cpu_route {
+                    H3QwenPlacement::HostCpuThenDrop
+                } else {
+                    H3QwenPlacement::AssignedGpuThenDrop
+                }
+            );
+            assert_exact_denoise_output_charge(&plan, &runtime, &checkpoint);
+        }
+    }
+
+    #[test]
+    fn denoise_output_overflow_and_below_base_vram_fail_closed() {
+        assert_eq!(
+            qwen_output_tensor_bytes(u64::MAX).unwrap_err(),
+            H3AdmissionError::ArithmeticOverflow("Qwen output transfer")
+        );
+
+        let inventory = landed_inventory(minimax_h3::FL2VA_COMFY);
+        let (task, shape) =
+            prepared_with_text_rows(minimax_h3::FL2VA_COMFY, H3_QWEN_MODEL_MAX_ROWS);
+        let mut checkpoint = compact_cpu_route_checkpoint(&inventory);
+        checkpoint.qwen.cuda.device_resident_parameter_bytes = 30 * GIB;
+        let mut runtime = compact_cpu_route_runtime();
+        runtime.maximum_packed_rows = shape.rows.total_packed_rows;
+        let admitted = plan_h3_admission(
+            task,
+            shape.clone(),
+            &inventory,
+            &checkpoint,
+            Some(&runtime),
+            &[cuda(8 * GIB)],
+            H3HostMemory {
+                total_bytes: 160 * GIB,
+                available_bytes: 160 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(admitted.qwen_placement, H3QwenPlacement::HostCpuThenDrop);
+        let minimum_denoise_base = admitted
+            .memory
+            .denoise_phase_vram_bytes
+            .checked_sub(admitted.memory.resident_block_bytes)
+            .and_then(|bytes| bytes.checked_sub(admitted.memory.prefetch_device_bytes))
+            .and_then(|bytes| bytes.checked_sub(admitted.memory.dequantization_workspace_bytes))
+            .and_then(|bytes| {
+                bytes.checked_sub(if admitted.audio.keep_vae_resident_during_denoise {
+                    checkpoint.audio_vae_device_bytes
+                } else {
+                    0
+                })
+            })
+            .unwrap();
+        assert!(
+            minimum_denoise_base
+                > runtime.fixed_vram_bytes + admitted.memory.qwen_output_transfer_device_bytes
+        );
+        let available_without_output = minimum_denoise_base - 1;
+        assert!(
+            minimum_denoise_base - admitted.memory.qwen_output_state_device_bytes
+                <= available_without_output
+        );
+        let error = plan_h3_admission(
+            task,
+            shape,
+            &inventory,
+            &checkpoint,
+            Some(&runtime),
+            &[cuda(available_without_output)],
+            H3HostMemory {
+                total_bytes: 160 * GIB,
+                available_bytes: 160 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, H3AdmissionError::InsufficientVram { .. }));
     }
 
     #[test]
@@ -2548,6 +3112,30 @@ mod tests {
             H3AdmissionPolicy::default(),
         )
         .unwrap();
+        assert_eq!(plan.qwen_placement, H3QwenPlacement::AssignedGpuThenDrop);
+        assert_eq!(
+            plan.qwen_memory,
+            checkpoint
+                .qwen
+                .freeze_for(H3QwenPlacement::AssignedGpuThenDrop)
+        );
+        assert_eq!(
+            plan.memory.qwen_phase_vram_bytes,
+            runtime.fixed_vram_bytes
+                + checkpoint.qwen.cuda.device_resident_parameter_bytes
+                + plan.memory.qwen_activation_bytes
+        );
+        assert_eq!(
+            plan.memory.qwen_host_workspace_bytes,
+            checkpoint.qwen.cuda.host_resident_parameter_bytes
+        );
+        assert_eq!(plan.memory.qwen_output_transfer_device_bytes, 0);
+        assert_eq!(
+            plan.memory.runtime_host_workspace_bytes,
+            runtime.fixed_host_bytes
+                + plan.memory.aac_mux_staging_bytes
+                + checkpoint.qwen.cuda.host_resident_parameter_bytes
+        );
         let mut engine_config = mold_inference::FrozenEngineConfig::resolve(
             minimax_h3::FL2VA_COMFY,
             &mold_core::Config::default(),
@@ -2578,7 +3166,15 @@ mod tests {
         assert_eq!(authority.attention_chunk(), engine_config.attention_chunk);
         assert_eq!(
             authority.qwen_parameter_bytes(),
-            checkpoint.qwen_device_bytes
+            checkpoint.qwen.source_parameter_bytes
+        );
+        assert_eq!(
+            authority.qwen_host_resident_parameter_bytes(),
+            checkpoint.qwen.cuda.host_resident_parameter_bytes
+        );
+        assert_eq!(
+            authority.qwen_device_resident_parameter_bytes(),
+            checkpoint.qwen.cuda.device_resident_parameter_bytes
         );
         assert_eq!(
             authority.qwen_activation_workspace_bytes(),
@@ -2602,6 +3198,233 @@ mod tests {
             Some(authority.identity_sha256())
         );
         assert!(!minimax_h3::capabilities(minimax_h3::Task::Fl2va).runtime_available);
+    }
+
+    #[test]
+    fn private_qwen_bridge_authority_is_loader_exact_for_cuda_and_cpu() {
+        use mold_inference::{
+            released_h3_private_qwen_loader_memory_authority,
+            validate_h3_private_qwen_loader_memory_authority, H3PrivateQwenLoaderMemoryRoute,
+        };
+
+        let inventory = landed_inventory(minimax_h3::FL2VA_COMFY);
+        let checkpoint = checkpoint(&inventory);
+        let released_cuda =
+            released_h3_private_qwen_loader_memory_authority(H3PrivateQwenLoaderMemoryRoute::Cuda)
+                .unwrap();
+        let released_cpu =
+            released_h3_private_qwen_loader_memory_authority(H3PrivateQwenLoaderMemoryRoute::Cpu)
+                .unwrap();
+        assert_eq!(
+            checkpoint.qwen,
+            H3QwenCheckpointMemoryFacts {
+                source_parameter_bytes: released_cuda.source_parameter_bytes,
+                cuda: H3QwenResidencyFacts {
+                    host_resident_parameter_bytes: released_cuda.host_resident_parameter_bytes,
+                    device_resident_parameter_bytes: released_cuda.device_resident_parameter_bytes,
+                },
+                cpu: H3QwenResidencyFacts {
+                    host_resident_parameter_bytes: released_cpu.host_resident_parameter_bytes,
+                    device_resident_parameter_bytes: released_cpu.device_resident_parameter_bytes,
+                },
+            }
+        );
+        assert_eq!(
+            released_cuda.source_parameter_bytes,
+            released_cpu.source_parameter_bytes
+        );
+
+        let runtime = qualified_runtime();
+        let device = cuda(24 * GIB);
+        let (task, shape) = prepared(minimax_h3::FL2VA_COMFY, 124);
+        let cuda_plan = plan_h3_admission(
+            task,
+            shape,
+            &inventory,
+            &checkpoint,
+            Some(&runtime),
+            std::slice::from_ref(&device),
+            H3HostMemory {
+                total_bytes: 160 * GIB,
+                available_bytes: 160 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            cuda_plan.qwen_placement,
+            H3QwenPlacement::AssignedGpuThenDrop
+        );
+        let mut cuda_config = private_engine_config();
+        bind_h3_factory_authority(
+            &cuda_plan,
+            &inventory,
+            &checkpoint,
+            &device,
+            &mut cuda_config,
+        )
+        .unwrap();
+        validate_h3_private_qwen_loader_memory_authority(
+            cuda_config.h3_factory_authority.as_ref().unwrap(),
+            H3PrivateQwenLoaderMemoryRoute::Cuda,
+        )
+        .unwrap();
+
+        let cpu_checkpoint = compact_cpu_route_checkpoint(&inventory);
+        let cpu_runtime = compact_cpu_route_runtime();
+        let cpu_device = cuda(512 * MIB);
+        let (task, shape) = prepared(minimax_h3::FL2VA_COMFY, 124);
+        let cpu_plan = plan_h3_admission(
+            task,
+            shape,
+            &inventory,
+            &cpu_checkpoint,
+            Some(&cpu_runtime),
+            std::slice::from_ref(&cpu_device),
+            H3HostMemory {
+                total_bytes: 160 * GIB,
+                available_bytes: 160 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(cpu_plan.qwen_placement, H3QwenPlacement::HostCpuThenDrop);
+        assert_eq!(
+            cpu_plan.memory.qwen_output_transfer_device_bytes,
+            mold_inference::released_h3_private_qwen_output_tensor_bytes(
+                cpu_plan.shape.rows.qwen_output_text_rows
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            cpu_plan.memory.qwen_phase_vram_bytes,
+            cpu_runtime.fixed_vram_bytes
+                + qwen_output_tensor_bytes(cpu_plan.shape.rows.qwen_output_text_rows).unwrap()
+        );
+        let mut cpu_config = private_engine_config();
+        bind_h3_factory_authority(
+            &cpu_plan,
+            &inventory,
+            &cpu_checkpoint,
+            &cpu_device,
+            &mut cpu_config,
+        )
+        .unwrap();
+        validate_h3_private_qwen_loader_memory_authority(
+            cpu_config.h3_factory_authority.as_ref().unwrap(),
+            H3PrivateQwenLoaderMemoryRoute::Cpu,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn private_qwen_bridge_rejects_undercharge_and_post_plan_mismatch() {
+        use mold_inference::{
+            validate_h3_private_qwen_loader_memory_authority, H3PrivateQwenLoaderMemoryRoute,
+        };
+
+        let inventory = landed_inventory(minimax_h3::FL2VA_COMFY);
+        let runtime = qualified_runtime();
+        let device = cuda(24 * GIB);
+        let (task, shape) = prepared(minimax_h3::FL2VA_COMFY, 124);
+
+        let mut source_undercharge = checkpoint(&inventory);
+        source_undercharge.qwen.source_parameter_bytes -= 1;
+        let plan = plan_h3_admission(
+            task,
+            shape.clone(),
+            &inventory,
+            &source_undercharge,
+            Some(&runtime),
+            std::slice::from_ref(&device),
+            H3HostMemory {
+                total_bytes: 160 * GIB,
+                available_bytes: 160 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap();
+        let mut source_undercharge_config = private_engine_config();
+        bind_h3_factory_authority(
+            &plan,
+            &inventory,
+            &source_undercharge,
+            &device,
+            &mut source_undercharge_config,
+        )
+        .unwrap();
+        validate_h3_private_qwen_loader_memory_authority(
+            source_undercharge_config
+                .h3_factory_authority
+                .as_ref()
+                .unwrap(),
+            H3PrivateQwenLoaderMemoryRoute::Cuda,
+        )
+        .unwrap_err();
+
+        let exact = checkpoint(&inventory);
+        let plan = plan_h3_admission(
+            task,
+            shape,
+            &inventory,
+            &exact,
+            Some(&runtime),
+            std::slice::from_ref(&device),
+            H3HostMemory {
+                total_bytes: 160 * GIB,
+                available_bytes: 160 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap();
+        let mut changed_after_plan = exact.clone();
+        changed_after_plan.qwen.cuda.host_resident_parameter_bytes -= 1;
+        let error = bind_h3_factory_authority(
+            &plan,
+            &inventory,
+            &changed_after_plan,
+            &device,
+            &mut private_engine_config(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, H3AdmissionError::InvalidRuntimeFacts(_)));
+
+        let mut cpu_undercharge = compact_cpu_route_checkpoint(&inventory);
+        cpu_undercharge.qwen.cpu.host_resident_parameter_bytes -= 1;
+        let cpu_runtime = compact_cpu_route_runtime();
+        let cpu_device = cuda(512 * MIB);
+        let (task, shape) = prepared(minimax_h3::FL2VA_COMFY, 124);
+        let cpu_plan = plan_h3_admission(
+            task,
+            shape,
+            &inventory,
+            &cpu_undercharge,
+            Some(&cpu_runtime),
+            std::slice::from_ref(&cpu_device),
+            H3HostMemory {
+                total_bytes: 160 * GIB,
+                available_bytes: 160 * GIB,
+            },
+            H3AdmissionPolicy::default(),
+        )
+        .unwrap();
+        let mut cpu_undercharge_config = private_engine_config();
+        bind_h3_factory_authority(
+            &cpu_plan,
+            &inventory,
+            &cpu_undercharge,
+            &cpu_device,
+            &mut cpu_undercharge_config,
+        )
+        .unwrap();
+        validate_h3_private_qwen_loader_memory_authority(
+            cpu_undercharge_config
+                .h3_factory_authority
+                .as_ref()
+                .unwrap(),
+            H3PrivateQwenLoaderMemoryRoute::Cpu,
+        )
+        .unwrap_err();
     }
 
     #[test]
