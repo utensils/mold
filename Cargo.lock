@@ -3137,9 +3137,14 @@ name = "mold-ai-candle"
 version = "0.21.0"
 dependencies = [
  "candle-core",
+ "candle-flash-attn",
  "candle-nn",
  "candle-transformers",
  "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokenizers 0.21.4",
  "tracing",
 ]
 

@@ -24,11 +24,16 @@ import {
   type HostEntry,
 } from "../lib/hostRegistry";
 import {
+  hostCapabilities,
   hostDevices,
   hostModels,
   hostQueue,
   hostStatus,
 } from "../components/machines/hostClient";
+import {
+  filterRestrictedModels,
+  modelAccessRestrictionFor,
+} from "@studio/lib/modelAccess";
 import type { DeviceInfo } from "@studio/api/devices";
 import { ApiError, type ApiTarget } from "@studio/api/client";
 import { predictedCompletionUnixMs } from "@studio/api/queuePlan";
@@ -38,6 +43,7 @@ import {
   previewChainPlacement,
   previewGenerationPlacement,
   previewRequestForSiblingFanout,
+  requiresAuthoritativePlacement,
   type GenerationPlacementPreview,
   type PlacementMissingComponent,
 } from "@studio/api/generationPlacement";
@@ -60,6 +66,7 @@ import type {
   GpuInfo,
   GpuWorkerStatus,
   ModelInfoExtended,
+  ServerCapabilities,
   ServerStatus,
 } from "../types";
 
@@ -170,6 +177,7 @@ const POLL_INTERVAL_MS = 8000;
 const entries = ref<HostEntry[]>([]);
 const telemetry = ref<Record<string, HostTelemetry>>({});
 const modelsByHost = ref<ModelsByHost>({});
+const capabilitiesByHost = ref<Record<string, ServerCapabilities>>({});
 const settledHostIds = ref<string[]>([]);
 /** Hosts whose `/api/models` actually came back. A blipped host keeps its last
  * good list, but one that has never answered is unknown, not empty. */
@@ -237,10 +245,36 @@ const readyHostIds = computed(() =>
   hosts.value.filter((h) => h.status === "ready").map((h) => h.id),
 );
 
+function accessibleModelsOn(hostId: string): ModelInfoExtended[] {
+  return filterRestrictedModels(
+    modelsByHost.value[hostId] ?? [],
+    capabilitiesByHost.value[hostId],
+  );
+}
+
+function accessRestrictionForHost(hostId: string, model: string) {
+  const entry = modelsByHost.value[hostId]?.find(
+    (candidate) => candidate.name === model,
+  );
+  return modelAccessRestrictionFor(capabilitiesByHost.value[hostId], {
+    model,
+    family: entry?.family,
+  });
+}
+
+const accessibleModelsByHost = computed<ModelsByHost>(() =>
+  Object.fromEntries(
+    Object.keys(modelsByHost.value).map((hostId) => [
+      hostId,
+      accessibleModelsOn(hostId),
+    ]),
+  ),
+);
+
 const targetModels = computed<ModelInfoExtended[]>(() => {
   const sel = targetId.value;
   if (sel !== AUTO_TARGET_ID && sel !== CAPABLE_TARGET_ID) {
-    return modelsByHost.value[sel] ?? [];
+    return accessibleModelsOn(sel);
   }
   // Auto / Most capable can land anywhere, so the picker offers the union.
   // Before the first poll resolves nothing is "ready" yet — fall back to every
@@ -248,7 +282,7 @@ const targetModels = computed<ModelInfoExtended[]>(() => {
   const ids = readyHostIds.value.length
     ? readyHostIds.value
     : hosts.value.map((h) => h.id);
-  return unionModels(modelsByHost.value, ids);
+  return unionModels(accessibleModelsByHost.value, ids);
 });
 
 /** Every model any reachable machine holds — the ⌘K palette's search corpus.
@@ -263,7 +297,9 @@ const installedModels = computed<ModelInfoExtended[]>(() => {
   const ids = readyHostIds.value.length
     ? readyHostIds.value
     : hosts.value.filter((h) => h.status !== "error").map((h) => h.id);
-  return unionModels(modelsByHost.value, ids).filter((m) => m.downloaded);
+  return unionModels(accessibleModelsByHost.value, ids).filter(
+    (m) => m.downloaded,
+  );
 });
 
 function gpuFrom(
@@ -328,12 +364,14 @@ function gpuFromStatus(
 async function pollHost(entry: HostEntry): Promise<void> {
   const generation = (pollGenerations.get(entry.id) ?? 0) + 1;
   pollGenerations.set(entry.id, generation);
-  const [status, models, devices, queue] = await Promise.allSettled([
-    hostStatus(entry),
-    hostModels(entry),
-    hostDevices(entry),
-    hostQueue(entry),
-  ]);
+  const [status, models, devices, queue, capabilities] =
+    await Promise.allSettled([
+      hostStatus(entry),
+      hostModels(entry),
+      hostDevices(entry),
+      hostQueue(entry),
+      hostCapabilities(entry),
+    ]);
   const current = entries.value.find((candidate) => candidate.id === entry.id);
   if (
     pollGenerations.get(entry.id) !== generation ||
@@ -392,6 +430,19 @@ async function pollHost(entry: HostEntry): Promise<void> {
     // Keep the last good list for a host that blipped; only seed an empty one.
     modelsByHost.value = { ...modelsByHost.value, [entry.id]: [] };
   }
+  if (capabilities.status === "fulfilled") {
+    const previous = capabilitiesByHost.value[entry.id];
+    if (
+      JSON.stringify(previous?.model_access ?? null) !==
+      JSON.stringify(capabilities.value.model_access ?? null)
+    ) {
+      routingAuthorityGeneration += 1;
+    }
+    capabilitiesByHost.value = {
+      ...capabilitiesByHost.value,
+      [entry.id]: capabilities.value,
+    };
+  }
   if (!settledHostIds.value.includes(entry.id)) {
     settledHostIds.value = [...settledHostIds.value, entry.id];
   }
@@ -443,7 +494,7 @@ function setTarget(id: string): void {
 
 /** Hosts that hold `model` downloaded — the model-aware routing input. */
 function hostsForModel(model: string | null): string[] {
-  return model ? hostIdsForModel(modelsByHost.value, model) : [];
+  return model ? hostIdsForModel(accessibleModelsByHost.value, model) : [];
 }
 
 function inventoryKnown(hostId: string): boolean {
@@ -451,12 +502,25 @@ function inventoryKnown(hostId: string): boolean {
 }
 
 function resolve(model: string | null): HostRoute | null {
-  return resolveRoute(hosts.value, rawTargetId.value, hostsForModel(model));
+  const selection = targetId.value;
+  if (
+    model &&
+    selection !== AUTO_TARGET_ID &&
+    selection !== CAPABLE_TARGET_ID &&
+    accessRestrictionForHost(selection, model)
+  ) {
+    return null;
+  }
+  const eligible = model
+    ? hosts.value.filter((host) => !accessRestrictionForHost(host.id, model))
+    : hosts.value;
+  return resolveRoute(eligible, selection, hostsForModel(model));
 }
 
 async function resolveFeasibleWithPreview(
   model: string,
   previewFor: (target: ApiTarget) => Promise<GenerationPlacementPreview>,
+  requireAuthoritative = false,
   authorityRetry = 0,
 ): Promise<FeasibilityResult> {
   readRegistry();
@@ -469,6 +533,25 @@ async function resolveFeasibleWithPreview(
   );
   if (selection !== AUTO_TARGET_ID && selection !== CAPABLE_TARGET_ID) {
     candidates = candidates.filter((candidate) => candidate.id === selection);
+  }
+  const restricted = candidates.flatMap((candidate) => {
+    const restriction = accessRestrictionForHost(candidate.id, model);
+    return restriction
+      ? [
+          {
+            hostId: candidate.id,
+            label: candidate.label,
+            reason: restriction.message,
+            missingComponents: [],
+          },
+        ]
+      : [];
+  });
+  candidates = candidates.filter(
+    (candidate) => !accessRestrictionForHost(candidate.id, model),
+  );
+  if (candidates.length === 0 && restricted.length > 0) {
+    return { kind: "infeasible", perHost: restricted };
   }
   const probes = await Promise.all(
     candidates.map(async (candidate) => {
@@ -519,7 +602,12 @@ async function resolveFeasibleWithPreview(
   readTarget();
   if (routingAuthorityGeneration !== authorityGeneration) {
     if (authorityRetry === 0) {
-      return resolveFeasibleWithPreview(model, previewFor, 1);
+      return resolveFeasibleWithPreview(
+        model,
+        previewFor,
+        requireAuthoritative,
+        1,
+      );
     }
     return {
       kind: "transient",
@@ -576,7 +664,7 @@ async function resolveFeasibleWithPreview(
       unsupportedIds.includes(candidate.id) &&
       (candidate.id === ORIGIN_HOST_ID || candidate.status === "ready"),
   );
-  if (legacy.length > 0) {
+  if (!requireAuthoritative && legacy.length > 0) {
     const originRoutable = legacy.map((host) =>
       host.id === ORIGIN_HOST_ID ? { ...host, status: "ready" as const } : host,
     );
@@ -621,18 +709,25 @@ async function resolveFeasibleWithPreview(
     ];
   });
   const unreachable = probes
-    .filter(
-      (probe) =>
-        !probe.legacyUnsupported &&
+    .filter((probe) => {
+      const classification = classifyPlacementPreview(probe.preview);
+      return (
+        (requireAuthoritative || !probe.legacyUnsupported) &&
         (!probe.preview ||
-          classifyPlacementPreview(probe.preview) === "invalid"),
-    )
+          classification === "invalid" ||
+          (requireAuthoritative && classification === "unsupported"))
+      );
+    })
     .map((probe) => ({
       hostId: probe.candidate.id,
       label: probe.candidate.label,
       error:
-        probe.error ??
-        "returned an invalid authoritative placement-preview response",
+        requireAuthoritative &&
+        (probe.legacyUnsupported ||
+          classifyPlacementPreview(probe.preview) === "unsupported")
+          ? "does not provide the authoritative placement preview required for reference media"
+          : (probe.error ??
+            "returned an invalid authoritative placement-preview response"),
     }));
   if (transient.length > 0) {
     return {
@@ -673,14 +768,19 @@ async function resolveFeasible(
   request: GenerateRequestWire,
   copies = 1,
 ): Promise<FeasibilityResult> {
-  return resolveFeasibleWithPreview(request.model, (target) =>
-    previewGenerationPlacement(
-      target,
-      previewRequestForSiblingFanout(
-        request as unknown as Record<string, unknown>,
+  return resolveFeasibleWithPreview(
+    request.model,
+    (target) =>
+      previewGenerationPlacement(
+        target,
+        previewRequestForSiblingFanout(
+          request as unknown as Record<string, unknown>,
+          copies,
+        ),
         copies,
       ),
-      copies,
+    requiresAuthoritativePlacement(
+      request as unknown as Record<string, unknown>,
     ),
   );
 }
@@ -703,7 +803,9 @@ async function resolveFeasibleChain(
 
 async function revalidateFeasibleWithPreview(
   route: HostRoute,
+  model: string,
   previewFor: (target: ApiTarget) => Promise<GenerationPlacementPreview>,
+  requireAuthoritative = false,
   authorityRetry = 0,
 ): Promise<FeasibilityResult> {
   readRegistry();
@@ -711,6 +813,20 @@ async function revalidateFeasibleWithPreview(
   const authorityGeneration = routingAuthorityGeneration;
   const capturedTargetPolicyGeneration = targetPolicyGeneration;
   const captured = hosts.value.find((entry) => entry.id === route.hostId);
+  const restriction = accessRestrictionForHost(route.hostId, model);
+  if (restriction) {
+    return {
+      kind: "infeasible",
+      perHost: [
+        {
+          hostId: route.hostId,
+          label: route.label,
+          reason: restriction.message,
+          missingComponents: [],
+        },
+      ],
+    };
+  }
   if (
     !captured ||
     captured.url !== route.target.baseUrl ||
@@ -758,7 +874,13 @@ async function revalidateFeasibleWithPreview(
   }
   if (routingAuthorityGeneration !== authorityGeneration) {
     if (authorityRetry === 0) {
-      return revalidateFeasibleWithPreview(route, previewFor, 1);
+      return revalidateFeasibleWithPreview(
+        route,
+        model,
+        previewFor,
+        requireAuthoritative,
+        1,
+      );
     }
     return { kind: "transient", perHost: [] };
   }
@@ -812,6 +934,19 @@ async function revalidateFeasibleWithPreview(
       ],
     };
   }
+  if (classification === "unsupported" && requireAuthoritative) {
+    return {
+      kind: "unreachable",
+      perHost: [
+        {
+          hostId: route.hostId,
+          label: route.label,
+          error:
+            "does not provide the authoritative placement preview required for reference media",
+        },
+      ],
+    };
+  }
   return {
     kind: "route",
     route: {
@@ -828,14 +963,20 @@ async function revalidateFeasible(
   request: GenerateRequestWire,
   copies = 1,
 ): Promise<FeasibilityResult> {
-  return revalidateFeasibleWithPreview(route, (target) =>
-    previewGenerationPlacement(
-      target,
-      previewRequestForSiblingFanout(
-        request as unknown as Record<string, unknown>,
+  return revalidateFeasibleWithPreview(
+    route,
+    request.model,
+    (target) =>
+      previewGenerationPlacement(
+        target,
+        previewRequestForSiblingFanout(
+          request as unknown as Record<string, unknown>,
+          copies,
+        ),
         copies,
       ),
-      copies,
+    requiresAuthoritativePlacement(
+      request as unknown as Record<string, unknown>,
     ),
   );
 }
@@ -845,7 +986,7 @@ async function revalidateFeasibleChain(
   request: ChainRequestWire,
   copies = 1,
 ): Promise<FeasibilityResult> {
-  return revalidateFeasibleWithPreview(route, (target) =>
+  return revalidateFeasibleWithPreview(route, request.model, (target) =>
     previewChainPlacement(
       target,
       previewRequestForSiblingFanout(
@@ -891,6 +1032,7 @@ export const __testing__ = {
     entries.value = [];
     telemetry.value = {};
     modelsByHost.value = {};
+    capabilitiesByHost.value = {};
     settledHostIds.value = [];
     inventoryHostIds.value = [];
     modelsSettled.value = false;

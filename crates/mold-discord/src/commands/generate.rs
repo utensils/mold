@@ -88,6 +88,13 @@ fn defaults_from_manifest(
             &manifest.family,
         ),
         frame_step: mold_core::validation::frame_step_for_family(&manifest.family),
+        frame_offset: mold_core::validation::frame_offset_for_family(&manifest.family),
+        // Same per-model grid `/api/models` would advertise, so the
+        // cold-cache fallback fits sources on the checkpoint's real grid.
+        dimension_alignment: Some(mold_core::dimension_alignment_for_model(
+            &manifest.name,
+            Some(&manifest.family),
+        )),
         ..Default::default()
     }
 }
@@ -366,6 +373,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         scheduler: None,
         cfg_plus: None,
         edit_images: None,
+        references: None,
         source_image: params.source_image,
         source_image_name: None,
         strength: params.strength.unwrap_or(0.75),
@@ -475,12 +483,15 @@ fn validate_inline_media_lengths(sizes: impl IntoIterator<Item = u64>) -> Result
 /// width/height when the user didn't supply explicit values — otherwise the
 /// server would `resize_exact` a landscape photo into a square default.
 /// Fits the source into the model's default canvas via the shared
-/// aspect-preserving, 16px-aligned helper used by the CLI and server.
+/// aspect-preserving helper used by the CLI and server, on the grid the
+/// server advertises for the model (`dimension_alignment` — 32 for
+/// `wan22-ti2v-5b`, 16 elsewhere; older servers omit it and keep 16).
 fn fit_attachment_dims(w: u32, h: u32, defaults: Option<&mold_core::ModelDefaults>) -> (u32, u32) {
     let (model_w, model_h) = defaults
         .map(|d| (d.default_width, d.default_height))
         .unwrap_or((1024, 1024));
-    mold_core::fit_to_model_dimensions(w, h, model_w, model_h)
+    let align = defaults.and_then(|d| d.dimension_alignment).unwrap_or(16);
+    mold_core::fit_to_model_dimensions_aligned(w, h, model_w, model_h, align)
 }
 
 /// Download an attachment and sanity-check that it looks like a PNG or JPEG
@@ -1347,6 +1358,61 @@ mod tests {
         // Output always lands on the 16px grid.
         let (w, h) = fit_attachment_dims(777, 513, Some(&d));
         assert_eq!((w % 16, h % 16), (0, 0));
+    }
+
+    /// The bot fits on the grid `/api/models` advertises per model:
+    /// `wan22-ti2v-5b` reports 32, so its I2V sources must land on /32
+    /// instead of the family-wide /16 that queued canvases the engine then
+    /// rejected after a 10 GB load.
+    #[test]
+    fn fit_attachment_dims_honors_advertised_32px_grid() {
+        // 1617x1000 into a 1280x704 canvas is height-limited:
+        // h=704, w=704*1.617=1138.4 — which floors differently per grid.
+        let five_b = mold_core::ModelDefaults {
+            default_width: 1280,
+            default_height: 704,
+            dimension_alignment: Some(32),
+            ..defaults_1024()
+        };
+        assert_eq!(fit_attachment_dims(1617, 1000, Some(&five_b)), (1120, 704));
+
+        let fourteen_b = mold_core::ModelDefaults {
+            default_width: 1280,
+            default_height: 704,
+            dimension_alignment: Some(16),
+            ..defaults_1024()
+        };
+        assert_eq!(
+            fit_attachment_dims(1617, 1000, Some(&fourteen_b)),
+            (1136, 704)
+        );
+
+        // Older servers omit the field; the compatible 16px grid remains.
+        let unadvertised = mold_core::ModelDefaults {
+            default_width: 1280,
+            default_height: 704,
+            ..defaults_1024()
+        };
+        assert_eq!(
+            fit_attachment_dims(1617, 1000, Some(&unadvertised)),
+            (1136, 704)
+        );
+    }
+
+    /// The cold-cache manifest fallback must carry the same per-model grid
+    /// the live `/api/models` advertisement would.
+    #[test]
+    fn manifest_fallback_defaults_carry_the_models_grid() {
+        let five_b = mold_core::manifest::find_manifest("wan22-ti2v-5b:fp16")
+            .expect("wan22-ti2v-5b:fp16 is a manifest model");
+        assert_eq!(defaults_from_manifest(five_b).dimension_alignment, Some(32));
+
+        let one_three_b = mold_core::manifest::find_manifest("wan21-t2v-1.3b:bf16")
+            .expect("wan21-t2v-1.3b:bf16 is a manifest model");
+        assert_eq!(
+            defaults_from_manifest(one_three_b).dimension_alignment,
+            Some(16)
+        );
     }
 
     // --- autocomplete ranking ---

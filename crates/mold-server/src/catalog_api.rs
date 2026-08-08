@@ -5,11 +5,39 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
 
+fn model_activation_response(error: mold_core::ModelActivationError) -> axum::response::Response {
+    crate::routes::ApiError::model_activation(error).into_response()
+}
+
+fn repair_enqueue_error(error: crate::downloads::EnqueueError) -> crate::routes::ApiError {
+    match error {
+        crate::downloads::EnqueueError::ModelActivation(error) => {
+            crate::routes::ApiError::model_activation(error)
+        }
+        other => crate::routes::ApiError::internal_with_status(
+            other.to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+    }
+}
+
+fn sidecar_activation_available(
+    models_dir: &std::path::Path,
+    sidecar_dir: &std::path::Path,
+    sidecar: &mold_catalog::sidecar::CatalogSidecar,
+) -> bool {
+    mold_catalog::sidecar::require_sidecar_artifact_activation(models_dir, sidecar_dir, sidecar)
+        .is_ok()
+}
+
 pub async fn get_catalog_entry(
     State(state): State<crate::state::AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    if let Err(error) = mold_core::require_model_activation(&id, None) {
+        return model_activation_response(error);
+    }
     let forwarded = ForwardedCatalogCredentials::from_headers(&headers);
     let cfg_guard = state.config.read().await;
     let models_dir = cfg_guard.resolved_models_dir();
@@ -42,6 +70,10 @@ pub async fn get_catalog_entry(
         )
             .into_response();
     };
+
+    if let Err(error) = mold_catalog::entry::require_catalog_entry_activation(&entry) {
+        return model_activation_response(error);
+    }
 
     Json(live_entry_to_wire(&entry, &models_dir)).into_response()
 }
@@ -215,12 +247,20 @@ fn rendered_primary_recipe_dest(
 pub(crate) async fn enqueue_catalog_primary_repair(
     state: &crate::state::AppState,
     id: &str,
-) -> Result<Option<String>, (StatusCode, String)> {
+) -> Result<Option<String>, crate::routes::ApiError> {
+    mold_core::require_model_activation(id, None)
+        .map_err(crate::routes::ApiError::model_activation)?;
     let models_dir = state.config.read().await.resolved_models_dir();
     if let Some(version_id) = id.strip_prefix("cv:") {
         let sc_path = mold_catalog::sidecar::civitai_sidecar_path(&models_dir, id);
         if let Ok(sidecar) = mold_catalog::sidecar::read_sidecar(&sc_path) {
             if let Some(parent) = sc_path.parent() {
+                mold_catalog::sidecar::require_sidecar_artifact_activation(
+                    &models_dir,
+                    parent,
+                    &sidecar,
+                )
+                .map_err(crate::routes::ApiError::model_activation)?;
                 if mold_catalog::sidecar::primary_path_if_present(parent, &sidecar).is_some() {
                     return Ok(None);
                 }
@@ -235,20 +275,27 @@ pub(crate) async fn enqueue_catalog_primary_repair(
         )
         .await
         .map_err(|e| match e {
-            mold_catalog::live::LiveSearchError::Upstream { status: 404, .. } => (
-                StatusCode::NOT_FOUND,
-                format!("{id}: upstream returned 404"),
+            mold_catalog::live::LiveSearchError::Upstream { status: 404, .. } => {
+                crate::routes::ApiError::internal_with_status(
+                    format!("{id}: upstream returned 404"),
+                    StatusCode::NOT_FOUND,
+                )
+            }
+            other => crate::routes::ApiError::internal_with_status(
+                format!("upstream: {other}"),
+                StatusCode::BAD_GATEWAY,
             ),
-            other => (StatusCode::BAD_GATEWAY, format!("upstream: {other}")),
         })?;
+        mold_catalog::entry::require_catalog_entry_activation(&entry)
+            .map_err(crate::routes::ApiError::model_activation)?;
 
         let auth = match entry.download_recipe.needs_token {
             Some(mold_catalog::entry::TokenKind::Civitai) => civitai_token
                 .map(mold_core::download::RecipeAuth::Bearer)
                 .ok_or_else(|| {
-                    (
-                        StatusCode::UNAUTHORIZED,
+                    crate::routes::ApiError::internal_with_status(
                         format!("{id} requires a Civitai token saved in Settings or CIVITAI_TOKEN"),
+                        StatusCode::UNAUTHORIZED,
                     )
                 })?,
             _ => mold_core::download::RecipeAuth::None,
@@ -293,7 +340,7 @@ pub(crate) async fn enqueue_catalog_primary_repair(
             .downloads
             .enqueue_recipe_in_group(payload, id)
             .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            .map_err(repair_enqueue_error)?;
         return Ok(Some(job_id));
     }
 
@@ -305,12 +352,19 @@ pub(crate) async fn enqueue_catalog_primary_repair(
         )
         .await
         .map_err(|e| match e {
-            mold_catalog::live::LiveSearchError::Upstream { status: 404, .. } => (
-                StatusCode::NOT_FOUND,
-                format!("{id}: upstream returned 404"),
+            mold_catalog::live::LiveSearchError::Upstream { status: 404, .. } => {
+                crate::routes::ApiError::internal_with_status(
+                    format!("{id}: upstream returned 404"),
+                    StatusCode::NOT_FOUND,
+                )
+            }
+            other => crate::routes::ApiError::internal_with_status(
+                format!("upstream: {other}"),
+                StatusCode::BAD_GATEWAY,
             ),
-            other => (StatusCode::BAD_GATEWAY, format!("upstream: {other}")),
         })?;
+        mold_catalog::entry::require_catalog_entry_activation(&entry)
+            .map_err(crate::routes::ApiError::model_activation)?;
         let model = match mold_core::manifest::find_manifest(&entry.source_id) {
             Some(m) => m.name.clone(),
             None => entry.source_id.clone(),
@@ -319,7 +373,7 @@ pub(crate) async fn enqueue_catalog_primary_repair(
             .downloads
             .enqueue_in_group(model, id)
             .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            .map_err(repair_enqueue_error)?;
         return Ok(Some(job_id));
     }
 
@@ -330,10 +384,8 @@ pub async fn list_families(State(_state): State<crate::state::AppState>) -> impl
     // Live search hits one family per request, so the sidebar just gets
     // the static taxonomy. No per-family counts — that line is gone from
     // the SPA too.
-    use mold_catalog::families::{Family, ALL_FAMILIES};
-    let merged: Vec<serde_json::Value> = ALL_FAMILIES
-        .iter()
-        .map(|f: &Family| serde_json::json!({ "family": f.as_str() }))
+    let merged: Vec<serde_json::Value> = mold_catalog::families::active_families()
+        .map(|family| serde_json::json!({ "family": family.as_str() }))
         .collect();
     Json(serde_json::json!({ "families": merged })).into_response()
 }
@@ -416,6 +468,9 @@ pub async fn post_catalog_download(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    if let Err(error) = mold_core::require_model_activation(&id, None) {
+        return model_activation_response(error);
+    }
     let forwarded = ForwardedCatalogCredentials::from_headers(&headers);
     // Live single-id lookup — replaces the bulk-scrape DB read.
     if let Some(companion_name) = mold_catalog::live::companion_name_for_catalog_id(&id) {
@@ -468,6 +523,10 @@ pub async fn post_catalog_download(
         )
             .into_response();
     };
+
+    if let Err(error) = mold_catalog::entry::require_catalog_entry_activation(&entry) {
+        return model_activation_response(error);
+    }
 
     if !entry_download_supported(&entry) {
         return (
@@ -717,6 +776,22 @@ pub async fn live_search_catalog(
         },
         None => None,
     };
+    if let Some(family) = family {
+        if let Err(error) =
+            mold_core::require_model_activation(family.as_str(), Some(family.as_str()))
+        {
+            return model_activation_response(error);
+        }
+    }
+    if let Some(query) =
+        q.q.as_deref()
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+    {
+        if let Err(error) = mold_core::require_model_activation(query, None) {
+            return model_activation_response(error);
+        }
+    }
     let kind = match q.kind.as_deref().filter(|s| !s.is_empty()) {
         Some(s) => match parse_kind(s) {
             Some(k) => Some(k),
@@ -794,6 +869,7 @@ pub async fn live_search_catalog(
     let wire: Vec<serde_json::Value> = result
         .entries
         .iter()
+        .filter(|entry| mold_catalog::entry::require_catalog_entry_activation(entry).is_ok())
         .map(|e| live_entry_to_wire(e, &models_dir))
         .collect();
     Json(serde_json::json!({
@@ -837,6 +913,9 @@ pub async fn list_installed_catalog(
     let walked = mold_catalog::sidecar::walk_sidecars(&models_dir);
     let mut wire = Vec::with_capacity(walked.len());
     for (dir, sidecar) in walked {
+        if !sidecar_activation_available(&models_dir, &dir, &sidecar) {
+            continue;
+        }
         if let Some(k) = kind_filter.as_deref() {
             if sidecar.kind != k {
                 continue;
@@ -907,6 +986,9 @@ pub async fn list_loras(
     let mut loras = mold_catalog::sidecar::walk_sidecars(&models_dir)
         .into_iter()
         .filter_map(|(dir, sidecar)| {
+            if !sidecar_activation_available(&models_dir, &dir, &sidecar) {
+                return None;
+            }
             if sidecar.kind != "lora" {
                 return None;
             }
@@ -938,6 +1020,9 @@ fn compatible_lora_families(family: &str) -> Vec<String> {
 }
 
 async fn lora_family_for_model(state: &crate::state::AppState, model: &str) -> Option<String> {
+    if mold_core::require_model_activation(model, None).is_err() {
+        return None;
+    }
     let canonical = mold_core::manifest::resolve_model_name(model);
     if let Some(manifest) = mold_core::manifest::find_manifest(&canonical) {
         return Some(manifest.family.clone());
@@ -966,8 +1051,15 @@ async fn lora_family_for_model(state: &crate::state::AppState, model: &str) -> O
     drop(config);
 
     if model.starts_with("cv:") || model.starts_with("hf:") {
-        for (_, sidecar) in mold_catalog::sidecar::walk_sidecars(&models_dir) {
-            if sidecar.id == model {
+        for (sidecar_dir, sidecar) in mold_catalog::sidecar::walk_sidecars(&models_dir) {
+            if sidecar.id == model
+                && mold_catalog::sidecar::require_sidecar_artifact_activation(
+                    &models_dir,
+                    &sidecar_dir,
+                    &sidecar,
+                )
+                .is_ok()
+            {
                 return Some(sidecar.family);
             }
         }
@@ -1030,13 +1122,18 @@ fn live_entry_to_wire(
         let sc_path = mold_catalog::sidecar::civitai_sidecar_path(models_dir, entry.id.as_str());
         match mold_catalog::sidecar::read_sidecar(&sc_path) {
             Ok(sidecar) => match sc_path.parent() {
-                Some(parent) => {
+                Some(parent)
+                    if mold_catalog::sidecar::require_sidecar_artifact_activation(
+                        models_dir, parent, &sidecar,
+                    )
+                    .is_ok() =>
+                {
                     match mold_catalog::sidecar::primary_path_if_present(parent, &sidecar) {
                         Some(abs) => (true, Some(abs.to_string_lossy().into_owned())),
                         None => (false, None),
                     }
                 }
-                None => (false, None),
+                _ => (false, None),
             },
             Err(_) => (false, None),
         }

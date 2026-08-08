@@ -205,10 +205,12 @@ impl ModelConfig {
         let mut paths = Vec::new();
         let singles = [
             &self.transformer,
+            &self.low_noise_transformer,
             &self.vae,
             &self.spatial_upscaler,
             &self.temporal_upscaler,
             &self.distilled_lora,
+            &self.low_noise_distilled_lora,
             &self.t5_encoder,
             &self.clip_encoder,
             &self.t5_tokenizer,
@@ -217,6 +219,7 @@ impl ModelConfig {
             &self.clip_tokenizer_2,
             &self.text_tokenizer,
             &self.decoder,
+            &self.lora,
         ];
         for p in singles.into_iter().flatten() {
             paths.push(p.clone());
@@ -332,6 +335,28 @@ pub struct ModelPaths {
 
 impl ModelPaths {
     const FROZEN_MODEL_PREFIX: &'static str = "\0mold-frozen-chain:";
+
+    /// Every resolved local artifact that can participate in engine creation.
+    /// Policy fences consume this before inspecting or loading any artifact.
+    pub fn all_file_paths(&self) -> Vec<&Path> {
+        let mut paths = vec![self.transformer.as_path(), self.vae.as_path()];
+        paths.extend(self.transformer_shards.iter().map(PathBuf::as_path));
+        paths.extend(self.low_noise_transformer.as_deref());
+        paths.extend(self.spatial_upscaler.as_deref());
+        paths.extend(self.temporal_upscaler.as_deref());
+        paths.extend(self.distilled_lora.as_deref());
+        paths.extend(self.low_noise_distilled_lora.as_deref());
+        paths.extend(self.t5_encoder.as_deref());
+        paths.extend(self.clip_encoder.as_deref());
+        paths.extend(self.t5_tokenizer.as_deref());
+        paths.extend(self.clip_tokenizer.as_deref());
+        paths.extend(self.clip_encoder_2.as_deref());
+        paths.extend(self.clip_tokenizer_2.as_deref());
+        paths.extend(self.text_encoder_files.iter().map(PathBuf::as_path));
+        paths.extend(self.text_tokenizer.as_deref());
+        paths.extend(self.decoder.as_deref());
+        paths
+    }
 
     /// Resolve paths for a model. Checks config, then env vars.
     /// Returns None if transformer and VAE paths can't be resolved.
@@ -1752,6 +1777,15 @@ fn resolved_manifest_paths_exist(
             .text_tokenizer
             .as_ref()
             .is_some_and(|path| path.exists()),
+        // H3 remains contract-only. ModelPaths does not yet carry these
+        // components, so a manifest can never be mistaken for runnable merely
+        // because the legacy transformer/VAE subset exists.
+        ModelComponent::AudioVae
+        | ModelComponent::Processor
+        | ModelComponent::VideoScheduler
+        | ModelComponent::AudioScheduler
+        | ModelComponent::ModelConfig
+        | ModelComponent::TaskConfig => false,
         ModelComponent::Decoder => paths.decoder.as_ref().is_some_and(|path| path.exists()),
         ModelComponent::Upscaler => paths.transformer.exists(),
     })

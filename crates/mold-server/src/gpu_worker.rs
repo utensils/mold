@@ -168,6 +168,14 @@ impl mold_inference::InferenceEngine for PlannedInferenceEngine {
         self.inner.generate(req)
     }
 
+    fn generate_with_reference_bindings(
+        &mut self,
+        req: &mold_core::GenerateRequest,
+        bindings: &[mold_inference::GenerationReferenceBinding],
+    ) -> anyhow::Result<mold_core::GenerateResponse> {
+        self.inner.generate_with_reference_bindings(req, bindings)
+    }
+
     fn model_name(&self) -> &str {
         self.inner.model_name()
     }
@@ -2646,6 +2654,31 @@ fn process_job_with_sink(
         return false;
     }
 
+    // The durable parent owns an attempt-scoped token. Reference hashing runs
+    // on this dedicated worker thread and polls the same token before any
+    // model or CUDA work begins.
+    let batch_cancellation = job
+        .batch_child
+        .as_ref()
+        .map(|child| child.cancellation.clone());
+    let reference_bindings = match crate::reference_uploads::inference_bindings_for_request(
+        &job.request,
+        job.resolved_references.as_ref(),
+        batch_cancellation.as_ref(),
+    ) {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            let err_msg = format!("generation reference binding error: {error:#}");
+            if let Some(ref tx) = job.progress_tx {
+                let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                    message: err_msg.clone(),
+                }));
+            }
+            let _ = job.result_tx.send(Err(err_msg));
+            return false;
+        }
+    };
+
     // Mark the registry entry as running on this specific GPU. The /api/queue
     // listing now shows this row as `state: "running"` with `gpu: <ordinal>`.
     // The V2 coordinator claims the row atomically before transport. Legacy
@@ -2858,14 +2891,6 @@ fn process_job_with_sink(
             .expect("failed to spawn RSS watchdog")
     };
 
-    // The durable parent owns an attempt-scoped token. Installing that exact
-    // token lets cancellation stop expensive inference at family-defined safe
-    // checkpoints instead of merely fencing publication after work completes.
-    let batch_cancellation = job
-        .batch_child
-        .as_ref()
-        .map(|child| child.cancellation.clone());
-
     // Run inference — cache mutex is FREE during this.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ensure_worker_not_poisoned(worker, &model_name)?;
@@ -2873,9 +2898,11 @@ fn process_job_with_sink(
             Some(cancellation) => mold_inference::with_inference_cancellation(
                 &mut *cached_engine.engine,
                 cancellation.clone(),
-                |engine| engine.generate(&job.request),
+                |engine| engine.generate_with_reference_bindings(&job.request, &reference_bindings),
             ),
-            None => cached_engine.engine.generate(&job.request),
+            None => cached_engine
+                .engine
+                .generate_with_reference_bindings(&job.request, &reference_bindings),
         }
     }));
 
@@ -3043,6 +3070,7 @@ fn process_job_with_sink(
                                 mold_inference::upscaler::resolve_upscale_execution_plan(
                                     resolved.clone(),
                                     std::path::Path::new(path),
+                                    Some(&config.resolved_models_dir()),
                                     mold_inference::upscaler::ExactUpscalePlacement::Cpu,
                                 )
                                 .map_err(|error| error.to_string())
@@ -3086,6 +3114,7 @@ fn process_job_with_sink(
                             mold_inference::upscaler::resolve_upscale_execution_plan_from_artifact(
                                 frozen_upscale_plan.model_name.clone(),
                                 frozen_upscale_plan.weights.clone(),
+                                frozen_upscale_plan.artifact_root.clone(),
                                 mold_inference::upscaler::ExactUpscalePlacement::Device {
                                     backend: worker.gpu.backend,
                                     ordinal: worker.gpu.ordinal,
@@ -5379,6 +5408,7 @@ mod tests {
             id: "job-upscale-test".to_string(),
             model: request.model.clone(),
             request,
+            resolved_references: None,
             completion_payload: crate::state::SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -5498,6 +5528,7 @@ mod tests {
         let plan = mold_inference::upscaler::resolve_upscale_execution_plan(
             "real-esrgan-x4plus:fp16",
             &weights,
+            None,
             mold_inference::upscaler::ExactUpscalePlacement::Cpu,
         )
         .unwrap();
@@ -5669,6 +5700,7 @@ mod tests {
                 id: "stale".to_string(),
                 model: request.model.clone(),
                 request,
+                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -6528,6 +6560,7 @@ mod tests {
                 id: id.to_string(),
                 model: request.model.clone(),
                 request,
+                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -6566,6 +6599,7 @@ mod tests {
                             mold_inference::upscaler::resolve_upscale_execution_plan(
                                 "missing-upscaler",
                                 &upscale_weights,
+                                None,
                                 mold_inference::upscaler::ExactUpscalePlacement::Device {
                                     backend: worker.gpu.backend,
                                     ordinal: worker.gpu.ordinal,
@@ -6656,6 +6690,7 @@ mod tests {
                     id: "barrier-generation".to_string(),
                     model: request.model.clone(),
                     request,
+                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -7275,6 +7310,7 @@ mod tests {
                     id: "invalidated".to_string(),
                     model: "test:q4".to_string(),
                     request,
+                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -7817,6 +7853,7 @@ mod tests {
                 GenerationJob {
                     id: "generate".to_string(),
                     request: request.clone(),
+                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -7835,6 +7872,7 @@ mod tests {
                 id: "generate".to_string(),
                 model: "lifecycle".to_string(),
                 request,
+                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -7990,6 +8028,7 @@ mod tests {
                 GenerationJob {
                     id: "placeholder".to_string(),
                     request: request.clone(),
+                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -8012,6 +8051,7 @@ mod tests {
                 id: "buffered-job".to_string(),
                 model: request.model.clone(),
                 request,
+                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: Some(progress_tx),
                 result_tx,
@@ -8076,6 +8116,7 @@ mod tests {
                 GenerationJob {
                     id: "placeholder".to_string(),
                     request: request.clone(),
+                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -8098,6 +8139,7 @@ mod tests {
                     id: "panic-job".to_string(),
                     model: "panic-model".to_string(),
                     request: panic_request,
+                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -8140,6 +8182,7 @@ mod tests {
                 GenerationJob {
                     id: "placeholder-2".to_string(),
                     request: request.clone(),
+                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -8160,6 +8203,7 @@ mod tests {
                     id: "followup".to_string(),
                     model: "panic-model".to_string(),
                     request,
+                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -8517,6 +8561,7 @@ mod tests {
         let err = mold_inference::upscaler::resolve_upscale_execution_plan(
             "real-esrgan-x4plus:fp16",
             &missing_weights,
+            None,
             mold_inference::upscaler::ExactUpscalePlacement::Cpu,
         )
         .expect_err("planning must surface missing weights before admission");
@@ -8572,6 +8617,7 @@ mod tests {
                 GenerationJob {
                     id: "queue-slot".to_string(),
                     request: job.request.clone(),
+                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: dummy_tx,

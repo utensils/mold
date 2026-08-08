@@ -45,7 +45,7 @@ features today?
 | Z-Image         | z-image         | No         | Yes  |
 | Wuerstchen v2   | wuerstchen      | No         | No   |
 | LTX Video       | ltx-video       | No         | No   |
-| Wan Video       | wan             | No         | No   |
+| Wan Video       | wan             | No         | Yes  |
 
 ## Prompt Conditioning
 
@@ -61,6 +61,7 @@ features today?
 | Qwen-Image      | Yes              | No                 |
 | Qwen-Image-Edit | Yes              | No                 |
 | LTX Video       | No               | No                 |
+| Wan Video       | Yes              | No                 |
 
 ## Video Generation
 
@@ -68,15 +69,19 @@ features today?
 | ---------- | ------- | ------- | --------- | -------- | ------ | ------- | ------- | ----------- |
 | LTX Video  | Yes     | Not yet | No        | No       | No     | No      | No      | No          |
 | LTX-2      | Yes     | Yes     | Yes       | Yes      | Yes    | Yes     | Yes     | Yes         |
-| Wan Video  | Yes     | Not yet | No        | No       | No     | No      | No      | No          |
+| Wan Video  | Yes     | Yes     | No        | No       | No     | No      | No      | No          |
 | All others | No      | No      | No        | No       | No     | No      | No      | No          |
 
-LTX Video defaults to APNG (lossless, metadata-rich). LTX-2 defaults to MP4 so
-it can preserve synchronized audio when requested. Both families also support
-GIF, and feature-gated WebP/MP4 outputs where applicable. Use
-`--format apng|gif|webp|mp4`. Frame count must be 8n+1 (9, 17, 25, 33, ...).
-Dimensions must be multiples of 32 — 64 for LTX-2 lip dub, which always renders
-in two stages and takes its frame count and rate from the reference clip.
+LTX Video defaults to APNG (lossless, metadata-rich). LTX-2 and Wan default to
+MP4 — LTX-2 so it can preserve synchronized audio when requested; Wan renders
+video only and has no audio path. All three families also support GIF, and
+feature-gated WebP/MP4 outputs where applicable. Use
+`--format apng|gif|webp|mp4`. Frame grids are per family: LTX Video and LTX-2
+take 8n+1 frame counts (9, 17, 25, 33, ...) with dimensions in multiples of
+32 — 64 for LTX-2 lip dub, which always renders in two stages and takes its
+frame count and rate from the reference clip. Wan takes 4n+1 frame counts
+(49, 53, 81, ...) with dimensions in multiples of 16, except `wan22-ti2v-5b`,
+whose 2.2 VAE requires multiples of 32.
 
 The recommended LTX default today is `ltx-video-0.9.6-distilled:bf16`. The
 `0.9.8` family is available, pulls its spatial upscaler asset, and now runs
@@ -127,13 +132,19 @@ complete workflows.
 
 - ControlNet is currently available only for SD 1.5.
 - LoRA-capable families are `flux`, `flux2`, `ltx2`, `sd15`, `sd3`, `sdxl`,
-  `qwen-image`, `qwen-image-edit`, and `z-image`. Wuerstchen and LTX Video are
-  not wired for LoRA yet.
+  `qwen-image`, `qwen-image-edit`, `wan`, and `z-image`. Wuerstchen and LTX
+  Video are not wired for LoRA yet.
+- Wan adapters cover low-rank pairs and full-weight `.diff`/`.diff_b` deltas:
+  on bf16 safetensors they merge as the weights are read, on GGUF they apply
+  as a parallel branch at full precision. fp8-scaled Wan checkpoints refuse
+  adapter stacks rather than re-round their weights.
 - LTX-2 adds stacked LoRAs plus camera-control presets for the published 19B
   adapters.
 - `--scheduler` applies only to SD 1.5 and SDXL.
 - Negative prompts are meaningful for CFG-based families and ignored by FLUX,
-  Z-Image, and Flux.2 Klein.
+  Z-Image, and Flux.2 Klein. Wan checkpoints were tuned against a specific
+  negative prompt, which mold applies automatically when a request leaves it
+  unset.
 - `qwen-image-edit` is a distinct edit family, not a standard img2img mode.
 - The CLI and API support multiple ordered input images for `qwen-image-edit`;
   the TUI keeps the edit flow to a single source image in v1.

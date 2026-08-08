@@ -12,8 +12,9 @@ the family natively in Rust.
 
 > **Note**: Video output defaults to MP4. Also supports GIF, WebP, and APNG
 > via `--format`. Frame count must be 4n+1 (77, 81, 121, ...) due to the
-> VAE's 4x temporal compression. Wan generation currently targets CUDA;
-> CPU runs are correctness-only.
+> VAE's 4x temporal compression. Width and height must be multiples of 16 —
+> except `wan22-ti2v-5b`, whose 2.2 VAE requires multiples of 32. Wan
+> generation currently targets CUDA; CPU runs are correctness-only.
 
 ## Variants
 
@@ -21,10 +22,13 @@ the family natively in Rust.
 | --------------------- | ----- | ----------------- | -------------------------------------------- |
 | `wan21-t2v-1.3b:bf16` | 30    | ~14.5 GB          | 480p text-to-video; smallest, fastest pull   |
 | `wan22-ti2v-5b:fp16`  | 20    | ~22.8 GB          | 720p24 text- and image-to-video              |
+| `wan22-ti2v-5b:q8`    | 20    | ~18 GB            | Q8_0 5B; 8-12 GB cards at reduced settings   |
 | `wan22-t2v-a14b:q5`   | 4     | ~36 GB            | 480p16 text-to-video, 4-step Lightning tier  |
 | `wan22-t2v-a14b:q8`   | 20    | ~42 GB            | Same weights at Q8_0, no distill             |
+| `wan22-t2v-a14b:q4`   | 4     | ~33 GB            | Q4_K_M Lightning; 12-16 GB needs reduced use |
 | `wan22-i2v-a14b:q5`   | 4     | ~36 GB            | 480p16 image-to-video, 4-step Lightning tier |
 | `wan22-i2v-a14b:q8`   | 20    | ~42 GB            | Same weights at Q8_0, no distill             |
+| `wan22-i2v-a14b:q4`   | 4     | ~33 GB            | Q4_K_M Lightning; 12-16 GB needs reduced use |
 
 Totals include the shared UMT5-XXL encoder (~11.4 GB), tokenizer, and the
 variant's VAE. The encoder is shared across every Wan model under
@@ -71,11 +75,19 @@ it automatically when `--negative` is not given.
 | Property   | `wan21-t2v-1.3b`  | `wan22-ti2v-5b`     | `wan22-*-a14b:q5` | `wan22-*-a14b:q8` |
 | ---------- | ----------------- | ------------------- | ----------------- | ----------------- |
 | Resolution | 832x480 / 480x832 | 1280x704 / 704x1280 | 832x480           | 832x480           |
-| Frames     | 81 @ 16 fps       | 121 @ 24 fps        | 81 @ 16 fps       | 81 @ 16 fps       |
+| Frames     | 81 @ 16 fps       | 121 @ 24 fps        | 53 @ 16 fps       | 33 @ 16 fps       |
 | Steps      | 30                | 20                  | 4                 | 20                |
 | Guidance   | 6.0               | 5.0                 | 1.0 (no CFG pass) | 3.5               |
 | Flow shift | 8.0               | 8.0                 | 5.0               | 5.0               |
 | Sampler    | FlowUniPC (bh2)   | FlowUniPC (bh2)     | FlowUniPC (bh2)   | FlowUniPC (bh2)   |
+
+The A14B frame defaults are the measured 24 GB envelope, not the checkpoint's
+trained 81-frame clip length: on an RTX 4090 the `:q5` pair peaks at
+23,975 MiB rendering 53 frames at 832x480 (81 frames peaked at 23.0 GB and
+then ran out of memory), and the `:q8` pair's ~4.6 GB larger resident expert
+moves its edge to ~33 frames. Larger cards simply pass `--frames 81`.
+Reclaiming 81-frame clips on 24 GB is tracked in
+[#776](https://github.com/utensils/mold/issues/776).
 
 The sampler schedule matches the one lightx2v's Lightning distills were
 trained against (diffusers' flow-UniPC grid), so the 4-step tier reproduces
@@ -87,10 +99,20 @@ its published timesteps exactly. Override the flow shift with
 A14B ships as GGUF. Quantized weights stay quantized in memory and dequantize
 inside the matmul, which is what keeps a 14B expert at ~10.8 GB rather than
 ~28 GB. A LoRA cannot be merged into a weight in that state without
-requantizing it, so on GGUF mold applies adapters as a parallel low-rank
-branch instead — the same arithmetic, applied at full precision, with no load
-cost. On bf16 and fp8-scaled safetensors the adapter is merged as the weights
-are read.
+requantizing it, so on GGUF mold applies adapters as a parallel branch
+instead — low-rank for A/B pairs, dense for full-weight `.diff` deltas — the
+same arithmetic, applied at full precision, with no load cost. On bf16
+safetensors the adapter is merged as the weights are read; fp8-scaled
+checkpoints refuse adapter stacks rather than re-round their weights.
+
+Community adapters that carry `.diff` (full weight delta) and `.diff_b`
+(bias delta) tensors alongside or instead of their low-rank pairs — Kijai's
+Wan 2.1 lightx2v extractions, lightx2v's distill pairs, musubi-tuner-trained
+Civitai LoRAs — load fully: `W' = W + strength·diff`, `b' = b +
+strength·diff_b`, matching ComfyUI. The kohya alpha never rescales a
+full-weight delta (a delta has no rank), and a delta naming a tensor the
+checkpoint does not have still refuses the whole adapter rather than
+applying the part that matches.
 
 `*_fp8_e4m3fn_scaled` safetensors also load: the weights stay 1 byte per
 parameter and dequantize per call against their per-module scale. The `e5m2`

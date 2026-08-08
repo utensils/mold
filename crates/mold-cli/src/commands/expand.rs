@@ -119,7 +119,7 @@ pub(crate) async fn create_expander(
     settings: &ExpandSettings,
     config: &Config,
 ) -> Result<Box<dyn PromptExpander>> {
-    if let Some(api_expander) = settings.create_api_expander() {
+    if let Some(api_expander) = settings.create_api_expander()? {
         return Ok(Box::new(api_expander));
     }
 

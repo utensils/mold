@@ -394,6 +394,7 @@ pub struct GpuJob {
     pub id: String,
     pub model: String,
     pub request: mold_core::GenerateRequest,
+    pub resolved_references: Option<crate::reference_uploads::ResolvedReferenceSet>,
     pub completion_payload: crate::state::SseCompletionPayload,
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::state::SseMessage>>,
     pub result_tx: tokio::sync::oneshot::Sender<Result<crate::state::GenerationJobResult, String>>,

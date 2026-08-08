@@ -86,6 +86,10 @@ pub async fn create_chain_job(
     crate::routes::ensure_generation_available(&state)?;
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
+    {
+        let config = state.config.read().await;
+        crate::routes_chain::require_chain_artifact_activation(&config, &req, None, None)?;
+    }
     crate::routes_chain::validate_chain_build_features(&req)?;
     let authority = crate::routes_chain::resolve_chain_model_authority(&state, &req.model).await?;
     crate::routes_chain::validate_and_normalize_chain_family(&authority.config, &mut req)?;
@@ -315,7 +319,9 @@ pub async fn resume_chain_job(
     let row = chain_jobs::get_job(db, &id)
         .map_err(|e| ApiError::internal(format!("failed to load chain job: {e:#}")))?
         .ok_or_else(|| not_found(&id))?;
-    if read_manifest_optional(&row, &root).is_some_and(|manifest| manifest.ephemeral) {
+    let mut manifest = ChainJobManifest::read_from_dir(&row.job_dir)
+        .map_err(|e| ApiError::internal(format!("failed to read chain manifest: {e:#}")))?;
+    if manifest.ephemeral {
         return Err(conflict(
             CHAIN_JOB_EPHEMERAL,
             "ephemeral chain jobs are internal to legacy generate/chain shims and cannot be resumed",
@@ -335,8 +341,7 @@ pub async fn resume_chain_job(
             CHAIN_JOB_NOT_RESUMABLE,
         )?);
     }
-    let mut manifest = ChainJobManifest::read_from_dir(&row.job_dir)
-        .map_err(|e| ApiError::internal(format!("failed to read chain manifest: {e:#}")))?;
+    require_persisted_chain_model_activation(&state, &row, &manifest).await?;
     crate::chain_job_runner::reset_running_stages_for_retry(
         db,
         &id,
@@ -413,6 +418,12 @@ pub async fn retake_chain_job(
     let db = metadata_db(&state)?;
     let root = jobs_root()?;
     let _guard = handle.lock_job(&id).await;
+    let row = chain_jobs::get_job(db, &id)
+        .map_err(|e| ApiError::internal(format!("failed to load chain job: {e:#}")))?
+        .ok_or_else(|| not_found(&id))?;
+    let manifest = ChainJobManifest::read_from_dir(&row.job_dir)
+        .map_err(|e| ApiError::internal(format!("failed to read chain manifest: {e:#}")))?;
+    require_persisted_chain_model_activation(&state, &row, &manifest).await?;
     let updated = crate::chain_job_runner::apply_retake(db, &root, &id, &req).map_err(|e| {
         let msg = e.to_string();
         if msg.contains(RETAKE_SPLICE_REQUIRES_CUT_OR_FADE) {
@@ -498,6 +509,7 @@ pub async fn amend_chain_job(
         }
         let manifest = ChainJobManifest::read_from_dir(&row.job_dir)
             .map_err(|e| ApiError::internal(format!("failed to read chain manifest: {e:#}")))?;
+        require_persisted_chain_model_activation(&state, &row, &manifest).await?;
         let effective = crate::chain_job_runner::effective_request(&manifest)
             .map_err(|e| ApiError::internal(format!("failed to load chain request: {e:#}")))?;
         let mut candidate = crate::chain_job_runner::amend_candidate_request(&effective, &req);
@@ -1000,6 +1012,28 @@ fn read_manifest_optional(row: &ChainJobRow, _root: &FsPath) -> Option<ChainJobM
     ChainJobManifest::read_from_dir(&row.job_dir).ok()
 }
 
+/// Re-check every persisted source of model identity before an old durable
+/// job becomes schedulable again. Jobs can outlive both the server process and
+/// the policy that admitted them, so the row, request, frozen snapshot,
+/// current config, and built-in manifest are all inputs to this fail-closed
+/// boundary.
+async fn require_persisted_chain_model_activation(
+    state: &AppState,
+    row: &ChainJobRow,
+    manifest: &ChainJobManifest,
+) -> Result<(), ApiError> {
+    mold_core::require_model_activation(&row.model, None).map_err(ApiError::model_activation)?;
+    let effective = crate::chain_job_runner::effective_request(manifest)
+        .map_err(|error| ApiError::internal(format!("failed to load chain request: {error:#}")))?;
+    let config = state.config.read().await;
+    crate::routes_chain::require_chain_artifact_activation(
+        &config,
+        &effective,
+        None,
+        manifest.frozen_model.as_ref(),
+    )
+}
+
 fn sse_event(event: ChainJobEvent) -> sse::Event {
     match serde_json::to_string(&event) {
         Ok(data) => sse::Event::default().event("chain_job").data(data),
@@ -1077,7 +1111,7 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use axum::response::IntoResponse;
-    use mold_core::chain::{ChainStage, TransitionMode};
+    use mold_core::chain::{ChainStage, LoraSpec, TransitionMode};
     use mold_core::GenerateRequest;
     use mold_core::OutputFormat;
     use mold_inference::chain::ChainTail;
@@ -1360,6 +1394,165 @@ mod tests {
         assert_eq!(wire["type"], "chain_job_queued");
         assert_eq!(wire["id"], body.job_id.as_str());
         assert_eq!(wire["stage_count"].as_u64(), Some(row.stage_count as u64));
+    }
+
+    #[tokio::test]
+    async fn create_chain_job_rejects_configured_h3_before_persisting() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        state.config.write().await.models.insert(
+            "private-checkpoint".into(),
+            mold_core::ModelConfig {
+                family: Some("minimax-h3".into()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "private-checkpoint".into();
+
+        let error = with_mold_home(home.path(), || {
+            futures::executor::block_on(create_chain_job(State(state), Json(request)))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        assert!(chain_jobs::list_jobs(db.as_ref().as_ref().unwrap())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(not(feature = "mp4"))]
+    #[tokio::test]
+    async fn create_chain_job_keeps_h3_451_ahead_of_mp4_build_validation() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        state.config.write().await.models.insert(
+            "private-checkpoint".into(),
+            mold_core::ModelConfig {
+                family: Some("minimax-h3".into()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "private-checkpoint".into();
+        request.enable_audio = Some(true);
+
+        let error = with_mold_home(home.path(), || {
+            futures::executor::block_on(create_chain_job(State(state), Json(request)))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
+        );
+        assert!(chain_jobs::list_jobs(db.as_ref().as_ref().unwrap())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_chain_job_rejects_every_nested_h3_artifact_before_persisting() {
+        for case in [
+            "stage-lora",
+            "camera-control",
+            "spatial-upscaler",
+            "model-default-lora",
+            "canonicalized-stage-lora",
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let models_dir = home.path().join("models");
+            std::fs::create_dir_all(&models_dir).unwrap();
+            let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+            let state = state_with(
+                db.clone(),
+                crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+            );
+            let mut request = freezable_amend_request(&state, home.path()).await;
+            state.config.write().await.models_dir = models_dir.display().to_string();
+            let gated_path = models_dir.join("MiniMax-H3/adapter.safetensors");
+
+            match case {
+                "stage-lora" => request.stages[0].loras.push(LoraSpec {
+                    path: gated_path.display().to_string(),
+                    scale: 1.0,
+                    name: None,
+                }),
+                "camera-control" => request.stages[0].loras.push(LoraSpec {
+                    path: "camera-control:MiniMax-H3".into(),
+                    scale: 1.0,
+                    name: None,
+                }),
+                "spatial-upscaler" => {
+                    state
+                        .config
+                        .write()
+                        .await
+                        .models
+                        .get_mut(&request.model)
+                        .unwrap()
+                        .spatial_upscaler = Some(gated_path.display().to_string());
+                }
+                "model-default-lora" => {
+                    state
+                        .config
+                        .write()
+                        .await
+                        .models
+                        .get_mut(&request.model)
+                        .unwrap()
+                        .lora = Some(gated_path.display().to_string());
+                }
+                "canonicalized-stage-lora" => {
+                    std::fs::create_dir_all(gated_path.parent().unwrap()).unwrap();
+                    std::fs::write(&gated_path, b"restricted adapter fixture").unwrap();
+                    let alias_dir = models_dir.join("ordinary-adapters");
+                    std::fs::create_dir_all(&alias_dir).unwrap();
+                    let alias = alias_dir.join("style.safetensors");
+                    std::os::unix::fs::symlink(&gated_path, &alias).unwrap();
+                    request.stages[0].loras.push(LoraSpec {
+                        path: alias.display().to_string(),
+                        scale: 1.0,
+                        name: None,
+                    });
+                }
+                _ => unreachable!(),
+            }
+
+            let error = with_mold_home(home.path(), || {
+                futures::executor::block_on(create_chain_job(State(state.clone()), Json(request)))
+            })
+            .unwrap_err();
+
+            assert_eq!(
+                error.code,
+                mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED,
+                "{case}"
+            );
+            assert_eq!(
+                error.into_response().status(),
+                StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
+                "{case}"
+            );
+            assert!(
+                chain_jobs::list_jobs(db.as_ref().as_ref().unwrap())
+                    .unwrap()
+                    .is_empty(),
+                "{case} must reject before any durable row is created"
+            );
+            let downloads = state.downloads.listing().await;
+            assert!(downloads.active.is_none(), "{case}");
+            assert!(downloads.queued.is_empty(), "{case}");
+        }
     }
 
     #[tokio::test]
@@ -1691,6 +1884,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn amend_rejects_new_h3_stage_lora_without_mutating_or_requeueing() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        let request = freezable_amend_request(&state, home.path()).await;
+        let (_status, Json(created)) = with_mold_home(home.path(), || {
+            futures::executor::block_on(create_chain_job(
+                State(state.clone()),
+                Json(request.clone()),
+            ))
+        })
+        .unwrap();
+        let db_ref = db.as_ref().as_ref().unwrap();
+        let row = chain_jobs::get_job(db_ref, &created.job_id)
+            .unwrap()
+            .unwrap();
+        let before_manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
+        let before_stages = chain_jobs::stages_for_job(db_ref, &created.job_id).unwrap();
+
+        let mut stages = request.stages;
+        stages[0].loras.push(LoraSpec {
+            path: "/models/MiniMax-H3/amend-bypass.safetensors".into(),
+            scale: 1.0,
+            name: None,
+        });
+        let error = with_mold_home(home.path(), || {
+            futures::executor::block_on(amend_chain_job(
+                State(state.clone()),
+                Path(created.job_id.clone()),
+                Json(amend_body(stages)),
+            ))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
+        );
+        assert_eq!(
+            chain_jobs::get_job(db_ref, &created.job_id)
+                .unwrap()
+                .unwrap(),
+            row
+        );
+        assert_eq!(
+            ChainJobManifest::read_from_dir(&row.job_dir).unwrap(),
+            before_manifest
+        );
+        assert_eq!(
+            chain_jobs::stages_for_job(db_ref, &created.job_id).unwrap(),
+            before_stages
+        );
+    }
+
+    #[tokio::test]
     async fn amend_running_job_returns_409() {
         let home = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
@@ -1860,6 +2112,350 @@ mod tests {
             let stages = chain_jobs::stages_for_job(db.as_ref().as_ref().unwrap(), job_id).unwrap();
             assert_eq!(stages[0].state, StageState::Pending);
         }
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_persisted_configured_h3_without_mutating_the_job() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        state.config.write().await.models.insert(
+            "legacy-private-chain".into(),
+            mold_core::ModelConfig {
+                family: Some("minimax-h3".into()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let job_id = "01JBR55H3CFGRESUME";
+        let row = with_mold_home(home.path(), || {
+            let mut request = req(OutputFormat::Mp4).normalise().unwrap();
+            request.model = "legacy-private-chain".into();
+            let row = crate::chain_job_runner::create_job_with_params(
+                db.as_ref().as_ref().unwrap(),
+                &home.path().join("jobs"),
+                crate::chain_job_runner::CreateJobParams {
+                    id: job_id.into(),
+                    ephemeral: false,
+                    frozen_model: None,
+                    request,
+                },
+            )
+            .unwrap();
+            chain_jobs::update_job_state(
+                db.as_ref().as_ref().unwrap(),
+                job_id,
+                ChainJobState::Failed,
+                Some("old failure"),
+                now_ms(),
+            )
+            .unwrap();
+            row
+        });
+        let db_ref = db.as_ref().as_ref().unwrap();
+        let before_row = chain_jobs::get_job(db_ref, job_id).unwrap().unwrap();
+        let before_manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
+        let before_stages = chain_jobs::stages_for_job(db_ref, job_id).unwrap();
+
+        let error = with_mold_home(home.path(), || {
+            futures::executor::block_on(resume_chain_job(State(state), Path(job_id.to_string())))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
+        );
+        assert_eq!(
+            chain_jobs::get_job(db_ref, job_id).unwrap().unwrap(),
+            before_row
+        );
+        assert_eq!(
+            ChainJobManifest::read_from_dir(&row.job_dir).unwrap(),
+            before_manifest
+        );
+        assert_eq!(
+            chain_jobs::stages_for_job(db_ref, job_id).unwrap(),
+            before_stages
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_nested_persisted_h3_artifacts_without_mutation() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+
+        for case in [
+            "request-stage-lora",
+            "frozen-default-lora",
+            "frozen-upscaler",
+            "live-config-default-lora",
+        ] {
+            let model = format!("legacy-neutral-{case}");
+            let job_id = format!("01JBR55H3{}", case.replace('-', "").to_ascii_uppercase());
+            let mut request = req(OutputFormat::Mp4).normalise().unwrap();
+            request.model = model.clone();
+            let mut frozen_config = mold_core::ModelConfig {
+                family: Some("ltx2".into()),
+                ..mold_core::ModelConfig::default()
+            };
+            match case {
+                "request-stage-lora" => request.stages[0].loras.push(LoraSpec {
+                    path: "/models/MiniMax-H3/persisted-stage.safetensors".into(),
+                    scale: 1.0,
+                    name: None,
+                }),
+                "frozen-default-lora" => {
+                    frozen_config.lora =
+                        Some("/models/MiniMax-H3/frozen-default.safetensors".into());
+                }
+                "frozen-upscaler" => {
+                    frozen_config.spatial_upscaler =
+                        Some("/models/MiniMax-H3/frozen-upscaler.safetensors".into());
+                }
+                "live-config-default-lora" => {
+                    state.config.write().await.models.insert(
+                        model.clone(),
+                        mold_core::ModelConfig {
+                            family: Some("ltx2".into()),
+                            lora: Some("/models/MiniMax-H3/live-default.safetensors".into()),
+                            ..mold_core::ModelConfig::default()
+                        },
+                    );
+                }
+                _ => unreachable!(),
+            }
+            let frozen_model = if matches!(case, "request-stage-lora" | "live-config-default-lora")
+            {
+                None
+            } else {
+                Some(mold_core::chain_job::FrozenChainModel {
+                    runtime_model_id: format!("mold-frozen-chain:{model}"),
+                    config: frozen_config,
+                    model_fingerprint: format!("fixture-{case}"),
+                })
+            };
+            let row = with_mold_home(home.path(), || {
+                let row = crate::chain_job_runner::create_job_with_params(
+                    db.as_ref().as_ref().unwrap(),
+                    &home.path().join("jobs"),
+                    crate::chain_job_runner::CreateJobParams {
+                        id: job_id.clone(),
+                        ephemeral: false,
+                        frozen_model,
+                        request,
+                    },
+                )
+                .unwrap();
+                chain_jobs::update_job_state(
+                    db.as_ref().as_ref().unwrap(),
+                    &job_id,
+                    ChainJobState::Failed,
+                    Some("legacy failure"),
+                    now_ms(),
+                )
+                .unwrap();
+                row
+            });
+            let db_ref = db.as_ref().as_ref().unwrap();
+            let before_row = chain_jobs::get_job(db_ref, &job_id).unwrap().unwrap();
+            let before_manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
+            let before_stages = chain_jobs::stages_for_job(db_ref, &job_id).unwrap();
+
+            let error = with_mold_home(home.path(), || {
+                futures::executor::block_on(resume_chain_job(
+                    State(state.clone()),
+                    Path(job_id.clone()),
+                ))
+            })
+            .unwrap_err();
+
+            assert_eq!(
+                error.code,
+                mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED,
+                "{case}"
+            );
+            assert_eq!(
+                error.into_response().status(),
+                StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
+                "{case}"
+            );
+            assert_eq!(
+                chain_jobs::get_job(db_ref, &job_id).unwrap().unwrap(),
+                before_row,
+                "{case}"
+            );
+            assert_eq!(
+                ChainJobManifest::read_from_dir(&row.job_dir).unwrap(),
+                before_manifest,
+                "{case}"
+            );
+            assert_eq!(
+                chain_jobs::stages_for_job(db_ref, &job_id).unwrap(),
+                before_stages,
+                "{case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retake_rejects_persisted_h3_identity_and_frozen_family_without_mutation() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+
+        for (job_id, model, frozen_family) in [
+            ("01JBR55H3RAWRETAKE", "MiniMaxAI/MiniMax-H3", None),
+            (
+                "01JBR55H3FROZENRETAKE",
+                "legacy-private-chain",
+                Some("minimax-h3"),
+            ),
+        ] {
+            let row = with_mold_home(home.path(), || {
+                let mut request = req(OutputFormat::Mp4).normalise().unwrap();
+                request.model = model.into();
+                let frozen_model =
+                    frozen_family.map(|family| mold_core::chain_job::FrozenChainModel {
+                        runtime_model_id: "mold-frozen-chain:legacy-private".into(),
+                        config: mold_core::ModelConfig {
+                            family: Some(family.into()),
+                            ..mold_core::ModelConfig::default()
+                        },
+                        model_fingerprint: "legacy-fixture".into(),
+                    });
+                let row = crate::chain_job_runner::create_job_with_params(
+                    db.as_ref().as_ref().unwrap(),
+                    &home.path().join("jobs"),
+                    crate::chain_job_runner::CreateJobParams {
+                        id: job_id.into(),
+                        ephemeral: false,
+                        frozen_model,
+                        request,
+                    },
+                )
+                .unwrap();
+                chain_jobs::update_job_state(
+                    db.as_ref().as_ref().unwrap(),
+                    job_id,
+                    ChainJobState::Completed,
+                    None,
+                    now_ms(),
+                )
+                .unwrap();
+                row
+            });
+            let db_ref = db.as_ref().as_ref().unwrap();
+            let before_row = chain_jobs::get_job(db_ref, job_id).unwrap().unwrap();
+            let before_manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
+            let before_stages = chain_jobs::stages_for_job(db_ref, job_id).unwrap();
+
+            let error = with_mold_home(home.path(), || {
+                futures::executor::block_on(retake_chain_job(
+                    State(state.clone()),
+                    Path(job_id.to_string()),
+                    Json(RetakeRequest {
+                        stage_idx: 0,
+                        mode: mold_core::chain_job::RetakeMode::Cascade,
+                        seed_offset: Some(7),
+                        prompt: Some("new prompt".into()),
+                    }),
+                ))
+            })
+            .unwrap_err();
+
+            assert_eq!(
+                error.code,
+                mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED,
+                "{job_id}"
+            );
+            assert_eq!(
+                error.into_response().status(),
+                StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
+                "{job_id}"
+            );
+            assert_eq!(
+                chain_jobs::get_job(db_ref, job_id).unwrap().unwrap(),
+                before_row,
+                "{job_id}"
+            );
+            assert_eq!(
+                ChainJobManifest::read_from_dir(&row.job_dir).unwrap(),
+                before_manifest,
+                "{job_id}"
+            );
+            assert_eq!(
+                chain_jobs::stages_for_job(db_ref, job_id).unwrap(),
+                before_stages,
+                "{job_id}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retake_still_requeues_an_ordinary_persisted_job() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db.clone(),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        let job_id = "01JBR55ORDRETAKE";
+        let row = with_mold_home(home.path(), || {
+            let row = crate::chain_job_runner::create_job_with_params(
+                db.as_ref().as_ref().unwrap(),
+                &home.path().join("jobs"),
+                crate::chain_job_runner::CreateJobParams {
+                    id: job_id.into(),
+                    ephemeral: false,
+                    frozen_model: None,
+                    request: req(OutputFormat::Mp4).normalise().unwrap(),
+                },
+            )
+            .unwrap();
+            chain_jobs::update_job_state(
+                db.as_ref().as_ref().unwrap(),
+                job_id,
+                ChainJobState::Completed,
+                None,
+                now_ms(),
+            )
+            .unwrap();
+            row
+        });
+
+        let (status, Json(summary)) = with_mold_home(home.path(), || {
+            futures::executor::block_on(retake_chain_job(
+                State(state),
+                Path(job_id.to_string()),
+                Json(RetakeRequest {
+                    stage_idx: 0,
+                    mode: mold_core::chain_job::RetakeMode::Cascade,
+                    seed_offset: Some(9),
+                    prompt: Some("ordinary retake".into()),
+                }),
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(summary.state, ChainJobState::Queued);
+        let manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
+        assert_eq!(manifest.retakes.len(), 1);
+        assert_eq!(
+            manifest.retakes[0].new_prompt.as_deref(),
+            Some("ordinary retake")
+        );
     }
 
     #[tokio::test]

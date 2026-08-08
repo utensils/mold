@@ -437,6 +437,43 @@ describe("hosts store", () => {
     expect(hosts.resolveRoute("hal9000-7680")).toBeNull();
   });
 
+  it("refuses an advertised restricted request before placement", async () => {
+    const hosts = useHostsStore();
+    const restrictedModel = "hf:MiniMaxAI/MiniMaxH3";
+    hosts.capabilities.local = {
+      gallery: { can_delete: true },
+      model_access: {
+        restrictions: [
+          {
+            code: "minimax_h3_authorization_required",
+            family: "minimax-h3",
+            message: "MiniMax H3 is not activated.",
+            license_url: "https://example.test/license",
+            authorization_url: "https://example.test/authorize",
+          },
+        ],
+      },
+    };
+    useHostModelsStore().byHost.local = {
+      entries: [{ ...installedModel(restrictedModel), family: "minimax-h3" }],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    const request = { ...placementRequest, model: restrictedModel };
+
+    expect(hosts.resolveRoute("local", restrictedModel)).toBeNull();
+    await expect(hosts.resolveFeasible("local", request)).resolves.toEqual({
+      kind: "infeasible",
+      perHost: [
+        expect.objectContaining({
+          hostId: "local",
+          reason: "MiniMax H3 is not activated.",
+        }),
+      ],
+    });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+  });
+
   it("stops placement when the live generation selection changes", async () => {
     const prefs = useAppPrefsStore();
     prefs.settings = settings({
@@ -815,6 +852,54 @@ describe("hosts store", () => {
       });
     },
   );
+
+  it.each([404, 405])(
+    "fails closed for reference requests when placement HTTP %s is unsupported",
+    async (status) => {
+      previewGenerationPlacement.mockRejectedValueOnce(new ApiError("unsupported", status));
+      const hosts = useHostsStore();
+      const request = {
+        ...placementRequest,
+        model: "minimax-h3-ref2va:comfy-pruned-int8",
+        references: [],
+      } as GenerateRequest;
+
+      await expect(hosts.resolveFeasible("local", request)).resolves.toMatchObject({
+        kind: "unreachable",
+        perHost: [
+          expect.objectContaining({
+            error:
+              "does not provide the authoritative placement preview required for reference media",
+          }),
+        ],
+      });
+    },
+  );
+
+  it("fails closed for an explicit unsupported reference preview", async () => {
+    previewGenerationPlacement.mockResolvedValueOnce({
+      ...plannedPlacement(),
+      authoritative: false,
+      outcome: "unsupported",
+      candidate: null,
+    });
+    const hosts = useHostsStore();
+    const request = {
+      ...placementRequest,
+      model: "minimax-h3-ref2va:comfy-pruned-int8",
+      references: [],
+    } as GenerateRequest;
+
+    await expect(hosts.resolveFeasible("local", request)).resolves.toMatchObject({
+      kind: "unreachable",
+      perHost: [
+        expect.objectContaining({
+          error:
+            "does not provide the authoritative placement preview required for reference media",
+        }),
+      ],
+    });
+  });
 
   it("keeps the connecting local origin eligible for a legacy placement fallback", async () => {
     useConnectionStore().status = "starting";

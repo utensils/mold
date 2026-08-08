@@ -4078,6 +4078,85 @@ fn open_unix_directory_without_symlinks(path: &Path) -> anyhow::Result<File> {
 }
 
 #[cfg(unix)]
+pub(crate) fn verify_directory_no_follow(path: &Path) -> anyhow::Result<()> {
+    let directory = open_unix_directory_without_symlinks(path)?;
+    ensure!(
+        directory.metadata()?.is_dir(),
+        "private staging path is not a directory: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn verify_directory_no_follow(path: &Path) -> anyhow::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "private staging path is not a no-follow directory: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Create every missing directory component without traversing a
+/// caller-replaceable symlink. Existing components are verified by the final
+/// no-follow walk; each missing component is created relative to an already
+/// safely-opened parent.
+pub(crate) fn create_private_directories_no_follow(path: &Path) -> anyhow::Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                create_private_directory_no_follow(&current)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    verify_directory_no_follow(path)
+}
+
+#[cfg(unix)]
+pub(crate) fn create_private_directory_no_follow(path: &Path) -> anyhow::Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let parent = path
+        .parent()
+        .context("private staging directory has no parent")?;
+    let name = path
+        .file_name()
+        .context("private staging directory has no filename")?;
+    let name = CString::new(name.as_bytes()).context("private staging directory contains NUL")?;
+    let parent = open_unix_directory_without_symlinks(parent)?;
+    // SAFETY: `parent` owns a valid directory descriptor and `name` is a
+    // NUL-terminated single path component.
+    let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "creating no-follow private staging directory {}",
+                path.display()
+            )
+        });
+    }
+    verify_directory_no_follow(path)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn create_private_directory_no_follow(path: &Path) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .context("private staging directory has no parent")?;
+    verify_directory_no_follow(parent)?;
+    fs::create_dir(path)?;
+    verify_directory_no_follow(path)
+}
+
+#[cfg(unix)]
 fn verify_unix_authority_entry(
     locks: &File,
     lock_name: &std::ffi::CStr,
@@ -4996,6 +5075,66 @@ pub(crate) fn open_regular_file_no_follow(path: &Path) -> anyhow::Result<File> {
     ensure!(
         metadata.is_file(),
         "archive JSON is not a regular file: {}",
+        path.display()
+    );
+    Ok(file)
+}
+
+/// Create one private regular file without following a symlink in either the
+/// filename or any caller-controlled parent component. Reference ingress uses
+/// this for attacker-supplied media bytes before any decoder sees them.
+#[cfg(unix)]
+pub(crate) fn create_private_file_no_follow(path: &Path) -> anyhow::Result<File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let parent = path
+        .parent()
+        .context("private staging path has no parent")?;
+    let name = path
+        .file_name()
+        .context("private staging path has no filename")?;
+    let name = CString::new(name.as_bytes()).context("private staging filename contains NUL")?;
+    let parent = open_unix_directory_without_symlinks(parent)?;
+    // SAFETY: `parent` owns a valid directory descriptor, `name` is
+    // NUL-terminated, and a successful descriptor is transferred once.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("creating private staging file {}", path.display()));
+    }
+    // SAFETY: `fd` is a fresh owned descriptor returned by `openat`.
+    let file = unsafe { File::from_raw_fd(fd) };
+    ensure!(
+        file.metadata()?.is_file(),
+        "private staging target is not a regular file: {}",
+        path.display()
+    );
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn create_private_file_no_follow(path: &Path) -> anyhow::Result<File> {
+    let parent = path
+        .parent()
+        .context("private staging path has no parent")?;
+    ensure!(
+        !fs::symlink_metadata(parent)?.file_type().is_symlink(),
+        "private staging parent is a symlink: {}",
+        parent.display()
+    );
+    let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "private staging target is not a regular file: {}",
         path.display()
     );
     Ok(file)

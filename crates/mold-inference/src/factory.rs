@@ -17,6 +17,34 @@ use crate::wan::pipeline::WanEngine;
 use crate::wuerstchen::WuerstchenEngine;
 use crate::zimage::ZImageEngine;
 
+/// Whether the frozen factory can construct a family today.
+///
+/// Contract-only families are explicit so static metadata work cannot be
+/// mistaken for a runnable engine registration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FactoryFamilyAvailability {
+    Runnable,
+    ContractOnly,
+}
+
+pub fn factory_family_availability(family: &str) -> Option<FactoryFamilyAvailability> {
+    if let Some(contract) = mold_core::minimax_h3::capability_contract_for_model(family) {
+        Some(
+            if contract.generation.runtime_available
+                && crate::production_family_capability_for_family(family).is_some()
+            {
+                FactoryFamilyAvailability::Runnable
+            } else {
+                FactoryFamilyAvailability::ContractOnly
+            },
+        )
+    } else if crate::production_family_capability_for_family(family).is_some() {
+        Some(FactoryFamilyAvailability::Runnable)
+    } else {
+        None
+    }
+}
+
 /// Immutable inputs that may change the concrete engine constructed for a
 /// model. Scheduler-owned execution plans capture this once and pass it to
 /// [`create_engine_with_frozen_config`], so worker dispatch never consults a
@@ -24,6 +52,10 @@ use crate::zimage::ZImageEngine;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrozenEngineConfig {
     pub family: String,
+    /// Trusted root for concrete model artifacts. The activation policy strips
+    /// this storage prefix before classifying path identity, so a Mold home
+    /// named after a gated UAT target does not taint unrelated models.
+    pub artifact_root: PathBuf,
     pub is_schnell: Option<bool>,
     pub is_turbo: Option<bool>,
     pub scheduler: Option<Scheduler>,
@@ -40,6 +72,9 @@ pub struct FrozenEngineConfig {
     pub selected_qwen3_paths: Vec<PathBuf>,
     pub selected_qwen2_path: Option<PathBuf>,
     pub selected_gemma_paths: Vec<PathBuf>,
+    /// Exact contract-only MiniMax H3 admission/factory authority. This is
+    /// `None` for every runnable family and cannot activate H3 by itself.
+    pub h3_factory_authority: Option<crate::FrozenH3FactoryAuthority>,
     pub runtime_environment: crate::runtime_env::FrozenRuntimeEnvironment,
     pub attention_backend: crate::attention::AttentionBackend,
     pub attention_chunk: crate::attention::AttentionChunkPolicy,
@@ -53,6 +88,7 @@ impl FrozenEngineConfig {
         let runtime_environment = crate::runtime_env::snapshot();
         Self {
             family: resolve_family(model_name, config),
+            artifact_root: config.resolved_models_dir(),
             is_schnell: model_cfg.is_schnell,
             is_turbo: model_cfg.is_turbo,
             scheduler: model_cfg.scheduler,
@@ -81,6 +117,7 @@ impl FrozenEngineConfig {
             selected_qwen3_paths: Vec::new(),
             selected_qwen2_path: None,
             selected_gemma_paths: Vec::new(),
+            h3_factory_authority: None,
             runtime_environment,
             attention_backend: crate::attention::AttentionBackend::resolve(),
             attention_chunk: crate::attention::resolved_chunk_policy(),
@@ -351,6 +388,60 @@ pub fn create_engine_with_frozen_config(
     offload: bool,
     shared_pool: Option<Arc<Mutex<SharedPool>>>,
 ) -> Result<Box<dyn InferenceEngine>> {
+    create_engine_with_frozen_config_and_h3_factory(
+        model_name,
+        paths,
+        frozen,
+        load_strategy,
+        gpu_ordinal,
+        offload,
+        shared_pool,
+        |_| bail!(crate::minimax_h3::engine::H3_REAL_LOADER_DISABLED),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_engine_with_frozen_config_and_h3_factory<F>(
+    model_name: String,
+    paths: ModelPaths,
+    frozen: &FrozenEngineConfig,
+    load_strategy: LoadStrategy,
+    gpu_ordinal: usize,
+    offload: bool,
+    shared_pool: Option<Arc<Mutex<SharedPool>>>,
+    h3_factory: F,
+) -> Result<Box<dyn InferenceEngine>>
+where
+    F: FnOnce(
+        crate::minimax_h3::engine::H3RuntimeLoadRequest<'_>,
+    ) -> Result<Box<dyn InferenceEngine>>,
+{
+    // The compliance gate is intentionally the first operation. No path,
+    // runtime, device, authority, or future loader inspection may precede it.
+    mold_core::require_model_activation(&model_name, Some(&frozen.family))?;
+    if mold_core::minimax_h3::is_family(&frozen.family) {
+        let authority = frozen.h3_factory_authority.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("MiniMax H3 factory dispatch requires an exact frozen server authority")
+        })?;
+        // The static runtime/registry gate deliberately precedes even path
+        // classification and local-existence checks. Legal authorization alone
+        // can therefore never make a contract-only build touch H3 artifacts.
+        authority.validate_for_dispatch(
+            &model_name,
+            &frozen.family,
+            gpu_ordinal,
+            offload,
+            frozen.attention_backend,
+            frozen.attention_chunk,
+        )?;
+    }
+    for path in paths.all_file_paths() {
+        mold_core::require_model_artifact_activation(
+            path,
+            Some(&frozen.artifact_root),
+            Some(&frozen.family),
+        )?;
+    }
     let current_attention = crate::attention::AttentionBackend::resolve();
     let current_chunk = crate::attention::resolved_chunk_policy();
     let current_vae_tiling = crate::vae_tiling::resolve_mode();
@@ -618,6 +709,29 @@ pub fn create_engine_with_frozen_config(
             gpu_ordinal,
             shared_pool,
         ))),
+        family if mold_core::minimax_h3::is_family(family) => {
+            let authority = frozen.h3_factory_authority.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "MiniMax H3 factory dispatch requires an exact frozen server authority"
+                )
+            })?;
+            authority.validate_for_dispatch(
+                &model_name,
+                family,
+                gpu_ordinal,
+                offload,
+                frozen.attention_backend,
+                frozen.attention_chunk,
+            )?;
+            h3_factory(crate::minimax_h3::engine::H3RuntimeLoadRequest {
+                model_name: &model_name,
+                paths: &paths,
+                authority,
+                load_strategy,
+                gpu_ordinal,
+                block_offload: offload,
+            })
+        }
         "wuerstchen" | "wuerstchen-v2" => Ok(boxed_inference_engine(WuerstchenEngine::new(
             model_name,
             paths,
@@ -640,6 +754,61 @@ pub fn create_engine_with_frozen_config(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn sha(byte: char) -> String {
+        std::iter::repeat_n(byte, 64).collect()
+    }
+
+    fn h3_factory_authority(
+        frozen: &FrozenEngineConfig,
+        model: &str,
+    ) -> crate::FrozenH3FactoryAuthority {
+        crate::FrozenH3FactoryAuthority::new_contract_only(crate::H3FactoryAuthorityInput {
+            model: model.into(),
+            device_id: "gpu-0".into(),
+            device_ordinal: 0,
+            compute_capability: (8, 9),
+            execution_fingerprint: sha('a'),
+            conditioner_placement: crate::H3FactoryConditionerPlacement::HostCpuThenDrop,
+            qwen_parameter_bytes: 2048,
+            qwen_activation_workspace_bytes: 1024,
+            resident_block_count: 8,
+            prefetch_depth: 1,
+            attention_backend: frozen.attention_backend,
+            attention_chunk: frozen.attention_chunk,
+            attention_kernel_identity: "synthetic-lossless-packed-attention-v1".into(),
+            attention_qualification_sha256: sha('b'),
+            attention_full_noncausal: true,
+            attention_lossless: true,
+            attention_head_count: 56,
+            attention_head_dim: 128,
+            block_offload: true,
+            quantization: crate::H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
+                transformer_policy_sha256: sha('c'),
+                qwen_policy_sha256: sha('d'),
+                pruned_adaln_table_sha256: sha('e'),
+            },
+            components: [
+                crate::H3FactoryComponentRole::Conditioner,
+                crate::H3FactoryComponentRole::Transformer,
+                crate::H3FactoryComponentRole::VisualVae,
+                crate::H3FactoryComponentRole::AudioVae,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, role)| {
+                crate::H3FactoryComponentAuthority::new(
+                    role,
+                    sha(char::from(b'1' + index as u8)),
+                    sha(char::from(b'5' + index as u8)),
+                )
+                .unwrap()
+            })
+            .collect(),
+        })
+        .unwrap()
+    }
 
     fn dummy_paths() -> ModelPaths {
         ModelPaths {
@@ -714,6 +883,150 @@ mod tests {
         assert!(error
             .to_string()
             .contains("process-frozen attention/chunk/VAE authority"));
+    }
+
+    #[test]
+    fn frozen_factory_rejects_compliance_gated_family_before_runtime_or_device_work() {
+        let mut frozen = FrozenEngineConfig::resolve("private-checkpoint", &Config::default());
+        frozen.family = "minimax-h3".to_string();
+
+        let error = create_engine_with_frozen_config(
+            "private-checkpoint".into(),
+            dummy_paths(),
+            &frozen,
+            LoadStrategy::Sequential,
+            usize::MAX,
+            false,
+            None,
+        )
+        .err()
+        .expect("compliance-gated family must fail closed");
+
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[test]
+    fn frozen_factory_never_calls_h3_loader_before_the_legal_gate() {
+        for model in [
+            mold_core::minimax_h3::FL2VA_COMFY,
+            mold_core::minimax_h3::REF2VA_COMFY,
+        ] {
+            let mut frozen = FrozenEngineConfig::resolve(model, &Config::default());
+            frozen.family = mold_core::minimax_h3::FAMILY.to_string();
+            frozen.h3_factory_authority = Some(h3_factory_authority(&frozen, model));
+            let called = Arc::new(AtomicBool::new(false));
+            let loader_called = Arc::clone(&called);
+
+            let error = create_engine_with_frozen_config_and_h3_factory(
+                model.into(),
+                dummy_paths(),
+                &frozen,
+                LoadStrategy::Sequential,
+                0,
+                true,
+                None,
+                move |_| {
+                    loader_called.store(true, Ordering::SeqCst);
+                    unreachable!("the MiniMax H3 legal gate must precede the loader")
+                },
+            )
+            .err()
+            .expect("compliance-gated H3 must fail closed");
+
+            assert!(error
+                .to_string()
+                .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+            assert!(!called.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn h3_aliases_are_factory_contract_only_not_production_capabilities() {
+        for alias in mold_core::minimax_h3::FAMILY_ALIASES {
+            assert_eq!(
+                factory_family_availability(alias),
+                Some(FactoryFamilyAvailability::ContractOnly)
+            );
+            assert!(crate::production_family_capability_for_family(alias).is_none());
+        }
+        assert_eq!(
+            factory_family_availability("flux"),
+            Some(FactoryFamilyAvailability::Runnable)
+        );
+    }
+
+    #[test]
+    fn frozen_factory_rejects_restricted_artifact_path_before_runtime_or_device_work() {
+        let frozen = FrozenEngineConfig::resolve("flux-dev:q4", &Config::default());
+        let mut paths = dummy_paths();
+        paths.transformer = PathBuf::from("/models/MiniMax-H3/transformer.safetensors");
+
+        let error = create_engine_with_frozen_config(
+            "ordinary-checkpoint".into(),
+            paths,
+            &frozen,
+            LoadStrategy::Sequential,
+            usize::MAX,
+            false,
+            None,
+        )
+        .err()
+        .expect("restricted artifact path must fail closed");
+
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[test]
+    fn frozen_factory_ignores_h3_named_root_but_rejects_nested_h3_artifact() {
+        let artifact_root = PathBuf::from("/Volumes/ExternalStorage/mold-uat/minimax-h3/models");
+        let mut frozen = FrozenEngineConfig::resolve("flux-dev:q4", &Config::default());
+        frozen.artifact_root = artifact_root.clone();
+        frozen.attention_backend = match crate::attention::AttentionBackend::resolve() {
+            crate::attention::AttentionBackend::Math => crate::attention::AttentionBackend::Flash,
+            crate::attention::AttentionBackend::Flash => crate::attention::AttentionBackend::Math,
+        };
+        let mut ordinary = dummy_paths();
+        ordinary.transformer = artifact_root.join("flux-dev/transformer.safetensors");
+        ordinary.vae = artifact_root.join("flux-vae/ae.safetensors");
+
+        let error = create_engine_with_frozen_config(
+            "ordinary-checkpoint".into(),
+            ordinary,
+            &frozen,
+            LoadStrategy::Sequential,
+            usize::MAX,
+            false,
+            None,
+        )
+        .err()
+        .expect("the deliberate runtime mismatch should follow activation");
+        assert!(
+            error
+                .to_string()
+                .contains("process-frozen attention/chunk/VAE authority"),
+            "the storage root name must not taint ordinary artifacts: {error:#}"
+        );
+
+        let mut nested_h3 = dummy_paths();
+        nested_h3.transformer = artifact_root.join("MiniMax-H3/transformer.safetensors");
+        let error = create_engine_with_frozen_config(
+            "ordinary-checkpoint".into(),
+            nested_h3,
+            &frozen,
+            LoadStrategy::Sequential,
+            usize::MAX,
+            false,
+            None,
+        )
+        .err()
+        .expect("a nested H3 artifact must fail closed before runtime checks");
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
     }
 
     #[test]

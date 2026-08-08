@@ -38,6 +38,10 @@ pub(crate) fn family_config(family: &str) -> (u32, &'static str) {
              in chronological order. For conditioned tasks, describe only the requested change \
              and never restate source-visible details. Up to 120 words.",
         ),
+        "minimax-h3" | "minimax_h3" | "minimaxh3" => (
+            150,
+            "MiniMax H3 understands natural-language synchronized audio-video direction. Write a literal chronological target shot. Ordered references are semantic authority for identity, relationships, motion, and sound cues, not a pixel-aligned edit. Up to 150 words.",
+        ),
         // All flow-matching models with T5/Qwen3 encoders support longer prompts
         _ => (
             150,
@@ -145,6 +149,18 @@ Rules:
 
 {MODEL_NOTES}";
 
+const REFERENCE_TO_AUDIO_VIDEO_SYSTEM_TEMPLATE: &str = "\
+You are an audio-video generation prompt writer directing semantic resynthesis from ordered image, video, and audio references.
+
+Rules:
+1. PRESERVE referenced identities, relationships, chronology, motion cues, and audible events unless the user explicitly requests a change.
+2. Expand the requested target action as one synchronized chronological shot; do not describe this as a pixel-aligned edit or denoise operation.
+3. Respect reference order and do not merge, omit, reorder, or invent referenced people, objects, voices, music, or events.
+4. Describe only target composition, action, camera behavior, environment response, and synchronized sound needed by the request.
+5. Keep under {WORD_LIMIT} words and output ONLY the expanded prompt.
+
+{MODEL_NOTES}";
+
 const TEXT_TO_AUDIO_SYSTEM_TEMPLATE: &str = "\
 You are an audio generation prompt writer. Expand the user's brief into a chronological sound direction.
 
@@ -228,6 +244,9 @@ fn task_notes(task: ExpandTask) -> &'static str {
         ExpandTask::AudioDrivenVideo => {
             "The attached audio is authoritative. Synchronize distinct visual directions to its existing timing and events without inventing competing audio. When a source clip is attached, preserve its identity, framing, camera path, motion, and timing unless explicitly changed."
         }
+        ExpandTask::ReferenceToAudioVideo => {
+            "The ordered heterogeneous references are semantic audio-video authority. Preserve their identities, relationships, event order, motion cues, and sound cues while describing the requested new synchronized shot; this is resynthesis, not pixel-aligned editing."
+        }
         ExpandTask::TextToAudio => {
             "These are audio-only directions. Vary audible timing, space, intensity, or arrangement without visual or camera language."
         }
@@ -243,6 +262,7 @@ fn single_template(task: ExpandTask) -> &'static str {
         ExpandTask::Retake => RETAKE_SYSTEM_TEMPLATE,
         ExpandTask::KeyframeInterpolation => KEYFRAME_SYSTEM_TEMPLATE,
         ExpandTask::AudioDrivenVideo => AUDIO_DRIVEN_VIDEO_SYSTEM_TEMPLATE,
+        ExpandTask::ReferenceToAudioVideo => REFERENCE_TO_AUDIO_VIDEO_SYSTEM_TEMPLATE,
         ExpandTask::TextToAudio => TEXT_TO_AUDIO_SYSTEM_TEMPLATE,
     }
 }
@@ -256,7 +276,8 @@ fn batch_template(task: ExpandTask) -> &'static str {
         | ExpandTask::VideoToVideo
         | ExpandTask::Retake
         | ExpandTask::KeyframeInterpolation
-        | ExpandTask::AudioDrivenVideo => CONDITIONED_VIDEO_BATCH_SYSTEM_TEMPLATE,
+        | ExpandTask::AudioDrivenVideo
+        | ExpandTask::ReferenceToAudioVideo => CONDITIONED_VIDEO_BATCH_SYSTEM_TEMPLATE,
     }
 }
 

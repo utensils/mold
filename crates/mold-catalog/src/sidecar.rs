@@ -73,6 +73,69 @@ pub struct CatalogSidecar {
     pub written_at: i64,
 }
 
+/// Apply the core activation policy before locally persisted catalog metadata
+/// can re-enter inventory or engine resolution without a live lookup.
+pub fn require_sidecar_activation(
+    sidecar: &CatalogSidecar,
+) -> Result<(), mold_core::ModelActivationError> {
+    let family = Some(sidecar.family.as_str());
+    for identity in [
+        sidecar.id.as_str(),
+        sidecar.source_id.as_str(),
+        sidecar.name.as_str(),
+    ] {
+        mold_core::require_model_activation(identity, family)?;
+    }
+    if let Some(sub_family) = sidecar.sub_family.as_deref() {
+        mold_core::require_model_activation(sub_family, family)?;
+    }
+    if let Some(page_url) = sidecar.page_url.as_deref() {
+        mold_core::require_model_activation(page_url, family)?;
+    }
+    mold_core::require_model_activation(&sidecar.primary_filename_rel, family)?;
+    Ok(())
+}
+
+/// Apply activation policy to persisted sidecar metadata and its concrete
+/// primary artifact without treating the configured models root as identity.
+///
+/// The sidecar directory is part of the artifact identity even when the
+/// portable `primary_filename_rel` itself is neutral. This closes the case
+/// where an opaque sidecar points at `MiniMax-H3/weights.safetensors`, while
+/// still allowing an ordinary artifact when the operator's `models_dir` (or
+/// an ancestor such as `MOLD_HOME`) happens to carry that name.
+pub fn require_sidecar_artifact_activation(
+    models_dir: &Path,
+    sidecar_dir: &Path,
+    sidecar: &CatalogSidecar,
+) -> Result<(), mold_core::ModelActivationError> {
+    require_sidecar_activation(sidecar)?;
+    if let Some(primary) = primary_path(sidecar_dir, sidecar) {
+        mold_core::require_model_artifact_activation(
+            &primary,
+            Some(models_dir),
+            Some(sidecar.family.as_str()),
+        )?;
+    }
+    Ok(())
+}
+
+/// Reject a matching installed sidecar before callers decide whether to use it
+/// or fall back to a live lookup. This prevents persisted metadata from being
+/// treated as a cache miss that silently triggers network access.
+pub fn require_installed_sidecar_activation(
+    models_dir: &Path,
+    catalog_id: &str,
+) -> Result<(), mold_core::ModelActivationError> {
+    if let Some((sidecar_dir, sidecar)) = walk_sidecars(models_dir)
+        .into_iter()
+        .find(|(_, sidecar)| sidecar.id == catalog_id)
+    {
+        require_sidecar_artifact_activation(models_dir, &sidecar_dir, &sidecar)?;
+    }
+    Ok(())
+}
+
 fn default_true() -> bool {
     true
 }
@@ -336,6 +399,59 @@ mod tests {
             sc.primary_filename_rel,
             "flux/civitai/8001/test.safetensors"
         );
+    }
+
+    #[test]
+    fn installed_h3_sidecar_is_rejected_as_metadata_not_treated_as_a_cache_miss() {
+        let root = tempfile::tempdir().unwrap();
+        let mut entry = fixture_entry();
+        entry.id = CatalogId::from("cv:42");
+        entry.source_id = "42".into();
+        entry.name = "MiniMax H3 Ref2VA".into();
+        let sidecar = sidecar_from_entry(&entry, "weights.safetensors".into());
+        let path = civitai_sidecar_path(root.path(), entry.id.as_str());
+        write_sidecar(&path, &sidecar).unwrap();
+
+        let error = require_installed_sidecar_activation(root.path(), entry.id.as_str())
+            .expect_err("persisted H3 metadata must fail closed");
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[test]
+    fn neutral_sidecar_with_h3_primary_filename_is_rejected() {
+        let mut sidecar = sidecar_from_entry(&fixture_entry(), "MiniMaxH3.safetensors".into());
+        sidecar.id = "cv:42".into();
+        sidecar.source_id = "42".into();
+        sidecar.name = "renamed checkpoint".into();
+        sidecar.family = "custom".into();
+
+        let error = require_sidecar_activation(&sidecar).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[test]
+    fn sidecar_artifact_policy_ignores_named_root_but_rejects_nested_h3_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let models_dir = root.path().join("mold-uat/minimax-h3/models");
+        let ordinary_dir = models_dir.join("cv-42");
+        let h3_dir = models_dir.join("MiniMax-H3");
+        let mut sidecar = sidecar_from_entry(&fixture_entry(), "weights.safetensors".into());
+        sidecar.id = "cv:42".into();
+        sidecar.source_id = "42".into();
+        sidecar.name = "renamed checkpoint".into();
+        sidecar.family = "custom".into();
+
+        require_sidecar_artifact_activation(&models_dir, &ordinary_dir, &sidecar)
+            .expect("the configured root is storage placement, not model identity");
+        let error = require_sidecar_artifact_activation(&models_dir, &h3_dir, &sidecar)
+            .expect_err("a nested H3 artifact directory must fail closed");
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
     }
 
     #[cfg(unix)]

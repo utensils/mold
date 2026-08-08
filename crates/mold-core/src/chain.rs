@@ -648,6 +648,7 @@ impl ChainRequest {
             scheduler: None,
             cfg_plus: None,
             edit_images: None,
+            references: None,
             source_image: first.source_image.clone(),
             source_image_name: None,
             strength: self.strength,
@@ -758,7 +759,8 @@ impl ChainRequest {
         } else {
             crate::validation::Ltx2SpatialComposition::SinglePass
         };
-        crate::validation::validate_generation_dimensions_composed(
+        crate::validation::validate_generation_dimensions_for_model(
+            &self.model,
             self.width,
             self.height,
             family.as_deref(),

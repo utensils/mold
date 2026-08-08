@@ -57,6 +57,11 @@ jobs:
               - 'scripts/tests/local-multi-gpu-qualification-contract.sh'
               - 'scripts/tests/local_multi_gpu_qualification_test.py'
               - 'docs/qualification/local-multi-gpu-report.schema.json'
+              - 'scripts/minimax-h3-conformance.py'
+              - 'scripts/tests/minimax-h3-conformance-contract.py'
+              - 'tests/fixtures/minimax_h3/**'
+              - 'docs/qualification/minimax-h3-*.json'
+              - 'docs/qualification/minimax-h3-conformance.md'
               - 'docs/qualification/README.md'
               - '.github/workflows/ci.yml'
             # Forced-local checks exist to compile backend-specific code that
@@ -145,6 +150,7 @@ jobs:
               - 'docs/qualification/**'
               - 'scripts/tests/docker-web-context.sh'
               - 'scripts/tests/desktop-candle-lock-sync.sh'
+              - 'scripts/tests/desktop-candle-nix-source-hash.sh'
               - 'scripts/tests/release-sync-pr.sh'
               - 'scripts/tests/crates-publish-contract.sh'
               - '.github/workflows/release-plz.yml'
@@ -156,6 +162,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - uses: DeterminateSystems/determinate-nix-action@v3
       - name: Test release PR synchronization
         run: bash scripts/tests/release-sync-pr.sh
       - name: Test crates.io publication contract
@@ -168,6 +175,8 @@ jobs:
         run: bash scripts/tests/docker-web-context.sh
       - name: Test desktop Candle lock synchronization
         run: bash scripts/tests/desktop-candle-lock-sync.sh
+      - name: Test desktop Candle Nix source hash
+        run: bash scripts/tests/desktop-candle-nix-source-hash.sh
       - name: Test CUDA distribution contract
         run: bash scripts/tests/cuda-distribution-contract.sh
       - name: Test embedded PTX parser contract
@@ -290,6 +299,8 @@ jobs:
         run: cargo test --workspace
       - name: Test local multi-GPU qualification contract
         run: bash scripts/tests/local-multi-gpu-qualification-contract.sh
+      - name: Test MiniMax H3 conformance contract
+        run: python3 scripts/tests/minimax-h3-conformance-contract.py
       - name: Check with all optional features
         run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns
 

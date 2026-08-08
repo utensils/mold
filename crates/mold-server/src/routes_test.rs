@@ -910,6 +910,7 @@ mod tests {
             source_image_name: None,
             source_image_sha256: None,
             edit_image_sha256s: None,
+            references: None,
             scheduler: None,
             output_format: Some(mold_core::OutputFormat::Png),
             cfg_plus: None,
@@ -3732,6 +3733,17 @@ mod tests {
         assert_eq!(body["devices"]["stable_pins"], true);
         assert_eq!(body["devices"]["planned_lanes"], true);
         assert_eq!(body["devices"]["learned_eta"], true);
+        assert_eq!(body["reference_uploads"]["available"], true);
+        assert_eq!(body["reference_uploads"]["protocol_version"], 1);
+        assert_eq!(body["reference_uploads"]["requires_api_key"], true);
+        assert_eq!(
+            body["reference_uploads"]["upload_handle_header"],
+            crate::reference_uploads::UPLOAD_HANDLE_HEADER
+        );
+        assert_eq!(
+            body["reference_uploads"]["max_file_bytes"],
+            crate::reference_uploads::MAX_REFERENCE_UPLOAD_FILE_BYTES
+        );
     }
 
     #[tokio::test]
@@ -3885,7 +3897,7 @@ mod tests {
     /// Clients feature-detect server-side catalog sorting against this
     /// advertisement — older servers omit the field entirely.
     #[tokio::test]
-    async fn capabilities_reports_catalog_sort_vocabulary() {
+    async fn capabilities_reports_catalog_sort_vocabulary_and_h3_model_access_restriction() {
         let app = app_empty();
         let resp = app
             .oneshot(
@@ -3900,6 +3912,17 @@ mod tests {
         assert_eq!(
             body["catalog"]["sort"],
             serde_json::json!(["downloads", "recent", "rating"])
+        );
+        assert!(body["catalog"]["families"]
+            .as_array()
+            .is_some_and(|families| families.iter().all(|family| family != "minimax-h3")));
+        assert_eq!(
+            body["model_access"]["restrictions"][0]["code"],
+            mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
+        );
+        assert_eq!(
+            body["model_access"]["restrictions"][0]["family"],
+            "minimax-h3"
         );
     }
 
@@ -5886,6 +5909,18 @@ mod tests {
             "spec should document POST /api/generate/placement-preview"
         );
         assert!(
+            spec["paths"]["/api/generate/reference-upload-sessions"]["post"].is_object(),
+            "spec should document reference upload session creation"
+        );
+        assert!(
+            spec["paths"]["/api/generate/reference-upload-sessions"]["delete"].is_object(),
+            "spec should document reference upload session cancellation"
+        );
+        assert!(
+            spec["paths"]["/api/generate/reference-upload"]["put"].is_object(),
+            "spec should document streaming reference upload"
+        );
+        assert!(
             spec["paths"]["/api/chain-jobs/placement-preview"]["post"].is_object(),
             "spec should document POST /api/chain-jobs/placement-preview"
         );
@@ -5937,6 +5972,246 @@ mod tests {
         assert!(preview.authoritative);
         assert_eq!(preview.outcome, "infeasible");
         assert!(preview.reason.unwrap().contains("between 1 and 64"));
+    }
+
+    #[tokio::test]
+    async fn generation_placement_preview_is_authoritatively_infeasible_for_h3() {
+        let state = AppState::for_tests();
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"test","model":"hf:MiniMaxAI/MiniMax-H3","width":512,"height":512,"steps":4,"guidance":1.0,"batch_size":1}"#,
+        )
+        .unwrap();
+
+        let preview = crate::routes::placement_preview_for_request(&state, request, 1).await;
+
+        assert!(preview.authoritative);
+        assert_eq!(preview.outcome, "infeasible");
+        assert!(preview.candidate.is_none());
+        assert!(preview
+            .reason
+            .unwrap()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[tokio::test]
+    async fn reference_upload_session_requires_explicit_auth_then_451s_before_staging() {
+        let state = AppState::for_tests();
+        let app = app_with_state(state.clone());
+        let body = serde_json::json!({
+            "request": {
+                "prompt": "reference print",
+                "model": mold_core::minimax_h3::REF2VA_COMFY,
+                "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+                "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+                "steps": mold_core::minimax_h3::DEFAULT_STEPS,
+                "guidance": 0.0,
+                "batch_size": 1,
+                "frames": mold_core::minimax_h3::MIN_FRAMES,
+                "fps": mold_core::minimax_h3::FIXED_FPS,
+                "output_format": "mp4",
+                "references": [{
+                    "kind": "image",
+                    "media": { "authority": "descriptor" },
+                    "provenance": { "name": "anchor.png", "sha256": "11".repeat(32) },
+                    "mime_type": "image/png",
+                    "width": 1024,
+                    "height": 1024
+                }]
+            },
+            "upload_references": [1]
+        })
+        .to_string();
+
+        let unauthenticated = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate/reference-upload-sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        assert!(!state.reference_uploads.staging_exists());
+
+        let mut request = Request::post("/api/generate/reference-upload-sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(crate::auth::ApiKeyAuthenticated {
+                identity: "test-key".to_string(),
+            });
+        let blocked = app.oneshot(request).await.unwrap();
+        assert_eq!(blocked.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+        let blocked = json_body(blocked).await;
+        assert_eq!(
+            blocked["code"],
+            mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
+        );
+        assert!(!state.reference_uploads.staging_exists());
+    }
+
+    #[tokio::test]
+    async fn config_only_h3_generation_is_rejected_before_queueing() {
+        let (state, mut queue_rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.config.write().await.models.insert(
+            "private-video-model".to_string(),
+            mold_core::ModelConfig {
+                family: Some("minimax-h3".to_string()),
+                ..Default::default()
+            },
+        );
+        let app = app_with_state(state.clone());
+        let body = serde_json::json!({
+            "prompt": "test",
+            "model": "private-video-model",
+            "width": 512,
+            "height": 512,
+            "steps": 4,
+            "guidance": 1.0,
+            "batch_size": 1
+        });
+
+        let response = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        assert_eq!(state.job_registry.len(), 0);
+        assert!(
+            queue_rx.try_recv().is_err(),
+            "request must not reach the queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_h3_artifact_path_is_rejected_before_queueing() {
+        let (state, mut queue_rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.config.write().await.models.insert(
+            "renamed-private-model".to_string(),
+            mold_core::ModelConfig {
+                family: Some("flux".to_string()),
+                transformer: Some("/models/MiniMax-H3/transformer.safetensors".to_string()),
+                vae: Some("/models/ordinary-vae.safetensors".to_string()),
+                ..Default::default()
+            },
+        );
+        let app = app_with_state(state.clone());
+        let body = serde_json::json!({
+            "prompt": "test",
+            "model": "renamed-private-model",
+            "width": 512,
+            "height": 512,
+            "steps": 4,
+            "guidance": 1.0,
+            "batch_size": 1
+        });
+
+        let response = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        assert_eq!(state.job_registry.len(), 0);
+        assert!(
+            queue_rx.try_recv().is_err(),
+            "configured artifact path must not reach the queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_upscale_routes_reject_h3_before_pull_or_scheduling() {
+        let state = AppState::for_tests();
+        state.config.write().await.models.insert(
+            "private-upscaler".to_string(),
+            mold_core::ModelConfig {
+                family: Some("minimax-h3".to_string()),
+                transformer: Some("/models/ordinary-upscaler.safetensors".to_string()),
+                ..Default::default()
+            },
+        );
+        let app = app_with_state(state.clone());
+
+        for model in ["MiniMaxH3Scheduler", "private-upscaler"] {
+            let body = serde_json::json!({
+                "model": model,
+                "image": "AQID",
+                "output_format": "png"
+            })
+            .to_string();
+            for route in ["/api/upscale", "/api/upscale/stream"] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::post(route)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.clone()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
+                    "{route} {model}"
+                );
+                let response = json_body(response).await;
+                assert_eq!(
+                    response["code"],
+                    mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED,
+                    "{route} {model}"
+                );
+            }
+        }
+
+        let listing = state.downloads.listing().await;
+        assert!(listing.active.is_none());
+        assert!(listing.queued.is_empty());
+    }
+
+    #[tokio::test]
+    async fn config_only_h3_placement_preview_is_authoritatively_infeasible() {
+        let state = AppState::for_tests();
+        state.config.write().await.models.insert(
+            "private-video-model".to_string(),
+            mold_core::ModelConfig {
+                family: Some("minimax-h3".to_string()),
+                ..Default::default()
+            },
+        );
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"test","model":"private-video-model","width":512,"height":512,"steps":4,"guidance":1.0,"batch_size":1}"#,
+        )
+        .unwrap();
+
+        let preview = crate::routes::placement_preview_for_request(&state, request, 1).await;
+
+        assert!(preview.authoritative);
+        assert_eq!(preview.outcome, "infeasible");
+        assert!(preview.candidate.is_none());
+        assert!(preview
+            .reason
+            .unwrap()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
     }
 
     #[tokio::test]
@@ -6402,6 +6677,7 @@ mod tests {
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
+            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: true,
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -6473,6 +6749,7 @@ mod tests {
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
+            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: true,
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -6747,6 +7024,7 @@ mod tests {
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
             config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
+            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: true,
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -7863,6 +8141,7 @@ mod tests {
             source_image_name: None,
             source_image_sha256: None,
             edit_image_sha256s: None,
+            references: None,
             scheduler: None,
             output_format: Some(mold_core::OutputFormat::Png),
             cfg_plus: None,
@@ -8770,6 +9049,7 @@ mod tests {
             source_image_name: None,
             source_image_sha256: None,
             edit_image_sha256s: None,
+            references: None,
             scheduler: None,
             output_format: Some(mold_core::OutputFormat::Png),
             cfg_plus: None,
@@ -9218,6 +9498,133 @@ mod tests {
         assert!(body["error"].as_str().unwrap().contains("gpu:0"));
     }
     // ─── Downloads UI (Agent A) ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn post_api_downloads_rejects_h3_before_queueing() {
+        let state = AppState::for_tests();
+        let app = app_with_state(state.clone());
+        let body = serde_json::json!({ "model": "hf:MiniMaxAI/MiniMax-H3" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/downloads")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        let listing = state.downloads.listing().await;
+        assert!(listing.active.is_none());
+        assert!(listing.queued.is_empty());
+    }
+
+    #[tokio::test]
+    async fn config_only_h3_admin_and_download_routes_share_the_451_gate() {
+        let state = AppState::for_tests();
+        state.config.write().await.models.insert(
+            "private-video-model".to_string(),
+            mold_core::ModelConfig {
+                family: Some("minimax-h3".to_string()),
+                ..Default::default()
+            },
+        );
+        let app = app_with_state(state.clone());
+        let body = serde_json::json!({ "model": "private-video-model" }).to_string();
+
+        for route in ["/api/downloads", "/api/models/pull", "/api/models/load"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(route)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.clone()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
+                "{route}"
+            );
+            let response = json_body(response).await;
+            assert_eq!(
+                response["code"],
+                mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED,
+                "{route}"
+            );
+        }
+
+        let listing = state.downloads.listing().await;
+        assert!(listing.active.is_none());
+        assert!(listing.queued.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prompt_transform_routes_reject_h3_local_or_hosted_models_before_execution() {
+        for (backend, model, api_model) in [
+            ("local", "MiniMax-H3", "ordinary-api-model"),
+            (
+                "http://127.0.0.1:9",
+                "ordinary-local-model",
+                "MiniMaxAI/MiniMax-H3",
+            ),
+        ] {
+            let state = AppState::for_tests();
+            {
+                let mut config = state.config.write().await;
+                config.expand.backend = backend.to_string();
+                config.expand.model = model.to_string();
+                config.expand.api_model = api_model.to_string();
+            }
+            let app = app_with_state(state);
+            for (route, body) in [
+                (
+                    "/api/expand",
+                    serde_json::json!({
+                        "prompt": "a red apple",
+                        "model_family": "flux",
+                        "variations": 1
+                    }),
+                ),
+                (
+                    "/api/remix",
+                    serde_json::json!({
+                        "source_prompt": "a red apple",
+                        "model_family": "flux",
+                        "variations": 1
+                    }),
+                ),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::post(route)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
+                    "{backend} {route}"
+                );
+                assert_eq!(
+                    json_body(response).await["code"],
+                    mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED,
+                    "{backend} {route}"
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn post_api_downloads_enqueues_job() {

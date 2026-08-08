@@ -4,7 +4,7 @@ use base64::{engine::general_purpose, Engine as _};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::{
-    classify_generate_error, fit_to_model_dimensions, fit_to_target_area, manifest, Config,
+    classify_generate_error, fit_to_model_dimensions_aligned, fit_to_target_area, manifest, Config,
     DevicePlacement, GenerateRequest, GenerateResponse, GenerateServerAction, ImageData,
     KeyframeCondition, LoraWeight, Ltx2GuidanceOverrides, Ltx2PipelineMode, Ltx2SpatialUpscale,
     Ltx2TemporalUpscale, MoldClient, OutputFormat, Scheduler, TimeRange,
@@ -28,13 +28,20 @@ fn tag_remote(client: &MoldClient, e: anyhow::Error) -> anyhow::Error {
     RemoteInferenceError::wrap(client.host(), e)
 }
 
-/// Fit source image dimensions to the model's native resolution, preserving aspect ratio.
-fn source_image_model_dimensions(bytes: &[u8], model_w: u32, model_h: u32) -> Result<(u32, u32)> {
+/// Fit source image dimensions to the model's native resolution, preserving
+/// aspect ratio on the resolved model's pixel grid (16 for most checkpoints,
+/// 32 for e.g. `wan22-ti2v-5b`).
+fn source_image_model_dimensions(
+    bytes: &[u8],
+    model_w: u32,
+    model_h: u32,
+    align: u32,
+) -> Result<(u32, u32)> {
     let img = image::load_from_memory(bytes)
         .map_err(|e| anyhow::anyhow!("failed to decode source image: {e}"))?;
     let orig_w = img.width();
     let orig_h = img.height();
-    let (w, h) = fit_to_model_dimensions(orig_w, orig_h, model_w, model_h);
+    let (w, h) = fit_to_model_dimensions_aligned(orig_w, orig_h, model_w, model_h, align);
     if w != orig_w || h != orig_h {
         let is_upscale = w > orig_w || h > orig_h;
         let icon = if is_upscale {
@@ -43,14 +50,15 @@ fn source_image_model_dimensions(bytes: &[u8], model_w: u32, model_h: u32) -> Re
             theme::icon_warn()
         };
         status!(
-            "{} Source image {}x{} -> {}x{} (fit to {}x{} model bounds, 16px aligned)",
+            "{} Source image {}x{} -> {}x{} (fit to {}x{} model bounds, {}px aligned)",
             icon,
             orig_w,
             orig_h,
             w,
             h,
             model_w,
-            model_h
+            model_h,
+            align
         );
     }
     Ok((w, h))
@@ -87,6 +95,24 @@ fn resolve_family(model: &str, config: &Config) -> Option<String> {
         .or_else(|| manifest::find_manifest(model).map(|m| m.family.clone()))
 }
 
+fn require_local_request_model_activation(req: &GenerateRequest, config: &Config) -> Result<()> {
+    let family = resolve_family(&req.model, config);
+    let models_root = config.resolved_models_dir();
+    mold_core::require_generate_request_model_activation(
+        req,
+        Some(&models_root),
+        family.as_deref(),
+    )?;
+    crate::catalog_bridge::require_known_model_activation(config, &req.model)?;
+    for identity in [req.control_model.as_deref(), req.upscale_model.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        crate::catalog_bridge::require_known_model_activation(config, identity)?;
+    }
+    Ok(())
+}
+
 /// Validate a request on the forced-local path.
 ///
 /// Feeds the config/manifest-resolved family through as a hint so `cv:` / `hf:`
@@ -95,6 +121,7 @@ fn resolve_family(model: &str, config: &Config) -> Option<String> {
 /// mirrors what the HTTP server does with its catalog family hint.
 #[cfg(any(feature = "cuda", feature = "metal", test))]
 fn validate_local_request(req: &GenerateRequest, config: &Config) -> Result<()> {
+    require_local_request_model_activation(req, config)?;
     mold_core::validate_generate_request_with_family(
         req,
         resolve_family(&req.model, config).as_deref(),
@@ -102,9 +129,11 @@ fn validate_local_request(req: &GenerateRequest, config: &Config) -> Result<()> 
     .map_err(|e| anyhow::anyhow!(e))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn effective_dimensions(
     config: &Config,
     model_cfg: &mold_core::ModelConfig,
+    model: &str,
     family: Option<&str>,
     width: Option<u32>,
     height: Option<u32>,
@@ -126,7 +155,9 @@ fn effective_dimensions(
         (None, None, Some(source_image)) => {
             let model_w = model_cfg.effective_width(config);
             let model_h = model_cfg.effective_height(config);
-            source_image_model_dimensions(source_image, model_w, model_h)
+            // Per-model grid: `wan22-ti2v-5b` needs 32, most models 16.
+            let align = mold_core::dimension_alignment_for_model(model, family);
+            source_image_model_dimensions(source_image, model_w, model_h, align)
         }
         (None, None, None) => Ok((
             model_cfg.effective_width(config),
@@ -192,6 +223,7 @@ fn refit_request_after_pull(
         let (w, h) = effective_dimensions(
             config,
             model_cfg,
+            &req.model,
             family,
             None,
             None,
@@ -408,6 +440,7 @@ pub async fn run(
                 let (eff_w, eff_h) = effective_dimensions(
                     &config,
                     &model_cfg,
+                    model,
                     family.as_deref(),
                     width,
                     height,
@@ -516,6 +549,7 @@ pub async fn run(
                         source_image: None,
                         source_image_name: None,
                         edit_images: None,
+                        references: None,
                         strength: 1.0,
                         mask_image: None,
                         control_image: None,
@@ -604,6 +638,7 @@ pub async fn run(
     let (effective_width, effective_height) = effective_dimensions(
         &config,
         &model_cfg,
+        model,
         family.as_deref(),
         width,
         height,
@@ -636,6 +671,7 @@ pub async fn run(
         scheduler,
         cfg_plus,
         edit_images: edit_images.clone(),
+        references: None,
         source_image: source_image.clone(),
         source_image_name: None,
         strength,
@@ -672,6 +708,7 @@ pub async fn run(
         placement,
     };
     if local {
+        require_local_request_model_activation(&req, &config)?;
         materialize_local_builtin_control(&mut req, &config).await?;
         materialize_local_builtin_camera_controls(&mut req, &config).await?;
     }
@@ -1033,6 +1070,7 @@ async fn materialize_local_builtin_control(
     request: &mut GenerateRequest,
     config: &Config,
 ) -> Result<()> {
+    require_local_request_model_activation(request, config)?;
     let Some(control) = request.ic_lora_control.as_deref() else {
         return Ok(());
     };
@@ -1100,6 +1138,7 @@ async fn materialize_local_builtin_camera_controls(
     request: &mut GenerateRequest,
     config: &Config,
 ) -> Result<()> {
+    require_local_request_model_activation(request, config)?;
     let aliases: Vec<String> = request
         .loras
         .iter()
@@ -1410,6 +1449,8 @@ async fn prepare_local_request(
 
     let model_name = req.model.clone();
     let mut req = req.clone();
+
+    require_local_request_model_activation(&req, config)?;
 
     let (paths, effective_config, pulled) = resolve_or_pull_model(&model_name, config).await?;
     if pulled {
@@ -2854,7 +2895,17 @@ mod tests {
         };
 
         assert_eq!(
-            effective_dimensions(&config, &model_cfg, None, None, None, None, None).unwrap(),
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                "flux-dev:q4",
+                None,
+                None,
+                None,
+                None,
+                None
+            )
+            .unwrap(),
             (1024, 1024)
         );
     }
@@ -2871,8 +2922,17 @@ mod tests {
         let source = png_with_dimensions(1280, 704);
 
         assert_eq!(
-            effective_dimensions(&config, &model_cfg, None, None, None, Some(&source), None)
-                .unwrap(),
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                "flux-dev:q4",
+                None,
+                None,
+                None,
+                Some(&source),
+                None,
+            )
+            .unwrap(),
             (1024, 560)
         );
     }
@@ -2889,9 +2949,63 @@ mod tests {
         let source = png_with_dimensions(1001, 777);
 
         assert_eq!(
-            effective_dimensions(&config, &model_cfg, None, None, None, Some(&source), None)
-                .unwrap(),
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                "flux-dev:q4",
+                None,
+                None,
+                None,
+                Some(&source),
+                None,
+            )
+            .unwrap(),
             (1024, 784)
+        );
+    }
+
+    /// The 5B's I2V source fitting must land on its 2.2 VAE's 32px grid —
+    /// the flow that used to produce %16-not-%32 canvases the engine rejected
+    /// only after loading — while 2.1-VAE checkpoints keep the 16px grid.
+    #[test]
+    fn effective_dimensions_fits_wan22_ti2v_5b_source_to_its_32px_grid() {
+        let config = Config::default();
+        let model_cfg = ModelConfig {
+            default_width: Some(1280),
+            default_height: Some(704),
+            ..ModelConfig::default()
+        };
+        // 1617x1000 is height-limited: h=704, w=704*1.617=1138.4, which
+        // floors differently on the two grids (1120 vs 1136).
+        let source = png_with_dimensions(1617, 1000);
+
+        assert_eq!(
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                "wan22-ti2v-5b",
+                Some("wan"),
+                None,
+                None,
+                Some(&source),
+                None,
+            )
+            .unwrap(),
+            (1120, 704)
+        );
+        assert_eq!(
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                "wan21-t2v-1.3b",
+                Some("wan"),
+                None,
+                None,
+                Some(&source),
+                None,
+            )
+            .unwrap(),
+            (1136, 704)
         );
     }
 
@@ -2909,6 +3023,7 @@ mod tests {
             effective_dimensions(
                 &config,
                 &model_cfg,
+                "flux-dev:q4",
                 None,
                 Some(512),
                 Some(768),
@@ -2932,8 +3047,17 @@ mod tests {
         let source = png_with_dimensions(1024, 1024);
 
         assert_eq!(
-            effective_dimensions(&config, &model_cfg, None, None, None, Some(&source), None)
-                .unwrap(),
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                "flux-dev:q4",
+                None,
+                None,
+                None,
+                Some(&source),
+                None,
+            )
+            .unwrap(),
             (512, 512)
         );
     }
@@ -2950,8 +3074,17 @@ mod tests {
         let source = png_with_dimensions(1920, 1080);
 
         assert_eq!(
-            effective_dimensions(&config, &model_cfg, None, None, None, Some(&source), None)
-                .unwrap(),
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                "flux-dev:q4",
+                None,
+                None,
+                None,
+                Some(&source),
+                None,
+            )
+            .unwrap(),
             (512, 288)
         );
     }
@@ -2968,8 +3101,17 @@ mod tests {
         let source = png_with_dimensions(512, 512);
 
         assert_eq!(
-            effective_dimensions(&config, &model_cfg, None, None, None, Some(&source), None)
-                .unwrap(),
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                "flux-dev:q4",
+                None,
+                None,
+                None,
+                Some(&source),
+                None,
+            )
+            .unwrap(),
             (1024, 1024)
         );
     }
@@ -2985,6 +3127,7 @@ mod tests {
             effective_dimensions(
                 &config,
                 &model_cfg,
+                "qwen-image-edit",
                 Some("qwen-image-edit"),
                 None,
                 None,
@@ -3003,6 +3146,7 @@ mod tests {
         let err = effective_dimensions(
             &config,
             &model_cfg,
+            "qwen-image-edit",
             Some("qwen-image-edit"),
             None,
             None,
@@ -3267,6 +3411,45 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("prompt"));
+    }
+
+    #[test]
+    fn forced_local_policy_gates_nested_models_and_artifacts_before_pull() {
+        let root = "/Volumes/ExternalStorage/mold-uat/minimax-h3/models";
+        let mut config = Config {
+            models_dir: root.to_string(),
+            ..Config::default()
+        };
+        config.models.insert(
+            "private-control".to_string(),
+            ModelConfig {
+                family: Some("minimax-h3".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a red apple",
+            "model": "flux-dev:q4",
+            "width": 1024,
+            "height": 1024,
+            "steps": 4,
+            "guidance": 0.0,
+            "batch_size": 1
+        }))
+        .unwrap();
+
+        request.control_model = Some("private-control".to_string());
+        assert!(require_local_request_model_activation(&request, &config).is_err());
+
+        request.control_model = None;
+        request.lora = Some(LoraWeight {
+            path: format!("{root}/custom/MiniMax-H3/adapter.safetensors"),
+            scale: 1.0,
+        });
+        assert!(require_local_request_model_activation(&request, &config).is_err());
+
+        request.lora.as_mut().unwrap().path = format!("{root}/flux/ordinary-adapter.safetensors");
+        assert!(require_local_request_model_activation(&request, &config).is_ok());
     }
 
     /// Metadata must survive a zero-length prompt on every embedded surface.

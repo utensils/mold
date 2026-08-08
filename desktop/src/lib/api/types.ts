@@ -5,6 +5,10 @@
  */
 
 import type { ChainOutputMetadata } from "@studio/lib/api/chainTypes";
+import type {
+  GenerationReference,
+  GenerationReferenceMetadata,
+} from "@studio/lib/generationReferences";
 import type { Ltx2GuidanceOverrides } from "@studio/lib/guidanceOverrides";
 
 export interface GpuSnapshot {
@@ -78,6 +82,16 @@ export interface ExpandCapabilities {
 
 export interface ServerCapabilities {
   gallery: { can_delete: boolean };
+  /** Server-enforced model families that are not activated in this build. */
+  model_access?: {
+    restrictions: Array<{
+      code: string;
+      family: string;
+      message: string;
+      license_url: string;
+      authorization_url: string;
+    }>;
+  } | null;
   /** Continuation support. Absent on older servers, which means the Create
    * surfaces must hide the extend controls rather than send a rejected
    * request. */
@@ -90,6 +104,20 @@ export interface ServerCapabilities {
   discovery?: { can_browse: boolean } | null;
   /** Absent on servers that predate `GET /api/events`. */
   events?: { available: boolean } | null;
+  /** Stable-URL, header-secret reference ingress. Model access is advertised
+   * separately and may still keep H3 legally unavailable. */
+  reference_uploads?: {
+    available: boolean;
+    protocol_version: number;
+    requires_api_key: boolean;
+    session_path: string;
+    upload_path: string;
+    session_handle_header: string;
+    upload_handle_header: string;
+    max_file_bytes: number;
+    max_session_bytes: number;
+    session_ttl_ms: number;
+  } | null;
   /** Live lifecycle and restart-only recovery support. */
   devices?: {
     available?: boolean;
@@ -166,14 +194,18 @@ export interface ModelEntry {
   /** Server-advertised frame rate (LTX-Video ships 30, LTX-2 24); absent on
    * older servers and image models. Applied like steps/guidance. */
   default_fps?: number | null;
+  /** Minimum requestable frame count; omitted means the legacy floor of one. */
+  min_frames?: number | null;
   /** Requestable single-shot frame ceiling at `default_fps`. */
   max_frames?: number | null;
   /** Duration-based ceiling; clients recompute max frames when FPS changes. */
   max_runtime_seconds?: number | null;
   /** FPS-independent resource guard paired with `max_runtime_seconds`. */
   max_frames_absolute?: number | null;
-  /** Valid frame counts are `k * frame_step + 1`. */
+  /** Valid frame counts are `k * frame_step + frame_offset` (offset defaults to 1). */
   frame_step?: number | null;
+  /** Frame-grid offset; omitted means 1. MiniMax H3 advertises 5. */
+  frame_offset?: number | null;
 }
 
 // ── Generation ───────────────────────────────────────────────────────────
@@ -264,6 +296,7 @@ export type ExpandTask =
   | "retake"
   | "keyframe-interpolation"
   | "audio-driven-video"
+  | "reference-to-audio-video"
   | "text-to-audio";
 
 export interface ExpandRequest {
@@ -360,6 +393,8 @@ export interface GenerateRequest {
   /** Qwen-Image-Edit multi-image inputs, base64 each (no data-URI prefix).
    * Order is load-bearing: first = primary edit target, rest = references. */
   edit_images?: string[];
+  /** Ordered heterogeneous MiniMax H3 Ref2VA inputs. */
+  references?: GenerationReference[];
   strength?: number;
   /** Inpaint mask, base64. */
   mask_image?: string;
@@ -539,6 +574,8 @@ export interface OutputMetadata {
   source_image_sha256?: string | null;
   /** Ordered content keys for Qwen Image Edit inputs (newer servers only). */
   edit_image_sha256s?: string[] | null;
+  /** Redacted ordered H3 reference provenance (newer servers only). */
+  references?: GenerationReferenceMetadata[] | null;
   /** Durable sequence job this print was stitched from. Present only for
    * chain jobs with a server-side record — ephemeral chain outputs and
    * pre-#564 rows carry nothing (additive; newer servers only). */

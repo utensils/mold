@@ -128,7 +128,8 @@ pub fn resolve_remix_dimensions(
         | ExpandTask::VideoToVideo
         | ExpandTask::Retake
         | ExpandTask::KeyframeInterpolation
-        | ExpandTask::AudioDrivenVideo => &[RemixDimension::Movement],
+        | ExpandTask::AudioDrivenVideo
+        | ExpandTask::ReferenceToAudioVideo => &[RemixDimension::Movement],
         ExpandTask::TextToAudio => &[RemixDimension::Mood, RemixDimension::Movement],
     };
     let candidates = if requested.is_empty() {
@@ -715,14 +716,24 @@ impl ExpandSettings {
         warnings
     }
 
-    /// Create the appropriate expander backend.
+    /// Model identity selected by the configured backend.
+    pub fn active_model(&self) -> &str {
+        if self.is_local() {
+            &self.model
+        } else {
+            &self.api_model
+        }
+    }
+
+    /// Create the appropriate expander backend after enforcing model access.
     /// Returns `None` if the backend is "local" (handled by mold-inference).
-    pub fn create_api_expander(&self) -> Option<ApiExpander> {
-        if self.backend == "local" {
+    pub fn create_api_expander(&self) -> Result<Option<ApiExpander>, crate::ModelActivationError> {
+        crate::require_model_activation(self.active_model(), None)?;
+        Ok(if self.is_local() {
             None
         } else {
             Some(ApiExpander::new(&self.backend, &self.api_model))
-        }
+        })
     }
 
     /// Check if this is configured for local (GGUF) expansion.
@@ -1084,7 +1095,7 @@ mod tests {
     #[test]
     fn expand_settings_create_api_expander_none_for_local() {
         let settings = ExpandSettings::default();
-        assert!(settings.create_api_expander().is_none());
+        assert!(settings.create_api_expander().unwrap().is_none());
     }
 
     #[test]
@@ -1094,8 +1105,40 @@ mod tests {
             api_model: "llama3:8b".to_string(),
             ..Default::default()
         };
-        let expander = settings.create_api_expander();
+        let expander = settings.create_api_expander().unwrap();
         assert!(expander.is_some());
+    }
+
+    #[test]
+    fn expand_settings_gate_the_selected_local_or_api_model() {
+        let local_h3 = ExpandSettings {
+            model: "MiniMax-H3".to_string(),
+            api_model: "ordinary-inactive-api-model".to_string(),
+            ..Default::default()
+        };
+        let error = local_h3
+            .create_api_expander()
+            .err()
+            .expect("the selected local H3 model must be gated");
+        assert!(error
+            .to_string()
+            .contains(crate::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+
+        let api_h3 = ExpandSettings {
+            backend: "http://localhost:11434".to_string(),
+            model: "ordinary-inactive-local-model".to_string(),
+            api_model: "MiniMaxAI/MiniMax-H3".to_string(),
+            ..Default::default()
+        };
+        assert!(api_h3.create_api_expander().is_err());
+
+        let inactive_h3 = ExpandSettings {
+            backend: "http://localhost:11434".to_string(),
+            model: "MiniMax-H3".to_string(),
+            api_model: "llama3:8b".to_string(),
+            ..Default::default()
+        };
+        assert!(inactive_h3.create_api_expander().unwrap().is_some());
     }
 
     #[test]

@@ -477,6 +477,9 @@ struct DenoiseInputs<'a> {
     rope: &'a (Tensor, Tensor),
     device: &'a Device,
     progress: &'a crate::progress::ProgressReporter,
+    /// Live denoise previews. `None` when the checkpoint's latent channel
+    /// count has no factor table.
+    previewer: Option<&'a crate::latent_preview::LatentPreviewer>,
 }
 
 /// The sampling loop for all three conditioning modes.
@@ -498,6 +501,7 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
         rope,
         device,
         progress,
+        previewer,
     } = inputs;
 
     let total = schedule.timesteps.len();
@@ -555,6 +559,22 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
             total,
             elapsed: step_start.elapsed(),
         });
+        if let Some(previewer) = previewer {
+            if previewer.due(index + 1, total) {
+                // Preview the predicted clean latent, not the still-noisy
+                // working latent — composition is visible from the first
+                // step. The solver's own recorded x0 is the only valid
+                // estimate: UniPC's corrector rewrites the sample the
+                // predictor steps from, so recomputing `x - sigma * v` from
+                // the post-step state projects a stale velocity. The final
+                // step's x0 is what the order-1 terminal predictor returns,
+                // so the last preview still matches the finished latent.
+                match solver.last_x0() {
+                    Some(x0) => previewer.maybe_emit(progress, x0, index + 1, total),
+                    None => tracing::warn!("skipping denoise preview: solver has no x0 yet"),
+                }
+            }
+        }
     }
     Ok(latents)
 }
@@ -1000,6 +1020,9 @@ impl WanEngine {
             )?)?;
 
         progress.stage_start("Denoising");
+        // Live previews project the working latent through the checkpoint
+        // generation's own factor table, selected by latent channel count.
+        let previewer = crate::latent_preview::LatentPreviewer::wan(vae_config.z_dim);
         let latents = run_denoise_loop(DenoiseInputs {
             experts: &mut experts,
             conditioning: &conditioning,
@@ -1013,6 +1036,7 @@ impl WanEngine {
             rope: &rope,
             device: &device,
             progress,
+            previewer: previewer.as_ref(),
         })?;
         progress.checkpoint()?;
         drop(experts);
@@ -1295,6 +1319,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -1877,6 +1902,240 @@ mod tests {
         assert_eq!(frames[0].dimensions(), (32, 32));
     }
 
+    /// The preview must project the solver's own x0 — the pre-step
+    /// conversion `FlowUniPc::step` records — not a naive post-step
+    /// `x_next - sigma_next * v`, which is invalid once the corrector has
+    /// rewritten the sample the predictor stepped from (#791 review). The
+    /// first (order-1) and terminal steps coincide with the naive identity by
+    /// construction, so the fixture must discriminate on a corrector step in
+    /// between — a zero preview interval makes the loop emit all of them.
+    #[test]
+    fn preview_projects_the_solvers_own_x0() {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let z = 16usize;
+        let config = WanTransformerConfig::tiny(z, 2, 2);
+        let map = VarMap::new();
+        let transformer = WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&map, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+        // Seed every weight so the velocity field is nontrivial — an all-zero
+        // DiT would let a wrong-sigma preview hide inside v = 0.
+        for (index, var) in map.all_vars().iter().enumerate() {
+            let noise = seeded_randn(1000 + index as u64, var.dims(), &device, dtype)
+                .unwrap()
+                .affine(0.2, 0.0)
+                .unwrap();
+            var.set(&noise).unwrap();
+        }
+
+        let (latent_frames, latent_h, latent_w) = (2usize, 4usize, 4usize);
+        let total = 4usize;
+        let schedule = WanSchedule::new(WanScheduleConfig::new(total, 8.0)).unwrap();
+        let latents0 = seeded_randn(
+            7,
+            &[1, z, latent_frames, latent_h, latent_w],
+            &device,
+            dtype,
+        )
+        .unwrap();
+        let context = Tensor::zeros((1, 6, config.text_dim), dtype, &device).unwrap();
+        let progress_quiet = crate::progress::ProgressReporter::default();
+        let mut experts = WanExperts::single(transformer.clone());
+        let rope = experts
+            .transformer_for(schedule.timesteps[0], &progress_quiet)
+            .unwrap()
+            .rope_freqs_for(
+                &Tensor::zeros((1, z, latent_frames, latent_h, latent_w), dtype, &device).unwrap(),
+            )
+            .unwrap();
+
+        // Run the real loop with an unthrottled capturing previewer: every
+        // step emits, including the corrector steps under test.
+        let mut progress = crate::progress::ProgressReporter::default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        progress.set_callback(Box::new(move |e| sink.lock().unwrap().push(e)));
+        let previewer = crate::latent_preview::LatentPreviewer::wan(z)
+            .expect("16-channel Wan checkpoints have a preview table")
+            .force_enabled()
+            .with_min_interval(std::time::Duration::ZERO);
+        let mut solver = FlowUniPc::new(schedule.clone());
+        run_denoise_loop(DenoiseInputs {
+            experts: &mut experts,
+            conditioning: &WanImageConditioning::None,
+            schedule: &schedule,
+            solver: &mut solver,
+            latents: latents0.clone(),
+            cond_embeds: &context,
+            uncond_embeds: None,
+            guidance: 1.0,
+            patch: config.patch_size.1,
+            rope: &rope,
+            device: &device,
+            progress: &progress,
+            previewer: Some(&previewer),
+        })
+        .unwrap();
+        let loop_pngs: Vec<(usize, Vec<u8>)> = {
+            let events = events.lock().unwrap();
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    ProgressEvent::Preview {
+                        image_png, step, ..
+                    } => Some((*step, image_png.as_ref().clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            loop_pngs.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+            (1..=total).collect::<Vec<_>>(),
+            "an unthrottled previewer emits every step"
+        );
+
+        // Replay the identical trajectory, capturing per-step the solver's
+        // recorded x0 and the naive post-step estimate.
+        let render = |latent: &Tensor, step: usize| -> Vec<u8> {
+            let previewer = crate::latent_preview::LatentPreviewer::wan(z)
+                .unwrap()
+                .force_enabled();
+            let mut reporter = crate::progress::ProgressReporter::default();
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let sink = captured.clone();
+            reporter.set_callback(Box::new(move |e| sink.lock().unwrap().push(e)));
+            previewer.maybe_emit(&reporter, latent, step, total);
+            let events = captured.lock().unwrap();
+            events
+                .iter()
+                .find_map(|e| match e {
+                    ProgressEvent::Preview { image_png, .. } => Some(image_png.as_ref().clone()),
+                    _ => None,
+                })
+                .expect("render emits")
+        };
+        let mut replay = FlowUniPc::new(schedule.clone());
+        let mut latents = latents0;
+        let mut corrector_steps_discriminate = false;
+        for (index, timestep) in schedule.timesteps.iter().enumerate() {
+            let step = index + 1;
+            let timestep_tensor = scalar_timestep_tensor(*timestep, &device).unwrap();
+            let velocity = transformer
+                .forward_with_rope(&latents, &timestep_tensor, &context, &rope)
+                .unwrap();
+            latents = replay.step(&velocity, index, &latents).unwrap();
+
+            let solver_png = render(replay.last_x0().expect("step records an x0"), step);
+            assert_eq!(
+                loop_pngs[index].1, solver_png,
+                "step {step}: the emitted preview must be the solver's own x0"
+            );
+            if index >= 1 && step < total {
+                let naive = latents
+                    .sub(&velocity.affine(schedule.sigmas[index + 1], 0.0).unwrap())
+                    .unwrap();
+                if render(&naive, step) != solver_png {
+                    corrector_steps_discriminate = true;
+                }
+            }
+        }
+        assert!(
+            corrector_steps_discriminate,
+            "fixture has no power: every corrector step rendered the naive \
+             estimate identically to the solver's x0"
+        );
+    }
+
+    /// The real denoise loop must emit `Preview` events when a previewer is
+    /// attached: the final step is always rendered, at latent resolution.
+    #[test]
+    fn tiny_denoise_loop_emits_previews() {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        // z = 16 so the real Wan 2.1 factor table applies.
+        let z = 16usize;
+        let config = WanTransformerConfig::tiny(z, 2, 2);
+        let map = VarMap::new();
+        let transformer = WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&map, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+
+        let (latent_frames, latent_h, latent_w) = (2usize, 4usize, 4usize);
+        let schedule = WanSchedule::new(WanScheduleConfig::new(4, 8.0)).unwrap();
+        let mut solver = FlowUniPc::new(schedule.clone());
+        let latents = seeded_randn(
+            7,
+            &[1, z, latent_frames, latent_h, latent_w],
+            &device,
+            dtype,
+        )
+        .unwrap();
+
+        let mut progress = crate::progress::ProgressReporter::default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        progress.set_callback(Box::new(move |e| sink.lock().unwrap().push(e)));
+
+        let context = Tensor::zeros((1, 6, config.text_dim), dtype, &device).unwrap();
+        let mut experts = WanExperts::single(transformer);
+        let rope = experts
+            .transformer_for(schedule.timesteps[0], &progress)
+            .unwrap()
+            .rope_freqs_for(
+                &Tensor::zeros((1, z, latent_frames, latent_h, latent_w), dtype, &device).unwrap(),
+            )
+            .unwrap();
+
+        // `force_enabled` keeps the test hermetic against MOLD_STEP_PREVIEW.
+        let previewer = crate::latent_preview::LatentPreviewer::wan(z)
+            .expect("16-channel Wan checkpoints have a preview table")
+            .force_enabled();
+        run_denoise_loop(DenoiseInputs {
+            experts: &mut experts,
+            conditioning: &WanImageConditioning::None,
+            schedule: &schedule,
+            solver: &mut solver,
+            latents,
+            cond_embeds: &context,
+            uncond_embeds: None,
+            guidance: 1.0,
+            patch: config.patch_size.1,
+            rope: &rope,
+            device: &device,
+            progress: &progress,
+            previewer: Some(&previewer),
+        })
+        .unwrap();
+
+        let events = events.lock().unwrap();
+        let previews: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProgressEvent::Preview {
+                    image_png,
+                    step,
+                    total,
+                } => Some((image_png.clone(), *step, *total)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !previews.is_empty(),
+            "the wan denoise loop must emit at least one preview frame"
+        );
+        // The final step is always emitted, at latent resolution.
+        let (png, step, total) = previews.last().unwrap();
+        assert_eq!((*step, *total), (4, 4));
+        assert!(png.starts_with(b"\x89PNG"));
+        let decoded = image::load_from_memory(png).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (4, 4));
+    }
+
     /// Build a tiny model pair and drive the *real* denoise loop for one
     /// conditioning mode. Returns the final latents plus the decoded frames, so
     /// tests can assert both the latent invariant and the pixel outcome.
@@ -2019,6 +2278,7 @@ mod tests {
                 rope: &rope,
                 device: &device,
                 progress: &progress,
+                previewer: None,
             })
             .unwrap();
 

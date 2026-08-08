@@ -332,6 +332,8 @@ pub struct ExecutionSemanticConfig {
     pub qwen2_variant: Option<String>,
     pub qwen2_text_encoder_mode: Option<String>,
     pub ltx2_gemma_variant: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub h3_factory_authority_sha256: Option<String>,
     pub attention_backend: SemanticAttentionBackend,
     pub attention_chunk: SemanticAttentionChunk,
     pub vae_tiling: SemanticVaeTiling,
@@ -481,6 +483,7 @@ impl ExecutionSemanticConfig {
     ) -> Result<Self, ExecutionPlanError> {
         let mold_inference::FrozenEngineConfig {
             family,
+            artifact_root: _,
             is_schnell,
             is_turbo,
             scheduler,
@@ -496,6 +499,7 @@ impl ExecutionSemanticConfig {
             selected_qwen3_paths: _,
             selected_qwen2_path: _,
             selected_gemma_paths: _,
+            h3_factory_authority,
             runtime_environment,
             attention_backend,
             attention_chunk,
@@ -522,6 +526,9 @@ impl ExecutionSemanticConfig {
             qwen2_variant: qwen2_variant.clone(),
             qwen2_text_encoder_mode: qwen2_text_encoder_mode.clone(),
             ltx2_gemma_variant: ltx2_gemma_variant.clone(),
+            h3_factory_authority_sha256: h3_factory_authority
+                .as_ref()
+                .map(|authority| authority.identity_sha256().to_string()),
             attention_backend: match attention_backend {
                 mold_inference::attention::AttentionBackend::Math => SemanticAttentionBackend::Math,
                 mold_inference::attention::AttentionBackend::Flash => {
@@ -943,6 +950,8 @@ fn prepared_config_overlay(
 
 #[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
 pub enum ExecutionPlanError {
+    #[error("model activation rejected execution planning: {0}")]
+    ModelActivation(String),
     #[error("model '{model}' has no concrete local artifact paths")]
     MissingArtifacts { model: String },
     #[error("component {role:?} is pinned to CPU, but family '{family}' does not support that placement")]
@@ -1005,6 +1014,18 @@ pub fn capabilities_for_family(family: &str) -> PlacementCapabilities {
     }
 }
 
+fn require_execution_plan_activation(model: &str, family: &str) -> Result<(), ExecutionPlanError> {
+    if mold_core::minimax_h3::is_family(family)
+        || mold_core::minimax_h3::capability_contract_for_model(model).is_some()
+    {
+        return Err(ExecutionPlanError::ModelActivation(
+            crate::h3_admission::reject_normal_h3_admission(model, family).to_string(),
+        ));
+    }
+    mold_core::require_model_activation(model, Some(family))
+        .map_err(|error| ExecutionPlanError::ModelActivation(error.to_string()))
+}
+
 /// Resolve hard request/config placement before dependency preparation.
 ///
 /// This is intentionally artifact-only: it filters irrelevant sibling GPUs
@@ -1015,11 +1036,6 @@ pub fn eligible_devices_for_request(
     request: &GenerateRequest,
     devices: &[DeviceFact],
 ) -> Result<Vec<DeviceFact>, ExecutionPlanError> {
-    let paths = ModelPaths::resolve(&request.model, config).ok_or_else(|| {
-        ExecutionPlanError::MissingArtifacts {
-            model: request.model.clone(),
-        }
-    })?;
     let family = config
         .resolved_model_config(&request.model)
         .family
@@ -1028,6 +1044,12 @@ pub fn eligible_devices_for_request(
                 .map(|manifest| manifest.family.clone())
         })
         .unwrap_or_else(|| "unknown".to_string());
+    require_execution_plan_activation(&request.model, &family)?;
+    let paths = ModelPaths::resolve(&request.model, config).ok_or_else(|| {
+        ExecutionPlanError::MissingArtifacts {
+            model: request.model.clone(),
+        }
+    })?;
     let capabilities = capabilities_for_family(&family);
     let engine_config = mold_inference::FrozenEngineConfig::resolve(&request.model, config);
     if let Some(alias) = unresolvable_camera_control_alias(config, request) {
@@ -1130,11 +1152,6 @@ fn resolve_execution_plans_with_policy(
 ) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
     let overlaid_config = prepared_config_overlay(config, request, prepared);
     let config = overlaid_config.as_ref().unwrap_or(config);
-    let paths = ModelPaths::resolve(&request.model, config).ok_or_else(|| {
-        ExecutionPlanError::MissingArtifacts {
-            model: request.model.clone(),
-        }
-    })?;
     let family = config
         .resolved_model_config(&request.model)
         .family
@@ -1143,6 +1160,12 @@ fn resolve_execution_plans_with_policy(
                 .map(|manifest| manifest.family.clone())
         })
         .unwrap_or_else(|| "unknown".to_string());
+    require_execution_plan_activation(&request.model, &family)?;
+    let paths = ModelPaths::resolve(&request.model, config).ok_or_else(|| {
+        ExecutionPlanError::MissingArtifacts {
+            model: request.model.clone(),
+        }
+    })?;
     let capabilities = capabilities_for_family(&family);
     if offload_requested && !capabilities.supports_block_offload {
         return Err(ExecutionPlanError::UnsupportedOffload { family });
@@ -1299,6 +1322,19 @@ pub(crate) fn preparation_authority_fingerprint(
     normalized_request.prompt.clear();
     normalized_request.original_prompt = None;
     normalized_request.expand = None;
+    // Bind ordered reference content and probed shape without ever feeding
+    // inline bytes, request-scoped upload handles, or server-local paths into
+    // the serialized preparation authority. The content digest deliberately
+    // makes equivalent authorities converge while vector order remains part
+    // of the frozen identity.
+    let ordered_references = normalized_request.references.as_ref().map(|references| {
+        references
+            .iter()
+            .enumerate()
+            .map(|(index, reference)| reference.redacted_metadata(index))
+            .collect::<Vec<_>>()
+    });
+    normalized_request.references = None;
 
     let mut hash = Sha256::new();
     hash.update(format!("{paths:?}").as_bytes());
@@ -1316,6 +1352,23 @@ pub(crate) fn preparation_authority_fingerprint(
             .expect("GenerateRequest serialization is infallible")
             .as_slice(),
     );
+    hash.update(b"\0ordered-generation-references-v1\0");
+    hash.update(
+        serde_json::to_vec(&ordered_references)
+            .expect("redacted reference serialization is infallible")
+            .as_slice(),
+    );
+    let family = config.resolved_model_config(&request.model).family;
+    if let Some(authority) =
+        crate::h3_admission::preparation_authority_bytes(request, family.as_deref())
+    {
+        // This marker lands before runtime activation. It prevents prepared
+        // dependencies from surviving a change to H3 row accounting,
+        // one-device policy, Qwen truncation, or the host-memory floor even
+        // though the legal gate still rejects H3 before downloads/queueing.
+        hash.update(b"\0minimax-h3-admission-authority-v1\0");
+        hash.update(authority);
+    }
     format!("{:x}", hash.finalize())
 }
 
@@ -1376,6 +1429,7 @@ pub fn validate_before_cuda(
     request: &GenerateRequest,
     prepared: Option<&PreparedExecutionInputs>,
 ) -> Result<(), ExecutionPlanError> {
+    require_execution_plan_activation(&request.model, &plan.model_family)?;
     if plan.device_id != worker_device_id || plan.device_ordinal != worker_ordinal {
         return Err(ExecutionPlanError::PlanInvalidated(format!(
             "lease targets {worker_device_id}/gpu:{worker_ordinal}, plan targets {}/gpu:{}",
@@ -3493,16 +3547,81 @@ fn execution_fingerprint(
     hash.update(device.id.as_bytes());
     hash.update(format!("{effective:?}").as_bytes());
     hash.update(format!("{components:?}").as_bytes());
-    hash.update(format!("{engine_config:?}").as_bytes());
+    hash.update(format!("{:?}", ExecutionFingerprintEngineConfig(engine_config)).as_bytes());
     hash.update(format!("{effective_loras:?}").as_bytes());
     hash.update([u8::from(offload)]);
     format!("{:x}", hash.finalize())
 }
 
+/// Stable exact-fingerprint view of the engine configuration.
+///
+/// `artifact_root` is a storage trust boundary, not an execution input. The
+/// concrete component paths are already part of the exact fingerprint, so
+/// moving the same artifacts under a different configured root must not alter
+/// execution identity. Keep the historical `FrozenEngineConfig` debug shape
+/// for the remaining fields because this fingerprint is a persisted contract.
+struct ExecutionFingerprintEngineConfig<'a>(&'a mold_inference::FrozenEngineConfig);
+
+impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mold_inference::FrozenEngineConfig {
+            family,
+            artifact_root: _,
+            is_schnell,
+            is_turbo,
+            scheduler,
+            t5_variant,
+            qwen3_variant,
+            qwen2_variant,
+            qwen2_text_encoder_mode,
+            ltx2_gemma_variant,
+            selected_t5_path,
+            selected_qwen3_paths,
+            selected_qwen2_path,
+            selected_gemma_paths,
+            h3_factory_authority,
+            runtime_environment,
+            attention_backend,
+            attention_chunk,
+            vae_tiling,
+            vae_dtype,
+        } = self.0;
+
+        let mut debug = formatter.debug_struct("FrozenEngineConfig");
+        debug
+            .field("family", family)
+            .field("is_schnell", is_schnell)
+            .field("is_turbo", is_turbo)
+            .field("scheduler", scheduler)
+            .field("t5_variant", t5_variant)
+            .field("qwen3_variant", qwen3_variant)
+            .field("qwen2_variant", qwen2_variant)
+            .field("qwen2_text_encoder_mode", qwen2_text_encoder_mode)
+            .field("ltx2_gemma_variant", ltx2_gemma_variant)
+            .field("selected_t5_path", selected_t5_path)
+            .field("selected_qwen3_paths", selected_qwen3_paths)
+            .field("selected_qwen2_path", selected_qwen2_path)
+            .field("selected_gemma_paths", selected_gemma_paths);
+        if let Some(authority) = h3_factory_authority {
+            debug.field("h3_factory_authority", &authority.identity_sha256());
+        }
+        debug
+            .field("runtime_environment", runtime_environment)
+            .field("attention_backend", attention_backend)
+            .field("attention_chunk", attention_chunk)
+            .field("vae_tiling", vae_tiling)
+            .field("vae_dtype", vae_dtype)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mold_core::{AdvancedPlacement, ModelConfig};
+    use mold_core::{
+        AdvancedPlacement, GenerationReference, GenerationReferenceAuthority,
+        GenerationReferenceProvenance, ModelConfig,
+    };
     use tempfile::TempDir;
 
     #[test]
@@ -3580,6 +3699,82 @@ mod tests {
         .unwrap();
         request.placement = placement;
         request
+    }
+
+    #[test]
+    fn h3_activation_gate_precedes_artifact_resolution_in_normal_planning() {
+        let root = TempDir::new().unwrap();
+        let config = config(root.path(), "minimax-h3", None);
+        let error = resolve_execution_plans(&config, &request(None), &devices(&[24 * GIB]), false)
+            .unwrap_err();
+
+        assert!(matches!(error, ExecutionPlanError::ModelActivation(_)));
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[test]
+    fn preparation_authority_binds_reference_order_without_transport_secrets() {
+        let root = TempDir::new().unwrap();
+        let config = config(root.path(), "minimax-h3", None);
+        let paths = ModelPaths::resolve("test:q4", &config).unwrap();
+        let engine_config = mold_inference::FrozenEngineConfig::resolve("test:q4", &config);
+        let make_inline = |name: &str, data: Vec<u8>| GenerationReference::Image {
+            media: GenerationReferenceAuthority::Inline { data },
+            provenance: GenerationReferenceProvenance {
+                name: Some(name.to_string()),
+                sha256: None,
+            },
+            mime_type: "image/png".to_string(),
+            width: 640,
+            height: 480,
+        };
+
+        let first = make_inline(" first.png ", vec![1, 2, 3, 4]);
+        let second = make_inline("second.png", vec![5, 6, 7, 8]);
+        let mut request = request(None);
+        request.references = Some(vec![first.clone(), second.clone()]);
+        let forward = preparation_authority_fingerprint(&config, &request, &paths, &engine_config);
+        request.references = Some(vec![second, first.clone()]);
+        let reversed = preparation_authority_fingerprint(&config, &request, &paths, &engine_config);
+        assert_ne!(forward, reversed, "reference order is admission authority");
+
+        let digest = first.content_sha256().unwrap().to_ascii_uppercase();
+        request.references = Some(vec![GenerationReference::Image {
+            media: GenerationReferenceAuthority::ServerPath {
+                path: "/private/never-serialize-this.png".to_string(),
+            },
+            provenance: GenerationReferenceProvenance {
+                name: Some("first.png".to_string()),
+                sha256: Some(digest),
+            },
+            mime_type: "image/png".to_string(),
+            width: 640,
+            height: 480,
+        }]);
+        let path_authority =
+            preparation_authority_fingerprint(&config, &request, &paths, &engine_config);
+        request.references = Some(vec![first]);
+        let inline_authority =
+            preparation_authority_fingerprint(&config, &request, &paths, &engine_config);
+        assert_eq!(
+            path_authority, inline_authority,
+            "transport authority must converge on the same normalized content identity"
+        );
+
+        let projection = request
+            .references
+            .as_ref()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(index, reference)| reference.redacted_metadata(index))
+            .collect::<Vec<_>>();
+        let json = serde_json::to_string(&projection).unwrap();
+        assert!(!json.contains("private"));
+        assert!(!json.contains("authority"));
+        assert!(!json.contains("AQIDBA"));
     }
 
     fn indexed_paths(
@@ -5454,6 +5649,7 @@ mod tests {
         )]);
         let engine_config = mold_inference::FrozenEngineConfig {
             family: "flux2".into(),
+            artifact_root: PathBuf::from("/models"),
             is_schnell: Some(false),
             is_turbo: None,
             scheduler: None,
@@ -5466,6 +5662,7 @@ mod tests {
             selected_qwen3_paths: Vec::new(),
             selected_qwen2_path: None,
             selected_gemma_paths: Vec::new(),
+            h3_factory_authority: None,
             runtime_environment: mold_inference::runtime_env::FrozenRuntimeEnvironment::default(),
             attention_backend: mold_inference::attention::AttentionBackend::Math,
             attention_chunk: mold_inference::attention::AttentionChunkPolicy::Auto,
@@ -5484,6 +5681,22 @@ mod tests {
         assert_eq!(
             fingerprint, "6148b3759215b8e2082e7e0ac02d0b31bc5d29841e73d4625f1140d77bb200d8",
             "this is the exact path/device-qualified candidate 0bacf81d contract"
+        );
+
+        let mut relocated_config = engine_config.clone();
+        relocated_config.artifact_root = PathBuf::from("/different-mold-home/models");
+        assert_eq!(
+            fingerprint,
+            execution_fingerprint(
+                "cv:opaque",
+                &device,
+                &effective,
+                &components,
+                &relocated_config,
+                &[],
+                false,
+            ),
+            "the storage trust root is not part of execution identity"
         );
     }
 
@@ -5511,6 +5724,7 @@ mod tests {
                 qwen2_variant: None,
                 qwen2_text_encoder_mode: None,
                 ltx2_gemma_variant: None,
+                h3_factory_authority_sha256: None,
                 attention_backend: SemanticAttentionBackend::Math,
                 attention_chunk: SemanticAttentionChunk::Auto,
                 vae_tiling: SemanticVaeTiling::Auto,

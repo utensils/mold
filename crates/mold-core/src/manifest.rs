@@ -47,8 +47,21 @@ pub enum ModelComponent {
     ClipTokenizer2, // CLIP-G tokenizer (SDXL)
     TextEncoder,    // Generic text encoder shard (Qwen3 for Z-Image)
     TextTokenizer,  // Generic text encoder tokenizer
-    Decoder,        // Stage B decoder weights (Wuerstchen)
-    Upscaler,       // Upscaler model weights (Real-ESRGAN, etc.)
+    /// MiniMax H3 synchronized-audio VAE. Kept distinct from the video VAE.
+    AudioVae,
+    /// Tokenizer / multimodal processor data owned by a model family.
+    Processor,
+    /// Video-side scheduler configuration for a dual-modality model.
+    VideoScheduler,
+    /// Audio-side scheduler configuration for a dual-modality model.
+    AudioScheduler,
+    /// Shared architecture/configuration metadata.
+    ModelConfig,
+    /// Task-transformer configuration. Never shared across tasks; compatible
+    /// layouts of the same task may reuse one pinned config identity.
+    TaskConfig,
+    Decoder,  // Stage B decoder weights (Wuerstchen)
+    Upscaler, // Upscaler model weights (Real-ESRGAN, etc.)
 }
 
 #[derive(Debug, Clone)]
@@ -296,6 +309,7 @@ fn is_model_specific_component(component: ModelComponent) -> bool {
             | ModelComponent::LowNoiseTransformer
             | ModelComponent::DistilledLora
             | ModelComponent::LowNoiseDistilledLora
+            | ModelComponent::TaskConfig
             | ModelComponent::Upscaler
     )
 }
@@ -310,6 +324,20 @@ fn is_model_specific_component(component: ModelComponent) -> bool {
 /// creating subdirectories under the target directory.
 pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
     let sanitized_name = manifest.name.replace(':', "-");
+
+    // H3's official and Comfy transformers use the same task architecture
+    // config. Keep one copy per task across layouts while the task-specific
+    // source path (`transformer` vs `transformer_ref`) prevents cross-task
+    // substitution. The Comfy manifests intentionally omit official sharded
+    // weight indexes because those do not describe their single-file weights.
+    if manifest.family == crate::minimax_h3::FAMILY
+        && file.component == ModelComponent::TaskConfig
+        && file.hf_repo == crate::minimax_h3::OFFICIAL_REPO
+    {
+        return PathBuf::from("shared")
+            .join(crate::minimax_h3::FAMILY)
+            .join(&file.hf_filename);
+    }
 
     if is_model_specific_component(file.component) {
         PathBuf::from(&sanitized_name).join(&file.hf_filename)
@@ -1249,6 +1277,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(ltx_video_manifests());
     manifests.extend(ltx2_manifests());
     manifests.extend(wan_manifests());
+    manifests.extend(crate::minimax_h3::manifests());
     manifests.extend(ltx2_control_manifests());
     manifests.extend(ltx2_camera_control_manifests());
     manifests.extend(controlnet_manifests());
@@ -3497,6 +3526,9 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
 /// - `flux-dev:q4` → `flux-dev:q4` (unchanged)
 /// - `flux-dev-q4` → `flux-dev:q4` (legacy format)
 pub fn resolve_model_name(input: &str) -> String {
+    if let Some(name) = crate::minimax_h3::resolve_model_name(input) {
+        return name.to_string();
+    }
     // Already has a tag
     if input.contains(':') {
         return input.to_string();
@@ -3515,6 +3547,12 @@ pub fn resolve_model_name(input: &str) -> String {
     // continue to resolve to the smaller FP8 checkpoints.
     if matches!(input, "ltx-2.3-22b-dev" | "ltx-2.3-22b-distilled") {
         return format!("{input}:fp8");
+    }
+    // The bare 5B name stays on the fp16 safetensors default. The tag loop
+    // below tries `:q8` before `:fp16`, so without this pin the small-card
+    // GGUF tag added by #794 would silently become the family default.
+    if input == "wan22-ti2v-5b" {
+        return format!("{input}:fp16");
     }
     // Legacy format: flux-dev-q4 -> flux-dev:q4 and
     // ltx-2.3-22b-dev-fp8 -> ltx-2.3-22b-dev:fp8.
@@ -4924,13 +4962,53 @@ fn wan_manifests() -> Vec<ModelManifest> {
                 });
                 files
             },
+            defaults: defaults_ti2v.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "wan22-ti2v-5b:q8".to_string(),
+            family: "wan".to_string(),
+            description: "Wan 2.2 TI2V 5B Q8_0 — 720p24 text- and image-to-video (small-card GGUF)"
+                .to_string(),
+            files: {
+                let mut files = shared_wan_files();
+                // QuantStack's Q8_0 repack of the same 5B transformer:
+                // 5.4 GB against fp16's 10 GB, which is what reaches
+                // 8-12 GB-class cards (#794).
+                // VRAM peak: 18,460 MiB at the default 1280x704 x 121f
+                // (24 fps, 20 steps) on an RTX 4090 — small cards use
+                // reduced frames/resolution (#794).
+                files.push(ModelFile {
+                    hf_repo: "QuantStack/Wan2.2-TI2V-5B-GGUF".to_string(),
+                    hf_filename: "Wan2.2-TI2V-5B-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 5_400_179_040,
+                    gated: false,
+                    sha256: Some(
+                        "57bece983817ab2f957546683bb670f13be7d99022d45674840cd999a050ea8f",
+                    ),
+                });
+                files.push(ModelFile {
+                    hf_repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged".to_string(),
+                    hf_filename: "split_files/vae/wan2.2_vae.safetensors".to_string(),
+                    component: ModelComponent::Vae,
+                    size_bytes: 1_409_400_960,
+                    gated: false,
+                    sha256: Some(
+                        "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156",
+                    ),
+                });
+                files
+            },
             defaults: defaults_ti2v,
             hidden: false,
         },
         a14b_manifest(A14bTier::Fast, A14bTask::T2v),
         a14b_manifest(A14bTier::Quality, A14bTask::T2v),
+        a14b_manifest(A14bTier::Compact, A14bTask::T2v),
         a14b_manifest(A14bTier::Fast, A14bTask::I2v),
         a14b_manifest(A14bTier::Quality, A14bTask::I2v),
+        a14b_manifest(A14bTier::Compact, A14bTask::I2v),
     ]
 }
 
@@ -4960,15 +5038,20 @@ impl A14bTask {
     }
 }
 
-/// The two shipped A14B tiers. They are the same weights at different
+/// The three shipped A14B tiers. They are the same weights at different
 /// quantizations; what actually separates them is the four-step distill, which
-/// only the fast tier carries.
+/// only the Lightning tiers carry.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum A14bTier {
     /// Q5_K_M plus the lightx2v four-step distill pair.
     Fast,
     /// Q8_0, no adapter, the family's ordinary step count.
     Quality,
+    /// Q4_K_M plus the same four-step distill pair as `Fast` — the same
+    /// recipe with a ~1.1 GB smaller resident expert, aimed at 12-16 GB
+    /// cards. Q4_K_M is the community floor before the quality cliff; the
+    /// Q4/Q5 boundary is where GGUF Wan degrades visibly (#794).
+    Compact,
 }
 
 impl A14bTier {
@@ -4976,6 +5059,7 @@ impl A14bTier {
         match self {
             Self::Fast => "q5",
             Self::Quality => "q8",
+            Self::Compact => "q4",
         }
     }
 
@@ -4983,7 +5067,15 @@ impl A14bTier {
         match self {
             Self::Fast => "Q5_K_M",
             Self::Quality => "Q8_0",
+            Self::Compact => "Q4_K_M",
         }
+    }
+
+    /// Whether the tier ships the lightx2v four-step Lightning distill pair.
+    /// The adapters were trained against the bf16 weights, so the Q5 and Q4
+    /// tiers pull byte-identical files.
+    fn has_distill(self) -> bool {
+        !matches!(self, Self::Quality)
     }
 }
 
@@ -5024,6 +5116,27 @@ fn a14b_expert_facts(task: A14bTask, tier: A14bTier, low_noise: bool) -> FileFac
         (A14bTask::I2v, A14bTier::Quality, true) => (
             15_406_608_896,
             "029c7adc74de4f7804905c5e4fb9335d0862cd2fc37191df526aeac13b64425e",
+        ),
+        // The Q4_K_M pairs (#794). Sizes and hashes read from the Hugging
+        // Face API (`lfs.oid`), like every row above.
+        // VRAM peaks on an RTX 4090 at the 4-step Lightning defaults
+        // (53f @ 16 fps): T2V 21,372 MiB at 832x480; I2V 19,580 MiB at
+        // 720x480 (#794).
+        (A14bTask::T2v, A14bTier::Compact, false) => (
+            9_650_090_496,
+            "e0c490c6e316fd91ff52034e4ca66b825717e33ff11624585c0ccfcb5d410c59",
+        ),
+        (A14bTask::T2v, A14bTier::Compact, true) => (
+            9_650_090_496,
+            "091a5bae02e14aa016bc9b10a7892efda4c629346b81c5dcebbe30ea2ac8923a",
+        ),
+        (A14bTask::I2v, A14bTier::Compact, false) => (
+            9_651_728_896,
+            "836250abfaa3411694e2c9cf3a0cc18265329d5156d81aa116d5366b0f8f02e7",
+        ),
+        (A14bTask::I2v, A14bTier::Compact, true) => (
+            9_651_728_896,
+            "e2f98d834af009d035c6b0918268f2eba0aa8a63025ce942277e2384d40b0866",
         ),
     }
 }
@@ -5076,7 +5189,9 @@ fn a14b_distill_facts(task: A14bTask, low_noise: bool) -> (&'static str, FileFac
 ///
 /// Both experts ship as separate files and exactly one is GPU-resident at a
 /// time, so the VRAM demand is the max over the pair rather than their sum —
-/// 10.8 GB at `:q5`, 15.4 GB at `:q8`. Disk is the sum.
+/// 10.8 GB at `:q5`, 15.4 GB at `:q8`, 9.65 GB at `:q4` (measured `:q4` total
+/// peaks on an RTX 4090 at the 53f Lightning defaults: T2V 21,372 MiB at
+/// 832x480, I2V 19,580 MiB at 720x480; #794). Disk is the sum.
 ///
 /// Resolution defaults to 480p because that is the acceptance target for this
 /// tier (#747: "81f 480p in ~1.5-3 min on a 4090"); 720p renders, but not in
@@ -5135,7 +5250,7 @@ fn a14b_manifest(tier: A14bTier, task: A14bTask) -> ModelManifest {
         gated: false,
         sha256: Some("2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b"),
     });
-    if tier == A14bTier::Fast {
+    if tier.has_distill() {
         files.push(distill_file(false));
         files.push(distill_file(true));
     }
@@ -5144,7 +5259,7 @@ fn a14b_manifest(tier: A14bTier, task: A14bTask) -> ModelManifest {
         // The lightx2v recipe. Guidance 1.0 is not a weak setting, it is the
         // switch that drops the unconditional pass entirely — one forward per
         // step, which is half of where the speed comes from.
-        A14bTier::Fast => (4, 1.0, "4-step Lightning distill"),
+        A14bTier::Fast | A14bTier::Compact => (4, 1.0, "4-step Lightning distill"),
         A14bTier::Quality => (20, 3.5, "20-step, no distill"),
     };
     let task_label = match task {
@@ -5176,8 +5291,11 @@ fn a14b_manifest(tier: A14bTier, task: A14bTask) -> ModelManifest {
             // resident expert moves its edge to ~33 frames by the same
             // activation arithmetic. 53 is also the reference space's own
             // default duration. Larger cards can simply pass --frames 81.
+            // The Q4 pair's resident expert is ~1.1 GB smaller than Q5's, so
+            // 53 fits wherever Q5's does — confirmed: the Q4 T2V default
+            // measured 21,372 MiB at 832x480 x 53f on an RTX 4090 (#794).
             frames: Some(match tier {
-                A14bTier::Fast => 53,
+                A14bTier::Fast | A14bTier::Compact => 53,
                 A14bTier::Quality => 33,
             }),
             fps: Some(16),
@@ -6447,15 +6565,17 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 6 Wan + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 140
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 9 Wan + 4 compliance-hidden MiniMax H3 contracts + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 147
         // Wan bump: +wan22-{t2v,i2v}-a14b:{q5,q8} — the two-expert A14B tiers.
+        // Wan low-VRAM bump (#794): +wan22-{t2v,i2v}-a14b:q4 and
+        // +wan22-ti2v-5b:q8.
         // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
         // catalog bridge (single-file Civitai Flux.2 fine-tunes); +z-image-te
         // for single-file Civitai Z-Image checkpoints; +ltx2-te for the
         // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
         // Gemma 3 12B text encoder); +wan-umt5, +wan21-vae, +wan22-vae for
         // single-file Wan checkpoints.
-        assert_eq!(known_manifests().len(), 140);
+        assert_eq!(known_manifests().len(), 147);
     }
 
     #[test]
@@ -6481,14 +6601,22 @@ mod tests {
     #[test]
     fn wan_manifests_resolve_and_carry_full_component_sets() {
         assert_eq!(resolve_model_name("wan21-t2v-1.3b"), "wan21-t2v-1.3b:bf16");
+        // The bare 5B name must stay on the fp16 default even though a `:q8`
+        // small-card tag now exists — the generic tag loop tries `:q8` first,
+        // so this is pinned explicitly in `resolve_model_name` (#794).
         assert_eq!(resolve_model_name("wan22-ti2v-5b"), "wan22-ti2v-5b:fp16");
         // Legacy-dash form resolves like every other family's.
         assert_eq!(
             resolve_model_name("wan22-ti2v-5b-fp16"),
             "wan22-ti2v-5b:fp16"
         );
+        assert_eq!(resolve_model_name("wan22-ti2v-5b-q8"), "wan22-ti2v-5b:q8");
 
-        for name in ["wan21-t2v-1.3b:bf16", "wan22-ti2v-5b:fp16"] {
+        for name in [
+            "wan21-t2v-1.3b:bf16",
+            "wan22-ti2v-5b:fp16",
+            "wan22-ti2v-5b:q8",
+        ] {
             let manifest = find_manifest(name).unwrap_or_else(|| panic!("{name} must resolve"));
             assert_eq!(manifest.family, "wan");
             assert!(
@@ -6535,6 +6663,26 @@ mod tests {
         };
         assert!(vae_file("wan21-t2v-1.3b:bf16").contains("wan_2.1_vae"));
         assert!(vae_file("wan22-ti2v-5b:fp16").contains("wan2.2_vae"));
+        assert!(vae_file("wan22-ti2v-5b:q8").contains("wan2.2_vae"));
+
+        // The `:q8` tag is the same 5B transformer as QuantStack's Q8_0 GGUF
+        // — the ~5.4 GB pull that reaches small cards (#794).
+        let q8 = find_manifest("wan22-ti2v-5b:q8").unwrap();
+        let transformer = q8
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::Transformer)
+            .unwrap();
+        assert_eq!(transformer.hf_repo, "QuantStack/Wan2.2-TI2V-5B-GGUF");
+        assert!(transformer.hf_filename.contains("Q8_0"));
+        // Same recipe as fp16: the quantization changes the pull, not the
+        // defaults contract.
+        let fp16 = find_manifest("wan22-ti2v-5b:fp16").unwrap();
+        assert_eq!(q8.defaults.steps, fp16.defaults.steps);
+        assert_eq!(q8.defaults.guidance, fp16.defaults.guidance);
+        assert_eq!(q8.defaults.frames, fp16.defaults.frames);
+        assert_eq!(q8.defaults.fps, fp16.defaults.fps);
+        assert_eq!((q8.defaults.width, q8.defaults.height), (1280, 704));
     }
 
     /// Every A14B tier ships a complete expert pair, and the fast tier ships a
@@ -6547,8 +6695,10 @@ mod tests {
         assert_eq!(resolve_model_name("wan22-i2v-a14b"), "wan22-i2v-a14b:q8");
 
         for name in [
+            "wan22-t2v-a14b:q4",
             "wan22-t2v-a14b:q5",
             "wan22-t2v-a14b:q8",
+            "wan22-i2v-a14b:q4",
             "wan22-i2v-a14b:q5",
             "wan22-i2v-a14b:q8",
         ] {
@@ -6588,9 +6738,11 @@ mod tests {
             // Defaults are the measured RTX 4090 envelope, not the trained
             // 81: the Q5 pair peaks at 23,975 MiB rendering 53 frames at
             // 832x480 (81 OOM'd at a 23.0 GB peak), and the Q8 pair's larger
-            // resident expert moves its edge to ~33. Both stay on the 4n+1
+            // resident expert moves its edge to ~33. The Q4 pair's expert is
+            // ~1.1 GB smaller than Q5's, so 53 fits wherever Q5's does — its
+            // measured T2V peak is 21,372 MiB (#794). All stay on the 4n+1
             // grid; bigger cards pass --frames 81 explicitly.
-            let expected_frames = if name.ends_with(":q5") { 53 } else { 33 };
+            let expected_frames = if name.ends_with(":q8") { 33 } else { 53 };
             assert_eq!(defaults.frames, Some(expected_frames), "{name}");
             assert_eq!(
                 (expected_frames - 1) % 4,
@@ -6600,7 +6752,9 @@ mod tests {
             assert_eq!(defaults.fps, Some(16));
             assert!(defaults.negative_prompt.is_some());
 
-            let fast = name.ends_with(":q5");
+            // Both `:q5` and `:q4` are Lightning tiers; only `:q8` renders
+            // the family's ordinary schedule without the distill.
+            let fast = !name.ends_with(":q8");
             let distills: Vec<_> = manifest
                 .files
                 .iter()
@@ -6639,7 +6793,12 @@ mod tests {
         // similarly-named `lightx2v/Wan2.2-Distill-Loras` I2V files carry
         // `.diff`/`.diff_b` full-weight deltas and target the Wan 2.1 CLIP
         // branch, which this family's checkpoints do not have.
-        for name in ["wan22-t2v-a14b:q5", "wan22-i2v-a14b:q5"] {
+        for name in [
+            "wan22-t2v-a14b:q4",
+            "wan22-t2v-a14b:q5",
+            "wan22-i2v-a14b:q4",
+            "wan22-i2v-a14b:q5",
+        ] {
             for file in find_manifest(name).unwrap().files.iter().filter(|f| {
                 matches!(
                     f.component,
@@ -6673,6 +6832,53 @@ mod tests {
                 "{component:?} must be model-specific, got {}",
                 path.display()
             );
+        }
+    }
+
+    /// The `:q4` tier is the `:q5` recipe with smaller experts (#794): it must
+    /// carry byte-identical Lightning distill files — the adapters were
+    /// trained once, against the bf16 weights, and are quant-independent —
+    /// while its experts are the Q4_K_M GGUFs, distinct from Q5_K_M's.
+    #[test]
+    fn a14b_q4_tier_reuses_the_q5_lightning_distill_pair() {
+        for base in ["wan22-t2v-a14b", "wan22-i2v-a14b"] {
+            let q4 = find_manifest(&format!("{base}:q4")).unwrap();
+            let q5 = find_manifest(&format!("{base}:q5")).unwrap();
+
+            for component in [
+                ModelComponent::DistilledLora,
+                ModelComponent::LowNoiseDistilledLora,
+            ] {
+                let file = |m: &'static ModelManifest| {
+                    m.files
+                        .iter()
+                        .find(|f| f.component == component)
+                        .unwrap_or_else(|| panic!("{}: missing {component:?}", m.name))
+                };
+                let (a, b) = (file(q4), file(q5));
+                assert_eq!(a.hf_repo, b.hf_repo, "{base} {component:?}");
+                assert_eq!(a.hf_filename, b.hf_filename, "{base} {component:?}");
+                assert_eq!(a.sha256, b.sha256, "{base} {component:?}");
+                assert_eq!(a.size_bytes, b.size_bytes, "{base} {component:?}");
+            }
+
+            for component in [
+                ModelComponent::Transformer,
+                ModelComponent::LowNoiseTransformer,
+            ] {
+                let expert = q4.files.iter().find(|f| f.component == component).unwrap();
+                assert!(
+                    expert.hf_filename.contains("Q4_K_M"),
+                    "{base} {component:?}: expected a Q4_K_M expert, got {}",
+                    expert.hf_filename
+                );
+            }
+
+            // Same Lightning recipe as `:q5`, down to the reduced-envelope
+            // frame default.
+            assert_eq!(q4.defaults.steps, q5.defaults.steps);
+            assert_eq!(q4.defaults.guidance, q5.defaults.guidance);
+            assert_eq!(q4.defaults.frames, q5.defaults.frames);
         }
     }
 

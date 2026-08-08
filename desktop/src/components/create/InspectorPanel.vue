@@ -10,6 +10,7 @@ import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { defaultClipFrames, modelsForOutput, sequenceMotionTailFrames } from "@studio/lib/sequence";
+import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { GenerateForm } from "../../lib/generateForm";
 import { resetFormToModelDefaults, seedMode } from "../../lib/generateForm";
@@ -205,7 +206,10 @@ const advancedExpanded = ref(false);
 
 // ── Model picker (the shared ModelPicker; chains uses the same control) ──────
 const installedModels = computed(() =>
-  mergeInstalledModels(models.installed, hostModels.unionInstalled),
+  mergeInstalledModels(
+    filterRestrictedModels(models.installed, hosts.capabilities.local),
+    hostModels.unionInstalled,
+  ),
 );
 const selectedModel = computed<ModelEntry | null>(() =>
   findInstalledModel(installedModels.value, props.form.model),

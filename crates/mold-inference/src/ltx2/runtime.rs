@@ -8291,6 +8291,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,

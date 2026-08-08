@@ -66,6 +66,7 @@ export function remixDimensionsForTask(
     case "retake":
     case "keyframe-interpolation":
     case "audio-driven-video":
+    case "reference-to-audio-video":
       allowed = ["movement"];
       break;
   }
@@ -110,6 +111,7 @@ export function conditioningFingerprint(request: ExpansionTaskRequest): string {
     keyframes: request.keyframes ?? null,
     pipeline: request.pipeline ?? null,
     retake_range: request.retake_range ?? null,
+    references: request.references ?? null,
   });
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {

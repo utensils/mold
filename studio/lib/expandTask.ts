@@ -13,6 +13,7 @@ export type ExpandTask =
   | "retake"
   | "keyframe-interpolation"
   | "audio-driven-video"
+  | "reference-to-audio-video"
   | "text-to-audio";
 
 export interface ExpansionTaskRequest {
@@ -26,6 +27,7 @@ export interface ExpansionTaskRequest {
   keyframes?: readonly unknown[] | null;
   pipeline?: string | null;
   retake_range?: unknown;
+  references?: readonly unknown[] | null;
 }
 
 function presentPath(path: string | null | undefined): boolean {
@@ -37,12 +39,17 @@ export function expansionTaskForRequest(
   request: ExpansionTaskRequest,
 ): ExpandTask {
   const normalized = (family ?? "").trim().toLowerCase();
+  const h3 = ["minimax-h3", "minimax_h3", "minimaxh3"].includes(normalized);
   if (
+    !h3 &&
     !["ltx2", "ltx-2", "ltx-video", "wan", "wan2.1", "wan2.2"].includes(
       normalized,
     )
   ) {
     return "text-to-image";
+  }
+  if (h3 && (request.references?.length ?? 0) > 0) {
+    return "reference-to-audio-video";
   }
   switch (request.pipeline) {
     case "t2a":

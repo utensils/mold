@@ -1982,7 +1982,9 @@ description = "stale"
     fn all_file_paths_collects_all_fields() {
         let mc = ModelConfig {
             transformer: Some("/a/transformer.gguf".to_string()),
+            low_noise_transformer: Some("/a/transformer-low.gguf".to_string()),
             vae: Some("/a/vae.safetensors".to_string()),
+            low_noise_distilled_lora: Some("/a/low-noise-lora.safetensors".to_string()),
             t5_encoder: Some("/a/t5.safetensors".to_string()),
             clip_encoder: Some("/a/clip.safetensors".to_string()),
             t5_tokenizer: Some("/a/t5.tokenizer.json".to_string()),
@@ -1991,6 +1993,7 @@ description = "stale"
             clip_tokenizer_2: Some("/a/clip_g.tokenizer.json".to_string()),
             text_tokenizer: Some("/a/text.tokenizer.json".to_string()),
             decoder: Some("/a/decoder.safetensors".to_string()),
+            lora: Some("/a/default-lora.safetensors".to_string()),
             transformer_shards: Some(vec![
                 "/a/shard0.safetensors".to_string(),
                 "/a/shard1.safetensors".to_string(),
@@ -1999,13 +2002,16 @@ description = "stale"
             ..ModelConfig::default()
         };
         let paths = mc.all_file_paths();
-        // 10 single fields + 2 transformer shards + 1 text encoder file = 13
-        assert_eq!(paths.len(), 13);
+        // 13 single fields + 2 transformer shards + 1 text encoder file = 16
+        assert_eq!(paths.len(), 16);
         assert!(paths.contains(&"/a/transformer.gguf".to_string()));
         assert!(paths.contains(&"/a/clip_g.safetensors".to_string()));
         assert!(paths.contains(&"/a/shard0.safetensors".to_string()));
         assert!(paths.contains(&"/a/enc0.safetensors".to_string()));
         assert!(paths.contains(&"/a/decoder.safetensors".to_string()));
+        assert!(paths.contains(&"/a/transformer-low.gguf".to_string()));
+        assert!(paths.contains(&"/a/low-noise-lora.safetensors".to_string()));
+        assert!(paths.contains(&"/a/default-lora.safetensors".to_string()));
     }
 
     #[test]

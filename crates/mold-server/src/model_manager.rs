@@ -227,11 +227,14 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
 
 fn annotate_audio_capabilities(catalog: &mut [ModelInfoExtended], config: &Config) {
     for entry in catalog {
-        if entry.info.family != "ltx2" || entry.supports_audio.is_some() || !entry.downloaded {
+        if entry.supports_audio.is_some()
+            || !entry.downloaded
+            || !mold_inference::audio::output_probe_registered(&entry.info.family)
+        {
             continue;
         }
         entry.supports_audio = ModelPaths::resolve(&entry.info.name, config)
-            .map(|paths| mold_inference::ltx2::audio_output_supported(&paths));
+            .and_then(|paths| mold_inference::audio::output_supported(&entry.info.family, &paths));
     }
 }
 
@@ -289,14 +292,23 @@ pub(crate) async fn catalog_family_for(state: &AppState, model_name: &str) -> Op
 }
 
 /// Resolve the family slug for any model name — checks the static manifest
-/// first (covers `flux-dev:q8` and friends), then falls back to the catalog
-/// config entry (covers `cv:*` / `hf:*`). Used by the activation-budget
-/// preflight to dispatch to the right [`ActivationFamily`].
+/// first (covers `flux-dev:q8` and friends), then configured non-catalog
+/// models, and finally catalog metadata (covers `cv:*` / `hf:*`). Used by the
+/// activation-budget preflight to dispatch to the right [`ActivationFamily`].
 pub(crate) async fn family_for_model(state: &AppState, model_name: &str) -> Option<String> {
     if let Some(manifest) = mold_core::manifest::find_manifest(model_name) {
         return Some(manifest.family.clone());
     }
-    catalog_family_for(state, model_name).await
+    if looks_like_catalog_id(model_name) {
+        return catalog_family_for(state, model_name).await;
+    }
+    state
+        .config
+        .read()
+        .await
+        .models
+        .get(model_name)
+        .and_then(|model| model.family.clone())
 }
 
 /// Sync variant of [`family_for_model`] for the GPU-worker hot path which
@@ -364,26 +376,57 @@ pub(crate) fn resolve_intent_to_paths(
 /// This function is *pure synthesis* — no disk reads. The intent stays
 /// valid across download events; resolution into a `ModelConfig` is run
 /// lazily by [`resolve_intent_to_paths`] at engine-load time.
+fn require_catalog_intent_activation(
+    model_name: &str,
+    intent: &mold_catalog::synthesis::CatalogModelIntent,
+    artifact_root: &Path,
+) -> Result<(), mold_core::ModelActivationError> {
+    let family = Some(intent.family.as_str());
+    mold_core::require_model_activation(model_name, family)?;
+    if let Some(sub_family) = intent.sub_family.as_deref() {
+        mold_core::require_model_activation(sub_family, family)?;
+    }
+    mold_core::require_model_artifact_activation(
+        &intent.primary_recipe_path,
+        Some(artifact_root),
+        family,
+    )?;
+    if let Some(path) = intent.vae_recipe_path.as_deref() {
+        mold_core::require_model_artifact_activation(path, Some(artifact_root), family)?;
+    }
+    for path in &intent.text_encoder_recipe_paths {
+        mold_core::require_model_artifact_activation(path, Some(artifact_root), family)?;
+    }
+    for companion in &intent.companions {
+        mold_core::require_model_activation(&companion.name, family)?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn install_catalog_model(
     state: &AppState,
     model_name: &str,
 ) -> Result<(), mold_core::InstallError> {
+    mold_core::require_model_activation(model_name, None)?;
     if !looks_like_catalog_id(model_name) {
         // Caller should have shape-checked first; treat it as a no-op
         // success rather than fabricating a custom error variant.
         return Ok(());
     }
+    let models_dir = state.config.read().await.resolved_models_dir();
 
     // Already installed from a prior request — keep the cached intent.
     {
         let intents = state.catalog_intents.read().await;
-        if intents.contains_key(model_name) {
+        if let Some(intent) = intents.get(model_name) {
+            require_catalog_intent_activation(model_name, intent, &models_dir)?;
             return Ok(());
         }
     }
 
-    let models_dir = state.config.read().await.resolved_models_dir();
+    mold_catalog::sidecar::require_installed_sidecar_activation(&models_dir, model_name)?;
     if let Some(intent) = installed_intent_from_sidecar(&models_dir, model_name) {
+        require_catalog_intent_activation(model_name, &intent, &models_dir)?;
         let mut intents = state.catalog_intents.write().await;
         intents.insert(model_name.to_string(), intent);
         return Ok(());
@@ -405,9 +448,12 @@ pub(crate) async fn install_catalog_model(
     .await
     .map_err(|e| live_error_to_install_error(model_name, &e))?;
 
+    mold_catalog::entry::require_catalog_entry_activation(&entry)?;
+
     let intent = mold_catalog::synthesis::synthesize_intent(&entry, &models_dir).map_err(|e| {
         mold_core::InstallError::RecipeMalformed(format!("synthesize intent for {model_name}: {e}"))
     })?;
+    require_catalog_intent_activation(model_name, &intent, &models_dir)?;
     if model_name.starts_with("cv:") {
         write_catalog_sidecar_from_intent(&models_dir, &entry, &intent);
     }
@@ -490,6 +536,7 @@ fn truncate_body(body: &str) -> String {
 pub(crate) fn install_error_to_api_error(err: &mold_core::InstallError) -> ApiError {
     use mold_core::InstallError;
     match err {
+        InstallError::ModelActivation(error) => ApiError::model_activation(*error),
         InstallError::Network(msg) => {
             // 502 Bad Gateway via internal_with_status — the catalog
             // upstream is unreachable, not a mold internal failure.
@@ -527,6 +574,15 @@ fn installed_catalog_models(
     let walked = mold_catalog::sidecar::walk_sidecars(models_dir);
     let mut out = Vec::new();
     for (sidecar_dir, sidecar) in walked {
+        if mold_catalog::sidecar::require_sidecar_artifact_activation(
+            models_dir,
+            &sidecar_dir,
+            &sidecar,
+        )
+        .is_err()
+        {
+            continue;
+        }
         if sidecar.kind != "checkpoint" {
             continue;
         }
@@ -599,6 +655,7 @@ fn installed_catalog_models(
                 default_guidance: guidance,
                 default_frames: frames,
                 default_fps: fps,
+                min_frames: mold_core::validation::min_frames_for_family(&sidecar.family),
                 max_frames: mold_core::validation::max_frames_for_family_at_fps(
                     &sidecar.family,
                     fps.unwrap_or(mold_core::validation::LTX2_DEFAULT_FPS),
@@ -610,6 +667,7 @@ fn installed_catalog_models(
                     &sidecar.family,
                 ),
                 frame_step: mold_core::validation::frame_step_for_family(&sidecar.family),
+                frame_offset: mold_core::validation::frame_offset_for_family(&sidecar.family),
                 // Per model, through the same helper the manifest catalog
                 // uses. An installed `cv:` / `hf:` checkpoint has no spatial
                 // upsampler, so it advertises the single-pass ceiling and
@@ -634,8 +692,10 @@ fn installed_catalog_models(
             kind: Some(sidecar.kind.clone()),
             modality: Some(sidecar.modality.clone()),
             nsfw: sidecar.nsfw,
-            supports_audio: (sidecar.family == "ltx2")
-                .then(|| mold_inference::ltx2::checkpoint_supports_audio_output(&primary_path)),
+            supports_audio: mold_inference::audio::checkpoint_output_supported(
+                &sidecar.family,
+                &primary_path,
+            ),
             // Continuation reuses the chain motion-tail handoff, which the
             // whole ltx2 family implements — unlike audio, it does not depend
             // on optional checkpoint assets.
@@ -666,6 +726,9 @@ pub(crate) async fn check_model_available(
     state: &AppState,
     model_name: &str,
 ) -> Result<Option<ModelPaths>, ApiError> {
+    let family = family_for_model(state, model_name).await;
+    mold_core::require_model_activation(model_name, family.as_deref())
+        .map_err(ApiError::model_activation)?;
     // Check the model cache first.
     {
         let cache = state.model_cache.lock().await;
@@ -890,6 +953,9 @@ pub(crate) async fn model_component_status(
     state: &AppState,
     model_name: &str,
 ) -> Result<ModelComponentsResponse, ApiError> {
+    let family = family_for_model(state, model_name).await;
+    mold_core::require_model_activation(model_name, family.as_deref())
+        .map_err(ApiError::model_activation)?;
     let resolved = mold_core::manifest::resolve_model_name(model_name);
     if let Some(manifest) = mold_core::manifest::find_manifest(&resolved) {
         let config = state.config.read().await;
@@ -930,6 +996,8 @@ pub(crate) async fn model_component_status(
             }
         };
         let config = state.config.read().await;
+        require_model_paths_activation(&config, model_name, &paths)
+            .map_err(ApiError::model_activation)?;
         return Ok(ModelComponentsResponse {
             model: model_name.to_string(),
             components: component_status_from_paths(&config, model_name, &paths),
@@ -942,6 +1010,8 @@ pub(crate) async fn model_component_status(
             "unknown model '{model_name}'. Run 'mold list' to see available models."
         )));
     };
+    require_model_paths_activation(&config, model_name, &paths)
+        .map_err(ApiError::model_activation)?;
     Ok(ModelComponentsResponse {
         model: model_name.to_string(),
         components: component_status_from_paths(&config, model_name, &paths),
@@ -958,12 +1028,20 @@ pub(crate) async fn model_component_status_existing_only(
     state: &AppState,
     model_name: &str,
 ) -> Result<ModelComponentsResponse, ApiError> {
+    let family = family_for_model(state, model_name).await;
+    mold_core::require_model_activation(model_name, family.as_deref())
+        .map_err(ApiError::model_activation)?;
     let resolved = mold_core::manifest::resolve_model_name(model_name);
     let config = state.config.read().await;
     if mold_core::manifest::find_manifest(&resolved).is_some() {
-        let components = manifest_paths_with_config_overrides(&config, &resolved)
-            .map(|paths| component_status_from_paths(&config, &resolved, &paths))
-            .unwrap_or_else(|| manifest_component_status(&config, &resolved, &resolved));
+        let components =
+            if let Some(paths) = manifest_paths_with_config_overrides(&config, &resolved) {
+                require_model_paths_activation(&config, &resolved, &paths)
+                    .map_err(ApiError::model_activation)?;
+                component_status_from_paths(&config, &resolved, &paths)
+            } else {
+                manifest_component_status(&config, &resolved, &resolved)
+            };
         return Ok(ModelComponentsResponse {
             model: resolved,
             components,
@@ -983,6 +1061,8 @@ pub(crate) async fn model_component_status_existing_only(
                     effective
                 });
             let effective = overlaid.as_ref().unwrap_or(&config);
+            require_model_paths_activation(effective, model_name, &resolution.paths)
+                .map_err(ApiError::model_activation)?;
             return Ok(ModelComponentsResponse {
                 model: model_name.to_string(),
                 components: component_status_from_paths(effective, model_name, &resolution.paths),
@@ -990,7 +1070,8 @@ pub(crate) async fn model_component_status_existing_only(
         }
         return Ok(ModelComponentsResponse {
             model: model_name.to_string(),
-            components: catalog_sidecar_component_status(&config, model_name),
+            components: catalog_sidecar_component_status(&config, model_name)
+                .map_err(ApiError::model_activation)?,
         });
     }
 
@@ -999,30 +1080,63 @@ pub(crate) async fn model_component_status_existing_only(
             "unknown model '{model_name}'. Run 'mold list' to see available models."
         )));
     };
+    require_model_paths_activation(&config, model_name, &paths)
+        .map_err(ApiError::model_activation)?;
     Ok(ModelComponentsResponse {
         model: model_name.to_string(),
         components: component_status_from_paths(&config, model_name, &paths),
     })
 }
 
+fn require_model_paths_activation(
+    config: &Config,
+    model_name: &str,
+    paths: &ModelPaths,
+) -> Result<(), mold_core::ModelActivationError> {
+    let family = config
+        .lookup_model_config(model_name)
+        .and_then(|model| model.family)
+        .or_else(|| {
+            mold_core::manifest::find_manifest(model_name).map(|manifest| manifest.family.clone())
+        });
+    let artifact_root = config.resolved_models_dir();
+    for path in paths.all_file_paths() {
+        mold_core::require_model_artifact_activation(
+            path,
+            Some(&artifact_root),
+            family.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
 fn catalog_sidecar_component_status(
     config: &Config,
     model_name: &str,
-) -> Vec<ModelComponentStatus> {
+) -> Result<Vec<ModelComponentStatus>, mold_core::ModelActivationError> {
     let models_dir = config.resolved_models_dir();
     let sidecar = mold_catalog::sidecar::walk_sidecars(&models_dir)
         .into_iter()
         .find(|(_, sidecar)| sidecar.id == model_name);
     let Some((sidecar_dir, sidecar)) = sidecar else {
-        return vec![ModelComponentStatus {
+        return Ok(vec![ModelComponentStatus {
             kind: "transformer".to_string(),
             name: "primary checkpoint".to_string(),
             present: false,
             path: None,
             repair_model: Some(model_name.to_string()),
             options: component_options_for_kind(config, "transformer", None),
-        }];
+        }]);
     };
+    // A sidecar is externally persisted metadata. Validate all of its
+    // identities before deriving or returning concrete local paths so an
+    // opaque catalog id cannot expose compliance-gated model locations via
+    // the read-only component diagnostics endpoint.
+    mold_catalog::sidecar::require_sidecar_artifact_activation(
+        &models_dir,
+        &sidecar_dir,
+        &sidecar,
+    )?;
 
     let primary = mold_catalog::sidecar::primary_path(&sidecar_dir, &sidecar);
     let primary_present =
@@ -1039,7 +1153,7 @@ fn catalog_sidecar_component_status(
     }];
 
     let Ok(family) = mold_catalog::families::Family::from_str(&sidecar.family) else {
-        return components;
+        return Ok(components);
     };
     for companion in mold_catalog::companions::companions_for(
         family,
@@ -1048,12 +1162,13 @@ fn catalog_sidecar_component_status(
         mold_catalog::entry::Kind::Checkpoint,
     ) {
         if let Some(paths) = manifest_paths_with_config_overrides(config, &companion) {
+            require_model_paths_activation(config, model_name, &paths)?;
             components.extend(component_status_from_paths(config, model_name, &paths));
         } else {
             components.extend(manifest_component_status(config, &companion, model_name));
         }
     }
-    components
+    Ok(components)
 }
 
 fn manifest_paths_with_config_overrides(config: &Config, model_name: &str) -> Option<ModelPaths> {
@@ -1120,6 +1235,7 @@ fn manifest_component_kind(component: mold_core::manifest::ModelComponent) -> &'
         | ModelComponent::TransformerShard
         | ModelComponent::LowNoiseTransformer => "transformer",
         ModelComponent::Vae => "vae",
+        ModelComponent::AudioVae => "audio_vae",
         ModelComponent::SpatialUpscaler => "spatial_upscaler",
         ModelComponent::TemporalUpscaler => "temporal_upscaler",
         ModelComponent::DistilledLora | ModelComponent::LowNoiseDistilledLora => "distilled_lora",
@@ -1128,7 +1244,12 @@ fn manifest_component_kind(component: mold_core::manifest::ModelComponent) -> &'
         ModelComponent::T5Tokenizer
         | ModelComponent::ClipTokenizer
         | ModelComponent::ClipTokenizer2
-        | ModelComponent::TextTokenizer => "tokenizer",
+        | ModelComponent::TextTokenizer
+        | ModelComponent::Processor => "tokenizer",
+        ModelComponent::VideoScheduler
+        | ModelComponent::AudioScheduler
+        | ModelComponent::ModelConfig
+        | ModelComponent::TaskConfig => "config",
         ModelComponent::Decoder => "decoder",
         ModelComponent::Upscaler => "upscaler",
     }
@@ -1141,6 +1262,7 @@ fn manifest_component_name(component: mold_core::manifest::ModelComponent, filen
         ModelComponent::TransformerShard => "transformer shard",
         ModelComponent::LowNoiseTransformer => "low-noise transformer",
         ModelComponent::Vae => "vae",
+        ModelComponent::AudioVae => "audio vae",
         ModelComponent::SpatialUpscaler => "spatial upscaler",
         ModelComponent::TemporalUpscaler => "temporal upscaler",
         ModelComponent::DistilledLora => "distilled lora",
@@ -1153,6 +1275,11 @@ fn manifest_component_name(component: mold_core::manifest::ModelComponent, filen
         ModelComponent::ClipTokenizer2 => "clip-g tokenizer",
         ModelComponent::TextEncoder => "text encoder",
         ModelComponent::TextTokenizer => "text tokenizer",
+        ModelComponent::Processor => "processor",
+        ModelComponent::VideoScheduler => "video scheduler",
+        ModelComponent::AudioScheduler => "audio scheduler",
+        ModelComponent::ModelConfig => "model config",
+        ModelComponent::TaskConfig => "task config",
         ModelComponent::Decoder => "decoder",
         ModelComponent::Upscaler => filename,
     }
@@ -1234,22 +1361,43 @@ fn component_options_for_kind(
     current_path: Option<&Path>,
 ) -> Vec<ModelComponentOption> {
     let mut options = BTreeMap::<String, ModelComponentOption>::new();
-    if let Some(path) = current_path {
+    let models_dir = config.resolved_models_dir();
+    if let Some(path) = current_path.filter(|path| {
+        mold_core::require_model_artifact_activation(path, Some(&models_dir), None).is_ok()
+    }) {
         add_component_option(&mut options, path);
     }
     for model_cfg in config.models.values() {
         for path in config_component_paths_for_kind(model_cfg, kind) {
-            add_component_option(&mut options, Path::new(path));
+            let path = Path::new(path);
+            if mold_core::require_model_artifact_activation(
+                path,
+                Some(&models_dir),
+                model_cfg.family.as_deref(),
+            )
+            .is_ok()
+            {
+                add_component_option(&mut options, path);
+            }
         }
     }
-    let models_dir = config.resolved_models_dir();
     for manifest in mold_core::manifest::known_manifests() {
+        if mold_core::require_model_activation(&manifest.name, Some(&manifest.family)).is_err() {
+            continue;
+        }
         for file in &manifest.files {
             if manifest_component_kind(file.component) != kind {
                 continue;
             }
             let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
-            if path.is_file() {
+            if path.is_file()
+                && mold_core::require_model_artifact_activation(
+                    &path,
+                    Some(&models_dir),
+                    Some(&manifest.family),
+                )
+                .is_ok()
+            {
                 add_component_option(&mut options, &path);
             }
         }
@@ -1797,6 +1945,53 @@ mod tests {
 
     const GB: u64 = 1_000_000_000;
 
+    fn neutral_catalog_intent() -> mold_catalog::synthesis::CatalogModelIntent {
+        mold_catalog::synthesis::CatalogModelIntent {
+            family: "custom".to_string(),
+            sub_family: None,
+            primary_recipe_path: PathBuf::from("ordinary/model.safetensors"),
+            vae_recipe_path: None,
+            text_encoder_recipe_paths: Vec::new(),
+            companions: Vec::new(),
+            bundling: mold_catalog::entry::Bundling::SingleFile,
+        }
+    }
+
+    #[test]
+    fn cached_catalog_intent_cannot_hide_h3_in_paths_or_companions() {
+        let mut path_intent = neutral_catalog_intent();
+        path_intent.primary_recipe_path = PathBuf::from("ordinary/MiniMaxH3.safetensors");
+        assert!(
+            require_catalog_intent_activation("cv:42", &path_intent, Path::new("/models")).is_err()
+        );
+
+        let mut companion_intent = neutral_catalog_intent();
+        companion_intent
+            .companions
+            .push(mold_catalog::synthesis::CompanionIntent {
+                name: "MiniMaxH3Transformer3DModel".to_string(),
+                required: true,
+            });
+        assert!(require_catalog_intent_activation(
+            "cv:42",
+            &companion_intent,
+            Path::new("/models")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn cached_catalog_intent_uses_root_relative_artifact_identity() {
+        let artifact_root = Path::new("/Volumes/ExternalStorage/mold-uat/minimax-h3/models");
+        let mut intent = neutral_catalog_intent();
+        intent.primary_recipe_path = artifact_root.join("flux/cv-42/weights.safetensors");
+        require_catalog_intent_activation("cv:42", &intent, artifact_root)
+            .expect("the configured models root must not taint ordinary cached intent paths");
+
+        intent.primary_recipe_path = artifact_root.join("MiniMax-H3/weights.safetensors");
+        assert!(require_catalog_intent_activation("cv:42", &intent, artifact_root).is_err());
+    }
+
     #[tokio::test]
     async fn existing_only_component_status_never_installs_unseen_catalog_ids() {
         let root = tempfile::tempdir().unwrap();
@@ -2077,6 +2272,86 @@ mod tests {
         assert_eq!(format!("{:?}", *state.config.read().await), config_before);
         assert!(state.catalog_intents.read().await.is_empty());
         assert_eq!(filesystem_snapshot(root.path()), filesystem_before);
+    }
+
+    #[tokio::test]
+    async fn h3_persisted_sidecar_component_status_rejects_without_leaking_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let _environment = IsolatedModelEnvironment::hermetic();
+        let id = "cv:policy-sidecar";
+        let primary = catalog_sidecar(
+            root.path(),
+            "cv-policy-sidecar",
+            id,
+            "private/location/weights.safetensors",
+            true,
+        );
+        let sidecar_path = root
+            .path()
+            .join("cv-policy-sidecar")
+            .join(mold_catalog::sidecar::SIDECAR_FILENAME);
+        let mut sidecar = mold_catalog::sidecar::read_sidecar(&sidecar_path).unwrap();
+        sidecar.name = "MiniMax H3 renamed checkpoint".into();
+        mold_catalog::sidecar::write_sidecar(&sidecar_path, &sidecar).unwrap();
+
+        let state = AppState::for_tests();
+        state.config.write().await.models_dir = root.path().display().to_string();
+        let error = model_component_status_existing_only(&state, id)
+            .await
+            .expect_err("gated persisted metadata must reject component diagnostics");
+
+        assert_eq!(error.code, mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        assert!(
+            !error.error.contains(&primary.display().to_string()),
+            "policy response must not reveal the gated checkpoint path"
+        );
+        assert!(
+            primary.is_file(),
+            "read-only rejection must not mutate disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn neutral_sidecar_with_nested_h3_artifact_is_hidden_and_components_reject() {
+        let root = tempfile::tempdir().unwrap();
+        let _environment = IsolatedModelEnvironment::hermetic();
+        let id = "cv:neutral-h3-path";
+        let primary = catalog_sidecar(root.path(), "MiniMax-H3", id, "weights.safetensors", true);
+        let config = Config {
+            models_dir: root.path().display().to_string(),
+            ..Default::default()
+        };
+        let state = AppState::for_tests();
+        *state.config.write().await = config.clone();
+
+        assert!(installed_catalog_models(&state, &config, root.path(), None, false).is_empty());
+        let error = model_component_status_existing_only(&state, id)
+            .await
+            .expect_err("a neutral sidecar must not hide a gated artifact directory");
+        assert_eq!(error.code, mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        assert!(!error.error.contains(&primary.display().to_string()));
+    }
+
+    #[test]
+    fn installed_inventory_ignores_h3_named_storage_root_for_ordinary_sidecar() {
+        let root = tempfile::tempdir().unwrap();
+        let models_dir = root.path().join("mold-uat/minimax-h3/models");
+        catalog_sidecar(
+            &models_dir,
+            "cv-ordinary",
+            "cv:ordinary",
+            "weights.safetensors",
+            true,
+        );
+        let config = Config {
+            models_dir: models_dir.display().to_string(),
+            ..Default::default()
+        };
+        let state = AppState::for_tests();
+
+        let inventory = installed_catalog_models(&state, &config, &models_dir, None, false);
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].info.name, "cv:ordinary");
     }
 
     #[tokio::test]
@@ -3933,6 +4208,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 1.0,
             mask_image: None,
             control_image: None,

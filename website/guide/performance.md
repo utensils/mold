@@ -25,6 +25,9 @@ Reference hardware: RTX 4090 class GPU, warm model cache, default resolution.
 | `ltx-video-0.9.8-2b-distilled:bf16` | 7+3           | ~30-90s       | Newer checkpoint family, full multiscale refine |
 | `ltx-2-19b-distilled:fp8`           | 8             | ~2-6 min      | Joint audio-video; native Rust FP8 path         |
 | `ltx-2.3-22b-distilled:fp8`         | 8             | ~3-8 min      | Larger native joint audio-video path            |
+| `wan21-t2v-1.3b:bf16`               | 30            | ~3.5 min      | 480p16; measured 209 s at 33 frames             |
+| `wan22-ti2v-5b:fp16`                | 20            | ~2-4 min      | Measured 246 s T2V 720p24 / 105 s I2V 480p, 49f |
+| `wan22-i2v-a14b:q5`                 | 4             | ~3.5 min      | Two-expert Lightning tier; 199 s at 53 frames   |
 
 ## What Slows Things Down
 
@@ -47,6 +50,15 @@ On a 24 GB RTX 4090-class card, the practical local path is the distilled FP8
 checkpoint with native layer streaming enabled. mold currently uses the
 compatible `fp8-cast` path there rather than Hopper-only
 `fp8-scaled-mm`/TensorRT-LLM.
+
+Wan's fast tier is the A14B 4-step Lightning pair (`wan22-*-a14b:q5`): two
+14B experts alternate with one resident at a time, so VRAM is the larger
+expert (~10.8 GB of weights), and guidance 1.0 skips the unconditional pass so
+each of the four steps is one forward. The measured RTX 4090 envelope is
+23,975 MiB at the 53-frame default (832x480) — which is why the A14B defaults
+are 53 frames (`:q5`) and 33 frames (`:q8`) rather than the trained 81; larger
+cards pass `--frames 81`. The timing rows above are single-configuration RTX
+4090 measurements, not a support matrix.
 
 CUDA is the supported backend for real local LTX-2 runs. CPU exists for
 correctness-oriented native coverage and can be extremely slow. Metal is

@@ -38,6 +38,7 @@ pub fn seeds_for(family: Family) -> &'static [&'static str] {
             "QuantStack/Wan2.2-T2V-A14B-GGUF",
             "QuantStack/Wan2.2-I2V-A14B-GGUF",
         ],
+        MinimaxH3 => &["MiniMaxAI/MiniMax-H3", "Comfy-Org/MiniMax-H3"],
         QwenImage => &["Qwen/Qwen-Image"],
         Wuerstchen => &["warp-ai/wuerstchen"],
     }

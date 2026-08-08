@@ -11,6 +11,14 @@ use thiserror::Error;
 use crate::manifest::{paths_from_downloads, ModelComponent, ModelFile, ModelManifest};
 use crate::ModelPaths;
 
+fn hf_model_repo(repo_id: &str) -> Repo {
+    if let Some(revision) = crate::minimax_h3::repo_revision(repo_id) {
+        Repo::with_revision(repo_id.to_string(), RepoType::Model, revision.to_string())
+    } else {
+        Repo::new(repo_id.to_string(), RepoType::Model)
+    }
+}
+
 /// Callback-based download progress event.
 #[derive(Debug, Clone)]
 pub enum DownloadProgressEvent {
@@ -59,6 +67,9 @@ pub struct PullOptions {
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
+    #[error(transparent)]
+    ModelActivation(#[from] crate::ModelActivationError),
+
     #[error(
         "Model requires access approval on HuggingFace.\n\n  1. Visit: https://huggingface.co/{repo}\n  2. Accept the license agreement\n  3. Create a token at: https://huggingface.co/settings/tokens\n  4. Set: export HF_TOKEN=hf_...\n  5. Retry: mold pull {model}"
     )]
@@ -877,6 +888,15 @@ fn find_existing_placed_file(
 ///
 /// A `.pulling` marker file is written before downloads begin and removed on
 /// success. If the pull is interrupted, the marker signals an incomplete state.
+fn require_manifest_activation(manifest: &ModelManifest) -> Result<(), DownloadError> {
+    crate::require_model_activation(&manifest.name, Some(&manifest.family))?;
+    for file in &manifest.files {
+        crate::require_model_activation(&file.hf_repo, Some(&manifest.family))?;
+        crate::require_model_activation(&file.hf_filename, Some(&manifest.family))?;
+    }
+    Ok(())
+}
+
 pub async fn pull_model(
     manifest: &ModelManifest,
     opts: &PullOptions,
@@ -889,6 +909,7 @@ async fn pull_model_with_hf_token(
     opts: &PullOptions,
     hf_token: Option<&str>,
 ) -> Result<ModelPaths, DownloadError> {
+    require_manifest_activation(manifest)?;
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
@@ -962,6 +983,7 @@ async fn pull_model_with_callback_and_hf_token(
     opts: &PullOptions,
     hf_token: Option<&str>,
 ) -> Result<ModelPaths, DownloadError> {
+    require_manifest_activation(manifest)?;
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
@@ -1084,6 +1106,7 @@ async fn pull_model_files_only_with_hf_token(
     opts: &PullOptions,
     hf_token: Option<&str>,
 ) -> Result<(), DownloadError> {
+    require_manifest_activation(manifest)?;
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
@@ -1136,6 +1159,7 @@ async fn pull_model_files_only_with_callback_and_hf_token(
     opts: &PullOptions,
     hf_token: Option<&str>,
 ) -> Result<(), DownloadError> {
+    require_manifest_activation(manifest)?;
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
@@ -1247,7 +1271,7 @@ async fn download_file<P: Progress + Clone + Send + Sync + 'static>(
     progress: P,
     model_name: &str,
 ) -> Result<PathBuf, DownloadError> {
-    let repo = api.repo(Repo::new(file.hf_repo.clone(), RepoType::Model));
+    let repo = api.repo(hf_model_repo(&file.hf_repo));
 
     match repo
         .download_with_progress(&file.hf_filename, progress)
@@ -1285,6 +1309,19 @@ async fn download_file<P: Progress + Clone + Send + Sync + 'static>(
 
 // ── Synchronous single-file download (for use from spawn_blocking) ───────────
 
+fn require_single_file_activation(
+    hf_repo: &str,
+    hf_filename: &str,
+    target_subdir: Option<&str>,
+) -> Result<(), DownloadError> {
+    crate::require_model_activation(hf_repo, None)?;
+    crate::require_model_activation(hf_filename, None)?;
+    if let Some(target_subdir) = target_subdir {
+        crate::require_model_activation(target_subdir, None)?;
+    }
+    Ok(())
+}
+
 /// Download a single file from HuggingFace, returning its path.
 /// Uses the sync hf-hub API — safe to call from `spawn_blocking`.
 /// Returns immediately if already cached.
@@ -1297,6 +1334,8 @@ pub fn download_single_file_sync(
     hf_filename: &str,
     target_subdir: Option<&str>,
 ) -> Result<PathBuf, DownloadError> {
+    require_single_file_activation(hf_repo, hf_filename, target_subdir)?;
+
     let msg_width = filename_column_width();
     let bar_style = ProgressStyle::with_template(&format!(
         "  {{msg:<{msg_width}}} [{{bar:30.cyan/dim}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})"
@@ -1326,6 +1365,8 @@ pub fn download_single_file_sync_with_progress(
     target_subdir: Option<&str>,
     callback: DownloadProgressCallback,
 ) -> Result<PathBuf, DownloadError> {
+    require_single_file_activation(hf_repo, hf_filename, target_subdir)?;
+
     download_single_file_sync_with_adapter(
         &models_dir(),
         hf_repo,
@@ -1345,6 +1386,8 @@ pub fn download_single_file_sync_with_progress_in(
     target_subdir: Option<&str>,
     callback: DownloadProgressCallback,
 ) -> Result<PathBuf, DownloadError> {
+    require_single_file_activation(hf_repo, hf_filename, target_subdir)?;
+
     download_single_file_sync_with_adapter(
         models_root,
         hf_repo,
@@ -1385,6 +1428,11 @@ fn download_single_file_sync_with_adapter<P>(
 where
     P: hf_hub::api::Progress,
 {
+    // Keep the policy at the lowest download boundary as a defense against a
+    // future internal caller bypassing the public wrappers. The wrappers also
+    // check before constructing progress adapters or resolving managed paths.
+    require_single_file_activation(hf_repo, hf_filename, target_subdir)?;
+
     use hf_hub::api::sync::ApiBuilder;
 
     let mut builder = ApiBuilder::from_env()
@@ -1396,7 +1444,7 @@ where
     let api = builder
         .build()
         .map_err(|e| DownloadError::SyncApiSetup(e.to_string()))?;
-    let repo = api.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
+    let repo = api.repo(hf_model_repo(hf_repo));
     let hf_path = repo
         .download_with_progress(hf_filename, progress)
         .map_err(|e| {
@@ -1447,7 +1495,7 @@ where
 /// `MOLD_MODELS_DIR`, not the user's home HF cache.
 pub fn cached_file_path_in_mold_cache(hf_repo: &str, hf_filename: &str) -> Option<PathBuf> {
     let cache = Cache::new(hf_cache_dir());
-    let repo = cache.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
+    let repo = cache.repo(hf_model_repo(hf_repo));
     repo.get(hf_filename)
 }
 
@@ -1483,21 +1531,21 @@ pub fn cached_file_path_in(
 
     // 2. Check new hf-cache location (~/.mold/models/.hf-cache/)
     let new_cache = Cache::new(models_root.join(".hf-cache"));
-    let new_repo = new_cache.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
+    let new_repo = new_cache.repo(hf_model_repo(hf_repo));
     if let Some(path) = new_repo.get(hf_filename) {
         return Some(path);
     }
 
     // 3. Check old mold models dir (backward compat — HF cached here before .hf-cache/)
     let old_cache = Cache::new(models_root.to_path_buf());
-    let old_repo = old_cache.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
+    let old_repo = old_cache.repo(hf_model_repo(hf_repo));
     if let Some(path) = old_repo.get(hf_filename) {
         return Some(path);
     }
 
     // 4. Check default HF cache (~/.cache/huggingface/hub/)
     let default_cache = Cache::from_env();
-    let default_repo = default_cache.repo(Repo::new(hf_repo.to_string(), RepoType::Model));
+    let default_repo = default_cache.repo(hf_model_repo(hf_repo));
     default_repo.get(hf_filename)
 }
 
@@ -1523,7 +1571,7 @@ pub fn cached_file_path_existing_only(
     let lookup = |root: &Path| {
         root.is_dir().then(|| {
             Cache::new(root.to_path_buf())
-                .repo(Repo::new(hf_repo.to_string(), RepoType::Model))
+                .repo(hf_model_repo(hf_repo))
                 .get(hf_filename)
         })?
     };
@@ -1531,11 +1579,10 @@ pub fn cached_file_path_existing_only(
         .or_else(|| lookup(models_root))
         .or_else(|| {
             let cache = Cache::from_env();
-            cache.path().is_dir().then(|| {
-                cache
-                    .repo(Repo::new(hf_repo.to_string(), RepoType::Model))
-                    .get(hf_filename)
-            })?
+            cache
+                .path()
+                .is_dir()
+                .then(|| cache.repo(hf_model_repo(hf_repo)).get(hf_filename))?
         })
 }
 
@@ -1970,6 +2017,16 @@ pub async fn fetch_recipe(
     progress: Option<DownloadProgressCallback>,
     opts: &PullOptions,
 ) -> Result<Vec<PathBuf>, DownloadError> {
+    // The recipe path is a low-level public ingress used by both the CLI and
+    // server. Apply the activation policy before deriving paths, creating the
+    // recipe directory/marker, constructing an HTTP client, or reporting any
+    // progress so callers cannot bypass a catalog-level gate with an opaque id.
+    crate::require_model_activation(id, None)?;
+    for file in files {
+        crate::require_model_activation(file.url, None)?;
+        crate::require_model_activation(file.dest, None)?;
+    }
+
     let sanitized = sanitize_recipe_id(id);
     let subdir_root = models_dir.join(&sanitized);
 
@@ -2386,6 +2443,122 @@ mod tests {
         assert!(msg.contains("HF_TOKEN"));
         assert!(msg.contains("huggingface-cli login"));
         assert!(msg.contains("mold pull flux-schnell:q8"));
+    }
+
+    fn compliance_gated_manifest(name: &str, family: &str, repo: &str) -> ModelManifest {
+        use crate::manifest::{ManifestDefaults, ModelFile};
+
+        ModelManifest {
+            name: name.to_string(),
+            family: family.to_string(),
+            description: "policy fixture".to_string(),
+            files: vec![ModelFile {
+                hf_repo: repo.to_string(),
+                hf_filename: "weights.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 1,
+                gated: false,
+                sha256: None,
+            }],
+            defaults: ManifestDefaults {
+                steps: 1,
+                guidance: 1.0,
+                width: 32,
+                height: 32,
+                is_schnell: false,
+                scheduler: None,
+                negative_prompt: None,
+                frames: None,
+                fps: None,
+            },
+            hidden: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn pull_rejects_compliance_gated_manifest_before_progress_or_network() {
+        let manifest =
+            compliance_gated_manifest("private-checkpoint", "minimax-h3", "example/renamed");
+        let callbacks = Arc::new(Mutex::new(0usize));
+        let callback_count = callbacks.clone();
+        let callback: DownloadProgressCallback = Arc::new(move |_| {
+            *callback_count.lock().unwrap() += 1;
+        });
+
+        let error = pull_model_with_callback(&manifest, callback, &PullOptions::default())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, DownloadError::ModelActivation(_)));
+        assert_eq!(*callbacks.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn manifest_repo_identity_cannot_bypass_activation_policy() {
+        let manifest = compliance_gated_manifest("renamed-model", "custom", "Comfy-Org/MiniMax-H3");
+        let error = require_manifest_activation(&manifest).unwrap_err();
+        assert!(matches!(error, DownloadError::ModelActivation(_)));
+    }
+
+    #[test]
+    fn public_sync_downloads_gate_repo_filename_and_target_before_side_effects() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let error = download_single_file_sync("MiniMaxAI/MiniMax-H3", "weights.safetensors", None)
+            .expect_err("an H3 repository must be rejected before progress or network setup");
+        assert!(matches!(error, DownloadError::ModelActivation(_)));
+
+        let callbacks = Arc::new(AtomicUsize::new(0));
+        let observed = callbacks.clone();
+        let callback: DownloadProgressCallback = Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        });
+        let error = download_single_file_sync_with_progress(
+            "example/renamed-model",
+            "MiniMax-H3/weights.safetensors",
+            None,
+            callback,
+        )
+        .expect_err("an H3 filename must be rejected before callback or network setup");
+        assert!(matches!(error, DownloadError::ModelActivation(_)));
+        assert_eq!(callbacks.load(Ordering::SeqCst), 0);
+
+        let models_root = std::env::temp_dir().join(format!(
+            "mold_sync_h3_gate_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        assert!(!models_root.exists(), "test path must begin absent");
+        let callbacks = Arc::new(AtomicUsize::new(0));
+        let observed = callbacks.clone();
+        let callback: DownloadProgressCallback = Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        });
+        let error = download_single_file_sync_with_progress_in(
+            &models_root,
+            "example/renamed-model",
+            "weights.safetensors",
+            Some("shared/MiniMax-H3"),
+            callback,
+        )
+        .expect_err("an H3 target must be rejected before filesystem or network setup");
+        assert!(matches!(error, DownloadError::ModelActivation(_)));
+        assert_eq!(callbacks.load(Ordering::SeqCst), 0);
+        assert!(
+            !models_root.exists(),
+            "policy rejection must not create the managed model root"
+        );
+    }
+
+    #[test]
+    fn sync_download_policy_keeps_h3_lookalikes_available() {
+        for (repo, filename, target) in [
+            ("example/minimax-h30", "weights.safetensors", None),
+            ("example/model", "minimaxh30.safetensors", None),
+            ("example/model", "weights.safetensors", Some("shared/h3")),
+        ] {
+            require_single_file_activation(repo, filename, target)
+                .unwrap_or_else(|_| panic!("lookalike must remain available: {repo}/{filename}"));
+        }
     }
 
     /// Mutex to serialize tests that mutate `HF_TOKEN` — `set_var`/`remove_var`
@@ -3236,6 +3409,86 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[tokio::test]
+    async fn h3_recipe_fetch_rejects_id_url_and_dest_before_any_side_effect() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"must not be fetched"))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let ordinary_url = format!("{}/weights.safetensors", server.uri());
+        let gated_url = format!("{}/MiniMax-H3/weights.safetensors", server.uri());
+        let cases = [
+            (
+                "id",
+                "hf:MiniMaxAI/MiniMax-H3".to_string(),
+                ordinary_url.clone(),
+                "weights.safetensors".to_string(),
+            ),
+            (
+                "url",
+                "cv:opaque".to_string(),
+                gated_url,
+                "weights.safetensors".to_string(),
+            ),
+            (
+                "dest",
+                "cv:opaque".to_string(),
+                ordinary_url,
+                "MiniMax-H3/weights.safetensors".to_string(),
+            ),
+        ];
+
+        for (field, id, url, dest) in cases {
+            let models_dir = std::env::temp_dir().join(format!(
+                "mold_recipe_h3_{field}_{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            assert!(!models_dir.exists(), "test path must begin absent");
+
+            let files = [RecipeFetchFile {
+                url: &url,
+                dest: &dest,
+                sha256: None,
+                size_bytes: Some(1),
+            }];
+            let progress_count = Arc::new(AtomicUsize::new(0));
+            let observed = progress_count.clone();
+            let progress: DownloadProgressCallback = Arc::new(move |_| {
+                observed.fetch_add(1, Ordering::SeqCst);
+            });
+
+            let error = fetch_recipe(
+                &id,
+                &files,
+                RecipeAuth::None,
+                &models_dir,
+                Some(progress),
+                &PullOptions::default(),
+            )
+            .await
+            .expect_err("H3 recipe input must be compliance-gated");
+
+            assert!(
+                matches!(error, DownloadError::ModelActivation(_)),
+                "{field}"
+            );
+            assert_eq!(progress_count.load(Ordering::SeqCst), 0, "{field}");
+            assert!(
+                !models_dir.exists(),
+                "{field} rejection must not create the models directory"
+            );
+        }
+
+        server.verify().await;
     }
 
     #[tokio::test]

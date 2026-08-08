@@ -45,9 +45,13 @@ pub fn resolution_defaults(model: &str, family: &str) -> ResolutionDefaults {
         .into_iter()
         .map(|(width, height)| RecommendedDimensions { width, height })
         .collect(),
-        dimension_alignment: Some(crate::validation::dimension_alignment_for_family(Some(
-            family,
-        ))),
+        // Per model, like the buckets above: `wan22-ti2v-5b`'s 2.2 VAE needs
+        // a 32px grid the rest of its family does not, and Studio source
+        // fitting floors to exactly this advertised value.
+        dimension_alignment: Some(crate::validation::dimension_alignment_for_model(
+            model,
+            Some(family),
+        )),
     }
 }
 
@@ -68,8 +72,16 @@ pub fn build_model_catalog(
     engine_is_loaded: bool,
 ) -> Vec<ModelInfoExtended> {
     let mut models = Vec::with_capacity(known_manifests().len() + config.models.len());
+    let artifact_root = config.resolved_models_dir();
 
-    for manifest in visible_manifests() {
+    for manifest in visible_manifests().filter(|manifest| {
+        crate::require_model_activation(&manifest.name, Some(&manifest.family)).is_ok()
+            && manifest.files.iter().all(|file| {
+                crate::require_model_activation(&file.hf_repo, Some(&manifest.family)).is_ok()
+                    && crate::require_model_activation(&file.hf_filename, Some(&manifest.family))
+                        .is_ok()
+            })
+    }) {
         let resolution = resolution_defaults(&manifest.name, &manifest.family);
         let model_cfg = config.resolved_model_config(&manifest.name);
         let downloaded = config.manifest_model_is_downloaded(&manifest.name);
@@ -88,6 +100,7 @@ pub fn build_model_catalog(
                 default_height: model_cfg.effective_height(config),
                 default_frames: model_cfg.effective_frames(),
                 default_fps: model_cfg.effective_fps(),
+                min_frames: crate::validation::min_frames_for_family(&manifest.family),
                 max_frames: crate::validation::max_frames_for_family_at_fps(
                     &manifest.family,
                     model_cfg
@@ -101,6 +114,7 @@ pub fn build_model_catalog(
                     &manifest.family,
                 ),
                 frame_step: crate::validation::frame_step_for_family(&manifest.family),
+                frame_offset: crate::validation::frame_offset_for_family(&manifest.family),
                 max_pixels: resolution.max_pixels,
                 max_axis_pixels: resolution.max_axis_pixels,
                 recommended_dimensions: resolution.recommended_dimensions,
@@ -153,7 +167,18 @@ pub fn build_model_catalog(
     let mut config_only: Vec<_> = config
         .models
         .iter()
-        .filter(|(name, _)| crate::manifest::find_manifest(name).is_none())
+        .filter(|(name, model_cfg)| {
+            crate::manifest::find_manifest(name).is_none()
+                && crate::require_model_activation(name, model_cfg.family.as_deref()).is_ok()
+                && model_cfg.all_file_paths().iter().all(|path| {
+                    crate::require_model_artifact_activation(
+                        std::path::Path::new(path),
+                        Some(&artifact_root),
+                        model_cfg.family.as_deref(),
+                    )
+                    .is_ok()
+                })
+        })
         .collect();
     config_only.sort_by_key(|(name, _)| *name);
 
@@ -182,6 +207,7 @@ pub fn build_model_catalog(
                 default_height: model_cfg.effective_height(config),
                 default_frames: model_cfg.effective_frames(),
                 default_fps: model_cfg.effective_fps(),
+                min_frames: crate::validation::min_frames_for_family(&family),
                 max_frames: crate::validation::max_frames_for_family_at_fps(
                     &family,
                     model_cfg
@@ -191,6 +217,7 @@ pub fn build_model_catalog(
                 max_runtime_seconds: crate::validation::max_runtime_seconds_for_family(&family),
                 max_frames_absolute: crate::validation::max_frames_absolute_for_family(&family),
                 frame_step: crate::validation::frame_step_for_family(&family),
+                frame_offset: crate::validation::frame_offset_for_family(&family),
                 max_pixels: resolution.max_pixels,
                 max_axis_pixels: resolution.max_axis_pixels,
                 recommended_dimensions: resolution.recommended_dimensions,
@@ -400,6 +427,84 @@ mod tests {
         assert!(!flux.defaults.recommended_dimensions.is_empty());
     }
 
+    /// `/api/models` is the single source Studio surfaces read the grid from:
+    /// the 5B must advertise its 2.2 VAE's 32px grid while the 2.1-VAE
+    /// checkpoints keep the family's 16, and every advertised bucket must sit
+    /// on its own model's grid or source fitting floors to a canvas that
+    /// admission rejects.
+    #[test]
+    fn model_catalog_advertises_wan_alignment_per_checkpoint() {
+        let catalog = build_model_catalog(&Config::default(), None, false);
+        let alignment = |name: &str| {
+            catalog
+                .iter()
+                .find(|model| model.name == name)
+                .unwrap_or_else(|| panic!("{name} should be in the catalog"))
+                .defaults
+                .dimension_alignment
+        };
+        assert_eq!(alignment("wan22-ti2v-5b:fp16"), Some(32));
+        assert_eq!(alignment("wan21-t2v-1.3b:bf16"), Some(16));
+        assert_eq!(alignment("wan22-t2v-a14b:q8"), Some(16));
+
+        for model in catalog.iter().filter(|model| model.family == "wan") {
+            let align = model
+                .defaults
+                .dimension_alignment
+                .expect("wan rows always advertise a grid");
+            for size in &model.defaults.recommended_dimensions {
+                assert!(
+                    size.width % align == 0 && size.height % align == 0,
+                    "{}: advertised {}x{} is off its own {align}px grid",
+                    model.name,
+                    size.width,
+                    size.height,
+                );
+            }
+        }
+    }
+
+    /// The low-VRAM Wan tiers (#794) surface in the catalog with their
+    /// manifests' own recipes — the Q4_K_M A14B pair keeps the Lightning
+    /// 4-step contract and the TI2V-5B Q8_0 keeps the 5B's 121@24 — and the
+    /// quality sort keeps them behind the higher-precision variants of the
+    /// same base name (bare-name defaults are unchanged).
+    #[test]
+    fn wan_low_vram_tiers_surface_in_catalog_with_manifest_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let catalog = build_model_catalog(&Config::default(), None, false);
+        let position = |name: &str| {
+            catalog
+                .iter()
+                .position(|model| model.name == name)
+                .unwrap_or_else(|| panic!("{name} must be in the catalog"))
+        };
+
+        let ti2v_q8 = &catalog[position("wan22-ti2v-5b:q8")];
+        assert_eq!(ti2v_q8.family, "wan");
+        assert_eq!(ti2v_q8.defaults.default_steps, 20);
+        assert_eq!(ti2v_q8.defaults.default_guidance, 5.0);
+        assert_eq!(ti2v_q8.defaults.default_frames, Some(121));
+        assert_eq!(ti2v_q8.defaults.default_fps, Some(24));
+        assert_eq!(ti2v_q8.info.hf_repo, "QuantStack/Wan2.2-TI2V-5B-GGUF");
+
+        for base in ["wan22-t2v-a14b", "wan22-i2v-a14b"] {
+            let q4 = &catalog[position(&format!("{base}:q4"))];
+            assert_eq!(q4.family, "wan");
+            assert_eq!(q4.defaults.default_steps, 4);
+            assert_eq!(q4.defaults.default_guidance, 1.0);
+            assert_eq!(q4.defaults.default_frames, Some(53));
+            assert_eq!(q4.defaults.default_fps, Some(16));
+
+            // Quality order within the base name: q8 > q5 > q4.
+            assert!(position(&format!("{base}:q8")) < position(&format!("{base}:q5")));
+            assert!(position(&format!("{base}:q5")) < position(&format!("{base}:q4")));
+        }
+
+        // fp16 stays the 5B's lead (and bare-name default) variant.
+        assert!(position("wan22-ti2v-5b:fp16") < position("wan22-ti2v-5b:q8"));
+    }
+
     #[test]
     fn model_catalog_advertises_default_ltx_guidance_recipe() {
         let catalog = build_model_catalog(&Config::default(), None, false);
@@ -490,6 +595,52 @@ mod tests {
         assert!(entry.downloaded);
         assert_eq!(entry.family, "custom");
         assert_eq!(entry.defaults.default_steps, 12);
+    }
+
+    #[test]
+    fn build_model_catalog_hides_compliance_gated_config_only_models() {
+        let mut models = HashMap::new();
+        models.insert(
+            "private-checkpoint".to_string(),
+            ModelConfig {
+                family: Some("minimax-h3".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        models.insert(
+            "ordinary-custom-model".to_string(),
+            ModelConfig {
+                family: Some("custom".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        models.insert(
+            "disguised-checkpoint".to_string(),
+            ModelConfig {
+                family: Some("custom".to_string()),
+                transformer: Some("/models/MiniMax-H3/transformer.safetensors".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+
+        let catalog = build_model_catalog(
+            &Config {
+                models,
+                ..Config::default()
+            },
+            None,
+            false,
+        );
+
+        assert!(!catalog
+            .iter()
+            .any(|model| model.name == "private-checkpoint"));
+        assert!(!catalog
+            .iter()
+            .any(|model| model.name == "disguised-checkpoint"));
+        assert!(catalog
+            .iter()
+            .any(|model| model.name == "ordinary-custom-model"));
     }
 
     #[test]

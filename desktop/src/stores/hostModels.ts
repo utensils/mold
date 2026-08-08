@@ -1,4 +1,5 @@
 import { defineStore } from "pinia";
+import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import { apiJsonTo } from "../lib/api/client";
 import type { ModelEntry } from "../lib/api/types";
 import { mergeModelPresentationMetadata } from "../lib/models";
@@ -30,12 +31,19 @@ export const useHostModelsStore = defineStore("hostModels", {
   }),
   getters: {
     modelsOn(state) {
-      return (hostId: string): ModelEntry[] => state.byHost[hostId]?.entries ?? [];
+      return (hostId: string): ModelEntry[] =>
+        filterRestrictedModels(
+          state.byHost[hostId]?.entries ?? [],
+          useHostsStore().capabilities[hostId],
+        );
     },
     /** Downloaded generation models on one host — mirrors `useModelStore.installed`. */
     installedOn(state) {
       return (hostId: string): ModelEntry[] =>
-        (state.byHost[hostId]?.entries ?? []).filter((m) => m.downloaded && isGenerationModel(m));
+        filterRestrictedModels(
+          state.byHost[hostId]?.entries ?? [],
+          useHostsStore().capabilities[hostId],
+        ).filter((m) => m.downloaded && isGenerationModel(m));
     },
     /**
      * Every installed generation model across all hosts, deduped by name in

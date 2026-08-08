@@ -1,0 +1,85 @@
+{
+  "schema_version": "mold.minimax-h3.layer-output.v1",
+  "family": "minimax-h3",
+  "case_id": "synthetic-coupled-update-v1",
+  "layer": "dual-sampler",
+  "authority_tier": "synthetic",
+  "authorization_document_sha256": null,
+  "input": {
+    "id": "synthetic-v1",
+    "sha256": "bddf9a6b821015094aedba95dd58a7634a783c9338dd6d488e66bd8d5fcd182a",
+    "component_index_sha256": "a2b6a210e482ffb78e613b553f570c44e101afce6741bd4ed91429d0559af031"
+  },
+  "producer": {
+    "role": "oracle",
+    "implementation": "diffusers",
+    "source_id": "diffusers",
+    "revision": "9c6a68c32b3b2a64db91800b624d33cec6e25ab8"
+  },
+  "adapter": {
+    "schema_version": "mold.minimax-h3.layer-adapter.v1",
+    "id": "diffusers-synthetic-dual-sampler-v1",
+    "command": "python3 scripts/minimax-h3-conformance.py print-synthetic-output --role oracle",
+    "tensor_hash_encoding": "canonical-json-numeric-v1"
+  },
+  "environment": {
+    "device": "cpu-synthetic",
+    "dtype": "float32",
+    "attention_backend": "scalar-python",
+    "forbidden_accelerations_disabled": true
+  },
+  "outputs": [
+    {
+      "key": "video_next",
+      "shape": [4],
+      "dtype": "float32",
+      "content_sha256": "cfff2f665b33397e84a33853fc786e9597ebead599161a3e00d7d2a6761fbf9e",
+      "statistics": {
+        "min": -2.0,
+        "max": 1.0,
+        "mean": -0.3125,
+        "std": 1.109264959331178
+      },
+      "samples": [
+        { "index": [0], "value": 0.25 },
+        { "index": [1], "value": -0.5 },
+        { "index": [2], "value": 1.0 },
+        { "index": [3], "value": -2.0 }
+      ]
+    },
+    {
+      "key": "audio_next",
+      "shape": [4],
+      "dtype": "float32",
+      "content_sha256": "75880588de85c782b29eb21d3b780110fcf5f0e0ab364a4174cdedd77722b024",
+      "statistics": {
+        "min": -1.0,
+        "max": 0.5,
+        "mean": -0.15625,
+        "std": 0.554632479665589
+      },
+      "samples": [
+        { "index": [0], "value": 0.125 },
+        { "index": [1], "value": -0.25 },
+        { "index": [2], "value": 0.5 },
+        { "index": [3], "value": -1.0 }
+      ]
+    }
+  ],
+  "comparison": [
+    {
+      "key": "video_next",
+      "absolute": 0.0,
+      "relative": 0.0,
+      "metric": "elementwise-atol-plus-rtol",
+      "hash_policy": "exact"
+    },
+    {
+      "key": "audio_next",
+      "absolute": 0.000002,
+      "relative": 0.000001,
+      "metric": "elementwise-atol-plus-rtol",
+      "hash_policy": "record-only"
+    }
+  ]
+}

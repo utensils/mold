@@ -103,6 +103,8 @@ pub struct DownloadQueue {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnqueueError {
+    #[error(transparent)]
+    ModelActivation(#[from] mold_core::ModelActivationError),
     #[error("unknown model '{0}'. Run 'mold list' to see available models.")]
     UnknownModel(String),
     #[error("download queue lock poisoned")]
@@ -115,6 +117,26 @@ pub enum EnqueueOutcome {
     AlreadyPresent,
     /// Created a new job at the given 0-based position (0 = will start next).
     Created,
+}
+
+fn require_manifest_enqueue_activation(
+    manifest: &mold_core::manifest::ModelManifest,
+) -> Result<(), EnqueueError> {
+    mold_core::require_model_activation(&manifest.name, Some(&manifest.family))?;
+    for file in &manifest.files {
+        mold_core::require_model_activation(&file.hf_repo, Some(&manifest.family))?;
+        mold_core::require_model_activation(&file.hf_filename, Some(&manifest.family))?;
+    }
+    Ok(())
+}
+
+fn require_recipe_enqueue_activation(payload: &RecipePayload) -> Result<(), EnqueueError> {
+    mold_core::require_model_activation(&payload.catalog_id, None)?;
+    for file in &payload.files {
+        mold_core::require_model_activation(&file.url, None)?;
+        mold_core::require_model_activation(&file.dest, None)?;
+    }
+    Ok(())
 }
 
 impl DownloadQueue {
@@ -191,12 +213,31 @@ impl DownloadQueue {
         model: String,
         hf_fallback_token: Option<String>,
     ) -> Result<(String, usize, EnqueueOutcome), EnqueueError> {
+        // Check the caller-supplied identity before resolution so a gated
+        // model that has no registered manifest still receives the stable
+        // policy error rather than being flattened into UnknownModel.
+        mold_core::require_model_activation(&model, None)?;
+
         // Manifest validation up front so the caller gets a real 400 instead of a
         // background failure.
         let canonical = mold_core::manifest::resolve_model_name(&model);
-        if mold_core::manifest::find_manifest(&canonical).is_none() {
-            return Err(EnqueueError::UnknownModel(model));
-        }
+        let manifest = mold_core::manifest::find_manifest(&canonical)
+            .ok_or(EnqueueError::UnknownModel(model))?;
+        self.enqueue_resolved_manifest(canonical, manifest, hf_fallback_token)
+            .await
+    }
+
+    async fn enqueue_resolved_manifest(
+        &self,
+        canonical: String,
+        manifest: &mold_core::manifest::ModelManifest,
+        hf_fallback_token: Option<String>,
+    ) -> Result<(String, usize, EnqueueOutcome), EnqueueError> {
+        // The queue is an independent authority boundary: validate the full
+        // resolved manifest, including repos, before locking or mutating any
+        // queue state. This closes opaque/renamed-id bypasses even when a
+        // higher-level catalog caller misses its own preflight.
+        require_manifest_enqueue_activation(manifest)?;
 
         // Check for active/queued duplicate.
         {
@@ -262,6 +303,7 @@ impl DownloadQueue {
         &self,
         payload: RecipePayload,
     ) -> Result<(String, usize, EnqueueOutcome), EnqueueError> {
+        require_recipe_enqueue_activation(&payload)?;
         if payload.catalog_id.trim().is_empty() {
             return Err(EnqueueError::UnknownModel(payload.catalog_id));
         }

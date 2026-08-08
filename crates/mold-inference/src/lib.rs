@@ -2,6 +2,7 @@ pub(crate) mod adaptive_offload;
 pub mod artifact_format;
 pub mod attention;
 pub mod audio;
+pub mod av_media;
 mod batch;
 mod cache;
 pub(crate) mod cfg_plus_ddim;
@@ -17,6 +18,7 @@ pub mod expand;
 mod factory;
 pub mod flux;
 pub mod flux2;
+mod h3_factory;
 mod image;
 pub(crate) mod img2img;
 pub mod img_utils;
@@ -24,6 +26,12 @@ pub mod latent_preview;
 pub mod loader;
 pub mod ltx2;
 pub mod ltx_video;
+// The deterministic scheduler contract lands ahead of the license-gated H3
+// engine. Keeping these primitives crate-private avoids advertising a runnable
+// family while leaving exact math and conditioner lifecycle ready for the
+// future pipeline to consume.
+#[allow(dead_code)]
+pub(crate) mod minimax_h3;
 pub mod model_registry;
 pub(crate) mod nvfp4;
 pub mod progress;
@@ -53,14 +61,20 @@ pub use batch::{
     QualificationReference, SeedContract, TiledVaeCapability, WorkflowCapabilities,
 };
 pub use engine::{
-    with_inference_cancellation, BatchExecutionCapability, InferenceEngine, LoadStrategy,
+    with_inference_cancellation, BatchExecutionCapability, GenerationReferenceBinding,
+    InferenceEngine, LoadStrategy,
 };
 pub use error::InferenceError;
 pub use factory::{
-    create_engine, create_engine_with_frozen_config, create_engine_with_pool, FrozenEngineConfig,
+    create_engine, create_engine_with_frozen_config, create_engine_with_pool,
+    factory_family_availability, FactoryFamilyAvailability, FrozenEngineConfig,
 };
 pub use flux::FluxEngine;
 pub use flux2::Flux2Engine;
+pub use h3_factory::{
+    FrozenH3FactoryAuthority, H3FactoryAuthorityInput, H3FactoryComponentAuthority,
+    H3FactoryComponentRole, H3FactoryConditionerPlacement, H3FactoryQuantizationAuthority,
+};
 pub use ltx2::Ltx2Engine;
 pub use ltx_video::LtxVideoEngine;
 pub use model_registry::known_models;

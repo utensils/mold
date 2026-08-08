@@ -1,4 +1,8 @@
 import type { ChainOutputMetadata } from "@studio/lib/api/chainTypes";
+import type {
+  GenerationReference,
+  GenerationReferenceMetadata,
+} from "@studio/lib/generationReferences";
 import type { SourceFitPolicy } from "@studio/lib/sourceFit";
 import type {
   Ltx2GuidanceOverrides,
@@ -62,6 +66,8 @@ export interface OutputMetadata {
   source_image_sha256?: string | null;
   /** Ordered content keys for Qwen Image Edit inputs (newer servers only). */
   edit_image_sha256s?: string[] | null;
+  /** Redacted ordered H3 reference provenance (newer servers only). */
+  references?: GenerationReferenceMetadata[] | null;
   /** Durable sequence job this print was stitched from. Present only for
    * chain jobs with a server-side record — ephemeral chain outputs and
    * pre-#564 rows carry nothing (additive; newer servers only). */
@@ -133,6 +139,16 @@ export interface GalleryCapabilities {
 // Mirror of `mold_core::ServerCapabilities`.
 export interface ServerCapabilities {
   gallery?: GalleryCapabilities;
+  /** Server-enforced model families that are not activated in this build. */
+  model_access?: {
+    restrictions: Array<{
+      code: string;
+      family: string;
+      message: string;
+      license_url: string;
+      authorization_url: string;
+    }>;
+  };
   /** Continuation support. Absent on older servers, which means the Create
    * surfaces must hide the extend controls rather than send a rejected
    * request. */
@@ -141,6 +157,20 @@ export interface ServerCapabilities {
     extend_default_overlap_frames?: number | null;
   };
   discovery?: { can_browse: boolean };
+  /** Stable-URL, header-secret reference ingress. H3 activation remains a
+   * separate model_access decision. */
+  reference_uploads?: {
+    available: boolean;
+    protocol_version: number;
+    requires_api_key: boolean;
+    session_path: string;
+    upload_path: string;
+    session_handle_header: string;
+    upload_handle_header: string;
+    max_file_bytes: number;
+    max_session_bytes: number;
+    session_ttl_ms: number;
+  };
   devices?: {
     available?: boolean;
     lifecycle?: boolean;
@@ -225,6 +255,8 @@ export interface GenerateRequestWire {
    * subsequent images are references. Mutually exclusive with
    * `source_image`. */
   edit_images?: string[] | null;
+  /** Ordered heterogeneous MiniMax H3 Ref2VA inputs. */
+  references?: GenerationReference[] | null;
   strength?: number;
   mask_image?: string | null;
   control_image?: string | null;
@@ -329,14 +361,18 @@ export interface ModelInfoExtended extends ModelDefaults {
   /** Model's own default frame rate (`/api/models`, additive) — LTX-Video
    * ships 30, LTX-2 24; absent on older servers and image models. */
   default_fps?: number | null;
+  /** Minimum requestable frame count; omitted means the legacy floor of one. */
+  min_frames?: number | null;
   /** Requestable single-shot frame ceiling at `default_fps`. */
   max_frames?: number | null;
   /** Duration-based ceiling; clients recompute max frames when FPS changes. */
   max_runtime_seconds?: number | null;
   /** FPS-independent resource guard paired with `max_runtime_seconds`. */
   max_frames_absolute?: number | null;
-  /** Valid frame counts are `k * frame_step + 1`. */
+  /** Valid frame counts are `k * frame_step + frame_offset` (offset defaults to 1). */
   frame_step?: number | null;
+  /** Frame-grid offset; omitted means 1. MiniMax H3 advertises 5. */
+  frame_offset?: number | null;
 }
 
 export interface GpuInfo {
@@ -669,6 +705,7 @@ export type ExpandTask =
   | "retake"
   | "keyframe-interpolation"
   | "audio-driven-video"
+  | "reference-to-audio-video"
   | "text-to-audio";
 
 export interface ExpandRequestWire {

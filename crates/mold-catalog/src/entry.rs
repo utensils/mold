@@ -183,6 +183,36 @@ pub struct CatalogEntry {
     pub page_url: Option<String>,
 }
 
+/// Apply the core activation policy to every identity a normalized catalog
+/// entry can carry. Opaque `cv:` IDs become enforceable after metadata
+/// resolution, while raw HF repository identities fail before transfer.
+pub fn require_catalog_entry_activation(
+    entry: &CatalogEntry,
+) -> Result<(), mold_core::ModelActivationError> {
+    let family = Some(entry.family.as_str());
+    for identity in [
+        entry.id.as_str(),
+        entry.source_id.as_str(),
+        entry.name.as_str(),
+    ] {
+        mold_core::require_model_activation(identity, family)?;
+    }
+    if let Some(sub_family) = entry.sub_family.as_deref() {
+        mold_core::require_model_activation(sub_family, family)?;
+    }
+    if let Some(page_url) = entry.page_url.as_deref() {
+        mold_core::require_model_activation(page_url, family)?;
+    }
+    for companion in &entry.companions {
+        mold_core::require_model_activation(companion, family)?;
+    }
+    for file in &entry.download_recipe.files {
+        mold_core::require_model_activation(&file.url, family)?;
+        mold_core::require_model_activation(&file.dest, family)?;
+    }
+    Ok(())
+}
+
 /// On-disk shard format. One file per family in `data/catalog/`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Shard {

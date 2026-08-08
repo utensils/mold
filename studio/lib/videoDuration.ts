@@ -5,10 +5,12 @@ export interface VideoFrameContract {
   family?: string | null;
   default_frames?: number | null;
   default_fps?: number | null;
+  min_frames?: number | null;
   max_frames?: number | null;
   max_runtime_seconds?: number | null;
   max_frames_absolute?: number | null;
   frame_step?: number | null;
+  frame_offset?: number | null;
 }
 
 const LEGACY_FRAME_STEP = 8;
@@ -16,7 +18,8 @@ const LEGACY_MAX_FRAMES = 257;
 
 /**
  * Frame grid per family, mirroring `frame_step_for_family` in
- * `crates/mold-core/src/validation.rs`. Valid counts are `k * step + 1`.
+ * `crates/mold-core/src/validation.rs`. Valid counts are
+ * `k * step + videoFrameOffset(model)`.
  *
  * This is the fallback for a model row that names its family but not its
  * `frame_step`. It matters because the legacy default is 8 and Wan's grid is
@@ -29,6 +32,21 @@ const FAMILY_FRAME_STEP: ReadonlyMap<string, number> = new Map([
   ["ltx-2", 8],
   ["ltx-video", 8],
   ["wan", 4],
+  ["minimax-h3", 17],
+  ["minimax_h3", 17],
+  ["minimaxh3", 17],
+]);
+
+const FAMILY_FRAME_OFFSET: ReadonlyMap<string, number> = new Map([
+  ["minimax-h3", 5],
+  ["minimax_h3", 5],
+  ["minimaxh3", 5],
+]);
+
+const FAMILY_MIN_FRAMES: ReadonlyMap<string, number> = new Map([
+  ["minimax-h3", 124],
+  ["minimax_h3", 124],
+  ["minimaxh3", 124],
 ]);
 
 export function videoFrameStep(model?: VideoFrameContract | null): number {
@@ -41,16 +59,27 @@ export function videoFrameStep(model?: VideoFrameContract | null): number {
   return FAMILY_FRAME_STEP.get(family) ?? LEGACY_FRAME_STEP;
 }
 
-/** Snap a frame count onto the server's `k * step + 1` request grid. */
+export function videoFrameOffset(model?: VideoFrameContract | null): number {
+  const advertised = model?.frame_offset;
+  if (advertised != null) {
+    const offset = Math.round(advertised);
+    if (offset > 0) return offset;
+  }
+  const family = (model?.family ?? "").trim().toLowerCase();
+  return FAMILY_FRAME_OFFSET.get(family) ?? 1;
+}
+
+/** Snap a frame count onto the server's `k * step + offset` request grid. */
 export function snapVideoFrames(
   frames: number,
   model?: VideoFrameContract | null,
   direction: "nearest" | "down" = "nearest",
 ): number {
   const step = videoFrameStep(model);
-  const scaled = (Math.max(1, frames) - 1) / step;
+  const offset = videoFrameOffset(model);
+  const scaled = (Math.max(offset, frames) - offset) / step;
   const grid = direction === "down" ? Math.floor(scaled) : Math.round(scaled);
-  return Math.max(1, grid * step + 1);
+  return Math.max(offset, grid * step + offset);
 }
 
 /** Validate a frame count against the selected model's advertised grid. */
@@ -97,8 +126,14 @@ export function maxVideoFrames(
   return snapVideoFrames(cap, model, "down");
 }
 
-export function minVideoFrames(): number {
-  return 1;
+export function minVideoFrames(model?: VideoFrameContract | null): number {
+  const advertised = model?.min_frames;
+  if (advertised != null) {
+    const minimum = Math.round(advertised);
+    if (minimum > 0) return minimum;
+  }
+  const family = (model?.family ?? "").trim().toLowerCase();
+  return FAMILY_MIN_FRAMES.get(family) ?? 1;
 }
 
 export function clampVideoFrames(
@@ -108,7 +143,7 @@ export function clampVideoFrames(
 ): number {
   return Math.min(
     maxVideoFrames(model, fps),
-    Math.max(minVideoFrames(), snapVideoFrames(frames, model)),
+    Math.max(minVideoFrames(model), snapVideoFrames(frames, model)),
   );
 }
 

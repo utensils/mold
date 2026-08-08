@@ -1918,7 +1918,7 @@ fn write_stage_artifacts(
         .with_context(|| format!("encoding chain stage {stage_idx} segment"))?;
     #[cfg(feature = "mp4")]
     let segment_bytes = match outcome.audio.as_ref() {
-        Some(track) => mold_inference::ltx2::media::attach_aac_track_to_mp4_bytes(
+        Some(track) => mold_inference::av_media::attach_aac_track_to_mp4_bytes(
             &segment_bytes,
             &track.interleaved_samples,
             track.sample_rate,
@@ -2220,12 +2220,25 @@ fn finalize_job(
         #[cfg(feature = "mp4")]
         {
             let (sample_rate, channels) = audio_format.expect("samples imply format");
-            mold_inference::ltx2::media::attach_aac_track_to_mp4_bytes(
+            let cancelled = |_| deps.cancel.is_cancelled(&job.id);
+            match mold_inference::av_media::mux_aac_track_to_mp4_bytes(
                 &video_bytes,
                 &audio_samples,
                 sample_rate,
                 channels,
-            )?
+                mold_inference::av_media::AacMuxOptions::legacy_compatible(),
+                &cancelled,
+            ) {
+                Ok(output) => output.bytes,
+                Err(error)
+                    if error
+                        .downcast_ref::<mold_inference::av_media::AvMuxCancelled>()
+                        .is_some() =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            }
         }
         #[cfg(not(feature = "mp4"))]
         {
@@ -3482,6 +3495,7 @@ pub(crate) fn build_stage_generate_request(
         source_image: stage.source_image.clone(),
         source_image_name: None,
         edit_images: None,
+        references: None,
         strength: if idx == 0 { chain.strength } else { 1.0 },
         mask_image: None,
         control_image: None,

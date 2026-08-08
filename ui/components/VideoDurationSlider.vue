@@ -61,7 +61,7 @@ function update(frames: number): void {
   >
     <SliderRow
       :model-value="sliderValue"
-      :min="minVideoFrames()"
+      :min="minVideoFrames(model)"
       :max="maximum"
       :step="videoFrameStep(model)"
       :label="label"

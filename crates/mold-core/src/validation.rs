@@ -60,6 +60,7 @@ pub const LORA_CAPABLE_FAMILIES: &[&str] = &[
     "sdxl",
     "qwen-image",
     "qwen-image-edit",
+    "wan",
     "z-image",
 ];
 
@@ -289,6 +290,7 @@ pub fn max_frames_for_family_at_fps(family: &str, fps: u32) -> Option<u32> {
         // The flat global ceiling is the resource guard, and 257 sits on the
         // `4k+1` grid, so the advertised maximum is itself submittable.
         "wan" => Some(MAX_FRAMES_GLOBAL),
+        family if crate::minimax_h3::is_family(family) => Some(crate::minimax_h3::MAX_FRAMES),
         _ => None,
     }
 }
@@ -297,6 +299,18 @@ pub fn max_frames_for_family_at_fps(family: &str, fps: u32) -> Option<u32> {
 /// that have no per-model fps to hand.
 pub fn max_frames_for_family(family: &str) -> Option<u32> {
     max_frames_for_family_at_fps(family, LTX2_DEFAULT_FPS)
+}
+
+/// Minimum requestable frame count for families that impose one above the
+/// generic single-frame floor. `None` retains the historical minimum of one.
+pub fn min_frames_for_family(family: &str) -> Option<u32> {
+    crate::minimax_h3::is_family(family).then_some(crate::minimax_h3::MIN_FRAMES)
+}
+
+/// A family's mandatory frame rate, when the checkpoint does not support
+/// arbitrary FPS. `None` means callers may choose any otherwise-valid rate.
+pub fn fixed_fps_for_family(family: &str) -> Option<u32> {
+    crate::minimax_h3::is_family(family).then_some(crate::minimax_h3::FIXED_FPS)
 }
 
 /// Single-request runtime ceiling in seconds for families whose real limit is
@@ -310,14 +324,55 @@ pub fn max_frames_absolute_for_family(family: &str) -> Option<u32> {
     (family == "ltx2").then_some(LTX2_MAX_FRAMES_ABSOLUTE)
 }
 
-/// Frame-count grid for a family: valid counts are `k * step + 1`. The value
-/// `/api/models` advertises as `frame_step`; the validator consumes it.
+/// Step of the frame-count grid for a family. Pair with
+/// [`frame_offset_for_family`]; valid counts are `k * step + offset`.
 pub fn frame_step_for_family(family: &str) -> Option<u32> {
     match family {
         "ltx2" | "ltx-video" => Some(LTX2_TEMPORAL_SCALE),
         "wan" => Some(WAN_TEMPORAL_SCALE),
+        family if crate::minimax_h3::is_family(family) => Some(crate::minimax_h3::FRAME_STEP),
         _ => None,
     }
+}
+
+/// Offset of the frame-count grid. Existing video families use 1; MiniMax H3
+/// uses 5 (`17n+5`). `None` means the family has no temporal grid.
+pub fn frame_offset_for_family(family: &str) -> Option<u32> {
+    frame_step_for_family(family).map(|_| {
+        if crate::minimax_h3::is_family(family) {
+            crate::minimax_h3::FRAME_OFFSET
+        } else {
+            1
+        }
+    })
+}
+
+/// Validate family-specific temporal constraints that sit above the generic
+/// non-zero FPS/frame checks. Public admission calls this only after the model
+/// activation gate; keeping it factored lets the authority be tested without
+/// introducing a test-only authorization bypass.
+fn validate_family_video_timing_constraints(
+    frames: Option<u32>,
+    fps: Option<u32>,
+    family: Option<&str>,
+) -> Result<(), String> {
+    if let (Some(family), Some(fps)) = (family, fps) {
+        if let Some(fixed_fps) = fixed_fps_for_family(family) {
+            if fps != fixed_fps {
+                return Err(format!("{family} requires {fixed_fps} fps; received {fps}"));
+            }
+        }
+    }
+    if let (Some(family), Some(frames)) = (family, frames) {
+        if let Some(min_frames) = min_frames_for_family(family) {
+            if frames < min_frames {
+                return Err(format!(
+                    "frames ({frames}) must be >= {min_frames} for {family}"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn megapixel_limit_label_for(limit: u64) -> String {
@@ -443,6 +498,7 @@ pub fn max_pixels_for_family_composed(
     match (family, composition) {
         (Some("ltx2"), Ltx2SpatialComposition::TiledTwoStage) => LTX2_COMPOSED_MAX_PIXELS,
         (Some("ltx2"), Ltx2SpatialComposition::SinglePass) => LTX2_MAX_PIXELS,
+        (Some(family), _) if crate::minimax_h3::is_family(family) => crate::minimax_h3::MAX_PIXELS,
         _ => MAX_PIXELS,
     }
 }
@@ -471,11 +527,29 @@ pub fn max_axis_pixels_for_family_composed(
 /// LTX video VAEs compress spatial dimensions by 32. Every other current
 /// family uses the shared 16px generation grid.
 pub fn dimension_alignment_for_family(family: Option<&str>) -> u32 {
-    if matches!(family, Some("ltx-video" | "ltx2")) {
+    if matches!(family, Some("ltx-video" | "ltx2"))
+        || family.is_some_and(crate::minimax_h3::is_family)
+    {
         32
     } else {
         16
     }
+}
+
+/// Model-aware counterpart to [`dimension_alignment_for_family`].
+///
+/// Most families have one grid, but Wan's is per checkpoint:
+/// `wan22-ti2v-5b`'s 2.2 VAE compresses 16x spatially and its DiT patches the
+/// latent 2x2, putting it on a 32 px grid while the 2.1-VAE checkpoints keep
+/// the family's 16 (see [`wan_dimension_alignment`]). `family_hint` mirrors
+/// [`validate_generate_request_with_family`]: pass the catalog-resolved family
+/// for `cv:` / `hf:` ids; manifest models resolve without it.
+pub fn dimension_alignment_for_model(model: &str, family_hint: Option<&str>) -> u32 {
+    let family = resolved_family(model, family_hint);
+    if family == Some("wan") {
+        return wan_dimension_alignment(model);
+    }
+    dimension_alignment_for_family(family)
 }
 
 /// Validate explicit generation dimensions without rewriting them.
@@ -509,11 +583,49 @@ pub fn validate_generation_dimensions_composed(
     family: Option<&str>,
     composition: Ltx2SpatialComposition,
 ) -> Result<(), String> {
+    validate_generation_dimensions_with_alignment(
+        width,
+        height,
+        family,
+        composition,
+        dimension_alignment_for_family(family),
+    )
+}
+
+/// Model-aware sibling of [`validate_generation_dimensions_composed`].
+///
+/// Same contract, but the pixel grid comes from
+/// [`dimension_alignment_for_model`], so a per-checkpoint grid — currently
+/// `wan22-ti2v-5b`'s 32 — is enforced at admission instead of after the model
+/// has loaded. Callers that cannot name a model keep the family-only
+/// validator, whose answer is deliberately unchanged.
+pub fn validate_generation_dimensions_for_model(
+    model: &str,
+    width: u32,
+    height: u32,
+    family: Option<&str>,
+    composition: Ltx2SpatialComposition,
+) -> Result<(), String> {
+    validate_generation_dimensions_with_alignment(
+        width,
+        height,
+        family,
+        composition,
+        dimension_alignment_for_model(model, family),
+    )
+}
+
+fn validate_generation_dimensions_with_alignment(
+    width: u32,
+    height: u32,
+    family: Option<&str>,
+    composition: Ltx2SpatialComposition,
+    alignment: u32,
+) -> Result<(), String> {
     if width == 0 || height == 0 {
         return Err("width and height must be > 0".to_string());
     }
 
-    let alignment = dimension_alignment_for_family(family);
     if !width.is_multiple_of(alignment) || !height.is_multiple_of(alignment) {
         let family_label = family
             .filter(|value| !value.is_empty())
@@ -820,10 +932,16 @@ pub fn clamp_to_megapixel_limit(w: u32, h: u32) -> (u32, u32) {
 /// shrink a canvas the validator would have accepted, and could land off the
 /// /32 grid it requires — a silent downgrade followed by a rejection.
 pub fn clamp_to_family_pixel_limit(w: u32, h: u32, family: Option<&str>) -> (u32, u32) {
-    let limit = max_pixels_for_family(family);
-    let align = dimension_alignment_for_family(family);
-    let axis_limit = max_axis_pixels_for_family(family);
+    clamp_dims_to(
+        w,
+        h,
+        max_pixels_for_family(family),
+        dimension_alignment_for_family(family),
+        max_axis_pixels_for_family(family),
+    )
+}
 
+fn clamp_dims_to(w: u32, h: u32, limit: u64, align: u32, axis_limit: Option<u32>) -> (u32, u32) {
     let pixels = w as u64 * h as u64;
     let within_axis = axis_limit.is_none_or(|axis| w.max(h) <= axis);
     if pixels <= limit && within_axis {
@@ -862,7 +980,28 @@ pub fn clamp_to_family_pixel_limit(w: u32, h: u32, family: Option<&str>) -> (u32
 ///   scale while keeping the other axis within bounds.
 ///
 /// Output is rounded to 16px alignment and clamped to the megapixel limit.
+///
+/// This is the family-only compatibility path: 16 is the shared generation
+/// grid, but not every checkpoint's. Callers that know the model (or its
+/// advertised `dimension_alignment`) should use
+/// [`fit_to_model_dimensions_aligned`] with
+/// [`dimension_alignment_for_model`]'s answer so a 32-grid checkpoint like
+/// `wan22-ti2v-5b` receives a canvas its VAE can encode.
 pub fn fit_to_model_dimensions(src_w: u32, src_h: u32, model_w: u32, model_h: u32) -> (u32, u32) {
+    fit_to_model_dimensions_aligned(src_w, src_h, model_w, model_h, 16)
+}
+
+/// Alignment-aware counterpart to [`fit_to_model_dimensions`]: identical
+/// aspect-preserving fit, but both axes are floored to the caller-supplied
+/// grid — the resolved model's alignment, not the family-wide 16.
+pub fn fit_to_model_dimensions_aligned(
+    src_w: u32,
+    src_h: u32,
+    model_w: u32,
+    model_h: u32,
+    align: u32,
+) -> (u32, u32) {
+    let align = align.max(1);
     let src_ratio = src_w as f64 / src_h as f64;
     let model_ratio = model_w as f64 / model_h as f64;
 
@@ -874,9 +1013,9 @@ pub fn fit_to_model_dimensions(src_w: u32, src_h: u32, model_w: u32, model_h: u3
         (model_h as f64 * src_ratio, model_h as f64)
     };
 
-    let w = ((w as u32) / 16 * 16).max(16);
-    let h = ((h as u32) / 16 * 16).max(16);
-    clamp_to_megapixel_limit(w, h)
+    let w = ((w as u32) / align * align).max(align);
+    let h = ((h as u32) / align * align).max(align);
+    clamp_dims_to(w, h, MAX_PIXELS, align, None)
 }
 
 /// Resize dimensions toward a target pixel area while preserving aspect ratio.
@@ -1202,7 +1341,7 @@ fn require_ltx2_family(family: Option<&str>, feature_name: &str) -> Result<(), S
 }
 
 /// LoRA support is available for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL,
-/// Qwen-Image (and qwen-image-edit), and Z-Image — `mold-inference`'s
+/// Qwen-Image (and qwen-image-edit), Wan, and Z-Image — `mold-inference`'s
 /// per-family `lora.rs` modules are the engine paths that know how to merge
 /// low-rank adapters into the base weights. Surfacing the gate at validation
 /// produces a clear 400 instead of an opaque inference-layer panic when a
@@ -1211,10 +1350,10 @@ fn require_lora_capable_family(family: Option<&str>) -> Result<(), String> {
     match family {
         Some(family) if family_supports_lora(family) => Ok(()),
         Some(other) => Err(format!(
-            "LoRA is currently supported for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, and Z-Image models; got family {other:?}"
+            "LoRA is currently supported for FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, Wan, and Z-Image models; got family {other:?}"
         )),
         None => Err(
-            "LoRA requires a known model family — pick a FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, or Z-Image model first"
+            "LoRA requires a known model family — pick a FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, Wan, or Z-Image model first"
                 .to_string(),
         ),
     }
@@ -1260,6 +1399,36 @@ pub fn validate_generate_request(req: &GenerateRequest) -> Result<(), String> {
     validate_generate_request_with_family(req, None)
 }
 
+/// Enforce model access for every model/artifact identity carried directly by
+/// a generation request.
+///
+/// This is deliberately separate from shape/feature validation: callers that
+/// own an artifact root must run it before downloads, queue registration, or
+/// other admission mutations. The base model's configured/default artifacts
+/// remain the caller's responsibility because they do not travel in the
+/// request itself.
+pub fn require_generate_request_model_activation(
+    req: &GenerateRequest,
+    artifact_root: Option<&std::path::Path>,
+    family_hint: Option<&str>,
+) -> Result<(), crate::ModelActivationError> {
+    crate::require_model_activation(&req.model, family_hint)?;
+    for identity in [req.control_model.as_deref(), req.upscale_model.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        crate::require_model_activation(identity, None)?;
+    }
+    for lora in req.lora.iter().chain(req.loras.iter().flatten()) {
+        crate::require_model_artifact_activation(
+            std::path::Path::new(&lora.path),
+            artifact_root,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
 /// Variant of [`validate_generate_request`] that accepts an explicit family
 /// hint. The hint takes precedence over the manifest lookup, letting the HTTP
 /// server feed in the catalog-resolved family for `cv:` / `hf:` model IDs.
@@ -1267,7 +1436,25 @@ pub fn validate_generate_request_with_family(
     req: &GenerateRequest,
     family_hint: Option<&str>,
 ) -> Result<(), String> {
+    crate::require_model_activation(&req.model, family_hint).map_err(|error| error.to_string())?;
+    validate_generate_request_after_activation(req, family_hint)
+}
+
+/// Shape/feature validation after the caller has passed the model-activation
+/// authority. Kept private so tests can prove the future authorized H3 path
+/// without exposing a compliance-gate bypass to production callers.
+fn validate_generate_request_after_activation(
+    req: &GenerateRequest,
+    family_hint: Option<&str>,
+) -> Result<(), String> {
     let family = resolved_family(&req.model, family_hint);
+
+    if req.references.is_some() && !family.is_some_and(crate::minimax_h3::is_family) {
+        return Err(
+            "references is only supported by MiniMax H3 Ref2VA; other families retain their existing source/edit fields"
+                .to_string(),
+        );
+    }
 
     if req.prompt.trim().is_empty() && prompt_required_for(req, family_hint) {
         return Err("prompt must not be empty".to_string());
@@ -1281,7 +1468,14 @@ pub fn validate_generate_request_with_family(
     } else {
         Ltx2SpatialComposition::SinglePass
     };
-    validate_generation_dimensions_composed(req.width, req.height, family, composition)?;
+    validate_generation_dimensions_for_model(
+        &req.model,
+        req.width,
+        req.height,
+        family,
+        composition,
+    )?;
+    validate_family_video_timing_constraints(req.frames, req.fps, family)?;
     if composition == Ltx2SpatialComposition::TiledTwoStage {
         // The composed ceiling above is the x2 rung's. A request that names a
         // different rung reaches a different stage-1 shape, and only stage 1's
@@ -1320,6 +1514,89 @@ pub fn validate_generate_request_with_family(
                 neg.len()
             ));
         }
+    }
+    if family.is_some_and(crate::minimax_h3::is_family) {
+        let task = crate::minimax_h3::task_for_model(&req.model).ok_or_else(|| {
+            "MiniMax H3 requests must resolve an explicit FL2VA or Ref2VA task partition"
+                .to_string()
+        })?;
+        if req.mask_image.is_some() {
+            return Err("MiniMax H3 does not support mask_image".to_string());
+        }
+        if req.control_image.is_some() || req.control_model.is_some() {
+            return Err("MiniMax H3 does not support ControlNet inputs".to_string());
+        }
+        if req.cfg_plus.is_some() {
+            return Err("MiniMax H3 does not support cfg_plus".to_string());
+        }
+        if req.scheduler.is_some() {
+            return Err(
+                "MiniMax H3 uses its dedicated synchronized dual-shift schedule; scheduler overrides are unsupported"
+                    .to_string(),
+            );
+        }
+        if req.lora.is_some() || req.loras.is_some() {
+            return Err("MiniMax H3 does not support LoRA".to_string());
+        }
+        if req.upscale_model.is_some() {
+            return Err("MiniMax H3 does not support post-generation image upscaling".to_string());
+        }
+        if req.pipeline.is_some()
+            || req.ic_lora_control.is_some()
+            || req.retake_range.is_some()
+            || req.spatial_upscale.is_some()
+            || req.temporal_upscale.is_some()
+            || req.guidance_overrides.is_some()
+            || req.hdr_exr_dir.is_some()
+            || req.hdr_exr_full_float
+        {
+            return Err("MiniMax H3 does not accept LTX-2 pipeline controls".to_string());
+        }
+        if req
+            .source_image
+            .as_deref()
+            .is_some_and(|image| !is_valid_image_format(image))
+        {
+            return Err("source_image must be a PNG or JPEG image".to_string());
+        }
+        if req.source_image.is_some()
+            && (!req.strength.is_finite() || !(0.0..=1.0).contains(&req.strength))
+        {
+            return Err(format!(
+                "strength ({}) must be a finite value in range [0.0, 1.0] when source_image is provided",
+                req.strength
+            ));
+        }
+        if req
+            .edit_images
+            .as_ref()
+            .is_some_and(|images| images.iter().any(|image| !is_valid_image_format(image)))
+        {
+            return Err("edit_images must contain only PNG or JPEG images".to_string());
+        }
+        if req.edit_images.as_ref().is_some_and(Vec::is_empty) {
+            return Err("edit_images must not be empty when provided".to_string());
+        }
+        if req.keyframes.as_ref().is_some_and(|keyframes| {
+            keyframes
+                .iter()
+                .any(|keyframe| !is_valid_image_format(&keyframe.image))
+        }) {
+            return Err("keyframes must contain only PNG or JPEG images".to_string());
+        }
+        if req.keyframes.as_ref().is_some_and(Vec::is_empty) {
+            return Err("keyframes must not be empty when provided".to_string());
+        }
+        if req.extend_overlap_frames.is_some() {
+            return Err(
+                "extend_overlap_frames requires extend_video or extend_video_path, which MiniMax H3 does not support"
+                    .to_string(),
+            );
+        }
+        crate::minimax_h3::validate_request_contract(req, task)
+            .map(|_| ())
+            .map_err(|error| error.to_string())?;
+        return Ok(());
     }
     let flux2_dev = is_flux2_dev_model(&req.model);
     if family == Some("qwen-image-edit") {
@@ -1454,12 +1731,13 @@ pub fn validate_generate_request_with_family(
             return Err("frames must be >= 1".to_string());
         }
         if let Some(step) = family.and_then(frame_step_for_family) {
-            if frames > 1 && (frames - 1) % step != 0 {
+            let offset = family.and_then(frame_offset_for_family).unwrap_or(1);
+            if frames < offset || !(frames - offset).is_multiple_of(step) {
                 return Err(format!(
-                    "frames ({frames}) must be {step}n+1 for this model family (e.g. {}, {}, {}, …)",
-                    step + 1,
-                    2 * step + 1,
-                    3 * step + 1,
+                    "frames ({frames}) must be {step}n+{offset} for this model family (e.g. {}, {}, {}, …)",
+                    step + offset,
+                    2 * step + offset,
+                    3 * step + offset,
                 ));
             }
         }
@@ -1497,8 +1775,15 @@ pub fn validate_generate_request_with_family(
                      Raise --fps, lower --frames, or render the shot as a multi-clip sequence"
                 ));
             }
-        } else if frames > MAX_FRAMES_GLOBAL {
-            return Err(format!("frames ({frames}) must be <= {MAX_FRAMES_GLOBAL}"));
+        } else {
+            let max_frames = family
+                .and_then(|family| {
+                    max_frames_for_family_at_fps(family, req.fps.unwrap_or(LTX2_DEFAULT_FPS).max(1))
+                })
+                .unwrap_or(MAX_FRAMES_GLOBAL);
+            if frames > max_frames {
+                return Err(format!("frames ({frames}) must be <= {max_frames}"));
+            }
         }
     }
     if let Some(keyframes) = &req.keyframes {
@@ -1984,6 +2269,25 @@ pub fn wan_recommended_dimensions(model: &str) -> &'static [(u32, u32)] {
     recommended_dimensions("wan")
 }
 
+/// Per-checkpoint dimension grid for the Wan family.
+///
+/// `wan22-ti2v-5b`'s 2.2 VAE compresses 16x spatially and its DiT patches the
+/// latent 2x2, so its pixel grid is 32 — the engine enforces exactly this
+/// product after loading (`wan/pipeline.rs`), and admission must agree so an
+/// off-grid canvas never queues a 10 GB load it cannot survive. The 2.1-VAE
+/// checkpoints (1.3B, A14B: 8x stride x 2x2 patch) keep the family's 16.
+/// Mirrors [`wan_recommended_dimensions`]: variant tags and legacy dash names
+/// resolve through the manifest first, and unknown `cv:`/`hf:` installs keep
+/// the family fallback — deriving the grid from a sidecar-described VAE
+/// component is deliberately follow-up work.
+pub fn wan_dimension_alignment(model: &str) -> u32 {
+    let canonical = crate::manifest::resolve_model_name(model);
+    if canonical.starts_with("wan22-ti2v-5b") {
+        return 32;
+    }
+    dimension_alignment_for_family(Some("wan"))
+}
+
 /// Return the list of recommended (width, height) pairs for a model family.
 ///
 /// Returns an empty slice for unknown families, utility models (e.g. `qwen3-expand`),
@@ -2002,6 +2306,14 @@ pub fn recommended_dimensions(family: &str) -> &'static [(u32, u32)] {
         "ltx-video" => LTX_VIDEO_DIMS,
         "ltx2" => LTX2_DIMS,
         "wan" => WAN_DIMS,
+        family if crate::minimax_h3::is_family(family) => &[
+            (1536, 672),
+            (1344, 768),
+            (1024, 768),
+            (768, 768),
+            (768, 1024),
+            (768, 1344),
+        ],
         _ => &[],
     }
 }
@@ -2750,6 +3062,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -2783,6 +3096,197 @@ mod tests {
             temporal_upscale: None,
             placement: None,
         }
+    }
+
+    #[test]
+    fn generation_rejects_compliance_gated_model_identity_before_other_validation() {
+        let mut req = valid_req();
+        req.model = "hf:MiniMaxAI/MiniMax-H3".to_string();
+        req.prompt.clear();
+
+        let error = validate_generate_request_with_family(&req, None).unwrap_err();
+        assert!(error.contains(crate::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        assert!(!error.contains(&req.model));
+    }
+
+    #[test]
+    fn generation_rejects_opaque_catalog_id_with_compliance_gated_family() {
+        let mut req = valid_req();
+        req.model = "cv:42".to_string();
+
+        let error = validate_generate_request_with_family(&req, Some("minimax-h3")).unwrap_err();
+        assert!(error.contains(crate::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    fn valid_h3_request(model: &str) -> GenerateRequest {
+        let mut req = valid_req();
+        req.model = model.to_string();
+        req.width = crate::minimax_h3::DEFAULT_WIDTH;
+        req.height = crate::minimax_h3::DEFAULT_HEIGHT;
+        req.steps = crate::minimax_h3::DEFAULT_STEPS;
+        req.frames = Some(crate::minimax_h3::MIN_FRAMES);
+        req.fps = Some(crate::minimax_h3::FIXED_FPS);
+        req.output_format = Some(OutputFormat::Mp4);
+        req.enable_audio = Some(true);
+        // H3 has no denoise-strength control. The wire field is non-optional
+        // for legacy families, so activated H3 callers must send its neutral
+        // value rather than inheriting the generic img2img default.
+        req.strength = 1.0;
+        req
+    }
+
+    #[test]
+    fn h3_post_activation_fl2va_accepts_first_and_last_boundary_frames() {
+        let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+        req.source_image = Some(png_bytes());
+        req.keyframes = Some(vec![crate::KeyframeCondition {
+            frame: crate::minimax_h3::MIN_FRAMES - 1,
+            image: jpeg_bytes(),
+        }]);
+
+        assert!(
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY),)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn h3_post_activation_ref2va_accepts_image_references() {
+        let mut req = valid_h3_request(crate::minimax_h3::REF2VA_COMFY);
+        req.references = Some(vec![crate::GenerationReference::Image {
+            media: crate::GenerationReferenceAuthority::Inline { data: png_bytes() },
+            provenance: crate::GenerationReferenceProvenance {
+                name: Some("reference.png".to_string()),
+                sha256: None,
+            },
+            mime_type: "image/png".to_string(),
+            width: 1920,
+            height: 1080,
+        }]);
+
+        assert!(
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY),)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn h3_post_activation_rejects_non_boundary_keyframes() {
+        let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+        req.keyframes = Some(vec![crate::KeyframeCondition {
+            frame: 17,
+            image: png_bytes(),
+        }]);
+
+        let error =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(
+            error.contains("only frame 0 or final frame"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn h3_post_activation_rejects_generic_scheduler_and_lora_overrides() {
+        let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+        req.scheduler = Some(crate::Scheduler::UniPc);
+        let error =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(error.contains("scheduler overrides"), "got: {error}");
+
+        req.scheduler = None;
+        req.lora = Some(crate::LoraWeight {
+            path: "/tmp/adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        let error =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(error.contains("does not support LoRA"), "got: {error}");
+
+        req.lora = None;
+        req.loras = Some(Vec::new());
+        let error =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(error.contains("does not support LoRA"), "got: {error}");
+    }
+
+    #[test]
+    fn h3_post_activation_preserves_source_and_extend_invariants() {
+        for strength in [-1.0, 1.01, f64::NAN] {
+            let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+            req.source_image = Some(png_bytes());
+            req.strength = strength;
+            let error =
+                validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                    .unwrap_err();
+            assert!(error.contains("finite value in range"), "got: {error}");
+        }
+
+        let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+        req.extend_overlap_frames = Some(9);
+        let error =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(
+            error.contains("extend_overlap_frames requires extend_video"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn h3_post_activation_rejects_empty_conditioning_collections() {
+        let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+        req.edit_images = Some(Vec::new());
+        let error =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(
+            error.contains("edit_images must not be empty"),
+            "got: {error}"
+        );
+
+        req.edit_images = None;
+        req.keyframes = Some(Vec::new());
+        let error =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(
+            error.contains("keyframes must not be empty"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn generation_model_preflight_gates_nested_identities_and_artifacts() {
+        let root = std::path::Path::new("/Volumes/ExternalStorage/mold-uat/minimax-h3/models");
+
+        let mut req = valid_req();
+        req.control_model = Some("MiniMax-H3-FL2VA".to_string());
+        assert!(require_generate_request_model_activation(&req, Some(root), Some("flux")).is_err());
+
+        req.control_model = None;
+        req.upscale_model = Some("hf:MiniMaxAI/MiniMax-H3".to_string());
+        assert!(require_generate_request_model_activation(&req, Some(root), Some("flux")).is_err());
+
+        req.upscale_model = None;
+        req.lora = Some(crate::LoraWeight {
+            path: root
+                .join("custom/MiniMax-H3/adapter.safetensors")
+                .to_string_lossy()
+                .into_owned(),
+            scale: 1.0,
+        });
+        assert!(require_generate_request_model_activation(&req, Some(root), Some("flux")).is_err());
+
+        req.lora.as_mut().unwrap().path = root
+            .join("flux/ordinary-adapter.safetensors")
+            .to_string_lossy()
+            .into_owned();
+        assert!(require_generate_request_model_activation(&req, Some(root), Some("flux")).is_ok());
     }
 
     /// Minimal valid PNG header bytes for testing.
@@ -3793,6 +4297,8 @@ mod tests {
         assert_eq!(frame_step_for_family("ltx2"), Some(8));
         assert_eq!(frame_step_for_family("ltx-video"), Some(8));
         assert_eq!(frame_step_for_family("flux"), None);
+        assert_eq!(min_frames_for_family("flux"), None);
+        assert_eq!(fixed_fps_for_family("flux"), None);
 
         // One grid step past the advertised ltx-video cap must be rejected,
         // and the rejection must quote the same cap the wire advertises.
@@ -3814,6 +4320,45 @@ mod tests {
         req.frames = Some(249); // first 8n+1 value past the 244-frame cap
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains(&cap.to_string()), "got: {err}");
+    }
+
+    #[test]
+    fn h3_post_activation_timing_authority_rejects_short_or_retimed_requests() {
+        assert_eq!(
+            min_frames_for_family(crate::minimax_h3::FAMILY),
+            Some(crate::minimax_h3::MIN_FRAMES)
+        );
+        assert_eq!(
+            fixed_fps_for_family(crate::minimax_h3::FAMILY),
+            Some(crate::minimax_h3::FIXED_FPS)
+        );
+        assert_eq!(
+            max_frames_for_family(crate::minimax_h3::FAMILY),
+            Some(crate::minimax_h3::MAX_FRAMES)
+        );
+
+        let short = validate_family_video_timing_constraints(
+            Some(crate::minimax_h3::FRAME_OFFSET),
+            Some(crate::minimax_h3::FIXED_FPS),
+            Some(crate::minimax_h3::FAMILY),
+        )
+        .unwrap_err();
+        assert!(short.contains("124"), "got: {short}");
+
+        let retimed = validate_family_video_timing_constraints(
+            Some(crate::minimax_h3::MIN_FRAMES),
+            Some(23),
+            Some(crate::minimax_h3::FAMILY),
+        )
+        .unwrap_err();
+        assert!(retimed.contains("24 fps"), "got: {retimed}");
+
+        assert!(validate_family_video_timing_constraints(
+            Some(crate::minimax_h3::MIN_FRAMES),
+            Some(crate::minimax_h3::FIXED_FPS),
+            Some(crate::minimax_h3::FAMILY),
+        )
+        .is_ok());
     }
 
     /// Wan advertises a flat frame guard on the `4k+1` grid; the advertised
@@ -3909,8 +4454,118 @@ mod tests {
                     validate_generation_dimensions(*w, *h, Some("wan")).is_ok(),
                     "{model}: advertised {w}x{h} must pass the validator"
                 );
+                assert!(
+                    validate_generation_dimensions_for_model(
+                        model,
+                        *w,
+                        *h,
+                        Some("wan"),
+                        Ltx2SpatialComposition::SinglePass,
+                    )
+                    .is_ok(),
+                    "{model}: advertised {w}x{h} must pass its own model-aware validator"
+                );
             }
         }
+    }
+
+    /// The grid is per checkpoint too: `wan22-ti2v-5b`'s 2.2 VAE compresses
+    /// 16x spatially and its DiT patches the latent 2x2, so its pixel grid is
+    /// 32 while the 2.1-VAE checkpoints keep the family's 16.
+    #[test]
+    fn wan_dimension_alignment_is_per_checkpoint() {
+        assert_eq!(wan_dimension_alignment("wan22-ti2v-5b"), 32);
+        assert_eq!(wan_dimension_alignment("wan22-ti2v-5b:fp16"), 32);
+        // Variant tags and the legacy dash form must match like
+        // `wan_recommended_dimensions` — a `:q8` install of the same
+        // checkpoint has the same VAE.
+        assert_eq!(wan_dimension_alignment("wan22-ti2v-5b:q8"), 32);
+        assert_eq!(wan_dimension_alignment("wan22-ti2v-5b-fp16"), 32);
+        assert_eq!(wan_dimension_alignment("wan21-t2v-1.3b"), 16);
+        assert_eq!(wan_dimension_alignment("wan22-t2v-a14b:q5"), 16);
+        assert_eq!(wan_dimension_alignment("wan22-i2v-a14b:q8"), 16);
+        // Unknown catalog installs keep the family fallback; deriving the
+        // grid from a sidecar-described VAE is follow-up work.
+        assert_eq!(wan_dimension_alignment("cv:someone/some-wan-finetune"), 16);
+    }
+
+    #[test]
+    fn dimension_alignment_for_model_dispatches_wan_checkpoints() {
+        assert_eq!(
+            dimension_alignment_for_model("wan22-ti2v-5b", Some("wan")),
+            32
+        );
+        // Manifest models resolve their family without a hint.
+        assert_eq!(
+            dimension_alignment_for_model("wan22-ti2v-5b:fp16", None),
+            32
+        );
+        assert_eq!(
+            dimension_alignment_for_model("wan21-t2v-1.3b", Some("wan")),
+            16
+        );
+        assert_eq!(
+            dimension_alignment_for_model("cv:someone/some-wan-finetune", Some("wan")),
+            16
+        );
+        // Every other family keeps its family-wide answer.
+        assert_eq!(
+            dimension_alignment_for_model("ltx-2-19b-distilled:fp8", Some("ltx2")),
+            32
+        );
+        assert_eq!(
+            dimension_alignment_for_model("flux-dev:q4", Some("flux")),
+            16
+        );
+    }
+
+    /// 1280x720 is on the family's 16 px grid but off the 5B's 32 px grid.
+    /// Admission must reject it before a 10 GB model load, with the engine's
+    /// own number; the same canvas stays valid for the 2.1-VAE checkpoints.
+    #[test]
+    fn wan22_ti2v_5b_off_grid_dimensions_rejected_at_admission() {
+        let mut req = valid_req();
+        req.model = "wan22-ti2v-5b".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.width = 1280;
+        req.height = 720;
+        let err = validate_generate_request_with_family(&req, Some("wan")).unwrap_err();
+        assert!(err.contains("multiples of 32"), "got: {err}");
+
+        req.width = 704;
+        req.height = 1280;
+        validate_generate_request_with_family(&req, Some("wan"))
+            .expect("the 5B's native portrait bucket is on its 32px grid");
+
+        req.model = "wan21-t2v-1.3b".to_string();
+        req.width = 1280;
+        req.height = 720;
+        validate_generate_request_with_family(&req, Some("wan"))
+            .expect("the 2.1-VAE checkpoints keep the family's 16px grid");
+    }
+
+    #[test]
+    fn validate_generation_dimensions_for_model_uses_the_checkpoint_grid() {
+        let err = validate_generation_dimensions_for_model(
+            "wan22-ti2v-5b",
+            1280,
+            720,
+            Some("wan"),
+            Ltx2SpatialComposition::SinglePass,
+        )
+        .unwrap_err();
+        assert!(err.contains("multiples of 32"), "got: {err}");
+        validate_generation_dimensions_for_model(
+            "wan22-ti2v-5b",
+            1280,
+            704,
+            Some("wan"),
+            Ltx2SpatialComposition::SinglePass,
+        )
+        .expect("1280x704 sits on the 32px grid");
+        // The family-only validator deliberately keeps the compatible 16px
+        // answer for callers that cannot name a model.
+        assert!(validate_generation_dimensions(1280, 720, Some("wan")).is_ok());
     }
 
     #[test]
@@ -4554,6 +5209,22 @@ mod tests {
     }
 
     #[test]
+    fn fit_to_model_dimensions_aligned_rounds_to_the_models_grid() {
+        // 1617x1000 into the 5B's 1280x704 canvas is height-limited:
+        // h=704, w=704*1.617=1138.4 — which floors differently per grid.
+        assert_eq!(
+            fit_to_model_dimensions_aligned(1617, 1000, 1280, 704, 32),
+            (1120, 704)
+        );
+        assert_eq!(
+            fit_to_model_dimensions_aligned(1617, 1000, 1280, 704, 16),
+            (1136, 704)
+        );
+        // The family-only helper stays the /16 compatibility path.
+        assert_eq!(fit_to_model_dimensions(1617, 1000, 1280, 704), (1136, 704));
+    }
+
+    #[test]
     fn fit_to_target_area_preserves_ratio_and_alignment() {
         let (w, h) = fit_to_target_area(1600, 900, 1024 * 1024, 16);
         assert_eq!((w, h), (1360, 768));
@@ -4690,6 +5361,44 @@ mod tests {
         assert!(
             validate_generate_request(&req).is_ok(),
             "SDXL + plural LoRAs (multi-LoRA stack) must pass validation"
+        );
+    }
+
+    /// Wan gained LoRA support with the A14B Lightning distills (#747) and
+    /// community `.diff`/`.diff_b` deltas (#781) — `wan/lora.rs` merges pairs
+    /// and deltas on both the safetensors and GGUF weight paths — but this
+    /// gate was never updated, so the server 400'd every explicit wan LoRA
+    /// request while the engine loaded the same files happily.
+    #[test]
+    fn lora_on_wan_accepted() {
+        let mut req = valid_req();
+        req.model = "wan21-t2v-1.3b".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.fps = Some(16);
+        req.frames = Some(33);
+        req.lora = Some(crate::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+        });
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Wan + LoRA must pass validation now that wan/lora.rs is live"
+        );
+
+        req.lora = None;
+        req.loras = Some(vec![
+            crate::LoraWeight {
+                path: "a.safetensors".to_string(),
+                scale: 0.8,
+            },
+            crate::LoraWeight {
+                path: "b.safetensors".to_string(),
+                scale: 0.4,
+            },
+        ]);
+        assert!(
+            validate_generate_request(&req).is_ok(),
+            "Wan + plural LoRAs (multi-LoRA stack) must pass validation"
         );
     }
 
@@ -5166,6 +5875,7 @@ mod tests {
             ("qwen-image-edit", 1024, 1024),
             ("wuerstchen", 1024, 1024),
             ("ltx-video", 768, 512),
+            ("minimax-h3", 1344, 768),
         ];
         for (family, w, h) in families {
             let dims = recommended_dimensions(family);
@@ -5174,6 +5884,21 @@ mod tests {
                 "{family} native {w}x{h} missing from recommended list"
             );
         }
+    }
+
+    #[test]
+    fn h3_recommendations_are_the_official_product_ratios_on_the_oracle_canvas() {
+        assert_eq!(
+            recommended_dimensions(crate::minimax_h3::FAMILY),
+            &[
+                (1536, 672),
+                (1344, 768),
+                (1024, 768),
+                (768, 768),
+                (768, 1024),
+                (768, 1344),
+            ]
+        );
     }
 
     #[test]

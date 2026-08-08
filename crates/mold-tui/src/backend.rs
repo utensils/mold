@@ -98,7 +98,7 @@ async fn run_local_prompt_transform(
         )?;
     }
 
-    let expander: Box<dyn PromptExpander> = if let Some(api) = settings.create_api_expander() {
+    let expander: Box<dyn PromptExpander> = if let Some(api) = settings.create_api_expander()? {
         Box::new(api)
     } else {
         #[cfg(feature = "expand")]
@@ -708,6 +708,7 @@ fn build_request(
         scheduler: params.scheduler,
         cfg_plus: None,
         edit_images,
+        references: None,
         source_image,
         source_image_name,
         strength,

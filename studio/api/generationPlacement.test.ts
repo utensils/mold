@@ -5,6 +5,7 @@ import {
   previewRequestForSiblingFanout,
   redactChainForPlacement,
   redactGenerationForPlacement,
+  requiresAuthoritativePlacement,
   type GenerationPlacementPreview,
 } from "./generationPlacement";
 
@@ -31,6 +32,16 @@ function planned(
 }
 
 describe("generation placement preview", () => {
+  test("requires authority whenever the references field is present", () => {
+    expect(requiresAuthoritativePlacement({ model: "ordinary" })).toBe(false);
+    expect(
+      requiresAuthoritativePlacement({ model: "h3", references: null }),
+    ).toBe(true);
+    expect(
+      requiresAuthoritativePlacement({ model: "h3", references: [] }),
+    ).toBe(true);
+  });
+
   test("previews sibling fanout as copies of a one-image request without mutating input", () => {
     const request = { model: "preview", batch_size: 4, prompt: "reviewed" };
     expect(previewRequestForSiblingFanout(request, 4)).toEqual({
@@ -56,6 +67,35 @@ describe("generation placement preview", () => {
       source_video_path: "/private/source.mp4",
       source_video: "video-bytes",
       edit_images: ["one", "two"],
+      references: [
+        {
+          kind: "image",
+          media: { authority: "inline", data: "reference-bytes" },
+          provenance: { name: "anchor.png", sha256: "a".repeat(64) },
+          mime_type: "image/png",
+          width: 2048,
+          height: 1024,
+        },
+        {
+          kind: "video",
+          media: { authority: "upload", handle: "secret-handle" },
+          provenance: { name: "motion.mp4", sha256: "b".repeat(64) },
+          mime_type: "video/mp4",
+          width: 1920,
+          height: 1080,
+          duration_ms: 4000,
+          fps: 24,
+        },
+        {
+          kind: "audio",
+          media: { authority: "server_path", path: "/private/voice.wav" },
+          provenance: { name: "voice.wav", sha256: "c".repeat(64) },
+          mime_type: "audio/wav",
+          duration_ms: 3000,
+          sample_rate: 32000,
+          channels: 2,
+        },
+      ],
       keyframes: [{ frame: 0, image: "keyframe-bytes", strength: 0.5 }],
       lora: { path: "/models/legacy.safetensors", scale: 0.7 },
       loras: [{ path: "/models/style.safetensors", scale: 1.1 }],
@@ -74,6 +114,35 @@ describe("generation placement preview", () => {
       source_video_path: "",
       source_video: "",
       edit_images: ["", ""],
+      references: [
+        {
+          kind: "image",
+          media: { authority: "descriptor" },
+          provenance: { name: "anchor.png", sha256: "a".repeat(64) },
+          mime_type: "image/png",
+          width: 2048,
+          height: 1024,
+        },
+        {
+          kind: "video",
+          media: { authority: "descriptor" },
+          provenance: { name: "motion.mp4", sha256: "b".repeat(64) },
+          mime_type: "video/mp4",
+          width: 1920,
+          height: 1080,
+          duration_ms: 4000,
+          fps: 24,
+        },
+        {
+          kind: "audio",
+          media: { authority: "descriptor" },
+          provenance: { name: "voice.wav", sha256: "c".repeat(64) },
+          mime_type: "audio/wav",
+          duration_ms: 3000,
+          sample_rate: 32000,
+          channels: 2,
+        },
+      ],
       keyframes: [{ frame: 0, image: "", strength: 0.5 }],
       lora: { path: "/models/legacy.safetensors", scale: 0.7 },
       loras: [{ path: "/models/style.safetensors", scale: 1.1 }],

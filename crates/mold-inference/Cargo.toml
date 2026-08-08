@@ -22,7 +22,7 @@ metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "m
 # Off by default — pulls in the candle-flash-attn build, which requires the
 # CUDA toolkit. Tensors that aren't CUDA + fp16/bf16 transparently fall back
 # to the math path inside `crate::attention`.
-flash-attn = ["dep:candle-flash-attn", "cuda"]
+flash-attn = ["dep:candle-flash-attn", "cuda", "mold-candle/flash-attn"]
 expand = []
 webp = ["webp-animation"]
 mp4 = ["dep:fdk-aac"]

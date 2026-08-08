@@ -724,7 +724,7 @@ impl Ltx2Engine {
                     fs::write(&mp4_path, &video_only)?;
                     if let Some(audio_track) = rendered.audio_track.as_ref() {
                         let muxed_path = work_dir.join("native-video-audio.mp4");
-                        media::attach_aac_track_from_f32_interleaved(
+                        crate::av_media::attach_aac_track_from_f32_interleaved(
                             &mp4_path,
                             &muxed_path,
                             &audio_track.interleaved_samples,
@@ -1962,6 +1962,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -2209,6 +2210,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -2272,6 +2274,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -2508,6 +2511,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,

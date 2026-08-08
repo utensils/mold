@@ -14,10 +14,20 @@ name = "mold_candle"
 default = []
 cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
+# Developer-only H3 FlashAttention v2 primitive. Mold release artifacts do not
+# enable this feature; the H3 authority remains a separate fail-closed gate.
+flash-attn = ["dep:candle-flash-attn", "cuda"]
 
 [dependencies]
 candle = { package = "candle-core", version = "0.11" }
 candle-nn = "0.11"
 candle-transformers = "0.11"
+# The H3 runtime fingerprint qualifies this exact crates.io payload, not
+# an arbitrary semver-compatible 0.11.x implementation.
+candle-flash-attn = { version = "=0.11.0", optional = true }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 tracing = "0.1"

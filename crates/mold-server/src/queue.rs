@@ -756,15 +756,19 @@ async fn upscale_generated_image_on_single_worker(
             .map_err(|e| format!("failed to pull upscaler model: {}", e.error))?;
     }
 
-    let weights_path = {
+    let (weights_path, artifact_root) = {
         let config = state.config.read().await;
-        config
-            .models
-            .get(&model_name)
-            .and_then(|c| c.transformer.as_ref())
-            .map(std::path::PathBuf::from)
-    }
-    .ok_or_else(|| format!("upscaler model '{model_name}' not configured after pull"))?;
+        (
+            config
+                .models
+                .get(&model_name)
+                .and_then(|c| c.transformer.as_ref())
+                .map(std::path::PathBuf::from),
+            config.resolved_models_dir(),
+        )
+    };
+    let weights_path = weights_path
+        .ok_or_else(|| format!("upscaler model '{model_name}' not configured after pull"))?;
 
     let upscale_req = mold_core::UpscaleRequest {
         model: model_name.clone(),
@@ -788,6 +792,7 @@ async fn upscale_generated_image_on_single_worker(
                 let new_engine = mold_inference::create_upscale_engine(
                     model_name.clone(),
                     weights_path,
+                    Some(&artifact_root),
                     mold_inference::LoadStrategy::Eager,
                     0,
                 )?;
@@ -1399,7 +1404,7 @@ pub(crate) fn resolve_max_deferrals() -> usize {
     }
 }
 
-async fn process_job(state: &AppState, job: GenerationJob) {
+async fn process_job(state: &AppState, mut job: GenerationJob) {
     // Check if client already disconnected before doing any work
     if job.result_tx.is_closed() {
         tracing::debug!("skipping queued job — client disconnected");
@@ -1419,6 +1424,48 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             id: job.id.clone(),
         }));
     }
+
+    // Reference binding verifies up to one GiB of staged media. Keep that I/O
+    // off Tokio's async worker and return the staging owner alongside the
+    // opened handles so it remains alive for the whole generation attempt.
+    let reference_binding_result =
+        if job.request.references.is_none() && job.resolved_references.is_none() {
+            Ok(Vec::new())
+        } else {
+            let request = job.request.clone();
+            let resolved = job.resolved_references.take();
+            match tokio::task::spawn_blocking(move || {
+                let result = crate::reference_uploads::inference_bindings_for_request(
+                    &request,
+                    resolved.as_ref(),
+                    None,
+                );
+                (resolved, result)
+            })
+            .await
+            {
+                Ok((resolved, result)) => {
+                    job.resolved_references = resolved;
+                    result
+                }
+                Err(_) => Err(anyhow::anyhow!(
+                    "reference binding worker did not complete safely"
+                )),
+            }
+        };
+    let reference_bindings = match reference_binding_result {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            let err_msg = format!("generation reference binding error: {error:#}");
+            if let Some(ref tx) = job.progress_tx {
+                let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                    message: err_msg.clone(),
+                }));
+            }
+            let _ = job.result_tx.send(Err(err_msg));
+            return;
+        }
+    };
 
     // 1. Ensure model is ready (with progress forwarding)
     let progress_callback = job.progress_tx.as_ref().map(|tx| {
@@ -1510,7 +1557,9 @@ async fn process_job(state: &AppState, job: GenerationJob) {
     // the cache in async context regardless of outcome.
     let join_result = tokio::task::spawn_blocking(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            cached_engine.engine.generate(&gen_req)
+            cached_engine
+                .engine
+                .generate_with_reference_bindings(&gen_req, &reference_bindings)
         }));
         if was_streaming {
             cached_engine.engine.clear_on_progress();
@@ -2125,8 +2174,12 @@ fn freeze_legacy_post_upscale_candidates(
                 ordinal: worker.gpu.ordinal,
             }),
     );
-    work.utility_plans =
-        crate::scheduler::upscale_utility_candidates(&base.model_name, &base.weights, placements);
+    work.utility_plans = crate::scheduler::upscale_utility_candidates(
+        &base.model_name,
+        &base.weights,
+        base.artifact_root.as_deref(),
+        placements,
+    );
     Ok(())
 }
 
@@ -2310,6 +2363,7 @@ async fn run_queue_dispatcher_with_tuning(
             id: job.id.clone(),
             model: model_name.clone(),
             request: job.request,
+            resolved_references: job.resolved_references,
             completion_payload: job.completion_payload,
             progress_tx: job.progress_tx,
             result_tx: job.result_tx,
@@ -2940,6 +2994,7 @@ mod tests {
             source_image: None,
             source_image_name: None,
             edit_images: None,
+            references: None,
             strength: 0.75,
             mask_image: None,
             control_image: None,
@@ -3541,6 +3596,7 @@ mod tests {
         let cpu_plan = mold_inference::upscaler::resolve_upscale_execution_plan(
             "real-esrgan-x4plus:fp16",
             &weights,
+            None,
             mold_inference::upscaler::ExactUpscalePlacement::Cpu,
         )
         .unwrap();
@@ -3564,6 +3620,7 @@ mod tests {
             id: "legacy-sibling-post-upscale".to_string(),
             model: request.model.clone(),
             request,
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -3609,6 +3666,7 @@ mod tests {
                 mold_inference::upscaler::resolve_upscale_execution_plan_from_artifact(
                     cpu_plan.model_name.clone(),
                     cpu_plan.weights.clone(),
+                    cpu_plan.artifact_root.clone(),
                     mold_inference::upscaler::ExactUpscalePlacement::Device {
                         backend: origin.gpu.backend,
                         ordinal: origin.gpu.ordinal,
@@ -4094,6 +4152,268 @@ mod tests {
             Some(25),
             "DB-enabled publications must retain archive authority for a later DB-disabled restart"
         );
+    }
+
+    #[test]
+    fn synthetic_h3_video_publishes_synchronized_sse_and_gallery_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut request = fake_request(mold_core::minimax_h3::FL2VA_COMFY);
+        request.width = 1344;
+        request.height = 768;
+        request.frames = Some(124);
+        request.fps = Some(24);
+        request.output_format = Some(OutputFormat::Mp4);
+        request.enable_audio = Some(true);
+
+        let video = mold_core::VideoData {
+            data: b"synthetic-h3-mp4-with-synchronized-audio".to_vec(),
+            format: OutputFormat::Mp4,
+            width: 1344,
+            height: 768,
+            frames: 124,
+            fps: 24,
+            pipeline: None,
+            thumbnail: b"synthetic-h3-thumbnail".to_vec(),
+            gif_preview: Vec::new(),
+            has_audio: true,
+            duration_ms: Some(5_167),
+            audio_sample_rate: Some(mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ),
+            audio_channels: Some(mold_core::minimax_h3::AUDIO_CHANNELS),
+        };
+        let response = mold_core::GenerateResponse {
+            images: Vec::new(),
+            video: Some(video.clone()),
+            audio: None,
+            generation_time_ms: 12_345,
+            model: mold_core::minimax_h3::FL2VA_COMFY.to_string(),
+            seed_used: 42,
+            gpu: Some(0),
+        };
+        let mut metadata =
+            OutputMetadata::from_generate_request(&request, response.seed_used, None, "test");
+        metadata.apply_video_output(&video);
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
+        let filename = save_video_to_dir(
+            tmp.path(),
+            &video.data,
+            &video.gif_preview,
+            video.format,
+            &request.model,
+            &metadata,
+            Some(response.generation_time_ms as i64),
+            Some(&db),
+            None,
+            &gallery_gate,
+        )
+        .expect("synthetic publication should allocate one gallery filename");
+        assert_eq!(
+            std::fs::read(tmp.path().join(&filename)).unwrap(),
+            video.data
+        );
+
+        let rows = db.list(Some(tmp.path())).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].metadata.model, mold_core::minimax_h3::FL2VA_COMFY);
+        assert_eq!(rows[0].metadata.seed, 42);
+        assert_eq!(rows[0].metadata.frames, Some(124));
+        assert_eq!(rows[0].metadata.fps, Some(24));
+        assert_eq!(rows[0].metadata.enable_audio, Some(true));
+
+        let thumbnail = ImageData {
+            data: video.thumbnail.clone(),
+            format: OutputFormat::Png,
+            width: video.width,
+            height: video.height,
+            index: 0,
+        };
+        let message = build_sse_completion_message(
+            &response,
+            &thumbnail,
+            None,
+            Some(&metadata),
+            &SavedOutputNames {
+                output: Some(filename.clone()),
+                original: None,
+            },
+            SseCompletionPayload::MetadataOnly,
+        );
+        let SseMessage::Complete(event) = message else {
+            panic!("saved synthetic H3 video must complete over SSE")
+        };
+        assert_eq!(event.filename.as_deref(), Some(filename.as_str()));
+        assert_eq!(event.model, mold_core::minimax_h3::FL2VA_COMFY);
+        assert_eq!(event.format, OutputFormat::Mp4);
+        assert_eq!(event.video_frames, Some(124));
+        assert_eq!(event.video_fps, Some(24));
+        assert!(event.video_has_audio);
+        assert_eq!(
+            event.video_audio_sample_rate,
+            Some(mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ)
+        );
+        assert_eq!(
+            event.video_audio_channels,
+            Some(mold_core::minimax_h3::AUDIO_CHANNELS)
+        );
+        assert_eq!(event.metadata.as_ref().map(|value| value.seed), Some(42));
+        assert!(
+            event.image.is_empty(),
+            "metadata-only SSE must not duplicate MP4 bytes"
+        );
+    }
+
+    #[test]
+    fn synthetic_h3_ref2va_publication_preserves_ordered_redacted_provenance() {
+        use mold_core::{
+            GenerationReference, GenerationReferenceAuthority, GenerationReferenceKind,
+            GenerationReferenceProvenance,
+        };
+
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let provenance = |name: &str, byte: u8| GenerationReferenceProvenance {
+            name: Some(name.to_string()),
+            sha256: Some(format!("{byte:02x}").repeat(32)),
+        };
+        let mut request = fake_request(mold_core::minimax_h3::REF2VA_COMFY);
+        request.width = 1344;
+        request.height = 768;
+        request.frames = Some(124);
+        request.fps = Some(24);
+        request.output_format = Some(OutputFormat::Mp4);
+        request.enable_audio = Some(true);
+        request.guidance = 0.0;
+        request.strength = 1.0;
+        request.references = Some(vec![
+            GenerationReference::Video {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("motion.mp4", 1),
+                mime_type: "video/mp4".to_string(),
+                width: 1280,
+                height: 720,
+                frame_count: Some(48),
+                duration_ms: 2_000,
+                fps: 24.0,
+                has_audio: true,
+                audio_duration_ms: Some(2_000),
+                audio_sample_count: Some(96_000),
+                audio_sample_rate: Some(48_000),
+                audio_channels: Some(2),
+            },
+            GenerationReference::Image {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("portrait.png", 2),
+                mime_type: "image/png".to_string(),
+                width: 1024,
+                height: 768,
+            },
+            GenerationReference::Audio {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("voice.wav", 3),
+                mime_type: "audio/wav".to_string(),
+                duration_ms: 2_000,
+                sample_rate: 48_000,
+                channels: 1,
+                sample_count: Some(96_000),
+            },
+        ]);
+        let video = mold_core::VideoData {
+            data: b"synthetic-ref2va-mp4-with-synchronized-audio".to_vec(),
+            format: OutputFormat::Mp4,
+            width: request.width,
+            height: request.height,
+            frames: request.frames.unwrap(),
+            fps: request.fps.unwrap(),
+            pipeline: None,
+            thumbnail: b"synthetic-ref2va-thumbnail".to_vec(),
+            gif_preview: Vec::new(),
+            has_audio: true,
+            duration_ms: Some(5_167),
+            audio_sample_rate: Some(mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ),
+            audio_channels: Some(mold_core::minimax_h3::AUDIO_CHANNELS),
+        };
+        let response = mold_core::GenerateResponse {
+            images: Vec::new(),
+            video: Some(video.clone()),
+            audio: None,
+            generation_time_ms: 12_345,
+            model: request.model.clone(),
+            seed_used: 42,
+            gpu: Some(0),
+        };
+        let mut metadata = OutputMetadata::from_generate_request(&request, 42, None, "test");
+        metadata.apply_video_output(&video);
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
+        let filename = save_video_to_dir(
+            tmp.path(),
+            &video.data,
+            &video.gif_preview,
+            video.format,
+            &request.model,
+            &metadata,
+            Some(response.generation_time_ms as i64),
+            Some(&db),
+            None,
+            &gallery_gate,
+        )
+        .unwrap();
+
+        let rows = db.list(Some(tmp.path())).unwrap();
+        let references = rows[0].metadata.references.as_deref().unwrap();
+        assert_eq!(
+            references.iter().map(|item| item.kind).collect::<Vec<_>>(),
+            [
+                GenerationReferenceKind::Video,
+                GenerationReferenceKind::Image,
+                GenerationReferenceKind::Audio,
+            ]
+        );
+        assert_eq!(references[0].index, 1);
+        assert!(references[0].has_audio);
+        assert_eq!(references[0].audio_sample_rate, Some(48_000));
+        assert_eq!(references[2].index, 3);
+        let durable_json = serde_json::to_string(&rows[0].metadata).unwrap();
+        for secret in ["authority", "handle", "server_path", "/synthetic/"] {
+            assert!(!durable_json.contains(secret));
+        }
+
+        let thumbnail = ImageData {
+            data: video.thumbnail.clone(),
+            format: OutputFormat::Png,
+            width: video.width,
+            height: video.height,
+            index: 0,
+        };
+        let SseMessage::Complete(event) = build_sse_completion_message(
+            &response,
+            &thumbnail,
+            None,
+            Some(&metadata),
+            &SavedOutputNames {
+                output: Some(filename),
+                original: None,
+            },
+            SseCompletionPayload::MetadataOnly,
+        ) else {
+            panic!("saved synthetic Ref2VA output must complete over SSE")
+        };
+        assert_eq!(
+            event.video_audio_sample_rate,
+            Some(mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ)
+        );
+        assert_eq!(
+            event.video_audio_channels,
+            Some(mold_core::minimax_h3::AUDIO_CHANNELS)
+        );
+        assert_eq!(
+            event
+                .metadata
+                .as_ref()
+                .and_then(|value| value.references.as_ref())
+                .map(|items| items.iter().map(|item| item.index).collect::<Vec<_>>()),
+            Some(vec![1, 2, 3])
+        );
+        assert!(event.image.is_empty());
     }
 
     #[test]
@@ -4816,6 +5136,7 @@ mod tests {
             id: String::new(),
             model: "busy-model".to_string(),
             request: fake_request("busy-model"),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: filler_result_tx,
@@ -4845,6 +5166,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: String::new(),
             request: fake_request("flux-dev:q4"),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -4893,6 +5215,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: String::new(),
             request: fake_request("flux-dev:q4"),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -4972,6 +5295,7 @@ mod tests {
         BufferedJob::new(crate::state::GenerationJob {
             id: String::new(),
             request: fake_request(model),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: tx,
@@ -4985,6 +5309,7 @@ mod tests {
         BufferedJob::new(crate::state::GenerationJob {
             id: id.to_string(),
             request: fake_request(model),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: tx,
@@ -5241,6 +5566,7 @@ mod tests {
             let job = crate::state::GenerationJob {
                 id: String::new(),
                 request: fake_request(model),
+                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -5312,6 +5638,7 @@ mod tests {
             let job = crate::state::GenerationJob {
                 id: id.to_string(),
                 request: fake_request(&format!("model-{id}")),
+                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -5368,6 +5695,7 @@ mod tests {
             let job = GenerationJob {
                 id: String::new(),
                 request: fake_request(&format!("model-{i}")),
+                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -5471,6 +5799,7 @@ mod tests {
             let job = crate::state::GenerationJob {
                 id: String::new(),
                 request: fake_request(&format!("model-{i}")),
+                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -5603,6 +5932,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: String::new(),
             request,
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -5642,6 +5972,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: "auto-job".to_string(),
             request: fake_request("flux-dev:q4"),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -5690,6 +6021,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: "paused-job".to_string(),
             request: fake_request("flux-dev:q4"),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -5747,6 +6079,7 @@ mod tests {
                     crate::state::GenerationJob {
                         id: id.to_string(),
                         request: fake_request("flux-dev:q4"),
+                        resolved_references: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
                         result_tx,
@@ -5806,6 +6139,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: "parked-job".to_string(),
             request: fake_request("flux-dev:q4"),
+            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,

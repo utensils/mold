@@ -1,4 +1,5 @@
 import { defineStore } from "pinia";
+import { modelAccessRestrictionFor } from "@studio/lib/modelAccess";
 import { listDevices, type DeviceInfo } from "@studio/api/devices";
 import { listQueue, predictedCompletionUnixMs } from "@studio/api/queuePlan";
 import {
@@ -7,6 +8,7 @@ import {
   previewChainPlacement,
   previewGenerationPlacement,
   previewRequestForSiblingFanout,
+  requiresAuthoritativePlacement,
   type PlacementMissingComponent,
 } from "@studio/api/generationPlacement";
 import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
@@ -203,6 +205,20 @@ function probeError(error: unknown): string {
     return `placement preview returned HTTP ${error.status}${detail ? ` — ${detail}` : ""}`;
   }
   return error instanceof Error ? error.message : String(error);
+}
+
+function accessRestrictionForHost(
+  hostId: string,
+  model: string,
+  capabilities: ServerCapabilities | undefined,
+) {
+  const entry = useHostModelsStore().byHost[hostId]?.entries.find(
+    (candidate) => candidate.name === model,
+  );
+  return modelAccessRestrictionFor(capabilities, {
+    model,
+    family: entry?.family,
+  });
 }
 
 /**
@@ -524,7 +540,11 @@ export const useHostsStore = defineStore("hosts", {
             ...h,
             gpu: strongestRoutableGpu(this.telemetry[h.id]),
           };
-        });
+        })
+        .filter(
+          (host) =>
+            !modelName || !accessRestrictionForHost(host.id, modelName, this.capabilities[host.id]),
+        );
       const modelHostIds = modelName ? useHostModelsStore().hostsFor(modelName) : [];
 
       let chosen: (typeof routable)[number] | null;
@@ -552,6 +572,9 @@ export const useHostsStore = defineStore("hosts", {
       request: GenerateRequest | ChainRequest | AutoChainRequest,
       copies = 1,
     ): Promise<FeasibleRouteResult> {
+      const requireAuthoritative = requiresAuthoritativePlacement(
+        request as unknown as Record<string, unknown>,
+      );
       const intentSignature = () =>
         JSON.stringify({
           requestedSelection: selection,
@@ -564,6 +587,7 @@ export const useHostsStore = defineStore("hosts", {
       const availabilitySignature = () =>
         JSON.stringify({
           hosts: this.all.map((host) => [host.id, host.status]),
+          modelAccess: this.all.map((host) => [host.id, this.capabilities[host.id]?.model_access]),
         });
       const capturedIntent = intentSignature();
       const capturedIdentity = identitySignature();
@@ -593,6 +617,33 @@ export const useHostsStore = defineStore("hosts", {
           this.all.some((host) => host.id === selection)
         )
           candidates = candidates.filter((host) => host.id === selection);
+
+        const restricted = candidates.flatMap((host) => {
+          const restriction = accessRestrictionForHost(
+            host.id,
+            request.model,
+            this.capabilities[host.id],
+          );
+          const route = hostRoute(host);
+          return restriction && route
+            ? [
+                {
+                  kind: "infeasible" as const,
+                  hostId: host.id,
+                  label: host.label,
+                  route,
+                  reason: restriction.message,
+                  missingComponents: [],
+                },
+              ]
+            : [];
+        });
+        candidates = candidates.filter(
+          (host) => !accessRestrictionForHost(host.id, request.model, this.capabilities[host.id]),
+        );
+        if (candidates.length === 0 && restricted.length > 0) {
+          return { kind: "infeasible", perHost: restricted };
+        }
 
         if (candidates.length === 0) {
           const selected =
@@ -717,7 +768,7 @@ export const useHostsStore = defineStore("hosts", {
             ...host,
             gpu: strongestRoutableGpu(this.telemetry[host.id]),
           }));
-        if (legacy.length > 0) {
+        if (!requireAuthoritative && legacy.length > 0) {
           const modelHostIds = useHostModelsStore()
             .hostsFor(request.model)
             .filter((id) => unsupportedIds.includes(id));
@@ -735,6 +786,21 @@ export const useHostsStore = defineStore("hosts", {
         }
 
         const failures = probes.flatMap<HostFeasibilityFailure>((probe) => {
+          const classification = classifyPlacementPreview(probe.preview);
+          if (
+            requireAuthoritative &&
+            (probe.legacyUnsupported || classification === "unsupported")
+          ) {
+            return [
+              {
+                kind: "unreachable",
+                hostId: probe.host.id,
+                label: probe.host.label,
+                error:
+                  "does not provide the authoritative placement preview required for reference media",
+              },
+            ];
+          }
           if (probe.error && !probe.legacyUnsupported) {
             return [
               {
@@ -745,7 +811,6 @@ export const useHostsStore = defineStore("hosts", {
               },
             ];
           }
-          const classification = classifyPlacementPreview(probe.preview);
           if (classification === "infeasible" && probe.preview) {
             const route = hostRoute(probe.host);
             if (!route) return [];

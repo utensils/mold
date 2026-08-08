@@ -2425,6 +2425,7 @@ pub enum CatalogIdResolution {
 /// with the repo id); Civitai entries return `Recipe(entry)` so the
 /// caller can drive the recipe-fetcher with companion-first ordering.
 pub async fn resolve_catalog_id(id: &str) -> anyhow::Result<CatalogIdResolution> {
+    mold_core::require_model_activation(id, None)?;
     if let Some(repo_id) = id.strip_prefix("hf:") {
         // HF: defer to the manifest path. We don't need a live fetch to
         // know the repo id — that's what the user typed. The manifest
@@ -2433,6 +2434,8 @@ pub async fn resolve_catalog_id(id: &str) -> anyhow::Result<CatalogIdResolution>
         return Ok(CatalogIdResolution::Manifest(repo_id.to_string()));
     }
     let entry = catalog_bridge::lookup_catalog_entry_live(id).await?;
+    mold_core::require_model_activation(entry.id.as_str(), Some(entry.family.as_str()))?;
+    mold_core::require_model_activation(&entry.name, Some(entry.family.as_str()))?;
     if !entry.supported {
         anyhow::bail!("catalog entry is not supported by this build of mold");
     }
@@ -2453,6 +2456,17 @@ mod tests {
     /// Try to parse CLI args, returning the clap error on failure.
     fn try_parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("mold").chain(args.iter().copied()))
+    }
+
+    #[tokio::test]
+    async fn raw_h3_catalog_id_is_rejected_without_live_lookup() {
+        let error = resolve_catalog_id("hf:MiniMaxAI/MiniMax-H3")
+            .await
+            .err()
+            .expect("H3 must remain compliance-gated");
+        assert!(error
+            .to_string()
+            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
     }
 
     #[test]

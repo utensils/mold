@@ -709,6 +709,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationRecord> 
         source_image_name: None,
         source_image_sha256: None,
         edit_image_sha256s: None,
+        references: None,
         scheduler,
         output_format: Some(format),
         cfg_plus: None,
@@ -859,6 +860,7 @@ mod tests {
             source_image_name: None,
             source_image_sha256: None,
             edit_image_sha256s: None,
+            references: None,
             scheduler: Some(Scheduler::Ddim),
             output_format: Some(OutputFormat::Png),
             cfg_plus: None,
@@ -973,6 +975,70 @@ mod tests {
         rec.metadata.batch_id = Some("prepared-batch-1".into());
         rec.metadata.batch_index = Some(2);
         rec.metadata.batch_count = Some(3);
+        rec.metadata.references = Some(vec![
+            mold_core::GenerationReferenceMetadata {
+                kind: mold_core::GenerationReferenceKind::Video,
+                index: 1,
+                name: Some("opening.mp4".into()),
+                sha256: "a".repeat(64),
+                mime_type: "video/mp4".into(),
+                width: Some(1920),
+                height: Some(1080),
+                frame_count: Some(120),
+                duration_ms: Some(4_000),
+                fps: Some(24.0),
+                has_audio: true,
+                audio_duration_ms: Some(4_000),
+                audio_sample_count: Some(192_000),
+                audio_sample_rate: Some(48_000),
+                audio_channels: Some(2),
+                sample_rate: None,
+                channels: None,
+                sample_count: None,
+                prepared_shape: Some(mold_core::minimax_h3::GenerationReferencePreparedShape {
+                    version: mold_core::minimax_h3::REFERENCE_PREPROCESS_VERSION,
+                    normalized_width: Some(1344),
+                    normalized_height: Some(768),
+                    normalized_video_frames: Some(96),
+                    video_frames: Some(90),
+                    qwen_video_frames: Some(8),
+                    audio_samples_per_channel: Some(128_000),
+                    visual_rows: 27_216,
+                    audio_rows: 320,
+                }),
+            },
+            mold_core::GenerationReferenceMetadata {
+                kind: mold_core::GenerationReferenceKind::Audio,
+                index: 2,
+                name: Some("voice.wav".into()),
+                sha256: "b".repeat(64),
+                mime_type: "audio/wav".into(),
+                width: None,
+                height: None,
+                frame_count: None,
+                duration_ms: Some(3_000),
+                fps: None,
+                has_audio: false,
+                audio_duration_ms: None,
+                audio_sample_count: None,
+                audio_sample_rate: None,
+                audio_channels: None,
+                sample_rate: Some(32_000),
+                channels: Some(2),
+                sample_count: Some(96_000),
+                prepared_shape: Some(mold_core::minimax_h3::GenerationReferencePreparedShape {
+                    version: mold_core::minimax_h3::REFERENCE_PREPROCESS_VERSION,
+                    normalized_width: None,
+                    normalized_height: None,
+                    normalized_video_frames: None,
+                    video_frames: None,
+                    qwen_video_frames: None,
+                    audio_samples_per_channel: Some(96_000),
+                    visual_rows: 0,
+                    audio_rows: 240,
+                }),
+            },
+        ]);
 
         db.upsert(&rec).unwrap();
         let got = db
@@ -994,6 +1060,34 @@ mod tests {
         assert_eq!(got.metadata.batch_id.as_deref(), Some("prepared-batch-1"));
         assert_eq!(got.metadata.batch_index, Some(2));
         assert_eq!(got.metadata.batch_count, Some(3));
+        let references = got.metadata.references.expect("ordered references");
+        assert_eq!(references.len(), 2);
+        assert_eq!(references[0].index, 1);
+        assert_eq!(
+            references[0].kind,
+            mold_core::GenerationReferenceKind::Video
+        );
+        assert!(references[0].has_audio);
+        assert_eq!(
+            references[0]
+                .prepared_shape
+                .as_ref()
+                .map(|shape| shape.visual_rows),
+            Some(27_216)
+        );
+        assert_eq!(references[1].index, 2);
+        assert_eq!(
+            references[1].kind,
+            mold_core::GenerationReferenceKind::Audio
+        );
+        assert_eq!(references[1].sha256, "b".repeat(64));
+        assert_eq!(
+            references[1]
+                .prepared_shape
+                .as_ref()
+                .map(|shape| shape.audio_rows),
+            Some(240)
+        );
     }
 
     #[test]
