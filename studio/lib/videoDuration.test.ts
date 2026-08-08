@@ -12,7 +12,6 @@ import {
   fixedVideoFps,
   videoFrameGridError,
   videoFrameGridLabel,
-  videoFramesError,
 } from "./videoDuration";
 
 const ltx2 = {

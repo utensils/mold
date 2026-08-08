@@ -94,24 +94,6 @@ export function snapVideoFrames(
   return Math.max(offset, grid * step + offset);
 }
 
-/** Validate a frame count against the selected model's advertised grid. */
-export function videoFramesError(
-  frames: number,
-  model?: VideoFrameContract | null,
-): string | null {
-  const step = videoFrameStep(model);
-  if (Number.isInteger(frames) && frames > 0 && (frames - 1) % step === 0) {
-    return null;
-  }
-  const requested = Number.isFinite(frames)
-    ? frames
-    : (model?.default_frames ?? 1);
-  const down = snapVideoFrames(requested, model, "down");
-  const up = down >= requested ? down : down + step;
-  const suggestion = down === up ? String(down) : `${down} or ${up}`;
-  return `Frames must be ${step}n+1 — try ${suggestion}.`;
-}
-
 /**
  * Requestable single-shot ceiling at the currently selected FPS.
  *
@@ -186,8 +168,18 @@ export function videoFrameGridError(
   const step = videoFrameStep(model);
   const offset = videoFrameOffset(model);
   if (rounded < minimum) return `Frames must be at least ${minimum}.`;
-  if (rounded < offset || (rounded - offset) % step !== 0) {
-    return `Frames must follow the ${videoFrameGridLabel(model)} grid.`;
+  if (
+    !Number.isInteger(frames) ||
+    rounded < offset ||
+    (rounded - offset) % step !== 0
+  ) {
+    const requested = Number.isFinite(frames)
+      ? frames
+      : (model?.default_frames ?? minimum);
+    const down = snapVideoFrames(requested, model, "down");
+    const up = down >= requested ? down : down + step;
+    const suggestion = down === up ? String(down) : `${down} or ${up}`;
+    return `Frames must be ${videoFrameGridLabel(model)} — try ${suggestion}.`;
   }
   return null;
 }
