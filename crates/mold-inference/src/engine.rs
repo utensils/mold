@@ -42,6 +42,7 @@ pub struct BatchExecutionCapability {
 pub struct GenerationReferenceBinding {
     metadata: GenerationReferenceMetadata,
     file: File,
+    verified_bytes: u64,
 }
 
 impl GenerationReferenceBinding {
@@ -106,7 +107,11 @@ impl GenerationReferenceBinding {
             "generation reference binding digest differs from staged media"
         );
         file.seek(SeekFrom::Start(0))?;
-        Ok(Self { metadata, file })
+        Ok(Self {
+            metadata,
+            file,
+            verified_bytes: observed_bytes,
+        })
     }
 
     pub fn metadata(&self) -> &GenerationReferenceMetadata {
@@ -122,11 +127,21 @@ impl GenerationReferenceBinding {
         &self.file
     }
 
+    /// Exact byte length covered by the binding's digest verification.
+    ///
+    /// An opened descriptor preserves inode identity, but another writer can
+    /// still mutate that inode after admission. Decoders use this frozen bound
+    /// while copying and re-hash the bytes before parsing them.
+    pub(crate) fn verified_bytes(&self) -> u64 {
+        self.verified_bytes
+    }
+
     #[cfg(test)]
     pub(crate) fn synthetic(metadata: GenerationReferenceMetadata) -> Self {
         Self {
             metadata,
             file: tempfile::tempfile().expect("create synthetic reference handle"),
+            verified_bytes: 0,
         }
     }
 }

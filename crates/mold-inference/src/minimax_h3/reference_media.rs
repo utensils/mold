@@ -4,7 +4,7 @@
 //! model family. It turns server-bound, digest-verified file descriptors into
 //! the exact media tensors a future legally admitted backend must encode.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{anyhow, bail, Context, Result};
 use image::RgbImage;
@@ -23,15 +23,16 @@ use super::pipeline::{
 use crate::engine::GenerationReferenceBinding;
 use crate::ltx2::DecodedAudio;
 use crate::reference_media::{
-    cfr_source_indices, decode_audio_from_open_file, decode_image_from_open_file,
-    decode_video_from_open_file, normalize_audio, NormalizedStereoAudio,
+    cfr_source_indices, decode_audio_from_binding, decode_image_from_binding,
+    decode_video_from_binding, normalize_audio, NormalizedStereoAudio,
 };
 
 #[derive(Debug)]
 enum DecodedReference {
     Image(RgbImage),
     Video {
-        frames: Vec<RgbImage>,
+        selected_frames: BTreeMap<usize, RgbImage>,
+        source_frame_count: u32,
         fps: f64,
         audio: Option<DecodedAudio>,
     },
@@ -102,7 +103,7 @@ impl H3ReferenceMediaAdapter {
         };
         let (facts, media) = match reference.metadata.kind {
             GenerationReferenceKind::Image => {
-                let image = decode_image_from_open_file(binding.file(), &mut poll)?;
+                let image = decode_image_from_binding(binding, &mut poll)?;
                 let facts = H3DecodedReferenceFacts {
                     index,
                     kind: GenerationReferenceKind::Image,
@@ -115,11 +116,35 @@ impl H3ReferenceMediaAdapter {
                 (facts, DecodedReference::Image(image))
             }
             GenerationReferenceKind::Video => {
-                let decoded = decode_video_from_open_file(binding.file(), &mut poll)?;
-                let first = decoded
+                let width = required_dimension(reference.shape.normalized_width, "width")?;
+                let height = required_dimension(reference.shape.normalized_height, "height")?;
+                let source_frame_count = required_count(
+                    reference.metadata.frame_count,
+                    "decoded source video frames",
+                )?;
+                let source_fps = reference
+                    .metadata
+                    .fps
+                    .filter(|fps| fps.is_finite() && *fps > 0.0)
+                    .ok_or_else(|| anyhow!("MiniMax H3 reference lost its decoded frame rate"))?;
+                let selected_source_indices = selected_video_source_indices(
+                    reference,
+                    source_frame_count,
+                    source_fps,
+                    &mut poll,
+                )?;
+                let mut resize =
+                    |frame: RgbImage| pillow_lanczos_resize(&frame, width, height, &mut || Ok(()));
+                let decoded = decode_video_from_binding(
+                    binding,
+                    &selected_source_indices,
+                    &mut resize,
+                    &mut poll,
+                )?;
+                decoded
                     .frames
                     .first()
-                    .context("decoded H3 reference video did not contain a frame")?;
+                    .context("decoded H3 reference video did not contain a selected frame")?;
                 let audio_facts = decoded
                     .audio
                     .as_ref()
@@ -128,30 +153,29 @@ impl H3ReferenceMediaAdapter {
                 let facts = H3DecodedReferenceFacts {
                     index,
                     kind: GenerationReferenceKind::Video,
-                    width: Some(first.width()),
-                    height: Some(first.height()),
-                    frame_count: Some(
-                        u32::try_from(decoded.frames.len())
-                            .context("decoded H3 reference frame count exceeded u32")?,
-                    ),
+                    width: Some(decoded.source_width),
+                    height: Some(decoded.source_height),
+                    frame_count: Some(decoded.source_frame_count),
                     fps: Some(decoded.fps),
                     audio: audio_facts,
                 };
+                let selected_frames = selected_source_indices
+                    .into_iter()
+                    .zip(decoded.frames)
+                    .collect();
                 (
                     facts,
                     DecodedReference::Video {
-                        frames: decoded.frames,
+                        selected_frames,
+                        source_frame_count: decoded.source_frame_count,
                         fps: decoded.fps,
                         audio: decoded.audio,
                     },
                 )
             }
             GenerationReferenceKind::Audio => {
-                let decoded = decode_audio_from_open_file(
-                    binding.file(),
-                    &reference.metadata.mime_type,
-                    &mut poll,
-                )?;
+                let decoded =
+                    decode_audio_from_binding(binding, &reference.metadata.mime_type, &mut poll)?;
                 let facts = H3DecodedReferenceFacts {
                     index,
                     kind: GenerationReferenceKind::Audio,
@@ -227,7 +251,12 @@ impl H3ReferenceMediaAdapter {
                     },
                 )
             }
-            DecodedReference::Video { frames, fps, audio } => {
+            DecodedReference::Video {
+                selected_frames,
+                source_frame_count,
+                fps,
+                audio,
+            } => {
                 let width = required_dimension(reference.shape.normalized_width, "width")?;
                 let height = required_dimension(reference.shape.normalized_height, "height")?;
                 let normalized_count = required_count(
@@ -235,20 +264,29 @@ impl H3ReferenceMediaAdapter {
                     "normalized video frames",
                 )?;
                 let vae_count = required_count(reference.shape.video_frames, "video VAE frames")?;
-                let cfr_indices =
-                    cfr_source_indices(frames.len(), fps, FIXED_FPS, normalized_count, &mut poll)?;
+                let cfr_indices = cfr_source_indices(
+                    usize::try_from(source_frame_count)?,
+                    fps,
+                    FIXED_FPS,
+                    normalized_count,
+                    &mut poll,
+                )?;
                 if vae_count > cfr_indices.len() {
                     bail!("MiniMax H3 visual-VAE frame prefix exceeds normalized video");
                 }
                 let mut vae_frames = Vec::with_capacity(vae_count);
                 for &source_index in &cfr_indices[..vae_count] {
                     poll()?;
-                    vae_frames.push(pillow_lanczos_resize(
-                        &frames[source_index],
-                        width,
-                        height,
-                        &mut poll,
-                    )?);
+                    vae_frames.push(
+                        selected_frames
+                            .get(&source_index)
+                            .with_context(|| {
+                                format!(
+                                    "MiniMax H3 decoder omitted selected source frame {source_index}"
+                                )
+                            })?
+                            .clone(),
+                    );
                 }
 
                 let sampled = sample_video_frames(normalized_count, f64::from(FIXED_FPS))?;
@@ -266,12 +304,16 @@ impl H3ReferenceMediaAdapter {
                     if normalized_index < vae_frames.len() {
                         qwen_frames.push(vae_frames[normalized_index].clone());
                     } else {
-                        qwen_frames.push(pillow_lanczos_resize(
-                            &frames[source_index],
-                            width,
-                            height,
-                            &mut poll,
-                        )?);
+                        qwen_frames.push(
+                            selected_frames
+                                .get(&source_index)
+                                .with_context(|| {
+                                    format!(
+                                        "MiniMax H3 decoder omitted Qwen source frame {source_index}"
+                                    )
+                                })?
+                                .clone(),
+                        );
                     }
                 }
                 let audio = match audio {
@@ -326,6 +368,43 @@ impl H3ReferenceMediaAdapter {
     pub(crate) fn normalized_indices(&self) -> Vec<u32> {
         self.normalized_order.clone()
     }
+}
+
+fn selected_video_source_indices(
+    reference: &H3PreparedReference,
+    source_frame_count: usize,
+    source_fps: f64,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<Vec<usize>> {
+    let normalized_count = required_count(
+        reference.shape.normalized_video_frames,
+        "normalized video frames",
+    )?;
+    let vae_count = required_count(reference.shape.video_frames, "video VAE frames")?;
+    let cfr_indices = cfr_source_indices(
+        source_frame_count,
+        source_fps,
+        FIXED_FPS,
+        normalized_count,
+        checkpoint,
+    )?;
+    if vae_count > cfr_indices.len() {
+        bail!("MiniMax H3 visual-VAE frame prefix exceeds normalized video");
+    }
+    let sampled = sample_video_frames(normalized_count, f64::from(FIXED_FPS))?;
+    let expected_qwen = required_count(reference.shape.qwen_video_frames, "Qwen video frames")?;
+    if sampled.frame_indices.len() != expected_qwen {
+        bail!("MiniMax H3 Qwen 2 fps sampling changed the prepared frame count");
+    }
+    let mut selected = BTreeSet::new();
+    selected.extend(cfr_indices[..vae_count].iter().copied());
+    selected.extend(
+        sampled
+            .frame_indices
+            .into_iter()
+            .map(|normalized_index| cfr_indices[normalized_index]),
+    );
+    Ok(selected.into_iter().collect())
 }
 
 fn decoded_audio_facts(decoded: &DecodedAudio) -> Result<H3DecodedAudioFacts> {
@@ -664,10 +743,10 @@ mod tests {
         let audio_samples = (0..8_000)
             .flat_map(|sample| {
                 let value = sample as f32 / 8_000.0;
-                [value, value * 2.0, value * 3.0, value * 4.0]
+                [value * 2.0, value * 3.0]
             })
             .collect::<Vec<_>>();
-        let audio_bytes = encode_wav_f32_interleaved(&audio_samples, 16_000, 4).unwrap();
+        let audio_bytes = encode_wav_f32_interleaved(&audio_samples, 16_000, 2).unwrap();
 
         let mut image_metadata = metadata(1, GenerationReferenceKind::Image, "image/png");
         image_metadata.width = Some(32);
@@ -721,7 +800,7 @@ mod tests {
         let mut audio_metadata = metadata(3, GenerationReferenceKind::Audio, "audio/wav");
         audio_metadata.duration_ms = Some(500);
         audio_metadata.sample_rate = Some(16_000);
-        audio_metadata.channels = Some(4);
+        audio_metadata.channels = Some(2);
         audio_metadata.sample_count = Some(8_000);
         let audio_shape = GenerationReferencePreparedShape {
             version: mold_core::minimax_h3::REFERENCE_PREPROCESS_VERSION,
@@ -789,7 +868,7 @@ mod tests {
         };
         assert_eq!(audio.sample_rate, 32_000);
         assert_eq!(audio.samples_per_channel(), 16_000);
-        assert_eq!(audio.channels[0][100], 0.0125);
-        assert_eq!(audio.channels[1][100], 0.01875);
+        assert!((audio.channels[0][100] - 0.0125).abs() < 1e-6);
+        assert!((audio.channels[1][100] - 0.01875).abs() < 1e-6);
     }
 }

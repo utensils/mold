@@ -316,6 +316,8 @@ fn decode_video_bounded(
         target_fps,
         max_dimension,
         max_rgb_bytes,
+        None,
+        None,
         &mut || Ok(()),
     )
 }
@@ -325,6 +327,8 @@ fn decode_video_bounded_with_checkpoint(
     target_fps: Option<u32>,
     max_dimension: Option<u32>,
     max_rgb_bytes: Option<u64>,
+    selected_source_indices: Option<&[usize]>,
+    mut frame_transform: Option<&mut dyn FnMut(RgbImage) -> Result<RgbImage>>,
     checkpoint: &mut dyn FnMut() -> Result<()>,
 ) -> Result<DecodedVideo> {
     checkpoint()?;
@@ -332,6 +336,24 @@ fn decode_video_bounded_with_checkpoint(
     let video = find_video_track(&reader)?;
     let (has_audio, audio_sample_rate, audio_channels) = audio_metadata(&reader)?;
     let export_fps = target_fps.unwrap_or(video.fps).min(video.fps).max(1);
+    if let Some(indices) = selected_source_indices {
+        anyhow::ensure!(
+            !indices.is_empty()
+                && indices.windows(2).all(|pair| pair[0] < pair[1])
+                && video.frames.is_some_and(
+                    |frames| indices.last().copied().unwrap_or_default() < frames as usize
+                ),
+            "selected video-frame indices must be nonempty, strictly increasing, and in range"
+        );
+        anyhow::ensure!(
+            target_fps.is_none() && max_dimension.is_none(),
+            "selected video-frame decoding cannot also resample or resize frames"
+        );
+    }
+    anyhow::ensure!(
+        frame_transform.is_none() || selected_source_indices.is_some(),
+        "video-frame transforms require an explicit bounded selection"
+    );
     if let (Some(limit), Some(frame_count)) = (max_rgb_bytes, video.frames) {
         anyhow::ensure!(
             estimated_export_rgb_bytes(
@@ -380,13 +402,19 @@ fn decode_video_bounded_with_checkpoint(
     .context("failed to create H.264 decoder for LTX-2 media output")?;
 
     let mut converted = Vec::new();
-    let estimated_frames = video
-        .frames
-        .unwrap_or_default()
-        .saturating_mul(export_fps)
-        .div_ceil(video.fps.max(1)) as usize;
+    let estimated_frames = selected_source_indices.map_or_else(
+        || {
+            video
+                .frames
+                .unwrap_or_default()
+                .saturating_mul(export_fps)
+                .div_ceil(video.fps.max(1)) as usize
+        },
+        <[usize]>::len,
+    );
     let mut frames = Vec::with_capacity(estimated_frames);
     let mut decoded_index = 0_u32;
+    let mut selected_cursor = 0_usize;
     let mut retained_rgb_bytes = 0_u64;
     let mut new_idr = true;
     let mut sps_seen = false;
@@ -416,14 +444,23 @@ fn decode_video_bounded_with_checkpoint(
             .context("failed to decode H.264 frame from MP4")?
         {
             checkpoint()?;
-            if should_sample_export_frame(decoded_index, video.fps, export_fps) {
+            if should_retain_decoded_frame(
+                decoded_index,
+                video.fps,
+                export_fps,
+                selected_source_indices,
+                &mut selected_cursor,
+            )? {
                 let mut rgb = vec![0; image.rgb8_len()];
                 image.write_rgb8(&mut rgb);
                 let frame =
                     RgbImage::from_raw(video.width, video.height, rgb).ok_or_else(|| {
                         anyhow!("decoded H.264 frame size did not match track dimensions")
                     })?;
-                let frame = resize_export_frame(frame, max_dimension);
+                let frame = match frame_transform.as_deref_mut() {
+                    Some(transform) => transform(frame)?,
+                    None => resize_export_frame(frame, max_dimension),
+                };
                 retained_rgb_bytes = retained_rgb_bytes
                     .saturating_add(u64::from(frame.width()) * u64::from(frame.height()) * 3);
                 if let Some(limit) = max_rgb_bytes {
@@ -435,32 +472,58 @@ fn decode_video_bounded_with_checkpoint(
                 frames.push(frame);
             }
             decoded_index += 1;
+            if selected_source_indices.is_some_and(|indices| selected_cursor == indices.len()) {
+                break;
+            }
         }
     }
 
-    for image in decoder
-        .flush_remaining()
-        .context("failed to flush delayed H.264 frames")?
-    {
-        checkpoint()?;
-        if should_sample_export_frame(decoded_index, video.fps, export_fps) {
-            let mut rgb = vec![0; image.rgb8_len()];
-            image.write_rgb8(&mut rgb);
-            let frame = RgbImage::from_raw(video.width, video.height, rgb).ok_or_else(|| {
-                anyhow!("flushed H.264 frame size did not match track dimensions")
-            })?;
-            let frame = resize_export_frame(frame, max_dimension);
-            retained_rgb_bytes = retained_rgb_bytes
-                .saturating_add(u64::from(frame.width()) * u64::from(frame.height()) * 3);
-            if let Some(limit) = max_rgb_bytes {
-                anyhow::ensure!(
-                    retained_rgb_bytes <= limit,
-                    "animation export exceeds the safe decoded-frame budget; choose a smaller size or frame rate"
-                );
+    if selected_source_indices.is_none_or(|indices| selected_cursor != indices.len()) {
+        for image in decoder
+            .flush_remaining()
+            .context("failed to flush delayed H.264 frames")?
+        {
+            checkpoint()?;
+            if should_retain_decoded_frame(
+                decoded_index,
+                video.fps,
+                export_fps,
+                selected_source_indices,
+                &mut selected_cursor,
+            )? {
+                let mut rgb = vec![0; image.rgb8_len()];
+                image.write_rgb8(&mut rgb);
+                let frame =
+                    RgbImage::from_raw(video.width, video.height, rgb).ok_or_else(|| {
+                        anyhow!("flushed H.264 frame size did not match track dimensions")
+                    })?;
+                let frame = match frame_transform.as_deref_mut() {
+                    Some(transform) => transform(frame)?,
+                    None => resize_export_frame(frame, max_dimension),
+                };
+                retained_rgb_bytes = retained_rgb_bytes
+                    .saturating_add(u64::from(frame.width()) * u64::from(frame.height()) * 3);
+                if let Some(limit) = max_rgb_bytes {
+                    anyhow::ensure!(
+                        retained_rgb_bytes <= limit,
+                        "animation export exceeds the safe decoded-frame budget; choose a smaller size or frame rate"
+                    );
+                }
+                frames.push(frame);
             }
-            frames.push(frame);
+            decoded_index += 1;
+            if selected_source_indices.is_some_and(|indices| selected_cursor == indices.len()) {
+                break;
+            }
         }
-        decoded_index += 1;
+    }
+
+    if let Some(indices) = selected_source_indices {
+        anyhow::ensure!(
+            selected_cursor == indices.len(),
+            "video decoder produced only {decoded_index} frames before selected source frame {}",
+            indices[selected_cursor]
+        );
     }
 
     if frames.is_empty() {
@@ -474,10 +537,22 @@ fn decode_video_bounded_with_checkpoint(
 
     Ok(DecodedVideo {
         metadata: ProbeMetadata {
-            width: frames[0].width(),
-            height: frames[0].height(),
+            width: if selected_source_indices.is_some() {
+                video.width
+            } else {
+                frames[0].width()
+            },
+            height: if selected_source_indices.is_some() {
+                video.height
+            } else {
+                frames[0].height()
+            },
             fps: export_fps,
-            frames: Some(frames.len() as u32),
+            frames: if selected_source_indices.is_some() {
+                video.frames
+            } else {
+                Some(frames.len() as u32)
+            },
             duration_ms: video.duration_ms,
             has_audio,
             audio_sample_rate,
@@ -485,6 +560,36 @@ fn decode_video_bounded_with_checkpoint(
         },
         frames,
     })
+}
+
+fn should_retain_decoded_frame(
+    decoded_index: u32,
+    source_fps: u32,
+    export_fps: u32,
+    selected_source_indices: Option<&[usize]>,
+    selected_cursor: &mut usize,
+) -> Result<bool> {
+    let Some(indices) = selected_source_indices else {
+        return Ok(should_sample_export_frame(
+            decoded_index,
+            source_fps,
+            export_fps,
+        ));
+    };
+    if *selected_cursor == indices.len() {
+        return Ok(false);
+    }
+    let decoded_index = decoded_index as usize;
+    let expected = indices[*selected_cursor];
+    if decoded_index > expected {
+        bail!("video decoder skipped selected source frame {expected}");
+    }
+    if decoded_index == expected {
+        *selected_cursor += 1;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 fn resize_export_frame(frame: RgbImage, max_dimension: Option<u32>) -> RgbImage {
@@ -504,13 +609,25 @@ pub fn decode_video_frames_from_path(input: &Path) -> Result<(ProbeMetadata, Vec
     decode_video_frames(input)
 }
 
-/// Decode an H.264 MP4 while polling an attempt-scoped cancellation hook at
-/// container-sample and decoded-frame boundaries.
-pub(crate) fn decode_video_frames_from_path_with_checkpoint(
+/// Decode only a strictly increasing set of source frames and transform each
+/// retained frame before it enters the output vector. This keeps H3 reference
+/// normalization bounded by its frozen canvas instead of retaining every
+/// full-resolution source frame.
+pub(crate) fn decode_video_frames_selected_from_path_with_checkpoint(
     input: &Path,
+    selected_source_indices: &[usize],
+    frame_transform: &mut dyn FnMut(RgbImage) -> Result<RgbImage>,
     checkpoint: &mut dyn FnMut() -> Result<()>,
 ) -> Result<(ProbeMetadata, Vec<RgbImage>)> {
-    let video = decode_video_bounded_with_checkpoint(input, None, None, None, checkpoint)?;
+    let video = decode_video_bounded_with_checkpoint(
+        input,
+        None,
+        None,
+        None,
+        Some(selected_source_indices),
+        Some(frame_transform),
+        checkpoint,
+    )?;
     Ok((video.metadata, video.frames))
 }
 
