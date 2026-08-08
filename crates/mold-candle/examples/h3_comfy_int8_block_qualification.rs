@@ -48,6 +48,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &H3ComfyNeverCancel,
     )?;
     let checkpoint_identity = opened.checkpoint_identity_sha256().to_owned();
+    let published_header_identity = opened.candidate().header_identity_sha256.clone();
+    let published_tensor_count = opened.candidate().tensor_count;
+    let quantization_policy_sha256 = opened
+        .candidate()
+        .strategy
+        .quantization_policy
+        .policy_sha256
+        .clone();
+    let validated_quantization_sidecars = opened
+        .candidate()
+        .strategy
+        .quantization_policy
+        .quantized_layers
+        .len();
+    if validated_quantization_sidecars != 200 {
+        return Err(
+            "published H3 INT8 qualification requires exactly 200 validated sidecars".into(),
+        );
+    }
     let device = Device::new_cuda(gpu)?;
     let (transformer, mut loader) = opened.load(&device)?;
     let memory = loader.block_memory(block_index)?;
@@ -77,17 +96,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let block = loader.load_block(block_index)?;
     step.forward_block(block_index, &block)?;
     drop(block);
+    let f16_curve_projection_upcast_loads = loader.f16_curve_projection_upcast_loads();
+    if f16_curve_projection_upcast_loads != 4 {
+        return Err(format!(
+            "isolated block-0 qualification expected four F16-to-F32 curve projection loads, got {f16_curve_projection_upcast_loads}"
+        )
+        .into());
+    }
     let report = serde_json::json!({
         "schema": "mold.minimax-h3.comfy-int8-block-qualification.v1",
         "task": format!("{task:?}"),
         "block_index": block_index,
         "checkpoint_identity_sha256": checkpoint_identity,
+        "published_header_identity_sha256": published_header_identity,
+        "published_tensor_count": published_tensor_count,
+        "validated_quantization_sidecars": validated_quantization_sidecars,
+        "quantization_policy_sha256": quantization_policy_sha256,
         "content_sha256": loader.content_sha256(),
         "runtime_bytes_read": loader.bytes_read(),
         "encoded_host_bytes": memory.encoded_host_bytes,
         "max_host_read_staging_bytes": memory.max_host_read_staging_bytes,
         "max_device_weight_staging_bytes": memory.max_device_weight_staging_bytes,
         "protected_device_bytes": memory.protected_device_bytes,
+        "f16_curve_projection_upcast_loads": f16_curve_projection_upcast_loads,
         "live_blocks_after_drop": loader.live_block_count(),
         "executed_block_count": 1,
         "factory_activated": false,

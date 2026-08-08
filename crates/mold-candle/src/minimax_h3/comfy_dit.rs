@@ -67,6 +67,9 @@ const CONVROT_GROUP_SIZE: usize = 256;
 const PUBLISHED_INT8_CURVE_GRID: usize = 1_025;
 const PUBLISHED_INT8_CURVE_BASIS: usize = 8;
 const PUBLISHED_INT8_COMFY_QUANT_BYTES: usize = 72;
+const PUBLISHED_INT8_COMFY_QUANT_COUNT: usize = 200;
+const PUBLISHED_INT8_COMFY_QUANT_PAYLOAD: &[u8; PUBLISHED_INT8_COMFY_QUANT_BYTES] =
+    br#"{"format": "int8_tensorwise", "convrot": true, "convrot_groupsize": 256}"#;
 const FILE_READ_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const QUANTIZED_BLOCK_WEIGHT_SUFFIXES: &[&str] = &[
     "attn.qkv_proj.weight",
@@ -529,7 +532,7 @@ pub fn open_h3_comfy_published_int8_checkpoint(
         path,
         H3TransformerConfig::default(),
         requested_task,
-        artifact,
+        Some(artifact),
         Some((artifact.file_bytes(), artifact.content_sha256())),
         cancellation,
     )
@@ -539,18 +542,26 @@ fn open_h3_comfy_int8_checkpoint(
     path: &Path,
     config: H3TransformerConfig,
     requested_task: H3TransformerTask,
-    artifact: H3ComfyPublishedArtifact,
+    published_artifact: Option<H3ComfyPublishedArtifact>,
     expected_content: Option<(u64, &str)>,
     cancellation: &dyn H3ComfyInt8Cancellation,
 ) -> InspectionResult<H3ComfyOpenedInt8Checkpoint> {
-    if requested_task != artifact.task() {
-        return Err(failure(
-            H3ComfyCheckpointErrorCode::TaskAuthorityMismatch,
-            format!(
-                "H3 requested task {requested_task:?} does not match source authority {:?}",
-                artifact.task()
-            ),
-        ));
+    if let Some(artifact) = published_artifact {
+        if artifact.format() != H3ComfyPrunedFormat::Int8ConvRot {
+            return Err(failure(
+                H3ComfyCheckpointErrorCode::FormatMismatch,
+                "H3 opened INT8 runtime requires an INT8 ConvRot published authority",
+            ));
+        }
+        if requested_task != artifact.task() {
+            return Err(failure(
+                H3ComfyCheckpointErrorCode::TaskAuthorityMismatch,
+                format!(
+                    "H3 requested task {requested_task:?} does not match source authority {:?}",
+                    artifact.task()
+                ),
+            ));
+        }
     }
     cancellation_boundary_inspection(cancellation)?;
     let symlink_metadata = std::fs::symlink_metadata(path).map_err(|error| {
@@ -599,8 +610,16 @@ fn open_h3_comfy_int8_checkpoint(
         config.clone(),
         requested_task,
         H3ComfyPrunedFormat::Int8ConvRot,
-        Some(artifact),
+        published_artifact,
     )?;
+    if published_artifact.is_some() {
+        validate_published_int8_quantization_sidecars(
+            &mut file,
+            &parsed,
+            &candidate.strategy.quantization_policy,
+            cancellation,
+        )?;
+    }
     let content_sha256 = hash_open_file(&mut file, parsed.file_len, cancellation)?;
     if let Some((_, expected_sha256)) = expected_content {
         if content_sha256 != expected_sha256 {
@@ -624,6 +643,9 @@ fn open_h3_comfy_int8_checkpoint(
         ));
     }
     let checkpoint_identity_sha256 = comfy_checkpoint_identity(&candidate, &content_sha256);
+    let f16_curve_projection_tensors = published_artifact
+        .map(|_| published_int8_curve_projection_tensors(&config))
+        .unwrap_or_default();
     Ok(H3ComfyOpenedInt8Checkpoint {
         candidate,
         config,
@@ -633,6 +655,8 @@ fn open_h3_comfy_int8_checkpoint(
             identity,
             content_sha256,
             runtime_bytes_read: AtomicU64::new(0),
+            f16_curve_projection_tensors,
+            f16_curve_projection_upcast_loads: AtomicU64::new(0),
         }),
         checkpoint_identity_sha256,
     })
@@ -704,6 +728,8 @@ struct H3ComfyOpenedSource {
     identity: H3OpenedFileIdentity,
     content_sha256: String,
     runtime_bytes_read: AtomicU64,
+    f16_curve_projection_tensors: BTreeSet<String>,
+    f16_curve_projection_upcast_loads: AtomicU64,
 }
 
 impl fmt::Debug for H3ComfyOpenedSource {
@@ -935,6 +961,75 @@ fn cancellation_boundary_inspection(
     Ok(())
 }
 
+fn validate_published_int8_quantization_sidecars(
+    file: &mut File,
+    parsed: &ParsedHeader,
+    policy: &H3ComfyQuantizationPolicy,
+    cancellation: &dyn H3ComfyInt8Cancellation,
+) -> InspectionResult<()> {
+    if policy.quantized_layers.len() != PUBLISHED_INT8_COMFY_QUANT_COUNT {
+        return Err(failure(
+            H3ComfyCheckpointErrorCode::InvalidMetadata,
+            format!(
+                "published H3 INT8 authority requires exactly {PUBLISHED_INT8_COMFY_QUANT_COUNT} quantized layers"
+            ),
+        ));
+    }
+    for layer in &policy.quantized_layers {
+        cancellation_boundary_inspection(cancellation)?;
+        let name = format!("{layer}.comfy_quant");
+        let tensor = parsed.tensors.get(&name).ok_or_else(|| {
+            failure(
+                H3ComfyCheckpointErrorCode::InvalidMetadata,
+                format!("published H3 INT8 quantization sidecar {name:?} is missing"),
+            )
+        })?;
+        if tensor.dtype != "U8"
+            || tensor.shape != [PUBLISHED_INT8_COMFY_QUANT_BYTES]
+            || tensor.data_offsets[1] - tensor.data_offsets[0]
+                != PUBLISHED_INT8_COMFY_QUANT_BYTES as u64
+        {
+            return Err(failure(
+                H3ComfyCheckpointErrorCode::InvalidMetadata,
+                format!(
+                    "published H3 INT8 quantization sidecar {name:?} does not have the authenticated U8[72] storage"
+                ),
+            ));
+        }
+        let data_start = 8u64
+            .checked_add(parsed.header_len)
+            .and_then(|value| value.checked_add(tensor.data_offsets[0]))
+            .ok_or_else(|| {
+                failure(
+                    H3ComfyCheckpointErrorCode::InvalidHeader,
+                    format!("published H3 INT8 quantization sidecar {name:?} offset overflows"),
+                )
+            })?;
+        file.seek(SeekFrom::Start(data_start)).map_err(|error| {
+            failure(
+                H3ComfyCheckpointErrorCode::Io,
+                format!("failed to seek H3 Comfy quantization sidecar {name:?}: {error}"),
+            )
+        })?;
+        let mut payload = [0u8; PUBLISHED_INT8_COMFY_QUANT_BYTES];
+        file.read_exact(&mut payload).map_err(|error| {
+            failure(
+                H3ComfyCheckpointErrorCode::Io,
+                format!("failed to read H3 Comfy quantization sidecar {name:?}: {error}"),
+            )
+        })?;
+        if payload != *PUBLISHED_INT8_COMFY_QUANT_PAYLOAD {
+            return Err(failure(
+                H3ComfyCheckpointErrorCode::InvalidMetadata,
+                format!(
+                    "published H3 INT8 quantization sidecar {name:?} differs from the authenticated Comfy payload"
+                ),
+            ));
+        }
+    }
+    cancellation_boundary_inspection(cancellation)
+}
+
 fn hash_open_file(
     file: &mut File,
     file_len: u64,
@@ -1058,9 +1153,19 @@ impl H3ComfyOpenedSource {
         cancellation: &dyn H3ComfyInt8Cancellation,
     ) -> candle::Result<Tensor> {
         let header = self.tensor_header(name)?;
+        let f16_curve_projection_upcast = header.dtype == "F16";
         let source_dtype = match header.dtype.as_str() {
             "BF16" => DType::BF16,
             "F32" => DType::F32,
+            "F16"
+                if requested_dtype == DType::F32
+                    && self.f16_curve_projection_tensors.contains(name) =>
+            {
+                DType::F16
+            }
+            "F16" => candle::bail!(
+                "H3 Comfy F16 storage is authorized only for published curve projections loaded as logical F32; refused tensor {name:?} as {requested_dtype:?}"
+            ),
             dtype => candle::bail!(
                 "H3 Comfy dense backend refuses encoded dtype {dtype:?} for tensor {name:?}"
             ),
@@ -1072,7 +1177,12 @@ impl H3ComfyOpenedSource {
         } else {
             tensor.to_dtype(requested_dtype)?
         };
-        tensor.to_device(device)
+        let tensor = tensor.to_device(device)?;
+        if f16_curve_projection_upcast {
+            self.f16_curve_projection_upcast_loads
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(tensor)
     }
 
     fn load_raw_int8(
@@ -1178,58 +1288,19 @@ impl H3ComfyInt8BlockLoader {
         self.source.runtime_bytes_read.load(Ordering::Relaxed)
     }
 
+    pub fn f16_curve_projection_upcast_loads(&self) -> u64 {
+        self.source
+            .f16_curve_projection_upcast_loads
+            .load(Ordering::Relaxed)
+    }
+
     pub fn block_memory(&self, index: usize) -> candle::Result<H3ComfyInt8BlockMemory> {
-        if index >= self.block_count() {
-            candle::bail!(
-                "MiniMax H3 block index {index} is outside the exact block count {}",
-                self.block_count()
-            )
-        }
-        let prefix = format!("blocks.{index}.");
-        let mut encoded_host_bytes = 0u64;
-        let mut max_host_read_staging_bytes = 0u64;
-        let mut max_device_weight_staging_bytes = 0u64;
-        let mut protected_device_bytes = 0u64;
-        for (name, tensor) in self
-            .source
-            .header
-            .tensors
-            .range(prefix.clone()..)
-            .take_while(|(name, _)| name.starts_with(&prefix))
-        {
-            let bytes = tensor.data_offsets[1] - tensor.data_offsets[0];
-            max_host_read_staging_bytes = max_host_read_staging_bytes.max(bytes);
-            let quantized = QUANTIZED_BLOCK_WEIGHT_SUFFIXES
-                .iter()
-                .any(|suffix| name == &format!("{prefix}{suffix}"));
-            let scale = name.ends_with(".weight_scale");
-            if quantized || scale {
-                encoded_host_bytes = encoded_host_bytes.checked_add(bytes).ok_or_else(|| {
-                    candle::Error::Msg("H3 Comfy block host byte count overflows".into())
-                })?;
-                if quantized {
-                    let rows = tensor.shape[0].min(H3_COMFY_PORTABLE_ROW_CHUNK);
-                    let staging = rows
-                        .checked_mul(tensor.shape[1])
-                        .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
-                        .ok_or_else(|| {
-                            candle::Error::Msg("H3 Comfy device staging bytes overflow".into())
-                        })? as u64;
-                    max_device_weight_staging_bytes = max_device_weight_staging_bytes.max(staging);
-                }
-            } else {
-                protected_device_bytes =
-                    protected_device_bytes.checked_add(bytes).ok_or_else(|| {
-                        candle::Error::Msg("H3 Comfy protected block bytes overflow".into())
-                    })?;
-            }
-        }
-        Ok(H3ComfyInt8BlockMemory {
-            encoded_host_bytes,
-            max_host_read_staging_bytes,
-            max_device_weight_staging_bytes,
-            protected_device_bytes,
-        })
+        calculate_block_memory(
+            &self.source.header,
+            &self.source.f16_curve_projection_tensors,
+            index,
+            self.block_count(),
+        )
     }
 
     /// Load exactly one indexed main block. A second live block is rejected so
@@ -1273,6 +1344,84 @@ impl H3ComfyInt8BlockLoader {
             self.vb.pp(prefix),
         )
     }
+}
+
+fn calculate_block_memory(
+    header: &ParsedHeader,
+    f16_curve_projection_tensors: &BTreeSet<String>,
+    index: usize,
+    block_count: usize,
+) -> candle::Result<H3ComfyInt8BlockMemory> {
+    if index >= block_count {
+        candle::bail!(
+            "MiniMax H3 block index {index} is outside the exact block count {block_count}"
+        )
+    }
+    let prefix = format!("blocks.{index}.");
+    let mut encoded_host_bytes = 0u64;
+    let mut max_host_read_staging_bytes = 0u64;
+    let mut max_device_weight_staging_bytes = 0u64;
+    let mut protected_device_bytes = 0u64;
+    for (name, tensor) in header
+        .tensors
+        .range(prefix.clone()..)
+        .take_while(|(name, _)| name.starts_with(&prefix))
+    {
+        if name.ends_with(".comfy_quant") {
+            continue;
+        }
+        let bytes = tensor.data_offsets[1] - tensor.data_offsets[0];
+        max_host_read_staging_bytes = max_host_read_staging_bytes.max(bytes);
+        let quantized = QUANTIZED_BLOCK_WEIGHT_SUFFIXES
+            .iter()
+            .any(|suffix| name == &format!("{prefix}{suffix}"));
+        let scale = name.ends_with(".weight_scale");
+        if quantized || scale {
+            encoded_host_bytes = encoded_host_bytes.checked_add(bytes).ok_or_else(|| {
+                candle::Error::Msg("H3 Comfy block host byte count overflows".into())
+            })?;
+            if quantized {
+                let rows = tensor.shape[0].min(H3_COMFY_PORTABLE_ROW_CHUNK);
+                let staging = rows
+                    .checked_mul(tensor.shape[1])
+                    .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+                    .ok_or_else(|| {
+                        candle::Error::Msg("H3 Comfy device staging bytes overflow".into())
+                    })? as u64;
+                max_device_weight_staging_bytes = max_device_weight_staging_bytes.max(staging);
+            }
+        } else {
+            let device_bytes = if tensor.dtype == "F16"
+                && f16_curve_projection_tensors.contains(name)
+            {
+                tensor
+                    .shape
+                    .iter()
+                    .try_fold(1u64, |elements, dimension| {
+                        elements.checked_mul(*dimension as u64)
+                    })
+                    .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>() as u64))
+                    .ok_or_else(|| {
+                        candle::Error::Msg(
+                            "H3 Comfy protected F32 device byte count overflows".into(),
+                        )
+                    })?
+            } else {
+                bytes
+            };
+            protected_device_bytes = protected_device_bytes
+                .checked_add(device_bytes)
+                .ok_or_else(|| {
+                    candle::Error::Msg("H3 Comfy protected block bytes overflow".into())
+                })?;
+        }
+    }
+    Ok(H3ComfyInt8BlockMemory {
+        encoded_host_bytes,
+        max_host_read_staging_bytes,
+        max_device_weight_staging_bytes,
+        protected_device_bytes,
+    })
 }
 
 #[derive(Deserialize)]
@@ -1627,17 +1776,7 @@ fn apply_published_int8_storage_overrides(
     expected: &mut BTreeMap<String, ExpectedTensor>,
     config: &H3TransformerConfig,
 ) -> InspectionResult<()> {
-    let block_tensors = (0..config.num_layers).flat_map(|index| {
-        [
-            format!("blocks.{index}.adaln_proj.linear.weight"),
-            format!("blocks.{index}.adaln_proj.linear.bias"),
-        ]
-    });
-    let final_tensors = [
-        "final_layer.adaln_proj.linear.weight".to_owned(),
-        "final_layer.adaln_proj.linear.bias".to_owned(),
-    ];
-    for name in block_tensors.chain(final_tensors) {
+    for name in published_int8_curve_projection_tensors(config) {
         let tensor = expected.get_mut(&name).ok_or_else(|| {
             failure(
                 H3ComfyCheckpointErrorCode::ConfigMismatch,
@@ -1657,6 +1796,21 @@ fn apply_published_int8_storage_overrides(
         tensor.dtype = "F16";
     }
     Ok(())
+}
+
+fn published_int8_curve_projection_tensors(config: &H3TransformerConfig) -> BTreeSet<String> {
+    (0..config.num_layers)
+        .flat_map(|index| {
+            [
+                format!("blocks.{index}.adaln_proj.linear.weight"),
+                format!("blocks.{index}.adaln_proj.linear.bias"),
+            ]
+        })
+        .chain([
+            "final_layer.adaln_proj.linear.weight".to_owned(),
+            "final_layer.adaln_proj.linear.bias".to_owned(),
+        ])
+        .collect()
 }
 
 fn detect_format(
@@ -2883,6 +3037,206 @@ mod tests {
     }
 
     #[test]
+    fn published_int8_sidecar_payloads_are_exact_and_cancellable() {
+        let config = H3TransformerConfig::default();
+        let mode = H3AdaLnMode::Curve {
+            grid: PUBLISHED_INT8_CURVE_GRID,
+            basis_dim: PUBLISHED_INT8_CURVE_BASIS,
+        };
+        let quantization = published_int8_quantization(&config, mode).unwrap();
+        let (_, policy) = expected_schema(
+            &config,
+            mode,
+            H3ComfyPrunedFormat::Int8ConvRot,
+            Some(&quantization),
+        )
+        .unwrap();
+        assert_eq!(
+            policy.quantized_layers.len(),
+            PUBLISHED_INT8_COMFY_QUANT_COUNT
+        );
+
+        let mut tensors = BTreeMap::new();
+        let mut data = Vec::new();
+        for layer in &policy.quantized_layers {
+            let start = data.len() as u64;
+            data.extend_from_slice(PUBLISHED_INT8_COMFY_QUANT_PAYLOAD);
+            tensors.insert(
+                format!("{layer}.comfy_quant"),
+                HeaderTensor {
+                    dtype: "U8".into(),
+                    shape: vec![PUBLISHED_INT8_COMFY_QUANT_BYTES],
+                    data_offsets: [start, data.len() as u64],
+                },
+            );
+        }
+        let path = std::env::temp_dir().join(format!(
+            "mold-h3-comfy-sidecars-{}-{}.safetensors",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut created = File::create(&path).unwrap();
+        created.write_all(&0u64.to_le_bytes()).unwrap();
+        created.write_all(&data).unwrap();
+        drop(created);
+        let parsed = ParsedHeader {
+            metadata: BTreeMap::new(),
+            tensors,
+            header_len: 0,
+            file_len: 8 + data.len() as u64,
+            header_identity_sha256: String::new(),
+        };
+        let mut file = File::open(&path).unwrap();
+        validate_published_int8_quantization_sidecars(
+            &mut file,
+            &parsed,
+            &policy,
+            &H3ComfyNeverCancel,
+        )
+        .unwrap();
+
+        let mut mutable = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        mutable.seek(SeekFrom::Start(8 + 17)).unwrap();
+        mutable.write_all(b"X").unwrap();
+        mutable.sync_all().unwrap();
+        drop(mutable);
+        let mut file = File::open(&path).unwrap();
+        assert_eq!(
+            validate_published_int8_quantization_sidecars(
+                &mut file,
+                &parsed,
+                &policy,
+                &H3ComfyNeverCancel,
+            )
+            .unwrap_err()
+            .code,
+            H3ComfyCheckpointErrorCode::InvalidMetadata
+        );
+
+        let cancelled = ToggleCancellation(AtomicBool::new(true));
+        let mut file = File::open(&path).unwrap();
+        assert_eq!(
+            validate_published_int8_quantization_sidecars(&mut file, &parsed, &policy, &cancelled,)
+                .unwrap_err()
+                .code,
+            H3ComfyCheckpointErrorCode::Cancelled
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn published_f16_curve_storage_upcasts_only_authorized_logical_f32() {
+        let name = "blocks.0.adaln_proj.linear.bias";
+        let header = serde_json::json!({
+            (name): {
+                "dtype": "F16",
+                "shape": [2],
+                "data_offsets": [0, 4]
+            }
+        });
+        let path = write_fixture(&header, &[0x00, 0x3c, 0x00, 0xc0], "f16-upcast");
+        let parsed = read_safetensors_header(&path).unwrap();
+        let make_source = |allowed: BTreeSet<String>| {
+            let file = File::open(&path).unwrap();
+            let identity = H3OpenedFileIdentity::from_metadata(&file.metadata().unwrap());
+            H3ComfyOpenedSource {
+                file: Mutex::new(file),
+                header: parsed.clone(),
+                identity,
+                content_sha256: "fixture".into(),
+                runtime_bytes_read: AtomicU64::new(0),
+                f16_curve_projection_tensors: allowed,
+                f16_curve_projection_upcast_loads: AtomicU64::new(0),
+            }
+        };
+        let source = make_source(BTreeSet::from([name.to_owned()]));
+        let tensor = source
+            .load_dense_tensor(name, DType::F32, &Device::Cpu, &H3ComfyNeverCancel)
+            .unwrap();
+        assert_eq!(tensor.to_vec1::<f32>().unwrap(), vec![1.0, -2.0]);
+        assert_eq!(
+            source
+                .f16_curve_projection_upcast_loads
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert!(source
+            .load_dense_tensor(name, DType::BF16, &Device::Cpu, &H3ComfyNeverCancel)
+            .unwrap_err()
+            .to_string()
+            .contains("loaded as logical F32"));
+        let unauthorized = make_source(BTreeSet::new());
+        assert!(unauthorized
+            .load_dense_tensor(name, DType::F32, &Device::Cpu, &H3ComfyNeverCancel)
+            .unwrap_err()
+            .to_string()
+            .contains("authorized only for published curve projections"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn published_block_memory_excludes_sidecars_and_counts_logical_f32() {
+        let tensors = BTreeMap::from([
+            (
+                "blocks.0.attn.qkv_proj.weight".into(),
+                HeaderTensor {
+                    dtype: "I8".into(),
+                    shape: vec![1, 4],
+                    data_offsets: [0, 4],
+                },
+            ),
+            (
+                "blocks.0.attn.qkv_proj.weight_scale".into(),
+                HeaderTensor {
+                    dtype: "F32".into(),
+                    shape: vec![1, 1],
+                    data_offsets: [4, 8],
+                },
+            ),
+            (
+                "blocks.0.attn.qkv_proj.comfy_quant".into(),
+                HeaderTensor {
+                    dtype: "U8".into(),
+                    shape: vec![PUBLISHED_INT8_COMFY_QUANT_BYTES],
+                    data_offsets: [8, 80],
+                },
+            ),
+            (
+                "blocks.0.adaln_proj.linear.weight".into(),
+                HeaderTensor {
+                    dtype: "F16".into(),
+                    shape: vec![2],
+                    data_offsets: [80, 84],
+                },
+            ),
+            (
+                "blocks.0.norm1.weight".into(),
+                HeaderTensor {
+                    dtype: "F32".into(),
+                    shape: vec![1],
+                    data_offsets: [84, 88],
+                },
+            ),
+        ]);
+        let parsed = ParsedHeader {
+            metadata: BTreeMap::new(),
+            tensors,
+            header_len: 0,
+            file_len: 96,
+            header_identity_sha256: String::new(),
+        };
+        let allowed = BTreeSet::from(["blocks.0.adaln_proj.linear.weight".to_owned()]);
+        let memory = calculate_block_memory(&parsed, &allowed, 0, 1).unwrap();
+        assert_eq!(memory.encoded_host_bytes, 8);
+        assert_eq!(memory.max_host_read_staging_bytes, 4);
+        assert_eq!(memory.max_device_weight_staging_bytes, 16);
+        assert_eq!(memory.protected_device_bytes, 12);
+    }
+
+    #[test]
     fn opened_int8_runtime_streams_exactly_one_cpu_packed_block() -> candle::Result<()> {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<H3ComfyOpenedInt8Checkpoint>();
@@ -2894,7 +3248,7 @@ mod tests {
             &path,
             config,
             H3TransformerTask::T2VaFl2Va,
-            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+            None,
             None,
             &H3ComfyNeverCancel,
         )
@@ -2941,7 +3295,7 @@ mod tests {
             &path,
             config.clone(),
             H3TransformerTask::T2VaFl2Va,
-            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+            None,
             None,
             &H3ComfyNeverCancel,
         )
@@ -2950,7 +3304,7 @@ mod tests {
             &path,
             config.clone(),
             H3TransformerTask::T2VaFl2Va,
-            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+            None,
             None,
             &H3ComfyNeverCancel,
         )
@@ -2959,7 +3313,7 @@ mod tests {
             &path,
             config,
             H3TransformerTask::Ref2Va,
-            H3ComfyPublishedArtifact::Ref2VaPrunedInt8ConvRot,
+            None,
             None,
             &H3ComfyNeverCancel,
         )
@@ -2997,7 +3351,7 @@ mod tests {
             &path,
             config.clone(),
             H3TransformerTask::T2VaFl2Va,
-            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+            None,
             Some((bytes, &wrong_digest)),
             &H3ComfyNeverCancel,
         )
@@ -3012,7 +3366,7 @@ mod tests {
             &path,
             config.clone(),
             H3TransformerTask::T2VaFl2Va,
-            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+            None,
             None,
             &cancelled,
         )
@@ -3023,7 +3377,7 @@ mod tests {
             &path,
             config,
             H3TransformerTask::T2VaFl2Va,
-            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+            None,
             None,
             &H3ComfyNeverCancel,
         )
@@ -3045,7 +3399,7 @@ mod tests {
             &path,
             config.clone(),
             H3TransformerTask::T2VaFl2Va,
-            H3ComfyPublishedArtifact::Fl2VaPrunedInt8ConvRot,
+            None,
             None,
             &H3ComfyNeverCancel,
         )
