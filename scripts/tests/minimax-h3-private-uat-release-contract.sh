@@ -16,9 +16,12 @@ require_text() {
   grep -Fq "$text" "$file" || fail "$message"
 }
 
-require_text crates/mold-inference/Cargo.toml \
+require_text crates/mold-candle/Cargo.toml \
   'h3-private-uat = []' \
-  "mold-inference does not expose the private H3 qualification feature"
+  "mold-candle does not keep the private H3 runtime behind its own feature"
+require_text crates/mold-inference/Cargo.toml \
+  'h3-private-uat = ["mold-candle/h3-private-uat"]' \
+  "mold-inference does not narrowly forward the private H3 runtime feature"
 require_text crates/mold-inference/Cargo.toml \
   'required-features = ["dev-bins", "h3-private-uat"]' \
   "the private H3 artifact qualifier is reachable without both development features"

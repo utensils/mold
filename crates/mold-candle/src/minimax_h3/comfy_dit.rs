@@ -1284,6 +1284,20 @@ impl H3ComfyInt8BlockLoader {
         &self.source.content_sha256
     }
 
+    /// Exact schema, policy, and authenticated-content identity shared with
+    /// the resident transformer created by the same opened checkpoint.
+    pub fn checkpoint_identity_sha256(&self) -> &str {
+        self.identity
+            .checkpoint_identity_sha256()
+            .expect("Comfy block loaders always carry a checkpoint identity")
+    }
+
+    /// True only when this loader and resident transformer came from the same
+    /// opened checkpoint authority, not merely equal artifact bytes.
+    pub fn is_exact_pair_for(&self, transformer: &H3StreamedTransformer) -> bool {
+        transformer.shares_streamed_identity(&self.identity)
+    }
+
     pub fn bytes_read(&self) -> u64 {
         self.source.runtime_bytes_read.load(Ordering::Relaxed)
     }
@@ -3257,6 +3271,7 @@ mod tests {
         assert_eq!(opened.checkpoint_identity_sha256().len(), 64);
         let expected_identity = opened.checkpoint_identity_sha256().to_owned();
         let (transformer, mut loader) = opened.load(&Device::Cpu)?;
+        assert!(loader.is_exact_pair_for(&transformer));
         assert_eq!(
             transformer.checkpoint_identity_sha256(),
             Some(expected_identity.as_str())
@@ -3283,6 +3298,42 @@ mod tests {
         assert_eq!(block1.index(), 1);
         drop(block1);
         assert_eq!(loader.live_block_count(), 0);
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn independently_opened_runtime_halves_are_not_an_exact_pair() -> candle::Result<()> {
+        let (config, header, data) = runtime_fixture();
+        let path = write_fixture(&header, &data, "opened-pair-identity");
+        let first = open_h3_comfy_int8_checkpoint(
+            &path,
+            config.clone(),
+            H3TransformerTask::T2VaFl2Va,
+            None,
+            None,
+            &H3ComfyNeverCancel,
+        )
+        .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        let second = open_h3_comfy_int8_checkpoint(
+            &path,
+            config,
+            H3TransformerTask::T2VaFl2Va,
+            None,
+            None,
+            &H3ComfyNeverCancel,
+        )
+        .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        let (first_transformer, first_loader) = first.load(&Device::Cpu)?;
+        let (second_transformer, second_loader) = second.load(&Device::Cpu)?;
+        assert_eq!(
+            first_loader.checkpoint_identity_sha256(),
+            second_loader.checkpoint_identity_sha256()
+        );
+        assert!(first_loader.is_exact_pair_for(&first_transformer));
+        assert!(second_loader.is_exact_pair_for(&second_transformer));
+        assert!(!first_loader.is_exact_pair_for(&second_transformer));
+        assert!(!second_loader.is_exact_pair_for(&first_transformer));
         let _ = std::fs::remove_file(path);
         Ok(())
     }

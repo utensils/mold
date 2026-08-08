@@ -122,6 +122,12 @@ pub use qwen_nvfp4::{
     H3_QWEN_NVFP4_AWQ_TENSOR_COUNT, H3_QWEN_NVFP4_LINEAR_COUNT,
     H3_QWEN_NVFP4_PRE_QUANT_SCALE_COUNT, H3_QWEN_QUANT_MARKER_COUNT,
 };
+#[cfg(feature = "h3-private-uat")]
+#[doc(hidden)]
+pub use qwen_nvfp4_runtime::{
+    load_h3_qwen_nvfp4_conditioner, H3QwenNvfp4LoadEvent, H3QwenNvfp4LoadObserver,
+    H3QwenNvfp4RuntimeError, LoadedH3QwenNvfp4Conditioner, NoopH3QwenNvfp4LoadObserver,
+};
 pub use qwen_quant::{
     expected_h3_qwen_int8_weight_only_schema, validate_h3_qwen_int8_weight_only_schema,
     H3QwenFp32Boundary, H3QwenInt8CheckpointMetadata, H3QwenInt8LayerMetadata,
