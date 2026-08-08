@@ -232,26 +232,35 @@ report is public evidence.
 
 The development-only qualifier repeats full-content authentication and bounded
 structural inspection before any later runtime qualification. It is hard-bound
-to the authorized host, root, canonical hidden model name, and explicit scope:
+to the authorized host, root, either exact canonical hidden task name, and the
+explicit scope. Qualify the two independently so a shared component cannot
+hide a task-transformer mismatch:
 
 ```bash
-nix develop --offline --no-write-lock-file -c \
-  cargo run --locked --offline --release \
-  -p mold-ai-inference \
-  --features dev-bins,h3-private-uat \
-  --bin h3_artifact_qualification -- \
-  --models-root /storage/jamesbrink/mold-uat/minimax-h3/models \
-  --model minimax-h3-fl2va:comfy-pruned-int8 \
-  --authorization-scope private-plato-uat \
-  > /storage/jamesbrink/mold-uat/minimax-h3/evidence/artifact-qualification.json
+for model in \
+  minimax-h3-fl2va:comfy-pruned-int8 \
+  minimax-h3-ref2va:comfy-pruned-int8
+do
+  task=${model#minimax-h3-}
+  task=${task%%:*}
+  nix develop --offline --no-write-lock-file -c \
+    cargo run --locked --offline --release \
+    -p mold-ai-inference \
+    --features dev-bins,h3-private-uat \
+    --bin h3_artifact_qualification -- \
+    --models-root /storage/jamesbrink/mold-uat/minimax-h3/models \
+    --model "$model" \
+    --authorization-scope private-plato-uat \
+    > "/storage/jamesbrink/mold-uat/minimax-h3/evidence/artifact-qualification-$task.json"
+done
 ```
 
-The report contains only relative paths and identities, says explicitly that no
-runtime or generated media was constructed, and remains private with the model
-campaign. The feature is not forwarded by `mold-ai`; every published binary is
-scanned for its claim marker and rejected if the private reader is present.
-This qualifies artifact identity only. It does not satisfy numerical parity,
-CUDA generation UAT, public authorization, or release activation.
+Each report contains only relative paths and identities, says explicitly that
+no runtime or generated media was constructed, and remains private with the
+model campaign. The feature is not forwarded by `mold-ai`; every published
+binary is scanned for its claim marker and rejected if the private reader is
+present. This qualifies artifact identity only. It does not satisfy numerical
+parity, CUDA generation UAT, public authorization, or release activation.
 
 No H3 model download, `MOLD_HOME`, fixture bundle, checkpoint shard or header,
 generated output, or other H3 artifact was read from or placed on that volume.

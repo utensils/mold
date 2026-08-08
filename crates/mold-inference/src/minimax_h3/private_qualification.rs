@@ -13,9 +13,12 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use mold_candle::minimax_h3::{
-    inspect_h3_comfy_published_header, inspect_safetensors_header, validate_audio_safetensors,
-    validate_comfy_weight_file, validate_processor_assets, AudioTensorLayout, AudioVaeConfig,
-    H3ComfyPublishedArtifact, H3ConditionerConfig, H3TransformerTask, MiniMaxH3VisualVaeConfig,
+    inspect_h3_comfy_published_header, inspect_h3_qwen_nvfp4_awq_header,
+    validate_audio_safetensors, validate_comfy_weight_file, validate_processor_assets,
+    AudioTensorLayout, AudioVaeConfig, H3ComfyPublishedArtifact, H3ConditionerConfig,
+    H3TransformerTask, MiniMaxH3VisualVaeConfig, H3_QWEN_NVFP4_AWQ_FILENAME,
+    H3_QWEN_NVFP4_AWQ_FILE_BYTES, H3_QWEN_NVFP4_AWQ_HEADER_BYTES, H3_QWEN_NVFP4_AWQ_POLICY_SHA256,
+    H3_QWEN_NVFP4_AWQ_SHA256, H3_QWEN_NVFP4_AWQ_STABLE_ID, H3_QWEN_NVFP4_AWQ_TENSOR_COUNT,
 };
 use mold_core::manifest::{find_manifest, storage_path, ModelComponent, ModelFile, ModelManifest};
 use mold_core::minimax_h3::{self as contract, Task};
@@ -31,10 +34,6 @@ pub const H3_PRIVATE_AUTHORIZATION_SCOPE: &str = "private-plato-uat";
 pub const H3_PRIVATE_HOST: &str = "plato";
 pub const H3_PRIVATE_MODELS_ROOT: &str = "/storage/jamesbrink/mold-uat/minimax-h3/models";
 
-const QWEN_NVFP4_FILENAME: &str = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors";
-const QWEN_NVFP4_FILE_BYTES: u64 = 15_687_142_551;
-const QWEN_NVFP4_HEADER_BYTES: u64 = 231_400;
-const QWEN_NVFP4_TENSOR_COUNT: usize = 2_054;
 const MAX_PRIVATE_HEADER_BYTES: u64 = 8 * 1024 * 1024;
 const HASH_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
@@ -569,7 +568,7 @@ fn inspect_structure(
                 policy_identity_sha256: Some(candidate.strategy.quantization_policy.policy_sha256),
             })
         }
-        ModelComponent::TextEncoder => inspect_qwen_nvfp4_awq(&artifact.canonical_path),
+        ModelComponent::TextEncoder => inspect_qwen_nvfp4_awq(artifact),
         ModelComponent::Vae => {
             let validated = validate_comfy_weight_file(
                 &MiniMaxH3VisualVaeConfig::default(),
@@ -625,69 +624,37 @@ fn inspect_structure(
     }
 }
 
-fn inspect_qwen_nvfp4_awq(path: &Path) -> Result<StructuralInspection> {
-    if path.file_name().and_then(|name| name.to_str()) != Some(QWEN_NVFP4_FILENAME) {
+fn inspect_qwen_nvfp4_awq(artifact: &ResolvedArtifact<'_>) -> Result<StructuralInspection> {
+    if artifact.file.hf_filename != H3_QWEN_NVFP4_AWQ_FILENAME
+        || artifact
+            .canonical_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some(H3_QWEN_NVFP4_AWQ_FILENAME)
+    {
         bail!("private H3 Qwen NVFP4-AWQ artifact has a non-canonical filename")
     }
-    let header = inspect_safetensors_header(path)?;
-    if header.header_len != QWEN_NVFP4_HEADER_BYTES
-        || header.file_len != QWEN_NVFP4_FILE_BYTES
-        || header.tensors.len() != QWEN_NVFP4_TENSOR_COUNT
+    if artifact.file.size_bytes != H3_QWEN_NVFP4_AWQ_FILE_BYTES
+        || artifact.file.sha256 != Some(H3_QWEN_NVFP4_AWQ_SHA256)
     {
-        bail!("private H3 Qwen NVFP4-AWQ header identity does not match the released object")
+        bail!("private H3 Qwen NVFP4-AWQ manifest identity differs from the strict published contract")
     }
-    let mut dtypes = BTreeMap::<&str, usize>::new();
-    for tensor in header.tensors.values() {
-        *dtypes.entry(tensor.dtype.as_str()).or_default() += 1;
-    }
-    let expected_dtypes = BTreeMap::from([
-        ("BF16", 651),
-        ("F32", 351),
-        ("F8_E4M3", 350),
-        ("I8", 1),
-        ("U8", 701),
-    ]);
-    let suffix_counts = |suffix: &str| {
-        header
-            .tensors
-            .keys()
-            .filter(|name| name.ends_with(suffix))
-            .count()
-    };
-    if dtypes != expected_dtypes
-        || suffix_counts(".weight") != 727
-        || suffix_counts(".bias") != 175
-        || suffix_counts(".weight_scale") != 351
-        || suffix_counts(".weight_scale_2") != 350
-        || suffix_counts(".pre_quant_scale") != 100
-        || suffix_counts(".comfy_quant") != 351
+    let inspection = inspect_h3_qwen_nvfp4_awq_header(&artifact.canonical_path)
+        .map_err(|error| anyhow!(error))?;
+    if inspection.stable_id != H3_QWEN_NVFP4_AWQ_STABLE_ID
+        || inspection.expected_artifact_sha256 != H3_QWEN_NVFP4_AWQ_SHA256
+        || inspection.artifact_file_bytes != H3_QWEN_NVFP4_AWQ_FILE_BYTES
+        || inspection.header_bytes != H3_QWEN_NVFP4_AWQ_HEADER_BYTES
+        || inspection.tensor_count != H3_QWEN_NVFP4_AWQ_TENSOR_COUNT
+        || inspection.policy_sha256 != H3_QWEN_NVFP4_AWQ_POLICY_SHA256
     {
-        bail!("private H3 Qwen NVFP4-AWQ dtype/companion inventory mismatch")
-    }
-    let header_identity_sha256 = hash_safetensors_header(path)?;
-    let mut policy = Sha256::new();
-    policy.update(b"mold.minimax-h3.qwen3-vl.nvfp4-awq.header.v1\0");
-    policy.update(header_identity_sha256.as_bytes());
-    for (dtype, count) in expected_dtypes {
-        policy.update(dtype.as_bytes());
-        policy.update((count as u64).to_le_bytes());
-    }
-    for (suffix, count) in [
-        ("weight", 727_u64),
-        ("bias", 175),
-        ("weight_scale", 351),
-        ("weight_scale_2", 350),
-        ("pre_quant_scale", 100),
-        ("comfy_quant", 351),
-    ] {
-        policy.update(suffix.as_bytes());
-        policy.update(count.to_le_bytes());
+        bail!("private H3 Qwen NVFP4-AWQ inspection differs from the strict published contract")
     }
     Ok(StructuralInspection {
-        contract: "qwen3-vl-layer50-nvfp4-awq-bounded-header-v1",
-        header_identity_sha256: Some(header_identity_sha256),
-        tensor_count: Some(header.tensors.len()),
-        policy_identity_sha256: Some(format!("{:x}", policy.finalize())),
+        contract: H3_QWEN_NVFP4_AWQ_STABLE_ID,
+        header_identity_sha256: Some(inspection.header_identity_sha256),
+        tensor_count: Some(inspection.tensor_count),
+        policy_identity_sha256: Some(inspection.policy_sha256),
     })
 }
 
