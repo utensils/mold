@@ -78,6 +78,14 @@ concurrency:
 jobs:
   changes:
     name: Classify iOS changes
+    # Generated release-plz PRs promote an already-tested main revision. Match
+    # the repository-owned app as well as its branch prefix so this cannot be
+    # used as a user-controlled bypass.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.actor != 'release-plz-mold[bot]' ||
+      startsWith(github.head_ref, 'release-plz-') == false ||
+      github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -92,7 +100,9 @@ jobs:
         with:
           filters: |
             frontend:
-              - 'apps/mobile/**'
+              - 'apps/mobile/src-tauri/app-icon.png'
+              - 'apps/mobile/src-tauri/app-icon-source.sha256'
+              - 'apps/mobile/src-tauri/gen/apple/Assets.xcassets/**'
               - 'studio/**'
               - 'ui/**'
               - 'package.json'
@@ -140,12 +150,18 @@ jobs:
       - run: ../scripts/tests/ios-release-assets.sh
       - run: ../scripts/tests/ios-testflight-distribution.sh
       - run: ../scripts/tests/ios-sim-pick.sh
-      - run: bun run test
-      - run: bun run fmt:check
+      # The full desktop + Studio suite runs in Desktop CI. Keep iOS focused on
+      # its 29 mobile tests and mobile-only formatting; the release-assets
+      # contract above already performs the authoritative mobile typecheck/build.
+      - run: bunx vitest run src/mobile
+      - run: bunx prettier --check "src/mobile/**/*.{ts,vue,css}" vite.mobile.config.ts index.mobile.html
 
   simulator-rust:
     name: iOS simulator Rust
     needs: changes
+    # This is the only compiler for the standalone mobile crate and has caught
+    # native-only PR failures. Keep Clippy, but drop the redundant cargo check
+    # because Clippy compiles the same target before linting it.
     if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     runs-on: macos-14
     defaults:
@@ -161,5 +177,4 @@ jobs:
         with:
           workspaces: apps/mobile/src-tauri
       - run: cargo fmt -- --check
-      - run: cargo check --target aarch64-apple-ios-sim
       - run: cargo clippy --target aarch64-apple-ios-sim -- -D warnings

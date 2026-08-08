@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC1003,SC2016 # Literal workflow/Docker/Nix source is asserted below.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -27,6 +28,10 @@ require_ci_release_path() {
     ' "$repo_root/.github/workflows/ci.yml"
   )"
   [[ -n "$block" ]] || fail ".github/workflows/ci.yml has no release path classifier"
+  if [[ "$path" == .github/workflows/* ]] \
+    && grep -Fq -- "- '.github/workflows/**'" <<<"$block"; then
+    return 0
+  fi
   grep -Fq -- "- '${path}'" <<<"$block" \
     || fail ".github/workflows/ci.yml release classifier is missing: $path"
 }
