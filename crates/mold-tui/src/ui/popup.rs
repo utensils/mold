@@ -1197,6 +1197,8 @@ mod tests {
                     &crate::model_info::family_for_model("", &mold_core::Config::default()),
                 ),
                 progress: crate::app::ProgressState::default(),
+                live_preview_image: None,
+                live_preview_protocol: None,
                 preview_image: None,
                 image_state: None,
                 animation: None,

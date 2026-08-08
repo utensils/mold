@@ -2,23 +2,42 @@
 //!
 //! Three states (mock-exact):
 //! 1. **Idle** — a dim `◇` and "Press Enter to generate".
-//! 2. **Generating** — braille spinner + `Developing… {step}/{total}`
-//!    (spec §11 vocabulary) + a 22-char `█░` bar + `pct · it/s · eta`.
-//!    While a model pull is in flight the existing download status text
-//!    takes the stage line.
+//! 2. **Generating** — the latest centered fixed-protocol latent preview plus
+//!    `Developing… {step}/{total} · pct` when available; otherwise a braille
+//!    spinner + 22-char `█░` bar + `pct · it/s · eta`. While a model pull is
+//!    in flight the existing download status text takes the stage line.
 //! 3. **Done** — the print via the existing `StatefulImage` resize path
 //!    (NOT the gallery grid's fixed-protocol path) + a caption row
 //!    `model · seed · time · host`.
 
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
-use ratatui_image::StatefulImage;
+use ratatui_image::{Image, Resize, StatefulImage};
 
 use crate::app::App;
 use crate::ui::widgets::panel_block;
 
 /// Width of the `█░` progress bar in cells.
 const BAR_WIDTH: usize = 22;
+/// A live image always keeps one text row for denoise position. This makes
+/// progress observable even when a terminal graphics protocol is unavailable.
+const LIVE_PREVIEW_STATUS_ROWS: u16 = 1;
+
+fn live_preview_areas(inner: Rect) -> (Rect, Rect) {
+    let status_height = LIVE_PREVIEW_STATUS_ROWS.min(inner.height);
+    let image_height = inner.height.saturating_sub(status_height);
+    (
+        Rect {
+            height: image_height,
+            ..inner
+        },
+        Rect {
+            y: inner.y + image_height,
+            height: status_height,
+            ..inner
+        },
+    )
+}
 
 /// Pure formatter for the generating state: the stage line, the bar, and
 /// the `pct · rate · eta` line. Guards division by zero when no step has
@@ -89,6 +108,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    if app.generate.generating && app.generate.live_preview_image.is_some() {
+        render_live_preview(frame, app, inner);
+        return;
+    }
+
     if app.generate.image_state.is_some() {
         render_done(frame, app, inner);
         return;
@@ -98,6 +122,54 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         render_generating(frame, app, inner);
     } else {
         render_idle(frame, app, inner);
+    }
+}
+
+fn render_live_preview(frame: &mut Frame, app: &mut App, inner: Rect) {
+    let (image_area, status_area) = live_preview_areas(inner);
+    let cache_valid = app
+        .generate
+        .live_preview_protocol
+        .as_ref()
+        .is_some_and(|(w, h, _)| *w == image_area.width && *h == image_area.height);
+
+    if !cache_valid {
+        app.generate.live_preview_protocol = None;
+        if image_area.width > 0 && image_area.height > 0 {
+            if let Some(image) = app.generate.live_preview_image.clone() {
+                if let Ok(protocol) =
+                    app.picker
+                        .new_protocol(image, image_area, Resize::Scale(None))
+                {
+                    app.generate.live_preview_protocol =
+                        Some((image_area.width, image_area.height, protocol));
+                }
+            }
+        }
+    }
+
+    if let Some((_, _, ref mut protocol)) = app.generate.live_preview_protocol {
+        let fitted = protocol.area();
+        let centered = crate::ui::gallery::center_rect(image_area, fitted.width, fitted.height);
+        frame.render_widget(Image::new(protocol), centered);
+    } else {
+        render_generating(frame, app, image_area);
+    }
+
+    if status_area.height > 0 {
+        let progress = &app.generate.progress;
+        let total = progress.denoise_total.max(1);
+        let step = progress.denoise_step.min(total);
+        let status = format!(
+            "Developing\u{2026} {step}/{total} \u{00b7} {}%",
+            step * 100 / total
+        );
+        frame.render_widget(
+            Paragraph::new(status)
+                .style(app.theme.dim())
+                .alignment(Alignment::Center),
+            status_area,
+        );
     }
 }
 
@@ -210,6 +282,14 @@ fn render_centered(frame: &mut Frame, inner: Rect, lines: Vec<Line>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_preview_reserves_one_status_row_without_squeezing_the_image() {
+        let inner = Rect::new(4, 7, 48, 8);
+        let (image, status) = live_preview_areas(inner);
+        assert_eq!(image, Rect::new(4, 7, 48, 7));
+        assert_eq!(status, Rect::new(4, 14, 48, 1));
+    }
 
     #[test]
     fn preview_progress_formats_percent_rate_eta() {
