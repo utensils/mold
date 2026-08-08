@@ -21,6 +21,7 @@ mod text;
 mod tiling;
 
 pub use chain::{extract_tail_latents, tail_latent_frame_count};
+pub(crate) use model::DecodedAudio;
 pub use pipeline::Ltx2Engine;
 
 /// Whether the resolved checkpoint set contains both the audio VAE and

@@ -311,6 +311,23 @@ fn decode_video_bounded(
     max_dimension: Option<u32>,
     max_rgb_bytes: Option<u64>,
 ) -> Result<DecodedVideo> {
+    decode_video_bounded_with_checkpoint(
+        input_video,
+        target_fps,
+        max_dimension,
+        max_rgb_bytes,
+        &mut || Ok(()),
+    )
+}
+
+fn decode_video_bounded_with_checkpoint(
+    input_video: &Path,
+    target_fps: Option<u32>,
+    max_dimension: Option<u32>,
+    max_rgb_bytes: Option<u64>,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<DecodedVideo> {
+    checkpoint()?;
     let mut reader = read_mp4(input_video)?;
     let video = find_video_track(&reader)?;
     let (has_audio, audio_sample_rate, audio_channels) = audio_metadata(&reader)?;
@@ -376,6 +393,7 @@ fn decode_video_bounded(
     let mut pps_seen = false;
 
     for sample_id in 1..=video.frames.unwrap_or_default() {
+        checkpoint()?;
         let Some(sample) = reader.read_sample(video.track_id, sample_id)? else {
             continue;
         };
@@ -397,6 +415,7 @@ fn decode_video_bounded(
             .decode(&converted)
             .context("failed to decode H.264 frame from MP4")?
         {
+            checkpoint()?;
             if should_sample_export_frame(decoded_index, video.fps, export_fps) {
                 let mut rgb = vec![0; image.rgb8_len()];
                 image.write_rgb8(&mut rgb);
@@ -423,6 +442,7 @@ fn decode_video_bounded(
         .flush_remaining()
         .context("failed to flush delayed H.264 frames")?
     {
+        checkpoint()?;
         if should_sample_export_frame(decoded_index, video.fps, export_fps) {
             let mut rgb = vec![0; image.rgb8_len()];
             image.write_rgb8(&mut rgb);
@@ -449,6 +469,8 @@ fn decode_video_bounded(
             input_video.display()
         );
     }
+
+    checkpoint()?;
 
     Ok(DecodedVideo {
         metadata: ProbeMetadata {
@@ -480,6 +502,16 @@ pub(crate) fn decode_video_frames(input_video: &Path) -> Result<(ProbeMetadata, 
 
 pub fn decode_video_frames_from_path(input: &Path) -> Result<(ProbeMetadata, Vec<RgbImage>)> {
     decode_video_frames(input)
+}
+
+/// Decode an H.264 MP4 while polling an attempt-scoped cancellation hook at
+/// container-sample and decoded-frame boundaries.
+pub(crate) fn decode_video_frames_from_path_with_checkpoint(
+    input: &Path,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<(ProbeMetadata, Vec<RgbImage>)> {
+    let video = decode_video_bounded_with_checkpoint(input, None, None, None, checkpoint)?;
+    Ok((video.metadata, video.frames))
 }
 
 #[allow(dead_code)]

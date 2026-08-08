@@ -8,6 +8,7 @@ pub(crate) mod backend;
 pub(crate) mod engine;
 pub(crate) mod offload;
 pub(crate) mod pipeline;
+pub(crate) mod reference_media;
 pub(crate) mod sampler;
 
 use anyhow::{anyhow, Result};
