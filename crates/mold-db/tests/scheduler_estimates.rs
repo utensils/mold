@@ -22,6 +22,9 @@ fn scheduler_estimates_round_trip_and_prune() {
             ewma_prompt_encode_ms: Some(100.0),
             ewma_denoise_ms: Some(800.0),
             ewma_vae_ms: Some(100.0),
+            ewma_visual_decode_ms: Some(90.0),
+            ewma_audio_decode_ms: Some(40.0),
+            ewma_mux_ms: Some(10.0),
             ewma_upscale_ms: None,
             vram_high_water_bytes: Some(12_000),
             host_high_water_bytes: Some(16_000),
@@ -41,6 +44,10 @@ fn scheduler_estimates_round_trip_and_prune() {
     assert_eq!(loaded[0].ewma_runtime_ms, Some(950.0));
     assert_eq!(loaded[0].model_family, "flux");
     assert_eq!(loaded[0].ewma_denoise_ms, Some(800.0));
+    assert_eq!(loaded[0].ewma_vae_ms, Some(100.0));
+    assert_eq!(loaded[0].ewma_visual_decode_ms, Some(90.0));
+    assert_eq!(loaded[0].ewma_audio_decode_ms, Some(40.0));
+    assert_eq!(loaded[0].ewma_mux_ms, Some(10.0));
     assert_eq!(loaded[0].failure_count, 1);
     assert_eq!(loaded[0].invalidated_count, 2);
 

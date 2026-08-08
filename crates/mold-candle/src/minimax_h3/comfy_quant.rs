@@ -19,10 +19,10 @@
 //! - The Qwen3-VL INT8 ConvRot variant reconstructs bounded weight chunks and
 //!   runs an ordinary floating-point matmul; it does not quantize activations.
 //! - The Qwen3-VL NVFP4 variant stores high-nibble-first weights with
-//!   swizzled FP8-E4M3 block scales, an F32 tensor scale, and an AWQ-style
-//!   `pre_quant_scale`. Comfy deliberately selects full-precision matrix
-//!   multiplication for text encoders, so the portable forward dequantizes
-//!   weight chunks and applies the input scale before the linear operation.
+//!   swizzled FP8-E4M3 block scales and an F32 tensor scale. Its selective
+//!   AWQ-style `pre_quant_scale` is applied when present. Comfy deliberately
+//!   selects full-precision matrix multiplication for text encoders, so the
+//!   portable forward dequantizes weight chunks before the linear operation.
 //!
 //! These are reusable Candle operations, not runtime activation authority.
 //! H3 remains hidden behind Mold's compliance gate and unavailable factory.
@@ -628,13 +628,140 @@ fn unswizzle_nvfp4_scales(
     Ok(natural)
 }
 
-/// CPU-backed NVFP4 weight with the mandatory H3 AWQ input transform.
+/// CPU-backed tensorwise-INT8 embedding used by the selected H3 conditioner.
+///
+/// Candle has no signed-I8 tensor dtype, so an authenticated loader preserves
+/// the safetensors payload byte-for-byte in U8 storage. Lookup widens each
+/// selected byte through two's-complement `i8` interpretation and applies the
+/// corresponding F32 row scale. Only requested token rows are materialized in
+/// floating point; the complete 151,936 x 5,120 table is never dequantized.
+#[derive(Clone, Debug)]
+pub struct H3ComfyInt8TensorwiseEmbedding {
+    weight_bytes: Tensor,
+    row_scales: Tensor,
+    vocabulary: usize,
+    hidden_size: usize,
+}
+
+impl H3ComfyInt8TensorwiseEmbedding {
+    pub fn new(weight_bytes: Tensor, row_scales: Tensor) -> Result<Self> {
+        if !weight_bytes.device().is_cpu() || !row_scales.device().is_cpu() {
+            candle::bail!("MiniMax H3 portable INT8 embedding storage must remain on CPU")
+        }
+        if weight_bytes.dtype() != DType::U8 {
+            candle::bail!(
+                "MiniMax H3 INT8 embedding payload must retain raw U8 bytes, got {:?}",
+                weight_bytes.dtype()
+            )
+        }
+        if row_scales.dtype() != DType::F32 {
+            candle::bail!(
+                "MiniMax H3 INT8 embedding row scales must be F32, got {:?}",
+                row_scales.dtype()
+            )
+        }
+        let (vocabulary, hidden_size) = weight_bytes.dims2()?;
+        if vocabulary == 0 || hidden_size == 0 {
+            candle::bail!("MiniMax H3 INT8 embedding dimensions must be positive")
+        }
+        if row_scales.dims() != [vocabulary, 1] {
+            candle::bail!(
+                "MiniMax H3 INT8 embedding scales must have shape [{vocabulary}, 1], got {:?}",
+                row_scales.dims()
+            )
+        }
+        let scales = row_scales.flatten_all()?.to_vec1::<f32>()?;
+        if scales
+            .iter()
+            .any(|scale| !scale.is_finite() || *scale <= 0.0)
+        {
+            candle::bail!("MiniMax H3 INT8 embedding scales must be finite and positive")
+        }
+        Ok(Self {
+            weight_bytes,
+            row_scales,
+            vocabulary,
+            hidden_size,
+        })
+    }
+
+    pub const fn vocabulary(&self) -> usize {
+        self.vocabulary
+    }
+
+    pub const fn hidden_size(&self) -> usize {
+        self.hidden_size
+    }
+
+    pub fn encoded_weight_bytes(&self) -> Result<usize> {
+        self.vocabulary
+            .checked_mul(self.hidden_size)
+            .and_then(|bytes| {
+                self.vocabulary
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .and_then(|scales| bytes.checked_add(scales))
+            })
+            .ok_or_else(|| candle::Error::Msg("MiniMax H3 INT8 embedding bytes overflow".into()))
+    }
+
+    pub fn forward(
+        &self,
+        input_ids: &Tensor,
+        output_dtype: DType,
+        device: &Device,
+    ) -> Result<Tensor> {
+        ensure_output_dtype(output_dtype)?;
+        if input_ids.dtype() != DType::U32 {
+            candle::bail!(
+                "MiniMax H3 INT8 embedding input ids must be U32, got {:?}",
+                input_ids.dtype()
+            )
+        }
+        let input_shape = input_ids.dims().to_vec();
+        if input_shape.is_empty() {
+            candle::bail!("MiniMax H3 INT8 embedding input ids must have rank at least one")
+        }
+        let ids = input_ids
+            .to_device(&Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<u32>()?;
+        if ids.is_empty() {
+            candle::bail!("MiniMax H3 INT8 embedding input ids cannot be empty")
+        }
+        let scales = self.row_scales.flatten_all()?.to_vec1::<f32>()?;
+        let mut rows =
+            Vec::with_capacity(ids.len().checked_mul(self.hidden_size).ok_or_else(|| {
+                candle::Error::Msg("MiniMax H3 INT8 embedding output size overflows".into())
+            })?);
+        for id in ids {
+            let row = id as usize;
+            if row >= self.vocabulary {
+                candle::bail!(
+                    "MiniMax H3 INT8 embedding token id {row} exceeds vocabulary {}",
+                    self.vocabulary
+                )
+            }
+            let bytes = self
+                .weight_bytes
+                .narrow(0, row, 1)?
+                .flatten_all()?
+                .to_vec1::<u8>()?;
+            let scale = scales[row];
+            rows.extend(bytes.into_iter().map(|byte| (byte as i8) as f32 * scale));
+        }
+        let mut output_shape = input_shape;
+        output_shape.push(self.hidden_size);
+        Tensor::from_vec(rows, output_shape.as_slice(), device)?.to_dtype(output_dtype)
+    }
+}
+
+/// CPU-backed NVFP4 weight with H3's selective AWQ input transform.
 #[derive(Clone, Debug)]
 pub struct H3ComfyNvfp4AwqLinear {
     packed_weight: Tensor,
     natural_block_scales: Vec<f32>,
     tensor_scale: f32,
-    pre_quant_scale: Tensor,
+    pre_quant_scale: Option<Tensor>,
     out_features: usize,
     in_features: usize,
     padded_out_features: usize,
@@ -651,10 +778,36 @@ impl H3ComfyNvfp4AwqLinear {
         out_features: usize,
         in_features: usize,
     ) -> Result<Self> {
+        Self::new_with_optional_awq(
+            packed_weight,
+            block_scales,
+            tensor_scale,
+            Some(pre_quant_scale),
+            out_features,
+            in_features,
+        )
+    }
+
+    /// Construct one published NVFP4 projection. ModelOpt AWQ smoothing is
+    /// selective in the H3 Qwen artifact: `None` is the exact identity input
+    /// transform used by 250 projections, while the attention output and MLP
+    /// down projections provide a mandatory vector validated by the artifact
+    /// loading policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_optional_awq(
+        packed_weight: Tensor,
+        block_scales: Tensor,
+        tensor_scale: Tensor,
+        pre_quant_scale: Option<Tensor>,
+        out_features: usize,
+        in_features: usize,
+    ) -> Result<Self> {
         if !packed_weight.device().is_cpu()
             || !block_scales.device().is_cpu()
             || !tensor_scale.device().is_cpu()
-            || !pre_quant_scale.device().is_cpu()
+            || pre_quant_scale
+                .as_ref()
+                .is_some_and(|scale| !scale.device().is_cpu())
         {
             candle::bail!("MiniMax H3 portable NVFP4-AWQ storage must remain on CPU")
         }
@@ -678,12 +831,14 @@ impl H3ComfyNvfp4AwqLinear {
         {
             candle::bail!("MiniMax H3 NVFP4 tensor scale must be F32 with source shape [] or [1]")
         }
-        ensure_floating(pre_quant_scale.dtype(), "NVFP4 AWQ pre_quant_scale")?;
-        if pre_quant_scale.dims() != [in_features] {
-            candle::bail!(
-                "MiniMax H3 NVFP4 AWQ pre_quant_scale must have shape [{in_features}], got {:?}",
-                pre_quant_scale.dims()
-            )
+        if let Some(pre_quant_scale) = &pre_quant_scale {
+            ensure_floating(pre_quant_scale.dtype(), "NVFP4 AWQ pre_quant_scale")?;
+            if pre_quant_scale.dims() != [in_features] {
+                candle::bail!(
+                    "MiniMax H3 NVFP4 AWQ pre_quant_scale must have shape [{in_features}], got {:?}",
+                    pre_quant_scale.dims()
+                )
+            }
         }
 
         let padded_out_features = checked_round_up(out_features, 16, "NVFP4 output")?;
@@ -708,9 +863,11 @@ impl H3ComfyNvfp4AwqLinear {
         if !tensor_scale.is_finite() || tensor_scale <= 0.0 {
             candle::bail!("MiniMax H3 NVFP4 tensor scale must be finite and positive")
         }
-        let awq = pre_quant_scale.to_dtype(DType::F32)?.to_vec1::<f32>()?;
-        if awq.iter().any(|scale| !scale.is_finite() || *scale <= 0.0) {
-            candle::bail!("MiniMax H3 AWQ input scales must be finite and positive")
+        if let Some(pre_quant_scale) = &pre_quant_scale {
+            let awq = pre_quant_scale.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+            if awq.iter().any(|scale| !scale.is_finite() || *scale <= 0.0) {
+                candle::bail!("MiniMax H3 AWQ input scales must be finite and positive")
+            }
         }
         let swizzled = block_scales
             .to_dtype(DType::F32)?
@@ -766,12 +923,13 @@ impl H3ComfyNvfp4AwqLinear {
         let scales = scale_rows
             .checked_mul(scale_columns)
             .ok_or_else(|| candle::Error::Msg("MiniMax H3 NVFP4 scale count overflows".into()))?;
-        let awq_scale = self
-            .in_features
-            .checked_mul(self.pre_quant_scale.dtype().size_in_bytes())
-            .ok_or_else(|| {
-                candle::Error::Msg("MiniMax H3 NVFP4 AWQ byte count overflows".into())
-            })?;
+        let awq_scale = self.pre_quant_scale.as_ref().map_or(Ok(0), |scale| {
+            self.in_features
+                .checked_mul(scale.dtype().size_in_bytes())
+                .ok_or_else(|| {
+                    candle::Error::Msg("MiniMax H3 NVFP4 AWQ byte count overflows".into())
+                })
+        })?;
         packed
             .checked_add(scales)
             .and_then(|bytes| bytes.checked_add(std::mem::size_of::<f32>()))
@@ -859,15 +1017,18 @@ impl H3ComfyNvfp4AwqLinear {
         let device = input.device();
         let (flat, output_shape) = flattened_input(input, self.in_features)?;
         let rows = flat.dim(0)?;
-        let awq = self
-            .pre_quant_scale
-            .to_device(device)?
-            .to_dtype(DType::F32)?
-            .reshape((1, self.in_features))?;
         let scaled = flat
             .to_dtype(DType::F32)?
-            .reshape((rows, self.in_features))?
-            .broadcast_mul(&awq)?;
+            .reshape((rows, self.in_features))?;
+        let scaled = if let Some(pre_quant_scale) = &self.pre_quant_scale {
+            let awq = pre_quant_scale
+                .to_device(device)?
+                .to_dtype(DType::F32)?
+                .reshape((1, self.in_features))?;
+            scaled.broadcast_mul(&awq)?
+        } else {
+            scaled
+        };
         let mut chunks = Vec::new();
         for start in (0..self.out_features).step_by(rows_per_chunk) {
             let width = rows_per_chunk.min(self.out_features - start);
@@ -1378,6 +1539,64 @@ mod tests {
             .collect::<Vec<_>>();
         let swizzled = swizzle_scales(&natural, rows, columns);
         assert_eq!(unswizzle_nvfp4_scales(&swizzled, rows, columns)?, natural);
+        Ok(())
+    }
+
+    #[test]
+    fn nvfp4_without_selective_awq_scale_uses_identity_input_transform() -> Result<()> {
+        let device = Device::Cpu;
+        let out_features = 1;
+        let in_features = 16;
+        let padded_rows = 16;
+        let mut packed = vec![0_u8; padded_rows * in_features / 2];
+        packed[0] = 0x22;
+        let block_scales = Tensor::from_vec(
+            swizzle_scales(&vec![1.0; padded_rows], padded_rows, 1),
+            (128, 4),
+            &device,
+        )?
+        .to_dtype(DType::F8E4M3)?;
+        let linear = H3ComfyNvfp4AwqLinear::new_with_optional_awq(
+            Tensor::from_vec(packed, (padded_rows, in_features / 2), &device)?,
+            block_scales,
+            Tensor::new(1.0_f32, &device)?,
+            None,
+            out_features,
+            in_features,
+        )?;
+        let output = linear.forward_dequantized(
+            &Tensor::from_vec(vec![1.0_f32; in_features], (1, in_features), &device)?,
+            None,
+            DType::F32,
+            1,
+        )?;
+        assert_eq!(output.to_vec2::<f32>()?, vec![vec![2.0]]);
+        assert_eq!(linear.encoded_weight_bytes()?, 16 * 8 + 128 * 4 + 4);
+        Ok(())
+    }
+
+    #[test]
+    fn int8_embedding_widens_signed_bytes_and_only_materializes_selected_rows() -> Result<()> {
+        let device = Device::Cpu;
+        let embedding = H3ComfyInt8TensorwiseEmbedding::new(
+            Tensor::from_vec(vec![0_u8, 1, 127, 128, 255, 2, 254, 64], (2, 4), &device)?,
+            Tensor::from_vec(vec![0.5_f32, 2.0], (2, 1), &device)?,
+        )?;
+        let output = embedding.forward(
+            &Tensor::from_vec(vec![1_u32, 0], (1, 2), &device)?,
+            DType::F32,
+            &device,
+        )?;
+        assert_eq!(
+            output.to_vec3::<f32>()?,
+            vec![vec![
+                vec![-2.0, 4.0, -4.0, 128.0],
+                vec![0.0, 0.5, 63.5, -64.0],
+            ]]
+        );
+        assert_eq!(embedding.vocabulary(), 2);
+        assert_eq!(embedding.hidden_size(), 4);
+        assert_eq!(embedding.encoded_weight_bytes()?, 16);
         Ok(())
     }
 

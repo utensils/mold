@@ -78,6 +78,9 @@ fn resolved_estimate_exposes_learned_setup_and_run_phases_for_planning() {
                 prompt_encode_ms: Some(200),
                 denoise_ms: Some(500),
                 vae_ms: Some(100),
+                visual_decode_ms: Some(75),
+                audio_decode_ms: Some(25),
+                mux_ms: Some(10),
                 upscale_ms: Some(50),
             },
             observed_at_unix_s: 100,
@@ -102,6 +105,13 @@ fn resolved_estimate_exposes_learned_setup_and_run_phases_for_planning() {
     // Runtime excludes both independently observed setup phases.
     assert_eq!(estimate.predicted_run_ms, 875);
     assert_eq!(estimate.confidence, EstimateConfidence::Low);
+    let phases = store.exact(&key("phase-truth")).unwrap();
+    assert_eq!(phases.ewma_prompt_encode_ms, Some(200.0));
+    assert_eq!(phases.ewma_denoise_ms, Some(500.0));
+    assert_eq!(phases.ewma_vae_ms, Some(100.0));
+    assert_eq!(phases.ewma_visual_decode_ms, Some(75.0));
+    assert_eq!(phases.ewma_audio_decode_ms, Some(25.0));
+    assert_eq!(phases.ewma_mux_ms, Some(10.0));
 }
 
 #[test]
@@ -236,6 +246,9 @@ fn legacy_total_without_learned_load_remains_a_nonzero_run_estimate() {
         ewma_prompt_encode_ms: None,
         ewma_denoise_ms: None,
         ewma_vae_ms: None,
+        ewma_visual_decode_ms: None,
+        ewma_audio_decode_ms: None,
+        ewma_mux_ms: None,
         ewma_upscale_ms: None,
         vram_conservative_bytes: None,
         host_conservative_bytes: None,
@@ -418,6 +431,9 @@ fn failures_and_invalidations_are_persisted_without_poisoning_eta_samples() {
             total_ms: Some(1_000),
             phases: EstimatePhaseTimings {
                 denoise_ms: Some(800),
+                visual_decode_ms: Some(90),
+                audio_decode_ms: Some(40),
+                mux_ms: Some(10),
                 ..Default::default()
             },
             observed_at_unix_s: 1,
@@ -428,6 +444,12 @@ fn failures_and_invalidations_are_persisted_without_poisoning_eta_samples() {
         key.clone(),
         EstimateObservation {
             outcome: EstimateOutcome::Failure,
+            phases: EstimatePhaseTimings {
+                visual_decode_ms: Some(9_000),
+                audio_decode_ms: Some(9_000),
+                mux_ms: Some(9_000),
+                ..Default::default()
+            },
             fallback_reason: Some("vae_cpu".into()),
             observed_at_unix_s: 2,
             ..Default::default()
@@ -449,6 +471,9 @@ fn failures_and_invalidations_are_persisted_without_poisoning_eta_samples() {
     assert_eq!(bucket.invalidated_count, 1);
     assert_eq!(bucket.ewma_total_ms, 1_000.0);
     assert_eq!(bucket.ewma_denoise_ms, Some(800.0));
+    assert_eq!(bucket.ewma_visual_decode_ms, Some(90.0));
+    assert_eq!(bucket.ewma_audio_decode_ms, Some(40.0));
+    assert_eq!(bucket.ewma_mux_ms, Some(10.0));
     assert_eq!(bucket.last_outcome, EstimateOutcome::Invalidated);
     assert_eq!(
         bucket.last_invalidated_plan_reason.as_deref(),

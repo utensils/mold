@@ -1,13 +1,18 @@
 # MiniMax H3 Comfy quantization source audit
 
-Status: source-only portable primitives; runtime activation remains blocked.
+Status: authorized bounded artifact contract plus portable primitives; runtime
+activation remains blocked.
 
-This audit did not access MiniMax H3 binary model payloads, safetensors headers,
-or generated outputs. It used only public implementation source and textual
-repository metadata. The model's license gate in `mold-core` remains
-authoritative. Frozen H3 factory authority and FL2VA/Ref2VA dispatch seams now
-exist, but `runtime_available` remains false and the Comfy checkpoint candidate
-continues to reject every production runtime backend.
+The source-derived quantization math remains pinned to public implementation
+source. After the project received authorization for private qualification,
+Mold additionally performed bounded inspection of the exact selected Qwen
+safetensors header and its small per-layer `comfy_quant` marker tensors. The
+complete artifact digest was verified independently against the pinned
+manifest identity; no weight payload or generated output is committed. The
+model's public-product license gate in `mold-core` remains authoritative.
+Frozen H3 factory authority and FL2VA/Ref2VA dispatch seams exist, but
+`runtime_available` remains false and the Comfy checkpoint candidate continues
+to reject every production runtime backend.
 
 ## Pinned implementation sources
 
@@ -125,26 +130,46 @@ Comfy's NVFP4 storage consists of:
   rank-0 `[]` or one-element `[1]`; and
 - an optional ModelOpt AWQ-style `pre_quant_scale` applied to the input.
 
-The H3 Comfy conditioner contract is the AWQ variant, so Mold requires an
-explicit input-scale vector with exactly `in_features` entries. It applies that
-vector before the linear operation. Comfy constructs text encoders with
-`full_precision_mm=true`, so their NVFP4 representation is a storage and
-streaming optimization: weights dequantize before matrix multiplication even
-on hardware that offers native NVFP4 compute. Mold follows that ordering and
-does not substitute an unqualified Blackwell kernel.
+The selected H3 Comfy conditioner is a mixed layout, not the older INT8 ConvRot
+conditioner. Its token embedding is INT8 tensorwise with a per-row F32 scale.
+Exactly 350 language projections are NVFP4, and every one carries an explicit
+`comfy_quant` marker with `full_precision_matrix_mult=true`. ModelOpt AWQ
+smoothing is selective: the attention output and MLP down projections in each
+of layers 0-49 carry a BF16 `pre_quant_scale` vector, for 100 vectors total;
+absence on the other 250 projections is the source-defined identity transform.
+When present, Mold applies that vector before the linear operation. The NVFP4
+representation is therefore a storage and streaming optimization: weights
+dequantize before matrix multiplication even on hardware that offers native
+NVFP4 compute. Mold follows that ordering and does not substitute an
+unqualified Blackwell kernel.
 
 For packed byte `b`, logical even column `2i` uses `b >> 4` and odd column
 `2i+1` uses `b & 0x0f`. Reconstruction is
 
 ```text
 W[row, col] = E2M1[nibble] * E4M3[block] * tensor_scale
-y = (x * pre_quant_scale) * W^T + bias
+y = (x * optional_pre_quant_scale) * W^T + bias
 ```
+
+The pinned object is 15,687,142,551 bytes: an 8-byte safetensors length prefix,
+an exact 231,400-byte JSON header, and 15,686,911,143 payload bytes across 2,054
+tensors. That payload contains 12,189,696,000 packed NVFP4 weight bytes,
+1,523,712,000 FP8 block-scale bytes, 1,400 F32 tensor-scale bytes, 3,379,200
+selective AWQ bytes, a
+777,912,320-byte INT8 embedding with 607,744 scale bytes, 1,191,583,200 dense
+BF16 bytes, and 19,279 bounded quant-marker bytes. The validator rejects any
+extra/missing tensor, dtype or shape drift, missing mandatory sidecar, AWQ
+vector on the wrong projection, marker extension, or native-MM substitution.
 
 Mold unswizzles the block scales once, retains compressed U8 weights on the
 host, and stages only a bounded number of output rows for each F32 Candle
-matrix multiplication. The same portable path is typed for CPU, Metal, and
-CUDA execution devices; native quantized kernels remain out of scope.
+matrix multiplication. The INT8 embedding similarly widens only requested
+token rows through signed two's-complement interpretation. The same portable
+path is typed for CPU, Metal, and CUDA execution devices; native quantized
+kernels remain out of scope. Bounded header validation reports the expected
+full-object SHA-256 but deliberately does not pretend to authenticate the
+tensor payload; private qualification must verify that digest separately
+before any mmap authority is constructed.
 
 ## Synthetic qualification and remaining gates
 
@@ -159,7 +184,10 @@ The committed tests use tiny deterministic synthetic tensors only. They prove:
   execution, FP32 compute boundaries, and public-size-derived byte accounting;
 - high-nibble-first E2M1 decoding, tensor/block scale application, and
   multi-tile scale unswizzling against a fixed comfy-kitchen layout oracle;
-- AWQ input scaling occurs before the dequantized linear operation; and
+- selective AWQ input scaling occurs before the dequantized linear operation,
+  while an absent scale is an explicit identity transform;
+- the exact 2,054-tensor published Qwen schema and bounded marker values match
+  the pinned 15.7 GB object, including the separately scaled INT8 embedding;
 - source-dtype-aware encoded byte accounting, CPU/Metal forward parity, and
   fail-closed invalid dtypes, shapes, scales, and zero-sized staging plans.
 
