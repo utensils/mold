@@ -1984,6 +1984,10 @@ impl H3StreamedTransformerIdentity {
     pub(super) fn live_block_count(&self) -> usize {
         self.live_blocks.load(Ordering::Relaxed)
     }
+
+    pub(super) fn checkpoint_identity_sha256(&self) -> Option<&str> {
+        self.checkpoint_identity_sha256.as_deref()
+    }
 }
 
 /// One independently owned main DiT block.
@@ -2402,6 +2406,13 @@ impl H3StreamedTransformer {
 
     pub(super) fn streamed_identity(&self) -> Arc<H3StreamedTransformerIdentity> {
         self.identity.clone()
+    }
+
+    pub(super) fn shares_streamed_identity(
+        &self,
+        other: &Arc<H3StreamedTransformerIdentity>,
+    ) -> bool {
+        Arc::ptr_eq(&self.identity, other)
     }
 
     pub fn task(&self) -> H3TransformerTask {

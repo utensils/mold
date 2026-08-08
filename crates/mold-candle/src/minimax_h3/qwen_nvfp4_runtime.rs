@@ -23,7 +23,7 @@ use super::qwen_nvfp4::{
 use super::text::{Qwen3VlNvfp4LayerWeights, Qwen3VlNvfp4Weights};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum H3QwenNvfp4LoadEvent {
+pub enum H3QwenNvfp4LoadEvent {
     Authenticating {
         completed_bytes: u64,
         total_bytes: u64,
@@ -37,13 +37,13 @@ pub(crate) enum H3QwenNvfp4LoadEvent {
     },
 }
 
-pub(crate) trait H3QwenNvfp4LoadObserver {
+pub trait H3QwenNvfp4LoadObserver {
     /// Return true to cancel at the next bounded read checkpoint.
     fn should_cancel(&mut self, event: &H3QwenNvfp4LoadEvent) -> bool;
 }
 
 #[derive(Default)]
-pub(crate) struct NoopH3QwenNvfp4LoadObserver;
+pub struct NoopH3QwenNvfp4LoadObserver;
 
 impl H3QwenNvfp4LoadObserver for NoopH3QwenNvfp4LoadObserver {
     fn should_cancel(&mut self, _event: &H3QwenNvfp4LoadEvent) -> bool {
@@ -52,7 +52,7 @@ impl H3QwenNvfp4LoadObserver for NoopH3QwenNvfp4LoadObserver {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum H3QwenNvfp4RuntimeError {
+pub enum H3QwenNvfp4RuntimeError {
     #[error(transparent)]
     Artifact(#[from] H3QwenNvfp4AwqError),
     #[error("invalid H3 Qwen NVFP4 runtime contract: {0}")]
@@ -61,14 +61,30 @@ pub(crate) enum H3QwenNvfp4RuntimeError {
     Candle(#[from] candle::Error),
 }
 
-pub(crate) struct LoadedH3QwenNvfp4Conditioner {
+pub struct LoadedH3QwenNvfp4Conditioner {
     model: H3QwenNvfp4Layer50Conditioner,
     artifact: OpenedH3QwenNvfp4AwqArtifact,
 }
 
 impl LoadedH3QwenNvfp4Conditioner {
-    pub(crate) fn model(&self) -> &H3QwenNvfp4Layer50Conditioner {
+    fn model(&self) -> &H3QwenNvfp4Layer50Conditioner {
         &self.model
+    }
+
+    pub fn encode(
+        &self,
+        input: &super::model::H3ConditionerInput,
+        checkpoint: &mut dyn FnMut(super::model::ConditionerCheckpoint) -> candle::Result<()>,
+    ) -> candle::Result<Tensor> {
+        self.model.encode(input, checkpoint)
+    }
+
+    pub fn dtype_profile(&self) -> super::model::H3DTypeProfile {
+        self.model.dtype_profile()
+    }
+
+    pub fn resident_language_layers(&self) -> usize {
+        self.model.resident_language_layers()
     }
 
     pub(crate) fn inspection(&self) -> &H3QwenNvfp4AwqInspection {
@@ -132,7 +148,7 @@ impl TensorLoadProgress<'_> {
     }
 }
 
-pub(crate) fn load_h3_qwen_nvfp4_conditioner(
+pub fn load_h3_qwen_nvfp4_conditioner(
     path: &Path,
     config: &H3ConditionerConfig,
     device: &Device,

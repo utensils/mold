@@ -33,7 +33,7 @@ dev-bins = []
 # Development-only access to the authorization-bound MiniMax H3 artifact
 # qualifier. This feature is intentionally not forwarded by mold-ai or any
 # shipping surface; release verification rejects its embedded claim marker.
-h3-private-uat = []
+h3-private-uat = ["mold-candle/h3-private-uat"]
 
 [[bin]]
 name = "ltx2_checkpoint_probe"
