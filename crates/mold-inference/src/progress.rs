@@ -33,6 +33,24 @@ impl InferenceCancellationToken {
     }
 }
 
+/// Read-only view of one attempt-scoped cancellation token.
+///
+/// Cached runtimes may retain this view only while an explicit attempt guard
+/// is active. The view deliberately exposes no cancellation mutator, so model
+/// code cannot cancel its caller or replace the current attempt authority.
+#[cfg(feature = "h3-private-uat")]
+#[derive(Clone, Debug)]
+pub(crate) struct InferenceCancellationObserver {
+    token: InferenceCancellationToken,
+}
+
+#[cfg(feature = "h3-private-uat")]
+impl InferenceCancellationObserver {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+}
+
 /// Typed non-fatal result returned when an inference attempt observes its
 /// cooperative cancellation token at a safe point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,6 +205,17 @@ impl ProgressReporter {
         self.cancellation = None;
     }
 
+    /// Snapshot a read-only view for one explicitly bounded runtime attempt.
+    /// Callers must not retain it across `clear_cancellation_token` or a later
+    /// `set_cancellation_token`; cached runtimes should install it behind an
+    /// attempt-scoped guard.
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn cancellation_observer(&self) -> Option<InferenceCancellationObserver> {
+        self.cancellation
+            .clone()
+            .map(|token| InferenceCancellationObserver { token })
+    }
+
     /// Return a typed cancellation result only at a caller-selected safe point.
     pub fn checkpoint(&self) -> Result<(), InferenceCancelled> {
         match &self.cancellation {
@@ -307,6 +336,22 @@ mod tests {
 
         reporter.clear_cancellation_token();
         assert!(reporter.checkpoint().is_ok());
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    #[test]
+    fn read_only_observer_tracks_only_its_attempt_token() {
+        let first = InferenceCancellationToken::default();
+        let mut reporter = ProgressReporter::default();
+        reporter.set_cancellation_token(first.clone());
+        let observer = reporter.cancellation_observer().unwrap();
+
+        assert!(!observer.is_cancelled());
+        first.cancel();
+        assert!(observer.is_cancelled());
+
+        reporter.clear_cancellation_token();
+        assert!(reporter.cancellation_observer().is_none());
     }
 
     #[test]
