@@ -3332,6 +3332,7 @@ name = "mold-ai-tui"
 version = "0.21.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "crossterm 0.28.1",
  "dirs 6.0.0",
  "image",

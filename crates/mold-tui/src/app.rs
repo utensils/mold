@@ -8,7 +8,7 @@ use mold_core::{
 };
 use rand::Rng;
 use ratatui_image::picker::Picker;
-use ratatui_image::protocol::StatefulProtocol;
+use ratatui_image::protocol::{Protocol, StatefulProtocol};
 use std::collections::VecDeque;
 use tokio::sync::mpsc;
 use tui_textarea::TextArea;
@@ -1067,6 +1067,13 @@ pub struct GenerateState {
     pub param_scroll: usize,
     pub capabilities: ModelCapabilities,
     pub progress: ProgressState,
+    /// Latest transient denoise preview from the shared SSE stream. This is
+    /// separate from `preview_image`: completion replaces transient authority
+    /// with the final print instead of letting a latent frame survive settle.
+    pub live_preview_image: Option<image::DynamicImage>,
+    /// Fixed-protocol render cache keyed by Preview-panel geometry. A new SSE
+    /// frame invalidates it so Kitty/Sixel/iTerm2 repaint the latest pixels.
+    pub live_preview_protocol: Option<(u16, u16, Protocol)>,
     pub preview_image: Option<image::DynamicImage>,
     pub image_state: Option<StatefulProtocol>,
     /// When the preview is an animated GIF/APNG/WebP, holds the decoded
@@ -1089,6 +1096,11 @@ pub struct GenerateState {
 }
 
 impl GenerateState {
+    fn clear_live_preview(&mut self) {
+        self.live_preview_image = None;
+        self.live_preview_protocol = None;
+    }
+
     /// The checkpoint default or an explicit source-free LTX-2 recipe resolves
     /// whether the primary guidance control is adjustable.
     pub fn guidance_adjustable(&self) -> bool {
@@ -1937,6 +1949,8 @@ impl App {
                 param_scroll: 0,
                 capabilities,
                 progress: ProgressState::default(),
+                live_preview_image: None,
+                live_preview_protocol: None,
                 preview_image: None,
                 image_state: None,
                 animation: None,
@@ -6371,6 +6385,7 @@ impl App {
         self.generate.error_message = None;
         self.generate.progress.clear();
         self.generate.progress.mark_generation_start();
+        self.generate.clear_live_preview();
         self.generate.preview_image = None;
         self.generate.image_state = None;
         self.generate.animation = None;
@@ -6803,6 +6818,7 @@ impl App {
                     from_local,
                     metadata_snapshot,
                 } => {
+                    self.generate.clear_live_preview();
                     let GenerationMetadataSnapshot {
                         params: submitted_params,
                         prompt: prompt_text,
@@ -7158,6 +7174,7 @@ impl App {
                 BackgroundEvent::Error(msg) => {
                     self.generate.generating = false;
                     self.generate.batch_remaining = 0;
+                    self.generate.clear_live_preview();
                     self.generate.error_message = Some(msg);
                     self.generate.progress.generation_started_at = None;
                     self.generate.progress.stage_started_at = None;
@@ -7674,6 +7691,7 @@ impl App {
                 }
                 BackgroundEvent::ChainComplete { response } => {
                     self.generate.generating = false;
+                    self.generate.clear_live_preview();
                     self.generate.progress.generation_started_at = None;
                     self.generate.progress.stage_started_at = None;
                     self.generate.progress.push_log(ProgressLogEntry {
@@ -7690,6 +7708,7 @@ impl App {
                 }
                 BackgroundEvent::ChainError(msg) => {
                     self.generate.generating = false;
+                    self.generate.clear_live_preview();
                     self.generate.progress.generation_started_at = None;
                     self.generate.progress.stage_started_at = None;
                     self.generate.error_message = Some(msg);
@@ -7702,7 +7721,17 @@ impl App {
     }
 
     fn handle_progress(&mut self, event: SseProgressEvent) {
+        let live_preview = match &event {
+            SseProgressEvent::Preview { image, .. } => decode_live_preview(image),
+            _ => None,
+        };
         let refresh_catalog = reduce_progress_state(&mut self.generate.progress, event);
+        if self.generate.generating {
+            if let Some(image) = live_preview {
+                self.generate.live_preview_image = Some(image);
+                self.generate.live_preview_protocol = None;
+            }
+        }
         if refresh_catalog {
             // Refresh config and catalog after pull
             self.config = Config::load_or_default();
@@ -7711,11 +7740,38 @@ impl App {
     }
 }
 
+const MAX_LIVE_PREVIEW_ENCODED_BYTES: usize = 8 * 1024 * 1024;
+const MAX_LIVE_PREVIEW_DIMENSION: u32 = 4096;
+const MAX_LIVE_PREVIEW_DECODE_BYTES: u64 = 64 * 1024 * 1024;
+
+fn decode_live_preview(encoded: &str) -> Option<image::DynamicImage> {
+    use base64::Engine as _;
+
+    if encoded.len() > MAX_LIVE_PREVIEW_ENCODED_BYTES {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_LIVE_PREVIEW_DIMENSION);
+    limits.max_image_height = Some(MAX_LIVE_PREVIEW_DIMENSION);
+    limits.max_alloc = Some(MAX_LIVE_PREVIEW_DECODE_BYTES);
+    reader.limits(limits);
+    reader.decode().ok()
+}
+
 fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) -> bool {
     match event {
-        // Latent previews are for canvas clients (web SPA / desktop app);
-        // the TUI progress bar already tracks DenoiseStep.
-        SseProgressEvent::Preview { .. } => {}
+        SseProgressEvent::Preview { step, total, .. } => {
+            // Preview frames are authoritative denoise progress too. Keeping
+            // this synchronized matters when transport timing delivers the
+            // preview after its paired DenoiseStep event.
+            progress.denoise_step = step;
+            progress.denoise_total = total;
+        }
         SseProgressEvent::DependencyWait { dependency, reason } => {
             progress.current_stage = Some(format!("Waiting for {dependency}: {reason}"));
             progress.stage_started_at = None;
@@ -7865,6 +7921,16 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+
+    fn live_preview_png(width: u32, height: u32, rgba: [u8; 4]) -> String {
+        let image = image::RgbaImage::from_pixel(width, height, image::Rgba(rgba));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("encode preview PNG");
+        base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())
+    }
 
     fn generation_metadata_snapshot(app: &App) -> Box<GenerationMetadataSnapshot> {
         let prompt = app.generate.prompt.lines().join("\n").trim().to_string();
@@ -7884,6 +7950,137 @@ mod tests {
                 Some(negative)
             },
         ))
+    }
+
+    #[tokio::test]
+    async fn live_preview_events_replace_the_create_preview_and_advance_progress() {
+        let mut app = make_settings_test_app();
+        app.generate.generating = true;
+
+        app.bg_tx
+            .send(BackgroundEvent::Progress(SseProgressEvent::Preview {
+                image: live_preview_png(2, 1, [255, 0, 0, 255]),
+                step: 3,
+                total: 12,
+            }))
+            .unwrap();
+        app.process_background_events();
+
+        let first = app
+            .generate
+            .live_preview_image
+            .as_ref()
+            .expect("valid preview should be installed");
+        assert_eq!((first.width(), first.height()), (2, 1));
+        assert_eq!(first.to_rgba8().get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(app.generate.progress.denoise_step, 3);
+        assert_eq!(app.generate.progress.denoise_total, 12);
+
+        app.bg_tx
+            .send(BackgroundEvent::Progress(SseProgressEvent::Preview {
+                image: live_preview_png(1, 2, [0, 0, 255, 255]),
+                step: 6,
+                total: 12,
+            }))
+            .unwrap();
+        app.process_background_events();
+
+        let second = app.generate.live_preview_image.as_ref().unwrap();
+        assert_eq!((second.width(), second.height()), (1, 2));
+        assert_eq!(second.to_rgba8().get_pixel(0, 0).0, [0, 0, 255, 255]);
+        assert_eq!(app.generate.progress.denoise_step, 6);
+        assert!(app.generate.live_preview_protocol.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_live_preview_keeps_the_last_valid_frame() {
+        let mut app = make_settings_test_app();
+        app.generate.generating = true;
+        app.bg_tx
+            .send(BackgroundEvent::Progress(SseProgressEvent::Preview {
+                image: live_preview_png(2, 1, [12, 34, 56, 255]),
+                step: 1,
+                total: 4,
+            }))
+            .unwrap();
+        app.process_background_events();
+
+        app.bg_tx
+            .send(BackgroundEvent::Progress(SseProgressEvent::Preview {
+                image: "not-base64".to_string(),
+                step: 2,
+                total: 4,
+            }))
+            .unwrap();
+        app.process_background_events();
+
+        let retained = app.generate.live_preview_image.as_ref().unwrap();
+        assert_eq!(retained.to_rgba8().get_pixel(0, 0).0, [12, 34, 56, 255]);
+        assert_eq!(app.generate.progress.denoise_step, 2);
+        assert_eq!(app.generate.progress.denoise_total, 4);
+    }
+
+    #[test]
+    fn live_preview_decode_rejects_oversized_dimensions() {
+        let encoded = live_preview_png(MAX_LIVE_PREVIEW_DIMENSION + 1, 1, [1, 2, 3, 255]);
+        assert!(decode_live_preview(&encoded).is_none());
+    }
+
+    #[tokio::test]
+    async fn live_preview_renders_through_the_fixed_protocol_with_visible_progress() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        app.generate.generating = true;
+        app.bg_tx
+            .send(BackgroundEvent::Progress(SseProgressEvent::Preview {
+                image: live_preview_png(16, 8, [40, 80, 120, 255]),
+                step: 7,
+                total: 20,
+            }))
+            .unwrap();
+        app.process_background_events();
+
+        let text = render_view_to_string(&mut app, 110, 40);
+        assert!(
+            text.contains("Developing\u{2026} 7/20 \u{00b7} 35%"),
+            "live image must retain readable denoise progress:\n{text}"
+        );
+        assert!(
+            app.generate.live_preview_protocol.is_some(),
+            "rendering should populate the fixed-protocol cache"
+        );
+        let protocol_area = app
+            .generate
+            .live_preview_protocol
+            .as_ref()
+            .unwrap()
+            .2
+            .area();
+        assert!(
+            protocol_area.width > 2,
+            "the 16px-wide latent must upscale beyond its native two terminal cells: {protocol_area:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_error_clears_transient_live_preview_state() {
+        let mut app = make_settings_test_app();
+        app.generate.generating = true;
+        app.bg_tx
+            .send(BackgroundEvent::Progress(SseProgressEvent::Preview {
+                image: live_preview_png(2, 2, [1, 2, 3, 255]),
+                step: 1,
+                total: 3,
+            }))
+            .unwrap();
+        app.bg_tx
+            .send(BackgroundEvent::Error("fixture failure".to_string()))
+            .unwrap();
+        app.process_background_events();
+
+        assert!(!app.generate.generating);
+        assert!(app.generate.live_preview_image.is_none());
+        assert!(app.generate.live_preview_protocol.is_none());
     }
 
     #[test]
@@ -8828,6 +9025,8 @@ mod tests {
                 param_scroll: 0,
                 capabilities: caps,
                 progress: ProgressState::default(),
+                live_preview_image: None,
+                live_preview_protocol: None,
                 preview_image: None,
                 image_state: None,
                 animation: None,
@@ -11845,6 +12044,8 @@ mod tests {
             param_scroll: 0,
             capabilities: capabilities_for_family("flux"),
             progress: ProgressState::default(),
+            live_preview_image: None,
+            live_preview_protocol: None,
             preview_image: None,
             image_state: None,
             animation: None,
@@ -11905,6 +12106,8 @@ mod tests {
             param_scroll: 0,
             capabilities: capabilities_for_family("flux"),
             progress: ProgressState::default(),
+            live_preview_image: None,
+            live_preview_protocol: None,
             preview_image: None,
             image_state: None,
             animation: None,
@@ -11946,6 +12149,8 @@ mod tests {
             param_scroll: 0,
             capabilities: capabilities_for_family("flux"),
             progress: ProgressState::default(),
+            live_preview_image: None,
+            live_preview_protocol: None,
             preview_image: None,
             image_state: None,
             animation: None,

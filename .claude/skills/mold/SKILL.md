@@ -386,6 +386,14 @@ including an implicit Auto selection. Server, CLI, and TUI save paths preserve
 it in `OutputMetadata.pipeline`; web, desktop, iPhone, and both TUI Library
 detail presentations show it only when present.
 
+The TUI consumes the same family-agnostic `SseProgressEvent::Preview` frames as
+web, desktop, and iPhone. It bounds and decodes each base64 PNG into a transient
+Create preview, replaces the fixed-protocol render cache on every frame, and
+keeps one readable denoise-status row. Kitty, Sixel, and iTerm2 rendering must
+stay centered through `ui::gallery::center_rect`; malformed frames retain the
+last valid image, while a new run, completion, or error clears transient state.
+The plain CLI intentionally remains a text progress surface.
+
 Community LTX-2 checkpoints can be video-only even when their transformer and
 video VAE are complete. Mold inspects the installed safetensors for both the
 audio VAE and vocoder; web, desktop, and iPhone disable generated audio when

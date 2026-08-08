@@ -239,6 +239,9 @@ checkpoint-aware `default` / `on` / `off` synchronized-audio control, and
 native/1.5×/2× spatial plus native/2× temporal upscale controls for LTX-2,
 plus optional STG scale/blocks, CFG rescale, modality scale, and guidance skip
 controls using the same absent-by-default request contract as the CLI and apps.
+During denoising, preview-capable families stream the same forming image shown
+by the graphical apps into this Create panel through Ghostty/Kitty, Sixel, or
+iTerm2 graphics, with centered aspect fit and a live step readout.
 
 <p align="center">
   <img src="website/public/gallery/tui-generate.png" alt="Mold TUI Create workspace with image preview" width="720" />
