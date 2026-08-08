@@ -28,6 +28,7 @@ export interface ExpansionTaskRequest {
   pipeline?: string | null;
   retake_range?: unknown;
   references?: readonly unknown[] | null;
+  frames?: number | null;
 }
 
 function presentPath(path: string | null | undefined): boolean {
@@ -89,5 +90,16 @@ export function expansionTaskForRequest(
     return "video-to-video";
   }
   if (request.source_image) return "image-to-video";
+  // A single-frame Wan render with no conditioning is a still (#798):
+  // prompt work is image-style visual description, not chronological shot
+  // direction. Deliberately after the source checks — a source-conditioned
+  // one-frame request keeps its source-preserving contract. Mirrors
+  // `mold_core::ExpandTask::for_conditioning`.
+  if (
+    ["wan", "wan2.1", "wan2.2"].includes(normalized) &&
+    request.frames === 1
+  ) {
+    return "text-to-image";
+  }
   return "text-to-video";
 }

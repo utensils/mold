@@ -917,6 +917,10 @@ pub async fn run(
             audio_file_bytes.is_some(),
             keyframes.as_ref().map_or(0, Vec::len),
             retake_range.is_some(),
+            // The effective frame count, not the raw flag: a model configured
+            // with default_frames = 1 renders a still even when --frames is
+            // omitted, and expansion derives from the concrete request.
+            frames.or_else(|| config.resolved_model_config(&model).effective_frames()),
         )
     };
 

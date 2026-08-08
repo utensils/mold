@@ -267,11 +267,14 @@ mold run wan22-i2v-a14b:q5 "the balloon lifts off" --image balloon.png
 mold run wan22-t2v-a14b:q4 "a paper boat drifting down a rain gutter"
 mold run wan22-ti2v-5b:q8 "waves on a black sand beach" --width 1280 --height 704
 
+# Wan single-frame text-to-image: --frames 1 renders a PNG still (png default, jpeg allowed)
+mold run wan22-t2v-a14b:q5 "a lighthouse at dusk, volumetric fog" --frames 1 -o still.png
+
 # WebP animated output
 mold run ltx-video-0.9.6-distilled:bf16 "a waterfall" --frames 9 --format webp -o waterfall.webp
 ```
 
-**Constraints:** LTX frame counts must be 8n+1 (9, 17, 25, 33, 49, ...) with dimensions in multiples of 32; Wan frame counts must be 4n+1 (49, 53, 81, ...) with dimensions in multiples of 16 (32 for `wan22-ti2v-5b`). Current LTX defaults are 1216x704, 25 frames, 30 fps. A14B defaults to 53 frames (`:q5`) / 33 (`:q8`) — the measured 24 GB envelope; larger cards pass `--frames 81`. Distilled models use fewer steps.
+**Constraints:** LTX frame counts must be 8n+1 (9, 17, 25, 33, 49, ...) with dimensions in multiples of 32; Wan frame counts must be 4n+1 (1, 49, 53, 81, ...) with dimensions in multiples of 16 (32 for `wan22-ti2v-5b`). Wan `--frames 1` is a still: png/jpeg admitted (png default); every other frame count is video-only (mp4/gif/apng/webp). The A14B `:q8` quality tier defaults to upstream's per-expert guidance (T2V 4.0 high-noise / 3.0 low-noise, I2V 3.5/3.5); an explicit `--guidance` pins one scale. Current LTX defaults are 1216x704, 25 frames, 30 fps. A14B defaults to 53 frames (`:q5`) / 33 (`:q8`) — the measured 24 GB envelope; larger cards pass `--frames 81`. Distilled models use fewer steps.
 
 **Current status:** `ltx-video-0.9.6-distilled:bf16` is still the safest default, but the `0.9.8` models now run the full multiscale refinement path. mold pulls the required spatial upscaler asset explicitly, keeps the shared T5 assets under `shared/flux/...`, and intentionally continues using the compatible `LTX-Video-0.9.5` VAE source until the newer VAE layout is ported. Legacy LTX-Video 13B BF16 still has no streaming transformer; CUDA runs preflight full-resident VRAM and fail before allocation when it cannot fit.
 

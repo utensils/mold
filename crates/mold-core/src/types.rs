@@ -236,6 +236,7 @@ impl ExpandTask {
                     .is_some_and(|path| !path.trim().is_empty()),
             req.keyframes.as_ref().map_or(0, Vec::len),
             req.retake_range.is_some(),
+            req.frames,
         )
     }
 
@@ -250,9 +251,11 @@ impl ExpandTask {
         has_audio: bool,
         keyframe_count: usize,
         has_retake_range: bool,
+        frames: Option<u32>,
     ) -> Self {
+        let normalized = family.trim().to_ascii_lowercase();
         if !matches!(
-            family.trim().to_ascii_lowercase().as_str(),
+            normalized.as_str(),
             "ltx2"
                 | "ltx-2"
                 | "ltx-video"
@@ -295,6 +298,15 @@ impl ExpandTask {
         }
         if has_source_image {
             return Self::ImageToVideo;
+        }
+        // A single-frame Wan render with no conditioning is a still (#798):
+        // prompt work is image-style visual description, not chronological
+        // shot direction. Deliberately after the source checks — a
+        // source-conditioned one-frame request keeps its source-preserving
+        // contract even though the output is a still.
+        // Twin: `studio/lib/expandTask.ts`.
+        if matches!(normalized.as_str(), "wan" | "wan2.1" | "wan2.2") && frames == Some(1) {
+            return Self::TextToImage;
         }
         Self::TextToVideo
     }
@@ -1341,6 +1353,8 @@ impl GenerateRequest {
     /// - `ltx2` (any other case) → `Mp4` (most compatible video container)
     /// - `ltx-video` → `Mp4` (most compatible; engine falls back to APNG when
     ///   the field is non-video, but Mp4 is the right API default)
+    /// - `wan` with `frames == Some(1)` → `Png` (a single-frame render is a
+    ///   still, not a one-frame video — #798)
     /// - all other families → `Png` (existing image default)
     ///
     /// This is a no-op when `output_format` is already `Some(…)` — explicit
@@ -1358,6 +1372,7 @@ impl GenerateRequest {
             return self;
         }
         self.output_format = Some(match family {
+            Some("wan") if self.frames == Some(1) => OutputFormat::Png,
             Some("ltx2") | Some("ltx-video") | Some("wan") | Some("minimax-h3")
             | Some("minimax_h3") | Some("minimaxh3") => OutputFormat::Mp4,
             _ => OutputFormat::Png,
