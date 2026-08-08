@@ -57,9 +57,11 @@ pub use attention::{
     H3_FLASH_ATTN_QUALIFIED_COMPUTE_CAPABILITY,
 };
 pub use comfy_dit::{
-    inspect_h3_comfy_published_header, H3ComfyAccuracyTier, H3ComfyCheckpointCandidate,
-    H3ComfyCheckpointError, H3ComfyCheckpointErrorCode, H3ComfyCurveInterpolation,
-    H3ComfyFrozenStrategyMetadata, H3ComfyMemoryAccounting, H3ComfyPrunedFormat,
+    inspect_h3_comfy_published_header, open_h3_comfy_published_int8_checkpoint,
+    H3ComfyAccuracyTier, H3ComfyCheckpointCandidate, H3ComfyCheckpointError,
+    H3ComfyCheckpointErrorCode, H3ComfyCurveInterpolation, H3ComfyFrozenStrategyMetadata,
+    H3ComfyInt8BlockLoader, H3ComfyInt8BlockMemory, H3ComfyInt8Cancellation,
+    H3ComfyMemoryAccounting, H3ComfyNeverCancel, H3ComfyOpenedInt8Checkpoint, H3ComfyPrunedFormat,
     H3ComfyPublishedArtifact, H3ComfyQuantizationPolicy, H3ComfyRuntimeBackend,
     H3ComfyRuntimeRejection, H3ComfyRuntimeRequirement, H3_COMFYUI_SOURCE_REVISION,
     H3_COMFY_KITCHEN_REPOSITORY, H3_COMFY_KITCHEN_SOURCE_REVISION, H3_COMFY_KITCHEN_VERSION,

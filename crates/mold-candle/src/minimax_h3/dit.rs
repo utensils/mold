@@ -25,6 +25,7 @@ use super::attention::{
     execute_h3_attention, H3AttentionDType, H3AttentionDevice, H3AttentionModelContract,
     H3AttentionRuntimeAuthority, H3FrozenAttentionExecution, H3FrozenAttentionPlan,
 };
+use super::comfy_quant::{H3ComfyInt8ConvRotLinear, H3_COMFY_PORTABLE_ROW_CHUNK};
 
 pub const H3_MODALITY_COUNT: usize = 3;
 
@@ -1436,6 +1437,211 @@ struct H3TransformerBlockWeights {
     adaln: H3AdaLnProjection,
 }
 
+#[derive(Clone, Debug)]
+struct H3ComfyInt8Attention {
+    heads: usize,
+    head_dim: usize,
+    inner_dim: usize,
+    qkv: H3ComfyInt8ConvRotLinear,
+    q_norm: nn::RmsNorm,
+    k_norm: nn::RmsNorm,
+    out: H3ComfyInt8ConvRotLinear,
+}
+
+impl H3ComfyInt8Attention {
+    fn forward(
+        &self,
+        hidden: &Tensor,
+        rotary: (&Tensor, &Tensor, usize),
+        attention_plan: &H3FrozenAttentionPlan,
+    ) -> Result<Tensor> {
+        let (batch, seq_len, _) = hidden.dims3()?;
+        let qkv = self.qkv.forward_reference(
+            hidden,
+            None,
+            hidden.dtype(),
+            H3_COMFY_PORTABLE_ROW_CHUNK,
+        )?;
+        let q = qkv.narrow(2, 0, self.inner_dim)?;
+        let k = qkv.narrow(2, self.inner_dim, self.inner_dim)?;
+        let v = qkv.narrow(2, 2 * self.inner_dim, self.inner_dim)?;
+        let mut q = q
+            .reshape((batch, seq_len, self.heads, self.head_dim))?
+            .contiguous()?;
+        let mut k = k
+            .reshape((batch, seq_len, self.heads, self.head_dim))?
+            .contiguous()?;
+        let v = v
+            .reshape((batch, seq_len, self.heads, self.head_dim))?
+            .contiguous()?;
+        q = self.q_norm.forward(&q)?;
+        k = self.k_norm.forward(&k)?;
+        q = apply_h3_rotary(&q, rotary.0, rotary.1, rotary.2)?;
+        k = apply_h3_rotary(&k, rotary.0, rotary.1, rotary.2)?;
+        let output = execute_h3_attention(attention_plan, &q, &k, &v)
+            .map_err(|error| candle::Error::Msg(error.to_string()))?
+            .reshape((batch, seq_len, self.inner_dim))?;
+        self.out
+            .forward_reference(&output, None, hidden.dtype(), H3_COMFY_PORTABLE_ROW_CHUNK)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct H3ComfyInt8Mlp {
+    width: usize,
+    fc1: H3ComfyInt8ConvRotLinear,
+    fc2: H3ComfyInt8ConvRotLinear,
+}
+
+impl H3ComfyInt8Mlp {
+    fn forward(&self, hidden: &Tensor) -> Result<Tensor> {
+        let projected = self.fc1.forward_reference(
+            hidden,
+            None,
+            hidden.dtype(),
+            H3_COMFY_PORTABLE_ROW_CHUNK,
+        )?;
+        let gate = projected.narrow(D::Minus1, 0, self.width)?;
+        let up = projected.narrow(D::Minus1, self.width, self.width)?;
+        self.fc2.forward_reference(
+            &silu(&gate)?.broadcast_mul(&up)?,
+            None,
+            hidden.dtype(),
+            H3_COMFY_PORTABLE_ROW_CHUNK,
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+struct H3ComfyInt8TransformerBlockWeights {
+    norm1: nn::RmsNorm,
+    attention: H3ComfyInt8Attention,
+    norm2: nn::RmsNorm,
+    mlp: H3ComfyInt8Mlp,
+    adaln: H3AdaLnProjection,
+}
+
+/// Exact CPU-packed matrices for one Comfy INT8 ConvRot main block.
+///
+/// This stays crate-private so the public streamed block handle remains the
+/// only execution representation exposed to inference consumers.
+pub(super) struct H3ComfyInt8BlockMatrices {
+    pub qkv: H3ComfyInt8ConvRotLinear,
+    pub out: H3ComfyInt8ConvRotLinear,
+    pub fc1: H3ComfyInt8ConvRotLinear,
+    pub fc2: H3ComfyInt8ConvRotLinear,
+}
+
+impl H3ComfyInt8TransformerBlockWeights {
+    fn load(
+        config: &H3TransformerConfig,
+        mode: H3AdaLnMode,
+        precision: H3PrecisionProfile,
+        matrices: H3ComfyInt8BlockMatrices,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        let compute_dtype = precision.compute_dtype();
+        if !matches!(mode, H3AdaLnMode::Curve { .. }) || mode.qkv_layout() != H3QkvLayout::QkvMajor
+        {
+            candle::bail!("MiniMax H3 Comfy INT8 blocks require pruned Curve AdaLN/QKV-major mode")
+        }
+        let inner_dim = config.attention_inner_dim();
+        if matrices.qkv.in_features() != config.hidden_size
+            || matrices.qkv.out_features() != 3 * inner_dim
+            || matrices.out.in_features() != inner_dim
+            || matrices.out.out_features() != config.hidden_size
+            || matrices.fc1.in_features() != config.hidden_size
+            || matrices.fc1.out_features() != 2 * config.ffn_hidden_size
+            || matrices.fc2.in_features() != config.ffn_hidden_size
+            || matrices.fc2.out_features() != config.hidden_size
+        {
+            candle::bail!(
+                "MiniMax H3 Comfy INT8 block matrix shapes do not match the frozen config"
+            )
+        }
+        Ok(Self {
+            norm1: rms_norm_with_dtype(
+                config.hidden_size,
+                config.norm_eps,
+                compute_dtype,
+                vb.pp("norm1"),
+            )?,
+            attention: H3ComfyInt8Attention {
+                heads: config.num_attention_heads,
+                head_dim: config.attention_head_dim,
+                inner_dim,
+                qkv: matrices.qkv,
+                q_norm: rms_norm_with_dtype(
+                    config.attention_head_dim,
+                    config.qk_norm_eps,
+                    compute_dtype,
+                    vb.pp("attn.q_norm"),
+                )?,
+                k_norm: rms_norm_with_dtype(
+                    config.attention_head_dim,
+                    config.qk_norm_eps,
+                    compute_dtype,
+                    vb.pp("attn.k_norm"),
+                )?,
+                out: matrices.out,
+            },
+            norm2: rms_norm_with_dtype(
+                config.hidden_size,
+                config.norm_eps,
+                compute_dtype,
+                vb.pp("norm2"),
+            )?,
+            mlp: H3ComfyInt8Mlp {
+                width: config.ffn_hidden_size,
+                fc1: matrices.fc1,
+                fc2: matrices.fc2,
+            },
+            // Curve projections are a source-defined FP32-sensitive island.
+            adaln: H3AdaLnProjection::load(
+                mode.input_dim(config),
+                config.hidden_size,
+                6,
+                H3_MODALITY_COUNT,
+                DType::F32,
+                vb.pp("adaln_proj"),
+            )?,
+        })
+    }
+
+    fn forward(
+        &self,
+        hidden: &Tensor,
+        adaln_input: &Tensor,
+        adaln_indices: &Tensor,
+        rotary: (&Tensor, &Tensor, usize),
+        attention_plan: &H3FrozenAttentionPlan,
+    ) -> Result<Tensor> {
+        let parameters = self.adaln.forward(adaln_input)?;
+        let [shift_attention, scale_attention, gate_attention, shift_mlp, scale_mlp, gate_mlp]:
+            [Tensor; 6] = parameters.try_into().map_err(|_| {
+                candle::Error::Msg("MiniMax H3 block AdaLN must produce six tensors".into())
+            })?;
+        let normalized = modulate(
+            &self.norm1.forward(hidden)?,
+            &shift_attention,
+            &scale_attention,
+            adaln_indices,
+        )?;
+        let update = self
+            .attention
+            .forward(&normalized, rotary, attention_plan)?;
+        let hidden = gated_residual(hidden, &update, &gate_attention, adaln_indices)?;
+        let normalized = modulate(
+            &self.norm2.forward(&hidden)?,
+            &shift_mlp,
+            &scale_mlp,
+            adaln_indices,
+        )?;
+        let update = self.mlp.forward(&normalized)?;
+        gated_residual(&hidden, &update, &gate_mlp, adaln_indices)
+    }
+}
+
 impl H3TransformerBlockWeights {
     fn load(
         config: &H3TransformerConfig,
@@ -1517,6 +1723,7 @@ impl H3TransformerBlockWeights {
 #[derive(Clone, Debug)]
 enum H3TransformerBlockRepresentation {
     Dense(H3TransformerBlockWeights),
+    ComfyInt8ConvRot(H3ComfyInt8TransformerBlockWeights),
 }
 
 impl H3TransformerBlockRepresentation {
@@ -1530,6 +1737,9 @@ impl H3TransformerBlockRepresentation {
     ) -> Result<Tensor> {
         match self {
             Self::Dense(block) => {
+                block.forward(hidden, adaln_input, adaln_indices, rotary, attention_plan)
+            }
+            Self::ComfyInt8ConvRot(block) => {
                 block.forward(hidden, adaln_input, adaln_indices, rotary, attention_plan)
             }
         }
@@ -1754,11 +1964,26 @@ pub struct H3TransformerOutput {
 }
 
 #[derive(Debug)]
-struct H3StreamedTransformerIdentity {
+pub(super) struct H3StreamedTransformerIdentity {
     task: H3TransformerTask,
     attention_identity_sha256: String,
+    checkpoint_identity_sha256: Option<String>,
     block_count: usize,
     live_blocks: AtomicUsize,
+}
+
+impl H3StreamedTransformerIdentity {
+    pub(super) fn task(&self) -> H3TransformerTask {
+        self.task
+    }
+
+    pub(super) fn block_count(&self) -> usize {
+        self.block_count
+    }
+
+    pub(super) fn live_block_count(&self) -> usize {
+        self.live_blocks.load(Ordering::Relaxed)
+    }
 }
 
 /// One independently owned main DiT block.
@@ -1795,6 +2020,25 @@ impl H3LoadedTransformerBlock {
             identity,
             representation: H3TransformerBlockRepresentation::Dense(block),
         }
+    }
+
+    pub(super) fn new_comfy_int8(
+        index: usize,
+        identity: Arc<H3StreamedTransformerIdentity>,
+        config: &H3TransformerConfig,
+        mode: H3AdaLnMode,
+        precision: H3PrecisionProfile,
+        matrices: H3ComfyInt8BlockMatrices,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        let block =
+            H3ComfyInt8TransformerBlockWeights::load(config, mode, precision, matrices, vb)?;
+        identity.live_blocks.fetch_add(1, Ordering::Relaxed);
+        Ok(Self {
+            index,
+            identity,
+            representation: H3TransformerBlockRepresentation::ComfyInt8ConvRot(block),
+        })
     }
 
     fn clone_for_eager(&self) -> Self {
@@ -1951,6 +2195,9 @@ impl H3TransformerStep {
         if block.identity.attention_identity_sha256 != self.identity.attention_identity_sha256 {
             candle::bail!("MiniMax H3 streamed block attention authority does not match the step")
         }
+        if block.identity.checkpoint_identity_sha256 != self.identity.checkpoint_identity_sha256 {
+            candle::bail!("MiniMax H3 streamed block checkpoint authority does not match the step")
+        }
         if !Arc::ptr_eq(&block.identity, &self.identity) {
             candle::bail!(
                 "MiniMax H3 streamed block belongs to a different audited checkpoint load"
@@ -2023,7 +2270,41 @@ impl H3StreamedTransformer {
         } = checkpoint;
         debug_assert_eq!(source.inventory.component, plan.component);
         let vb = source.vb;
-        let compute_dtype = plan.precision.compute_dtype();
+        for key in plan.expected.keys() {
+            if !vb.contains_tensor(key) {
+                candle::bail!("MiniMax H3 audited tensor {key:?} is absent from the loader")
+            }
+        }
+        let transformer = Self::load_resident(
+            config.clone(),
+            plan.task,
+            plan.mode,
+            plan.precision,
+            vb.clone(),
+            attention_runtime,
+            None,
+        )?;
+        let loader = H3TransformerBlockLoader {
+            config,
+            mode: plan.mode,
+            precision: plan.precision,
+            vb,
+            identity: transformer.identity.clone(),
+        };
+        Ok((transformer, loader))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_resident(
+        config: H3TransformerConfig,
+        task: H3TransformerTask,
+        mode: H3AdaLnMode,
+        precision: H3PrecisionProfile,
+        vb: VarBuilder,
+        attention_runtime: H3AttentionRuntimeAuthority,
+        checkpoint_identity_sha256: Option<String>,
+    ) -> Result<Self> {
+        let compute_dtype = precision.compute_dtype();
         attention_runtime
             .verify_model(
                 H3AttentionModelContract {
@@ -2035,15 +2316,10 @@ impl H3StreamedTransformer {
                 vb.device(),
             )
             .map_err(|error| candle::Error::Msg(error.to_string()))?;
-        for key in plan.expected.keys() {
-            if !vb.contains_tensor(key) {
-                candle::bail!("MiniMax H3 audited tensor {key:?} is absent from the loader")
-            }
-        }
-
         let identity = Arc::new(H3StreamedTransformerIdentity {
-            task: plan.task,
+            task,
             attention_identity_sha256: attention_runtime.identity_sha256().to_owned(),
+            checkpoint_identity_sha256,
             block_count: config.num_layers,
             live_blocks: AtomicUsize::new(0),
         });
@@ -2051,21 +2327,14 @@ impl H3StreamedTransformer {
         for index in 0..config.token_refiner_num_layers {
             token_refiner.push(H3TokenRefinerBlock::load(
                 &config,
-                plan.qkv_layout(),
+                mode.qkv_layout(),
                 compute_dtype,
                 vb.pp(format!("token_refiner.blocks.{index}")),
             )?);
         }
-        let loader = H3TransformerBlockLoader {
-            config: config.clone(),
-            mode: plan.mode,
-            precision: plan.precision,
-            vb: vb.clone(),
-            identity: identity.clone(),
-        };
-        let transformer = Self {
-            mode: plan.mode,
-            precision: plan.precision,
+        Ok(Self {
+            mode,
+            precision,
             attention_runtime,
             video_projection: linear_with_dtype(
                 config.video_patch_dim(),
@@ -2088,7 +2357,7 @@ impl H3StreamedTransformer {
                 compute_dtype,
                 vb.pp("condition_proj"),
             )?,
-            time: H3TimeConditioner::load(&config, plan.mode, vb.clone())?,
+            time: H3TimeConditioner::load(&config, mode, vb.clone())?,
             rope: H3Rope::load(&config, vb.pp("rope"))?,
             token_refiner,
             token_refiner_norm: rms_norm_with_dtype(
@@ -2097,16 +2366,42 @@ impl H3StreamedTransformer {
                 compute_dtype,
                 vb.pp("token_refiner.final_norm"),
             )?,
-            final_layer: H3FinalLayer::load(
-                &config,
-                plan.mode,
-                plan.precision,
-                vb.pp("final_layer"),
-            )?,
+            final_layer: H3FinalLayer::load(&config, mode, precision, vb.pp("final_layer"))?,
             config,
             identity,
-        };
-        Ok((transformer, loader))
+        })
+    }
+
+    /// Internal constructor for the source-pinned Comfy INT8 checkpoint
+    /// primitive. It is intentionally not a factory registration or public
+    /// runtime activation path.
+    pub(super) fn load_comfy_int8_resident(
+        config: H3TransformerConfig,
+        task: H3TransformerTask,
+        mode: H3AdaLnMode,
+        precision: H3PrecisionProfile,
+        vb: VarBuilder<'static>,
+        attention_runtime: H3AttentionRuntimeAuthority,
+        checkpoint_identity_sha256: String,
+    ) -> Result<Self> {
+        if !matches!(mode, H3AdaLnMode::Curve { .. })
+            || precision != H3PrecisionProfile::OfficialMixedBf16F32
+        {
+            candle::bail!("MiniMax H3 Comfy INT8 resident core requires the official pruned mixed-precision profile")
+        }
+        Self::load_resident(
+            config,
+            task,
+            mode,
+            precision,
+            vb,
+            attention_runtime,
+            Some(checkpoint_identity_sha256),
+        )
+    }
+
+    pub(super) fn streamed_identity(&self) -> Arc<H3StreamedTransformerIdentity> {
+        self.identity.clone()
     }
 
     pub fn task(&self) -> H3TransformerTask {
@@ -2131,6 +2426,12 @@ impl H3StreamedTransformer {
 
     pub fn block_count(&self) -> usize {
         self.identity.block_count
+    }
+
+    /// Exact schema/policy/content identity when this resident core came from
+    /// an opened Comfy INT8 authority. Dense audited sources remain `None`.
+    pub fn checkpoint_identity_sha256(&self) -> Option<&str> {
+        self.identity.checkpoint_identity_sha256.as_deref()
     }
 
     pub fn live_block_count(&self) -> usize {
@@ -3178,6 +3479,123 @@ mod tests {
     }
 
     #[test]
+    fn comfy_int8_block_matches_its_exact_dense_dequantized_oracle() -> Result<()> {
+        let device = Device::Cpu;
+        let config = H3TransformerConfig {
+            hidden_size: 256,
+            num_layers: 1,
+            token_refiner_num_layers: 1,
+            num_attention_heads: 2,
+            attention_head_dim: 128,
+            ffn_hidden_size: 256,
+            video_latent_channels: 64,
+            audio_latent_channels: 256,
+            patch_size: [1, 2, 2],
+            text_dim: 256,
+            timestep_input_dim: 64,
+            time_embed_hidden_size: 256,
+            time_embed_dim: 128,
+            rope_inv_freq_len: 16,
+            norm_eps: 1e-5,
+            qk_norm_eps: 1e-5,
+            final_norm_eps: 1e-5,
+        };
+        let mode = H3AdaLnMode::Curve {
+            grid: 5,
+            basis_dim: 64,
+        };
+        let precision = H3PrecisionProfile::SyntheticF32;
+        let specs = expected_h3_weight_specs(&config, mode, precision)?;
+        let mut tensors = tensor_map(&specs, &device)?;
+
+        let quantized = |out_features: usize,
+                         in_features: usize,
+                         seed: usize|
+         -> Result<(H3ComfyInt8ConvRotLinear, Tensor)> {
+            let raw = (0..out_features * in_features)
+                .map(|index| {
+                    let signed = ((index.wrapping_mul(17).wrapping_add(seed)) % 7) as i8 - 3;
+                    signed.to_ne_bytes()[0]
+                })
+                .collect::<Vec<_>>();
+            let scales = (0..out_features)
+                .map(|row| 0.003 + ((row + seed) % 11) as f32 * 0.0001)
+                .collect::<Vec<_>>();
+            let linear = H3ComfyInt8ConvRotLinear::new(
+                Tensor::from_vec(raw, (out_features, in_features), &device)?,
+                Tensor::from_vec(scales, (out_features, 1), &device)?,
+            )?;
+            let dense = linear.dequantize_weight(DType::F32, &device, 256)?;
+            Ok((linear, dense))
+        };
+        let inner = config.attention_inner_dim();
+        let (qkv, qkv_dense) = quantized(3 * inner, config.hidden_size, 1)?;
+        let (out, out_dense) = quantized(config.hidden_size, inner, 2)?;
+        let (fc1, fc1_dense) = quantized(2 * config.ffn_hidden_size, config.hidden_size, 3)?;
+        let (fc2, fc2_dense) = quantized(config.hidden_size, config.ffn_hidden_size, 4)?;
+        tensors.insert("blocks.0.attn.qkv_proj.weight".into(), qkv_dense);
+        tensors.insert("blocks.0.attn.out_proj.weight".into(), out_dense);
+        tensors.insert("blocks.0.mlp.fc1.weight".into(), fc1_dense);
+        tensors.insert("blocks.0.mlp.fc2.weight".into(), fc2_dense);
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
+        let dense = H3TransformerBlockWeights::load(&config, mode, precision, vb.pp("blocks.0"))?;
+        let quant = H3ComfyInt8TransformerBlockWeights::load(
+            &config,
+            mode,
+            precision,
+            H3ComfyInt8BlockMatrices { qkv, out, fc1, fc2 },
+            vb.pp("blocks.0"),
+        )?;
+
+        let hidden = Tensor::from_vec(
+            (0..3 * config.hidden_size)
+                .map(|index| index as f32 / 997.0 - 0.35)
+                .collect::<Vec<_>>(),
+            (1, 3, config.hidden_size),
+            &device,
+        )?;
+        let adaln_input = Tensor::from_vec(
+            (0..64)
+                .map(|index| index as f32 / 211.0 - 0.1)
+                .collect::<Vec<_>>(),
+            (1, 64),
+            &device,
+        )?;
+        let adaln_indices = Tensor::new(&[0u32, 1, 2], &device)?;
+        let rotary_dim = 6 * config.rope_inv_freq_len;
+        let cos = Tensor::ones((3, rotary_dim), DType::F32, &device)?;
+        let sin = Tensor::zeros((3, rotary_dim), DType::F32, &device)?;
+        let authority = H3AttentionRuntimeAuthority::bounded_synthetic_math(
+            H3AttentionDevice::Cpu,
+            H3AttentionModelContract {
+                heads: config.num_attention_heads,
+                head_dim: config.attention_head_dim,
+                dtype: H3AttentionDType::F32,
+            },
+        )
+        .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        let plan = authority
+            .freeze_execution(1, 3, 3)
+            .map_err(|error| candle::Error::Msg(error.to_string()))?
+            .packed_transformer;
+        let expected = dense.forward(
+            &hidden,
+            &adaln_input,
+            &adaln_indices,
+            (&cos, &sin, rotary_dim),
+            &plan,
+        )?;
+        let actual = quant.forward(
+            &hidden,
+            &adaln_input,
+            &adaln_indices,
+            (&cos, &sin, rotary_dim),
+            &plan,
+        )?;
+        assert_close(&expected, &actual, 2e-4)
+    }
+
+    #[test]
     fn full_tiny_stack_runs_both_heads_deterministically() -> Result<()> {
         let device = Device::Cpu;
         let model = load_tiny(
@@ -3389,7 +3807,9 @@ mod tests {
         )?;
         assert_eq!(model.streamed.video_projection.weight().dtype(), DType::F32);
         assert_eq!(model.streamed.text_projection.weight().dtype(), DType::BF16);
-        let H3TransformerBlockRepresentation::Dense(first) = &model.blocks[0].representation;
+        let H3TransformerBlockRepresentation::Dense(first) = &model.blocks[0].representation else {
+            panic!("eager audited checkpoint must retain dense blocks")
+        };
         assert_eq!(first.attention.qkv.weight().dtype(), DType::BF16);
         assert_eq!(first.adaln.linear.weight().dtype(), DType::BF16);
         assert_eq!(
