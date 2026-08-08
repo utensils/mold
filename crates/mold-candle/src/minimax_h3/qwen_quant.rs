@@ -35,24 +35,28 @@ const LANGUAGE_LINEAR_SUFFIXES: &[&str] = &[
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum H3QwenTensorDType {
     Bf16,
+    F8E4M3,
     F32,
     I8,
+    U8,
 }
 
 impl H3QwenTensorDType {
-    const fn byte_width(self) -> u64 {
+    pub(super) const fn byte_width(self) -> u64 {
         match self {
-            Self::I8 => 1,
+            Self::F8E4M3 | Self::I8 | Self::U8 => 1,
             Self::Bf16 => 2,
             Self::F32 => 4,
         }
     }
 
-    const fn stable_id(self) -> &'static str {
+    pub(super) const fn stable_id(self) -> &'static str {
         match self {
             Self::Bf16 => "bf16",
+            Self::F8E4M3 => "f8-e4m3",
             Self::F32 => "f32",
             Self::I8 => "i8",
+            Self::U8 => "u8",
         }
     }
 }
