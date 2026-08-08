@@ -10,11 +10,12 @@ schema are documented separately in
 
 The status record distinguishes code merged through main `50f28de3` from the
 exact, open attention release candidate in PR #871 and its weight-free Plato
-prequalification. The ordinary shipping-binary exclusion fixture remains
-pending. The record also explains why nominal mount metadata does not make the
-requested `/Volumes/ExternalStorage` UAT home usable. None of those engineering
-states overrides the open authorization gate in issue #831, and none records
-binary model-artifact access or licensed H3 UAT.
+prequalification. Its same-tree ordinary shipping-feature fixture passed the
+release-candidate exclusion checks, but is deliberately non-publishable and is
+not a public release artifact. The record also explains why nominal mount
+metadata does not make the requested `/Volumes/ExternalStorage` UAT home usable.
+None of those engineering states overrides the open authorization gate in issue
+#831, and none records binary model-artifact access or licensed H3 UAT.
 
 The schema and runner define the deferred real RTX 3090 acceptance gate. No
 passing hardware report is checked in, and the runner never provisions cloud
