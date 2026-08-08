@@ -437,6 +437,35 @@ pub(crate) trait H3BackendExecutionLease {
     fn is_active(&self) -> bool;
 }
 
+impl<T> H3BackendExecutionLease for &T
+where
+    T: H3BackendExecutionLease + ?Sized,
+{
+    fn lease_id(&self) -> &str {
+        T::lease_id(self)
+    }
+
+    fn device_id(&self) -> &str {
+        T::device_id(self)
+    }
+
+    fn backend(&self) -> H3CandleBackendDevice {
+        T::backend(self)
+    }
+
+    fn execution_fingerprint(&self) -> &str {
+        T::execution_fingerprint(self)
+    }
+
+    fn device(&self) -> &Device {
+        T::device(self)
+    }
+
+    fn is_active(&self) -> bool {
+        T::is_active(self)
+    }
+}
+
 /// Keeps every mmap-backed component immutable until all Candle tensors drop.
 ///
 /// # Safety
@@ -447,6 +476,21 @@ pub(crate) trait H3BackendExecutionLease {
 pub(crate) unsafe trait H3BackendArtifactLease {
     fn component_set_identity(&self) -> &str;
     fn is_active(&self) -> bool;
+}
+
+// SAFETY: borrowing a valid artifact lease cannot shorten the underlying
+// lease's lifetime or permit mutation of its protected artifact set.
+unsafe impl<T> H3BackendArtifactLease for &T
+where
+    T: H3BackendArtifactLease + ?Sized,
+{
+    fn component_set_identity(&self) -> &str {
+        T::component_set_identity(self)
+    }
+
+    fn is_active(&self) -> bool {
+        T::is_active(self)
+    }
 }
 
 /// Real component bundle returned by a future authorized loader. Field order

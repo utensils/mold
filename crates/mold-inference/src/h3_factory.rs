@@ -19,7 +19,7 @@ use crate::minimax_h3::offload::FrozenH3BlockStreamingPlan;
 use crate::minimax_h3::vae_runtime::expected_h3_comfy_vae_artifact_plan_identity;
 use crate::minimax_h3::{FrozenH3ConditionerPlacement, H3ConditionerExecution};
 
-const H3_FACTORY_AUTHORITY_SCHEMA_VERSION: u32 = 3;
+const H3_FACTORY_AUTHORITY_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum H3FactoryComponentRole {
@@ -131,6 +131,7 @@ pub struct H3FactoryAuthorityInput {
     pub qwen_activation_workspace_bytes: u64,
     pub qwen_output_text_rows: u64,
     pub qwen_vision_rows: u64,
+    pub condition_visual_rows: u64,
     pub resident_block_count: u32,
     pub prefetch_depth: u32,
     pub attention_backend: AttentionBackend,
@@ -164,6 +165,7 @@ pub struct FrozenH3FactoryAuthority {
     qwen_activation_workspace_bytes: u64,
     qwen_output_text_rows: u64,
     qwen_vision_rows: u64,
+    condition_visual_rows: u64,
     attention_backend: AttentionBackend,
     attention_chunk: AttentionChunkPolicy,
     attention_kernel_identity: String,
@@ -190,6 +192,43 @@ pub(crate) struct H3PrivateVaeFactoryAuthority {
     pub(crate) task: Task,
     pub(crate) device_id: String,
     pub(crate) execution_fingerprint: String,
+}
+
+/// Complete private projection consumed by the VAE-free streamed core. It is
+/// still contract-only: no artifact path, opened descriptor, runtime object,
+/// or public dispatch authority crosses this boundary.
+#[cfg(feature = "h3-private-uat")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct H3PrivateFl2VaFactoryAuthority {
+    pub(crate) factory_identity_sha256: String,
+    pub(crate) backend_plan_identity_sha256: String,
+    pub(crate) component_set_identity_sha256: String,
+    pub(crate) vae_artifact_plan_identity_sha256: String,
+    pub(crate) canonical_model: String,
+    pub(crate) task: Task,
+    pub(crate) device_id: String,
+    pub(crate) device_ordinal: usize,
+    pub(crate) compute_capability: (u16, u16),
+    pub(crate) execution_fingerprint: String,
+    pub(crate) condition_visual_rows: u64,
+    pub(crate) block_streaming: FrozenH3BlockStreamingPlan,
+    pub(crate) attention_backend: AttentionBackend,
+    pub(crate) attention_chunk: AttentionChunkPolicy,
+    pub(crate) attention_kernel_identity: String,
+    pub(crate) attention_qualification_sha256: String,
+    pub(crate) attention_full_noncausal: bool,
+    pub(crate) attention_lossless: bool,
+    pub(crate) attention_head_count: u32,
+    pub(crate) attention_head_dim: u32,
+    pub(crate) quantization: H3FactoryQuantizationAuthority,
+    pub(crate) conditioner_component_content_sha256: String,
+    pub(crate) conditioner_component_validation_sha256: String,
+    pub(crate) transformer_component_content_sha256: String,
+    pub(crate) transformer_component_validation_sha256: String,
+    pub(crate) visual_vae_component_content_sha256: String,
+    pub(crate) visual_vae_component_validation_sha256: String,
+    pub(crate) audio_vae_component_content_sha256: String,
+    pub(crate) audio_vae_component_validation_sha256: String,
 }
 
 impl FrozenH3FactoryAuthority {
@@ -310,6 +349,7 @@ impl FrozenH3FactoryAuthority {
             qwen_activation_workspace_bytes: input.qwen_activation_workspace_bytes,
             qwen_output_text_rows: input.qwen_output_text_rows,
             qwen_vision_rows: input.qwen_vision_rows,
+            condition_visual_rows: input.condition_visual_rows,
             attention_backend: input.attention_backend,
             attention_chunk: input.attention_chunk,
             attention_kernel_identity: input.attention_kernel_identity,
@@ -362,6 +402,56 @@ impl FrozenH3FactoryAuthority {
         })
     }
 
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn private_fl2va_runtime_authority(&self) -> Result<H3PrivateFl2VaFactoryAuthority> {
+        self.validate_frozen()?;
+        let vae_artifact_plan_identity_sha256 = self
+            .comfy_vae_artifact_plan_identity_sha256
+            .as_deref()
+            .ok_or_else(|| anyhow!("MiniMax H3 factory authority has no private Comfy VAE plan"))?;
+        if self.task() != Task::Fl2va {
+            bail!("private MiniMax H3 streamed runtime currently requires FL2VA authority");
+        }
+        let (conditioner_content, conditioner_validation) =
+            self.component_authority(H3ComponentRole::Conditioner);
+        let (transformer_content, transformer_validation) =
+            self.component_authority(H3ComponentRole::Transformer);
+        let (visual_content, visual_validation) =
+            self.component_authority(H3ComponentRole::VisualVae);
+        let (audio_content, audio_validation) = self.component_authority(H3ComponentRole::AudioVae);
+        Ok(H3PrivateFl2VaFactoryAuthority {
+            factory_identity_sha256: self.identity_sha256.clone(),
+            backend_plan_identity_sha256: self.backend_plan_identity_sha256().into(),
+            component_set_identity_sha256: self.component_set_identity_sha256().into(),
+            vae_artifact_plan_identity_sha256: vae_artifact_plan_identity_sha256.into(),
+            canonical_model: self.canonical_model().into(),
+            task: self.task(),
+            device_id: self.device_id().into(),
+            device_ordinal: self.device_ordinal,
+            compute_capability: self.compute_capability(),
+            execution_fingerprint: self.execution_fingerprint().into(),
+            condition_visual_rows: self.condition_visual_rows,
+            block_streaming: self.backend_plan.block_streaming().clone(),
+            attention_backend: self.attention_backend,
+            attention_chunk: self.attention_chunk,
+            attention_kernel_identity: self.attention_kernel_identity.clone(),
+            attention_qualification_sha256: self.attention_qualification_sha256.clone(),
+            attention_full_noncausal: self.attention_full_noncausal,
+            attention_lossless: self.attention_lossless,
+            attention_head_count: self.attention_head_count,
+            attention_head_dim: self.attention_head_dim,
+            quantization: self.quantization.clone(),
+            conditioner_component_content_sha256: conditioner_content.into(),
+            conditioner_component_validation_sha256: conditioner_validation.into(),
+            transformer_component_content_sha256: transformer_content.into(),
+            transformer_component_validation_sha256: transformer_validation.into(),
+            visual_vae_component_content_sha256: visual_content.into(),
+            visual_vae_component_validation_sha256: visual_validation.into(),
+            audio_vae_component_content_sha256: audio_content.into(),
+            audio_vae_component_validation_sha256: audio_validation.into(),
+        })
+    }
+
     /// Exact logical conditioner authority frozen by server admission.
     ///
     /// Private runtime adapters use this to cross-check the independently
@@ -369,11 +459,16 @@ impl FrozenH3FactoryAuthority {
     /// digests, never artifact paths or bytes.
     #[cfg(feature = "h3-private-uat")]
     pub(crate) fn conditioner_component_authority(&self) -> (&str, &str) {
+        self.component_authority(H3ComponentRole::Conditioner)
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    fn component_authority(&self, role: H3ComponentRole) -> (&str, &str) {
         let authority = self
             .backend_plan
             .components()
-            .authority(H3ComponentRole::Conditioner)
-            .expect("validated H3 component set always contains the conditioner");
+            .authority(role)
+            .expect("validated H3 component set always contains every required role");
         (authority.content_sha256(), authority.validation_sha256())
     }
 
@@ -583,7 +678,7 @@ impl FrozenH3FactoryAuthority {
 
 fn frozen_identity(authority: &FrozenH3FactoryAuthority) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"mold.minimax-h3.factory-authority.v3\0");
+    hash.update(b"mold.minimax-h3.factory-authority.v4\0");
     hash.update(authority.schema_version.to_le_bytes());
     hash.update(authority.backend_plan.identity_sha256().as_bytes());
     hash.update([0]);
@@ -605,6 +700,7 @@ fn frozen_identity(authority: &FrozenH3FactoryAuthority) -> String {
     hash.update(authority.qwen_activation_workspace_bytes.to_le_bytes());
     hash.update(authority.qwen_output_text_rows.to_le_bytes());
     hash.update(authority.qwen_vision_rows.to_le_bytes());
+    hash.update(authority.condition_visual_rows.to_le_bytes());
     hash.update(match authority.attention_backend {
         AttentionBackend::Math => b"math".as_slice(),
         AttentionBackend::Flash => b"flash".as_slice(),
@@ -661,6 +757,7 @@ mod tests {
             qwen_activation_workspace_bytes: 1024,
             qwen_output_text_rows: 1,
             qwen_vision_rows: 0,
+            condition_visual_rows: 0,
             resident_block_count: 8,
             prefetch_depth: 1,
             attention_backend: AttentionBackend::Flash,
@@ -740,6 +837,7 @@ mod tests {
         for mutate in [
             (|value: &mut FrozenH3FactoryAuthority| value.device_ordinal += 1)
                 as fn(&mut FrozenH3FactoryAuthority),
+            |value| value.condition_visual_rows += 1,
             |value| value.attention_kernel_identity.push_str("-changed"),
             |value| value.block_offload = false,
             |value| {
@@ -806,6 +904,7 @@ mod tests {
             qwen_activation_workspace_bytes: 1024,
             qwen_output_text_rows: 1,
             qwen_vision_rows: 0,
+            condition_visual_rows: 0,
             resident_block_count: 8,
             prefetch_depth: 1,
             attention_backend: AttentionBackend::Flash,

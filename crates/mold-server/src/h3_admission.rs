@@ -1727,6 +1727,7 @@ pub(crate) fn bind_h3_factory_authority(
             qwen_activation_workspace_bytes: plan.memory.qwen_activation_bytes,
             qwen_output_text_rows: plan.shape.rows.qwen_output_text_rows,
             qwen_vision_rows: plan.shape.rows.qwen_vision_rows,
+            condition_visual_rows: plan.shape.rows.condition_visual_rows,
             resident_block_count: plan.resident_block_count,
             prefetch_depth: plan.prefetch_depth,
             attention_backend: engine_config.attention_backend,
