@@ -11,6 +11,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::error::Error as StdError;
 use std::fmt;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn as nn;
@@ -196,8 +198,10 @@ impl H3CheckpointSource<'static> {
     ///
     /// # Safety
     ///
-    /// The mapped files must not be modified or truncated until this source has
-    /// been consumed by [`H3Transformer::load`]. This is the same requirement as
+    /// The mapped files must not be modified or truncated until this source and
+    /// any [`H3TransformerBlockLoader`] built from it have been dropped. The
+    /// eager [`H3Transformer::load`] path consumes the loader before returning.
+    /// This is the same requirement as
     /// [`candle::safetensors::MmapedSafetensors::multi`].
     pub unsafe fn from_mmaped_safetensors<P: AsRef<Path>>(
         component: H3CheckpointComponent,
@@ -1424,7 +1428,7 @@ fn gated_residual(
 }
 
 #[derive(Clone, Debug)]
-struct H3TransformerBlock {
+struct H3TransformerBlockWeights {
     norm1: nn::RmsNorm,
     attention: H3Attention,
     norm2: nn::RmsNorm,
@@ -1432,7 +1436,7 @@ struct H3TransformerBlock {
     adaln: H3AdaLnProjection,
 }
 
-impl H3TransformerBlock {
+impl H3TransformerBlockWeights {
     fn load(
         config: &H3TransformerConfig,
         mode: H3AdaLnMode,
@@ -1502,6 +1506,33 @@ impl H3TransformerBlock {
         )?;
         let update = self.mlp.forward(&normalized)?;
         gated_residual(&hidden, &update, &gate_mlp, adaln_indices)
+    }
+}
+
+/// Private execution representation behind the public streamed block handle.
+///
+/// Keeping this enum out of the public contract is deliberate: the published
+/// Comfy checkpoints can add an INT8 ConvRot-backed variant without changing
+/// the loader/executor signatures consumed by `mold-inference`.
+#[derive(Clone, Debug)]
+enum H3TransformerBlockRepresentation {
+    Dense(H3TransformerBlockWeights),
+}
+
+impl H3TransformerBlockRepresentation {
+    fn forward(
+        &self,
+        hidden: &Tensor,
+        adaln_input: &Tensor,
+        adaln_indices: &Tensor,
+        rotary: (&Tensor, &Tensor, usize),
+        attention_plan: &H3FrozenAttentionPlan,
+    ) -> Result<Tensor> {
+        match self {
+            Self::Dense(block) => {
+                block.forward(hidden, adaln_input, adaln_indices, rotary, attention_plan)
+            }
+        }
     }
 }
 
@@ -1722,10 +1753,230 @@ pub struct H3TransformerOutput {
     pub audio: Tensor,
 }
 
-#[derive(Clone, Debug)]
-pub struct H3Transformer {
-    config: H3TransformerConfig,
+#[derive(Debug)]
+struct H3StreamedTransformerIdentity {
     task: H3TransformerTask,
+    attention_identity_sha256: String,
+    block_count: usize,
+    live_blocks: AtomicUsize,
+}
+
+/// One independently owned main DiT block.
+///
+/// The representation is intentionally opaque and this handle is not
+/// `Clone`: the streaming owner decides exactly how long its device allocation
+/// remains live. A future Comfy INT8 ConvRot representation can be added behind
+/// this type without changing the public loader/executor contract.
+pub struct H3LoadedTransformerBlock {
+    index: usize,
+    identity: Arc<H3StreamedTransformerIdentity>,
+    representation: H3TransformerBlockRepresentation,
+}
+
+impl fmt::Debug for H3LoadedTransformerBlock {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("H3LoadedTransformerBlock")
+            .field("index", &self.index)
+            .field("task", &self.identity.task)
+            .finish_non_exhaustive()
+    }
+}
+
+impl H3LoadedTransformerBlock {
+    fn new_dense(
+        index: usize,
+        identity: Arc<H3StreamedTransformerIdentity>,
+        block: H3TransformerBlockWeights,
+    ) -> Self {
+        identity.live_blocks.fetch_add(1, Ordering::Relaxed);
+        Self {
+            index,
+            identity,
+            representation: H3TransformerBlockRepresentation::Dense(block),
+        }
+    }
+
+    fn clone_for_eager(&self) -> Self {
+        self.identity.live_blocks.fetch_add(1, Ordering::Relaxed);
+        Self {
+            index: self.index,
+            identity: self.identity.clone(),
+            representation: self.representation.clone(),
+        }
+    }
+
+    pub const fn index(&self) -> usize {
+        self.index
+    }
+
+    pub fn task(&self) -> H3TransformerTask {
+        self.identity.task
+    }
+}
+
+impl Drop for H3LoadedTransformerBlock {
+    fn drop(&mut self) {
+        let previous = self.identity.live_blocks.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(previous > 0, "MiniMax H3 live block accounting underflow");
+    }
+}
+
+/// Dense audited-checkpoint loader for independently owned main DiT blocks.
+///
+/// This object retains the checkpoint tensor backend, not materialized block
+/// tensors. `load_block` is the only operation that allocates one block on the
+/// source's already-audited device.
+pub struct H3TransformerBlockLoader<'a> {
+    config: H3TransformerConfig,
+    mode: H3AdaLnMode,
+    precision: H3PrecisionProfile,
+    vb: VarBuilder<'a>,
+    identity: Arc<H3StreamedTransformerIdentity>,
+}
+
+impl fmt::Debug for H3TransformerBlockLoader<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("H3TransformerBlockLoader")
+            .field("task", &self.identity.task)
+            .field("block_count", &self.identity.block_count)
+            .field("live_blocks", &self.live_block_count())
+            .finish_non_exhaustive()
+    }
+}
+
+impl H3TransformerBlockLoader<'_> {
+    pub fn task(&self) -> H3TransformerTask {
+        self.identity.task
+    }
+
+    pub fn block_count(&self) -> usize {
+        self.identity.block_count
+    }
+
+    /// Number of block handles from this exact load that have not been
+    /// dropped. The loader and resident core themselves always retain zero.
+    pub fn live_block_count(&self) -> usize {
+        self.identity.live_blocks.load(Ordering::Relaxed)
+    }
+
+    pub fn load_block(&mut self, index: usize) -> Result<H3LoadedTransformerBlock> {
+        if index >= self.identity.block_count {
+            candle::bail!(
+                "MiniMax H3 block index {index} is outside the exact block count {}",
+                self.identity.block_count
+            )
+        }
+        let block = H3TransformerBlockWeights::load(
+            &self.config,
+            self.mode,
+            self.precision,
+            self.vb.pp(format!("blocks.{index}")),
+        )?;
+        Ok(H3LoadedTransformerBlock::new_dense(
+            index,
+            self.identity.clone(),
+            block,
+        ))
+    }
+}
+
+/// Mutable state for one denoising step through an H3 streamed transformer.
+///
+/// The step owns projected hidden state, frozen attention plans, MM-RoPE, and
+/// AdaLN inputs. It retains no transformer block and accepts each exact block
+/// once in monotonically increasing order.
+pub struct H3TransformerStep {
+    identity: Arc<H3StreamedTransformerIdentity>,
+    hidden: Tensor,
+    adaln_input: Tensor,
+    adaln_indices: Tensor,
+    cos: Tensor,
+    sin: Tensor,
+    rotary_dim: usize,
+    attention_plan: H3FrozenAttentionPlan,
+    timestep_indices: Tensor,
+    video_indices: Tensor,
+    audio_indices: Tensor,
+    next_block: usize,
+}
+
+impl fmt::Debug for H3TransformerStep {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("H3TransformerStep")
+            .field("task", &self.identity.task)
+            .field("next_block", &self.next_block)
+            .field("block_count", &self.identity.block_count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl H3TransformerStep {
+    pub fn task(&self) -> H3TransformerTask {
+        self.identity.task
+    }
+
+    pub const fn next_block_index(&self) -> usize {
+        self.next_block
+    }
+
+    pub fn block_count(&self) -> usize {
+        self.identity.block_count
+    }
+
+    /// Execute exactly the next block. Index, task, checkpoint-load identity,
+    /// and frozen attention route are checked before any tensor operation.
+    pub fn forward_block(&mut self, index: usize, block: &H3LoadedTransformerBlock) -> Result<()> {
+        if index != self.next_block {
+            candle::bail!(
+                "MiniMax H3 streamed step expected block {}, received requested index {index}",
+                self.next_block
+            )
+        }
+        if block.index != index {
+            candle::bail!(
+                "MiniMax H3 streamed block handle {} does not match requested index {index}",
+                block.index
+            )
+        }
+        if block.identity.task != self.identity.task {
+            candle::bail!(
+                "MiniMax H3 streamed block task {:?} does not match step task {:?}",
+                block.identity.task,
+                self.identity.task
+            )
+        }
+        if block.identity.attention_identity_sha256 != self.identity.attention_identity_sha256 {
+            candle::bail!("MiniMax H3 streamed block attention authority does not match the step")
+        }
+        if !Arc::ptr_eq(&block.identity, &self.identity) {
+            candle::bail!(
+                "MiniMax H3 streamed block belongs to a different audited checkpoint load"
+            )
+        }
+        self.hidden = block.representation.forward(
+            &self.hidden,
+            &self.adaln_input,
+            &self.adaln_indices,
+            (&self.cos, &self.sin, self.rotary_dim),
+            &self.attention_plan,
+        )?;
+        self.next_block += 1;
+        Ok(())
+    }
+}
+
+/// Resident MiniMax H3 DiT stages.
+///
+/// Video/audio/text projections, the timestep conditioner (including Comfy's
+/// pruned curve table), MM-RoPE, token refiners, and output heads live here.
+/// Main transformer blocks never do: callers load one opaque block at a time
+/// through the paired [`H3TransformerBlockLoader`].
+#[derive(Clone, Debug)]
+pub struct H3StreamedTransformer {
+    config: H3TransformerConfig,
     mode: H3AdaLnMode,
     precision: H3PrecisionProfile,
     attention_runtime: H3AttentionRuntimeAuthority,
@@ -1736,12 +1987,14 @@ pub struct H3Transformer {
     rope: H3Rope,
     token_refiner: Vec<H3TokenRefinerBlock>,
     token_refiner_norm: nn::RmsNorm,
-    blocks: Vec<H3TransformerBlock>,
     final_layer: H3FinalLayer,
+    identity: Arc<H3StreamedTransformerIdentity>,
 }
 
-impl H3Transformer {
-    pub fn load(checkpoint: H3AuditedCheckpoint<'_>) -> Result<Self> {
+impl H3StreamedTransformer {
+    pub fn load<'a>(
+        checkpoint: H3AuditedCheckpoint<'a>,
+    ) -> Result<(Self, H3TransformerBlockLoader<'a>)> {
         let contract = H3AttentionModelContract {
             heads: checkpoint.config.num_attention_heads,
             head_dim: checkpoint.config.attention_head_dim,
@@ -1756,16 +2009,13 @@ impl H3Transformer {
         Self::load_with_attention(checkpoint, attention_runtime)
     }
 
-    /// Load with one explicit attention authority.
-    ///
-    /// This does not activate H3 in any engine or release artifact. It exists
-    /// so a scheduler can eventually bind a qualified kernel/device identity
-    /// before model construction and so developer qualification can exercise
-    /// the exact DiT dispatch without environment-driven fallback.
-    pub fn load_with_attention(
-        checkpoint: H3AuditedCheckpoint<'_>,
+    /// Load resident stages and preserve the audited backend for exact
+    /// block-at-a-time materialization under one explicit attention authority.
+    /// This does not register or activate an H3 inference engine.
+    pub fn load_with_attention<'a>(
+        checkpoint: H3AuditedCheckpoint<'a>,
         attention_runtime: H3AttentionRuntimeAuthority,
-    ) -> Result<Self> {
+    ) -> Result<(Self, H3TransformerBlockLoader<'a>)> {
         let H3AuditedCheckpoint {
             config,
             plan,
@@ -1790,6 +2040,13 @@ impl H3Transformer {
                 candle::bail!("MiniMax H3 audited tensor {key:?} is absent from the loader")
             }
         }
+
+        let identity = Arc::new(H3StreamedTransformerIdentity {
+            task: plan.task,
+            attention_identity_sha256: attention_runtime.identity_sha256().to_owned(),
+            block_count: config.num_layers,
+            live_blocks: AtomicUsize::new(0),
+        });
         let mut token_refiner = Vec::with_capacity(config.token_refiner_num_layers);
         for index in 0..config.token_refiner_num_layers {
             token_refiner.push(H3TokenRefinerBlock::load(
@@ -1799,17 +2056,14 @@ impl H3Transformer {
                 vb.pp(format!("token_refiner.blocks.{index}")),
             )?);
         }
-        let mut blocks = Vec::with_capacity(config.num_layers);
-        for index in 0..config.num_layers {
-            blocks.push(H3TransformerBlock::load(
-                &config,
-                plan.mode,
-                plan.precision,
-                vb.pp(format!("blocks.{index}")),
-            )?);
-        }
-        Ok(Self {
-            task: plan.task,
+        let loader = H3TransformerBlockLoader {
+            config: config.clone(),
+            mode: plan.mode,
+            precision: plan.precision,
+            vb: vb.clone(),
+            identity: identity.clone(),
+        };
+        let transformer = Self {
             mode: plan.mode,
             precision: plan.precision,
             attention_runtime,
@@ -1843,7 +2097,6 @@ impl H3Transformer {
                 compute_dtype,
                 vb.pp("token_refiner.final_norm"),
             )?,
-            blocks,
             final_layer: H3FinalLayer::load(
                 &config,
                 plan.mode,
@@ -1851,14 +2104,15 @@ impl H3Transformer {
                 vb.pp("final_layer"),
             )?,
             config,
-        })
+            identity,
+        };
+        Ok((transformer, loader))
     }
 
-    pub const fn task(&self) -> H3TransformerTask {
-        self.task
+    pub fn task(&self) -> H3TransformerTask {
+        self.identity.task
     }
 
-    /// Exact architecture consumed by the audited checkpoint loader.
     pub fn config(&self) -> &H3TransformerConfig {
         &self.config
     }
@@ -1875,6 +2129,14 @@ impl H3Transformer {
         &self.attention_runtime
     }
 
+    pub fn block_count(&self) -> usize {
+        self.identity.block_count
+    }
+
+    pub fn live_block_count(&self) -> usize {
+        self.identity.live_blocks.load(Ordering::Relaxed)
+    }
+
     /// Freeze both token-refiner and packed-transformer attention identities
     /// before any projection or model block runs.
     pub fn freeze_attention_execution(
@@ -1888,20 +2150,20 @@ impl H3Transformer {
             .map_err(|error| candle::Error::Msg(error.to_string()))
     }
 
-    pub fn forward(
+    pub fn begin_step(
         &self,
         input: H3ForwardInput<'_>,
         layout: &H3FrozenPackedLayout,
-    ) -> Result<H3TransformerOutput> {
-        self.forward_with_observer(input, layout, |_| Ok(()))
+    ) -> Result<H3TransformerStep> {
+        self.begin_step_with_observer(input, layout, |_| Ok(()))
     }
 
-    pub fn forward_with_observer<F>(
+    pub fn begin_step_with_observer<F>(
         &self,
         input: H3ForwardInput<'_>,
         layout: &H3FrozenPackedLayout,
         mut observer: F,
-    ) -> Result<H3TransformerOutput>
+    ) -> Result<H3TransformerStep>
     where
         F: FnMut(H3BlockProgress) -> Result<()>,
     {
@@ -1931,13 +2193,14 @@ impl H3Transformer {
         {
             candle::bail!("MiniMax H3 inputs and frozen layout must share one device")
         }
+        if !device.same_device(self.video_projection.weight().device()) {
+            candle::bail!("MiniMax H3 streamed inputs do not match the resident model device")
+        }
 
-        // This is intentionally before any projection or block execution: a
-        // product-size N² math fallback is rejected without spending model
-        // compute or waiting for a late CUDA allocation failure.
+        // Reject an unavailable product-size attention route before any model
+        // projection or block load.
         let attention_execution =
             self.freeze_attention_execution(batch, text_rows, layout.seq_len)?;
-
         let compute_dtype = self.precision.compute_dtype();
         let video = self
             .video_projection
@@ -1981,25 +2244,51 @@ impl H3Transformer {
             H3AdaLnMode::Curve { .. } => time_embedding,
         };
         let (cos, sin) = self.rope.forward(&layout.position_ids)?;
-        let rotary_dim = 6 * self.config.rope_inv_freq_len;
         observer(H3BlockProgress {
             stack: H3BlockStack::Transformer,
             completed: 0,
-            total: self.blocks.len(),
+            total: self.identity.block_count,
         })?;
-        for (index, block) in self.blocks.iter().enumerate() {
-            hidden = block.forward(
-                &hidden,
-                &adaln_input,
-                &layout.adaln_indices,
-                (&cos, &sin, rotary_dim),
-                &attention_execution.packed_transformer,
-            )?;
-            observer(H3BlockProgress {
-                stack: H3BlockStack::Transformer,
-                completed: index + 1,
-                total: self.blocks.len(),
-            })?;
+        Ok(H3TransformerStep {
+            identity: self.identity.clone(),
+            hidden,
+            adaln_input,
+            adaln_indices: layout.adaln_indices.clone(),
+            cos,
+            sin,
+            rotary_dim: 6 * self.config.rope_inv_freq_len,
+            attention_plan: attention_execution.packed_transformer,
+            timestep_indices: layout.timestep_indices.clone(),
+            video_indices: layout.video_indices.clone(),
+            audio_indices: layout.audio_indices.clone(),
+            next_block: 0,
+        })
+    }
+
+    pub fn finish_step(&self, step: H3TransformerStep) -> Result<H3TransformerOutput> {
+        self.finish_step_with_observer(step, |_| Ok(()))
+    }
+
+    pub fn finish_step_with_observer<F>(
+        &self,
+        step: H3TransformerStep,
+        mut observer: F,
+    ) -> Result<H3TransformerOutput>
+    where
+        F: FnMut(H3BlockProgress) -> Result<()>,
+    {
+        if step.identity.task != self.identity.task
+            || step.identity.attention_identity_sha256 != self.identity.attention_identity_sha256
+            || !Arc::ptr_eq(&step.identity, &self.identity)
+        {
+            candle::bail!("MiniMax H3 streamed step belongs to a different resident transformer")
+        }
+        if step.next_block != self.identity.block_count {
+            candle::bail!(
+                "MiniMax H3 streamed step completed {} of {} exact blocks",
+                step.next_block,
+                self.identity.block_count
+            )
         }
         observer(H3BlockProgress {
             stack: H3BlockStack::Output,
@@ -2007,11 +2296,11 @@ impl H3Transformer {
             total: 1,
         })?;
         let (video, audio) = self.final_layer.forward(
-            &hidden,
-            &adaln_input,
-            &layout.timestep_indices,
-            &layout.video_indices,
-            &layout.audio_indices,
+            &step.hidden,
+            &step.adaln_input,
+            &step.timestep_indices,
+            &step.video_indices,
+            &step.audio_indices,
         )?;
         observer(H3BlockProgress {
             stack: H3BlockStack::Output,
@@ -2019,6 +2308,120 @@ impl H3Transformer {
             total: 1,
         })?;
         Ok(H3TransformerOutput { video, audio })
+    }
+}
+
+/// Compatibility wrapper that eagerly retains every main block while running
+/// the same streamed core/step implementation. Existing callers and numerical
+/// regressions therefore exercise the production block boundary rather than a
+/// second forward implementation.
+#[derive(Debug)]
+pub struct H3Transformer {
+    streamed: H3StreamedTransformer,
+    blocks: Vec<H3LoadedTransformerBlock>,
+}
+
+impl Clone for H3Transformer {
+    fn clone(&self) -> Self {
+        Self {
+            streamed: self.streamed.clone(),
+            blocks: self
+                .blocks
+                .iter()
+                .map(H3LoadedTransformerBlock::clone_for_eager)
+                .collect(),
+        }
+    }
+}
+
+impl H3Transformer {
+    pub fn load(checkpoint: H3AuditedCheckpoint<'_>) -> Result<Self> {
+        let (streamed, mut loader) = H3StreamedTransformer::load(checkpoint)?;
+        Self::finish_eager_load(streamed, &mut loader)
+    }
+
+    /// Preserve the eager compatibility API under one explicit attention
+    /// authority by composing the streamed resident core and exact block
+    /// loader.
+    pub fn load_with_attention(
+        checkpoint: H3AuditedCheckpoint<'_>,
+        attention_runtime: H3AttentionRuntimeAuthority,
+    ) -> Result<Self> {
+        let (streamed, mut loader) =
+            H3StreamedTransformer::load_with_attention(checkpoint, attention_runtime)?;
+        Self::finish_eager_load(streamed, &mut loader)
+    }
+
+    fn finish_eager_load(
+        streamed: H3StreamedTransformer,
+        loader: &mut H3TransformerBlockLoader<'_>,
+    ) -> Result<Self> {
+        let mut blocks = Vec::with_capacity(streamed.block_count());
+        for index in 0..streamed.block_count() {
+            blocks.push(loader.load_block(index)?);
+        }
+        Ok(Self { streamed, blocks })
+    }
+
+    pub fn task(&self) -> H3TransformerTask {
+        self.streamed.task()
+    }
+
+    pub fn config(&self) -> &H3TransformerConfig {
+        self.streamed.config()
+    }
+
+    pub const fn adaln_mode(&self) -> H3AdaLnMode {
+        self.streamed.adaln_mode()
+    }
+
+    pub const fn precision(&self) -> H3PrecisionProfile {
+        self.streamed.precision()
+    }
+
+    pub const fn attention_runtime(&self) -> &H3AttentionRuntimeAuthority {
+        self.streamed.attention_runtime()
+    }
+
+    pub fn freeze_attention_execution(
+        &self,
+        batch_size: usize,
+        token_refiner_rows: usize,
+        packed_rows: usize,
+    ) -> Result<H3FrozenAttentionExecution> {
+        self.streamed
+            .freeze_attention_execution(batch_size, token_refiner_rows, packed_rows)
+    }
+
+    pub fn forward(
+        &self,
+        input: H3ForwardInput<'_>,
+        layout: &H3FrozenPackedLayout,
+    ) -> Result<H3TransformerOutput> {
+        self.forward_with_observer(input, layout, |_| Ok(()))
+    }
+
+    pub fn forward_with_observer<F>(
+        &self,
+        input: H3ForwardInput<'_>,
+        layout: &H3FrozenPackedLayout,
+        mut observer: F,
+    ) -> Result<H3TransformerOutput>
+    where
+        F: FnMut(H3BlockProgress) -> Result<()>,
+    {
+        let mut step = self
+            .streamed
+            .begin_step_with_observer(input, layout, &mut observer)?;
+        for (index, block) in self.blocks.iter().enumerate() {
+            step.forward_block(index, block)?;
+            observer(H3BlockProgress {
+                stack: H3BlockStack::Transformer,
+                completed: index + 1,
+                total: self.blocks.len(),
+            })?;
+        }
+        self.streamed.finish_step_with_observer(step, &mut observer)
     }
 }
 
@@ -2106,6 +2509,20 @@ mod tests {
         let checkpoint = audit_h3_checkpoint(config, task, precision, source)
             .map_err(|error| candle::Error::Msg(error.to_string()))?;
         H3Transformer::load(checkpoint)
+    }
+
+    fn load_streamed_tiny(
+        device: &Device,
+        mode: H3AdaLnMode,
+        precision: H3PrecisionProfile,
+        task: H3TransformerTask,
+    ) -> Result<(H3StreamedTransformer, H3TransformerBlockLoader<'static>)> {
+        let config = H3TransformerConfig::tiny();
+        let inventory = inventory(&config, mode, precision, task.checkpoint_component());
+        let source = source_from_inventory(inventory, device)?;
+        let checkpoint = audit_h3_checkpoint(config, task, precision, source)
+            .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        H3StreamedTransformer::load(checkpoint)
     }
 
     fn load_with_attention(
@@ -2580,6 +2997,187 @@ mod tests {
     }
 
     #[test]
+    fn streamed_full_and_curve_stacks_match_eager_with_one_live_block() -> Result<()> {
+        let device = Device::Cpu;
+        let cases = [
+            (H3AdaLnMode::Full, H3TransformerTask::T2VaFl2Va),
+            (
+                H3AdaLnMode::Curve {
+                    grid: 7,
+                    basis_dim: 3,
+                },
+                H3TransformerTask::Ref2Va,
+            ),
+        ];
+        for (mode, task) in cases {
+            let eager = load_tiny(&device, mode, H3PrecisionProfile::SyntheticF32, task)?;
+            let (streamed, mut loader) =
+                load_streamed_tiny(&device, mode, H3PrecisionProfile::SyntheticF32, task)?;
+            assert_eq!(streamed.task(), task);
+            assert_eq!(streamed.adaln_mode(), mode);
+            assert_eq!(streamed.block_count(), 2);
+            assert_eq!(loader.block_count(), 2);
+            assert_eq!(streamed.live_block_count(), 0);
+            assert_eq!(loader.live_block_count(), 0);
+
+            let layout = tiny_layout().freeze(&device)?;
+            let input = OwnedInput::new(&device)?;
+            let eager_output = eager.forward(input.borrowed(), &layout)?;
+            let mut step = streamed.begin_step(input.borrowed(), &layout)?;
+            assert_eq!(step.task(), task);
+            assert_eq!(step.block_count(), 2);
+            assert_eq!(step.next_block_index(), 0);
+
+            let mut observed = Vec::new();
+            for index in 0..streamed.block_count() {
+                let block = loader.load_block(index)?;
+                observed.push(block.index());
+                assert_eq!(block.task(), task);
+                assert_eq!(streamed.live_block_count(), 1);
+                assert_eq!(loader.live_block_count(), 1);
+                step.forward_block(index, &block)?;
+                assert_eq!(step.next_block_index(), index + 1);
+                drop(block);
+                assert_eq!(streamed.live_block_count(), 0);
+                assert_eq!(loader.live_block_count(), 0);
+            }
+            assert_eq!(observed, vec![0, 1]);
+            let streamed_output = streamed.finish_step(step)?;
+            assert_close(&eager_output.video, &streamed_output.video, 0.0)?;
+            assert_close(&eager_output.audio, &streamed_output.audio, 0.0)?;
+            assert_eq!(streamed.live_block_count(), 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn streamed_steps_reject_wrong_order_task_checkpoint_and_incomplete_count() -> Result<()> {
+        let device = Device::Cpu;
+        let (streamed, mut loader) = load_streamed_tiny(
+            &device,
+            H3AdaLnMode::Full,
+            H3PrecisionProfile::SyntheticF32,
+            H3TransformerTask::T2VaFl2Va,
+        )?;
+        let (_same_task_core, mut same_task_loader) = load_streamed_tiny(
+            &device,
+            H3AdaLnMode::Full,
+            H3PrecisionProfile::SyntheticF32,
+            H3TransformerTask::T2VaFl2Va,
+        )?;
+        let (_ref_core, mut ref_loader) = load_streamed_tiny(
+            &device,
+            H3AdaLnMode::Full,
+            H3PrecisionProfile::SyntheticF32,
+            H3TransformerTask::Ref2Va,
+        )?;
+        let layout = tiny_layout().freeze(&device)?;
+        let input = OwnedInput::new(&device)?;
+        let mut step = streamed.begin_step(input.borrowed(), &layout)?;
+
+        let error = loader.load_block(loader.block_count()).unwrap_err();
+        assert!(error.to_string().contains("outside the exact block count"));
+
+        let block_one = loader.load_block(1)?;
+        let error = step.forward_block(1, &block_one).unwrap_err();
+        assert!(error.to_string().contains("expected block 0"));
+        assert_eq!(step.next_block_index(), 0);
+
+        let block_zero = loader.load_block(0)?;
+        let error = step.forward_block(0, &block_one).unwrap_err();
+        assert!(error.to_string().contains("handle 1"));
+        assert_eq!(step.next_block_index(), 0);
+
+        let ref_block = ref_loader.load_block(0)?;
+        let error = step.forward_block(0, &ref_block).unwrap_err();
+        assert!(error.to_string().contains("block task Ref2Va"));
+        assert_eq!(step.next_block_index(), 0);
+
+        let other_checkpoint_block = same_task_loader.load_block(0)?;
+        let error = step.forward_block(0, &other_checkpoint_block).unwrap_err();
+        assert!(error.to_string().contains("different audited checkpoint"));
+        assert_eq!(step.next_block_index(), 0);
+
+        step.forward_block(0, &block_zero)?;
+        let error = step.forward_block(0, &block_zero).unwrap_err();
+        assert!(error.to_string().contains("expected block 1"));
+        let error = streamed.finish_step(step).unwrap_err();
+        assert!(error.to_string().contains("completed 1 of 2 exact blocks"));
+
+        drop(block_one);
+        drop(block_zero);
+        drop(ref_block);
+        drop(other_checkpoint_block);
+        assert_eq!(loader.live_block_count(), 0);
+        assert_eq!(ref_loader.live_block_count(), 0);
+        assert_eq!(same_task_loader.live_block_count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn streamed_shape_and_attention_authority_mutations_fail_closed() -> Result<()> {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<H3StreamedTransformer>();
+        assert_send_sync::<H3TransformerBlockLoader<'static>>();
+        assert_send_sync::<H3LoadedTransformerBlock>();
+        assert_send_sync::<H3TransformerStep>();
+
+        let device = Device::Cpu;
+        let (streamed, _loader) = load_streamed_tiny(
+            &device,
+            H3AdaLnMode::Full,
+            H3PrecisionProfile::SyntheticF32,
+            H3TransformerTask::T2VaFl2Va,
+        )?;
+        let layout = tiny_layout().freeze(&device)?;
+        let input = OwnedInput::new(&device)?;
+        let wrong_video_rows = Tensor::zeros((1, 1, 8), DType::F32, &device)?;
+        let error = streamed
+            .begin_step(
+                H3ForwardInput {
+                    video_rows: &wrong_video_rows,
+                    ..input.borrowed()
+                },
+                &layout,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("frozen packed layout/config"));
+
+        let config = H3TransformerConfig::tiny();
+        let source = source_from_inventory(
+            inventory(
+                &config,
+                H3AdaLnMode::Full,
+                H3PrecisionProfile::SyntheticF32,
+                H3CheckpointComponent::Transformer,
+            ),
+            &device,
+        )?;
+        let checkpoint = audit_h3_checkpoint(
+            config.clone(),
+            H3TransformerTask::T2VaFl2Va,
+            H3PrecisionProfile::SyntheticF32,
+            source,
+        )
+        .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        let authority = H3AttentionRuntimeAuthority::bounded_synthetic_math(
+            H3AttentionDevice::Cpu,
+            H3AttentionModelContract {
+                heads: config.num_attention_heads,
+                head_dim: config.attention_head_dim,
+                dtype: H3AttentionDType::F32,
+            },
+        )
+        .unwrap();
+        let mut serialized = serde_json::to_value(authority).unwrap();
+        serialized["identity_sha256"] = serde_json::Value::String("0".repeat(64));
+        let tampered: H3AttentionRuntimeAuthority = serde_json::from_value(serialized).unwrap();
+        let error = H3StreamedTransformer::load_with_attention(checkpoint, tampered).unwrap_err();
+        assert!(error.to_string().contains("identity"));
+        Ok(())
+    }
+
+    #[test]
     fn full_tiny_stack_runs_both_heads_deterministically() -> Result<()> {
         let device = Device::Cpu;
         let model = load_tiny(
@@ -2789,13 +3387,20 @@ mod tests {
             H3PrecisionProfile::OfficialMixedBf16F32,
             H3TransformerTask::T2VaFl2Va,
         )?;
-        assert_eq!(model.video_projection.weight().dtype(), DType::F32);
-        assert_eq!(model.text_projection.weight().dtype(), DType::BF16);
-        assert_eq!(model.blocks[0].attention.qkv.weight().dtype(), DType::BF16);
-        assert_eq!(model.blocks[0].adaln.linear.weight().dtype(), DType::BF16);
-        assert_eq!(model.final_layer.video_out.weight().dtype(), DType::F32);
-        assert_eq!(model.final_layer.audio_out.weight().dtype(), DType::F32);
-        match &model.time {
+        assert_eq!(model.streamed.video_projection.weight().dtype(), DType::F32);
+        assert_eq!(model.streamed.text_projection.weight().dtype(), DType::BF16);
+        let H3TransformerBlockRepresentation::Dense(first) = &model.blocks[0].representation;
+        assert_eq!(first.attention.qkv.weight().dtype(), DType::BF16);
+        assert_eq!(first.adaln.linear.weight().dtype(), DType::BF16);
+        assert_eq!(
+            model.streamed.final_layer.video_out.weight().dtype(),
+            DType::F32
+        );
+        assert_eq!(
+            model.streamed.final_layer.audio_out.weight().dtype(),
+            DType::F32
+        );
+        match &model.streamed.time {
             H3TimeConditioner::Full {
                 proj_in, proj_out, ..
             } => {

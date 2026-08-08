@@ -82,9 +82,10 @@ pub use dit::{
     patchify_h3_video, reorder_h3_grouped_qkv, unpack_h3_audio, unpatchify_h3_video, H3AdaLnMode,
     H3AuditedCheckpoint, H3BlockProgress, H3BlockStack, H3CheckpointComponent,
     H3CheckpointInventory, H3CheckpointSource, H3ForwardInput, H3FrozenPackedLayout, H3LoadPlan,
-    H3Modality, H3PackedLayout, H3PrecisionProfile, H3QkvLayout, H3TensorSpec, H3Transformer,
-    H3TransformerConfig, H3TransformerOutput, H3TransformerTask, H3WeightAuditError,
-    H3WeightAuditIssue, H3_MODALITY_COUNT,
+    H3LoadedTransformerBlock, H3Modality, H3PackedLayout, H3PrecisionProfile, H3QkvLayout,
+    H3StreamedTransformer, H3TensorSpec, H3Transformer, H3TransformerBlockLoader,
+    H3TransformerConfig, H3TransformerOutput, H3TransformerStep, H3TransformerTask,
+    H3WeightAuditError, H3WeightAuditIssue, H3_MODALITY_COUNT,
 };
 pub use loader::{
     load_bf16_conditioner, load_prepared_bf16_conditioner, prepare_conditioner_assets,
