@@ -10,6 +10,7 @@ pub(crate) mod offload;
 pub(crate) mod pipeline;
 pub(crate) mod reference_media;
 pub(crate) mod sampler;
+pub(crate) mod vae_runtime;
 
 use anyhow::{anyhow, Result};
 use candle_core::{Device, Tensor};

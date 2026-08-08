@@ -896,17 +896,36 @@ pub struct AudioVae {
 }
 
 impl AudioVae {
+    #[cfg(test)]
     pub(super) fn load(
         config: AudioVaeConfig,
         layout: AudioTensorLayout,
         requested_dtype: DType,
         vb: VarBuilder,
     ) -> Result<Self> {
+        Self::load_with_observer(
+            config,
+            layout,
+            requested_dtype,
+            vb,
+            &mut |_completed, _total| Ok(()),
+        )
+    }
+
+    pub(super) fn load_with_observer(
+        config: AudioVaeConfig,
+        layout: AudioTensorLayout,
+        requested_dtype: DType,
+        vb: VarBuilder,
+        observer: &mut dyn FnMut(usize, usize) -> Result<()>,
+    ) -> Result<Self> {
+        const LOAD_STAGES: usize = 6;
         config.validate()?;
         config.validate_execution_dtype(requested_dtype)?;
         if vb.dtype() != DType::F32 {
             bail!("MiniMax H3 audio VarBuilder must expose F32 tensors")
         }
+        observer(0, LOAD_STAGES)?;
         let latent_mean = Tensor::from_vec(
             config.latents_mean.clone(),
             (1, config.latent_channels, 1),
@@ -917,13 +936,16 @@ impl AudioVae {
             (1, config.latent_channels, 1),
             vb.device(),
         )?;
+        observer(1, LOAD_STAGES)?;
         let encoder = DacEncoder::load(&config, layout, vb.pp("encoder"))?;
+        observer(2, LOAD_STAGES)?;
         let pre_block = AttnProjection::load(
             config.latent_dim,
             config.latent_channels,
             config.attention_heads,
             vb.pp("pre_block"),
         )?;
+        observer(3, LOAD_STAGES)?;
         let mean_proj = load_plain_conv1d(
             config.latent_channels,
             config.latent_channels,
@@ -946,6 +968,7 @@ impl AudioVae {
             true,
             vb.pp("logs_proj"),
         )?;
+        observer(4, LOAD_STAGES)?;
         let dec_in_proj = load_plain_conv1d(
             config.latent_channels,
             config.latent_dim,
@@ -956,7 +979,9 @@ impl AudioVae {
             true,
             vb.pp("dec_in_proj"),
         )?;
+        observer(5, LOAD_STAGES)?;
         let decoder = BigVganDecoder::load(&config, layout, vb.pp("decoder"))?;
+        observer(6, LOAD_STAGES)?;
         Ok(Self {
             config,
             encoder,

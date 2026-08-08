@@ -40,7 +40,9 @@ pub use audio_config::{
     SAMPLES_PER_LATENT, SAMPLE_RATE,
 };
 pub use audio_weights::{
-    load_validated_audio_vae, validate_audio_safetensors, AudioTensorLayout, AudioTensorSpec,
+    inspect_audio_vae_config_bytes, load_validated_audio_vae,
+    load_validated_audio_vae_with_observer, validate_audio_safetensors, AudioTensorLayout,
+    AudioTensorSpec, AudioVaeLoadObserver, NoopAudioVaeLoadObserver,
 };
 
 pub use artifacts::{
@@ -142,8 +144,9 @@ pub use visual_vae::{
 };
 pub use visual_weights::{
     comfy_tensor_transforms, component_fingerprint, component_fingerprint_with_observer,
-    expected_comfy_weight_shapes, expected_diffusers_weight_shapes, inspect_safetensors_header,
-    inspect_visual_vae_config, validate_comfy_weight_file, validate_diffusers_weight_index,
+    expected_comfy_weight_shapes, expected_diffusers_weight_shapes,
+    expected_visual_vae_parameter_bytes, inspect_safetensors_header, inspect_visual_vae_config,
+    inspect_visual_vae_config_bytes, validate_comfy_weight_file, validate_diffusers_weight_index,
     ComfyTensorTransform, DiffusersWeightIndex, NoopVisualWeightReadObserver, SafetensorsHeader,
     SafetensorsTensorHeader, ValidatedVisualVaeWeights, VisualVaeComponentRole,
     VisualVaeWeightInspection, VisualWeightReadObserver, COMFY_VISUAL_VAE_FILENAME,
