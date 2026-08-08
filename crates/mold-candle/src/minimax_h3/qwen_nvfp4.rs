@@ -744,6 +744,18 @@ pub fn inspect_h3_qwen_nvfp4_awq_header(
     file.seek(SeekFrom::Start(0))
         .and_then(|_| file.read_exact(&mut header_bytes))
         .map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
+    let raw_header: serde_json::Value =
+        serde_json::from_slice(&header_bytes[8..]).map_err(|error| {
+            H3QwenNvfp4AwqError::Header(format!("failed to reparse bounded header: {error}"))
+        })?;
+    if raw_header
+        .as_object()
+        .is_some_and(|object| object.contains_key("__metadata__"))
+    {
+        return Err(H3QwenNvfp4AwqError::Metadata(
+            "published Qwen NVFP4-AWQ object must not add safetensors __metadata__".into(),
+        ));
+    }
     let after_open = file
         .metadata()
         .map(|metadata| file_identity(&metadata))
@@ -821,7 +833,7 @@ mod tests {
         }
     }
 
-    fn sparse_published_fixture() -> PathBuf {
+    fn sparse_published_fixture_with_metadata(include_metadata: bool) -> PathBuf {
         let (_, tensors, markers) = fixture();
         // Safetensors payload order is independent of JSON key order. Put the
         // numerous small tensors first, like the published converter does, so
@@ -839,6 +851,9 @@ mod tests {
         assert_eq!(cursor, H3_QWEN_NVFP4_AWQ_PAYLOAD_BYTES);
 
         let mut root = serde_json::Map::new();
+        if include_metadata {
+            root.insert("__metadata__".into(), json!({"format": "pt"}));
+        }
         let mut marker_ranges = Vec::new();
         for (name, spec) in &tensors {
             let offsets = ranges[name];
@@ -885,6 +900,10 @@ mod tests {
         }
         file.sync_all().unwrap();
         path
+    }
+
+    fn sparse_published_fixture() -> PathBuf {
+        sparse_published_fixture_with_metadata(false)
     }
 
     #[test]
@@ -1037,6 +1056,13 @@ mod tests {
             Err(H3QwenNvfp4AwqError::Metadata(_))
         ));
         std::fs::remove_file(path).unwrap();
+
+        let metadata_path = sparse_published_fixture_with_metadata(true);
+        assert!(matches!(
+            inspect_h3_qwen_nvfp4_awq_header(&metadata_path),
+            Err(H3QwenNvfp4AwqError::Metadata(_))
+        ));
+        std::fs::remove_file(metadata_path).unwrap();
     }
 
     #[test]
