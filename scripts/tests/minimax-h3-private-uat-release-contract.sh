@@ -31,6 +31,41 @@ require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
 require_text crates/mold-inference/src/minimax_h3/private_qwen_support.rs \
   '"mold.minimax-h3.private-uat-qwen-support-loader.v1"' \
   "the private H3 Qwen support loader has no release-rejectable claim marker"
+require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
+  'pub enum Token {}' \
+  "private H3 FL2VA composition is not safely uninhabited before scheduler memory binding"
+require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
+  '_activation: admitted_overlap_seal::Token,' \
+  "private H3 FL2VA overlap authority no longer contains its uninhabited token"
+overlap_seal=$(sed -n '/mod admitted_overlap_seal {/,/^}/p' \
+  crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs)
+if ! grep -Fq '#[cfg(not(test))]' <<<"$overlap_seal"; then
+  fail "private H3 FL2VA overlap seal is constructible in non-test builds"
+fi
+overlap_constructor=$(sed -n \
+  '/impl H3PrivateFl2VaMemoryOverlapAuthority {/,/fn validate(&self)/p' \
+  crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs)
+if ! grep -Fq '#[cfg(test)]' <<<"$overlap_constructor"; then
+  fail "private H3 FL2VA overlap authority exposes a non-test constructor"
+fi
+if [[ $(grep -Fc 'pub(crate) fn new(' <<<"$overlap_constructor") -ne 1 ]] \
+  || [[ $(grep -Fc 'Self {' <<<"$overlap_constructor") -ne 1 ]]; then
+  fail "private H3 FL2VA overlap authority gained an unguarded construction path"
+fi
+if grep -Eq '^[[:space:]]*pub([[:space:]]*\([^)]*\))?[[:space:]]+(type[[:space:]]+H3PrivateComfyPipelineRuntime|fn[[:space:]]+compose_private_comfy_fl2va_runtime)' \
+  crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs; then
+  fail "private H3 FL2VA composition exposes an into-runtime escape"
+fi
+if grep -Eq '(transmute|MaybeUninit|::zeroed|unsafe[[:space:]]*\{).*(H3PrivateFl2VaMemoryOverlapAuthority|admitted_overlap_seal)' \
+  crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs; then
+  fail "private H3 FL2VA overlap authority has an unsafe fabrication path"
+fi
+if [[ $(grep -Fxc 'mod vae_free_inner_seal {' \
+  crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs) -ne 1 ]] \
+  || [[ $(grep -Fxc 'pub(crate) mod vae_free_inner_seal {' \
+  crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs) -ne 1 ]]; then
+  fail "private H3 VAE-free seal is not private in production and test-visible only"
+fi
 require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
   'pub const H3_PRIVATE_HOST_AUTHORITY_SHA256: &str =' \
   "private H3 qualification is not bound to an opaque authorized-host identity"
