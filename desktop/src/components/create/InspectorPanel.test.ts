@@ -109,6 +109,31 @@ describe("InspectorPanel — layout", () => {
 });
 
 describe("InspectorPanel — shape + resolution projection", () => {
+  it("hides aspect ratios the selected wan checkpoint does not support", () => {
+    const model = {
+      name: "wan22-i2v-a14b:q5",
+      family: "wan",
+      recommended_dimensions: [
+        { width: 832, height: 480 },
+        { width: 480, height: 832 },
+      ],
+      dimension_alignment: 16,
+      max_pixels: 1280 * 720,
+    } as ModelEntry;
+    useModelStore().all = [model];
+    const form = formFor("wan");
+    form.model = model.name;
+    form.width = 480;
+    form.height = 832;
+
+    const wrapper = mount(InspectorPanel, { props: { form } });
+
+    expect(wrapper.getComponent(ShapePicker).props("options")).toEqual([
+      expect.objectContaining({ id: "wide", label: "16:9" }),
+      expect.objectContaining({ id: "tall", label: "9:16" }),
+    ]);
+  });
+
   it("applies a picked shape to the form dimensions at the current budget", async () => {
     const form = formFor("flux");
     form.width = 1024;

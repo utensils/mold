@@ -649,6 +649,29 @@ describe("AdvancedDrawer interactions", () => {
     expect(next.frames).toBe(97);
   });
 
+  it("snaps wan video frames to the advertised 4n+1 grid", async () => {
+    const model = {
+      name: "wan22-i2v-a14b:q5",
+      family: "wan",
+      frame_step: 4,
+    };
+    const wrapper = factory(
+      "wan",
+      { model: model.name, modelFamily: "wan", frames: 45 },
+      { models: [model] },
+    );
+    expect(wrapper.get("[data-test='section-video']").text()).toContain(
+      "Frames (4n+1)",
+    );
+    const input = wrapper.get("[data-test='video-frames']");
+    (input.element as HTMLInputElement).value = "46";
+    await input.trigger("change");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.frames).toBe(45);
+  });
+
   it("Reset clears advanced fields but preserves the prompt", async () => {
     const wrapper = factory("sdxl", {
       prompt: "a lighthouse in a storm",

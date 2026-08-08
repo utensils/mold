@@ -6,6 +6,7 @@ import {
   maxVideoFrames,
   minVideoFrames,
   snapVideoFrames,
+  videoFramesError,
   videoFrameStep,
   videoFrameOffset,
 } from "./videoDuration";
@@ -58,6 +59,16 @@ describe("video duration controls", () => {
     expect(snapVideoFrames(45, { family: "ltx2" })).toBe(49);
     expect(snapVideoFrames(53, wan)).toBe(53);
     expect(snapVideoFrames(53, { family: "ltx2" })).toBe(57);
+  });
+
+  it("validates frame counts against the selected model grid", () => {
+    expect(videoFramesError(45, { family: "wan" })).toBeNull();
+    expect(videoFramesError(45, { family: "ltx2" })).toBe(
+      "Frames must be 8n+1 — try 41 or 49.",
+    );
+    expect(videoFramesError(46, { family: "wan" })).toBe(
+      "Frames must be 4n+1 — try 45 or 49.",
+    );
   });
 
   it("prefers a server-advertised frame_step over the family fallback", () => {

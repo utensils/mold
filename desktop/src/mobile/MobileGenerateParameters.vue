@@ -10,7 +10,7 @@ import type {
   ModelEntry,
 } from "../lib/api/types";
 import { generationCapabilitiesForFamily, MAX_LORA_STACK } from "../lib/capabilities";
-import { frames8n1Error, snapFrames } from "../lib/chain";
+import { snapVideoFrames, videoFramesError, videoFrameStep } from "@studio/lib/videoDuration";
 import {
   autoChainFieldList,
   decideGenerateRequestRouting,
@@ -91,8 +91,9 @@ const batchLocked = computed(
     (caps.value.sourceImageMode === "references" && props.form.imageAttachments.length > 0),
 );
 const generationRequest = computed(() => buildRequest(props.form));
+const videoFrameContract = computed(() => props.selectedModel ?? { family: props.form.family });
 const frameError = computed(() =>
-  caps.value.supportsVideo ? frames8n1Error(props.form.frames) : null,
+  caps.value.supportsVideo ? videoFramesError(props.form.frames, videoFrameContract.value) : null,
 );
 const fpsError = computed(() =>
   caps.value.supportsVideo ? fpsValidationError(props.form.fps) : null,
@@ -155,7 +156,7 @@ function setBatch(raw: string): void {
 }
 
 function snapFramesField(): void {
-  props.form.frames = snapFrames(props.form.frames);
+  props.form.frames = snapVideoFrames(props.form.frames, videoFrameContract.value);
 }
 
 const schedulerLabels: Record<string, string> = {
@@ -578,7 +579,7 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
             type="number"
             inputmode="numeric"
             min="1"
-            step="8"
+            :step="videoFrameStep(videoFrameContract)"
             :aria-invalid="frameError ? 'true' : undefined"
             :aria-describedby="frameError ? frameErrorId : undefined"
             @change="snapFramesField"
