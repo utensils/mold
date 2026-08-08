@@ -9,6 +9,7 @@ fi
 binary=$1
 claim_marker='mold.minimax-h3.attention-rc.kernel-compiled.v1'
 private_uat_marker='mold.minimax-h3.private-uat-artifact-reader.v1'
+private_qwen_support_marker='mold.minimax-h3.private-uat-qwen-support-loader.v1'
 omitted_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=omitted'
 compiled_markers=(
   'mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=omitted'
@@ -44,6 +45,11 @@ fi
 
 if grep -aFq "$private_uat_marker" "$binary"; then
   echo "published binary contains the forbidden MiniMax H3 private-UAT artifact reader" >&2
+  exit 1
+fi
+
+if grep -aFq "$private_qwen_support_marker" "$binary"; then
+  echo "published binary contains the forbidden MiniMax H3 private Qwen support loader" >&2
   exit 1
 fi
 
