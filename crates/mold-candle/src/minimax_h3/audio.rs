@@ -1063,14 +1063,42 @@ impl AudioVae {
         association: AudioSoundtrackAssociation,
         cancellation: &dyn AudioVaeCancellation,
     ) -> Result<StereoWaveform> {
-        cancellation_boundary(cancellation, AudioVaePhase::DecodeProjection)?;
+        self.decode_with_checkpoint(latents, association, &mut |phase| {
+            cancellation_boundary(cancellation, phase)
+        })
+    }
+
+    /// Decode with a fallible callback at each named audio safe point.
+    ///
+    /// This developer-only seam lets the private H3 pipeline preserve its
+    /// request-scoped cancellation and phase-accounting authority without
+    /// placing a non-`Send` pipeline checkpoint behind the public
+    /// [`AudioVaeCancellation`] trait.
+    #[cfg(feature = "h3-private-uat")]
+    #[doc(hidden)]
+    pub fn decode_with_phase_checkpoint(
+        &self,
+        latents: &StereoLatents,
+        association: AudioSoundtrackAssociation,
+        checkpoint: &mut dyn FnMut(AudioVaePhase) -> Result<()>,
+    ) -> Result<StereoWaveform> {
+        self.decode_with_checkpoint(latents, association, checkpoint)
+    }
+
+    fn decode_with_checkpoint(
+        &self,
+        latents: &StereoLatents,
+        association: AudioSoundtrackAssociation,
+        checkpoint: &mut dyn FnMut(AudioVaePhase) -> Result<()>,
+    ) -> Result<StereoWaveform> {
+        checkpoint(AudioVaePhase::DecodeProjection)?;
         let (batch, _, _, _) = latents.normalized().dims4()?;
         let packed = latents.pack_mono_batch()?;
         let denormalized = self.denormalize_mono_latents(&packed)?;
         let projected = self.dec_in_proj.forward(&denormalized)?;
-        cancellation_boundary(cancellation, AudioVaePhase::DecodeBigVgan)?;
+        checkpoint(AudioVaePhase::DecodeBigVgan)?;
         let decoded = self.decoder.forward(&projected)?;
-        cancellation_boundary(cancellation, AudioVaePhase::DecodeOutput)?;
+        checkpoint(AudioVaePhase::DecodeOutput)?;
         if self.config.sample_rate == SAMPLE_RATE {
             StereoWaveform::from_mono_batch(decoded, batch, self.config.sample_rate, association)
         } else {
@@ -1510,6 +1538,42 @@ mod tests {
                 )
                 .is_err());
             assert!(cancellation.seen.lock().unwrap().contains(&phase));
+        }
+        #[cfg(feature = "h3-private-uat")]
+        {
+            let mut phases = Vec::new();
+            vae.decode_with_phase_checkpoint(
+                &latents,
+                AudioSoundtrackAssociation::Generated,
+                &mut |phase| {
+                    phases.push(phase);
+                    Ok(())
+                },
+            )?;
+            assert_eq!(
+                phases,
+                [
+                    AudioVaePhase::DecodeProjection,
+                    AudioVaePhase::DecodeBigVgan,
+                    AudioVaePhase::DecodeOutput,
+                ]
+            );
+
+            let error = vae
+                .decode_with_phase_checkpoint(
+                    &latents,
+                    AudioSoundtrackAssociation::Generated,
+                    &mut |phase| {
+                        if phase == AudioVaePhase::DecodeBigVgan {
+                            bail!("synthetic pipeline cancellation")
+                        }
+                        Ok(())
+                    },
+                )
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("synthetic pipeline cancellation"));
         }
         Ok(())
     }

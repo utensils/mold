@@ -16,9 +16,10 @@ use crate::minimax_h3::backend::{
     H3ValidatedComponentSet,
 };
 use crate::minimax_h3::offload::FrozenH3BlockStreamingPlan;
+use crate::minimax_h3::vae_runtime::expected_h3_comfy_vae_artifact_plan_identity;
 use crate::minimax_h3::{FrozenH3ConditionerPlacement, H3ConditionerExecution};
 
-const H3_FACTORY_AUTHORITY_SCHEMA_VERSION: u32 = 1;
+const H3_FACTORY_AUTHORITY_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum H3FactoryComponentRole {
@@ -150,6 +151,7 @@ pub struct H3FactoryAuthorityInput {
 pub struct FrozenH3FactoryAuthority {
     schema_version: u32,
     backend_plan: FrozenH3Fl2VaCandlePlan,
+    comfy_vae_artifact_plan_identity_sha256: Option<String>,
     device_ordinal: usize,
     conditioner_placement: H3FactoryConditionerPlacement,
     qwen_parameter_bytes: u64,
@@ -165,6 +167,21 @@ pub struct FrozenH3FactoryAuthority {
     block_offload: bool,
     quantization: H3FactoryQuantizationAuthority,
     identity_sha256: String,
+}
+
+/// Private-only projection of the exact admission record needed to compose
+/// the opened-file Comfy VAEs with one already-authorized component backend.
+#[cfg(feature = "h3-private-uat")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct H3PrivateVaeFactoryAuthority {
+    pub(crate) factory_identity_sha256: String,
+    pub(crate) backend_plan_identity_sha256: String,
+    pub(crate) vae_artifact_plan_identity_sha256: String,
+    pub(crate) component_set_identity_sha256: String,
+    pub(crate) canonical_model: String,
+    pub(crate) task: Task,
+    pub(crate) device_id: String,
+    pub(crate) execution_fingerprint: String,
 }
 
 impl FrozenH3FactoryAuthority {
@@ -255,9 +272,19 @@ impl FrozenH3FactoryAuthority {
             block_streaming,
             components,
         )?;
+        let comfy_vae_artifact_plan_identity_sha256 =
+            if model_contract.layout == Layout::ComfyPrunedInt8ConvrotNvfp4Awq {
+                Some(
+                    expected_h3_comfy_vae_artifact_plan_identity(model_contract.canonical_model)
+                        .map_err(|error| anyhow!(error.to_string()))?,
+                )
+            } else {
+                None
+            };
         let mut frozen = Self {
             schema_version: H3_FACTORY_AUTHORITY_SCHEMA_VERSION,
             backend_plan,
+            comfy_vae_artifact_plan_identity_sha256,
             device_ordinal: input.device_ordinal,
             conditioner_placement: input.conditioner_placement,
             qwen_parameter_bytes: input.qwen_parameter_bytes,
@@ -285,6 +312,33 @@ impl FrozenH3FactoryAuthority {
 
     pub fn component_set_identity_sha256(&self) -> &str {
         self.backend_plan.component_set_identity()
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn backend_plan_identity_sha256(&self) -> &str {
+        self.backend_plan.identity_sha256()
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn private_vae_adapter_authority(&self) -> Result<H3PrivateVaeFactoryAuthority> {
+        self.validate_frozen()?;
+        let vae_artifact_plan_identity_sha256 = self
+            .comfy_vae_artifact_plan_identity_sha256
+            .as_deref()
+            .ok_or_else(|| anyhow!("MiniMax H3 factory authority has no private Comfy VAE plan"))?;
+        if self.task() != Task::Fl2va {
+            bail!("private MiniMax H3 VAE adapter currently requires the FL2VA task authority");
+        }
+        Ok(H3PrivateVaeFactoryAuthority {
+            factory_identity_sha256: self.identity_sha256.clone(),
+            backend_plan_identity_sha256: self.backend_plan_identity_sha256().into(),
+            vae_artifact_plan_identity_sha256: vae_artifact_plan_identity_sha256.into(),
+            component_set_identity_sha256: self.component_set_identity_sha256().into(),
+            canonical_model: self.canonical_model().into(),
+            task: self.task(),
+            device_id: self.device_id().into(),
+            execution_fingerprint: self.execution_fingerprint().into(),
+        })
     }
 
     pub fn canonical_model(&self) -> &str {
@@ -385,6 +439,18 @@ impl FrozenH3FactoryAuthority {
             bail!("MiniMax H3 factory authority uses an unsupported schema version");
         }
         self.backend_plan.validate()?;
+        let expected_vae_plan =
+            if self.backend_plan.layout() == Layout::ComfyPrunedInt8ConvrotNvfp4Awq {
+                Some(
+                    expected_h3_comfy_vae_artifact_plan_identity(self.canonical_model())
+                        .map_err(|error| anyhow!(error.to_string()))?,
+                )
+            } else {
+                None
+            };
+        if self.comfy_vae_artifact_plan_identity_sha256 != expected_vae_plan {
+            bail!("MiniMax H3 factory VAE artifact plan changed after admission");
+        }
         if self.backend_plan.block_streaming().resident_block_count > 50
             || self.backend_plan.block_streaming().prefetch_depth > 2
         {
@@ -450,9 +516,17 @@ impl FrozenH3FactoryAuthority {
 
 fn frozen_identity(authority: &FrozenH3FactoryAuthority) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"mold.minimax-h3.factory-authority.v1\0");
+    hash.update(b"mold.minimax-h3.factory-authority.v2\0");
     hash.update(authority.schema_version.to_le_bytes());
     hash.update(authority.backend_plan.identity_sha256().as_bytes());
+    hash.update([0]);
+    hash.update(
+        authority
+            .comfy_vae_artifact_plan_identity_sha256
+            .as_deref()
+            .unwrap_or("no-comfy-vae-plan")
+            .as_bytes(),
+    );
     hash.update(authority.device_ordinal.to_le_bytes());
     hash.update(match authority.conditioner_placement {
         H3FactoryConditionerPlacement::AssignedCudaThenDrop => b"qwen-cuda".as_slice(),
@@ -562,6 +636,23 @@ mod tests {
         assert_eq!(authority.execution_fingerprint(), sha('a'));
         assert_eq!(authority.identity_sha256().len(), 64);
         assert_eq!(authority.component_set_identity_sha256().len(), 64);
+        #[cfg(feature = "h3-private-uat")]
+        {
+            let vae = authority.private_vae_adapter_authority().unwrap();
+            assert_eq!(vae.factory_identity_sha256, authority.identity_sha256());
+            assert_eq!(
+                vae.backend_plan_identity_sha256,
+                authority.backend_plan_identity_sha256()
+            );
+            assert_eq!(
+                vae.component_set_identity_sha256,
+                authority.component_set_identity_sha256()
+            );
+            assert_eq!(
+                vae.vae_artifact_plan_identity_sha256,
+                expected_h3_comfy_vae_artifact_plan_identity(contract::FL2VA_COMFY).unwrap()
+            );
+        }
         assert!(authority.block_offload());
         assert!(matches!(
             authority.quantization(),
@@ -578,6 +669,9 @@ mod tests {
             |value| value.block_offload = false,
             |value| {
                 value.quantization = H3FactoryQuantizationAuthority::OfficialBf16;
+            },
+            |value| {
+                value.comfy_vae_artifact_plan_identity_sha256 = Some(sha('f'));
             },
         ] {
             let mut changed = authority();

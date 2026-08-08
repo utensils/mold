@@ -14,6 +14,8 @@ pub mod private_qualification;
 pub(crate) mod private_qwen_support;
 #[cfg(feature = "h3-private-uat")]
 pub(crate) mod private_runtime;
+#[cfg(feature = "h3-private-uat")]
+pub(crate) mod private_vae_adapter;
 pub(crate) mod reference_media;
 pub(crate) mod sampler;
 pub(crate) mod vae_runtime;
