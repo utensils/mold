@@ -16,6 +16,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PROBE_PATH = REPO_ROOT / "scripts/probe-cuda-embedded-ptx.py"
 VERIFIER_PATH = REPO_ROOT / "scripts/verify-cuda-release-binary.sh"
 SEAL_PATH = REPO_ROOT / "scripts/seal-cuda-ptx-manifest.py"
+H3_OMITTED_ATTENTION_PROVENANCE = (
+    "mold.minimax-h3.attention-release-provenance.v2:"
+    "h3-rc=omitted:global-flash=omitted"
+)
 
 
 def load_probe_module():
@@ -83,8 +87,9 @@ class EmbeddedPtxParserContract(unittest.TestCase):
             "#include <string.h>\n"
             f"__attribute__((used)) static const unsigned char generated_ptx[] = {{{byte_literals}}};\n"
             '__attribute__((used)) static const char nvml_symbol[] = "nvmlDeviceGetCount_v2";\n'
+            f'__attribute__((used)) static const char h3_attention_provenance[] = "{H3_OMITTED_ATTENTION_PROVENANCE}";\n'
             "int main(int argc, char **argv) {\n"
-            "  volatile const void *keep[] = {generated_ptx, nvml_symbol};\n"
+            "  volatile const void *keep[] = {generated_ptx, nvml_symbol, h3_attention_provenance};\n"
             "  (void)keep;\n"
             '  return argc == 2 && strcmp(argv[1], "version") == 0 ? 0 : 1;\n'
             "}\n",
