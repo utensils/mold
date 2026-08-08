@@ -657,6 +657,21 @@
                 # check hermetic by running only binary unit tests; exec-based
                 # CLI smoke tests remain covered by non-sandbox CI.
                 cargoTestExtraArgs = "--bins";
+
+                # The H3 release-provenance marker deliberately keeps the
+                # CUDA/C++ dependency path live in the binary test harness.
+                # It runs before autoPatchelf, so expose the pinned toolkit
+                # libraries and inert driver stub only during checkPhase.
+                preCheck = ''
+                  export LD_LIBRARY_PATH=${
+                    lib.makeLibraryPath [
+                      pkgs.stdenv.cc.cc.lib
+                      pkgs.cudaPackages.cuda_cudart
+                      pkgs.cudaPackages.libcublas.lib
+                      pkgs.cudaPackages.libcurand.lib
+                    ]
+                  }:${pkgs.cudaPackages.cuda_cudart}/lib/stubs''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+                '';
               }
               // {
                 passthru.moldCudaComputeCapability = computeCap;
