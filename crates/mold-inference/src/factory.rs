@@ -777,6 +777,7 @@ mod tests {
             qwen_activation_workspace_bytes: 1024,
             qwen_output_text_rows: 1,
             qwen_vision_rows: 0,
+            condition_visual_rows: 0,
             resident_block_count: 8,
             prefetch_depth: 1,
             attention_backend: frozen.attention_backend,

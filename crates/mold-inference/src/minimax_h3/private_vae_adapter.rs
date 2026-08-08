@@ -22,10 +22,12 @@ use mold_core::minimax_h3::{self as contract, Task};
 use crate::h3_factory::H3PrivateVaeFactoryAuthority;
 use crate::FrozenH3FactoryAuthority;
 
+use super::engine::H3StreamedFl2VaBackend;
 use super::pipeline::{
     H3Fl2VaBackend, H3PipelineBackendIdentity, H3PipelineBackendKind, H3PipelineCheckpoint,
     H3PipelineEvent, H3PipelinePhase, H3PreparedEndpoint, H3TextConditioning, H3VideoEncodeSink,
 };
+use super::private_fl2va_runtime::H3PrivateVaeFreeInnerAuthority;
 use super::vae_runtime::{H3ComfyVaeRuntimeBundle, H3ComfyVaeRuntimeMemory};
 
 pub(crate) trait H3PrivateVaeRuntime: Send + Sync {
@@ -154,61 +156,6 @@ impl H3PrivateVaeRuntime for H3ComfyVaeRuntimeBundle {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct H3PrivateInnerAuthority {
-    factory_identity_sha256: String,
-    backend_plan_identity_sha256: String,
-    component_set_identity_sha256: String,
-}
-
-impl H3PrivateInnerAuthority {
-    pub(crate) fn new(
-        factory_identity_sha256: impl Into<String>,
-        backend_plan_identity_sha256: impl Into<String>,
-        component_set_identity_sha256: impl Into<String>,
-    ) -> Result<Self> {
-        let authority = Self {
-            factory_identity_sha256: factory_identity_sha256.into(),
-            backend_plan_identity_sha256: backend_plan_identity_sha256.into(),
-            component_set_identity_sha256: component_set_identity_sha256.into(),
-        };
-        if !valid_sha256(&authority.factory_identity_sha256)
-            || !valid_sha256(&authority.backend_plan_identity_sha256)
-            || !valid_sha256(&authority.component_set_identity_sha256)
-        {
-            bail!("private MiniMax H3 VAE-free inner authority is not exact SHA-256 evidence");
-        }
-        Ok(authority)
-    }
-
-    fn matches(&self, admitted: &H3PrivateVaeFactoryAuthority) -> bool {
-        self.factory_identity_sha256 == admitted.factory_identity_sha256
-            && self.backend_plan_identity_sha256 == admitted.backend_plan_identity_sha256
-            && self.component_set_identity_sha256 == admitted.component_set_identity_sha256
-    }
-}
-
-mod vae_free_inner_seal {
-    pub trait Sealed {}
-}
-
-/// Active-authority hook required of a decorated VAE-free component backend.
-///
-/// # Safety
-///
-/// An implementer must own no visual or audio VAE weights. Every call must
-/// revalidate its active execution lease and the artifact lease covering its
-/// complete admitted component set, then return the exact full-factory,
-/// backend-plan, and component-set identities from that live admission. The
-/// private seal deliberately prevents eager or otherwise VAE-owning backends
-/// from opting into this contract outside this module.
-#[allow(private_bounds)]
-pub(crate) unsafe trait H3PrivateVaeFreeInnerAuthority:
-    H3Fl2VaBackend + vae_free_inner_seal::Sealed
-{
-    fn validate_private_vae_free_inner_authority(&self) -> Result<H3PrivateInnerAuthority>;
-}
-
 /// VAE-only decorator for the existing FL2VA/T2VA component contract.
 ///
 /// Field order is load-bearing. The visual/audio models and their source-file
@@ -266,7 +213,11 @@ where
     B: H3PrivateVaeFreeInnerAuthority,
     R: H3PrivateVaeRuntime,
 {
-    fn new_with_runtime(inner: B, vae: R, authority: &FrozenH3FactoryAuthority) -> Result<Self> {
+    pub(crate) fn new_with_runtime(
+        inner: B,
+        vae: R,
+        authority: &FrozenH3FactoryAuthority,
+    ) -> Result<Self> {
         let frozen_identity = inner.identity();
         let admitted = authority.private_vae_adapter_authority()?;
         validate_initial_authority(&inner, &vae, &frozen_identity, &admitted)?;
@@ -367,6 +318,16 @@ where
         checkpoint: &mut dyn H3PipelineCheckpoint,
     ) -> Result<StereoWaveform> {
         self.checked(|vae| vae.decode_audio(latents, checkpoint))
+    }
+}
+
+impl<B, R> H3StreamedFl2VaBackend for H3PrivateComfyVaeAdapter<B, R>
+where
+    B: H3PrivateVaeFreeInnerAuthority + Send + Sync,
+    R: H3PrivateVaeRuntime,
+{
+    fn component_set_identity_sha256(&self) -> &str {
+        &self.admitted.component_set_identity_sha256
     }
 }
 
@@ -566,6 +527,7 @@ mod tests {
     use crate::minimax_h3::backend::{
         H3BackendArtifactLease, H3BackendExecutionLease, H3CandleBackend,
     };
+    use crate::minimax_h3::private_fl2va_runtime::{vae_free_inner_seal, H3PrivateInnerAuthority};
     use crate::minimax_h3::H3ConditionerLease;
     use crate::progress::{is_inference_cancelled, InferenceCancelled};
     use crate::{
@@ -616,6 +578,7 @@ mod tests {
             qwen_activation_workspace_bytes: 1_024,
             qwen_output_text_rows: 1,
             qwen_vision_rows: 0,
+            condition_visual_rows: 0,
             resident_block_count: 0,
             prefetch_depth: 0,
             attention_backend: AttentionBackend::Flash,
@@ -699,7 +662,7 @@ mod tests {
         }
     }
 
-    impl super::vae_free_inner_seal::Sealed for FakeBackend {}
+    impl vae_free_inner_seal::Sealed for FakeBackend {}
 
     // SAFETY: this synthetic backend owns no visual or audio VAE model. Its
     // only artifact/execution state is represented by the two active flags,

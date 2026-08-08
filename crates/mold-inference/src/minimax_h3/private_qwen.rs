@@ -123,10 +123,45 @@ pub(crate) unsafe trait H3PrivateQwenArtifactLease: H3BackendArtifactLease {
     fn weight_policy_identity_sha256(&self) -> &str;
 }
 
+// SAFETY: the borrowed projection retains the same immutable artifact lease
+// and delegates every authenticated identity without widening its lifetime.
+unsafe impl<T> H3PrivateQwenArtifactLease for &T
+where
+    T: H3PrivateQwenArtifactLease + ?Sized,
+{
+    fn factory_identity_sha256(&self) -> &str {
+        T::factory_identity_sha256(self)
+    }
+
+    fn conditioner_component_content_sha256(&self) -> &str {
+        T::conditioner_component_content_sha256(self)
+    }
+
+    fn conditioner_component_validation_sha256(&self) -> &str {
+        T::conditioner_component_validation_sha256(self)
+    }
+
+    fn support_identity_sha256(&self) -> &str {
+        T::support_identity_sha256(self)
+    }
+
+    fn weight_identity_sha256(&self) -> &str {
+        T::weight_identity_sha256(self)
+    }
+
+    fn weight_header_identity_sha256(&self) -> &str {
+        T::weight_header_identity_sha256(self)
+    }
+
+    fn weight_policy_identity_sha256(&self) -> &str {
+        T::weight_policy_identity_sha256(self)
+    }
+}
+
 /// Field order is load-bearing. `model` is explicitly taken before releasing
-/// the conditioner lease. The outer execution and artifact leases are only
-/// borrowed by the one-shot Qwen phase and therefore cannot be consumed,
-/// cloned, or dropped here.
+/// the conditioner lease. The adapter owns only lightweight execution and
+/// artifact projections; the singular underlying leases remain owned by the
+/// outer attempt and cannot be cloned or dropped here.
 struct H3PrivateQwenResources<M, S, C>
 where
     C: H3PrivateQwenConditionerLease,
@@ -171,8 +206,8 @@ where
     A: H3PrivateQwenArtifactLease,
 {
     resources: H3PrivateQwenResources<LoadedH3QwenNvfp4Conditioner, H3PrivateQwenSupport, C>,
-    execution_lease: &'authority E,
-    artifact_lease: &'authority A,
+    execution_lease: E,
+    artifact_lease: A,
     authority: &'authority FrozenH3FactoryAuthority,
 }
 
@@ -190,8 +225,8 @@ where
         weights_path: &Path,
         support: H3PrivateQwenSupport,
         conditioner_lease: C,
-        execution_lease: &'authority E,
-        artifact_lease: &'authority A,
+        execution_lease: E,
+        artifact_lease: A,
         authority: &'authority FrozenH3FactoryAuthority,
         checkpoint: &mut dyn H3PipelineCheckpoint,
     ) -> Result<Self> {
@@ -221,8 +256,8 @@ where
         weights_path: &Path,
         support: H3PrivateQwenSupport,
         conditioner_lease: C,
-        execution_lease: &'authority E,
-        artifact_lease: &'authority A,
+        execution_lease: E,
+        artifact_lease: A,
         authority: &'authority FrozenH3FactoryAuthority,
         checkpoint: &mut dyn H3PipelineCheckpoint,
         loader: impl FnOnce(
@@ -248,8 +283,8 @@ where
                 validate_preload_authorities(
                     &resources.support,
                     &resources.conditioner_lease,
-                    execution_lease,
-                    artifact_lease,
+                    &execution_lease,
+                    &artifact_lease,
                     authority,
                     &memory_facts,
                 )
@@ -259,8 +294,8 @@ where
                     poll_active_authorities(
                         &resources.support,
                         &resources.conditioner_lease,
-                        execution_lease,
-                        artifact_lease,
+                        &execution_lease,
+                        &artifact_lease,
                         authority,
                     )
                 });
@@ -295,6 +330,14 @@ where
 
     pub(crate) fn support_identity_sha256(&self) -> &str {
         self.resources.support.support_identity_sha256()
+    }
+
+    pub(crate) fn execution_lease(&self) -> &E {
+        &self.execution_lease
+    }
+
+    pub(crate) fn artifact_lease(&self) -> &A {
+        &self.artifact_lease
     }
 
     pub(crate) fn encode_fl2va(
@@ -374,8 +417,8 @@ where
                     poll_active_authorities(
                         &self.resources.support,
                         &self.resources.conditioner_lease,
-                        self.execution_lease,
-                        self.artifact_lease,
+                        &self.execution_lease,
+                        &self.artifact_lease,
                         self.authority,
                     )
                 },
@@ -385,8 +428,9 @@ where
         let encode_result = complete_encode(encode_result, || self.validate_active_authorities());
 
         // Model storage must drop before C is released on success, failure,
-        // cancellation, or post-encode revocation. E/A remain borrowed by the
-        // outer attempt and are validated before and after tensor transfer.
+        // cancellation, or post-encode revocation. E/A are lightweight
+        // projections over the outer attempt and are validated before and
+        // after tensor transfer.
         self.resources.release_conditioner();
         let states = encode_result?;
         validate_output_dtype(states.dtype())?;
@@ -427,8 +471,8 @@ where
         let frozen = frozen_binding_claims(self.authority)?;
         let leases = lease_binding_claims(
             &self.resources.conditioner_lease,
-            self.execution_lease,
-            self.artifact_lease,
+            &self.execution_lease,
+            &self.artifact_lease,
             model
                 .device()
                 .same_device(self.resources.conditioner_lease.device()),
@@ -437,7 +481,7 @@ where
         validate_parameter_memory(self.authority, model.memory_facts())
     }
 
-    fn validate_continuing_authorities(&self) -> Result<()> {
+    pub(crate) fn validate_continuing_authorities(&self) -> Result<()> {
         self.resources.support.revalidate()?;
         self.authority.validate_engine_seam(
             self.resources.support.model(),
@@ -1462,6 +1506,7 @@ mod tests {
             qwen_activation_workspace_bytes,
             qwen_output_text_rows,
             qwen_vision_rows,
+            condition_visual_rows: 0,
             resident_block_count: 0,
             prefetch_depth: 0,
             attention_backend: AttentionBackend::Flash,
@@ -2544,6 +2589,7 @@ mod tests {
             qwen_activation_workspace_bytes: activation_floor,
             qwen_output_text_rows,
             qwen_vision_rows,
+            condition_visual_rows: 0,
             resident_block_count: 0,
             prefetch_depth: 0,
             attention_backend: AttentionBackend::Flash,

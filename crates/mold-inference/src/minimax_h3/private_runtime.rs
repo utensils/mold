@@ -11,10 +11,12 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{bail, Result};
+use candle_core::Device;
 use mold_candle::minimax_h3::{
-    H3BlockProgress, H3BlockStack, H3ComfyInt8BlockLoader, H3ComfyInt8Cancellation, H3ForwardInput,
-    H3FrozenPackedLayout, H3LoadedTransformerBlock, H3StreamedTransformer, H3TransformerOutput,
-    H3TransformerStep, H3TransformerTask,
+    H3AttentionRuntimeAuthority, H3BlockProgress, H3BlockStack, H3ComfyInt8BlockLoader,
+    H3ComfyInt8Cancellation, H3ComfyOpenedInt8Checkpoint, H3ForwardInput, H3FrozenPackedLayout,
+    H3LoadedTransformerBlock, H3StreamedTransformer, H3TransformerOutput, H3TransformerStep,
+    H3TransformerTask,
 };
 
 use crate::progress::{InferenceCancellationObserver, InferenceCancelled, ProgressReporter};
@@ -87,6 +89,11 @@ impl H3PrivateComfyCancellationSlot {
         lock_cancellation_state(&self.state)
             .active_attempt_id
             .is_some()
+    }
+
+    #[cfg(test)]
+    fn shares_attempt_state(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
     }
 }
 
@@ -387,6 +394,66 @@ pub(crate) fn pair_private_comfy_stream(
     ))
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct H3PrivateComfyStreamAuthority {
+    pub(crate) task: H3TransformerTask,
+    pub(crate) transformer_content_sha256: String,
+    pub(crate) checkpoint_identity_sha256: String,
+    pub(crate) transformer_policy_identity_sha256: String,
+    pub(crate) attention_runtime_identity_sha256: String,
+}
+
+pub(crate) struct H3PrivateComfyStream {
+    pub(crate) loader: H3PrivateComfyBlockLoader,
+    pub(crate) executor: H3PrivateComfyTransformerExecutor,
+    pub(crate) authority: H3PrivateComfyStreamAuthority,
+}
+
+/// Load the resident transformer and bind its streamed block loader while one
+/// attempt guard is installed in `cancellation`. The exact same slot is passed
+/// to Candle for the resident load and retained by every later block read.
+pub(crate) fn load_and_pair_private_comfy_stream(
+    opened: H3ComfyOpenedInt8Checkpoint,
+    device: &Device,
+    attention: H3AttentionRuntimeAuthority,
+    plan: &FrozenH3BlockStreamingPlan,
+    expected_task: H3TransformerTask,
+    cancellation: H3PrivateComfyCancellationSlot,
+) -> Result<H3PrivateComfyStream> {
+    plan.validate()?;
+    if opened.candidate().strategy.task != expected_task {
+        bail!("private H3 Comfy opened checkpoint differs from the frozen task authority");
+    }
+    let authority = H3PrivateComfyStreamAuthority {
+        task: opened.candidate().strategy.task,
+        transformer_content_sha256: opened.candidate().expected_content_sha256.clone(),
+        checkpoint_identity_sha256: opened.checkpoint_identity_sha256().into(),
+        transformer_policy_identity_sha256: opened
+            .candidate()
+            .strategy
+            .quantization_policy
+            .policy_sha256
+            .clone(),
+        attention_runtime_identity_sha256: attention.identity_sha256().into(),
+    };
+    let cancellation_for_candle: Arc<dyn H3ComfyInt8Cancellation> = Arc::new(cancellation.clone());
+    let (transformer, loader) = cancellation.run_candle_operation(|| {
+        opened.load_with_attention_and_cancellation(device, attention, cancellation_for_candle)
+    })?;
+    if loader.content_sha256() != authority.transformer_content_sha256
+        || loader.checkpoint_identity_sha256() != authority.checkpoint_identity_sha256
+    {
+        bail!("private H3 Comfy streamed runtime differs from its opened artifact authority");
+    }
+    let (loader, executor) =
+        pair_private_comfy_stream(transformer, loader, plan, expected_task, cancellation)?;
+    Ok(H3PrivateComfyStream {
+        loader,
+        executor,
+        authority,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_stream_pair(
     plan: &FrozenH3BlockStreamingPlan,
@@ -604,6 +671,39 @@ mod tests {
             })
             .unwrap_err();
         assert!(error.to_string().contains("did not poll its bound"));
+    }
+
+    #[test]
+    fn resident_load_and_every_block_projection_share_one_attempt_slot() {
+        let slot = H3PrivateComfyCancellationSlot::default();
+        let resident_load_slot = slot.clone();
+        let block_load_slot = slot.clone();
+        assert!(slot.shares_attempt_state(&resident_load_slot));
+        assert!(slot.shares_attempt_state(&block_load_slot));
+
+        let token = InferenceCancellationToken::default();
+        let mut progress = ProgressReporter::default();
+        progress.set_cancellation_token(token.clone());
+        let guard = slot.install(&progress).unwrap();
+        resident_load_slot
+            .run_candle_operation(|| {
+                assert!(!H3ComfyInt8Cancellation::is_cancelled(&resident_load_slot));
+                Ok(())
+            })
+            .unwrap();
+
+        token.cancel();
+        let error = block_load_slot
+            .run_candle_operation::<()>(|| {
+                assert!(H3ComfyInt8Cancellation::is_cancelled(&block_load_slot));
+                Err(candle_core::Error::Msg(
+                    "synthetic block cancellation transport".into(),
+                ))
+            })
+            .unwrap_err();
+        assert!(is_inference_cancelled(&error));
+        drop(guard);
+        assert!(!slot.has_active_attempt());
     }
 
     #[test]
