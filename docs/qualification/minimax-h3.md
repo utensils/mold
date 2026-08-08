@@ -1,7 +1,8 @@
 # MiniMax H3 qualification and authorization status
 
-- Status: **unavailable; compliance-gated**
-- Evidence snapshot: **2026-08-08 07:08 UTC, Mold main `ff927086`**
+- Public product status: **unavailable; compliance-gated**
+- Private qualification status: **authorized on access-controlled Plato**
+- Evidence snapshot: **2026-08-08, Mold main `8a826153`**
 - Authorization owner: [issue #831](https://github.com/utensils/mold/issues/831)
 - Final qualification owner: [issue #827](https://github.com/utensils/mold/issues/827)
 
@@ -15,12 +16,15 @@ The research used public implementation source and small textual repository
 metadata only. The reviewed
 [MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/bfc8ed0353f5a9733be73e6b2c98ec0948195b86/LICENSE)
 defines a default territory that excludes the United States, European Union,
-United Kingdom, and Republic of Korea. The current development environment is
-in an excluded territory and has no accepted written authorization record.
-Accordingly, no binary H3 checkpoint or other model payload, production
-safetensors header range, generated media, or real-checkpoint UAT was
-downloaded, read, executed, or retained for the work recorded here. The planned
-external-volume UAT home was not used for H3 artifacts.
+United Kingdom, and Republic of Korea. On 2026-08-08, the maintainer accepted a
+direct attestation that MiniMax authorized H3 integration with Mold. The
+[decision record](../architecture/minimax-h3-authorization.md) limits that
+authority to private downloads, inference, benign outputs, and conformance work
+on access-controlled Plato. It does not authorize public product activation,
+hosted or third-party access, distribution, or redistribution. No binary H3
+checkpoint, production safetensors header, generated media, or real-checkpoint
+UAT had been accessed at this evidence snapshot. The excluded external-volume
+UAT home was not used for H3 artifacts.
 
 See the separate [authorization decision record](../architecture/minimax-h3-authorization.md)
 for the reviewed license identity, activation requirements, review ownership,
@@ -42,15 +46,16 @@ Terms in this record are deliberately narrow:
 ## Fail-closed product behavior
 
 [`mold-core::model_policy`](../../crates/mold-core/src/model_policy.rs) is the
-single authorization authority. Until issue #831 records approved written
-authority, all of these statements must remain true:
+single public-product authorization authority. Under the private-only decision
+in issue #831, all of these statements must remain true for ordinary builds and
+product ingress:
 
 - H3 is absent from ordinary catalog, install, and model-family discovery.
-- Before any model payload is transferred, persisted, placed, or queued, the
-  gate checks raw `hf:` identities, aliases, resolved `cv:` metadata,
-  configured families, nested generation artifacts, and root-relative model
-  paths. A Civitai metadata lookup may precede that decision; model-artifact
-  transfer may not.
+- Before any product model payload is transferred, persisted, placed, or
+  queued, the gate checks raw `hf:` identities, aliases, resolved `cv:`
+  metadata, configured families, nested generation artifacts, and root-relative
+  model paths. A Civitai metadata lookup may precede that decision;
+  model-artifact transfer through an ordinary product path may not.
 - Existing weight files do not imply authorization.
 - `runtime_available` remains `false`; hidden manifests are identity and
   accounting contracts, not runnable model registrations.
@@ -298,20 +303,21 @@ real CUDA UAT, not a benchmark of H3, and not evidence about the excluded
 external-volume `MOLD_HOME`. No H3 artifact payload or production safetensors
 header-range byte was accessed for any row in this document.
 
-## Authorized future UAT acceptance matrix
+## Private qualification and future public acceptance matrix
 
-Do not begin any row below until issue #831 contains a reviewed approval whose
-scope covers checkpoint access and execution, automated fixtures, retained
-outputs, distribution, local/server/remote-client use, and the intended
-territory. The external authorization record and fixture bundle must first
-pass the commands in the [conformance guide](./minimax-h3-conformance.md).
-Every row is currently **blocked and unattempted**; the table defines future
-acceptance evidence and does not report licensed UAT.
+Private artifact-identity, numerical-parity, T2VA/FL2VA/Ref2VA, Comfy,
+memory/performance, cancellation, fault-recovery, and single-device rows may be
+attempted on access-controlled Plato under the narrow decision record. Their
+payloads and evidence remain private. Product-surface, hosted/remote-client,
+distribution, and release-artifact rows remain blocked until issue #831 records
+broader authority and the resulting obligations are implemented. Every row was
+unattempted at this evidence snapshot; the table defines required evidence and
+does not itself report a passing UAT result.
 
 | Gate                          | Required campaign                                                                                                                                                                    | Passing evidence                                                                                                                                                                                          |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Authorization                 | Revalidate the pinned license/Q&A and obtain written authority for every intended product, territory, user, artifact, and output flow                                                | Approved external authorization record with reviewed source-document hash, scope, owner, expiry/revocation terms, and issue #831 approval                                                                 |
-| Clean storage                 | Re-qualify the intended external volume, then use a fresh absolute `MOLD_HOME` and separate external fixture root; never reuse an ordinary Mold home                                 | Bounded create/fsync/read/checksum/delete probe, capacity report, mount identity, clean before/after inventory, and no H3 bytes in the checkout                                                           |
+| Clean storage                 | Use the qualified Plato ZFS pool with a fresh access-controlled absolute `MOLD_HOME`; keep the unhealthy local external volume excluded and never reuse an ordinary Mold home       | Capacity and mount report, private ownership/mode, clean before/after inventory, and no H3 bytes in the checkout                                                                                          |
 | Artifact identity             | Fetch only the approved task/layout and every pinned companion                                                                                                                       | Exact repository/revision/path/byte count/full SHA-256, component-index hashes, license/NOTICE capture, and no unexpected file                                                                            |
 | Full-path numerical parity    | Run tokenizer/processor, Qwen layer 50, visual VAE, AudioVAE, token refiner, transformer block, packed layout, noise allocation, and dual sampler against pinned Diffusers BF16/FP32 | External fixture bundle passes schema/hash validation and every recorded tolerance; no approximate backend contributed a golden value                                                                     |
 | T2VA                          | Generate 1344x768 at 124 and 362 frames, plus the 243-frame grid control                                                                                                             | Decoded 24 fps MP4, exact frame count, synchronized 32 kHz stereo audio, stable seed/provenance, phase telemetry, and full-reference quality metrics                                                      |
