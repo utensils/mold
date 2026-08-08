@@ -56,7 +56,17 @@ pub fn is_inference_cancelled(error: &anyhow::Error) -> bool {
 pub enum ProgressPhase {
     ModelLoad,
     PromptEncode,
+    /// Legacy family-neutral VAE work. Existing image/video families retain
+    /// this bucket while synchronized A/V families can report their output
+    /// decoders independently.
     Vae,
+    /// Visual output decode, including streaming into a family-owned encoder
+    /// sink when decode and publication are one bounded pipeline phase.
+    VisualDecode,
+    /// Audio latent decode into the publication waveform.
+    AudioDecode,
+    /// Final synchronized media-container mux.
+    Mux,
     Upscale,
 }
 
@@ -407,20 +417,27 @@ mod tests {
 
     #[test]
     fn typed_phase_done_preserves_the_existing_sse_wire_shape() {
-        let wire: mold_core::SseProgressEvent = ProgressEvent::PhaseDone {
-            phase: ProgressPhase::Vae,
-            name: "Decoding video frames".to_string(),
-            elapsed: Duration::from_millis(37),
-        }
-        .into();
+        for phase in [
+            ProgressPhase::Vae,
+            ProgressPhase::VisualDecode,
+            ProgressPhase::AudioDecode,
+            ProgressPhase::Mux,
+        ] {
+            let wire: mold_core::SseProgressEvent = ProgressEvent::PhaseDone {
+                phase,
+                name: "Finishing output".to_string(),
+                elapsed: Duration::from_millis(37),
+            }
+            .into();
 
-        assert!(matches!(
-            wire,
-            mold_core::SseProgressEvent::StageDone {
-                name,
-                elapsed_ms: 37
-            } if name == "Decoding video frames"
-        ));
+            assert!(matches!(
+                wire,
+                mold_core::SseProgressEvent::StageDone {
+                    name,
+                    elapsed_ms: 37
+                } if name == "Finishing output"
+            ));
+        }
     }
 
     #[test]

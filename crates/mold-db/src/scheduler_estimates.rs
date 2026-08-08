@@ -20,6 +20,9 @@ pub struct SchedulerEstimateRecord {
     pub ewma_prompt_encode_ms: Option<f64>,
     pub ewma_denoise_ms: Option<f64>,
     pub ewma_vae_ms: Option<f64>,
+    pub ewma_visual_decode_ms: Option<f64>,
+    pub ewma_audio_decode_ms: Option<f64>,
+    pub ewma_mux_ms: Option<f64>,
     pub ewma_upscale_ms: Option<f64>,
     pub vram_high_water_bytes: Option<u64>,
     pub host_high_water_bytes: Option<u64>,
@@ -46,7 +49,8 @@ impl<'a> SchedulerEstimates<'a> {
                 "SELECT estimate_key, device_class, model_family, model_fingerprint, work_kind, shape_bucket,
                         execution_fingerprint, sample_count, ewma_total_ms, ewma_runtime_ms, ewma_load_ms,
                         ewma_warm_reload_ms, ewma_prompt_encode_ms, ewma_denoise_ms,
-                        ewma_vae_ms, ewma_upscale_ms,
+                        ewma_vae_ms, ewma_visual_decode_ms, ewma_audio_decode_ms,
+                        ewma_mux_ms, ewma_upscale_ms,
                         vram_high_water_bytes, host_high_water_bytes,
                         failure_count, invalidated_count, last_outcome,
                         last_fallback_reason, last_invalidated_plan_reason, last_observed_at
@@ -70,19 +74,22 @@ impl<'a> SchedulerEstimates<'a> {
                     ewma_prompt_encode_ms: row.get(12)?,
                     ewma_denoise_ms: row.get(13)?,
                     ewma_vae_ms: row.get(14)?,
-                    ewma_upscale_ms: row.get(15)?,
+                    ewma_visual_decode_ms: row.get(15)?,
+                    ewma_audio_decode_ms: row.get(16)?,
+                    ewma_mux_ms: row.get(17)?,
+                    ewma_upscale_ms: row.get(18)?,
                     vram_high_water_bytes: row
-                        .get::<_, Option<i64>>(16)?
+                        .get::<_, Option<i64>>(19)?
                         .map(|value| value.max(0) as u64),
                     host_high_water_bytes: row
-                        .get::<_, Option<i64>>(17)?
+                        .get::<_, Option<i64>>(20)?
                         .map(|value| value.max(0) as u64),
-                    failure_count: row.get::<_, i64>(18)?.max(0) as u64,
-                    invalidated_count: row.get::<_, i64>(19)?.max(0) as u64,
-                    last_outcome: row.get(20)?,
-                    last_fallback_reason: row.get(21)?,
-                    last_invalidated_plan_reason: row.get(22)?,
-                    last_observed_at: row.get(23)?,
+                    failure_count: row.get::<_, i64>(21)?.max(0) as u64,
+                    invalidated_count: row.get::<_, i64>(22)?.max(0) as u64,
+                    last_outcome: row.get(23)?,
+                    last_fallback_reason: row.get(24)?,
+                    last_invalidated_plan_reason: row.get(25)?,
+                    last_observed_at: row.get(26)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()
@@ -97,11 +104,12 @@ impl<'a> SchedulerEstimates<'a> {
                     estimate_key, device_class, model_family, model_fingerprint, work_kind, shape_bucket,
                     execution_fingerprint, sample_count, ewma_total_ms, ewma_runtime_ms, ewma_load_ms,
                     ewma_warm_reload_ms, ewma_prompt_encode_ms, ewma_denoise_ms,
-                    ewma_vae_ms, ewma_upscale_ms,
+                    ewma_vae_ms, ewma_visual_decode_ms, ewma_audio_decode_ms,
+                    ewma_mux_ms, ewma_upscale_ms,
                     vram_high_water_bytes, host_high_water_bytes,
                     failure_count, invalidated_count, last_outcome,
                     last_fallback_reason, last_invalidated_plan_reason, last_observed_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
                  ON CONFLICT(estimate_key) DO UPDATE SET
                     device_class = excluded.device_class,
                     model_family = excluded.model_family,
@@ -117,6 +125,9 @@ impl<'a> SchedulerEstimates<'a> {
                     ewma_prompt_encode_ms = excluded.ewma_prompt_encode_ms,
                     ewma_denoise_ms = excluded.ewma_denoise_ms,
                     ewma_vae_ms = excluded.ewma_vae_ms,
+                    ewma_visual_decode_ms = excluded.ewma_visual_decode_ms,
+                    ewma_audio_decode_ms = excluded.ewma_audio_decode_ms,
+                    ewma_mux_ms = excluded.ewma_mux_ms,
                     ewma_upscale_ms = excluded.ewma_upscale_ms,
                     vram_high_water_bytes = excluded.vram_high_water_bytes,
                     host_high_water_bytes = excluded.host_high_water_bytes,
@@ -142,6 +153,9 @@ impl<'a> SchedulerEstimates<'a> {
                     record.ewma_prompt_encode_ms,
                     record.ewma_denoise_ms,
                     record.ewma_vae_ms,
+                    record.ewma_visual_decode_ms,
+                    record.ewma_audio_decode_ms,
+                    record.ewma_mux_ms,
                     record.ewma_upscale_ms,
                     record
                         .vram_high_water_bytes

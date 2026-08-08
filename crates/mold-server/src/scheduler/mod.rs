@@ -154,7 +154,7 @@ pub enum WorkerEvent {
         /// Actor-only result authority transferred from the GPU owner. The
         /// coordinator settles it only after the matching lease, memory
         /// reservation, timing observation, and published plan are updated.
-        completion: Option<crate::gpu_worker::DeferredOwnerCompletion>,
+        completion: Option<Box<crate::gpu_worker::DeferredOwnerCompletion>>,
     },
     Stopped {
         device_id: String,
@@ -5545,6 +5545,9 @@ fn load_estimate_store(state: &AppState) -> EstimateStore {
                 ewma_prompt_encode_ms: record.ewma_prompt_encode_ms,
                 ewma_denoise_ms: record.ewma_denoise_ms,
                 ewma_vae_ms: record.ewma_vae_ms,
+                ewma_visual_decode_ms: record.ewma_visual_decode_ms,
+                ewma_audio_decode_ms: record.ewma_audio_decode_ms,
+                ewma_mux_ms: record.ewma_mux_ms,
                 ewma_upscale_ms: record.ewma_upscale_ms,
                 vram_conservative_bytes: record.vram_high_water_bytes,
                 host_conservative_bytes: record.host_high_water_bytes,
@@ -5580,6 +5583,9 @@ fn estimate_record(bucket: &EstimateBucket) -> mold_db::SchedulerEstimateRecord 
         ewma_prompt_encode_ms: bucket.ewma_prompt_encode_ms,
         ewma_denoise_ms: bucket.ewma_denoise_ms,
         ewma_vae_ms: bucket.ewma_vae_ms,
+        ewma_visual_decode_ms: bucket.ewma_visual_decode_ms,
+        ewma_audio_decode_ms: bucket.ewma_audio_decode_ms,
+        ewma_mux_ms: bucket.ewma_mux_ms,
         ewma_upscale_ms: bucket.ewma_upscale_ms,
         vram_high_water_bytes: bucket.vram_conservative_bytes,
         host_high_water_bytes: bucket.host_conservative_bytes,
@@ -9371,7 +9377,7 @@ mod tests {
             worker_generation: 1,
             successful: false,
             phase_timings: EstimatePhaseTimings::default(),
-            completion: Some(completion),
+            completion: Some(Box::new(completion)),
         };
         let (actor_advanced_tx, mut actor_advanced_rx) = tokio::sync::mpsc::unbounded_channel();
         let actor = tokio::spawn(async move {
@@ -9536,7 +9542,7 @@ mod tests {
                     worker_generation: 1,
                     successful,
                     phase_timings: EstimatePhaseTimings::default(),
-                    completion: Some(completion),
+                    completion: Some(Box::new(completion)),
                 },
                 &mut immediate,
             );
@@ -9658,7 +9664,7 @@ mod tests {
                 worker_generation: 1,
                 successful: true,
                 phase_timings: EstimatePhaseTimings::default(),
-                completion: Some(completion),
+                completion: Some(Box::new(completion)),
             },
             &mut immediate,
         );
@@ -9809,7 +9815,7 @@ mod tests {
                 worker_generation: 1,
                 successful: true,
                 phase_timings: EstimatePhaseTimings::default(),
-                completion: Some(completion),
+                completion: Some(Box::new(completion)),
             },
             &mut immediate,
         );
@@ -12746,6 +12752,9 @@ mod tests {
             ewma_prompt_encode_ms: None,
             ewma_denoise_ms: None,
             ewma_vae_ms: None,
+            ewma_visual_decode_ms: None,
+            ewma_audio_decode_ms: None,
+            ewma_mux_ms: None,
             ewma_upscale_ms: None,
             vram_conservative_bytes: Some(24_884_805_632),
             host_conservative_bytes: None,
