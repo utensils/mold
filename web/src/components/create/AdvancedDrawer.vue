@@ -270,7 +270,10 @@ function patch(next: Partial<GenerateFormState>) {
 
 // ── Scheduler & sampling ──────────────────────────────────────────────
 function setScheduler(value: string) {
-  patch({ scheduler: value as Scheduler });
+  // "default" is a UI-only sentinel meaning "omit the field" — the wire enum
+  // has no such variant, so it must become null here, not travel (codex
+  // review).
+  patch({ scheduler: value === "default" ? null : (value as Scheduler) });
 }
 
 // ── Wan sampler recipe ────────────────────────────────────────────────

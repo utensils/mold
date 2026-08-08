@@ -892,7 +892,12 @@ export function useGenerateForm(): UseGenerateForm {
         batch_size: requestForcesBatchSizeOne ? 1 : s.batchSize,
         output_format: s.outputFormat,
         cfg_plus: capabilities.supportsCfgPlus && s.cfgPlus ? true : undefined,
-        scheduler: capabilities.supportsScheduler ? s.scheduler : undefined,
+        // "default" is the picker's omit-sentinel, not a wire variant; a
+        // stored sentinel must never reach serde (codex review).
+        scheduler:
+          capabilities.supportsScheduler && s.scheduler !== "default"
+            ? s.scheduler
+            : undefined,
         ...(attachmentMode
           ? {
               edit_images: attachments.map((image) => image.base64),

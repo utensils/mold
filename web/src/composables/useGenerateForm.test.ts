@@ -682,6 +682,19 @@ describe("useGenerateForm", () => {
     expect(form.state.value.scheduler).toBe("uni-pc");
   });
 
+  it("never serializes the picker's default scheduler sentinel", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "wan22-t2v-a14b:q4",
+      modelFamily: "wan",
+      prompt: "a cat",
+      // The select's omit-sentinel: the wire enum has no such variant, so a
+      // stored "default" must serialize as an absent field, not a 422.
+      scheduler: "default",
+    });
+    expect(form.toRequest().scheduler).toBeUndefined();
+  });
+
   it("applyModelDefaults enters H3 on its valid minimum frame and fixed-fps contract", () => {
     const form = useGenerateForm();
     form.state.value.frames = 25;
