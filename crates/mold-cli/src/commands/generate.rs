@@ -449,6 +449,10 @@ pub async fn run(
     } else if format == OutputFormat::Png && effective_frames.is_some() {
         if is_ltx2 {
             OutputFormat::Mp4
+        } else if family.as_deref() == Some("wan") && effective_frames == Some(1) {
+            // A single-frame Wan render is a still (#798): keep the raster
+            // default instead of wrapping one frame in a video container.
+            OutputFormat::Png
         } else {
             OutputFormat::Apng
         }

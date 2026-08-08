@@ -65,7 +65,17 @@ mold run wan22-t2v-a14b:q5 "a paper boat drifting down a rain gutter"
 
 # A14B image-to-video from a still
 mold run wan22-i2v-a14b:q5 "the balloon lifts off" --image balloon.png
+
+# Single-frame text-to-image — Wan 2.2 as a still-image model
+mold run wan22-t2v-a14b:q5 "a lighthouse at dusk, volumetric fog" \
+  --frames 1 --output still.png
 ```
+
+At `--frames 1` Wan renders a still: png/jpeg output is admitted (and png is
+the default there), the image embeds the same `mold:parameters` provenance as
+every image family, and the gallery treats it as an upscale-eligible still.
+Upstream defines its `t2i-14B` task as the same weights at `frame_num=1`; any
+frame count above 1 keeps the video-only output contract.
 
 Wan checkpoints were tuned against a specific negative prompt; mold applies
 it automatically when `--negative` is not given.
@@ -77,9 +87,19 @@ it automatically when `--negative` is not given.
 | Resolution | 832x480 / 480x832 | 1280x704 / 704x1280 | 832x480           | 832x480           |
 | Frames     | 81 @ 16 fps       | 121 @ 24 fps        | 53 @ 16 fps       | 33 @ 16 fps       |
 | Steps      | 30                | 20                  | 4                 | 20                |
-| Guidance   | 6.0               | 5.0                 | 1.0 (no CFG pass) | 3.5               |
+| Guidance   | 6.0               | 5.0                 | 1.0 (no CFG pass) | per-expert¹       |
 | Flow shift | 8.0               | 8.0                 | 5.0               | 5.0               |
 | Sampler    | FlowUniPC (bh2)   | FlowUniPC (bh2)     | FlowUniPC (bh2)   | FlowUniPC (bh2)   |
+
+¹ The `:q8` quality tier advertises guidance 3.5, but by default mold applies
+upstream's **per-expert** scales, switching at the same boundary as the expert
+swap: T2V runs 4.0 while the high-noise expert is resident and 3.0 after the
+boundary; I2V runs 3.5 throughout (`wan_{t2v,i2v}_A14B.py`
+`sample_guide_scale`). Passing an explicit `--guidance` pins that one scale
+for the whole schedule — except an explicit 3.5 on the quality tier, which is
+indistinguishable from the default on the wire and selects the per-expert
+pair. The Lightning tiers (default 1.0) treat every value, 3.5 included, as
+an explicit uniform choice.
 
 The A14B frame defaults are the measured 24 GB envelope, not the checkpoint's
 trained 81-frame clip length: on an RTX 4090 the `:q5` pair peaks at

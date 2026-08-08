@@ -55,6 +55,63 @@ impl WanExpertRole {
             Self::LowNoise => "low-noise",
         }
     }
+
+    /// The one boundary comparison, upstream's `t >= boundary * 1000`
+    /// (`Wan2.2/wan/text2video.py:343`). Both decisions that depend on the
+    /// boundary — the expert swap and per-expert guidance selection — route
+    /// through here, so they can never disagree about which side a timestep
+    /// is on.
+    pub fn at(boundary_timestep: i64, timestep: i64) -> Self {
+        if timestep >= boundary_timestep {
+            Self::HighNoise
+        } else {
+            Self::LowNoise
+        }
+    }
+}
+
+/// Upstream A14B guidance is a per-expert pair, not a scalar: each expert was
+/// tuned with its own CFG scale, selected by the same boundary rule as the
+/// expert swap. A single compromise scale under-guides the structural
+/// high-noise phase and over-guides the detail phase relative to the
+/// reference.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct WanExpertGuidance {
+    pub high_noise: f64,
+    pub low_noise: f64,
+}
+
+impl WanExpertGuidance {
+    /// Upstream's `sample_guide_scale = (low, high)` for the task:
+    /// T2V `(3.0, 4.0)` (`wan_t2v_A14B.py:37`), I2V `(3.5, 3.5)`
+    /// (`wan_i2v_A14B.py:37`). Task identity is the conditioning shape, like
+    /// the boundary itself.
+    pub fn upstream_for(channel_concat: bool) -> Self {
+        if channel_concat {
+            Self {
+                high_noise: 3.5,
+                low_noise: 3.5,
+            }
+        } else {
+            Self {
+                high_noise: 4.0,
+                low_noise: 3.0,
+            }
+        }
+    }
+
+    pub fn for_role(self, role: WanExpertRole) -> f64 {
+        match role {
+            WanExpertRole::HighNoise => self.high_noise,
+            WanExpertRole::LowNoise => self.low_noise,
+        }
+    }
+
+    /// The strongest scale any step will use — what decides whether the
+    /// unconditional prompt needs encoding at all.
+    pub fn max(self) -> f64 {
+        self.high_noise.max(self.low_noise)
+    }
 }
 
 /// One expert's weights and whatever adapter belongs to it.
@@ -92,11 +149,7 @@ impl WanExpertPair {
     }
 
     pub fn role_for(&self, timestep: i64) -> WanExpertRole {
-        if timestep >= self.boundary_timestep {
-            WanExpertRole::HighNoise
-        } else {
-            WanExpertRole::LowNoise
-        }
+        WanExpertRole::at(self.boundary_timestep, timestep)
     }
 
     fn slot(&self, role: WanExpertRole) -> &WanExpertSlot {
@@ -310,6 +363,30 @@ mod tests {
         let i2v = pair(true);
         assert_eq!(i2v.role_for(880), WanExpertRole::LowNoise);
         assert_eq!(t2v.role_for(880), WanExpertRole::HighNoise);
+    }
+
+    /// The per-expert scales are upstream's `sample_guide_scale` pairs. A
+    /// wrong value here quietly mis-guides half the schedule and still
+    /// renders.
+    #[test]
+    fn upstream_per_expert_guidance_matches_the_reference_configs() {
+        let t2v = WanExpertGuidance::upstream_for(false);
+        assert_eq!(
+            (t2v.low_noise, t2v.high_noise),
+            (3.0, 4.0),
+            "wan_t2v_A14B.py sample_guide_scale"
+        );
+        let i2v = WanExpertGuidance::upstream_for(true);
+        assert_eq!(
+            (i2v.low_noise, i2v.high_noise),
+            (3.5, 3.5),
+            "wan_i2v_A14B.py sample_guide_scale"
+        );
+        assert_eq!(t2v.max(), 4.0);
+
+        // Selection follows the same role the expert swap resolves.
+        assert_eq!(t2v.for_role(WanExpertRole::HighNoise), 4.0);
+        assert_eq!(t2v.for_role(WanExpertRole::LowNoise), 3.0);
     }
 
     #[test]

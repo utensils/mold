@@ -22,6 +22,22 @@ describe("expansionTaskForRequest", () => {
     ).toBe("image-to-video");
   });
 
+  it("classifies a single-frame wan render as image work (#798)", () => {
+    expect(expansionTaskForRequest("wan", { frames: 1 })).toBe("text-to-image");
+    // A source-conditioned one-frame request keeps its source-preserving
+    // contract: the source image stays the visual authority.
+    expect(
+      expansionTaskForRequest("wan", { frames: 1, source_image: "still" }),
+    ).toBe("image-to-video");
+    expect(expansionTaskForRequest("wan", { frames: 81 })).toBe(
+      "text-to-video",
+    );
+    // The still contract is wan's: LTX keeps its video classification.
+    expect(expansionTaskForRequest("ltx2", { frames: 1 })).toBe(
+      "text-to-video",
+    );
+  });
+
   it("distinguishes H3 ordered-reference resynthesis from FL2VA", () => {
     expect(expansionTaskForRequest("minimax-h3", {})).toBe("text-to-video");
     expect(

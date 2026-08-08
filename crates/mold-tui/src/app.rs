@@ -6463,6 +6463,7 @@ impl App {
             false,
             0,
             false,
+            Some(self.generate.params.frames),
         )
     }
 

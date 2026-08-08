@@ -28,7 +28,9 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use candle_core::{safetensors::MmapedSafetensors, DType, Device, IndexOp, Tensor};
-use mold_core::{GenerateRequest, GenerateResponse, ModelPaths, OutputFormat, VideoData};
+use mold_core::{
+    GenerateRequest, GenerateResponse, ImageData, ModelPaths, OutputFormat, VideoData,
+};
 
 use crate::engine::{gpu_dtype, rand_seed, seeded_randn, LoadStrategy};
 use crate::engine_base::EngineBase;
@@ -38,7 +40,9 @@ use crate::shared_pool::SharedPool;
 use crate::wan::conditioning::{
     build_a14b_conditioning, WanImageAnchors, WanLatentGeometry, WanTi2vInpaint,
 };
-use crate::wan::experts::{WanExpertPair, WanExpertSlot, WanExperts};
+use crate::wan::experts::{
+    WanExpertGuidance, WanExpertPair, WanExpertRole, WanExpertSlot, WanExperts,
+};
 use crate::wan::lora::WanLoraRegistry;
 #[cfg(test)]
 use crate::wan::model::transformer::WanTransformer;
@@ -445,6 +449,79 @@ pub(crate) fn needs_cfg_pass(guidance: f64) -> bool {
     guidance > 1.0
 }
 
+/// How guidance varies over the schedule.
+///
+/// Upstream A14B guides each expert with its own scale; everything else — and
+/// an A14B run where the user picked a scale explicitly — uses one scale for
+/// the whole schedule.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum WanGuidancePlan {
+    Uniform(f64),
+    /// Upstream's per-expert pair, selected per timestep with the same
+    /// `>= boundary` comparison as the expert swap ([`WanExpertRole::at`]).
+    PerExpert {
+        boundary_timestep: i64,
+        guidance: WanExpertGuidance,
+    },
+}
+
+impl WanGuidancePlan {
+    /// The scale for one denoise step.
+    fn for_timestep(self, timestep: i64) -> f64 {
+        match self {
+            Self::Uniform(guidance) => guidance,
+            Self::PerExpert {
+                boundary_timestep,
+                guidance,
+            } => guidance.for_role(WanExpertRole::at(boundary_timestep, timestep)),
+        }
+    }
+
+    /// The strongest scale any step will use. Decides whether the negative
+    /// prompt is encoded at all; individual steps still skip their uncond
+    /// forward whenever their own scale is <= 1 ([`needs_cfg_pass`]).
+    fn max(self) -> f64 {
+        match self {
+            Self::Uniform(guidance) => guidance,
+            Self::PerExpert { guidance, .. } => guidance.max(),
+        }
+    }
+}
+
+/// Decide between uniform and per-expert guidance.
+///
+/// Per-expert scales engage only when the request's scale is *this model's
+/// own* advertised default AND that default is the quality tier's
+/// [`WAN_A14B_QUALITY_GUIDANCE`](mold_core::manifest::WAN_A14B_QUALITY_GUIDANCE)
+/// — and the checkpoint actually is a pair. Gating on the model's default,
+/// not the family constant alone, keeps an explicit `--guidance 3.5` on a
+/// Lightning tier (whose default is 1.0, so 3.5 there is always a choice)
+/// honored uniformly, and keeps community pair installs without a manifest
+/// on uniform guidance.
+///
+/// The one case the wire cannot express: on the quality tier itself an
+/// explicit 3.5 is byte-identical to the default and receives the upstream
+/// pair. `GenerateRequest.guidance` is a bare scalar, so "typed 3.5" and
+/// "left the default" are the same request; a dedicated
+/// `guidance_high`/`guidance_low` surface is deliberately deferred until
+/// demanded (#796).
+fn resolve_guidance_plan(
+    requested: f64,
+    pair_boundary: Option<i64>,
+    channel_concat: bool,
+    model_default: Option<f64>,
+) -> WanGuidancePlan {
+    let is_advertised_default = model_default == Some(requested)
+        && requested == mold_core::manifest::WAN_A14B_QUALITY_GUIDANCE;
+    match pair_boundary {
+        Some(boundary_timestep) if is_advertised_default => WanGuidancePlan::PerExpert {
+            boundary_timestep,
+            guidance: WanExpertGuidance::upstream_for(channel_concat),
+        },
+        _ => WanGuidancePlan::Uniform(requested),
+    }
+}
+
 /// The scalar timestep tensor handed to the DiT for one denoise step.
 ///
 /// Deliberately F32 regardless of the compute dtype: the DiT's
@@ -471,7 +548,7 @@ struct DenoiseInputs<'a> {
     latents: Tensor,
     cond_embeds: &'a Tensor,
     uncond_embeds: Option<&'a Tensor>,
-    guidance: f64,
+    guidance: WanGuidancePlan,
     /// DiT spatial patch size, needed to size the per-token timestep vector.
     patch: usize,
     rope: &'a (Tensor, Tensor),
@@ -508,6 +585,9 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
     for (index, timestep) in schedule.timesteps.iter().enumerate() {
         progress.checkpoint()?;
         let step_start = Instant::now();
+        // Resolved before the transformer borrow: per-expert guidance follows
+        // the same boundary the swap below is about to consult.
+        let step_guidance = guidance.for_timestep(*timestep);
         // A14B switches experts here, once, when the schedule crosses the
         // boundary. Every other checkpoint hands back the same transformer.
         let transformer = experts.transformer_for(*timestep, progress)?;
@@ -533,17 +613,19 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
 
         let cond =
             transformer.forward_with_rope(&model_input, &timestep_tensor, cond_embeds, rope)?;
+        // A step whose own scale is <= 1 skips its uncond forward even when
+        // the uncond embedding was encoded for other steps' sake.
         let velocity = match uncond_embeds {
-            Some(uncond_embeds) => {
+            Some(uncond_embeds) if needs_cfg_pass(step_guidance) => {
                 let uncond = transformer.forward_with_rope(
                     &model_input,
                     &timestep_tensor,
                     uncond_embeds,
                     rope,
                 )?;
-                apply_cfg(&cond, &uncond, guidance)?
+                apply_cfg(&cond, &uncond, step_guidance)?
             }
-            None => cond,
+            _ => cond,
         };
         latents = solver.step(&velocity, index, &latents)?;
 
@@ -874,15 +956,41 @@ impl WanEngine {
         let latent_h = height as usize / vae_config.spatial_compression();
         let latent_w = width as usize / vae_config.spatial_compression();
         let shift = resolve_flow_shift(low_noise_expert.is_some())?;
-        let needs_cfg = needs_cfg_pass(guidance);
+        let channel_concat = shape == WanConditioningShape::ChannelConcat;
+        // The model's own advertised default decides whether the request's
+        // scale means "I did not choose" — a community pair without a
+        // manifest stays on uniform guidance.
+        let model_default_guidance = mold_core::manifest::find_manifest(&self.base.model_name)
+            .map(|manifest| manifest.defaults.guidance);
+        let guidance_plan = resolve_guidance_plan(
+            guidance,
+            low_noise_expert.map(|_| WanExpertPair::boundary_for(channel_concat)),
+            channel_concat,
+            model_default_guidance,
+        );
+        let needs_cfg = needs_cfg_pass(guidance_plan.max());
 
         let device = crate::device::create_device(self.base.gpu_ordinal, progress)?;
         let dtype = gpu_dtype(&device);
 
+        let guidance_label = match guidance_plan {
+            WanGuidancePlan::Uniform(scale) => format!("{scale:.1}"),
+            WanGuidancePlan::PerExpert { guidance, .. } => format!(
+                "{:.1} (high-noise) / {:.1} (low-noise)",
+                guidance.high_noise, guidance.low_noise
+            ),
+        };
         progress.info(&format!(
             "Wan: {width}x{height} x {num_frames} frames @ {fps} fps, {steps} steps, \
-             guidance {guidance:.1}, shift {shift:.1}, seed {seed}"
+             guidance {guidance_label}, shift {shift:.1}, seed {seed}"
         ));
+        if let WanGuidancePlan::PerExpert { guidance, .. } = guidance_plan {
+            progress.info(&format!(
+                "Using upstream per-expert guidance ({:.1} while the high-noise expert runs, \
+                 {:.1} after the boundary); pass an explicit --guidance to pin one scale",
+                guidance.high_noise, guidance.low_noise
+            ));
+        }
         if !needs_cfg {
             progress.info("Guidance <= 1: running one forward per step (no CFG pass)");
         }
@@ -1031,7 +1139,7 @@ impl WanEngine {
             latents,
             cond_embeds: &cond_embeds,
             uncond_embeds: uncond_embeds.as_ref(),
-            guidance,
+            guidance: guidance_plan,
             patch: transformer_config.patch_size.1,
             rope: &rope,
             device: &device,
@@ -1068,8 +1176,41 @@ impl WanEngine {
         // ------------------------------------------------------------------
         // 4. Encode the artifact
         // ------------------------------------------------------------------
-        let output_format = if req.resolved_output_format().is_video() {
-            req.resolved_output_format()
+        let frames = video_frames_to_images(&video, width, height)?;
+
+        // A single-frame render with an image format is a still (#798):
+        // it takes the standard still pipeline — embedded `mold:parameters`,
+        // a gallery row, upscale eligibility — not a one-frame video.
+        // Admission only admits png/jpeg at frames == 1; the length check
+        // covers forced-local callers that skipped validation.
+        let resolved_format = req.resolved_output_format();
+        if matches!(resolved_format, OutputFormat::Png | OutputFormat::Jpeg) {
+            if frames.len() != 1 {
+                bail!(
+                    "Wan renders a {} still only at frames=1, got {} frames",
+                    resolved_format.extension(),
+                    frames.len()
+                );
+            }
+            let response = still_response(
+                req,
+                &self.base.model_name,
+                seed,
+                &frames[0],
+                width,
+                height,
+                start,
+            )?;
+            progress.info(&format!(
+                "Done: 1 frame ({} still), {:.1}s total",
+                resolved_format.extension(),
+                response.generation_time_ms as f64 / 1000.0
+            ));
+            return Ok(response);
+        }
+
+        let output_format = if resolved_format.is_video() {
+            resolved_format
         } else {
             OutputFormat::Apng
         };
@@ -1077,7 +1218,6 @@ impl WanEngine {
         progress.stage_start(&format!("Encoding {format_name}"));
         let encode_start = Instant::now();
 
-        let frames = video_frames_to_images(&video, width, height)?;
         let frame_count = frames.len() as u32;
         let video_bytes = match output_format {
             OutputFormat::Apng => {
@@ -1153,6 +1293,41 @@ impl WanEngine {
             gpu: None,
         })
     }
+}
+
+/// Build the still artifact for a single-frame Wan render (#798).
+///
+/// The frame goes through the same encoder every image family uses —
+/// `encode_rgb_image` with `build_output_metadata` — so the PNG/JPEG carries
+/// the embedded `mold:parameters` block, the gallery records a still row, and
+/// post-generation upscale sees an ordinary image response.
+fn still_response(
+    req: &GenerateRequest,
+    model_name: &str,
+    seed: u64,
+    frame: &image::RgbImage,
+    width: u32,
+    height: u32,
+    start: Instant,
+) -> Result<GenerateResponse> {
+    let format = req.resolved_output_format();
+    let metadata = crate::image::build_output_metadata(req, seed, None);
+    let data = crate::image::encode_rgb_image(frame, format, metadata.as_ref())?;
+    Ok(GenerateResponse {
+        audio: None,
+        images: vec![ImageData {
+            data,
+            format,
+            width,
+            height,
+            index: 0,
+        }],
+        video: None,
+        generation_time_ms: start.elapsed().as_millis() as u64,
+        model: model_name.to_string(),
+        seed_used: seed,
+        gpu: None,
+    })
 }
 
 /// `[1, 3, F, H, W]` in `[-1, 1]` to RGB frames, resampling if the VAE's
@@ -1355,6 +1530,61 @@ mod tests {
         }
     }
 
+    /// #798: a frames=1 render with an image format takes the standard still
+    /// pipeline — an image response (never a one-frame video) whose PNG
+    /// carries the embedded `mold:parameters` provenance the gallery and
+    /// upscaler read.
+    #[test]
+    fn single_frame_still_takes_the_image_pipeline() {
+        let mut req = request();
+        req.frames = Some(1);
+        req.output_format = Some(OutputFormat::Png);
+        let frame = image::RgbImage::from_pixel(8, 8, image::Rgb([200u8, 40, 40]));
+
+        let response =
+            still_response(&req, "wan22-t2v-a14b:q5", 7, &frame, 8, 8, Instant::now()).unwrap();
+
+        assert!(response.video.is_none(), "a still is not a one-frame video");
+        assert!(response.audio.is_none());
+        assert_eq!(response.images.len(), 1);
+        let image = &response.images[0];
+        assert_eq!(image.format, OutputFormat::Png);
+        assert_eq!((image.width, image.height), (8, 8));
+        assert!(image.data.starts_with(&[0x89, 0x50, 0x4E, 0x47]));
+
+        // The embedded provenance is the same contract every image family
+        // writes: a `mold:parameters` JSON block carrying the request.
+        let decoder = png::Decoder::new(std::io::Cursor::new(image.data.clone()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut buf).unwrap();
+        let info = reader.info();
+        assert!(
+            info.utf8_text.iter().any(|chunk| {
+                chunk.keyword == "mold:parameters"
+                    && chunk.get_text().unwrap().contains("\"prompt\":\"a cat\"")
+            }),
+            "the still must embed mold:parameters"
+        );
+
+        // JPEG output is the other admitted still format.
+        req.output_format = Some(OutputFormat::Jpeg);
+        let jpeg =
+            still_response(&req, "wan22-t2v-a14b:q5", 7, &frame, 8, 8, Instant::now()).unwrap();
+        assert!(jpeg.images[0].data.starts_with(&[0xFF, 0xD8]));
+
+        // Respecting the metadata opt-out keeps parity with image families.
+        req.output_format = Some(OutputFormat::Png);
+        req.embed_metadata = Some(false);
+        let bare =
+            still_response(&req, "wan22-t2v-a14b:q5", 7, &frame, 8, 8, Instant::now()).unwrap();
+        let decoder = png::Decoder::new(std::io::Cursor::new(bare.images[0].data.clone()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut buf).unwrap();
+        assert!(reader.info().utf8_text.is_empty(), "opt-out must hold");
+    }
+
     /// The registry force-constructs every family with paths that do not
     /// exist; construction must not touch the filesystem.
     #[test]
@@ -1466,6 +1696,113 @@ mod tests {
         assert!(needs_cfg_pass(1.0001));
         assert!(needs_cfg_pass(5.0));
         assert!(needs_cfg_pass(6.0));
+    }
+
+    /// The quality tier's advertised 3.5 means "I did not choose": on a pair
+    /// it becomes upstream's per-expert scales, applied on exactly the same
+    /// side of the boundary as the expert swap (`text2video.py:343-344`).
+    #[test]
+    fn quality_tier_default_guidance_becomes_the_upstream_per_expert_pair() {
+        let boundary = WanExpertPair::boundary_for(false);
+        let quality_default = Some(mold_core::manifest::WAN_A14B_QUALITY_GUIDANCE);
+        let plan = resolve_guidance_plan(
+            mold_core::manifest::WAN_A14B_QUALITY_GUIDANCE,
+            Some(boundary),
+            false,
+            quality_default,
+        );
+        assert_eq!(plan.for_timestep(1000), 4.0);
+        assert_eq!(
+            plan.for_timestep(boundary),
+            4.0,
+            "the boundary itself is high-noise, matching the expert swap"
+        );
+        assert_eq!(plan.for_timestep(boundary - 1), 3.0);
+        assert_eq!(plan.for_timestep(0), 3.0);
+        assert_eq!(plan.max(), 4.0, "the uncond prompt is encoded once");
+
+        // I2V's upstream pair is flat, so the plan is per-expert in name and
+        // 3.5 at every step — identical to today's behavior.
+        let i2v_boundary = WanExpertPair::boundary_for(true);
+        let i2v = resolve_guidance_plan(
+            mold_core::manifest::WAN_A14B_QUALITY_GUIDANCE,
+            Some(i2v_boundary),
+            true,
+            quality_default,
+        );
+        assert_eq!(i2v.for_timestep(1000), 3.5);
+        assert_eq!(i2v.for_timestep(0), 3.5);
+    }
+
+    /// An explicit scale is an instruction, not a hint: it applies uniformly
+    /// even on a pair, and single-expert checkpoints never see per-expert
+    /// scales no matter what the request carries.
+    #[test]
+    fn explicit_or_single_expert_guidance_stays_uniform() {
+        let boundary = WanExpertPair::boundary_for(false);
+        let quality_default = Some(mold_core::manifest::WAN_A14B_QUALITY_GUIDANCE);
+        assert_eq!(
+            resolve_guidance_plan(5.0, Some(boundary), false, quality_default),
+            WanGuidancePlan::Uniform(5.0)
+        );
+        assert_eq!(
+            resolve_guidance_plan(
+                mold_core::manifest::WAN_A14B_QUALITY_GUIDANCE,
+                None,
+                false,
+                quality_default,
+            ),
+            WanGuidancePlan::Uniform(mold_core::manifest::WAN_A14B_QUALITY_GUIDANCE)
+        );
+        // The Lightning tiers default to 1.0: uniform, CFG pass skipped —
+        // bit-identical to the pre-per-expert behavior.
+        let lightning = resolve_guidance_plan(1.0, Some(boundary), false, Some(1.0));
+        assert_eq!(lightning, WanGuidancePlan::Uniform(1.0));
+        assert!(!needs_cfg_pass(lightning.max()));
+
+        // An explicit 3.5 on a Lightning pair is always a user choice — the
+        // tier's own default is 1.0 — and must stay uniform even though the
+        // value collides with the quality tier's sentinel (codex review).
+        assert_eq!(
+            resolve_guidance_plan(
+                mold_core::manifest::WAN_A14B_QUALITY_GUIDANCE,
+                Some(boundary),
+                false,
+                Some(1.0),
+            ),
+            WanGuidancePlan::Uniform(mold_core::manifest::WAN_A14B_QUALITY_GUIDANCE)
+        );
+        // A community pair with no manifest default never engages per-expert
+        // scales.
+        assert_eq!(
+            resolve_guidance_plan(
+                mold_core::manifest::WAN_A14B_QUALITY_GUIDANCE,
+                Some(boundary),
+                false,
+                None,
+            ),
+            WanGuidancePlan::Uniform(mold_core::manifest::WAN_A14B_QUALITY_GUIDANCE)
+        );
+    }
+
+    /// Mixed plans keep `needs_cfg_pass` semantics per step: a phase at or
+    /// below unit guidance skips its uncond forward even though the negative
+    /// prompt was encoded for the other phase.
+    #[test]
+    fn a_mixed_plan_skips_the_uncond_pass_only_where_guidance_allows() {
+        let plan = WanGuidancePlan::PerExpert {
+            boundary_timestep: 875,
+            guidance: WanExpertGuidance {
+                high_noise: 2.0,
+                low_noise: 1.0,
+            },
+        };
+        assert!(needs_cfg_pass(plan.max()), "the uncond prompt is encoded");
+        assert!(needs_cfg_pass(plan.for_timestep(1000)));
+        assert!(
+            !needs_cfg_pass(plan.for_timestep(0)),
+            "skipped below the boundary"
+        );
     }
 
     #[test]
@@ -1971,7 +2308,7 @@ mod tests {
             latents: latents0.clone(),
             cond_embeds: &context,
             uncond_embeds: None,
-            guidance: 1.0,
+            guidance: WanGuidancePlan::Uniform(1.0),
             patch: config.patch_size.1,
             rope: &rope,
             device: &device,
@@ -2103,7 +2440,7 @@ mod tests {
             latents,
             cond_embeds: &context,
             uncond_embeds: None,
-            guidance: 1.0,
+            guidance: WanGuidancePlan::Uniform(1.0),
             patch: config.patch_size.1,
             rope: &rope,
             device: &device,
@@ -2273,7 +2610,7 @@ mod tests {
                 latents,
                 cond_embeds: &context,
                 uncond_embeds: None,
-                guidance,
+                guidance: WanGuidancePlan::Uniform(guidance),
                 patch: transformer_config.patch_size.1,
                 rope: &rope,
                 device: &device,

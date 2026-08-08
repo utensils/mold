@@ -1935,12 +1935,19 @@ fn validate_generate_request_after_activation(
         }
     }
 
-    // Wan renders video only; without this gate, an explicit image format
-    // reaches the engine and fails after the model loads instead of at
-    // admission (Wan has no audio path, so `wav` is refused here too).
+    // Wan renders video, with one deliberate exception: a single-frame render
+    // is a still (#798) — upstream's own `t2i-14B` task is the same weights at
+    // `frame_num=1` — so png/jpeg are admitted exactly when `frames == 1`.
+    // Every other image format request would otherwise reach the engine and
+    // fail after the model loads instead of at admission (Wan has no audio
+    // path, so `wav` is refused here too).
     if family == Some("wan") {
-        match req.resolved_output_format() {
-            OutputFormat::Gif | OutputFormat::Apng | OutputFormat::Webp | OutputFormat::Mp4 => {}
+        match (req.resolved_output_format(), req.frames) {
+            (
+                OutputFormat::Gif | OutputFormat::Apng | OutputFormat::Webp | OutputFormat::Mp4,
+                _,
+            ) => {}
+            (OutputFormat::Png | OutputFormat::Jpeg, Some(1)) => {}
             _ => return Err("Wan outputs must use mp4, gif, apng, or webp".to_string()),
         }
     }
@@ -4437,11 +4444,11 @@ mod tests {
         use crate::ExpandTask;
         assert_eq!(ExpandTask::for_family("wan"), ExpandTask::TextToVideo);
         assert_eq!(
-            ExpandTask::for_conditioning("wan", None, true, false, false, 0, false),
+            ExpandTask::for_conditioning("wan", None, true, false, false, 0, false, None),
             ExpandTask::ImageToVideo
         );
         assert_eq!(
-            ExpandTask::for_conditioning("wan", None, false, false, false, 0, false),
+            ExpandTask::for_conditioning("wan", None, false, false, false, 0, false, None),
             ExpandTask::TextToVideo
         );
 
@@ -4454,6 +4461,78 @@ mod tests {
         req.output_format = Some(OutputFormat::Png);
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("mp4"), "got: {err}");
+    }
+
+    /// #798: a single-frame Wan render is a still. png/jpeg are admitted at
+    /// exactly `frames == 1`, default to png there, and classify as
+    /// image-style prompt work — while `frames > 1` (or unset, which defaults
+    /// to a full clip) keeps the video-only contract and its current error.
+    /// Twin: `studio/lib/expandTask.ts`.
+    #[test]
+    fn wan_single_frame_is_a_still() {
+        use crate::ExpandTask;
+
+        let mut req = valid_req();
+        req.model = "wan22-t2v-a14b:q5".to_string();
+        req.frames = Some(1);
+
+        // Unset format at frames=1 normalises to a still, and both image
+        // formats pass admission.
+        req.output_format = None;
+        req.normalise_output_format(Some("wan"));
+        assert_eq!(req.resolved_output_format(), OutputFormat::Png);
+        assert!(validate_generate_request(&req).is_ok());
+        req.output_format = Some(OutputFormat::Jpeg);
+        assert!(validate_generate_request(&req).is_ok());
+        // Video formats stay allowed at frames=1 — permitting stills must not
+        // revoke the existing contract.
+        req.output_format = Some(OutputFormat::Mp4);
+        assert!(validate_generate_request(&req).is_ok());
+        // Audio never becomes admissible through the still gate.
+        req.output_format = Some(OutputFormat::Wav);
+        assert!(validate_generate_request(&req).is_err());
+
+        // frames > 1 and frames unset keep refusing image formats with the
+        // current message.
+        for frames in [Some(5), None] {
+            req.frames = frames;
+            req.output_format = Some(OutputFormat::Png);
+            let err = validate_generate_request(&req).unwrap_err();
+            assert!(err.contains("mp4, gif, apng, or webp"), "got: {err}");
+            req.output_format = None;
+            req.normalise_output_format(Some("wan"));
+            assert_eq!(req.resolved_output_format(), OutputFormat::Mp4);
+        }
+
+        // The expansion task follows: a frames=1 wan request is image-style
+        // prompt work, not chronological shot direction.
+        assert_eq!(
+            ExpandTask::for_conditioning("wan", None, false, false, false, 0, false, Some(1)),
+            ExpandTask::TextToImage
+        );
+        // …unless a source image conditions it: source authority survives the
+        // still contract (codex review).
+        assert_eq!(
+            ExpandTask::for_conditioning("wan", None, true, false, false, 0, false, Some(1)),
+            ExpandTask::ImageToVideo
+        );
+        assert_eq!(
+            ExpandTask::for_conditioning("wan", None, false, false, false, 0, false, Some(81)),
+            ExpandTask::TextToVideo
+        );
+        // LTX keeps its video classification even at one frame — the still
+        // contract is wan's.
+        assert_eq!(
+            ExpandTask::for_conditioning("ltx2", None, false, false, false, 0, false, Some(1)),
+            ExpandTask::TextToVideo
+        );
+        let mut still_req = valid_req();
+        still_req.model = "wan22-t2v-a14b:q5".to_string();
+        still_req.frames = Some(1);
+        assert_eq!(
+            ExpandTask::for_generation("wan", &still_req),
+            ExpandTask::TextToImage
+        );
     }
 
     /// Buckets are advertised per checkpoint: the 480p-only 1.3B and the
