@@ -397,6 +397,17 @@ CREATE INDEX idx_paired_clients_instance_created_at
 ON paired_clients(server_instance_id, created_at_ms DESC);
 "#;
 
+/// v17 → synchronized audio/video output-phase timing.
+///
+/// The legacy `ewma_vae_ms` column remains authoritative for families that
+/// report one undifferentiated VAE phase. NULL additive fields preserve every
+/// existing estimate until a runtime emits the more specific typed phases.
+const V17_SCHEDULER_AV_PHASES: &str = r#"
+ALTER TABLE scheduler_estimates ADD COLUMN ewma_visual_decode_ms REAL;
+ALTER TABLE scheduler_estimates ADD COLUMN ewma_audio_decode_ms REAL;
+ALTER TABLE scheduler_estimates ADD COLUMN ewma_mux_ms REAL;
+"#;
+
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -464,11 +475,15 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 16,
         kind: MigrationKind::Sql(V16_PAIRED_CLIENTS),
     },
+    Migration {
+        version: 17,
+        kind: MigrationKind::Sql(V17_SCHEDULER_AV_PHASES),
+    },
 ];
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -844,7 +859,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 16);
+        assert_eq!(SCHEMA_VERSION, 17);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1176,7 +1191,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 16);
+        assert_eq!(SCHEMA_VERSION, 17);
     }
 
     #[test]
@@ -1266,5 +1281,45 @@ mod v15_tests {
             )
             .unwrap();
         assert_eq!(runtime, None);
+    }
+}
+
+#[cfg(test)]
+mod v17_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn v16_av_phase_migration_preserves_legacy_vae_evidence() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(V13_SCHEDULER_ESTIMATES).unwrap();
+        conn.execute_batch(V14_SCHEDULER_ESTIMATE_EVIDENCE).unwrap();
+        conn.execute_batch(V15_SCHEDULER_ESTIMATE_RUNTIME).unwrap();
+        conn.execute_batch(V16_PAIRED_CLIENTS).unwrap();
+        conn.execute(
+            "INSERT INTO scheduler_estimates (
+                estimate_key, device_class, model_fingerprint, work_kind,
+                shape_bucket, execution_fingerprint, sample_count,
+                ewma_total_ms, ewma_vae_ms, last_observed_at
+             ) VALUES ('legacy-vae', 'cuda:sm86', 'wan', 'generation',
+                '544x960', 'bf16', 4, 1200.0, 321.0, 100)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA user_version = 16;").unwrap();
+
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
+        let phases: (Option<f64>, Option<f64>, Option<f64>, Option<f64>) = conn
+            .query_row(
+                "SELECT ewma_vae_ms, ewma_visual_decode_ms,
+                        ewma_audio_decode_ms, ewma_mux_ms
+                 FROM scheduler_estimates WHERE estimate_key = 'legacy-vae'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(phases, (Some(321.0), None, None, None));
     }
 }

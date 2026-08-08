@@ -30,6 +30,9 @@ thread_local! {
             prompt_encode_ms: None,
             denoise_ms: None,
             vae_ms: None,
+            visual_decode_ms: None,
+            audio_decode_ms: None,
+            mux_ms: None,
             upscale_ms: None,
         }) };
 }
@@ -100,6 +103,15 @@ fn record_phase_timing(event: &mold_inference::ProgressEvent) {
                 }
                 mold_inference::ProgressPhase::Vae => {
                     add_phase_sample(&mut timings.vae_ms, *elapsed)
+                }
+                mold_inference::ProgressPhase::VisualDecode => {
+                    add_phase_sample(&mut timings.visual_decode_ms, *elapsed)
+                }
+                mold_inference::ProgressPhase::AudioDecode => {
+                    add_phase_sample(&mut timings.audio_decode_ms, *elapsed)
+                }
+                mold_inference::ProgressPhase::Mux => {
+                    add_phase_sample(&mut timings.mux_ms, *elapsed)
                 }
                 mold_inference::ProgressPhase::Upscale => {
                     add_phase_sample(&mut timings.upscale_ms, *elapsed)
@@ -747,7 +759,7 @@ fn run_gpu_owner_loop(
                         && !worker.poisoned.load(Ordering::SeqCst)
                         && !worker.fatal_cuda_error.load(Ordering::SeqCst),
                     phase_timings,
-                    completion,
+                    completion: completion.map(Box::new),
                 });
             }
             Ok(OwnerProcessOutcome::PlanInvalidated { mut grant, error }) => {
@@ -787,7 +799,7 @@ fn run_gpu_owner_loop(
                     worker_generation: generation,
                     successful: false,
                     phase_timings,
-                    completion,
+                    completion: completion.map(Box::new),
                 });
             }
         }
@@ -7115,6 +7127,17 @@ mod tests {
                                 13,
                             ),
                             (mold_inference::ProgressPhase::Vae, "VAE decode", 15),
+                            (
+                                mold_inference::ProgressPhase::VisualDecode,
+                                "Visual decode",
+                                17,
+                            ),
+                            (
+                                mold_inference::ProgressPhase::AudioDecode,
+                                "Audio decode",
+                                18,
+                            ),
+                            (mold_inference::ProgressPhase::Mux, "A/V mux", 19),
                             (mold_inference::ProgressPhase::Upscale, "Upscaling", 16),
                         ] {
                             record_phase_timing(&mold_inference::ProgressEvent::PhaseDone {
@@ -7160,6 +7183,9 @@ mod tests {
         assert_eq!(timings.prompt_encode_ms, Some(13));
         assert_eq!(timings.denoise_ms, Some(14));
         assert_eq!(timings.vae_ms, Some(15));
+        assert_eq!(timings.visual_decode_ms, Some(17));
+        assert_eq!(timings.audio_decode_ms, Some(18));
+        assert_eq!(timings.mux_ms, Some(19));
         assert_eq!(timings.upscale_ms, Some(16));
 
         assert!(matches!(

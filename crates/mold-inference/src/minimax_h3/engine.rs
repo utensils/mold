@@ -475,6 +475,7 @@ struct H3EngineProgressObserver<'a> {
     progress: &'a ProgressReporter,
     started: HashMap<H3PipelinePhase, Instant>,
     last_completed: HashMap<H3PipelinePhase, usize>,
+    denoise_step_started: Option<Instant>,
 }
 
 impl<'a> H3EngineProgressObserver<'a> {
@@ -483,22 +484,34 @@ impl<'a> H3EngineProgressObserver<'a> {
             progress,
             started: HashMap::new(),
             last_completed: HashMap::new(),
+            denoise_step_started: None,
         }
     }
 }
 
 impl H3PipelineObserver for H3EngineProgressObserver<'_> {
     fn observe(&mut self, event: H3PipelineEvent) {
+        let now = Instant::now();
         let previous = self.last_completed.get(&event.phase).copied();
         if event.completed == 0 || previous.is_some_and(|value| event.completed < value) {
-            self.started.insert(event.phase, Instant::now());
+            self.started.insert(event.phase, now);
+            if event.phase == H3PipelinePhase::Denoise {
+                self.denoise_step_started = Some(now);
+            }
             self.progress.stage_start(pipeline_phase_name(event.phase));
         }
-        if event.phase == H3PipelinePhase::Denoise && event.completed > 0 {
+        if event.phase == H3PipelinePhase::Denoise
+            && event.completed > 0
+            && previous != Some(event.completed)
+        {
+            let elapsed = self
+                .denoise_step_started
+                .replace(now)
+                .map_or(Duration::ZERO, |started| now.duration_since(started));
             self.progress.emit(ProgressEvent::DenoiseStep {
                 step: event.completed,
                 total: event.total,
-                elapsed: Duration::ZERO,
+                elapsed,
             });
         }
         if event.completed == event.total && previous != Some(event.completed) {
@@ -507,22 +520,32 @@ impl H3PipelineObserver for H3EngineProgressObserver<'_> {
                 .remove(&event.phase)
                 .map_or(Duration::ZERO, |started| started.elapsed());
             match event.phase {
-                H3PipelinePhase::QwenEncode
-                | H3PipelinePhase::QwenEncodeChunk
-                | H3PipelinePhase::PromptEncode => self.progress.phase_done(
-                    ProgressPhase::PromptEncode,
+                H3PipelinePhase::QwenEncode | H3PipelinePhase::PromptEncode => {
+                    self.progress.phase_done(
+                        ProgressPhase::PromptEncode,
+                        pipeline_phase_name(event.phase),
+                        elapsed,
+                    )
+                }
+                H3PipelinePhase::VisualConditionEncode
+                | H3PipelinePhase::ReferenceVisualEncode
+                | H3PipelinePhase::ReferenceAudioEncode => self.progress.phase_done(
+                    ProgressPhase::Vae,
                     pipeline_phase_name(event.phase),
                     elapsed,
                 ),
-                H3PipelinePhase::VisualConditionEncode
-                | H3PipelinePhase::VisualConditionEncodeChunk
-                | H3PipelinePhase::ReferenceVisualEncode
-                | H3PipelinePhase::ReferenceVisualEncodeChunk
-                | H3PipelinePhase::ReferenceAudioEncode
-                | H3PipelinePhase::ReferenceAudioEncodeChunk
-                | H3PipelinePhase::VisualDecode
-                | H3PipelinePhase::VisualDecodeChunk => self.progress.phase_done(
-                    ProgressPhase::Vae,
+                H3PipelinePhase::VisualDecode => self.progress.phase_done(
+                    ProgressPhase::VisualDecode,
+                    pipeline_phase_name(event.phase),
+                    elapsed,
+                ),
+                H3PipelinePhase::AudioDecode => self.progress.phase_done(
+                    ProgressPhase::AudioDecode,
+                    pipeline_phase_name(event.phase),
+                    elapsed,
+                ),
+                H3PipelinePhase::Mux => self.progress.phase_done(
+                    ProgressPhase::Mux,
                     pipeline_phase_name(event.phase),
                     elapsed,
                 ),
@@ -1660,6 +1683,87 @@ mod tests {
             }),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn progress_observer_emits_independent_h3_runtime_phases() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let mut progress = ProgressReporter::default();
+        progress.set_callback(Box::new(move |event| {
+            captured.lock().unwrap().push(event);
+        }));
+        let mut observer = H3EngineProgressObserver::new(&progress);
+
+        for phase in [
+            H3PipelinePhase::PromptEncode,
+            H3PipelinePhase::VisualDecode,
+            H3PipelinePhase::AudioDecode,
+            H3PipelinePhase::Mux,
+        ] {
+            observer.observe(H3PipelineEvent {
+                phase,
+                completed: 0,
+                total: 1,
+            });
+            let chunk = match phase {
+                H3PipelinePhase::VisualDecode => Some(H3PipelinePhase::VisualDecodeChunk),
+                H3PipelinePhase::AudioDecode => Some(H3PipelinePhase::AudioDecodeChunk),
+                _ => None,
+            };
+            if let Some(chunk) = chunk {
+                observer.observe(H3PipelineEvent {
+                    phase: chunk,
+                    completed: 0,
+                    total: 1,
+                });
+                observer.observe(H3PipelineEvent {
+                    phase: chunk,
+                    completed: 1,
+                    total: 1,
+                });
+            }
+            observer.observe(H3PipelineEvent {
+                phase,
+                completed: 1,
+                total: 1,
+            });
+        }
+
+        observer.observe(H3PipelineEvent {
+            phase: H3PipelinePhase::Denoise,
+            completed: 0,
+            total: 1,
+        });
+        std::thread::sleep(Duration::from_millis(1));
+        observer.observe(H3PipelineEvent {
+            phase: H3PipelinePhase::Denoise,
+            completed: 1,
+            total: 1,
+        });
+
+        let events = events.lock().unwrap();
+        let typed = events
+            .iter()
+            .filter_map(|event| match event {
+                ProgressEvent::PhaseDone { phase, .. } => Some(*phase),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            typed,
+            vec![
+                ProgressPhase::PromptEncode,
+                ProgressPhase::VisualDecode,
+                ProgressPhase::AudioDecode,
+                ProgressPhase::Mux,
+            ],
+            "nested decoder chunks must remain display-only instead of double-counting telemetry"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProgressEvent::DenoiseStep { elapsed, .. } if *elapsed > Duration::ZERO
+        )));
     }
 
     #[test]

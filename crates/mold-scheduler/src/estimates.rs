@@ -99,6 +99,9 @@ pub struct EstimatePhaseTimings {
     pub prompt_encode_ms: Option<u64>,
     pub denoise_ms: Option<u64>,
     pub vae_ms: Option<u64>,
+    pub visual_decode_ms: Option<u64>,
+    pub audio_decode_ms: Option<u64>,
+    pub mux_ms: Option<u64>,
     pub upscale_ms: Option<u64>,
 }
 
@@ -130,6 +133,9 @@ pub struct EstimateBucket {
     pub ewma_prompt_encode_ms: Option<f64>,
     pub ewma_denoise_ms: Option<f64>,
     pub ewma_vae_ms: Option<f64>,
+    pub ewma_visual_decode_ms: Option<f64>,
+    pub ewma_audio_decode_ms: Option<f64>,
+    pub ewma_mux_ms: Option<f64>,
     pub ewma_upscale_ms: Option<f64>,
     /// Decaying conservative envelope of measured execution peaks.
     pub vram_conservative_bytes: Option<u64>,
@@ -264,6 +270,21 @@ impl EstimateStore {
                         bucket.ewma_vae_ms,
                         observation.phases.vae_ms.map(|value| value as f64),
                     );
+                    bucket.ewma_visual_decode_ms = update_optional_ewma(
+                        bucket.ewma_visual_decode_ms,
+                        observation
+                            .phases
+                            .visual_decode_ms
+                            .map(|value| value as f64),
+                    );
+                    bucket.ewma_audio_decode_ms = update_optional_ewma(
+                        bucket.ewma_audio_decode_ms,
+                        observation.phases.audio_decode_ms.map(|value| value as f64),
+                    );
+                    bucket.ewma_mux_ms = update_optional_ewma(
+                        bucket.ewma_mux_ms,
+                        observation.phases.mux_ms.map(|value| value as f64),
+                    );
                     bucket.ewma_upscale_ms = update_optional_ewma(
                         bucket.ewma_upscale_ms,
                         observation.phases.upscale_ms.map(|value| value as f64),
@@ -324,6 +345,21 @@ impl EstimateStore {
                         ewma_vae_ms: observation
                             .phases
                             .vae_ms
+                            .filter(|_| successful)
+                            .map(|value| value as f64),
+                        ewma_visual_decode_ms: observation
+                            .phases
+                            .visual_decode_ms
+                            .filter(|_| successful)
+                            .map(|value| value as f64),
+                        ewma_audio_decode_ms: observation
+                            .phases
+                            .audio_decode_ms
+                            .filter(|_| successful)
+                            .map(|value| value as f64),
+                        ewma_mux_ms: observation
+                            .phases
+                            .mux_ms
                             .filter(|_| successful)
                             .map(|value| value as f64),
                         ewma_upscale_ms: observation
