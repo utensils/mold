@@ -17,7 +17,8 @@ use mold_inference::private_qualification::{
 fn usage() -> &'static str {
     "usage: h3_artifact_qualification --models-root \
      /storage/jamesbrink/mold-uat/minimax-h3/models --model \
-     minimax-h3-fl2va:comfy-pruned-int8 --authorization-scope private-plato-uat"
+     <minimax-h3-fl2va:comfy-pruned-int8|minimax-h3-ref2va:comfy-pruned-int8> \
+     --authorization-scope private-plato-uat"
 }
 
 fn parse_args() -> Result<(PathBuf, String, String)> {
