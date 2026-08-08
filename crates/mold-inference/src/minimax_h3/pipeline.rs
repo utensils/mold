@@ -1149,7 +1149,7 @@ fn pillow_resample_channel(samples: impl Iterator<Item = (u8, i32)>) -> u8 {
     (accumulator >> PILLOW_RESAMPLE_PRECISION_BITS).clamp(0, 255) as u8
 }
 
-fn pillow_lanczos_resize(
+pub(super) fn pillow_lanczos_resize(
     source: &RgbImage,
     width: u32,
     height: u32,

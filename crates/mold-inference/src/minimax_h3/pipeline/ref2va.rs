@@ -9,6 +9,7 @@
 
 use super::*;
 use crate::engine::GenerationReferenceBinding;
+use crate::minimax_h3::reference_media::H3ReferenceMediaAdapter;
 use crate::minimax_h3::sampler::H3_VISUAL_CONDITION_TIMESTEP;
 use mold_candle::minimax_h3::{
     pack_h3_audio, sample_video_frames, AudioVaeConfig, RefPresentation, RefPresentationKind,
@@ -31,6 +32,7 @@ pub(crate) struct H3PreparedRef2VaRequest {
 pub(crate) struct H3PreparedReference {
     pub metadata: GenerationReferenceMetadata,
     pub shape: contract::GenerationReferencePreparedShape,
+    pub target_frames: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,12 +80,24 @@ pub(crate) trait H3Ref2VaBackend {
     /// every reference block, and both generated suffixes.
     fn maximum_packed_rows(&self) -> usize;
 
+    /// Concrete, weight-free media preprocessing owned by a future Ref2VA
+    /// backend. Synthetic backends may override the two methods below; a
+    /// production backend exposes this adapter and cannot silently substitute
+    /// metadata-only preprocessing.
+    fn reference_media_adapter(&mut self) -> Option<&mut H3ReferenceMediaAdapter> {
+        None
+    }
+
     fn decode_reference(
         &mut self,
         reference: &H3PreparedReference,
         binding: &GenerationReferenceBinding,
         checkpoint: &mut dyn H3PipelineCheckpoint,
-    ) -> Result<H3DecodedReferenceFacts>;
+    ) -> Result<H3DecodedReferenceFacts> {
+        self.reference_media_adapter()
+            .ok_or_else(|| anyhow!("MiniMax H3 Ref2VA backend has no reference-media adapter"))?
+            .decode_reference(reference, binding, checkpoint)
+    }
 
     /// Normalize the already-decoded media and retain it internally for the
     /// two VAE encoders. The returned presentation is the exact Qwen vision
@@ -93,7 +107,11 @@ pub(crate) trait H3Ref2VaBackend {
         reference: &H3PreparedReference,
         decoded: &H3DecodedReferenceFacts,
         checkpoint: &mut dyn H3PipelineCheckpoint,
-    ) -> Result<H3ReferencePresentation>;
+    ) -> Result<H3ReferencePresentation> {
+        self.reference_media_adapter()
+            .ok_or_else(|| anyhow!("MiniMax H3 Ref2VA backend has no reference-media adapter"))?
+            .preprocess_reference(reference, decoded, checkpoint)
+    }
 
     fn encode_text(
         &mut self,
@@ -222,7 +240,11 @@ fn prepare_request_with_authority(
             bail!("MiniMax H3 Ref2VA reference {} lost its digest", index + 1);
         }
         metadata.prepared_shape = Some(shape.clone());
-        references.push(H3PreparedReference { metadata, shape });
+        references.push(H3PreparedReference {
+            metadata,
+            shape,
+            target_frames: frames,
+        });
     }
     let metadata = references
         .iter()

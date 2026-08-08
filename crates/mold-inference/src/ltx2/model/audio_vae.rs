@@ -269,11 +269,21 @@ pub struct DecodedAudio {
 
 impl DecodedAudio {
     pub fn from_file(path: &Path, max_duration_seconds: Option<f32>) -> Result<Option<Self>> {
+        Self::from_file_with_checkpoint(path, max_duration_seconds, &mut || Ok(()))
+    }
+
+    pub(crate) fn from_file_with_checkpoint(
+        path: &Path,
+        max_duration_seconds: Option<f32>,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Option<Self>> {
+        checkpoint()?;
         let decoded = if is_mp4_audio_container(path) {
-            return Self::from_mp4_file(path, max_duration_seconds);
+            return Self::from_mp4_file_with_checkpoint(path, max_duration_seconds, checkpoint);
         } else {
-            Self::decode_with_probe(path)?
+            Self::decode_with_probe_with_checkpoint(path, checkpoint)?
         };
+        checkpoint()?;
         Ok(decoded.map(|decoded| decoded.trimmed(max_duration_seconds)))
     }
 
@@ -281,11 +291,26 @@ impl DecodedAudio {
     /// extension. Reference ingress uses this to bind exact decoded sample
     /// counts before Ref2VA placement can freeze a layout.
     pub fn from_mp4_file(path: &Path, max_duration_seconds: Option<f32>) -> Result<Option<Self>> {
-        let decoded = match Self::decode_with_probe(path) {
+        Self::from_mp4_file_with_checkpoint(path, max_duration_seconds, &mut || Ok(()))
+    }
+
+    pub(crate) fn from_mp4_file_with_checkpoint(
+        path: &Path,
+        max_duration_seconds: Option<f32>,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Option<Self>> {
+        checkpoint()?;
+        let decoded = match Self::decode_with_probe_with_checkpoint(path, checkpoint) {
             Ok(Some(decoded)) => Some(decoded),
-            Ok(None) => Self::decode_aac_from_mp4(path)?,
-            Err(probe_err) => match Self::decode_aac_from_mp4(path) {
+            Ok(None) => Self::decode_aac_from_mp4_with_checkpoint(path, checkpoint)?,
+            Err(probe_err) if crate::progress::is_inference_cancelled(&probe_err) => {
+                return Err(probe_err);
+            }
+            Err(probe_err) => match Self::decode_aac_from_mp4_with_checkpoint(path, checkpoint) {
                 Ok(decoded) => decoded,
+                Err(fallback_err) if crate::progress::is_inference_cancelled(&fallback_err) => {
+                    return Err(fallback_err);
+                }
                 Err(fallback_err) => {
                     return Err(anyhow!(
                         "failed to decode source audio '{}' via probe ({probe_err:#}) or native MP4 fallback ({fallback_err:#})",
@@ -294,10 +319,20 @@ impl DecodedAudio {
                 }
             },
         };
+        checkpoint()?;
         Ok(decoded.map(|decoded| decoded.trimmed(max_duration_seconds)))
     }
 
+    #[cfg(all(test, feature = "mp4"))]
     fn decode_with_probe(path: &Path) -> Result<Option<Self>> {
+        Self::decode_with_probe_with_checkpoint(path, &mut || Ok(()))
+    }
+
+    fn decode_with_probe_with_checkpoint(
+        path: &Path,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Option<Self>> {
+        checkpoint()?;
         let file = File::open(path)
             .with_context(|| format!("failed to open source audio '{}'", path.display()))?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -342,6 +377,7 @@ impl DecodedAudio {
         );
 
         loop {
+            checkpoint()?;
             let packet = match format.next_packet() {
                 Ok(packet) => packet,
                 Err(SymphoniaError::IoError(_)) => break,
@@ -353,10 +389,15 @@ impl DecodedAudio {
             accumulator.push_packet(path, decoder.as_mut(), &packet)?;
         }
 
+        checkpoint()?;
         Ok(accumulator.finish())
     }
 
-    fn decode_aac_from_mp4(path: &Path) -> Result<Option<Self>> {
+    fn decode_aac_from_mp4_with_checkpoint(
+        path: &Path,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Option<Self>> {
+        checkpoint()?;
         let bytes = std::fs::read(path)
             .with_context(|| format!("failed to read source MP4 audio '{}'", path.display()))?;
         let mut reader = Mp4Reader::read_header(Cursor::new(bytes.clone()), bytes.len() as u64)
@@ -414,6 +455,7 @@ impl DecodedAudio {
         );
 
         for sample_id in 1..=track.sample_count() {
+            checkpoint()?;
             let Some(sample) = reader.read_sample(track_id, sample_id)? else {
                 continue;
             };
@@ -426,6 +468,7 @@ impl DecodedAudio {
             accumulator.push_packet(path, decoder.as_mut(), &packet)?;
         }
 
+        checkpoint()?;
         Ok(accumulator.finish())
     }
 
