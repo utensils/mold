@@ -1,9 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import type { ExpansionPullView } from "../lib/expansionPull";
+import { expansionPullPresentation, type ExpansionPullView } from "../lib/expansionPull";
 import type { ModelEntry } from "../lib/api/types";
-import { formatBytes, formatEta, percent } from "../lib/format";
-import { modelDisplayNameForId } from "../lib/models";
 
 const props = defineProps<{
   model: string;
@@ -13,37 +11,18 @@ const props = defineProps<{
   etaSeconds: number | null;
   models?: ModelEntry[] | undefined;
 }>();
-const modelLabel = computed(() => modelDisplayNameForId(props.model, props.models ?? []));
 defineEmits<{ pull: []; "retry-expansion": [] }>();
 
-const amount = computed(() =>
-  props.status.job
-    ? Math.round(percent(props.status.job.bytes_done, props.status.job.bytes_total))
-    : 0,
+const presentation = computed(() =>
+  expansionPullPresentation(
+    props.status,
+    props.model,
+    props.hostLabel,
+    props.error,
+    props.etaSeconds,
+    props.models ?? [],
+  ),
 );
-const busy = computed(() =>
-  ["connecting", "starting", "queued", "pulling"].includes(props.status.kind),
-);
-const label = computed(() => {
-  switch (props.status.kind) {
-    case "missing":
-      return props.error;
-    case "connecting":
-      return `Connecting to ${props.hostLabel} to pull ${modelLabel.value}…`;
-    case "starting":
-      return `Starting ${modelLabel.value} on ${props.hostLabel}…`;
-    case "queued":
-      return `${modelLabel.value} queued on ${props.hostLabel}`;
-    case "pulling":
-      return `Pulling ${modelLabel.value} on ${props.hostLabel}`;
-    case "ready":
-      return `${modelLabel.value} ready on ${props.hostLabel}`;
-    case "failed":
-      return `${modelLabel.value} pull failed on ${props.hostLabel}`;
-    case "cancelled":
-      return `${props.model} pull cancelled on ${props.hostLabel}`;
-  }
-});
 </script>
 
 <template>
@@ -52,9 +31,9 @@ const label = computed(() => {
     role="status"
     aria-live="polite"
     aria-atomic="true"
-    :aria-busy="busy || undefined"
+    :aria-busy="presentation.busy || undefined"
   >
-    <strong>{{ label }}</strong>
+    <strong>{{ presentation.label }}</strong>
     <span v-if="error && status.kind !== 'missing'" class="error-text" role="alert">{{
       error
     }}</span>
@@ -66,22 +45,17 @@ const label = computed(() => {
         role="progressbar"
         aria-valuemin="0"
         aria-valuemax="100"
-        :aria-valuenow="amount"
-        :aria-label="label"
+        :aria-valuenow="presentation.percent"
+        :aria-label="presentation.label"
       >
-        <span :style="{ width: `${amount}%` }" />
+        <span :style="{ width: `${presentation.percent}%` }" />
       </div>
       <p>
-        <span>{{ amount }}%</span>
-        <span
-          >{{ formatBytes(status.job.bytes_done) }} /
-          {{ formatBytes(status.job.bytes_total) }}</span
-        >
-        <span v-if="status.job.files_total"
-          >{{ status.job.files_done }}/{{ status.job.files_total }} files</span
-        >
+        <span>{{ presentation.percent }}%</span>
+        <span>{{ presentation.bytes }}</span>
+        <span v-if="presentation.files">{{ presentation.files }}</span>
         <span v-if="status.job.current_file">{{ status.job.current_file }}</span>
-        <span>ETA {{ formatEta(etaSeconds) }}</span>
+        <span>ETA {{ presentation.eta }}</span>
       </p>
     </div>
     <button
@@ -109,7 +83,7 @@ const label = computed(() => {
       data-test="mobile-retry-expansion-pull"
       @click="$emit('pull')"
     >
-      Retry {{ modelLabel }} pull on {{ hostLabel }}
+      Retry {{ presentation.modelLabel }} pull on {{ hostLabel }}
     </button>
   </section>
 </template>
