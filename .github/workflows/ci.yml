@@ -59,6 +59,7 @@ jobs:
               - 'docs/qualification/local-multi-gpu-report.schema.json'
               - 'scripts/minimax-h3-conformance.py'
               - 'scripts/tests/minimax-h3-conformance-contract.py'
+              - 'scripts/tests/minimax-h3-private-uat-release-contract.sh'
               - 'tests/fixtures/minimax_h3/**'
               - 'docs/qualification/minimax-h3-*.json'
               - 'docs/qualification/minimax-h3-conformance.md'
@@ -132,6 +133,8 @@ jobs:
               - 'crates/mold-inference/Cargo.toml'
               - 'crates/mold-inference/src/lib.rs'
               - 'crates/mold-inference/src/bin/h3_attention_qualification.rs'
+              - 'crates/mold-inference/src/bin/h3_artifact_qualification.rs'
+              - 'crates/mold-inference/src/minimax_h3/private_qualification.rs'
               - 'crates/mold-server/src/lib.rs'
               - 'crates/mold-cli/src/main.rs'
               - 'desktop/src-tauri/src/main.rs'
@@ -166,6 +169,7 @@ jobs:
               - 'scripts/tests/install-cuda-arch.sh'
               - 'scripts/tests/cuda-qualification-contract.sh'
               - 'scripts/tests/minimax-h3-attention-release-contract.sh'
+              - 'scripts/tests/minimax-h3-private-uat-release-contract.sh'
               - 'scripts/qualify-cuda-sm86.sh'
               - 'docs/qualification/**'
               - 'scripts/tests/docker-web-context.sh'
@@ -207,6 +211,8 @@ jobs:
         run: bash scripts/tests/cuda-qualification-contract.sh
       - name: Test MiniMax H3 attention release-candidate contract
         run: bash scripts/tests/minimax-h3-attention-release-contract.sh
+      - name: Test MiniMax H3 private-UAT release contract
+        run: bash scripts/tests/minimax-h3-private-uat-release-contract.sh
 
   docs:
     needs: changes
@@ -323,6 +329,8 @@ jobs:
         run: bash scripts/tests/local-multi-gpu-qualification-contract.sh
       - name: Test MiniMax H3 conformance contract
         run: python3 scripts/tests/minimax-h3-conformance-contract.py
+      - name: Clippy the private MiniMax H3 artifact qualifier
+        run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_artifact_qualification -- -D warnings
       - name: Check with all optional features
         run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns
 
