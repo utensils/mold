@@ -1,11 +1,14 @@
 # MiniMax H3 authorization gate
 
-Status: **blocked**
+Status: **private qualification authorized; public product activation blocked**
 
-Mold does not currently activate, advertise, download, or execute MiniMax H3.
-The reviewed H3 Community License revision limits the territory in which its
-rights apply, and this repository has no written authorization record covering
-the current development and distribution environment.
+Ordinary Mold builds do not currently activate, advertise, download, or execute
+MiniMax H3. On 2026-08-08, the project maintainer accepted a direct attestation
+that MiniMax granted permission to integrate H3 with Mold. That evidence is
+accepted only for a private, access-controlled implementation and qualification
+campaign on project-controlled Plato storage and compute. It is not accepted as
+authority for public product activation, distribution, redistribution, hosted
+access, or third-party use.
 
 This is a product compliance boundary, not a location-detection feature. The
 gate is enforced from model identity and resolved family at the shared catalog,
@@ -32,23 +35,34 @@ owner must authorize storage recovery, and a fresh clean probe must pass before
 the volume can be considered for any Mold UAT. Storage recovery would not
 change the H3 authorization gate.
 
-## Work allowed while blocked
+## Authorized private qualification scope
 
-The current decision permits static review of public implementation source,
-small textual repository metadata, and license materials. It also permits
-weight-free compilation and deterministic tests that construct only synthetic
-tensors and fixtures.
+The current decision permits:
 
-Until issue #831 contains an accepted authorization record, do not:
+- direct download of revision-pinned official or Comfy H3 artifacts into the
+  private, access-controlled Plato qualification root;
+- private local inference and benign UAT on Plato by the project maintainer;
+- private conformance outputs and fixtures needed to compare Mold with the
+  pinned official and Comfy implementations; and
+- static source review, small textual repository metadata, weight-free
+  compilation, and deterministic synthetic tests.
 
-- download, clone through Git LFS, cache, open, range-read, or hash an H3
-  checkpoint shard or other binary model payload;
-- fetch or inspect a production safetensors header, execute a real H3
-  checkpoint, retain generated H3 media, or call any of those activities UAT;
-- seed any `MOLD_HOME`, external volume, fixture root, model cache, catalog,
-  manifest, installer, cloud image, or release artifact with H3 model bytes; or
+The qualification host must not expose an H3 endpoint to a third party. Model
+payloads, headers, generated media, and real-checkpoint evidence stay private
+until a later reviewed decision explicitly permits publication. No copy may be
+moved across a different host, operator, organization, or territory under this
+record.
+
+Until issue #831 contains a broader accepted authorization record, do not:
+
+- expose H3 through a public or shared CLI, server, Discord bot, desktop, web,
+  iPhone, gallery, remote client, cloud image, or hosted service;
+- enable ordinary catalog/search/install/download planning, public manifests or
+  artifact URLs, release capabilities, or a shipping production factory;
+- redistribute official weights, transformed/quantized weights, safetensors
+  headers, generated media, or real-checkpoint fixtures; or
 - treat source compilation, synthetic CUDA probes, UI authoring, or existing
-  local files as evidence that H3 is licensed, qualified, or available.
+  local files as evidence that H3 is publicly licensed, qualified, or available.
 
 ## Reviewed sources
 
@@ -57,19 +71,28 @@ Until issue #831 contains an accepted authorization record, do not:
 - [Official implementation, pinned revision](https://github.com/MiniMax-AI/MiniMax-H3/tree/8d8824efaf94586c0cc9ac7ad8d0723d4d6420ea)
 - [Authorization tracking issue](https://github.com/utensils/mold/issues/831)
 
-## Activation record
+## Decision record
 
-No authorization evidence has been accepted as of 2026-08-07.
+The direct authorization correspondence is retained privately because it may
+contain personal or contact information. The repository records its accepted
+scope and a content identity for the maintainer-supplied corroborating image,
+not the private correspondence itself.
 
-| Field                  | Current record                                                                  |
-| ---------------------- | ------------------------------------------------------------------------------- |
-| Decision               | Unavailable; fail closed                                                        |
-| Policy owner           | `utensils/mold` maintainers through issue #831                                  |
-| Last review            | 2026-08-07                                                                      |
-| Authorization evidence | None accepted                                                                   |
-| Next mandatory review  | Any upstream license/Q&A revision, proposed H3 artifact, or release touching H3 |
+| Field                  | Current record                                                                                                                                                                                           |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Decision               | Private implementation and qualification on access-controlled Plato are authorized; every public product path remains fail-closed                                                                       |
+| Decision owner         | James Brink, `utensils/mold` maintainer                                                                                                                                                                  |
+| Revocation owner       | James Brink, `utensils/mold` maintainer                                                                                                                                                                  |
+| Last review            | 2026-08-08                                                                                                                                                                                               |
+| License revision       | `bfc8ed0353f5a9733be73e6b2c98ec0948195b86`; LICENSE SHA-256 `59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44`                                                                         |
+| Authorization evidence | Maintainer attestation that MiniMax authorized H3 integration with Mold; corroborating image SHA-256 `8cd4d6e52cff34d7d39721ebab13b8c1187aa87aafc1c4ae2a16609186f22f1d`; direct grant retained privately |
+| Permitted artifacts    | Revision-pinned official and Comfy H3 artifacts downloaded directly to the private Plato qualification root; private benign outputs and conformance evidence                                              |
+| Permitted users        | Project maintainer operating access-controlled Plato only                                                                                                                                               |
+| Prohibited scope       | Third-party access; public/hosted product activation; distribution or redistribution; public weights, headers, outputs, fixtures, manifests, URLs, or release capabilities                               |
+| Expiry/revocation      | Immediate on MiniMax revocation, narrowed authority, license/Q&A change, loss of access control, or maintainer decision                                                                                   |
+| Next mandatory review  | Any upstream license/Q&A revision, scope expansion, proposed public artifact or service, new operator/host/territory, or release touching H3                                                             |
 
-Activation requires all of the following in a reviewed change:
+Broader public activation requires all of the following in a reviewed change:
 
 1. Written authorization whose scope explicitly covers implementation, local
    inference, automated tests and fixtures, distribution, and any hosted use.
@@ -80,8 +103,11 @@ Activation requires all of the following in a reviewed change:
    allowed path follows that exact record.
 4. Named ownership for recurring license review and immediate revocation.
 
-If authorization expires, is narrowed, or is revoked, the compile-time gate is
-restored before any release or hosted deployment proceeds.
+The private qualification path must remain separate from shipping features and
+must fail release-exclusion verification. If authorization expires, is narrowed,
+or is revoked, stop private execution, remove qualification credentials and
+access, and preserve the ordinary compile-time/product gate before any further
+run, release, or hosted deployment.
 
 ## Release checklist
 
@@ -89,11 +115,11 @@ restored before any release or hosted deployment proceeds.
       upstream versions. Any change, or any proposed H3-specific artifact, blocks
       the release until the authorization record and policy tests are reviewed by
       the named compliance owner in issue #831.
-- [ ] While the decision remains blocked, prove that the exact release contains
+- [ ] While public activation remains blocked, prove that the exact release contains
       no H3 catalog entry, public manifest or download URL, runtime activation,
       model payload, or generated fixture.
 - [ ] Prove that every published binary omits the local H3 attention release
       candidate and every other development-only H3 execution feature.
-- [ ] If written authority is accepted, replace this blocked decision in review
-      before fetching a checkpoint payload or starting real-checkpoint UAT; a
-      storage repair or a green synthetic test is not a substitute.
+- [ ] If broader written authority is accepted, replace this private-only
+      decision in review before any public activation, distribution, hosted use,
+      or release claim; a private green UAT result is not a substitute.
