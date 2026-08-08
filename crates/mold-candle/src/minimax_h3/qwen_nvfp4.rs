@@ -10,9 +10,10 @@
 //! not an incomplete checkpoint.
 //!
 //! This module reads only the bounded safetensors header and the small
-//! `comfy_quant` marker tensors. It neither hashes the full artifact nor grants
-//! download, license, factory, or runtime authority. Callers must separately
-//! authenticate the complete pinned object before mapping tensor payloads.
+//! `comfy_quant` marker tensors through one identity-fenced regular-file
+//! descriptor. It neither hashes the full artifact nor grants download,
+//! license, factory, or runtime authority. Callers must separately authenticate
+//! the complete pinned object before mapping tensor payloads.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -25,8 +26,10 @@ use thiserror::Error;
 use super::artifacts::{expected_checkpoint_shapes, expected_materialized_keys};
 use super::config::{H3ConditionerConfig, H3_SELECTED_LANGUAGE_LAYERS};
 use super::qwen_quant::{H3QwenTensorDType, H3QwenTensorSpec};
-use super::visual_weights::inspect_safetensors_header;
 use super::H3_COMFY_NVFP4_BLOCK_SIZE;
+
+#[cfg(test)]
+use super::visual_weights::inspect_safetensors_header;
 
 pub const H3_QWEN_NVFP4_AWQ_STABLE_ID: &str = "minimax-h3.qwen3-vl.layer50.nvfp4-awq.v1";
 pub const H3_QWEN_NVFP4_AWQ_FILENAME: &str = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors";
@@ -656,21 +659,221 @@ fn file_identity(metadata: &Metadata) -> FileIdentity {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct H3SafetensorsTensorHeader {
+    dtype: String,
+    shape: Vec<usize>,
+    data_offsets: [u64; 2],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct H3SafetensorsHeader {
+    tensors: BTreeMap<String, H3SafetensorsTensorHeader>,
+    header_len: u64,
+    file_len: u64,
+    bytes: Vec<u8>,
+    has_metadata: bool,
+}
+
+struct UniqueH3SafetensorsHeader(BTreeMap<String, serde_json::Value>);
+
+impl<'de> Deserialize<'de> for UniqueH3SafetensorsHeader {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct UniqueHeaderVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for UniqueHeaderVisitor {
+            type Value = UniqueH3SafetensorsHeader;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a safetensors header with unique tensor names")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut entries = BTreeMap::new();
+                while let Some((name, value)) = map.next_entry::<String, serde_json::Value>()? {
+                    if entries.insert(name.clone(), value).is_some() {
+                        return Err(serde::de::Error::custom(format!(
+                            "duplicate safetensors tensor {name}"
+                        )));
+                    }
+                }
+                Ok(UniqueH3SafetensorsHeader(entries))
+            }
+        }
+
+        deserializer.deserialize_map(UniqueHeaderVisitor)
+    }
+}
+
+fn checked_path_identity(
+    path: &Path,
+    expected: Option<&FileIdentity>,
+    operation: &str,
+) -> Result<FileIdentity, H3QwenNvfp4AwqError> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| H3QwenNvfp4AwqError::Io(format!("{operation}: {error}")))?;
+    if metadata.file_type().is_symlink() {
+        return Err(H3QwenNvfp4AwqError::Io(format!(
+            "{operation}: artifact path must not be a symlink"
+        )));
+    }
+    if !metadata.file_type().is_file() {
+        return Err(H3QwenNvfp4AwqError::Io(format!(
+            "{operation}: artifact path must be a regular file"
+        )));
+    }
+    let identity = file_identity(&metadata);
+    if expected.is_some_and(|expected| *expected != identity) {
+        return Err(H3QwenNvfp4AwqError::Io(format!(
+            "{operation}: artifact path identity changed"
+        )));
+    }
+    Ok(identity)
+}
+
+fn checked_open_identity(
+    file: &File,
+    expected: &FileIdentity,
+    operation: &str,
+) -> Result<(), H3QwenNvfp4AwqError> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| H3QwenNvfp4AwqError::Io(format!("{operation}: {error}")))?;
+    if !metadata.file_type().is_file() || file_identity(&metadata) != *expected {
+        return Err(H3QwenNvfp4AwqError::Io(format!(
+            "{operation}: opened artifact identity changed"
+        )));
+    }
+    Ok(())
+}
+
+fn read_h3_safetensors_header(
+    file: &mut File,
+    file_len: u64,
+) -> Result<H3SafetensorsHeader, H3QwenNvfp4AwqError> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
+    let mut len_bytes = [0_u8; 8];
+    file.read_exact(&mut len_bytes)
+        .map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
+    let header_len = u64::from_le_bytes(len_bytes);
+    if header_len != H3_QWEN_NVFP4_AWQ_HEADER_BYTES
+        || header_len.checked_add(8).is_none_or(|end| end > file_len)
+    {
+        return Err(H3QwenNvfp4AwqError::Header(format!(
+            "expected {H3_QWEN_NVFP4_AWQ_HEADER_BYTES} header bytes, got {header_len}"
+        )));
+    }
+    let header_size = usize::try_from(header_len)
+        .map_err(|_| H3QwenNvfp4AwqError::Header("header length overflows usize".into()))?;
+    let mut json_bytes = vec![0_u8; header_size];
+    file.read_exact(&mut json_bytes)
+        .map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
+    let UniqueH3SafetensorsHeader(mut raw) = serde_json::from_slice(&json_bytes)
+        .map_err(|error| H3QwenNvfp4AwqError::Header(error.to_string()))?;
+    let has_metadata = raw.remove("__metadata__").is_some();
+    let data_len = file_len - header_len - 8;
+    let mut tensors = BTreeMap::new();
+    for (name, value) in raw {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Entry {
+            dtype: String,
+            shape: Vec<usize>,
+            data_offsets: [u64; 2],
+        }
+
+        let entry: Entry = serde_json::from_value(value).map_err(|error| {
+            H3QwenNvfp4AwqError::Header(format!("invalid tensor {name:?}: {error}"))
+        })?;
+        if entry.data_offsets[0] > entry.data_offsets[1] || entry.data_offsets[1] > data_len {
+            return Err(H3QwenNvfp4AwqError::Header(format!(
+                "invalid safetensors offsets for {name:?}"
+            )));
+        }
+        let dtype = parse_dtype(&entry.dtype)?;
+        let elements = entry.shape.iter().try_fold(1_u64, |total, &dimension| {
+            total.checked_mul(dimension as u64)
+        });
+        let expected_bytes = elements
+            .and_then(|elements| elements.checked_mul(dtype.byte_width()))
+            .ok_or_else(|| {
+                H3QwenNvfp4AwqError::Header(format!("byte-size overflow for {name:?}"))
+            })?;
+        if entry.data_offsets[1] - entry.data_offsets[0] != expected_bytes {
+            return Err(H3QwenNvfp4AwqError::Header(format!(
+                "safetensors byte range does not match dtype/shape for {name:?}"
+            )));
+        }
+        tensors.insert(
+            name,
+            H3SafetensorsTensorHeader {
+                dtype: entry.dtype,
+                shape: entry.shape,
+                data_offsets: entry.data_offsets,
+            },
+        );
+    }
+
+    let mut cursor = 0_u64;
+    let mut ranges = tensors
+        .iter()
+        .map(|(name, tensor)| (tensor.data_offsets, name.as_str()))
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|(offsets, _)| offsets[0]);
+    for (offsets, name) in ranges {
+        if offsets[0] != cursor {
+            return Err(H3QwenNvfp4AwqError::Header(format!(
+                "non-contiguous or overlapping safetensors data before {name:?}"
+            )));
+        }
+        cursor = offsets[1];
+    }
+    if cursor != data_len {
+        return Err(H3QwenNvfp4AwqError::Header(format!(
+            "safetensors data section has {} unclaimed bytes",
+            data_len - cursor
+        )));
+    }
+
+    let mut bytes = Vec::with_capacity(8 + header_size);
+    bytes.extend_from_slice(&len_bytes);
+    bytes.extend_from_slice(&json_bytes);
+    Ok(H3SafetensorsHeader {
+        tensors,
+        header_len,
+        file_len,
+        bytes,
+        has_metadata,
+    })
+}
+
 /// Inspect the exact selected H3 Qwen object using bounded reads.
 ///
-/// This validates file/header size, every tensor dtype/shape/range, all 351
-/// small quantization marker payloads, and the frozen policy identity. It does
+/// Symlinks and non-regular files are rejected. One opened descriptor supplies
+/// the prefix, header, header identity, and all marker bytes while descriptor
+/// and path identities are fenced before and after bounded inspection. This
+/// validates file/header size, every tensor dtype/shape/range, all 351 small
+/// quantization marker payloads, and the frozen policy identity. It does
 /// **not** hash the 15.7 GB tensor payload; compare a separately computed full
 /// digest with [`H3_QWEN_NVFP4_AWQ_SHA256`] before treating weights as
 /// authenticated.
 pub fn inspect_h3_qwen_nvfp4_awq_header(
     path: &Path,
 ) -> Result<H3QwenNvfp4AwqInspection, H3QwenNvfp4AwqError> {
-    let before = std::fs::metadata(path)
-        .map(|metadata| file_identity(&metadata))
-        .map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
-    let header = inspect_safetensors_header(path)
-        .map_err(|error| H3QwenNvfp4AwqError::Header(error.to_string()))?;
+    let before = checked_path_identity(path, None, "before bounded inspection")?;
+    let mut file = File::open(path).map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
+    checked_open_identity(&file, &before, "after opening artifact")?;
+    checked_path_identity(path, Some(&before), "after opening artifact")?;
+    let header = read_h3_safetensors_header(&mut file, before.len)?;
+    checked_open_identity(&file, &before, "after header inspection")?;
+    checked_path_identity(path, Some(&before), "after header inspection")?;
     if header.file_len != H3_QWEN_NVFP4_AWQ_FILE_BYTES
         || header.header_len != H3_QWEN_NVFP4_AWQ_HEADER_BYTES
         || header.tensors.len() != H3_QWEN_NVFP4_AWQ_TENSOR_COUNT
@@ -696,16 +899,6 @@ pub fn inspect_h3_qwen_nvfp4_awq_header(
         })
         .collect::<Result<BTreeMap<_, _>, H3QwenNvfp4AwqError>>()?;
 
-    let mut file = File::open(path).map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
-    let opened = file
-        .metadata()
-        .map(|metadata| file_identity(&metadata))
-        .map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
-    if opened != before {
-        return Err(H3QwenNvfp4AwqError::Io(
-            "artifact changed between header and marker inspection".into(),
-        ));
-    }
     let data_start = 8_u64
         .checked_add(header.header_len)
         .ok_or_else(|| H3QwenNvfp4AwqError::Header("data offset overflows".into()))?;
@@ -740,34 +933,13 @@ pub fn inspect_h3_qwen_nvfp4_awq_header(
     }
     let policy = validate_h3_qwen_nvfp4_awq_schema(&released_config()?, &tensors, &markers)?;
 
-    let mut header_bytes = vec![0_u8; (8 + header.header_len) as usize];
-    file.seek(SeekFrom::Start(0))
-        .and_then(|_| file.read_exact(&mut header_bytes))
-        .map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
-    let raw_header: serde_json::Value =
-        serde_json::from_slice(&header_bytes[8..]).map_err(|error| {
-            H3QwenNvfp4AwqError::Header(format!("failed to reparse bounded header: {error}"))
-        })?;
-    if raw_header
-        .as_object()
-        .is_some_and(|object| object.contains_key("__metadata__"))
-    {
+    if header.has_metadata {
         return Err(H3QwenNvfp4AwqError::Metadata(
             "published Qwen NVFP4-AWQ object must not add safetensors __metadata__".into(),
         ));
     }
-    let after_open = file
-        .metadata()
-        .map(|metadata| file_identity(&metadata))
-        .map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
-    let after_path = std::fs::metadata(path)
-        .map(|metadata| file_identity(&metadata))
-        .map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
-    if before != after_open || before != after_path {
-        return Err(H3QwenNvfp4AwqError::Io(
-            "artifact changed during bounded inspection".into(),
-        ));
-    }
+    checked_open_identity(&file, &before, "after marker inspection")?;
+    checked_path_identity(path, Some(&before), "after marker inspection")?;
     Ok(H3QwenNvfp4AwqInspection {
         stable_id: H3_QWEN_NVFP4_AWQ_STABLE_ID.into(),
         expected_artifact_sha256: H3_QWEN_NVFP4_AWQ_SHA256.into(),
@@ -781,7 +953,7 @@ pub fn inspect_h3_qwen_nvfp4_awq_header(
             .values()
             .filter(|marker| marker.format == "int8_tensorwise")
             .count(),
-        header_identity_sha256: hex_digest(Sha256::digest(&header_bytes)),
+        header_identity_sha256: hex_digest(Sha256::digest(&header.bytes)),
         policy_sha256: policy.policy_sha256().into(),
     })
 }
@@ -1025,6 +1197,47 @@ mod tests {
     fn serialized_markers_reject_unknown_execution_fields() {
         let marker = br#"{"format":"nvfp4","full_precision_matrix_mult":true,"native":true}"#;
         assert!(serde_json::from_slice::<H3QwenQuantMarker>(marker).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_inspector_rejects_symlinks_before_opening_weights() {
+        use std::os::unix::fs::symlink;
+
+        let target = temp_path("symlink-target");
+        let link = temp_path("symlink");
+        std::fs::write(&target, b"not opened through the link").unwrap();
+        symlink(&target, &link).unwrap();
+        let error = inspect_h3_qwen_nvfp4_awq_header(&link).unwrap_err();
+        assert!(
+            matches!(error, H3QwenNvfp4AwqError::Io(message) if message.contains("must not be a symlink"))
+        );
+        std::fs::remove_file(link).unwrap();
+        std::fs::remove_file(target).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fd_and_path_identity_fences_detect_replacement() {
+        let path = temp_path("identity-original");
+        let replacement = temp_path("identity-replacement");
+        std::fs::write(&path, b"original").unwrap();
+        std::fs::write(&replacement, b"replacement").unwrap();
+        let expected = checked_path_identity(&path, None, "test setup").unwrap();
+        let file = File::open(&path).unwrap();
+        checked_open_identity(&file, &expected, "test setup").unwrap();
+
+        std::fs::rename(&replacement, &path).unwrap();
+
+        assert!(matches!(
+            checked_open_identity(&file, &expected, "after replacement"),
+            Err(H3QwenNvfp4AwqError::Io(message)) if message.contains("identity changed")
+        ));
+        assert!(matches!(
+            checked_path_identity(&path, Some(&expected), "after replacement"),
+            Err(H3QwenNvfp4AwqError::Io(message)) if message.contains("identity changed")
+        ));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
