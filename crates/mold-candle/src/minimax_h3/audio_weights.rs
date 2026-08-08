@@ -34,6 +34,21 @@ pub struct ValidatedAudioWeights {
     pub layout: AudioTensorLayout,
 }
 
+pub trait AudioVaeLoadObserver {
+    /// Returning an error cancels construction at the next major component
+    /// boundary. The total is stable for the production topology.
+    fn checkpoint(&mut self, completed: usize, total: usize) -> Result<()>;
+}
+
+#[derive(Default)]
+pub struct NoopAudioVaeLoadObserver;
+
+impl AudioVaeLoadObserver for NoopAudioVaeLoadObserver {
+    fn checkpoint(&mut self, _completed: usize, _total: usize) -> Result<()> {
+        Ok(())
+    }
+}
+
 pub fn audio_tensor_specs(
     config: &AudioVaeConfig,
     layout: AudioTensorLayout,
@@ -290,6 +305,62 @@ pub fn validate_audio_safetensors(
     validate_header_and_file_len(&header, file_len, config, layout)
 }
 
+/// Validate an already-authenticated Diffusers audio-VAE config without
+/// reopening its source path. Framework bookkeeping fields are ignored, but
+/// every execution-relevant field is required and must match Mold's frozen
+/// production contract exactly.
+pub fn inspect_audio_vae_config_bytes(bytes: &[u8]) -> Result<AudioVaeConfig> {
+    let raw: Value = serde_json::from_slice(bytes).map_err(|error| {
+        candle::Error::Msg(format!("invalid MiniMax H3 audio VAE config JSON: {error}"))
+    })?;
+    let object = raw
+        .as_object()
+        .ok_or_else(|| candle::Error::Msg("H3 audio VAE config must be a JSON object".into()))?;
+    const REQUIRED: &[&str] = &[
+        "encoder_dim",
+        "encoder_rates",
+        "latent_dim",
+        "latent_channels",
+        "decoder_dim",
+        "decoder_rates",
+        "decoder_kernel_sizes",
+        "num_attention_heads",
+        "resblock_kernel_sizes",
+        "resblock_dilation_sizes",
+        "sampling_rate",
+        "latents_mean",
+        "latents_std",
+    ];
+    let missing = REQUIRED
+        .iter()
+        .filter(|key| !object.contains_key(**key))
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        bail!("H3 audio VAE config is missing required fields {missing:?}")
+    }
+
+    let mut normalized = raw;
+    let normalized = normalized.as_object_mut().ok_or_else(|| {
+        candle::Error::Msg("H3 audio VAE config must remain a JSON object".into())
+    })?;
+    let attention_heads = normalized
+        .remove("num_attention_heads")
+        .ok_or_else(|| candle::Error::Msg("H3 audio VAE config lost attention heads".into()))?;
+    let sample_rate = normalized
+        .remove("sampling_rate")
+        .ok_or_else(|| candle::Error::Msg("H3 audio VAE config lost sample rate".into()))?;
+    normalized.insert("attention_heads".into(), attention_heads);
+    normalized.insert("sample_rate".into(), sample_rate);
+    let config: AudioVaeConfig =
+        serde_json::from_value(Value::Object(normalized.clone())).map_err(candle::Error::wrap)?;
+    config.validate()?;
+    if config != AudioVaeConfig::default() {
+        bail!("H3 audio VAE config does not match the released production contract")
+    }
+    Ok(config)
+}
+
 /// Validate the exact audio-VAE tensor contract, then construct the FP32
 /// model from mmaped safetensors.
 ///
@@ -305,6 +376,34 @@ pub unsafe fn load_validated_audio_vae(
     requested_dtype: DType,
     device: &Device,
 ) -> Result<AudioVae> {
+    // SAFETY: this wrapper preserves the caller's immutable-file obligation.
+    unsafe {
+        load_validated_audio_vae_with_observer(
+            path,
+            config,
+            layout,
+            requested_dtype,
+            device,
+            &mut NoopAudioVaeLoadObserver,
+        )
+    }
+}
+
+/// Observer-aware variant of [`load_validated_audio_vae`].
+///
+/// # Safety
+///
+/// The checkpoint path must remain immutable and valid for the complete
+/// lifetime of the returned [`AudioVae`]. Mutating, replacing, or truncating
+/// the file while Candle's mmap is live may cause undefined behavior.
+pub unsafe fn load_validated_audio_vae_with_observer(
+    path: impl AsRef<Path>,
+    config: AudioVaeConfig,
+    layout: AudioTensorLayout,
+    requested_dtype: DType,
+    device: &Device,
+    observer: &mut dyn AudioVaeLoadObserver,
+) -> Result<AudioVae> {
     config.validate_execution_dtype(requested_dtype)?;
     let path = path.as_ref();
     validate_audio_safetensors(path, &config, layout)?;
@@ -314,7 +413,13 @@ pub unsafe fn load_validated_audio_vae(
     if layout == AudioTensorLayout::ComfyFolded {
         validate_comfy_normalization_values(&vb, &config)?;
     }
-    AudioVae::load(config, layout, requested_dtype, vb)
+    AudioVae::load_with_observer(
+        config,
+        layout,
+        requested_dtype,
+        vb,
+        &mut |completed, total| observer.checkpoint(completed, total),
+    )
 }
 
 fn validate_header_and_file_len(
@@ -608,6 +713,59 @@ mod tests {
 
     use super::*;
 
+    #[derive(Default)]
+    struct RecordingLoadObserver {
+        checkpoints: Vec<(usize, usize)>,
+        cancel_at: Option<usize>,
+    }
+
+    impl AudioVaeLoadObserver for RecordingLoadObserver {
+        fn checkpoint(&mut self, completed: usize, total: usize) -> Result<()> {
+            self.checkpoints.push((completed, total));
+            if self.cancel_at == Some(completed) {
+                bail!("synthetic audio VAE construction cancellation")
+            }
+            Ok(())
+        }
+    }
+
+    fn production_config_bytes() -> Vec<u8> {
+        let mut value = serde_json::to_value(AudioVaeConfig::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        let attention_heads = object.remove("attention_heads").unwrap();
+        let sample_rate = object.remove("sample_rate").unwrap();
+        object.insert("num_attention_heads".into(), attention_heads);
+        object.insert("sampling_rate".into(), sample_rate);
+        object.insert(
+            "_class_name".into(),
+            Value::String("AutoencoderKLMiniMaxH3Audio".into()),
+        );
+        // Preserve the official JSON precision at the four values where the
+        // previous shortened literals rounded one ULP away from release.
+        object["latents_mean"][2] = serde_json::json!(-0.04398279799186767);
+        object["latents_std"][8] = serde_json::json!(2.6336525640336896);
+        object["latents_std"][14] = serde_json::json!(1.4922469314453364);
+        object["latents_std"][25] = serde_json::json!(1.5540637421583379);
+        serde_json::to_vec(&value).unwrap()
+    }
+
+    #[test]
+    fn opened_audio_config_bytes_require_the_production_contract() {
+        let bytes = production_config_bytes();
+        assert_eq!(
+            inspect_audio_vae_config_bytes(&bytes).unwrap(),
+            AudioVaeConfig::default()
+        );
+
+        let mut missing: Value = serde_json::from_slice(&bytes).unwrap();
+        missing.as_object_mut().unwrap().remove("sampling_rate");
+        assert!(inspect_audio_vae_config_bytes(&serde_json::to_vec(&missing).unwrap()).is_err());
+
+        let mut changed: Value = serde_json::from_slice(&bytes).unwrap();
+        changed["sampling_rate"] = Value::from(16_000);
+        assert!(inspect_audio_vae_config_bytes(&serde_json::to_vec(&changed).unwrap()).is_err());
+    }
+
     fn safetensors_bytes(
         config: &AudioVaeConfig,
         layout: AudioTensorLayout,
@@ -776,17 +934,45 @@ mod tests {
         candle::safetensors::save(&tensors, &path)?;
         // SAFETY: this test owns the temporary file and does not mutate or
         // remove it until after the returned model has been dropped below.
+        let mut observer = RecordingLoadObserver::default();
         let loaded = unsafe {
-            load_validated_audio_vae(
+            load_validated_audio_vae_with_observer(
+                &path,
+                config.clone(),
+                AudioTensorLayout::ComfyFolded,
+                DType::F32,
+                &Device::Cpu,
+                &mut observer,
+            )
+        };
+        let passed = loaded.is_ok();
+        drop(loaded);
+        assert_eq!(
+            observer.checkpoints,
+            (0..=6).map(|completed| (completed, 6)).collect::<Vec<_>>()
+        );
+
+        let mut cancelling = RecordingLoadObserver {
+            cancel_at: Some(3),
+            ..Default::default()
+        };
+        // SAFETY: this test still owns the immutable temporary file. The
+        // cancelled construction returns before the file is removed.
+        let cancelled = unsafe {
+            load_validated_audio_vae_with_observer(
                 &path,
                 config,
                 AudioTensorLayout::ComfyFolded,
                 DType::F32,
                 &Device::Cpu,
+                &mut cancelling,
             )
         };
-        let passed = loaded.is_ok();
-        drop(loaded);
+        assert!(cancelled.is_err());
+        assert_eq!(
+            cancelling.checkpoints,
+            (0..=3).map(|completed| (completed, 6)).collect::<Vec<_>>()
+        );
         let _ = std::fs::remove_file(&path);
         assert!(passed);
         Ok(())

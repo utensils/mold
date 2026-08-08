@@ -84,6 +84,7 @@ image = "0.25"
 # OpenEXR, no cmake, nothing to cross-compile for the sm86/89/100/120 matrix.
 exr = "1.74"
 base64 = "0.22"
+fs2 = "0.4"
 mp4-rs = { package = "mp4", version = "0.14" }
 openh264 = { version = "0.9", features = ["source"] }
 png = "0.18"

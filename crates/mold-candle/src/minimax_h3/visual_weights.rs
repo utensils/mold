@@ -381,8 +381,10 @@ pub fn expected_diffusers_weight_shapes(
 
 /// Map old bundled/Comfy source names to the converted Diffusers layout. The
 /// fused QKV transform is returned separately because it is a split, not a
-/// rename. `decoder.mask_token` is deliberately absent: it is checkpoint-only
-/// training state and unused at inference.
+/// rename. `decoder.mask_token` is checkpoint-only training state. The two
+/// latent-stat buffers duplicate the authenticated config authority used by
+/// encode/decode. All three remain validated source tensors but are not model
+/// parameters.
 pub fn comfy_tensor_transforms(
     config: &MiniMaxH3VisualVaeConfig,
 ) -> Result<Vec<ComfyTensorTransform>> {
@@ -423,12 +425,18 @@ pub fn comfy_tensor_transforms(
     transforms.push(ComfyTensorTransform::Drop {
         source: "decoder.mask_token".into(),
     });
+    for source in ["latents_mean", "latents_std"] {
+        transforms.push(ComfyTensorTransform::Drop {
+            source: source.into(),
+        });
+    }
     Ok(transforms)
 }
 
 /// Exact tensor contract of Mold's pinned single-file Comfy checkpoint. The
 /// source keeps attention QKV fused per head, stores the feed-forward gate
-/// half first, and includes one unused decoder mask token.
+/// half first, and includes three source-only tensors: the decoder mask token
+/// plus config-backed latent mean and standard deviation buffers.
 pub fn expected_comfy_weight_shapes(
     config: &MiniMaxH3VisualVaeConfig,
 ) -> Result<BTreeMap<String, Vec<usize>>> {
@@ -471,17 +479,39 @@ pub fn expected_comfy_weight_shapes(
             ComfyTensorTransform::Drop {
                 source: source_name,
             } => {
-                let dim = config
-                    .decoder_num_attention_heads
-                    .checked_mul(config.decoder_attention_head_dim)
-                    .ok_or_else(|| {
-                        candle::Error::Msg("H3 decoder width overflow for mask token".into())
-                    })?;
-                insert(source_name, vec![1, 1, dim])?;
+                let shape = match source_name.as_str() {
+                    "decoder.mask_token" => {
+                        let dim = config
+                            .decoder_num_attention_heads
+                            .checked_mul(config.decoder_attention_head_dim)
+                            .ok_or_else(|| {
+                                candle::Error::Msg(
+                                    "H3 decoder width overflow for mask token".into(),
+                                )
+                            })?;
+                        vec![1, 1, dim]
+                    }
+                    "latents_mean" | "latents_std" => vec![config.latent_channels],
+                    other => bail!("unknown dropped H3 Comfy visual VAE tensor {other}"),
+                };
+                insert(source_name, shape)?;
             }
         }
     }
     Ok(source)
+}
+
+/// Dense model-parameter bytes after source-only tensors are discarded and
+/// fused source tensors are mapped into their execution layout.
+pub fn expected_visual_vae_parameter_bytes(
+    config: &MiniMaxH3VisualVaeConfig,
+    dtype: DType,
+) -> Result<u64> {
+    if !matches!(dtype, DType::F16 | DType::F32) {
+        bail!("H3 visual VAE parameter accounting does not support {dtype:?}")
+    }
+    let expected = expected_diffusers_weight_shapes(config)?;
+    expected_data_size(&expected, dtype.size_in_bytes() as u64)
 }
 
 fn diffusers_to_comfy_direct_key(target: &str) -> String {
@@ -608,10 +638,13 @@ fn inspect_safetensors_header_for_identity(
 /// every inference-relevant field must equal the released f16t4d24 contract.
 pub fn inspect_visual_vae_config(path: &Path) -> Result<MiniMaxH3VisualVaeConfig> {
     let bytes = std::fs::read(path)?;
-    parse_visual_vae_config(&bytes)
+    inspect_visual_vae_config_bytes(&bytes)
 }
 
-fn parse_visual_vae_config(bytes: &[u8]) -> Result<MiniMaxH3VisualVaeConfig> {
+/// Validate an already-authenticated visual-VAE config without reopening its
+/// source path. Production loaders use this after binding the config bytes to
+/// one opened descriptor and the pinned manifest digest.
+pub fn inspect_visual_vae_config_bytes(bytes: &[u8]) -> Result<MiniMaxH3VisualVaeConfig> {
     let raw: serde_json::Value = serde_json::from_slice(bytes).map_err(candle::Error::wrap)?;
     let object = raw
         .as_object()
@@ -665,7 +698,7 @@ pub fn validate_diffusers_weight_index(
         serde_json::from_slice(&index_bytes).map_err(candle::Error::wrap)?;
     let expected = expected_diffusers_weight_shapes(config)?;
     validate_weight_map_keys(expected.keys(), index.weight_map.keys())?;
-    let expected_data_size = expected_f32_data_size(&expected)?;
+    let expected_data_size = expected_visual_vae_parameter_bytes(config, DType::F32)?;
     let indexed_data_size = index
         .metadata
         .get("total_size")
@@ -1077,14 +1110,17 @@ fn visual_weight_file_identity_from_metadata(
     })
 }
 
-fn expected_f32_data_size(expected: &BTreeMap<String, Vec<usize>>) -> Result<u64> {
+fn expected_data_size(
+    expected: &BTreeMap<String, Vec<usize>>,
+    bytes_per_element: u64,
+) -> Result<u64> {
     expected.values().try_fold(0u64, |total, shape| {
         let elements = shape.iter().try_fold(1u64, |elements, dimension| {
             elements
                 .checked_mul(*dimension as u64)
                 .ok_or_else(|| candle::Error::Msg("H3 visual VAE expected shape overflow".into()))
         })?;
-        let bytes = elements.checked_mul(4).ok_or_else(|| {
+        let bytes = elements.checked_mul(bytes_per_element).ok_or_else(|| {
             candle::Error::Msg("H3 visual VAE expected byte-size overflow".into())
         })?;
         total
@@ -1177,9 +1213,9 @@ mod tests {
     }
 
     #[test]
-    fn comfy_contract_has_exact_560_source_tensors_and_fp16_payload() {
+    fn comfy_contract_has_exact_562_source_tensors_and_fp16_payload() {
         let shapes = expected_comfy_weight_shapes(&MiniMaxH3VisualVaeConfig::production()).unwrap();
-        assert_eq!(shapes.len(), 560);
+        assert_eq!(shapes.len(), 562);
         assert_eq!(
             shapes["decoder.transformer_blocks.35.attn.to_qkv.weight"],
             vec![6144, 2048]
@@ -1189,11 +1225,21 @@ mod tests {
             vec![16384, 2048]
         );
         assert_eq!(shapes["decoder.mask_token"], vec![1, 1, 2048]);
+        assert_eq!(shapes["latents_mean"], vec![24]);
+        assert_eq!(shapes["latents_std"], vec![24]);
         let elements = shapes
             .values()
             .map(|shape| shape.iter().product::<usize>() as u64)
             .sum::<u64>();
-        assert_eq!(elements * 2, 5_207_742_064);
+        assert_eq!(elements * 2, 5_207_742_160);
+        assert_eq!(
+            expected_visual_vae_parameter_bytes(
+                &MiniMaxH3VisualVaeConfig::production(),
+                DType::F16
+            )
+            .unwrap(),
+            5_207_737_968
+        );
     }
 
     #[test]
@@ -1253,16 +1299,16 @@ mod tests {
     fn config_inspection_accepts_only_the_released_contract() {
         let config = MiniMaxH3VisualVaeConfig::production();
         let bytes = serde_json::to_vec(&config).unwrap();
-        assert_eq!(parse_visual_vae_config(&bytes).unwrap(), config);
-        assert!(parse_visual_vae_config(b"{}").is_err());
+        assert_eq!(inspect_visual_vae_config_bytes(&bytes).unwrap(), config);
+        assert!(inspect_visual_vae_config_bytes(b"{}").is_err());
 
         let mut value = serde_json::to_value(config).unwrap();
         value["latent_channels"] = serde_json::Value::from(16);
-        assert!(parse_visual_vae_config(&serde_json::to_vec(&value).unwrap()).is_err());
+        assert!(inspect_visual_vae_config_bytes(&serde_json::to_vec(&value).unwrap()).is_err());
 
         let mut value = serde_json::to_value(MiniMaxH3VisualVaeConfig::production()).unwrap();
         value["spatial_padding_mode"] = serde_json::Value::from("zeros");
-        assert!(parse_visual_vae_config(&serde_json::to_vec(&value).unwrap()).is_err());
+        assert!(inspect_visual_vae_config_bytes(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 
     #[test]
@@ -1292,6 +1338,12 @@ mod tests {
         );
         assert!(transforms.contains(&ComfyTensorTransform::Drop {
             source: "decoder.mask_token".into(),
+        }));
+        assert!(transforms.contains(&ComfyTensorTransform::Drop {
+            source: "latents_mean".into(),
+        }));
+        assert!(transforms.contains(&ComfyTensorTransform::Drop {
+            source: "latents_std".into(),
         }));
     }
 
@@ -1327,7 +1379,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(sources.len(), 560);
+        assert_eq!(sources.len(), 562);
         assert_eq!(
             targets,
             expected_diffusers_weight_shapes(&config)

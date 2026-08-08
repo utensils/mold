@@ -3243,6 +3243,7 @@ dependencies = [
  "candle-transformers",
  "exr",
  "fdk-aac",
+ "fs2",
  "gif 0.13.3",
  "image",
  "mold-ai-candle",
