@@ -105,6 +105,7 @@ import {
   syncCameraMotionLora,
 } from "@studio/lib/cameraMotion";
 import { emptyGuidanceOverrides, guidanceOverridesAreEmpty } from "@studio/lib/guidanceOverrides";
+import { emptyWanRecipe, wanRecipeCount } from "@studio/lib/wanRecipe";
 import {
   buildAutoChainRequest,
   buildGenerationEstimateRequest,
@@ -434,6 +435,9 @@ const advancedActiveCount = computed(() => {
   ) {
     count += 1;
   }
+  if (generationCapabilitiesForFamily(form.family, form.model).wanRecipe.supported) {
+    count += wanRecipeCount(form.wanRecipe);
+  }
   return count;
 });
 
@@ -471,6 +475,7 @@ function resetAdvancedSettings(): void {
   form.controlModel = defaults.controlModel;
   form.controlScale = defaults.controlScale;
   form.guidanceOverrides = emptyGuidanceOverrides();
+  form.wanRecipe = emptyWanRecipe();
 }
 const preparingGeneration = ref(false);
 const preparedBatch = ref<PreparedExpansionBatchState | null>(null);

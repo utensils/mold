@@ -120,6 +120,9 @@ export function pruneRequestForFamily(
     delete next.negative_prompt;
     delete next.scheduler;
     delete next.cfg_plus;
+    delete next.sample_shift;
+    delete next.distill_strength_high;
+    delete next.distill_strength_low;
     delete next.mask_image;
     delete next.control_image;
     delete next.control_model;
@@ -135,8 +138,20 @@ export function pruneRequestForFamily(
   }
 
   if (!caps.supportsNegativePrompt) delete next.negative_prompt;
-  if (!caps.supportsScheduler) delete next.scheduler;
+  // The UNet schedulers and wan's sample solvers share the field but are
+  // disjoint on the server, so a solver that survived a family change is
+  // rejected, not ignored.
+  if (!caps.supportsScheduler || !caps.schedulerOptions.includes(next.scheduler ?? "default")) {
+    delete next.scheduler;
+  }
   if (!caps.supportsCfgPlus) delete next.cfg_plus;
+  if (!caps.wanRecipe.supported) {
+    delete next.sample_shift;
+  }
+  if (!caps.wanRecipe.supportsDistillStrength) {
+    delete next.distill_strength_high;
+    delete next.distill_strength_low;
+  }
 
   if (
     caps.forcesBatchSizeOne ||

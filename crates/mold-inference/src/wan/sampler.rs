@@ -52,7 +52,7 @@ pub(crate) struct WanSchedule {
 }
 
 impl WanSchedule {
-    /// Build the grid.
+    /// Build the diffusers-flow grid (UniPC and euler).
     ///
     /// ```text
     /// raw      = linspace(1, 1/1000, steps + 1)[:-1]
@@ -112,6 +112,57 @@ impl WanSchedule {
 
     pub fn steps(&self) -> usize {
         self.timesteps.len()
+    }
+
+    /// Build the dpm++ grid — upstream's `get_sampling_sigmas`
+    /// (`fm_solvers.py:24-28`), genuinely different from [`Self::new`]:
+    ///
+    /// ```text
+    /// raw       = linspace(1, 0, steps + 1)[:steps]
+    /// shifted   = shift * raw / (1 + (shift - 1) * raw)
+    /// timesteps = trunc(shifted * 1000)
+    /// sigmas    = f32(shifted) ++ [0.0]
+    /// ```
+    ///
+    /// Two deliberate differences from the diffusers grid, both pinned by
+    /// golden fixtures generated from upstream:
+    ///
+    /// 1. **The raw grid interpolates to 0, not 1/1000** — at 4 steps /
+    ///    shift 5 the grid is `[1000, 937, 833, 625]` where the diffusers
+    ///    grid gives `[999, 937, 833, 625]`.
+    /// 2. **No epsilon nudge on the leading sigma.** It is exactly 1.0 and
+    ///    the first DiT timestep is exactly 1000; `FlowDpmPp`'s first-order
+    ///    update takes `lambda(1.0) = -inf` through `exp(-inf) = 0`, which
+    ///    collapses benignly — torch does the same.
+    pub fn dpmpp(config: WanScheduleConfig) -> Result<Self> {
+        if config.steps == 0 {
+            bail!("Wan sampler: a schedule needs at least one step");
+        }
+        if config.shift <= 0.0 || !config.shift.is_finite() {
+            bail!(
+                "Wan sampler: flow shift must be finite and positive, got {}",
+                config.shift
+            );
+        }
+        let train = WAN_NUM_TRAIN_TIMESTEPS as f64;
+        let steps = config.steps;
+
+        // Mirror numpy's `linspace(1, 0, steps + 1)` arithmetic exactly:
+        // `1 + i * step` with `step = -1/steps`, NOT `1 - i/steps`. The two
+        // round differently — at 6 steps the last raw value lands a hair
+        // below 1/6 the second way, truncating timestep 375 to 374.
+        let step = 1.0 / (steps as f64);
+        let mut shifted = Vec::with_capacity(steps);
+        for i in 0..steps {
+            let raw = 1.0 - (i as f64) * step;
+            shifted.push(config.shift * raw / (1.0 + (config.shift - 1.0) * raw));
+        }
+
+        let timesteps = shifted.iter().map(|s| (s * train) as i64).collect();
+        let mut sigmas: Vec<f64> = shifted.iter().map(|s| *s as f32 as f64).collect();
+        sigmas.push(0.0);
+
+        Ok(Self { sigmas, timesteps })
     }
 }
 
@@ -469,6 +520,240 @@ impl FlowUniPc {
         self.next_step_index += 1;
 
         Ok(prev_sample.to_dtype(out_dtype)?)
+    }
+}
+
+/// Wan's `FlowDPMSolverMultistepScheduler` (`fm_solvers.py`) at the
+/// configuration upstream constructs: `solver_order=2`,
+/// `algorithm_type="dpmsolver++"`, `solver_type="midpoint"`,
+/// `lower_order_final=True`, `final_sigmas_type="zero"`, no thresholding.
+///
+/// Order sequence at that config: first-order on the warm-up step, midpoint
+/// second-order in between, and first-order again on the final step —
+/// `final_sigmas_type == "zero"` makes the `lower_order_final` branch
+/// unconditional at the last step (`fm_solvers.py:748-751`), independent of
+/// the `< 15 steps` clause.
+#[derive(Clone, Debug)]
+pub(crate) struct FlowDpmPp {
+    schedule: WanSchedule,
+    /// x0-converted model outputs, oldest first, like [`FlowUniPc`]'s.
+    model_outputs: Vec<Option<Tensor>>,
+    lower_order_nums: usize,
+    next_step_index: usize,
+}
+
+impl FlowDpmPp {
+    pub fn new(schedule: WanSchedule) -> Self {
+        Self {
+            schedule,
+            model_outputs: vec![None; SOLVER_ORDER],
+            lower_order_nums: 0,
+            next_step_index: 0,
+        }
+    }
+
+    pub fn schedule(&self) -> &WanSchedule {
+        &self.schedule
+    }
+
+    /// The x0 prediction recorded by the most recent `step` — what previews
+    /// project, same contract as [`FlowUniPc::last_x0`].
+    pub fn last_x0(&self) -> Option<&Tensor> {
+        self.model_outputs.last().and_then(|slot| slot.as_ref())
+    }
+
+    /// `dpm_solver_first_order_update` (`fm_solvers.py:417-485`), dpmsolver++:
+    /// `x_t = (sigma_t / sigma_s) * x - alpha_t * (exp(-h) - 1) * m0`.
+    fn first_order(&self, sample: &Tensor, step_index: usize) -> Result<Tensor> {
+        let sigmas = &self.schedule.sigmas;
+        let sigma_t = sigmas[step_index + 1];
+        let sigma_s = sigmas[step_index];
+        let alpha_t = 1.0 - sigma_t;
+        // At the dpm++ grid's leading sigma of exactly 1.0, `lambda(sigma_s)`
+        // is -inf, `h` is +inf, and `exp(-h)` is 0 — the update collapses to
+        // `sigma_t * x + alpha_t * m0`, exactly as torch evaluates it.
+        let h = lambda_at(sigma_t) - lambda_at(sigma_s);
+        let m0 = self.model_output(0)?;
+        Ok(sample
+            .affine(sigma_t / sigma_s, 0.0)?
+            .sub(&m0.affine(alpha_t * ((-h).exp() - 1.0), 0.0)?)?)
+    }
+
+    /// `multistep_dpm_solver_second_order_update` (`fm_solvers.py:488-595`),
+    /// dpmsolver++ midpoint:
+    /// `x_t = (sigma_t / sigma_s0) * x - alpha_t * (exp(-h) - 1) * (D0 + 0.5 * D1)`.
+    fn second_order(&self, sample: &Tensor, step_index: usize) -> Result<Tensor> {
+        let sigmas = &self.schedule.sigmas;
+        let sigma_t = sigmas[step_index + 1];
+        let sigma_s0 = sigmas[step_index];
+        let sigma_s1 = sigmas[step_index - 1];
+        let alpha_t = 1.0 - sigma_t;
+        let lambda_s0 = lambda_at(sigma_s0);
+        let h = lambda_at(sigma_t) - lambda_s0;
+        // When sigma_s1 is the grid's leading 1.0, `h_0` is +inf, `r0` is
+        // +inf, and `D1` scales by `1 / inf = 0` — the midpoint term
+        // vanishes, matching torch.
+        let h_0 = lambda_s0 - lambda_at(sigma_s1);
+        let r0 = h_0 / h;
+        let m0 = self.model_output(0)?;
+        let m1 = self.model_output(1)?;
+        let d1 = m0.sub(m1)?.affine(1.0 / r0, 0.0)?;
+        let scale = alpha_t * ((-h).exp() - 1.0);
+        Ok(sample
+            .affine(sigma_t / sigma_s0, 0.0)?
+            .sub(&m0.affine(scale, 0.0)?)?
+            .sub(&d1.affine(0.5 * scale, 0.0)?)?)
+    }
+
+    fn model_output(&self, back: usize) -> Result<&Tensor> {
+        let len = self.model_outputs.len();
+        if back >= len {
+            bail!("Wan sampler: dpm++ asked for history {back} beyond order {len}");
+        }
+        self.model_outputs[len - 1 - back]
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Wan sampler: dpm++ history slot {back} is empty"))
+    }
+
+    /// Advance one step (`fm_solvers.py:708-799`). Same driving contract as
+    /// [`FlowUniPc::step`].
+    pub fn step(
+        &mut self,
+        model_output: &Tensor,
+        step_index: usize,
+        sample: &Tensor,
+    ) -> Result<Tensor> {
+        if step_index != self.next_step_index {
+            bail!(
+                "Wan sampler: FlowDpmPp is a multistep solver and must be driven in order — \
+                 expected step {}, got {step_index}",
+                self.next_step_index
+            );
+        }
+        if step_index >= self.schedule.steps() {
+            bail!(
+                "Wan sampler: step {step_index} is past the {}-step schedule",
+                self.schedule.steps()
+            );
+        }
+
+        let out_dtype = sample.dtype();
+        let sample32 = sample.to_dtype(DType::F32)?;
+        let model_output32 = model_output.to_dtype(DType::F32)?;
+
+        // `convert_model_output` (`fm_solvers.py:382-395`):
+        // `x0 = sample - sigma_t * v`, thresholding off.
+        let sigma = self.schedule.sigmas[step_index];
+        let x0 = sample32.sub(&model_output32.affine(sigma, 0.0)?)?;
+        self.model_outputs.rotate_left(1);
+        let last = self.model_outputs.len() - 1;
+        self.model_outputs[last] = Some(x0);
+
+        // `final_sigmas_type == "zero"` forces first order on the last step
+        // regardless of step count (`fm_solvers.py:748-751`).
+        let lower_order_final = step_index + 1 == self.schedule.steps();
+        let prev = if self.lower_order_nums < 1 || lower_order_final {
+            self.first_order(&sample32, step_index)?
+        } else {
+            self.second_order(&sample32, step_index)?
+        };
+
+        if self.lower_order_nums < SOLVER_ORDER {
+            self.lower_order_nums += 1;
+        }
+        self.next_step_index += 1;
+        Ok(prev.to_dtype(out_dtype)?)
+    }
+}
+
+/// Plain flow Euler as a stateful solver, so the denoise loop can drive all
+/// three solvers through one shape. Wraps [`euler_step`] and records the x0
+/// prediction previews project.
+#[derive(Clone, Debug)]
+pub(crate) struct FlowEuler {
+    schedule: WanSchedule,
+    last_x0: Option<Tensor>,
+    next_step_index: usize,
+}
+
+impl FlowEuler {
+    pub fn new(schedule: WanSchedule) -> Self {
+        Self {
+            schedule,
+            last_x0: None,
+            next_step_index: 0,
+        }
+    }
+
+    pub fn schedule(&self) -> &WanSchedule {
+        &self.schedule
+    }
+
+    pub fn last_x0(&self) -> Option<&Tensor> {
+        self.last_x0.as_ref()
+    }
+
+    pub fn step(
+        &mut self,
+        model_output: &Tensor,
+        step_index: usize,
+        sample: &Tensor,
+    ) -> Result<Tensor> {
+        if step_index != self.next_step_index {
+            bail!(
+                "Wan sampler: FlowEuler must be driven in order — expected step {}, got \
+                 {step_index}",
+                self.next_step_index
+            );
+        }
+        let sample32 = sample.to_dtype(DType::F32)?;
+        let model_output32 = model_output.to_dtype(DType::F32)?;
+        let sigma = self.schedule.sigmas[step_index];
+        self.last_x0 = Some(sample32.sub(&model_output32.affine(sigma, 0.0)?)?);
+        self.next_step_index += 1;
+        euler_step(&sample32, &model_output32, &self.schedule, step_index)
+            .and_then(|next| Ok(next.to_dtype(sample.dtype())?))
+    }
+}
+
+/// The solver a Wan denoise run drives — selected per request (#795),
+/// defaulting to [`FlowUniPc`], which preserves every existing render
+/// bit-for-bit.
+#[derive(Clone, Debug)]
+pub(crate) enum WanSolver {
+    UniPc(FlowUniPc),
+    DpmPp(FlowDpmPp),
+    Euler(FlowEuler),
+}
+
+impl WanSolver {
+    pub fn schedule(&self) -> &WanSchedule {
+        match self {
+            Self::UniPc(solver) => solver.schedule(),
+            Self::DpmPp(solver) => solver.schedule(),
+            Self::Euler(solver) => solver.schedule(),
+        }
+    }
+
+    pub fn last_x0(&self) -> Option<&Tensor> {
+        match self {
+            Self::UniPc(solver) => solver.last_x0(),
+            Self::DpmPp(solver) => solver.last_x0(),
+            Self::Euler(solver) => solver.last_x0(),
+        }
+    }
+
+    pub fn step(
+        &mut self,
+        model_output: &Tensor,
+        step_index: usize,
+        sample: &Tensor,
+    ) -> Result<Tensor> {
+        match self {
+            Self::UniPc(solver) => solver.step(model_output, step_index, sample),
+            Self::DpmPp(solver) => solver.step(model_output, step_index, sample),
+            Self::Euler(solver) => solver.step(model_output, step_index, sample),
+        }
     }
 }
 
@@ -933,6 +1218,380 @@ mod tests {
                 .any(|(a, b)| (a - b).abs() > 1e-3),
             "corrector left the sample unchanged, so this test proves nothing"
         );
+    }
+
+    // dpm++ golden vectors generated from upstream Wan2.1
+    // `wan/utils/fm_solvers.py` (`FlowDPMSolverMultistepScheduler` at the
+    // config `generate.py` constructs: defaults + `shift=1`, sigmas from
+    // `get_sampling_sigmas(steps, shift)`), torch CPU. The grid genuinely
+    // differs from the diffusers/Lightning grid: linspace to 0 (not 1/1000),
+    // no epsilon nudge, first timestep exactly 1000.
+
+    /// `(steps, shift, sigmas, timesteps)`.
+    const DPMPP_GOLDEN_GRIDS: &[(usize, f64, &[f64], &[i64])] = &[
+        (
+            4,
+            5.0,
+            &[1.0, 0.9375, 0.8333333134651184, 0.625, 0.0],
+            &[1000, 937, 833, 625],
+        ),
+        (
+            4,
+            3.0,
+            &[1.0, 0.8999999761581421, 0.75, 0.5, 0.0],
+            &[1000, 900, 750, 500],
+        ),
+        (
+            6,
+            3.0,
+            &[
+                1.0,
+                0.9375,
+                0.8571428656578064,
+                0.75,
+                0.6000000238418579,
+                0.375,
+                0.0,
+            ],
+            &[1000, 937, 857, 750, 600, 375],
+        ),
+        (
+            20,
+            8.0,
+            &[
+                1.0,
+                0.9934640526771545,
+                0.9863013625144958,
+                0.9784172773361206,
+                0.9696969985961914,
+                0.9599999785423279,
+                0.9491525292396545,
+                0.9369369149208069,
+                0.9230769276618958,
+                0.907216489315033,
+                0.8888888955116272,
+                0.8674699068069458,
+                0.8421052694320679,
+                0.8115941882133484,
+                0.774193525314331,
+                0.7272727489471436,
+                0.6666666865348816,
+                0.5853658318519592,
+                0.47058823704719543,
+                0.29629629850387573,
+                0.0,
+            ],
+            &[
+                1000, 993, 986, 978, 969, 960, 949, 936, 923, 907, 888, 867, 842, 811, 774, 727,
+                666, 585, 470, 296,
+            ],
+        ),
+        (
+            20,
+            5.0,
+            &[
+                1.0,
+                0.9895833134651184,
+                0.97826087474823,
+                0.9659090638160706,
+                0.9523809552192688,
+                0.9375,
+                0.9210526347160339,
+                0.9027777910232544,
+                0.8823529481887817,
+                0.859375,
+                0.8333333134651184,
+                0.8035714030265808,
+                0.7692307829856873,
+                0.7291666865348816,
+                0.6818181872367859,
+                0.625,
+                0.5555555820465088,
+                0.46875,
+                0.3571428656578064,
+                0.2083333283662796,
+                0.0,
+            ],
+            &[
+                1000, 989, 978, 965, 952, 937, 921, 902, 882, 859, 833, 803, 769, 729, 681, 625,
+                555, 468, 357, 208,
+            ],
+        ),
+        (
+            40,
+            12.0,
+            &[
+                1.0,
+                0.9978678226470947,
+                0.9956331849098206,
+                0.9932885766029358,
+                0.9908257126808167,
+                0.9882352948188782,
+                0.9855072498321533,
+                0.9826302528381348,
+                0.9795918464660645,
+                0.9763779640197754,
+                0.9729729890823364,
+                0.9693593382835388,
+                0.9655172228813171,
+                0.9614243507385254,
+                0.9570552110671997,
+                0.9523809552192688,
+                0.9473684430122375,
+                0.9419795274734497,
+                0.936170220375061,
+                0.9298893213272095,
+                0.9230769276618958,
+                0.9156626462936401,
+                0.9075630307197571,
+                0.8986784219741821,
+                0.8888888955116272,
+                0.8780487775802612,
+                0.8659793734550476,
+                0.8524590134620667,
+                0.8372092843055725,
+                0.8198757767677307,
+                0.800000011920929,
+                0.7769784331321716,
+                0.75,
+                0.7179487347602844,
+                0.6792452931404114,
+                0.6315789222717285,
+                0.5714285969734192,
+                0.4931506812572479,
+                0.3870967626571655,
+                0.23529411852359772,
+                0.0,
+            ],
+            &[
+                1000, 997, 995, 993, 990, 988, 985, 982, 979, 976, 972, 969, 965, 961, 957, 952,
+                947, 941, 936, 929, 923, 915, 907, 898, 888, 878, 865, 852, 837, 819, 800, 776,
+                750, 717, 679, 631, 571, 493, 387, 235,
+            ],
+        ),
+    ];
+
+    /// 6 steps, shift 3.0, same fake model as the UniPC golden trace:
+    /// `v = 0.05 * sample + t / 1000`.
+    const DPMPP_GOLDEN_TRACE_STEPS: &[(i64, [f64; 4])] = &[
+        (
+            1000,
+            [
+                0.4359374940395355,
+                -1.30859375,
+                1.931249976158142,
+                0.06210937350988388,
+            ],
+        ),
+        (
+            937,
+            [
+                0.3588913381099701,
+                -1.3786306381225586,
+                1.8481959104537964,
+                -0.01343480870127678,
+            ],
+        ),
+        (
+            857,
+            [
+                0.2685454189777374,
+                -1.4596827030181885,
+                1.749883770942688,
+                -0.10178918391466141,
+            ],
+        ),
+        (
+            750,
+            [
+                0.1627349555492401,
+                -1.552567720413208,
+                1.632994294166565,
+                -0.20482993125915527,
+            ],
+        ),
+        (
+            600,
+            [
+                0.05115579441189766,
+                -1.6449549198150635,
+                1.5049647092819214,
+                -0.3122965097427368,
+            ],
+        ),
+        (
+            375,
+            [
+                -0.09042838215827942,
+                -1.7547370195388794,
+                1.3361215591430664,
+                -0.44706594944000244,
+            ],
+        ),
+    ];
+
+    #[test]
+    fn dpmpp_schedules_match_the_upstream_golden_grids() {
+        for (steps, shift, want_sigmas, want_timesteps) in DPMPP_GOLDEN_GRIDS {
+            let got = WanSchedule::dpmpp(WanScheduleConfig::new(*steps, *shift))
+                .expect("dpm++ schedule builds");
+            assert_eq!(
+                got.timesteps, *want_timesteps,
+                "steps={steps} shift={shift}: timesteps"
+            );
+            for (i, (g, w)) in got.sigmas.iter().zip(want_sigmas.iter()).enumerate() {
+                assert!(
+                    (g - w).abs() < 1e-7,
+                    "steps={steps} shift={shift}: sigma[{i}] got {g}, want {w}"
+                );
+            }
+            assert_eq!(got.sigmas[0], 1.0, "no epsilon nudge on the dpm++ grid");
+            assert_eq!(got.timesteps[0], 1000, "the first dpm++ timestep is 1000");
+            assert_eq!(got.sigmas[*steps], 0.0, "terminal sigma is exactly zero");
+        }
+    }
+
+    /// The full dpm++ multistep trace against upstream — first-order warm-up,
+    /// midpoint second-order middle, first-order final (forced by
+    /// `final_sigmas_type = "zero"`). The values differ from the UniPC trace
+    /// on the same fake model, so this cannot pass with the wrong solver.
+    #[test]
+    fn dpmpp_multistep_trace_matches_the_upstream_golden_vectors() {
+        let schedule = WanSchedule::dpmpp(WanScheduleConfig::new(6, 3.0)).expect("schedule builds");
+        let mut solver = FlowDpmPp::new(schedule);
+        let mut sample = tensor(&GOLDEN_TRACE_INITIAL);
+        for (step_index, (want_t, want_sample)) in DPMPP_GOLDEN_TRACE_STEPS.iter().enumerate() {
+            let t = solver.schedule().timesteps[step_index];
+            assert_eq!(t, *want_t, "step {step_index}: timestep");
+            let velocity = sample.affine(0.05, t as f64 / 1000.0).expect("fake model");
+            sample = solver.step(&velocity, step_index, &sample).expect("step");
+            for (i, (g, w)) in values(&sample).iter().zip(want_sample.iter()).enumerate() {
+                assert!(
+                    (f64::from(*g) - w).abs() < 1e-4,
+                    "step {step_index} element {i}: got {g}, want {w}"
+                );
+            }
+        }
+    }
+
+    /// The final dpm++ step is first-order onto the x0 prediction even on
+    /// long schedules — `final_sigmas_type = "zero"` bypasses the `< 15
+    /// steps` clause of `lower_order_final` (`fm_solvers.py:748-751`).
+    #[test]
+    fn dpmpp_terminal_step_lands_on_the_x0_prediction_even_past_fifteen_steps() {
+        let schedule =
+            WanSchedule::dpmpp(WanScheduleConfig::new(20, 5.0)).expect("schedule builds");
+        let sigmas = schedule.sigmas.clone();
+        let mut solver = FlowDpmPp::new(schedule);
+        let mut sample = tensor(&[0.4, -0.9, 1.7, 0.05]);
+        let mut last_input = sample.clone();
+        let mut last_velocity = sample.clone();
+        for step_index in 0..20 {
+            let t = solver.schedule().timesteps[step_index];
+            let velocity = sample.affine(0.05, t as f64 / 1000.0).expect("fake model");
+            last_input = sample.clone();
+            last_velocity = velocity.clone();
+            sample = solver.step(&velocity, step_index, &sample).expect("step");
+        }
+        let want = last_input
+            .sub(&last_velocity.affine(sigmas[19], 0.0).expect("scale"))
+            .expect("x0");
+        for (g, w) in values(&sample).iter().zip(values(&want).iter()) {
+            assert!((g - w).abs() < 1e-5, "got {g}, want {w}");
+        }
+    }
+
+    #[test]
+    fn dpmpp_step_must_be_driven_in_order() {
+        let schedule = WanSchedule::dpmpp(WanScheduleConfig::new(4, 5.0)).expect("schedule builds");
+        let mut solver = FlowDpmPp::new(schedule);
+        let sample = tensor(&[1.0, 2.0]);
+        assert!(solver.step(&sample, 1, &sample).is_err());
+        solver.step(&sample, 0, &sample).expect("first step");
+        assert!(solver.step(&sample, 0, &sample).is_err());
+    }
+
+    /// FlowEuler over the published 4-step Lightning grid: every step matches
+    /// the closed-form euler update, `last_x0` records the pre-step
+    /// conversion for previews, and the trajectory differs from UniPC's on
+    /// the same inputs (order 2 vs order 1 is a real output difference at 4
+    /// steps — the point of #795).
+    #[test]
+    fn flow_euler_walks_the_lightning_grid_and_diverges_from_unipc() {
+        let schedule = schedule(4, 5.0);
+        assert_eq!(schedule.timesteps, vec![999, 937, 833, 625]);
+        let mut euler = FlowEuler::new(schedule.clone());
+        let mut unipc = FlowUniPc::new(schedule.clone());
+        assert!(euler.last_x0().is_none());
+
+        let mut euler_x = tensor(&GOLDEN_TRACE_INITIAL);
+        let mut unipc_x = tensor(&GOLDEN_TRACE_INITIAL);
+        let mut diverged = false;
+        for step_index in 0..schedule.steps() {
+            let t = schedule.timesteps[step_index];
+            let sigma = schedule.sigmas[step_index];
+            let dt = schedule.sigmas[step_index + 1] - sigma;
+
+            let velocity = euler_x.affine(0.05, t as f64 / 1000.0).expect("fake model");
+            let want: Vec<f32> = values(&euler_x)
+                .iter()
+                .zip(values(&velocity).iter())
+                .map(|(x, v)| x + (dt as f32) * v)
+                .collect();
+            let want_x0: Vec<f32> = values(&euler_x)
+                .iter()
+                .zip(values(&velocity).iter())
+                .map(|(x, v)| x - (sigma as f32) * v)
+                .collect();
+            euler_x = euler.step(&velocity, step_index, &euler_x).expect("euler");
+            for (g, w) in values(&euler_x).iter().zip(want.iter()) {
+                assert!((g - w).abs() < 1e-6, "step {step_index}: got {g}, want {w}");
+            }
+            for (g, w) in values(euler.last_x0().expect("x0 recorded"))
+                .iter()
+                .zip(want_x0.iter())
+            {
+                assert!((g - w).abs() < 1e-6, "step {step_index} x0: {g} vs {w}");
+            }
+
+            let unipc_velocity = unipc_x.affine(0.05, t as f64 / 1000.0).expect("fake model");
+            unipc_x = unipc
+                .step(&unipc_velocity, step_index, &unipc_x)
+                .expect("unipc");
+            if step_index + 1 < schedule.steps()
+                && values(&euler_x)
+                    .iter()
+                    .zip(values(&unipc_x).iter())
+                    .any(|(a, b)| (a - b).abs() > 1e-4)
+            {
+                diverged = true;
+            }
+        }
+        assert!(
+            diverged,
+            "euler and UniPC produced identical trajectories; the solver switch is inert"
+        );
+    }
+
+    /// The enum drives all three solvers through one contract.
+    #[test]
+    fn wan_solver_enum_dispatches_step_schedule_and_x0() {
+        let sched = schedule(4, 5.0);
+        let solvers = [
+            WanSolver::UniPc(FlowUniPc::new(sched.clone())),
+            WanSolver::Euler(FlowEuler::new(sched.clone())),
+            WanSolver::DpmPp(FlowDpmPp::new(
+                WanSchedule::dpmpp(WanScheduleConfig::new(4, 5.0)).expect("builds"),
+            )),
+        ];
+        for mut solver in solvers {
+            assert_eq!(solver.schedule().steps(), 4);
+            assert!(solver.last_x0().is_none());
+            let sample = tensor(&[0.5, -0.5]);
+            let velocity = tensor(&[0.25, 0.25]);
+            solver.step(&velocity, 0, &sample).expect("step");
+            assert!(solver.last_x0().is_some(), "previews need an x0");
+        }
     }
 
     #[test]

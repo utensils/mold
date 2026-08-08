@@ -111,8 +111,40 @@ Reclaiming 81-frame clips on 24 GB is tracked in
 
 The sampler schedule matches the one lightx2v's Lightning distills were
 trained against (diffusers' flow-UniPC grid), so the 4-step tier reproduces
-its published timesteps exactly. Override the flow shift with
-`MOLD_WAN_SHIFT`.
+its published timesteps exactly.
+
+## Recipe controls
+
+Three request-level knobs reproduce published Wan recipes; each stays absent
+by default so the tier defaults above remain authoritative.
+
+**Flow shift** (`--sample-shift`, env fallback `MOLD_WAN_SHIFT`) is the
+family's primary quality/character knob — upstream ships per-task values from
+3.0 to 16, diffusers documents 2.0–5.0 for low resolutions and 7.0–12.0 for
+high, Lightning wants 5, upstream's 720p quality A14B T2V wants 12, and
+ComfyUI templates ship 8. Precedence is request > env > per-tier default, so
+two queued jobs can run different shifts on one server.
+
+**Sample solver** (`--sample-solver unipc|euler|dpm++`, env fallback
+`MOLD_WAN_SOLVER`, wire slot `scheduler`) selects the denoise algorithm:
+
+- `unipc` (default) — FlowUniPC order-2 predictor-corrector, the UAT'd
+  recipe every existing seed reproduces.
+- `euler` — plain flow Euler over the same grid; the solver the lightx2v
+  4-step Lightning distills were tuned for. At 4 steps, order 2 vs order 1
+  is a real output difference.
+- `dpm++` — upstream's `FlowDPMSolverMultistepScheduler` (order 2,
+  dpmsolver++ midpoint) over its own sigma grid, which starts at exactly 1.0
+  (first DiT timestep 1000) — useful for A/B-ing quality-tier renders
+  against upstream, golden-pinned to `fm_solvers.py`.
+
+**Distill strength** (`--distill-strength high=X,low=Y`, or one number for
+both experts) scales the manifest-shipped Lightning adapters per expert. The
+fast tier's documented failure mode is reduced motion / grayish output; the
+community mitigation (lightx2v-acknowledged) is high-noise strength 1.5–2.0
+with low at 1.0, and/or 5–6 steps at guidance 1. A strength on a tier that
+ships no distill in that slot (the `:q8` quality tier) is refused, not
+ignored.
 
 ## Quantized checkpoints and adapters
 

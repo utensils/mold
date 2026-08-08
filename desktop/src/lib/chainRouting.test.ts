@@ -290,7 +290,7 @@ describe("automatic chain request projection", () => {
     fps: 24,
     enable_audio: true,
     cfg_plus: true,
-    scheduler: "unipc",
+    scheduler: "uni-pc",
     original_prompt: "a lighthouse at dusk",
     batch_id: "prepared-batch-1",
     batch_index: 2,

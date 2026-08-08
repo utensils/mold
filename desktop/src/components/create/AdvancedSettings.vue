@@ -27,6 +27,13 @@ import {
   defaultOutputFormat,
   outputFormatsForFamily,
 } from "../../lib/capabilities";
+import { schedulerLabel } from "@studio/lib/generationCapabilities";
+import {
+  MAX_WAN_DISTILL_STRENGTH,
+  emptyWanRecipe,
+  wanRecipeCount,
+  type WanRecipeState,
+} from "@studio/lib/wanRecipe";
 import {
   clampVideoFrames,
   fixedVideoFps,
@@ -48,6 +55,7 @@ import {
   audioOutputValidationError,
   cameraControlValidationError,
   fpsValidationError,
+  wanRecipeValidationError,
 } from "../../lib/generateValidation";
 import { advancedActiveCount } from "../../lib/advancedCount";
 import {
@@ -134,15 +142,25 @@ function setH3Authoring(value: MinimaxH3AuthoringState): void {
 }
 
 // ── Scheduler & sampling ─────────────────────────────────────────────────────
-const schedulerLabels: Record<string, string> = {
-  default: "Default",
-  ddim: "DDIM",
-  "euler-ancestral": "Euler ancestral",
-  unipc: "UniPC",
-};
-const schedulerSummary = computed(
-  () => schedulerLabels[props.form.scheduler] ?? props.form.scheduler,
+const schedulerSummary = computed(() => schedulerLabel(props.form.scheduler));
+
+// ── Wan sampler recipe ───────────────────────────────────────────────────────
+// Wan's solver belongs beside the flow shift it is tuned with, so the generic
+// scheduler section stands down for the family rather than rendering a second
+// picker onto the same field.
+const showScheduler = computed(
+  () =>
+    (caps.value.supportsScheduler && !caps.value.wanRecipe.supported) || caps.value.supportsCfgPlus,
 );
+const wanRecipe = computed<WanRecipeState>(() => props.form.wanRecipe);
+const wanRecipeActive = computed(() => wanRecipeCount(wanRecipe.value));
+const wanRecipeMessage = computed(() => wanRecipeValidationError(props.form));
+function setWanRecipe(next: Partial<WanRecipeState>) {
+  props.form.wanRecipe = { ...wanRecipe.value, ...next };
+}
+function resetWanRecipe() {
+  props.form.wanRecipe = emptyWanRecipe();
+}
 
 // ── Negative prompt quick-adds ───────────────────────────────────────────────
 const NEGATIVE_QUICK_ADDS = [
@@ -421,7 +439,7 @@ function reset() {
     <div class="ms-adv__list">
       <!-- 1 · Scheduler & sampling -->
       <AccordionSection
-        v-if="caps.supportsScheduler || caps.supportsCfgPlus"
+        v-if="showScheduler"
         icon="scheduler"
         title="Scheduler &amp; sampling"
         :summary="schedulerSummary"
@@ -433,7 +451,7 @@ function reset() {
           <label class="ms-label">Scheduler</label>
           <select v-model="form.scheduler" class="ms-select" aria-label="Scheduler">
             <option v-for="opt in caps.schedulerOptions" :key="opt" :value="opt">
-              {{ schedulerLabels[opt] ?? opt }}
+              {{ schedulerLabel(opt) }}
             </option>
           </select>
         </template>
@@ -448,6 +466,116 @@ function reset() {
             @update:model-value="form.cfgPlus = $event"
           />
         </div>
+      </AccordionSection>
+
+      <!-- 1b · Wan sampler recipe -->
+      <AccordionSection
+        v-if="caps.wanRecipe.supported"
+        icon="scheduler"
+        title="Sampler recipe"
+        :summary="
+          wanRecipeActive
+            ? `${wanRecipeActive} set · ${schedulerLabel(form.scheduler)}`
+            : schedulerLabel(form.scheduler)
+        "
+        :open="true"
+        :header-interactive="false"
+        data-test="section-wan-recipe"
+      >
+        <div class="ms-guidance__head">
+          <label class="ms-label">
+            Sample solver
+            <span v-if="wanRecipeActive" class="ms-guidance__count" data-test="wan-recipe-count">{{
+              wanRecipeActive
+            }}</span>
+          </label>
+          <button
+            v-if="wanRecipeActive"
+            type="button"
+            class="ms-guidance__reset"
+            data-test="wan-recipe-reset"
+            @click="resetWanRecipe"
+          >
+            Reset
+          </button>
+        </div>
+        <select
+          v-model="form.scheduler"
+          class="ms-select ms-label--mt"
+          aria-label="Sample solver"
+          data-test="wan-solver-select"
+        >
+          <option v-for="opt in caps.schedulerOptions" :key="opt" :value="opt">
+            {{ schedulerLabel(opt) }}
+          </option>
+        </select>
+        <label class="ms-guidance__label ms-label--mt">
+          Flow shift
+          <input
+            type="number"
+            inputmode="decimal"
+            step="0.5"
+            min="0"
+            placeholder="Model default"
+            class="ms-input data-mono"
+            data-test="wan-sample-shift"
+            :value="wanRecipe.sampleShift ?? ''"
+            @input="
+              setWanRecipe({ sampleShift: numberOrNull(($event.target as HTMLInputElement).value) })
+            "
+          />
+        </label>
+        <p class="ms-hint">
+          Higher shift spends more steps on structure. Empty keeps this model's own value.
+        </p>
+        <div v-if="caps.wanRecipe.supportsDistillStrength" class="ms-grid2 ms-label--mt">
+          <label class="ms-guidance__label">
+            High-noise distill
+            <input
+              type="number"
+              inputmode="decimal"
+              step="0.1"
+              min="0"
+              :max="MAX_WAN_DISTILL_STRENGTH"
+              placeholder="1.0"
+              class="ms-input data-mono"
+              data-test="wan-distill-high"
+              :value="wanRecipe.distillStrengthHigh ?? ''"
+              @input="
+                setWanRecipe({
+                  distillStrengthHigh: numberOrNull(($event.target as HTMLInputElement).value),
+                })
+              "
+            />
+          </label>
+          <label class="ms-guidance__label">
+            Low-noise distill
+            <input
+              type="number"
+              inputmode="decimal"
+              step="0.1"
+              min="0"
+              :max="MAX_WAN_DISTILL_STRENGTH"
+              placeholder="1.0"
+              class="ms-input data-mono"
+              data-test="wan-distill-low"
+              :value="wanRecipe.distillStrengthLow ?? ''"
+              @input="
+                setWanRecipe({
+                  distillStrengthLow: numberOrNull(($event.target as HTMLInputElement).value),
+                })
+              "
+            />
+          </label>
+        </div>
+        <p
+          v-if="wanRecipeMessage"
+          class="ms-error ms-error--mt"
+          role="alert"
+          data-test="wan-recipe-error"
+        >
+          {{ wanRecipeMessage }}
+        </p>
       </AccordionSection>
 
       <!-- 2 · Negative prompt -->

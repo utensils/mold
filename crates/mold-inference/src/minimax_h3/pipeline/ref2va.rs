@@ -1313,6 +1313,9 @@ mod tests {
             spatial_upscale: None,
             temporal_upscale: None,
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             placement: None,
         }
     }

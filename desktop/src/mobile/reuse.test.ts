@@ -146,6 +146,71 @@ describe("applyMobileGalleryMetadata", () => {
     expect(buildRequest(form).loras).toBeUndefined();
     expect(buildRequest(form).upscale_model).toBeUndefined();
   });
+
+  it("restores a wan print's solver and recipe", () => {
+    const wan = {
+      ...model,
+      name: "wan22-t2v-a14b:q5",
+      family: "wan",
+      default_width: 832,
+      default_height: 480,
+    } as ModelEntry;
+    const form = newGenerateForm();
+
+    applyMobileGalleryMetadata(
+      form,
+      {
+        ...metadata,
+        model: wan.name,
+        scheduler: "euler",
+        sample_shift: 12,
+        distill_strength_high: 1.8,
+        distill_strength_low: 0.9,
+      },
+      [wan],
+    );
+
+    expect(form.scheduler).toBe("euler");
+    expect(buildRequest(form)).toMatchObject({
+      scheduler: "euler",
+      sample_shift: 12,
+      distill_strength_high: 1.8,
+      distill_strength_low: 0.9,
+    });
+  });
+
+  it("drops a wan solver and recipe when the substituted model is another family", () => {
+    const replacement = {
+      ...model,
+      name: "flux:replacement",
+      family: "flux",
+      default_width: 1024,
+      default_height: 1024,
+    } as ModelEntry;
+    const form = newGenerateForm();
+
+    applyMobileGalleryMetadata(
+      form,
+      {
+        ...metadata,
+        model: "wan22-t2v-a14b:q5",
+        scheduler: "dpm-pp",
+        sample_shift: 12,
+        distill_strength_high: 1.8,
+      },
+      [replacement],
+    );
+
+    expect(form.scheduler).toBe("default");
+    expect(form.wanRecipe).toEqual({
+      sampleShift: null,
+      distillStrengthHigh: null,
+      distillStrengthLow: null,
+    });
+    const request = buildRequest(form);
+    expect("sample_shift" in request).toBe(false);
+    expect("distill_strength_high" in request).toBe(false);
+  });
 });
 
 // iPhone gets Reuse only in this pass (Edit sequence needs a chain-detail

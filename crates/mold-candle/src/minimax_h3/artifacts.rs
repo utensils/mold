@@ -71,6 +71,10 @@ struct FileMetadataIdentity {
     changed_seconds: i64,
     #[cfg(unix)]
     changed_nanoseconds: i64,
+    /// Link count — the deterministic rename-over signal when the swap lands
+    /// inside the creation timestamp tick (see `qwen_nvfp4::FileIdentity`).
+    #[cfg(unix)]
+    links: u64,
     #[cfg(not(unix))]
     modified: Option<std::time::SystemTime>,
 }
@@ -238,6 +242,7 @@ fn metadata_identity(
             modified_nanoseconds: metadata.mtime_nsec(),
             changed_seconds: metadata.ctime(),
             changed_nanoseconds: metadata.ctime_nsec(),
+            links: metadata.nlink(),
         })
     }
     #[cfg(not(unix))]
@@ -883,6 +888,17 @@ mod tests {
                 .unwrap();
         fs::remove_file(&path).unwrap();
         fs::write(&path, b"replaced").unwrap();
+        // Deliberately the same byte length: the identity must catch a
+        // same-size swap through its inode/timestamp axes. On an idle tmpfs
+        // that combination is degenerate — the freed inode is reused and both
+        // writes land in one kernel timestamp tick — so pin the replacement's
+        // mtime ahead explicitly; a real swapped-in file never shares the
+        // original's timestamps to the nanosecond either.
+        let replacement = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        replacement
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2))
+            .unwrap();
+        drop(replacement);
         assert!(matches!(
             metadata_identity(artifact.role(), artifact.path()),
             Ok(found) if found != verified

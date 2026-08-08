@@ -45,6 +45,15 @@ pub fn build_scheduler(
             };
             config.build(inference_steps)
         }
+        // Wan's flow solvers (#795) never reach the UNet scheduler factory:
+        // admission rejects them for every non-wan family, and the wan engine
+        // consumes the selection itself. Fail loudly rather than silently
+        // sampling with the wrong algorithm if a path ever slips through.
+        MoldScheduler::Euler | MoldScheduler::DpmPp => {
+            anyhow::bail!(
+                "scheduler '{scheduler}' is a Wan flow solver and has no UNet implementation"
+            )
+        }
     };
     result.map_err(|e| anyhow::anyhow!("{e}"))
 }

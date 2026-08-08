@@ -19,22 +19,24 @@ describe("generationCapabilitiesForFamily", () => {
     }
   });
 
-  it("offers a scheduler only for sd15 and sdxl", () => {
-    expect(schedulerOptionsForFamily("sdxl")).toEqual([
-      "default",
-      "ddim",
-      "euler-ancestral",
-      "unipc",
-    ]);
-    expect(schedulerOptionsForFamily("sd15")).toEqual([
-      "default",
-      "ddim",
-      "euler-ancestral",
-      "unipc",
-    ]);
+  it("offers the UNet schedulers only for sd15 and sdxl", () => {
+    for (const family of ["sdxl", "sd15"]) {
+      expect(schedulerOptionsForFamily(family)).toEqual([
+        "default",
+        "ddim",
+        "euler-ancestral",
+        "uni-pc",
+      ]);
+    }
     expect(schedulerOptionsForFamily("flux")).toEqual([]);
     expect(schedulerOptionsForFamily("sd3")).toEqual([]);
     expect(schedulerOptionsForFamily("qwen-image")).toEqual([]);
+  });
+
+  it("offers wan its own disjoint sample solvers", () => {
+    // The server rejects `ddim`/`euler-ancestral` for wan and rejects
+    // `euler`/`dpm-pp` for everything else; only `uni-pc` crosses over.
+    expect(schedulerOptionsForFamily("wan")).toEqual(["default", "uni-pc", "euler", "dpm-pp"]);
   });
 
   it("gates CFG++ to sd3 / sd3.5 per the matrix", () => {
@@ -164,6 +166,46 @@ describe("pruneRequestForFamily", () => {
     const pruned = pruneRequestForFamily(full, "sd3");
     expect(pruned.cfg_plus).toBe(true);
     expect(pruned.scheduler).toBeUndefined();
+  });
+
+  it("strips the wan recipe off-family and a wan solver off-wan", () => {
+    const recipe: GenerateRequest = {
+      ...full,
+      scheduler: "dpm-pp",
+      sample_shift: 12,
+      distill_strength_high: 1.8,
+      distill_strength_low: 1,
+    };
+    const pruned = pruneRequestForFamily(recipe, "sd15");
+    expect(pruned.scheduler).toBeUndefined();
+    expect(pruned.sample_shift).toBeUndefined();
+    expect(pruned.distill_strength_high).toBeUndefined();
+    expect(pruned.distill_strength_low).toBeUndefined();
+  });
+
+  it("keeps the wan recipe for a distill tier and the shift alone without one", () => {
+    const recipe: GenerateRequest = {
+      ...full,
+      scheduler: "dpm-pp",
+      sample_shift: 12,
+      distill_strength_high: 1.8,
+      distill_strength_low: 1,
+    };
+    expect(pruneRequestForFamily(recipe, "wan", "wan22-t2v-a14b:q5")).toMatchObject({
+      scheduler: "dpm-pp",
+      sample_shift: 12,
+      distill_strength_high: 1.8,
+      distill_strength_low: 1,
+    });
+
+    const quality = pruneRequestForFamily(recipe, "wan", "wan22-t2v-a14b:q8");
+    expect(quality.sample_shift).toBe(12);
+    expect(quality.distill_strength_high).toBeUndefined();
+    expect(quality.distill_strength_low).toBeUndefined();
+  });
+
+  it("strips a UNet scheduler that survived a switch to wan", () => {
+    expect(pruneRequestForFamily(full, "wan", "wan22-t2v-a14b:q5").scheduler).toBeUndefined();
   });
 
   it("locks batch to 1 and drops source image for qwen-image-edit", () => {

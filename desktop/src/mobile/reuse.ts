@@ -13,6 +13,7 @@ import {
 } from "../lib/capabilities";
 import { applyMetadataToForm, type GenerateForm } from "../lib/generateForm";
 import { emptyGuidanceOverrides } from "@studio/lib/guidanceOverrides";
+import { emptyWanRecipe } from "@studio/lib/wanRecipe";
 
 /** The clip rail a sequence print reloads, plus what it could not give back. */
 export interface MobileSequenceReuse {
@@ -69,8 +70,21 @@ export function applyMobileGalleryMetadata(
     form.controlModel = "";
     form.cameraControl = null;
     form.icLoraControl = null;
-    if (!generationCapabilitiesForFamily(fallbackModel.family).supportsAdvancedVideo) {
+    const fallbackCaps = generationCapabilitiesForFamily(fallbackModel.family, fallbackModel.name);
+    if (!fallbackCaps.supportsAdvancedVideo) {
       form.guidanceOverrides = emptyGuidanceOverrides();
+    }
+    // The recorded solver and recipe belong to the print's own family and
+    // tier; the server rejects either across that boundary.
+    if (!fallbackCaps.schedulerOptions.includes(form.scheduler)) form.scheduler = "default";
+    if (!fallbackCaps.wanRecipe.supported) {
+      form.wanRecipe = emptyWanRecipe();
+    } else if (!fallbackCaps.wanRecipe.supportsDistillStrength) {
+      form.wanRecipe = {
+        ...form.wanRecipe,
+        distillStrengthHigh: null,
+        distillStrengthLow: null,
+      };
     }
   }
 

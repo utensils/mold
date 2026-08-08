@@ -31,6 +31,9 @@ export interface AdvancedCountParams {
    * audio, source video, keyframes, retake, spatial/temporal upscale, or the
    * GIF preview toggle. Counts once. Optional for the same reason. */
   videoSuite?: boolean;
+  /** How many wan recipe controls (flow shift, distill strengths) are set.
+   * Each counts, matching how LoRA rows do. Optional for the same reason. */
+  wanRecipe?: number;
 }
 
 /** Count of active advanced fields for the "N on" / "N active" badge. */
@@ -44,6 +47,7 @@ export function advancedActiveCount(p: AdvancedCountParams): number {
     (p.customSize ? 1 : 0) +
     (p.videoNonDefault ? 1 : 0) +
     (p.controlNet ? 1 : 0) +
-    (p.videoSuite ? 1 : 0)
+    (p.videoSuite ? 1 : 0) +
+    Math.max(0, p.wanRecipe ?? 0)
   );
 }

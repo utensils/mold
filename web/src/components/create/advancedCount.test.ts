@@ -63,13 +63,14 @@ describe("advancedActiveCount", () => {
           hasSource: true,
           loraCount: 2,
           upscaleOn: true,
-          scheduler: "unipc",
+          scheduler: "uni-pc",
           customSize: true,
           videoNonDefault: true,
           controlNet: true,
           videoSuite: true,
+          wanRecipe: 2,
         }),
       ),
-    ).toBe(10);
+    ).toBe(12);
   });
 });

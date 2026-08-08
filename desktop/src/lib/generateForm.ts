@@ -38,6 +38,12 @@ import {
   guidanceOverridesToWire,
   type Ltx2GuidanceOverridesState,
 } from "@studio/lib/guidanceOverrides";
+import {
+  emptyWanRecipe,
+  wanRecipeFromWire,
+  wanRecipeToWire,
+  type WanRecipeState,
+} from "@studio/lib/wanRecipe";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
 import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
 import {
@@ -146,6 +152,10 @@ export interface GenerateForm {
   temporalUpscale: Ltx2TemporalUpscale | null;
   /** Optional LTX-2 guider overrides. Empty values preserve pipeline defaults. */
   guidanceOverrides: Ltx2GuidanceOverridesState;
+  /** Wan flow shift and per-expert distill strengths. Null until touched for
+   * the same reason as `guidanceOverrides`: the field must stay off the wire
+   * so the resolved tier keeps its own value. */
+  wanRecipe: WanRecipeState;
   /** Conditioning audio for the a2-vid pipeline; base64 on the wire. */
   audioFile: PickedFile | null;
   /** LTX-2 camera-motion LoRA: a preset id (dolly-in, …, static) or an
@@ -204,6 +214,7 @@ export function newGenerateForm(): GenerateForm {
     spatialUpscale: null,
     temporalUpscale: null,
     guidanceOverrides: emptyGuidanceOverrides(),
+    wanRecipe: emptyWanRecipe(),
     audioFile: null,
     cameraControl: null,
     stylePreset: "",
@@ -237,6 +248,7 @@ export function cloneGenerateForm(form: GenerateForm): GenerateForm {
     })),
     retakeRange: form.retakeRange ? { ...form.retakeRange } : null,
     guidanceOverrides: { ...form.guidanceOverrides },
+    wanRecipe: { ...form.wanRecipe },
     audioFile: form.audioFile ? { ...form.audioFile } : null,
     h3Authoring: cloneMinimaxH3AuthoringState(form.h3Authoring),
   };
@@ -292,8 +304,22 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
   if (!outputFormatsForFamily(m.family).includes(form.outputFormat)) {
     form.outputFormat = defaultOutputFormat(m.family);
   }
-  if (!caps.supportsScheduler) form.scheduler = "default";
+  if (!caps.supportsScheduler || !caps.schedulerOptions.includes(form.scheduler)) {
+    // The UNet schedulers and wan's solvers share one field but are disjoint
+    // on the server, so a value carried across that boundary would be
+    // rejected rather than ignored.
+    form.scheduler = "default";
+  }
   if (!caps.supportsCfgPlus) form.cfgPlus = false;
+  if (!caps.wanRecipe.supported) {
+    form.wanRecipe = emptyWanRecipe();
+  } else if (!caps.wanRecipe.supportsDistillStrength) {
+    form.wanRecipe = {
+      ...form.wanRecipe,
+      distillStrengthHigh: null,
+      distillStrengthLow: null,
+    };
+  }
   if (caps.forcesBatchSizeOne) form.batchSize = 1;
   if (!caps.supportsImg2img) {
     form.sourceImage = null;
@@ -444,6 +470,10 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   if (caps.supportsScheduler && form.scheduler !== "default") req.scheduler = form.scheduler;
   if (caps.supportsCfgPlus && form.cfgPlus) req.cfg_plus = true;
 
+  // Assigned key by key: an untouched control contributes nothing, which is
+  // what keeps the resolved wan tier's own shift and distill strengths.
+  Object.assign(req, wanRecipeToWire(form.wanRecipe, caps.wanRecipe));
+
   // qwen-edit ships the ordered picture strip (first = Target, rest =
   // References) and never source_image/strength; batch is already locked to 1
   // by forcesBatchSizeOne + pruneRequestForFamily.
@@ -529,11 +559,18 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   );
 }
 
-const KNOWN_SCHEDULERS: readonly Scheduler[] = ["default", "ddim", "euler-ancestral", "unipc"];
+const KNOWN_SCHEDULERS: readonly Scheduler[] = [
+  "default",
+  "ddim",
+  "euler-ancestral",
+  "uni-pc",
+  "euler",
+  "dpm-pp",
+];
 
-/** Match separator-insensitively: the server's `Display for Scheduler` writes
- * UniPc as `"uni-pc"` while the form union spells it `"unipc"`, and legacy
- * rows carry `"uni_pc"` / `"euler_ancestral"`. Squash `-`/`_` to compare. */
+/** Match separator-insensitively: legacy rows carry `"unipc"` / `"uni_pc"` /
+ * `"euler_ancestral"` where the wire now writes `"uni-pc"` /
+ * `"euler-ancestral"`. Squash `-`/`_` to compare. */
 const squash = (name: string): string => name.toLowerCase().replace(/[-_]/g, "");
 const SCHEDULER_BY_SQUASHED = new Map<string, Scheduler>(
   KNOWN_SCHEDULERS.map((s) => [squash(s), s]),
@@ -621,6 +658,7 @@ export function applyMetadataToForm(
   form.spatialUpscale = metadata.spatial_upscale ?? null;
   form.temporalUpscale = metadata.temporal_upscale ?? null;
   form.guidanceOverrides = guidanceOverridesFromWire(metadata.guidance_overrides);
+  form.wanRecipe = wanRecipeFromWire(metadata);
 
   // Output metadata never carries source/mask/control/video/audio bytes —
   // clear any stale attachment instead of silently pairing it with the print.
@@ -744,6 +782,7 @@ export function applyRequestToForm(
   form.spatialUpscale = request.spatial_upscale ?? null;
   form.temporalUpscale = request.temporal_upscale ?? null;
   form.guidanceOverrides = guidanceOverridesFromWire(request.guidance_overrides);
+  form.wanRecipe = wanRecipeFromWire(request);
   if (isMinimaxH3Family(form.family) || minimaxH3TaskForModel(request.model)) {
     form.h3Authoring ??= emptyMinimaxH3AuthoringState();
     form.h3Authoring.references = (request.references ?? []).map((reference) => ({

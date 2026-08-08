@@ -29,6 +29,8 @@ pub struct ModelCapabilities {
     pub audio_required: bool,
     /// Whether the model supports LTX-2 latent spatial/temporal upscaling.
     pub supports_video_upscale: bool,
+    /// Whether the model takes Wan's request-level flow shift (#782).
+    pub supports_flow_shift: bool,
     /// Default scheduler for UNet-based models.
     pub default_scheduler: Option<Scheduler>,
 }
@@ -53,6 +55,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_audio: true,
             audio_required: true,
             supports_video_upscale: false,
+            supports_flow_shift: false,
             default_scheduler: None,
         };
     }
@@ -71,6 +74,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_audio: false,
             audio_required: false,
             supports_video_upscale: false,
+            supports_flow_shift: false,
             default_scheduler: Some(Scheduler::Ddim),
         },
         "sdxl" => ModelCapabilities {
@@ -87,6 +91,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_audio: false,
             audio_required: false,
             supports_video_upscale: false,
+            supports_flow_shift: false,
             default_scheduler: Some(Scheduler::Ddim),
         },
         "sd3" | "sd3.5" | "stable-diffusion-3" => ModelCapabilities {
@@ -103,6 +108,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_audio: false,
             audio_required: false,
             supports_video_upscale: false,
+            supports_flow_shift: false,
             default_scheduler: None,
         },
         "wuerstchen" | "wuerstchen-v2" => ModelCapabilities {
@@ -119,6 +125,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_audio: false,
             audio_required: false,
             supports_video_upscale: false,
+            supports_flow_shift: false,
             default_scheduler: None,
         },
         "flux" => ModelCapabilities {
@@ -135,6 +142,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_audio: false,
             audio_required: false,
             supports_video_upscale: false,
+            supports_flow_shift: false,
             default_scheduler: None,
         },
         "flux2" | "flux.2" | "flux2-klein" => ModelCapabilities {
@@ -151,6 +159,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_audio: false,
             audio_required: false,
             supports_video_upscale: false,
+            supports_flow_shift: false,
             default_scheduler: None,
         },
         "z-image" => ModelCapabilities {
@@ -167,6 +176,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_audio: false,
             audio_required: false,
             supports_video_upscale: false,
+            supports_flow_shift: false,
             default_scheduler: None,
         },
         "qwen-image" | "qwen_image" => ModelCapabilities {
@@ -183,6 +193,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_audio: false,
             audio_required: false,
             supports_video_upscale: false,
+            supports_flow_shift: false,
             default_scheduler: None,
         },
         "qwen-image-edit" => ModelCapabilities {
@@ -199,6 +210,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_audio: false,
             audio_required: false,
             supports_video_upscale: false,
+            supports_flow_shift: false,
             default_scheduler: None,
         },
         "ltx-video" => ModelCapabilities {
@@ -215,6 +227,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_audio: false,
             audio_required: false,
             supports_video_upscale: false,
+            supports_flow_shift: false,
             default_scheduler: None,
         },
         "ltx2" => ModelCapabilities {
@@ -231,6 +244,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_audio: true,
             audio_required: false,
             supports_video_upscale: true,
+            supports_flow_shift: false,
             default_scheduler: None,
         },
         // Wan differs from both LTX entries on three axes, and the catch-all
@@ -255,6 +269,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_audio: false,
             audio_required: false,
             supports_video_upscale: false,
+            supports_flow_shift: true,
             default_scheduler: None,
         },
         _ => ModelCapabilities {
@@ -271,6 +286,7 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
             supports_audio: false,
             audio_required: false,
             supports_video_upscale: false,
+            supports_flow_shift: false,
             default_scheduler: None,
         },
     }

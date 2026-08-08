@@ -41,6 +41,11 @@ import {
   guidanceOverridesToWire,
 } from "@studio/lib/guidanceOverrides";
 import {
+  emptyWanRecipe,
+  wanRecipeFromWire,
+  wanRecipeToWire,
+} from "@studio/lib/wanRecipe";
+import {
   MINIMAX_H3_MIN_FRAMES,
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Family,
@@ -157,6 +162,7 @@ function defaultForm(): GenerateFormState {
     spatialUpscale: null,
     temporalUpscale: null,
     guidanceOverrides: emptyGuidanceOverrides(),
+    wanRecipe: emptyWanRecipe(),
     cameraControl: null,
     placement: null,
     loras: [],
@@ -258,9 +264,29 @@ function modelDefaultsPatch(
     : null;
   if (!capabilities.supportsScheduler) {
     next.scheduler = null;
+  } else if (
+    next.scheduler !== null &&
+    !capabilities.schedulerOptions.includes(next.scheduler)
+  ) {
+    // The UNet schedulers and wan's flow solvers share the wire slot but are
+    // rejected on each other's families — membership in the new model's
+    // options is the test, not mere scheduler support (codex review).
+    next.scheduler = null;
   }
   if (!capabilities.supportsCfgPlus) {
     next.cfgPlus = false;
+  }
+  // The recipe knobs are wan's alone, and the strengths additionally need a
+  // distill slot — a value carried over from another model would be rejected,
+  // not ignored, so it is cleared on the way in.
+  if (!capabilities.wanRecipe.supported) {
+    next.wanRecipe = emptyWanRecipe();
+  } else if (!capabilities.wanRecipe.supportsDistillStrength) {
+    next.wanRecipe = {
+      ...(next.wanRecipe ?? emptyWanRecipe()),
+      distillStrengthHigh: null,
+      distillStrengthLow: null,
+    };
   }
   if (model.family !== "ltx2" && model.family !== "ltx-2") {
     next.audioFile = null;
@@ -413,6 +439,7 @@ export function applyMetadataToForm(
     spatialUpscale: metadata.spatial_upscale ?? null,
     temporalUpscale: metadata.temporal_upscale ?? null,
     guidanceOverrides: guidanceOverridesFromWire(metadata.guidance_overrides),
+    wanRecipe: wanRecipeFromWire(metadata),
     frames: metadata.frames ?? null,
     fps: metadata.fps ?? null,
     outputFormat: outputFormat ?? next.outputFormat,
@@ -865,7 +892,12 @@ export function useGenerateForm(): UseGenerateForm {
         batch_size: requestForcesBatchSizeOne ? 1 : s.batchSize,
         output_format: s.outputFormat,
         cfg_plus: capabilities.supportsCfgPlus && s.cfgPlus ? true : undefined,
-        scheduler: capabilities.supportsScheduler ? s.scheduler : undefined,
+        // "default" is the picker's omit-sentinel, not a wire variant; a
+        // stored sentinel must never reach serde (codex review).
+        scheduler:
+          capabilities.supportsScheduler && s.scheduler !== "default"
+            ? s.scheduler
+            : undefined,
         ...(attachmentMode
           ? {
               edit_images: attachments.map((image) => image.base64),
@@ -936,6 +968,10 @@ export function useGenerateForm(): UseGenerateForm {
               guidance_overrides: guidanceOverridesToWire(s.guidanceOverrides),
             }
           : {}),
+        // Spread rather than assigned: an untouched control contributes no
+        // key at all, which is what keeps the resolved tier's own shift and
+        // distill strengths in place.
+        ...wanRecipeToWire(s.wanRecipe, capabilities.wanRecipe),
       };
       return stripAudioOnlyIncompatibleFields(
         serializeMinimaxH3Authoring(

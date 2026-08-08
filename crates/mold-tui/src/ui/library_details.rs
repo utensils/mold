@@ -197,6 +197,9 @@ mod tests {
     fn test_metadata() -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "a lighthouse at dusk".to_string(),
             negative_prompt: Some("blurry".to_string()),
             original_prompt: None,

@@ -459,6 +459,9 @@ pub enum ParamField {
     RescaleScale,
     ModalityScale,
     GuidanceSkip,
+    /// Wan flow shift (#782). Absent-until-touched, like the LTX-2 override
+    /// rows above.
+    SampleShift,
 }
 
 impl ParamField {
@@ -494,6 +497,7 @@ impl ParamField {
             Self::RescaleScale => "CFG rescale",
             Self::ModalityScale => "Modality",
             Self::GuidanceSkip => "Guide skip",
+            Self::SampleShift => "Flow shift",
             Self::ControlScale => "Scale",
         }
     }
@@ -645,6 +649,9 @@ pub struct GenerateParams {
     /// Optional LTX-2 guider tuning. An empty value must stay absent from the
     /// request so the selected pipeline retains its own constants.
     pub guidance_overrides: Ltx2GuidanceOverrides,
+    /// Wan flow shift (#782). `None` stays absent from the request so the
+    /// per-tier pipeline defaults remain authoritative.
+    pub sample_shift: Option<f64>,
     // ControlNet
     pub control_image_path: Option<String>,
     pub control_model: Option<String>,
@@ -763,6 +770,7 @@ impl GenerateParams {
             spatial_upscale: None,
             temporal_upscale: None,
             guidance_overrides: Ltx2GuidanceOverrides::default(),
+            sample_shift: None,
             control_image_path: None,
             control_model: None,
             control_scale: 1.0,
@@ -900,6 +908,10 @@ impl GenerateParams {
                 .guidance_overrides
                 .skip_step
                 .map(|value| value.to_string())
+                .unwrap_or_else(|| "default".to_string()),
+            ParamField::SampleShift => self
+                .sample_shift
+                .map(|value| format!("{value:.1}"))
                 .unwrap_or_else(|| "default".to_string()),
             ParamField::ControlScale => format!("{:.1}", self.control_scale),
         }
@@ -2228,6 +2240,11 @@ impl App {
             self.generate.params.spatial_upscale = None;
             self.generate.params.temporal_upscale = None;
             self.generate.params.guidance_overrides = Ltx2GuidanceOverrides::default();
+        }
+        // Leaving wan clears its flow-shift override the same way leaving
+        // LTX-2 clears the guider overrides above (#782).
+        if !self.generate.capabilities.supports_flow_shift {
+            self.generate.params.sample_shift = None;
         }
         self.refresh_create_rows();
     }
@@ -4652,6 +4669,21 @@ impl App {
                     Ltx2GuidanceOverrides::MAX_SKIP_STEP,
                 );
             }
+            ParamField::SampleShift => {
+                // Wan flow shift (#782): 0 is not a valid shift, so the ramp
+                // walks default → 1.0 → … → 16.0 → default. 16 is upstream's
+                // own ceiling (the flf2v task ships shift 16).
+                p.sample_shift = match adjust_optional_scale(p.sample_shift, delta, 1.0, 16.0) {
+                    Some(value) if value < 1.0 => {
+                        if delta >= 0 {
+                            Some(1.0)
+                        } else {
+                            None
+                        }
+                    }
+                    other => other,
+                };
+            }
             ParamField::ControlScale => {
                 p.control_scale = (p.control_scale + delta as f64 * 0.1).clamp(0.0, 2.0);
             }
@@ -5283,6 +5315,9 @@ impl App {
                     Some(Scheduler::Ddim) => Some(Scheduler::EulerAncestral),
                     Some(Scheduler::EulerAncestral) => Some(Scheduler::UniPc),
                     Some(Scheduler::UniPc) => None,
+                    // Wan flow solvers are not part of the SD scheduler row's
+                    // cycle; a stale restored value resets to the default.
+                    Some(Scheduler::Euler) | Some(Scheduler::DpmPp) => None,
                 };
             }
             // Enter on the merged Seed row edits the value (◀▶ cycles mode)
@@ -7052,6 +7087,9 @@ impl App {
                                 .guidance_overrides
                                 .clone()
                                 .into_option(),
+                            sample_shift: submitted_params.sample_shift,
+                            distill_strength_high: None,
+                            distill_strength_low: None,
                             prompt: prompt_text,
                             negative_prompt,
                             original_prompt: submitted_params.original_prompt.clone(),
@@ -7454,6 +7492,9 @@ impl App {
 
                     let meta = mold_core::OutputMetadata {
                         guidance_overrides: None,
+                        sample_shift: None,
+                        distill_strength_high: None,
+                        distill_strength_low: None,
                         prompt: source_meta
                             .as_ref()
                             .map(|m| m.prompt.clone())
@@ -8616,6 +8657,9 @@ mod tests {
             path: std::path::PathBuf::from("/home/user/.mold/output/mold-flux-1234.png"),
             metadata: mold_core::OutputMetadata {
                 guidance_overrides: None,
+                sample_shift: None,
+                distill_strength_high: None,
+                distill_strength_low: None,
                 prompt: "test".to_string(),
                 negative_prompt: None,
                 original_prompt: None,
@@ -8679,6 +8723,9 @@ mod tests {
             path: std::path::PathBuf::new(),
             metadata: mold_core::OutputMetadata {
                 guidance_overrides: None,
+                sample_shift: None,
+                distill_strength_high: None,
+                distill_strength_low: None,
                 prompt: "test".to_string(),
                 negative_prompt: None,
                 original_prompt: None,
@@ -8803,6 +8850,9 @@ mod tests {
     fn make_test_metadata() -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
             guidance_overrides: None,
+            sample_shift: None,
+            distill_strength_high: None,
+            distill_strength_low: None,
             prompt: "a test prompt".to_string(),
             negative_prompt: Some("blurry".to_string()),
             original_prompt: None,

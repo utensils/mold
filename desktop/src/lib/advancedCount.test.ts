@@ -45,4 +45,15 @@ describe("advancedActiveCount", () => {
     form.family = "flux";
     expect(advancedActiveCount(form)).toBe(0);
   });
+
+  it("counts each set wan recipe control, and none off-family", () => {
+    const form = { ...newGenerateForm(), family: "wan", model: "wan22-t2v-a14b:q5" };
+    form.scheduler = "dpm-pp";
+    form.wanRecipe = { sampleShift: 12, distillStrengthHigh: 1.8, distillStrengthLow: null };
+    // Solver + shift + high strength.
+    expect(advancedActiveCount(form)).toBe(3);
+
+    form.family = "flux";
+    expect(advancedActiveCount(form)).toBe(0);
+  });
 });

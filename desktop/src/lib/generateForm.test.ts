@@ -707,6 +707,107 @@ describe("applyModelDefaults — qwen-edit attachment seeding", () => {
   });
 });
 
+function wanModel(name = "wan22-t2v-a14b:q5"): ModelEntry {
+  return {
+    ...ltx2Model(),
+    name,
+    family: "wan",
+    default_steps: 4,
+    default_guidance: 1,
+    default_width: 832,
+    default_height: 480,
+  };
+}
+
+function wanForm(name?: string) {
+  const form = newGenerateForm();
+  applyModelDefaults(form, wanModel(name));
+  return form;
+}
+
+describe("buildRequest — wan sampler recipe", () => {
+  it("omits every recipe field while the controls are untouched", () => {
+    const req = buildRequest(wanForm());
+    expect("sample_shift" in req).toBe(false);
+    expect("distill_strength_high" in req).toBe(false);
+    expect("distill_strength_low" in req).toBe(false);
+    expect(req.scheduler).toBeUndefined();
+  });
+
+  it("sends only what the user touched", () => {
+    const form = wanForm();
+    form.scheduler = "euler";
+    form.wanRecipe = { sampleShift: 12, distillStrengthHigh: 1.8, distillStrengthLow: null };
+    const req = buildRequest(form);
+    expect(req).toMatchObject({ scheduler: "euler", sample_shift: 12, distill_strength_high: 1.8 });
+    expect("distill_strength_low" in req).toBe(false);
+  });
+
+  it("drops the strengths on a wan tier that ships no distill", () => {
+    const form = wanForm("wan22-t2v-a14b:q8");
+    form.wanRecipe = { sampleShift: 8, distillStrengthHigh: 1.8, distillStrengthLow: 1 };
+    const req = buildRequest(form);
+    expect(req.sample_shift).toBe(8);
+    expect("distill_strength_high" in req).toBe(false);
+    expect("distill_strength_low" in req).toBe(false);
+  });
+
+  it("never ships a recipe field for another family", () => {
+    const form = ltx2Form();
+    form.wanRecipe = { sampleShift: 12, distillStrengthHigh: 1.8, distillStrengthLow: 1 };
+    const req = buildRequest(form);
+    expect("sample_shift" in req).toBe(false);
+    expect("distill_strength_high" in req).toBe(false);
+  });
+
+  it("omits a value the server would reject rather than sending it", () => {
+    const form = wanForm();
+    form.wanRecipe = { sampleShift: 0, distillStrengthHigh: 9, distillStrengthLow: null };
+    const req = buildRequest(form);
+    expect("sample_shift" in req).toBe(false);
+    expect("distill_strength_high" in req).toBe(false);
+  });
+});
+
+describe("applyModelDefaults — wan sampler recipe and solver", () => {
+  it("clears the recipe when the new model leaves the family", () => {
+    const form = wanForm();
+    form.wanRecipe = { sampleShift: 12, distillStrengthHigh: 1.8, distillStrengthLow: 1 };
+    applyModelDefaults(form, sd15Model());
+    expect(form.wanRecipe).toEqual({
+      sampleShift: null,
+      distillStrengthHigh: null,
+      distillStrengthLow: null,
+    });
+  });
+
+  it("keeps the shift but clears the strengths on a tier without a distill", () => {
+    const form = wanForm();
+    form.wanRecipe = { sampleShift: 12, distillStrengthHigh: 1.8, distillStrengthLow: 1 };
+    applyModelDefaults(form, wanModel("wan22-t2v-a14b:q8"));
+    expect(form.wanRecipe).toEqual({
+      sampleShift: 12,
+      distillStrengthHigh: null,
+      distillStrengthLow: null,
+    });
+  });
+
+  it("resets a solver the new family's server would reject", () => {
+    // The two option sets are disjoint on the server, so carrying `dpm-pp`
+    // into SDXL (or `ddim` into wan) is a 422, not a no-op.
+    const wan = wanForm();
+    wan.scheduler = "dpm-pp";
+    applyModelDefaults(wan, sd15Model());
+    expect(wan.scheduler).toBe("default");
+
+    const sd = newGenerateForm();
+    applyModelDefaults(sd, sd15Model());
+    sd.scheduler = "ddim";
+    applyModelDefaults(sd, wanModel());
+    expect(sd.scheduler).toBe("default");
+  });
+});
+
 describe("newGenerateForm source-fit default", () => {
   it("starts on pad-repaint, matching the web SPA's default policy", () => {
     expect(newGenerateForm().sourceFit).toEqual({ mode: "pad-repaint" });
@@ -966,23 +1067,61 @@ describe("applyMetadataToForm", () => {
   it("accepts the server's hyphenated/underscored scheduler spellings", () => {
     const form = newGenerateForm();
 
-    // mold-core `Display for Scheduler` serializes UniPc as "uni-pc".
-    applyMetadataToForm(form, { ...richImageMetadata(), scheduler: "uni-pc" }, [sd15Model()]);
-    expect(form.scheduler).toBe("unipc");
-
-    applyMetadataToForm(form, { ...richImageMetadata(), scheduler: "uni_pc" }, [sd15Model()]);
-    expect(form.scheduler).toBe("unipc");
+    // mold-core `Display for Scheduler` serializes UniPc as "uni-pc"; the
+    // separator-squashed legacy spellings still restore onto it.
+    for (const spelling of ["uni-pc", "uni_pc", "unipc"]) {
+      applyMetadataToForm(form, { ...richImageMetadata(), scheduler: spelling }, [sd15Model()]);
+      expect(form.scheduler).toBe("uni-pc");
+    }
 
     applyMetadataToForm(form, { ...richImageMetadata(), scheduler: { "uni-pc": {} } as never }, [
       sd15Model(),
     ]);
-    expect(form.scheduler).toBe("unipc");
+    expect(form.scheduler).toBe("uni-pc");
 
     // The canonical euler-ancestral spelling still round-trips.
     applyMetadataToForm(form, { ...richImageMetadata(), scheduler: "euler-ancestral" }, [
       sd15Model(),
     ]);
     expect(form.scheduler).toBe("euler-ancestral");
+  });
+
+  it("round-trips the wan recipe a print was rendered with", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(
+      form,
+      {
+        ...richImageMetadata(),
+        model: "wan22-t2v-a14b:q5",
+        scheduler: "dpm-pp",
+        sample_shift: 12,
+        distill_strength_high: 1.8,
+        distill_strength_low: 0.9,
+      },
+      [wanModel()],
+    );
+    expect(form.scheduler).toBe("dpm-pp");
+    expect(form.wanRecipe).toEqual({
+      sampleShift: 12,
+      distillStrengthHigh: 1.8,
+      distillStrengthLow: 0.9,
+    });
+    expect(buildRequest(form)).toMatchObject({
+      scheduler: "dpm-pp",
+      sample_shift: 12,
+      distill_strength_high: 1.8,
+      distill_strength_low: 0.9,
+    });
+  });
+
+  it("leaves the recipe untouched for a print that carried none", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(form, { ...richImageMetadata(), model: "wan22-t2v-a14b:q5" }, [wanModel()]);
+    expect(form.wanRecipe).toEqual({
+      sampleShift: null,
+      distillStrengthHigh: null,
+      distillStrengthLow: null,
+    });
   });
 });
 

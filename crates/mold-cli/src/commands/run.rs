@@ -472,6 +472,94 @@ impl GuidanceFlags {
     }
 }
 
+/// Wan recipe flags (#782, #795): sample solver, flow shift, and Lightning
+/// distill strengths, grouped like [`GuidanceFlags`] so the `run` signature
+/// stays sane.
+pub struct WanFlags {
+    pub sample_solver: Option<String>,
+    pub sample_shift: Option<f64>,
+    pub distill_strength: Option<String>,
+}
+
+impl WanFlags {
+    /// Parse into wire values. The solver merges into the request's
+    /// `scheduler` slot (upstream `--sample_solver` parity); clap's
+    /// `conflicts_with` keeps `--scheduler` and `--sample-solver` exclusive.
+    fn resolve(self) -> Result<ResolvedWanFlags> {
+        let solver = self
+            .sample_solver
+            .as_deref()
+            .map(|value| {
+                value
+                    .parse::<Scheduler>()
+                    .map_err(|error| anyhow::anyhow!("--sample-solver: {error}"))
+            })
+            .transpose()?;
+        if let Some(solver) = solver {
+            if !matches!(
+                solver,
+                Scheduler::UniPc | Scheduler::Euler | Scheduler::DpmPp
+            ) {
+                anyhow::bail!(
+                    "--sample-solver takes unipc, euler, or dpm++ — '{solver}' is a UNet \
+                     scheduler; use --scheduler for SD models"
+                );
+            }
+        }
+        let (distill_strength_high, distill_strength_low) = match self.distill_strength.as_deref() {
+            Some(spec) => parse_distill_strength(spec)?,
+            None => (None, None),
+        };
+        Ok(ResolvedWanFlags {
+            solver,
+            sample_shift: self.sample_shift,
+            distill_strength_high,
+            distill_strength_low,
+        })
+    }
+}
+
+pub(crate) struct ResolvedWanFlags {
+    pub solver: Option<Scheduler>,
+    pub sample_shift: Option<f64>,
+    pub distill_strength_high: Option<f64>,
+    pub distill_strength_low: Option<f64>,
+}
+
+/// `high=1.5,low=1.0` (either half optional, any order) or one bare number
+/// for both experts.
+fn parse_distill_strength(spec: &str) -> Result<(Option<f64>, Option<f64>)> {
+    let spec = spec.trim();
+    if let Ok(both) = spec.parse::<f64>() {
+        return Ok((Some(both), Some(both)));
+    }
+    let mut high = None;
+    let mut low = None;
+    for part in spec.split(',') {
+        let (key, value) = part.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!(
+                "--distill-strength takes `high=X,low=Y` (either half optional) or a single \
+                 number, got '{part}'"
+            )
+        })?;
+        let value: f64 = value.trim().parse().map_err(|_| {
+            anyhow::anyhow!("--distill-strength: '{}' is not a number", value.trim())
+        })?;
+        let slot = match key.trim() {
+            "high" => &mut high,
+            "low" => &mut low,
+            other => anyhow::bail!("--distill-strength keys are high/low, got '{other}'"),
+        };
+        if slot.replace(value).is_some() {
+            anyhow::bail!("--distill-strength repeats '{}'", key.trim());
+        }
+    }
+    if high.is_none() && low.is_none() {
+        anyhow::bail!("--distill-strength must set high and/or low");
+    }
+    Ok((high, low))
+}
+
 fn parse_stg_blocks(value: &str) -> Result<Vec<u32>> {
     let blocks = value
         .split(',')
@@ -648,6 +736,7 @@ pub async fn run(
     spatial_upscale: Option<Ltx2SpatialUpscaleArg>,
     temporal_upscale: Option<Ltx2TemporalUpscaleArg>,
     guidance_flags: GuidanceFlags,
+    wan_flags: WanFlags,
     camera_control: Option<String>,
     host: Option<String>,
     format: Option<OutputFormat>,
@@ -1126,6 +1215,12 @@ pub async fn run(
 
     let placement = resolve_placement(&config, &model, &placement_flags)?;
 
+    // Wan recipe knobs (#782, #795): the solver rides the scheduler slot
+    // (clap keeps --scheduler / --sample-solver exclusive), the rest are
+    // additive request fields that stay absent unless the user set them.
+    let wan = wan_flags.resolve()?;
+    let scheduler = scheduler.or(wan.solver);
+
     generate::run(
         &final_prompt,
         &model,
@@ -1162,6 +1257,9 @@ pub async fn run(
             spatial_upscale,
             temporal_upscale,
             guidance_overrides,
+            sample_shift: wan.sample_shift,
+            distill_strength_high: wan.distill_strength_high,
+            distill_strength_low: wan.distill_strength_low,
             source_image_name: if is_h3 {
                 h3_authoring.source_image_name.or_else(|| {
                     image

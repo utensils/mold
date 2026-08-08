@@ -53,17 +53,21 @@ describe("generationCapabilities", () => {
   });
 
   it("returns scheduler options only for families that honor them", () => {
-    expect(schedulerOptionsForFamily("sdxl")).toEqual([
+    for (const family of ["sdxl", "sd15"]) {
+      expect(schedulerOptionsForFamily(family)).toEqual([
+        "default",
+        "ddim",
+        "euler-ancestral",
+        "uni-pc",
+      ]);
+    }
+    // Wan's flow solvers are a disjoint set from the UNet schedulers; the
+    // server rejects each one for the other's families.
+    expect(schedulerOptionsForFamily("wan")).toEqual([
       "default",
-      "ddim",
-      "euler-ancestral",
-      "unipc",
-    ]);
-    expect(schedulerOptionsForFamily("sd15")).toEqual([
-      "default",
-      "ddim",
-      "euler-ancestral",
-      "unipc",
+      "uni-pc",
+      "euler",
+      "dpm-pp",
     ]);
     expect(schedulerOptionsForFamily("flux")).toEqual([]);
     expect(schedulerOptionsForFamily("qwen-image")).toEqual([]);

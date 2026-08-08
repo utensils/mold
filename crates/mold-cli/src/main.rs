@@ -816,6 +816,34 @@ Examples:
         #[arg(long, value_name = "N", help_heading = "Video")]
         guidance_skip_step: Option<u32>,
 
+        /// Wan sample solver: unipc (default), euler, or dpm++ — upstream's
+        /// --sample_solver. euler is the solver the 4-step Lightning distills
+        /// were tuned for; dpm++ matches upstream's alternative grid.
+        /// (MOLD_WAN_SOLVER is deliberately NOT a clap env binding: it would
+        /// inject a wan-only field into every family's request. The wan
+        /// engine reads it itself, so the env still applies to wan renders.)
+        #[arg(
+            long,
+            value_parser = ["unipc", "euler", "dpm++", "dpmpp", "dpm-pp"],
+            help_heading = "Video",
+            conflicts_with = "scheduler"
+        )]
+        sample_solver: Option<String>,
+
+        /// Wan flow shift (upstream --sample_shift): the family's primary
+        /// quality/character knob. Overrides the per-tier default for this
+        /// run. Upstream ships 3.0-16 per task; Lightning wants 5, upstream
+        /// quality A14B T2V wants 12, ComfyUI templates ship 8.
+        /// (MOLD_WAN_SHIFT reaches wan renders engine-side, same as above.)
+        #[arg(long, value_name = "SHIFT", help_heading = "Video")]
+        sample_shift: Option<f64>,
+
+        /// Wan Lightning distill strength: `high=X,low=Y` (either half
+        /// optional) or one number for both experts. The community's
+        /// reduced-motion mitigation runs high=1.5..2.0 with low=1.0.
+        #[arg(long, value_name = "SPEC", help_heading = "Video")]
+        distill_strength: Option<String>,
+
         /// Camera-control LoRA preset name or .safetensors path.
         ///
         /// Preset aliases (dolly-in, dolly-left, dolly-out, dolly-right,
@@ -1756,6 +1784,9 @@ async fn run() -> anyhow::Result<()> {
             rescale_scale,
             modality_scale,
             guidance_skip_step,
+            sample_solver,
+            sample_shift,
+            distill_strength,
             camera_control,
             host,
             format,
@@ -1925,6 +1956,11 @@ async fn run() -> anyhow::Result<()> {
                     rescale_scale,
                     modality_scale,
                     skip_step: guidance_skip_step,
+                },
+                commands::run::WanFlags {
+                    sample_solver,
+                    sample_shift,
+                    distill_strength,
                 },
                 camera_control,
                 host,
@@ -2561,6 +2597,38 @@ mod tests {
         let cli = parse(&["run", "model", "--seed", "42", "a", "cat"]);
         match cli.command {
             Commands::Run { seed, .. } => assert_eq!(seed, Some(42)),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    /// The wan env fallbacks are deliberately NOT clap env bindings: a bound
+    /// env would inject the wan-only fields into every family's request and
+    /// admission would reject e.g. a FLUX run outright (codex review). The
+    /// wan engine reads both vars itself, so they still reach wan renders.
+    #[test]
+    fn wan_env_fallbacks_do_not_populate_cli_flags() {
+        let previous_solver = std::env::var("MOLD_WAN_SOLVER").ok();
+        let previous_shift = std::env::var("MOLD_WAN_SHIFT").ok();
+        std::env::set_var("MOLD_WAN_SOLVER", "euler");
+        std::env::set_var("MOLD_WAN_SHIFT", "12.0");
+        let cli = parse(&["run", "flux-schnell", "a", "cat"]);
+        match previous_solver {
+            Some(value) => std::env::set_var("MOLD_WAN_SOLVER", value),
+            None => std::env::remove_var("MOLD_WAN_SOLVER"),
+        }
+        match previous_shift {
+            Some(value) => std::env::set_var("MOLD_WAN_SHIFT", value),
+            None => std::env::remove_var("MOLD_WAN_SHIFT"),
+        }
+        match cli.command {
+            Commands::Run {
+                sample_solver,
+                sample_shift,
+                ..
+            } => {
+                assert_eq!(sample_solver, None);
+                assert_eq!(sample_shift, None);
+            }
             _ => panic!("expected Run"),
         }
     }

@@ -64,6 +64,11 @@ import {
   guidanceOverridesFromWire,
 } from "@studio/lib/guidanceOverrides";
 import {
+  wanRecipeCount,
+  wanRecipeError,
+  wanRecipeFromWire,
+} from "@studio/lib/wanRecipe";
+import {
   defaultClipFrames,
   friendlySequenceError,
   modelsForOutput,
@@ -1856,6 +1861,9 @@ const advCount = computed(() =>
             form.state.value.spatialUpscale != null ||
             form.state.value.temporalUpscale != null ||
             guidanceOverrideCount(form.state.value.guidanceOverrides) > 0),
+        wanRecipe: capabilities.value.wanRecipe.supported
+          ? wanRecipeCount(form.state.value.wanRecipe)
+          : 0,
       }),
 );
 
@@ -2267,6 +2275,15 @@ function validateSubmit(): boolean {
   );
   if (guidanceError) {
     composerError.value = guidanceError;
+    showAdvanced.value = true;
+    return false;
+  }
+  // Same contract for the wan recipe: an out-of-band shift or distill strength
+  // is dropped by the serializer, so it has to be reported here or the render
+  // would silently fall back to the tier's own values.
+  const recipeError = wanRecipeError(form.state.value.wanRecipe);
+  if (recipeError) {
+    composerError.value = recipeError;
     showAdvanced.value = true;
     return false;
   }
@@ -3134,6 +3151,7 @@ function openJob(job: Job) {
   form.state.value.guidanceOverrides = guidanceOverridesFromWire(
     request.guidance_overrides,
   );
+  form.state.value.wanRecipe = wanRecipeFromWire(request);
   if (minimaxH3TaskForModel(request.model)) {
     form.state.value.h3Authoring = emptyMinimaxH3AuthoringState();
     form.state.value.h3Authoring.references = (request.references ?? []).map(
