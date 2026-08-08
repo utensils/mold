@@ -215,6 +215,7 @@ pub(crate) struct FrozenH3ComfyVaeLoadPlan {
     paths: H3ComfyVaeArtifactPaths,
     staging_root: PathBuf,
     artifacts: Vec<ExpectedArtifact>,
+    artifact_plan_identity_sha256: String,
     identity_sha256: String,
     #[cfg(test)]
     synthetic: bool,
@@ -253,11 +254,18 @@ impl FrozenH3ComfyVaeLoadPlan {
             paths,
             staging_root: staging_root.into(),
             artifacts,
+            artifact_plan_identity_sha256: String::new(),
             identity_sha256: String::new(),
             #[cfg(test)]
             synthetic: false,
         };
         plan.validate_fields()?;
+        plan.artifact_plan_identity_sha256 = artifact_plan_identity(
+            &plan.canonical_model,
+            plan.task,
+            plan.layout,
+            &plan.artifacts,
+        );
         plan.identity_sha256 = load_plan_identity(&plan);
         plan.validate()?;
         Ok(plan)
@@ -265,6 +273,10 @@ impl FrozenH3ComfyVaeLoadPlan {
 
     pub(crate) fn identity_sha256(&self) -> &str {
         &self.identity_sha256
+    }
+
+    pub(crate) fn artifact_plan_identity_sha256(&self) -> &str {
+        &self.artifact_plan_identity_sha256
     }
 
     pub(crate) const fn task(&self) -> Task {
@@ -325,7 +337,16 @@ impl FrozenH3ComfyVaeLoadPlan {
 
     fn validate(&self) -> LoadResult<()> {
         self.validate_fields()?;
-        if !valid_sha256(&self.identity_sha256) || self.identity_sha256 != load_plan_identity(self)
+        if !valid_sha256(&self.artifact_plan_identity_sha256)
+            || self.artifact_plan_identity_sha256
+                != artifact_plan_identity(
+                    &self.canonical_model,
+                    self.task,
+                    self.layout,
+                    &self.artifacts,
+                )
+            || !valid_sha256(&self.identity_sha256)
+            || self.identity_sha256 != load_plan_identity(self)
         {
             return Err(H3ComfyVaeLoadError::InvalidPlan(
                 "load-plan identity changed after freezing".into(),
@@ -366,10 +387,17 @@ impl FrozenH3ComfyVaeLoadPlan {
             paths,
             staging_root,
             artifacts,
+            artifact_plan_identity_sha256: String::new(),
             identity_sha256: String::new(),
             synthetic: true,
         };
         plan.validate_fields()?;
+        plan.artifact_plan_identity_sha256 = artifact_plan_identity(
+            &plan.canonical_model,
+            plan.task,
+            plan.layout,
+            &plan.artifacts,
+        );
         plan.identity_sha256 = load_plan_identity(&plan);
         plan.validate()?;
         Ok(plan)
@@ -496,7 +524,10 @@ pub(crate) struct H3ComfyVaeRuntimeBundle<V = MiniMaxH3VisualVae, A = AudioVae> 
     memory: H3ComfyVaeRuntimeMemory,
     task: Task,
     canonical_model: String,
+    artifact_plan_identity_sha256: String,
     plan_identity_sha256: String,
+    #[cfg(feature = "h3-private-uat")]
+    device: Device,
     pub(crate) artifact_lease: H3ComfyVaeArtifactLease,
 }
 
@@ -515,6 +546,21 @@ impl<V, A> H3ComfyVaeRuntimeBundle<V, A> {
 
     pub(crate) fn plan_identity_sha256(&self) -> &str {
         &self.plan_identity_sha256
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn artifact_plan_identity_sha256(&self) -> &str {
+        &self.artifact_plan_identity_sha256
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn authority_identity_sha256(&self) -> &str {
+        self.artifact_lease.authority_identity_sha256()
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn device(&self) -> &Device {
+        &self.device
     }
 
     pub(crate) fn validate_authority(&self) -> LoadResult<()> {
@@ -1003,7 +1049,10 @@ fn load_with_factory<F: VaeFactory>(
         memory,
         task: plan.task,
         canonical_model: plan.canonical_model.clone(),
+        artifact_plan_identity_sha256: plan.artifact_plan_identity_sha256.clone(),
         plan_identity_sha256: plan.identity_sha256.clone(),
+        #[cfg(feature = "h3-private-uat")]
+        device: device.clone(),
         artifact_lease,
     })
 }
@@ -1502,6 +1551,69 @@ fn production_artifacts(manifest: &ModelManifest) -> LoadResult<Vec<ExpectedArti
     .collect()
 }
 
+/// Path-independent authority for the exact four-artifact Comfy VAE plan.
+/// Admission and the opened-file runtime derive this independently from the
+/// pinned manifest; local source/staging paths remain confined to the
+/// attempt-specific load-plan identity below.
+pub(crate) fn expected_h3_comfy_vae_artifact_plan_identity(model: &str) -> LoadResult<String> {
+    let manifest = find_manifest(model)
+        .ok_or_else(|| H3ComfyVaeLoadError::InvalidPlan(format!("missing manifest {model:?}")))?;
+    let manifest_contract = contract::manifest_contract(manifest).ok_or_else(|| {
+        H3ComfyVaeLoadError::InvalidPlan(format!("{model:?} lost its H3 manifest contract"))
+    })?;
+    if manifest_contract.manifest_name != model
+        || manifest_contract.layout != Layout::ComfyPrunedInt8ConvrotNvfp4Awq
+    {
+        return Err(H3ComfyVaeLoadError::InvalidPlan(format!(
+            "{model:?} is not an exact canonical Comfy MiniMax H3 task"
+        )));
+    }
+    let artifacts = production_artifacts(manifest)?;
+    Ok(artifact_plan_identity(
+        model,
+        manifest_contract.task,
+        manifest_contract.layout,
+        &artifacts,
+    ))
+}
+
+fn artifact_plan_identity(
+    canonical_model: &str,
+    task: Task,
+    layout: Layout,
+    artifacts: &[ExpectedArtifact],
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"mold.minimax-h3.comfy-vae-artifact-plan.v1\0");
+    digest.update(canonical_model.as_bytes());
+    digest.update([0]);
+    digest.update(match task {
+        Task::Fl2va => b"fl2va".as_slice(),
+        Task::Ref2va => b"ref2va".as_slice(),
+    });
+    digest.update([0]);
+    digest.update(match layout {
+        Layout::OfficialBf16 => b"official-bf16".as_slice(),
+        Layout::ComfyPrunedInt8ConvrotNvfp4Awq => b"comfy-pruned-int8".as_slice(),
+    });
+    for artifact in artifacts {
+        digest.update([0]);
+        digest.update(artifact.role.stable_id().as_bytes());
+        digest.update([0]);
+        digest.update(artifact.source_repository.as_bytes());
+        digest.update([0]);
+        digest.update(artifact.source_revision.as_bytes());
+        digest.update([0]);
+        digest.update(artifact.source_path.as_bytes());
+        digest.update([0]);
+        digest.update(artifact.content_sha256.as_bytes());
+        digest.update(artifact.file_bytes.to_le_bytes());
+    }
+    digest.update(b"visual-resident-fp16\0visual-reference-compute-fp16\0");
+    digest.update(b"audio-resident-fp32\0audio-compute-fp32\0");
+    format!("{:x}", digest.finalize())
+}
+
 fn artifact_error(role: H3ComfyVaeArtifactRole, message: impl Into<String>) -> H3ComfyVaeLoadError {
     H3ComfyVaeLoadError::Artifact {
         role,
@@ -1762,6 +1874,14 @@ mod tests {
         assert_eq!(fl.task(), Task::Fl2va);
         assert_eq!(reference.task(), Task::Ref2va);
         assert_ne!(fl.identity_sha256(), reference.identity_sha256());
+        assert_ne!(
+            fl.artifact_plan_identity_sha256(),
+            reference.artifact_plan_identity_sha256()
+        );
+        assert_eq!(
+            fl.artifact_plan_identity_sha256(),
+            expected_h3_comfy_vae_artifact_plan_identity(contract::FL2VA_COMFY).unwrap()
+        );
         let visual = fl.artifact(H3ComfyVaeArtifactRole::VisualWeights).unwrap();
         assert_eq!(visual.file_bytes, 5_207_808_496);
         assert_eq!(

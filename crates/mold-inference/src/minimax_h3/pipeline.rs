@@ -903,7 +903,11 @@ impl H3VideoEncodeSink {
         Self::new_dimensions(geometry.width, geometry.height, geometry.frames)
     }
 
-    fn new_dimensions(width: usize, height: usize, expected_frames: usize) -> Result<Self> {
+    pub(super) fn new_dimensions(
+        width: usize,
+        height: usize,
+        expected_frames: usize,
+    ) -> Result<Self> {
         let width = u32::try_from(width).context("H3 width does not fit u32")?;
         let height = u32::try_from(height).context("H3 height does not fit u32")?;
         Ok(H3VideoEncodeSink {
