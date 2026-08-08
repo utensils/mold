@@ -79,6 +79,11 @@ build() {
     --features cuda,preview,expand,tui,webp,mp4,metrics,mdns
 }
 
+check() {
+  cd "mold-${pkgver}"
+  ./scripts/verify-h3-release-exclusion.sh "target/release/${_binname}"
+}
+
 package() {
   cd "mold-${pkgver}"
 

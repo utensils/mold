@@ -68,6 +68,13 @@ use tracing::info;
 
 use state::QueueHandle;
 
+/// Retains Mold's compile-time H3 attention exclusion proof in server-backed
+/// binaries, including the standalone Tauri desktop executable.
+#[doc(hidden)]
+pub fn h3_attention_release_provenance_marker() -> &'static str {
+    mold_inference::h3_attention_release_provenance_marker()
+}
+
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 fn trace_request_path<B>(request: &axum::http::Request<B>) -> &str {

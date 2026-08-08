@@ -43,11 +43,15 @@ pub use artifacts::{
     ArtifactVerificationProgress, CheckpointKeyReport, ConditionerArtifacts, FrozenArtifact,
 };
 pub use attention::{
-    execute_h3_attention, H3AttentionActivation, H3AttentionBackend, H3AttentionDType,
-    H3AttentionDevice, H3AttentionError, H3AttentionErrorCode, H3AttentionKernel, H3AttentionMask,
-    H3AttentionModelContract, H3AttentionReleaseRejection, H3AttentionReleaseRequirement,
-    H3AttentionRequirement, H3AttentionRuntimeAuthority, H3AttentionScope, H3AttentionWorkspace,
-    H3FrozenAttentionExecution, H3FrozenAttentionPlan, H3_DENSE_SYNTHETIC_MAX_SCORE_ELEMENTS,
+    execute_h3_attention, execute_h3_attention_with_telemetry,
+    h3_attention_release_provenance_marker, H3AttentionActivation, H3AttentionBackend,
+    H3AttentionDType, H3AttentionDevice, H3AttentionError, H3AttentionErrorCode, H3AttentionKernel,
+    H3AttentionMask, H3AttentionModelContract, H3AttentionReleaseCandidateBuild,
+    H3AttentionReleaseRejection, H3AttentionReleaseRequirement, H3AttentionRequirement,
+    H3AttentionRuntimeAuthority, H3AttentionScope, H3AttentionTelemetry, H3AttentionWorkspace,
+    H3FrozenAttentionExecution, H3FrozenAttentionPlan, H3_ATTENTION_RC_CLAIM_MARKER,
+    H3_ATTENTION_RC_FEATURE, H3_ATTENTION_RC_SCHEMA, H3_ATTENTION_RELEASE_PROVENANCE_MARKER,
+    H3_ATTENTION_RELEASE_PROVENANCE_PREFIX, H3_DENSE_SYNTHETIC_MAX_SCORE_ELEMENTS,
     H3_FLASH_ATTN_CRATE_SHA256, H3_FLASH_ATTN_PACKAGE_VERSION,
     H3_FLASH_ATTN_QUALIFIED_COMPUTE_CAPABILITY,
 };

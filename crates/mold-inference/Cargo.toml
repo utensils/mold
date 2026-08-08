@@ -23,6 +23,9 @@ metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "m
 # CUDA toolkit. Tensors that aren't CUDA + fp16/bf16 transparently fall back
 # to the math path inside `crate::attention`.
 flash-attn = ["dep:candle-flash-attn", "cuda", "mold-candle/flash-attn"]
+# H3-only kernel qualification. Unlike `flash-attn`, this does not change the
+# global attention default and is intentionally not forwarded by mold-ai.
+h3-attention-rc = ["cuda", "mold-candle/h3-flash-attn-rc"]
 expand = []
 webp = ["webp-animation"]
 mp4 = ["dep:fdk-aac"]
@@ -54,6 +57,11 @@ required-features = ["dev-bins"]
 name = "attention_bench"
 path = "src/bin/attention_bench.rs"
 required-features = ["dev-bins", "cuda"]
+
+[[bin]]
+name = "h3_attention_qualification"
+path = "src/bin/h3_attention_qualification.rs"
+required-features = ["dev-bins", "h3-attention-rc"]
 
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.21.0" }

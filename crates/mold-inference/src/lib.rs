@@ -90,11 +90,22 @@ pub use upscaler::{create_upscale_engine, with_upscale_cancellation, UpscaleEngi
 pub use wuerstchen::WuerstchenEngine;
 pub use zimage::ZImageEngine;
 
+/// Compile-time proof of whether either non-shipping FlashAttention feature
+/// reached the Mold-owned Candle dependency graph.
+///
+/// Release entry points consume this through `black_box` so the selected
+/// marker remains inspectable after LTO and stripping.
+#[inline(never)]
+pub fn h3_attention_release_provenance_marker() -> &'static str {
+    std::hint::black_box(mold_candle::minimax_h3::h3_attention_release_provenance_marker())
+}
+
 /// Compile-time acceleration backend label for provenance columns
 /// (gallery DB rows, embedded metadata). Lives here because the
 /// `cuda`/`metal` features are defined on this crate and forwarded by
 /// every binary, so feature unification guarantees one answer per build.
 pub fn compiled_backend_label() -> &'static str {
+    std::hint::black_box(h3_attention_release_provenance_marker());
     if cfg!(feature = "cuda") {
         "cuda"
     } else if cfg!(feature = "metal") {
@@ -109,5 +120,14 @@ mod backend_label_tests {
     #[test]
     fn backend_label_is_a_known_backend() {
         assert!(["cuda", "metal", "cpu"].contains(&super::compiled_backend_label()));
+    }
+
+    #[test]
+    #[cfg(not(any(feature = "flash-attn", feature = "h3-attention-rc")))]
+    fn ordinary_build_reports_both_attention_features_omitted() {
+        assert_eq!(
+            super::h3_attention_release_provenance_marker(),
+            "mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=omitted"
+        );
     }
 }

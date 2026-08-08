@@ -83,7 +83,14 @@ jobs:
             # on the release PR, and the main-branch run below already covers
             # dependency drift post-merge.
             flash:
+              - 'crates/mold-candle/Cargo.toml'
+              - 'crates/mold-candle/src/minimax_h3/attention.rs'
+              - 'crates/mold-candle/src/minimax_h3/mod.rs'
+              - 'crates/mold-candle/src/minimax_h3/dit.rs'
+              - 'crates/mold-candle/src/minimax_h3/visual_vae.rs'
               - 'crates/mold-inference/src/attention.rs'
+              - 'crates/mold-inference/src/lib.rs'
+              - 'crates/mold-inference/src/bin/h3_attention_qualification.rs'
               - 'crates/mold-inference/Cargo.toml'
               - 'crates/mold-cli/Cargo.toml'
             website:
@@ -117,6 +124,17 @@ jobs:
               - 'nix/**'
               - 'packaging/**'
               - 'crates/mold-cli/Cargo.toml'
+              - 'crates/mold-candle/Cargo.toml'
+              - 'crates/mold-candle/src/minimax_h3/attention.rs'
+              - 'crates/mold-candle/src/minimax_h3/mod.rs'
+              - 'crates/mold-candle/src/minimax_h3/dit.rs'
+              - 'crates/mold-candle/src/minimax_h3/visual_vae.rs'
+              - 'crates/mold-inference/Cargo.toml'
+              - 'crates/mold-inference/src/lib.rs'
+              - 'crates/mold-inference/src/bin/h3_attention_qualification.rs'
+              - 'crates/mold-server/src/lib.rs'
+              - 'crates/mold-cli/src/main.rs'
+              - 'desktop/src-tauri/src/main.rs'
               - 'crates/mold-cli/src/commands/lambda.rs'
               - 'crates/mold-cli/src/commands/runpod.rs'
               - 'crates/mold-core/src/cuda_distribution.rs'
@@ -134,6 +152,7 @@ jobs:
               - '.github/workflows/release.yml'
               - 'scripts/release/**'
               - 'scripts/verify-cuda-release-binary.sh'
+              - 'scripts/verify-h3-release-exclusion.sh'
               - 'scripts/probe-cuda-embedded-ptx.py'
               - 'scripts/seal-cuda-ptx-manifest.py'
               - 'scripts/create-release-provenance.sh'
@@ -146,6 +165,7 @@ jobs:
               - 'scripts/tests/cuda-ptx-parser-contract.py'
               - 'scripts/tests/install-cuda-arch.sh'
               - 'scripts/tests/cuda-qualification-contract.sh'
+              - 'scripts/tests/minimax-h3-attention-release-contract.sh'
               - 'scripts/qualify-cuda-sm86.sh'
               - 'docs/qualification/**'
               - 'scripts/tests/docker-web-context.sh'
@@ -185,6 +205,8 @@ jobs:
         run: bash scripts/tests/install-cuda-arch.sh
       - name: Test deferred CUDA qualification contract
         run: bash scripts/tests/cuda-qualification-contract.sh
+      - name: Test MiniMax H3 attention release-candidate contract
+        run: bash scripts/tests/minimax-h3-attention-release-contract.sh
 
   docs:
     needs: changes
@@ -413,6 +435,10 @@ jobs:
         run: cargo clippy -p mold-ai-inference --features flash-attn,dev-bins --all-targets -- -D warnings
       - name: Clippy the flash-attn binary wiring
         run: cargo clippy -p mold-ai --features flash-attn -- -D warnings
+      - name: Clippy the isolated MiniMax H3 release-candidate kernel
+        run: cargo clippy -p mold-ai-candle --features h3-flash-attn-rc --all-targets -- -D warnings
+      - name: Clippy the synthetic MiniMax H3 qualification probe
+        run: cargo clippy -p mold-ai-inference --features h3-attention-rc,dev-bins --bin h3_attention_qualification -- -D warnings
 
   metal-check:
     name: Metal forced-local typecheck

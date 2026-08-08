@@ -2899,7 +2899,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "flash-attn")]
+    #[cfg(feature = "h3-flash-attn-rc")]
     #[test]
     fn h3_stack_dispatches_through_qualified_flash_attention_on_cuda() -> Result<()> {
         let Ok(cuda) = Device::new_cuda(0) else {

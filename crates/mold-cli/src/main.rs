@@ -1537,6 +1537,11 @@ fn apply_spatial_tile_override(value: Option<&str>) {
 
 #[tokio::main]
 async fn main() {
+    // Keep positive compile-time exclusion provenance in every published CLI
+    // artifact even after LTO and stripping. Release verification rejects a
+    // missing marker as well as either compiled FlashAttention feature.
+    std::hint::black_box(mold_inference::h3_attention_release_provenance_marker());
+
     // Install a panic hook that prints a friendly crash report with a link
     // to file an issue.  This only fires on Rust panics — segfaults from
     // FFI/CUDA are OS signals and bypass this hook entirely.

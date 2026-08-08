@@ -7,11 +7,12 @@
 //! FlashAttention v2 primitive a separate, source- and hardware-qualified
 //! authority.
 //!
-//! The optional kernel is deliberately not a shipping claim. Mold's release,
-//! Nix, Docker, desktop, and AUR builds do not compile `flash-attn`, and doing
-//! so would require an explicit reproducibility-policy decision. The runtime
-//! authority below records that state and always fails its release-activation
-//! gate even in a developer build.
+//! The optional kernel is deliberately not a shipping claim. The dedicated
+//! `h3-flash-attn-rc` feature is reachable only from a synthetic qualification
+//! binary; Mold's release, Nix, Docker, desktop, and AUR builds compile neither
+//! it nor the global `flash-attn` feature. The runtime authority below records
+//! that state and always fails its release-activation gate even in a release-
+//! candidate build.
 
 use std::error::Error as StdError;
 use std::fmt;
@@ -19,16 +20,45 @@ use std::fmt;
 use candle::{DType, Device, Tensor, D};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::time::Instant;
 
 pub const H3_DENSE_SYNTHETIC_MAX_SCORE_ELEMENTS: u64 = 4 * 1024 * 1024;
 pub const H3_FLASH_ATTN_PACKAGE_VERSION: &str = "0.11.0";
 pub const H3_FLASH_ATTN_CRATE_SHA256: &str =
     "e5f1e2f29f5123d7a627171209fdaeb4ee91d076aefeac588922aa9842e30c2c";
 pub const H3_FLASH_ATTN_QUALIFIED_COMPUTE_CAPABILITY: (u16, u16) = (8, 9);
+pub const H3_ATTENTION_RC_SCHEMA: &str = "mold.minimax-h3.attention-rc.v1";
+pub const H3_ATTENTION_RC_FEATURE: &str = "h3-flash-attn-rc";
+pub const H3_ATTENTION_RC_CLAIM_MARKER: &str = "mold.minimax-h3.attention-rc.kernel-compiled.v1";
+pub const H3_ATTENTION_RELEASE_PROVENANCE_PREFIX: &str =
+    "mold.minimax-h3.attention-release-provenance.v2:";
+
+#[cfg(all(not(feature = "h3-flash-attn-rc"), not(feature = "flash-attn")))]
+pub const H3_ATTENTION_RELEASE_PROVENANCE_MARKER: &str =
+    "mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=omitted";
+#[cfg(all(feature = "h3-flash-attn-rc", not(feature = "flash-attn")))]
+pub const H3_ATTENTION_RELEASE_PROVENANCE_MARKER: &str =
+    "mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=omitted";
+#[cfg(all(not(feature = "h3-flash-attn-rc"), feature = "flash-attn"))]
+pub const H3_ATTENTION_RELEASE_PROVENANCE_MARKER: &str =
+    "mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=compiled";
+#[cfg(all(feature = "h3-flash-attn-rc", feature = "flash-attn"))]
+pub const H3_ATTENTION_RELEASE_PROVENANCE_MARKER: &str =
+    "mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=compiled";
 
 const H3_RELEASE_HEADS: usize = 56;
 const H3_RELEASE_HEAD_DIM: usize = 128;
 const PLAN_SCHEMA_VERSION: u32 = 1;
+
+/// Positive, compile-time provenance for release artifact inspection.
+///
+/// Exactly one marker is compiled from the same Cargo feature gates that make
+/// the H3 DiT and global FlashAttention code reachable. Published binaries
+/// deliberately retain this value and their verifier requires the omitted /
+/// omitted state; absence of evidence therefore fails closed.
+pub const fn h3_attention_release_provenance_marker() -> &'static str {
+    H3_ATTENTION_RELEASE_PROVENANCE_MARKER
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum H3AttentionDType {
@@ -197,14 +227,14 @@ impl H3AttentionKernel {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum H3AttentionActivation {
     SyntheticCorrectnessOnly,
-    DeveloperFeatureOnly,
+    ReleaseCandidateQualificationOnly,
 }
 
 impl H3AttentionActivation {
     const fn stable_id(self) -> &'static str {
         match self {
             Self::SyntheticCorrectnessOnly => "synthetic-correctness-only",
-            Self::DeveloperFeatureOnly => "developer-feature-only",
+            Self::ReleaseCandidateQualificationOnly => "release-candidate-qualification-only",
         }
     }
 }
@@ -226,6 +256,130 @@ impl H3AttentionModelContract {
     }
 }
 
+/// Compile-time identity of the isolated H3 attention release candidate.
+///
+/// A normal Mold build serializes this as `kernel_compiled = false` and has no
+/// claim marker. The marker exists only in an opt-in qualification binary and
+/// is forbidden by the release artifact verifier.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct H3AttentionReleaseCandidateBuild {
+    pub schema: String,
+    pub identity_sha256: String,
+    pub cargo_feature: String,
+    pub claim_marker: Option<String>,
+    pub kernel_compiled: bool,
+    pub compiled_compute_capability: Option<(u16, u16)>,
+    pub package_version: String,
+    pub package_sha256: String,
+    pub kernel: H3AttentionKernel,
+    pub mask: H3AttentionMask,
+    pub model_contract: H3AttentionModelContract,
+}
+
+impl H3AttentionReleaseCandidateBuild {
+    /// Inspect this exact compilation. `CUDA_COMPUTE_CAP` is captured by
+    /// rustc, not inferred from the runtime GPU, so a cached or cross-targeted
+    /// kernel cannot silently claim the device it happens to run on.
+    pub fn current() -> Self {
+        Self::from_build_inputs(
+            cfg!(feature = "h3-flash-attn-rc"),
+            option_env!("CUDA_COMPUTE_CAP"),
+        )
+    }
+
+    fn from_build_inputs(kernel_compiled: bool, cuda_compute_cap: Option<&str>) -> Self {
+        let compiled_compute_capability = cuda_compute_cap.and_then(parse_compute_capability);
+        let claim_marker = kernel_compiled.then(|| H3_ATTENTION_RC_CLAIM_MARKER.to_string());
+        let mut build = Self {
+            schema: H3_ATTENTION_RC_SCHEMA.to_string(),
+            identity_sha256: String::new(),
+            cargo_feature: H3_ATTENTION_RC_FEATURE.to_string(),
+            claim_marker,
+            kernel_compiled,
+            compiled_compute_capability,
+            package_version: H3_FLASH_ATTN_PACKAGE_VERSION.to_string(),
+            package_sha256: H3_FLASH_ATTN_CRATE_SHA256.to_string(),
+            kernel: H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011,
+            mask: H3AttentionMask::FullNonCausalPacked,
+            model_contract: H3AttentionModelContract::released_bf16(),
+        };
+        build.identity_sha256 = release_candidate_build_identity(&build);
+        build
+    }
+
+    /// Turn a compiled candidate into the exact runtime authority used by the
+    /// synthetic probe. Missing kernels, absent/unsupported build targets, and
+    /// build/device mismatches are all rejected before tensor allocation.
+    pub fn qualify(
+        &self,
+        device: H3AttentionDevice,
+    ) -> InspectionResult<H3AttentionRuntimeAuthority> {
+        self.validate_identity()?;
+        if !self.kernel_compiled {
+            return Err(failure(
+                H3AttentionErrorCode::KernelNotCompiled,
+                "MiniMax H3 release-candidate FlashAttention kernel is not compiled",
+                vec![H3AttentionRequirement::CompiledH3FlashAttentionV2],
+            ));
+        }
+        let compiled_target = self.compiled_compute_capability.ok_or_else(|| {
+            failure(
+                H3AttentionErrorCode::UnqualifiedArchitecture,
+                "MiniMax H3 release-candidate kernel has no parseable CUDA_COMPUTE_CAP build target",
+                vec![H3AttentionRequirement::QualifiedCudaSm89],
+            )
+        })?;
+        if compiled_target != H3_FLASH_ATTN_QUALIFIED_COMPUTE_CAPABILITY {
+            return Err(failure(
+                H3AttentionErrorCode::UnqualifiedArchitecture,
+                format!(
+                    "MiniMax H3 release-candidate kernel was compiled for SM{}{}, not qualified SM89",
+                    compiled_target.0, compiled_target.1
+                ),
+                vec![H3AttentionRequirement::QualifiedCudaSm89],
+            ));
+        }
+        if device
+            != (H3AttentionDevice::Cuda {
+                compute_capability: Some(compiled_target),
+            })
+        {
+            return Err(failure(
+                H3AttentionErrorCode::UnqualifiedArchitecture,
+                format!(
+                    "MiniMax H3 release-candidate kernel target SM{}{} does not match {}",
+                    compiled_target.0,
+                    compiled_target.1,
+                    device.stable_id()
+                ),
+                vec![H3AttentionRequirement::QualifiedCudaSm89],
+            ));
+        }
+        qualify_flash_attention_v2_with_availability(device, self.model_contract, true)
+    }
+
+    fn validate_identity(&self) -> InspectionResult<()> {
+        if self.schema != H3_ATTENTION_RC_SCHEMA
+            || self.cargo_feature != H3_ATTENTION_RC_FEATURE
+            || self.package_version != H3_FLASH_ATTN_PACKAGE_VERSION
+            || self.package_sha256 != H3_FLASH_ATTN_CRATE_SHA256
+            || self.kernel != H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011
+            || self.mask != H3AttentionMask::FullNonCausalPacked
+            || self.model_contract != H3AttentionModelContract::released_bf16()
+            || self.claim_marker.as_deref()
+                != self.kernel_compiled.then_some(H3_ATTENTION_RC_CLAIM_MARKER)
+            || self.identity_sha256 != release_candidate_build_identity(self)
+        {
+            return Err(failure(
+                H3AttentionErrorCode::FrozenIdentityMismatch,
+                "MiniMax H3 attention release-candidate build identity is inconsistent",
+                vec![H3AttentionRequirement::UntamperedFrozenPlan],
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct H3AttentionWorkspace {
     pub input_output_tensor_bytes: u64,
@@ -235,6 +389,30 @@ pub struct H3AttentionWorkspace {
     pub output_compute_bytes: u64,
     pub softmax_lse_bytes: u64,
     pub peak_auxiliary_bytes_upper_bound: u64,
+}
+
+/// Prompt/media-free evidence for one synchronized attention dispatch.
+///
+/// Qualification explicitly synchronizes the device before and after the
+/// kernel so `elapsed_micros` measures execution rather than only CUDA launch
+/// latency. The normal DiT path remains asynchronous and allocation-free.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct H3AttentionTelemetry {
+    pub schema: String,
+    pub plan_identity_sha256: String,
+    pub backend: H3AttentionBackend,
+    pub kernel: H3AttentionKernel,
+    pub activation: H3AttentionActivation,
+    pub device: H3AttentionDevice,
+    pub scope: H3AttentionScope,
+    pub mask: H3AttentionMask,
+    pub dtype: H3AttentionDType,
+    pub batch_size: usize,
+    pub sequence_rows: usize,
+    pub heads: usize,
+    pub head_dim: usize,
+    pub workspace: H3AttentionWorkspace,
+    pub elapsed_micros: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -440,7 +618,10 @@ impl H3AttentionRuntimeAuthority {
         device: H3AttentionDevice,
         contract: H3AttentionModelContract,
     ) -> InspectionResult<Self> {
-        qualify_flash_attention_v2_with_availability(device, contract, cfg!(feature = "flash-attn"))
+        if contract != H3AttentionModelContract::released_bf16() {
+            return qualify_flash_attention_v2_with_availability(device, contract, true);
+        }
+        H3AttentionReleaseCandidateBuild::current().qualify(device)
     }
 
     fn new(
@@ -635,6 +816,7 @@ impl H3AttentionRuntimeAuthority {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum H3AttentionRequirement {
     NonEmptySelfAttention,
+    NativeBatchOne,
     Bf16OrBoundedSyntheticF32,
     ReleasedBf16HeadGeometry,
     ExactModelContract,
@@ -761,7 +943,7 @@ fn validate_backend_contract(
         }
         H3AttentionBackend::FlashAttentionV2 => {
             if kernel != H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011
-                || activation != H3AttentionActivation::DeveloperFeatureOnly
+                || activation != H3AttentionActivation::ReleaseCandidateQualificationOnly
             {
                 return Err(failure(
                     H3AttentionErrorCode::RuntimePlanMismatch,
@@ -810,7 +992,7 @@ fn qualify_flash_attention_v2_with_availability(
     validate_backend_contract(
         H3AttentionBackend::FlashAttentionV2,
         H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011,
-        H3AttentionActivation::DeveloperFeatureOnly,
+        H3AttentionActivation::ReleaseCandidateQualificationOnly,
         device,
         contract,
     )?;
@@ -824,7 +1006,7 @@ fn qualify_flash_attention_v2_with_availability(
     Ok(H3AttentionRuntimeAuthority::new(
         H3AttentionBackend::FlashAttentionV2,
         H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011,
-        H3AttentionActivation::DeveloperFeatureOnly,
+        H3AttentionActivation::ReleaseCandidateQualificationOnly,
         device,
         contract,
     ))
@@ -840,12 +1022,59 @@ fn validate_flash_launch_shape(
     if backend != H3AttentionBackend::FlashAttentionV2 {
         return Ok(());
     }
+    if batch_size != 1 {
+        return Err(failure(
+            H3AttentionErrorCode::InvalidShape,
+            "MiniMax H3 release-candidate FlashAttention is qualified only for native batch 1",
+            vec![H3AttentionRequirement::NativeBatchOne],
+        ));
+    }
     let batch_stride = checked_product("FlashAttention batch stride", &[rows, heads, head_dim])?;
     let total_rows = checked_product("FlashAttention total rows", &[batch_size, rows])?;
-    if batch_stride > u32::MAX as u64 || total_rows > u32::MAX as u64 {
+    let rounded_rows = (rows as u64)
+        .checked_add(127)
+        .map(|value| value / 128 * 128)
+        .ok_or_else(|| {
+            failure(
+                H3AttentionErrorCode::ArithmeticOverflow,
+                "MiniMax H3 FlashAttention rounded sequence length overflows",
+                vec![H3AttentionRequirement::FlashAttentionU32LaunchShape],
+            )
+        })?;
+    if batch_stride > u32::MAX as u64
+        || total_rows > u32::MAX as u64
+        || rounded_rows > u32::MAX as u64
+    {
         return Err(failure(
             H3AttentionErrorCode::InvalidShape,
             "MiniMax H3 attention shape exceeds Candle FlashAttention's u32 launch contract",
+            vec![H3AttentionRequirement::FlashAttentionU32LaunchShape],
+        ));
+    }
+    Ok(())
+}
+
+fn validate_flash_tensor_strides(label: &str, strides: &[usize]) -> InspectionResult<()> {
+    if strides.len() != 4 || strides.last() != Some(&1) {
+        return Err(failure(
+            H3AttentionErrorCode::RuntimePlanMismatch,
+            format!(
+                "MiniMax H3 FlashAttention {label} must be rank-4 BNHD with unit head-dimension stride, got {strides:?}"
+            ),
+            vec![H3AttentionRequirement::ExactModelContract],
+        ));
+    }
+    if let Some((dimension, stride)) = strides
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, stride)| *stride > u32::MAX as usize)
+    {
+        return Err(failure(
+            H3AttentionErrorCode::RuntimePlanMismatch,
+            format!(
+                "MiniMax H3 FlashAttention {label} stride {dimension} value {stride} exceeds Candle FlashAttention's u32 FFI contract"
+            ),
             vec![H3AttentionRequirement::FlashAttentionU32LaunchShape],
         ));
     }
@@ -962,6 +1191,42 @@ fn workspace_for(
             })
         }
     }
+}
+
+fn parse_compute_capability(raw: &str) -> Option<(u16, u16)> {
+    let raw = raw.trim();
+    if raw.len() < 2 || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let (major, minor) = raw.split_at(raw.len() - 1);
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+fn release_candidate_build_identity(build: &H3AttentionReleaseCandidateBuild) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"minimax-h3-attention-release-candidate-build-v1");
+    digest.update(build.schema.as_bytes());
+    digest.update(build.cargo_feature.as_bytes());
+    digest.update([u8::from(build.kernel_compiled)]);
+    match build.compiled_compute_capability {
+        Some((major, minor)) => {
+            digest.update([1]);
+            digest.update(major.to_le_bytes());
+            digest.update(minor.to_le_bytes());
+        }
+        None => digest.update([0]),
+    }
+    if let Some(marker) = build.claim_marker.as_deref() {
+        digest.update(marker.as_bytes());
+    }
+    digest.update(build.package_version.as_bytes());
+    digest.update(build.package_sha256.as_bytes());
+    digest.update(build.kernel.stable_id().as_bytes());
+    digest.update(build.mask.stable_id().as_bytes());
+    digest.update((build.model_contract.heads as u64).to_le_bytes());
+    digest.update((build.model_contract.head_dim as u64).to_le_bytes());
+    digest.update(build.model_contract.dtype.stable_id().as_bytes());
+    hex_digest(digest.finalize())
 }
 
 fn runtime_identity(authority: &H3AttentionRuntimeAuthority) -> String {
@@ -1089,19 +1354,54 @@ pub fn execute_h3_attention(
     match plan.kernel {
         H3AttentionKernel::CandleDenseF32V011 => dense_attention(q, k, v, scale),
         H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011 => {
-            if q.stride().last() != Some(&1)
-                || k.stride().last() != Some(&1)
-                || v.stride().last() != Some(&1)
-            {
-                return Err(failure(
-                    H3AttentionErrorCode::RuntimePlanMismatch,
-                    "MiniMax H3 FlashAttention Q/K/V must have unit head-dimension stride",
-                    vec![H3AttentionRequirement::ExactModelContract],
-                ));
-            }
+            validate_flash_tensor_strides("query", q.stride())?;
+            validate_flash_tensor_strides("key", k.stride())?;
+            validate_flash_tensor_strides("value", v.stride())?;
             flash_attention(q, k, v, scale)
         }
     }
+}
+
+/// Execute and synchronously time one synthetic qualification dispatch.
+///
+/// This is intentionally a separate API from [`execute_h3_attention`]: a
+/// future authorized production runtime must choose its own sampling and
+/// synchronization policy rather than paying a device-wide barrier in every
+/// transformer block.
+pub fn execute_h3_attention_with_telemetry(
+    plan: &H3FrozenAttentionPlan,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+) -> InspectionResult<(Tensor, H3AttentionTelemetry)> {
+    plan.validate_identity()?;
+    q.device()
+        .synchronize()
+        .map_err(|error| kernel_error("pre-qualification synchronization", error))?;
+    let started = Instant::now();
+    let output = execute_h3_attention(plan, q, k, v)?;
+    q.device()
+        .synchronize()
+        .map_err(|error| kernel_error("post-qualification synchronization", error))?;
+    let elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let telemetry = H3AttentionTelemetry {
+        schema: H3_ATTENTION_RC_SCHEMA.to_string(),
+        plan_identity_sha256: plan.identity_sha256.clone(),
+        backend: plan.backend,
+        kernel: plan.kernel,
+        activation: plan.activation,
+        device: plan.device,
+        scope: plan.scope,
+        mask: plan.mask,
+        dtype: plan.dtype,
+        batch_size: plan.batch_size,
+        sequence_rows: plan.query_rows,
+        heads: plan.heads,
+        head_dim: plan.head_dim,
+        workspace: plan.workspace.clone(),
+        elapsed_micros,
+    };
+    Ok((output, telemetry))
 }
 
 fn kernel_shape_error(name: &str, error: candle::Error) -> H3AttentionError {
@@ -1155,13 +1455,13 @@ fn dense_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Inspection
         .map_err(|error| kernel_error("dense output", error))
 }
 
-#[cfg(feature = "flash-attn")]
+#[cfg(feature = "h3-flash-attn-rc")]
 fn flash_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> InspectionResult<Tensor> {
     candle_flash_attn::flash_attn(q, k, v, scale, false)
         .map_err(|error| kernel_error("FlashAttention v2 forward", error))
 }
 
-#[cfg(not(feature = "flash-attn"))]
+#[cfg(not(feature = "h3-flash-attn-rc"))]
 fn flash_attention(_: &Tensor, _: &Tensor, _: &Tensor, _: f32) -> InspectionResult<Tensor> {
     Err(failure(
         H3AttentionErrorCode::KernelNotCompiled,
@@ -1186,6 +1486,72 @@ mod tests {
     }
 
     #[test]
+    fn release_candidate_build_requires_kernel_target_and_matching_sm89_device() {
+        let sm89 = H3AttentionDevice::Cuda {
+            compute_capability: Some((8, 9)),
+        };
+        let omitted = H3AttentionReleaseCandidateBuild::from_build_inputs(false, None);
+        assert_eq!(omitted.claim_marker, None);
+        assert_eq!(
+            omitted.qualify(sm89).unwrap_err().code,
+            H3AttentionErrorCode::KernelNotCompiled
+        );
+
+        for raw_target in [None, Some("8.9"), Some("86"), Some("90"), Some("invalid")] {
+            let build = H3AttentionReleaseCandidateBuild::from_build_inputs(true, raw_target);
+            assert_eq!(
+                build.qualify(sm89).unwrap_err().code,
+                H3AttentionErrorCode::UnqualifiedArchitecture
+            );
+        }
+
+        let exact = H3AttentionReleaseCandidateBuild::from_build_inputs(true, Some("89"));
+        assert_eq!(exact.compiled_compute_capability, Some((8, 9)));
+        assert_eq!(
+            exact.claim_marker.as_deref(),
+            Some(H3_ATTENTION_RC_CLAIM_MARKER)
+        );
+        assert_eq!(exact.identity_sha256.len(), 64);
+        assert_eq!(
+            exact
+                .qualify(H3AttentionDevice::Cuda {
+                    compute_capability: Some((9, 0)),
+                })
+                .unwrap_err()
+                .code,
+            H3AttentionErrorCode::UnqualifiedArchitecture
+        );
+        assert_eq!(
+            exact.qualify(sm89).unwrap().activation(),
+            H3AttentionActivation::ReleaseCandidateQualificationOnly
+        );
+
+        let mut forged = exact;
+        forged.kernel_compiled = false;
+        assert_eq!(
+            forged.qualify(sm89).unwrap_err().code,
+            H3AttentionErrorCode::FrozenIdentityMismatch
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "h3-flash-attn-rc"))]
+    fn ordinary_build_carries_no_h3_attention_release_candidate_claim() {
+        let build = H3AttentionReleaseCandidateBuild::current();
+        assert!(!build.kernel_compiled);
+        assert!(build.claim_marker.is_none());
+        assert_eq!(
+            build
+                .qualify(H3AttentionDevice::Cuda {
+                    compute_capability: Some((8, 9)),
+                })
+                .unwrap_err()
+                .code,
+            H3AttentionErrorCode::KernelNotCompiled
+        );
+    }
+
+    #[test]
     fn released_flash_authority_is_exact_and_never_release_activated() {
         let authority = exact_flash_candidate();
         assert_eq!(authority.backend(), H3AttentionBackend::FlashAttentionV2);
@@ -1195,7 +1561,7 @@ mod tests {
         );
         assert_eq!(
             authority.activation(),
-            H3AttentionActivation::DeveloperFeatureOnly
+            H3AttentionActivation::ReleaseCandidateQualificationOnly
         );
         assert_eq!(authority.identity_sha256().len(), 64);
         assert_eq!(H3_FLASH_ATTN_PACKAGE_VERSION, "0.11.0");
@@ -1318,6 +1684,73 @@ mod tests {
     }
 
     #[test]
+    fn flash_release_candidate_rejects_non_native_batch() {
+        let authority = exact_flash_candidate();
+        for batch_size in [2, 8] {
+            let error = authority
+                .freeze_execution(batch_size, 256, 37_296)
+                .unwrap_err();
+            assert_eq!(error.code, H3AttentionErrorCode::InvalidShape);
+            assert!(error
+                .requirements
+                .contains(&H3AttentionRequirement::NativeBatchOne));
+        }
+
+        let mut forged = authority
+            .freeze_execution(1, 8, 8)
+            .unwrap()
+            .packed_transformer;
+        forged.batch_size = 2;
+        forged.identity_sha256 = plan_identity(&forged);
+        let error = forged.validate_identity().unwrap_err();
+        assert_eq!(error.code, H3AttentionErrorCode::InvalidShape);
+        assert!(error
+            .requirements
+            .contains(&H3AttentionRequirement::NativeBatchOne));
+
+        let dense = H3AttentionRuntimeAuthority::bounded_synthetic_math(
+            H3AttentionDevice::Cpu,
+            H3AttentionModelContract::released_bf16(),
+        )
+        .unwrap();
+        assert!(dense.freeze_execution(2, 8, 8).is_ok());
+    }
+
+    #[test]
+    fn flash_tensor_strides_are_checked_before_u32_ffi_conversion() {
+        assert!(validate_flash_tensor_strides("query", &[1_048_576, 8_192, 128, 1]).is_ok());
+
+        let non_unit_head_stride =
+            validate_flash_tensor_strides("query", &[16, 8, 2, 2]).unwrap_err();
+        assert_eq!(
+            non_unit_head_stride.code,
+            H3AttentionErrorCode::RuntimePlanMismatch
+        );
+        assert!(non_unit_head_stride
+            .requirements
+            .contains(&H3AttentionRequirement::ExactModelContract));
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            let oversized = u32::MAX as usize + 1;
+            for dimension in 0..3 {
+                let mut strides = [1_048_576, 8_192, 128, 1];
+                strides[dimension] = oversized;
+                let error = validate_flash_tensor_strides("query", &strides).unwrap_err();
+                assert_eq!(error.code, H3AttentionErrorCode::RuntimePlanMismatch);
+                assert!(error
+                    .requirements
+                    .contains(&H3AttentionRequirement::FlashAttentionU32LaunchShape));
+            }
+            assert!(validate_flash_tensor_strides(
+                "query",
+                &[u32::MAX as usize, u32::MAX as usize, u32::MAX as usize, 1]
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
     fn frozen_plan_mutation_and_tensor_shape_mismatch_are_rejected() {
         let authority = H3AttentionRuntimeAuthority::bounded_synthetic_math(
             H3AttentionDevice::Cpu,
@@ -1429,6 +1862,34 @@ mod tests {
         assert!(max <= 1e-6, "dense max difference {max}");
     }
 
+    #[test]
+    fn qualification_telemetry_contains_only_frozen_geometry_and_timing() {
+        let authority = H3AttentionRuntimeAuthority::bounded_synthetic_math(
+            H3AttentionDevice::Cpu,
+            H3AttentionModelContract {
+                heads: 2,
+                head_dim: 8,
+                dtype: H3AttentionDType::F32,
+            },
+        )
+        .unwrap();
+        let plan = authority
+            .freeze_execution(1, 3, 5)
+            .unwrap()
+            .packed_transformer;
+        let q = Tensor::zeros((1, 5, 2, 8), DType::F32, &Device::Cpu).unwrap();
+        let (output, telemetry) = execute_h3_attention_with_telemetry(&plan, &q, &q, &q).unwrap();
+        assert_eq!(output.dims(), &[1, 5, 2, 8]);
+        assert_eq!(telemetry.schema, H3_ATTENTION_RC_SCHEMA);
+        assert_eq!(telemetry.plan_identity_sha256, plan.identity_sha256());
+        assert_eq!(telemetry.scope, H3AttentionScope::PackedTransformer);
+        assert_eq!(telemetry.mask, H3AttentionMask::FullNonCausalPacked);
+        assert_eq!(telemetry.sequence_rows, 5);
+        assert_eq!(telemetry.heads, 2);
+        assert_eq!(telemetry.head_dim, 8);
+        assert_eq!(telemetry.workspace, plan.workspace().clone());
+    }
+
     #[cfg(feature = "metal")]
     #[test]
     fn metal_keeps_only_the_bounded_synthetic_dense_path() -> candle::Result<()> {
@@ -1469,9 +1930,21 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "flash-attn")]
+    #[cfg(feature = "h3-flash-attn-rc")]
     #[test]
     fn flash_bf16_cpu_reference_cuda_parity() -> candle::Result<()> {
+        fn deterministic_probe_values(count: usize, seed: u64, scale: f32) -> Vec<f32> {
+            (0..count)
+                .map(|index| {
+                    let mut value = (index as u64).wrapping_add(seed);
+                    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                    value ^= value >> 31;
+                    (((value >> 48) as i32 - 32_768) as f32 / 65_536.0) * scale
+                })
+                .collect()
+        }
+
         let Ok(cuda) = Device::new_cuda(0) else {
             return Ok(());
         };
@@ -1490,29 +1963,62 @@ mod tests {
         let flash_plan = flash.freeze_execution(1, 7, 37).unwrap().packed_transformer;
         let dense_plan = dense.freeze_execution(1, 7, 37).unwrap().packed_transformer;
         let count = 37 * H3_RELEASE_HEADS * H3_RELEASE_HEAD_DIM;
-        let values = (0..count)
-            .map(|index| ((index % 251) as f32 - 125.0) / 211.0)
-            .collect::<Vec<_>>();
-        let cpu = Tensor::from_vec(
-            values.clone(),
+        let q_cpu = Tensor::from_vec(
+            deterministic_probe_values(count, 0x243f_6a88_85a3_08d3, 2.0),
             (1, 37, H3_RELEASE_HEADS, H3_RELEASE_HEAD_DIM),
             &Device::Cpu,
         )?
         .to_dtype(DType::BF16)?;
-        let gpu = Tensor::from_vec(
-            values,
+        let k_cpu = Tensor::from_vec(
+            deterministic_probe_values(count, 0x1319_8a2e_0370_7344, 2.0),
+            (1, 37, H3_RELEASE_HEADS, H3_RELEASE_HEAD_DIM),
+            &Device::Cpu,
+        )?
+        .to_dtype(DType::BF16)?;
+        let v_cpu = Tensor::from_vec(
+            deterministic_probe_values(count, 0xa409_3822_299f_31d0, 1.0),
+            (1, 37, H3_RELEASE_HEADS, H3_RELEASE_HEAD_DIM),
+            &Device::Cpu,
+        )?
+        .to_dtype(DType::BF16)?;
+        let q_gpu = Tensor::from_vec(
+            deterministic_probe_values(count, 0x243f_6a88_85a3_08d3, 2.0),
             (1, 37, H3_RELEASE_HEADS, H3_RELEASE_HEAD_DIM),
             &cuda,
         )?
         .to_dtype(DType::BF16)?;
-        let cpu_out = execute_h3_attention(&dense_plan, &cpu, &(&cpu / 3.0)?, &(&cpu / 5.0)?)
+        let k_gpu = Tensor::from_vec(
+            deterministic_probe_values(count, 0x1319_8a2e_0370_7344, 2.0),
+            (1, 37, H3_RELEASE_HEADS, H3_RELEASE_HEAD_DIM),
+            &cuda,
+        )?
+        .to_dtype(DType::BF16)?;
+        let v_gpu = Tensor::from_vec(
+            deterministic_probe_values(count, 0xa409_3822_299f_31d0, 1.0),
+            (1, 37, H3_RELEASE_HEADS, H3_RELEASE_HEAD_DIM),
+            &cuda,
+        )?
+        .to_dtype(DType::BF16)?;
+        let cpu_out = execute_h3_attention(&dense_plan, &q_cpu, &k_cpu, &v_cpu)
             .unwrap()
             .to_dtype(DType::F32)?;
-        let gpu_out = execute_h3_attention(&flash_plan, &gpu, &(&gpu / 3.0)?, &(&gpu / 5.0)?)
+        let swapped_out = execute_h3_attention(&dense_plan, &k_cpu, &q_cpu, &v_cpu)
+            .unwrap()
+            .to_dtype(DType::F32)?;
+        let swap_max = (&cpu_out - swapped_out)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        assert!(
+            swap_max > 0.02,
+            "qualification vectors do not expose swapped Q/K wiring: {swap_max}"
+        );
+        let gpu_out = execute_h3_attention(&flash_plan, &q_gpu, &k_gpu, &v_gpu)
             .unwrap()
             .to_device(&Device::Cpu)?
             .to_dtype(DType::F32)?;
-        let max = (cpu_out - gpu_out)?
+        let max = (&cpu_out - gpu_out)?
             .abs()?
             .flatten_all()?
             .max(0)?

@@ -122,6 +122,7 @@ RUN cargo build --release -p mold-ai --features cuda,expand,discord,tui,webp,mp4
 COPY crates/ crates/
 COPY scripts/seal-cuda-ptx-manifest.py scripts/seal-cuda-ptx-manifest.py
 COPY scripts/probe-cuda-embedded-ptx.py scripts/probe-cuda-embedded-ptx.py
+COPY scripts/verify-h3-release-exclusion.sh scripts/verify-h3-release-exclusion.sh
 
 # Touch source files to invalidate the stub builds but keep dep artifacts
 RUN find crates/ -name "*.rs" -exec touch {} +
@@ -137,6 +138,7 @@ RUN scripts/seal-cuda-ptx-manifest.py /build/target/release/mold \
     "${CUDA_COMPUTE_CAP}" /build/target/release/build
 RUN scripts/probe-cuda-embedded-ptx.py /build/target/release/mold \
     "${CUDA_COMPUTE_CAP}" --extract-only >/dev/null
+RUN scripts/verify-h3-release-exclusion.sh /build/target/release/mold
 
 # Verify no unexpected missing libraries (libcuda.so.1 is expected to be
 # absent — it's the NVIDIA driver, injected at runtime by the container toolkit)
