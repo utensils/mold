@@ -11,6 +11,8 @@ pub(crate) mod pipeline;
 #[cfg(feature = "h3-private-uat")]
 pub mod private_qualification;
 #[cfg(feature = "h3-private-uat")]
+pub(crate) mod private_qwen;
+#[cfg(feature = "h3-private-uat")]
 pub(crate) mod private_qwen_support;
 #[cfg(feature = "h3-private-uat")]
 pub(crate) mod private_runtime;
@@ -25,7 +27,7 @@ use candle_core::{Device, Tensor};
 use mold_candle::minimax_h3::{
     load_prepared_bf16_conditioner, prepare_conditioner_assets_with_progress, ArtifactError,
     ConditionerArtifacts, ConditionerCheckpoint, H3ConditionerInput, H3DTypeProfile,
-    H3Layer50Conditioner, H3LoadError, PreparedH3ConditionerAssets, H3_BF16_PARAMETER_BYTES,
+    H3Layer50Conditioner, H3LoadError, PreparedH3ConditionerAssets,
 };
 use std::time::Instant;
 use tokenizers::Tokenizer;
@@ -59,20 +61,40 @@ impl FrozenH3ConditionerPlacement {
         device_id: impl Into<String>,
         execution: H3ConditionerExecution,
         execution_fingerprint: impl Into<String>,
+        host_resident_parameter_bytes: u64,
+        device_resident_parameter_bytes: u64,
         activation_workspace_bytes: u64,
     ) -> Result<Self> {
-        if activation_workspace_bytes == 0 {
+        let resident_parameter_bytes = host_resident_parameter_bytes
+            .checked_add(device_resident_parameter_bytes)
+            .ok_or_else(|| anyhow!("H3 conditioner resident parameter bytes overflow"))?;
+        if resident_parameter_bytes == 0 || activation_workspace_bytes == 0 {
             return Err(anyhow!(
-                "H3 conditioner placement must charge a nonzero activation workspace"
+                "H3 conditioner placement must charge nonzero parameter and activation bytes"
             ));
         }
-        let resident_parameter_bytes = H3_BF16_PARAMETER_BYTES;
-        let total = resident_parameter_bytes
-            .checked_add(activation_workspace_bytes)
-            .ok_or_else(|| anyhow!("H3 conditioner memory charge overflow"))?;
         let (charged_host_bytes, charged_vram_bytes) = match execution {
-            H3ConditionerExecution::CudaResident => (0, total),
-            H3ConditionerExecution::CpuOffloaded => (total, 0),
+            H3ConditionerExecution::CudaResident if device_resident_parameter_bytes > 0 => (
+                host_resident_parameter_bytes,
+                device_resident_parameter_bytes
+                    .checked_add(activation_workspace_bytes)
+                    .ok_or_else(|| anyhow!("H3 conditioner VRAM charge overflow"))?,
+            ),
+            H3ConditionerExecution::CpuOffloaded
+                if host_resident_parameter_bytes > 0 && device_resident_parameter_bytes == 0 =>
+            {
+                (
+                    host_resident_parameter_bytes
+                        .checked_add(activation_workspace_bytes)
+                        .ok_or_else(|| anyhow!("H3 conditioner host charge overflow"))?,
+                    0,
+                )
+            }
+            _ => {
+                return Err(anyhow!(
+                    "H3 conditioner parameter residency differs from its execution placement"
+                ))
+            }
         };
         let device_id = device_id.into();
         let execution_fingerprint = execution_fingerprint.into();
@@ -409,17 +431,19 @@ mod tests {
             "cpu",
             H3ConditionerExecution::CpuOffloaded,
             "frozen",
+            mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES,
+            0,
             2_000_000_000,
         )
         .unwrap();
         assert_eq!(
             placement.memory.resident_parameter_bytes,
-            H3_BF16_PARAMETER_BYTES
+            mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES
         );
         assert_eq!(placement.memory.charged_vram_bytes, 0);
         assert_eq!(
             placement.memory.charged_host_bytes,
-            H3_BF16_PARAMETER_BYTES + 2_000_000_000
+            mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES + 2_000_000_000
         );
     }
 
@@ -436,6 +460,8 @@ mod tests {
             "cpu-a",
             H3ConditionerExecution::CpuOffloaded,
             "frozen",
+            mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES,
+            0,
             1,
         )
         .unwrap();
@@ -456,6 +482,8 @@ mod tests {
             "cpu",
             H3ConditionerExecution::CudaResident,
             "frozen",
+            0,
+            mold_candle::minimax_h3::H3_BF16_PARAMETER_BYTES,
             1,
         )
         .unwrap();

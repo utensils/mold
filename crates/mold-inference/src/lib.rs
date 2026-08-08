@@ -34,6 +34,13 @@ pub mod ltx_video;
 pub(crate) mod minimax_h3;
 #[cfg(feature = "h3-private-uat")]
 pub use minimax_h3::private_qualification;
+#[cfg(feature = "h3-private-uat")]
+#[doc(hidden)]
+pub use minimax_h3::private_qwen::{
+    released_h3_private_qwen_loader_memory_authority, released_h3_private_qwen_output_tensor_bytes,
+    validate_h3_private_qwen_loader_memory_authority, H3PrivateQwenLoaderMemoryAuthority,
+    H3PrivateQwenLoaderMemoryRoute,
+};
 pub mod model_registry;
 pub(crate) mod nvfp4;
 pub mod progress;

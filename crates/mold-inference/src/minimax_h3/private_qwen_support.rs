@@ -201,6 +201,7 @@ impl OpenedSupportArtifact {
 /// identity, and a revalidation operation.
 pub(crate) struct H3PrivateQwenSupport {
     model: String,
+    task: Task,
     conditioner_config: H3ConditionerConfig,
     tokenizer: Arc<Tokenizer>,
     support_identity_sha256: String,
@@ -210,6 +211,10 @@ pub(crate) struct H3PrivateQwenSupport {
 impl H3PrivateQwenSupport {
     pub(crate) fn model(&self) -> &str {
         &self.model
+    }
+
+    pub(crate) const fn task(&self) -> Task {
+        self.task
     }
 
     pub(crate) fn conditioner_config(&self) -> &H3ConditionerConfig {
@@ -329,6 +334,7 @@ fn load_support_from_contracts_at_boundary(
     root_validated: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<H3PrivateQwenSupport> {
     validate_contract_set(&contracts)?;
+    let task = private_comfy_task(model)?;
     if !models_root.is_absolute() {
         bail!("private H3 models root must be absolute")
     }
@@ -376,6 +382,7 @@ fn load_support_from_contracts_at_boundary(
 
     let support = H3PrivateQwenSupport {
         model: model.to_owned(),
+        task,
         conditioner_config,
         tokenizer: Arc::new(tokenizer),
         support_identity_sha256,
@@ -383,6 +390,17 @@ fn load_support_from_contracts_at_boundary(
     };
     support.revalidate()?;
     Ok(support)
+}
+
+fn private_comfy_task(model: &str) -> Result<Task> {
+    let capability = contract::capability_contract_for_model(model)
+        .ok_or_else(|| anyhow!("private H3 Qwen support model has no capability contract"))?;
+    if capability.canonical_model != model
+        || capability.layout != Layout::ComfyPrunedInt8ConvrotNvfp4Awq
+    {
+        bail!("private H3 Qwen support requires an exact Comfy canonical model")
+    }
+    Ok(capability.task)
 }
 
 fn validate_models_root_identity(path: &Path, expected: &FileIdentity) -> Result<()> {

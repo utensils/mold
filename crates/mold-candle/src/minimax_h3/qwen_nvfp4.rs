@@ -696,10 +696,6 @@ impl OpenedH3QwenNvfp4AwqArtifact {
         &self.policy
     }
 
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub(crate) fn tensors(&self) -> &BTreeMap<String, H3SafetensorsTensorHeader> {
         &self.header.tensors
     }

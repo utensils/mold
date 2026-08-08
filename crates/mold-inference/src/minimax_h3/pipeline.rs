@@ -326,6 +326,8 @@ impl H3PipelineBackendIdentity {
 pub(crate) struct H3TextConditioning {
     pub states: Tensor,
     pub tags: Vec<H3ModalityTag>,
+    #[cfg(test)]
+    pub lifetime_probe: Option<std::sync::Arc<()>>,
 }
 
 impl H3TextConditioning {
@@ -377,6 +379,9 @@ pub(crate) trait H3Fl2VaBackend {
         checkpoint: &mut dyn H3PipelineCheckpoint,
     ) -> Result<Tensor>;
 
+    /// Borrowed inputs are call-scoped. Implementations must not clone or
+    /// retain text states after returning; the orchestrator releases them
+    /// immediately after the final forward to satisfy the frozen phase plan.
     fn denoise(
         &mut self,
         input: H3ForwardInput<'_>,
@@ -776,6 +781,10 @@ pub(crate) fn execute_staged(
             total: progress_after.total_evaluations,
         })?;
     }
+    // Text states are borrowed by every transformer forward but no decoder.
+    // End their device residency at the exact denoise boundary on success;
+    // ordinary unwinding provides the same guarantee for cancellation/errors.
+    drop(text);
 
     let generated_video_rows =
         video_rows.narrow(1, packed.condition_video_rows, packed.generated_video_rows)?;
@@ -1673,7 +1682,7 @@ fn mode_name(mode: Mode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, Weak};
 
     use image::{DynamicImage, ImageFormat, Rgb};
     use mold_candle::minimax_h3::{
@@ -1780,6 +1789,7 @@ mod tests {
         condition_values: Arc<Mutex<Vec<f32>>>,
         condition_rows_to_watch: usize,
         observed_condition_rows: Vec<Vec<f32>>,
+        text_lifetime: Option<Weak<()>>,
     }
 
     impl SyntheticBackend {
@@ -1798,7 +1808,14 @@ mod tests {
                 condition_values: Arc::new(Mutex::new(Vec::new())),
                 condition_rows_to_watch: 0,
                 observed_condition_rows: Vec::new(),
+                text_lifetime: None,
             }
+        }
+
+        fn text_was_dropped(&self) -> bool {
+            self.text_lifetime
+                .as_ref()
+                .is_some_and(|lifetime| lifetime.upgrade().is_none())
         }
     }
 
@@ -1826,9 +1843,12 @@ mod tests {
             for _ in endpoints {
                 tags.extend([H3ModalityTag::Text, H3ModalityTag::Vision]);
             }
+            let lifetime = Arc::new(());
+            self.text_lifetime = Some(Arc::downgrade(&lifetime));
             Ok(H3TextConditioning {
                 states: Tensor::zeros((1, tags.len(), TEXT_STATE_WIDTH), DType::F32, &self.device)?,
                 tags,
+                lifetime_probe: Some(lifetime),
             })
         }
 
@@ -1899,6 +1919,7 @@ mod tests {
             sink: &mut H3VideoEncodeSink,
             checkpoint: &mut dyn H3PipelineCheckpoint,
         ) -> Result<()> {
+            assert!(self.text_was_dropped());
             assert_eq!(latents.dims(), [1, 24, 37, 2, 2]);
             for frame in 0..124 {
                 checkpoint.checkpoint(H3PipelineEvent {
@@ -1920,6 +1941,7 @@ mod tests {
             latents: &StereoLatents,
             checkpoint: &mut dyn H3PipelineCheckpoint,
         ) -> Result<StereoWaveform> {
+            assert!(self.text_was_dropped());
             assert_eq!(latents.normalized().dims(), [1, 32, 2, 207]);
             checkpoint.checkpoint(H3PipelineEvent {
                 phase: H3PipelinePhase::AudioDecodeChunk,
@@ -2142,6 +2164,7 @@ mod tests {
         .unwrap();
         assert_eq!(backend.forwards, 3);
         assert!(backend.decoded_video && backend.decoded_audio);
+        assert!(backend.text_was_dropped());
         assert_eq!(*backend.condition_values.lock().unwrap(), [0.25, -0.5]);
         assert_eq!(backend.observed_condition_rows.len(), 3);
         assert!(backend
@@ -2242,6 +2265,7 @@ mod tests {
         assert_eq!(backend.forwards, 1);
         assert!(!backend.decoded_video);
         assert!(!backend.decoded_audio);
+        assert!(backend.text_was_dropped());
     }
 
     #[test]

@@ -44,6 +44,19 @@ require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
 if grep -Eq '^h3-private-uat[[:space:]]*=' crates/mold-cli/Cargo.toml; then
   fail "mold-ai forwards the private H3 UAT feature into a runnable product binary"
 fi
+server_dev_dependencies=$(sed -n '/^\[dev-dependencies\]/,/^\[/p' crates/mold-server/Cargo.toml)
+if ! grep -Eq '^mold-inference[[:space:]]*=.*path[[:space:]]*=[[:space:]]*"\.\./mold-inference".*package[[:space:]]*=[[:space:]]*"mold-ai-inference".*features[[:space:]]*=[[:space:]]*\["h3-private-uat"\]' \
+  <<<"$server_dev_dependencies"; then
+  fail "mold-server tests do not unify the private H3 loader for bridge verification"
+fi
+server_dependencies=$(sed -n '/^\[dependencies\]/,/^\[/p' crates/mold-server/Cargo.toml)
+if grep -Eq '^mold-inference[[:space:]]*=.*h3-private-uat' <<<"$server_dependencies"; then
+  fail "mold-ai-server activates the private H3 UAT path through an ordinary dependency"
+fi
+if sed -n '/^\[features\]/,/^\[/p' crates/mold-server/Cargo.toml \
+  | grep -Eq '^h3-private-uat[[:space:]]*='; then
+  fail "mold-ai-server forwards the private H3 UAT feature into a runnable product binary"
+fi
 
 release_feature_sources="$({
   grep -E -- '--features|releaseFeatures[[:space:]]*=|buildFeatures[[:space:]]*=' \
