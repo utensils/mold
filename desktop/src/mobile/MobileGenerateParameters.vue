@@ -224,7 +224,6 @@ function snapFramesField(): void {
       : Math.max(frameMinimum.value, snapVideoFrames(props.form.frames, videoContract.value));
 }
 
-
 const cameraMode = ref(cameraMotionMode(props.form.cameraControl));
 watch(
   () => props.form.cameraControl,
