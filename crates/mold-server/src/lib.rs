@@ -11,6 +11,7 @@ pub mod chain_limits;
 mod gallery_authority;
 #[allow(dead_code)]
 mod h3_admission;
+mod h3_attempt;
 pub mod test_support;
 // Agent A (downloads)
 pub mod device_registry;

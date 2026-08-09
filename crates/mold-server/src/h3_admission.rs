@@ -3190,6 +3190,11 @@ mod tests {
         );
         assert_eq!(authority.prefetch_depth(), plan.prefetch_depth as usize);
         assert_eq!(authority.component_set_identity_sha256().len(), 64);
+        assert_eq!(
+            authority.prepared_target_attempt_identities(),
+            None,
+            "production admission must not populate the future attempt/target identity triad",
+        );
         assert!(authority.block_offload());
         assert!(matches!(
             authority.quantization(),

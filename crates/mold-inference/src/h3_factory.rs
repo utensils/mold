@@ -2198,6 +2198,31 @@ impl FrozenH3FactoryAuthority {
         self.backend_plan.execution_fingerprint()
     }
 
+    /// Clone-free identity projection for the future server-owned one-shot
+    /// attempt root.
+    ///
+    /// Returning `None` is the production state today: server admission does
+    /// not populate the prepared-attempt, target-budget echo, or typed
+    /// attention triad. These value identities alone never make an authority
+    /// executable and do not remove any activation prerequisite.
+    pub fn prepared_target_attempt_identities(&self) -> Option<(&str, &str)> {
+        match (
+            &self.prepared_attempt,
+            &self.execution_budget_echo,
+            &self.attention_runtime,
+        ) {
+            (Some(attempt), Some(budget), Some(_))
+                if budget.prepared_attempt_identity_sha256 == attempt.identity_sha256 =>
+            {
+                Some((
+                    attempt.identity_sha256.as_str(),
+                    attempt.target_budget.identity_sha256.as_str(),
+                ))
+            }
+            _ => None,
+        }
+    }
+
     pub fn attention_qualification_sha256(&self) -> &str {
         &self.attention_qualification_sha256
     }
@@ -3139,11 +3164,22 @@ mod tests {
             prepared.raw_checkpoint.raw_content_sha256,
             logical_transformer.content_sha256
         );
+        let prepared_identities = (
+            prepared.identity_sha256.clone(),
+            prepared.target_budget.identity_sha256.clone(),
+        );
         let authority = FrozenH3FactoryAuthority::new_contract_only(input).unwrap();
         assert_eq!(authority.canonical_model(), contract::FL2VA_COMFY);
         assert_eq!(authority.device_id(), "gpu-0");
         assert_eq!(authority.device_ordinal(), 0);
         assert_eq!(authority.execution_fingerprint(), sha('a'));
+        assert_eq!(
+            authority.prepared_target_attempt_identities(),
+            Some((
+                prepared_identities.0.as_str(),
+                prepared_identities.1.as_str(),
+            ))
+        );
         assert_ne!(
             authority.attention_runtime_identity_sha256(),
             authority.attention_qualification_sha256()
