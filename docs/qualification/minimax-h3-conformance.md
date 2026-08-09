@@ -254,14 +254,63 @@ protected measurement validator. It is intentionally not a complete campaign:
 the protected runner still requires paired oracle and Mold evidence for all
 exact-full-bf16 layers.
 
-Qwen layer 50 is the next conditioner boundary, not part of this producer.
-The released Mold private conditioner currently exercises the deployment
-NVFP4/AWQ route, while the qwen-layer-50 manifest layer is
-exact-full-bf16. Relabeling that quantized output would be false evidence. The
-next slice must add an authorization-bound exact-BF16 Mold adapter and paired
-Diffusers capture for text-only and representative multimodal presentations,
-both recording the unnormalized hidden state after language layer 49, before
-this partial bundle can expand to that layer.
+### Exact-BF16 Qwen layer-50 capture
+
+`scripts/capture-minimax-h3-qwen-layer50.py` is the paired producer for the
+next conditioner boundary. It records two cases under the strict
+`qwen-layer-50` contract:
+
+- a raw text-only presentation; and
+- a representative presentation containing one deterministic image and one
+  deterministically sampled video.
+
+Both roles consume the same input-addressed token IDs, three-axis Qwen
+positions, processor grids, and BF16 processor values. The oracle calls the
+pinned Diffusers `get_qwen3vl_prompt_embeds` adapter at
+`text_encoder_layer=50`; the Mold role compiles and invokes the isolated
+`h3_qwen_layer50_capture` binary from the exact clean checkout. That binary
+uses only `load_bf16_conditioner` over the complete official checkpoint and
+returns the unnormalized state after language layer 49. It rejects any model
+that is not BF16 or does not retain exactly 50 resident language layers. The
+deployment quantized conditioner is not an oracle and is not reachable from
+this adapter.
+
+Use the same five external environment paths shown above. Run the roles
+separately so each full model is released before the other is loaded:
+
+    python3 scripts/capture-minimax-h3-qwen-layer50.py \
+      capture --role oracle --device cuda:0
+    python3 scripts/capture-minimax-h3-qwen-layer50.py \
+      capture --role mold --device cuda:0
+
+Before the oracle loads, the producer authenticates all 14 official text
+encoder shards against revision-bound Hugging Face metadata and their LFS
+SHA-256 values. The Mold loader independently hashes and structurally accounts
+for the same full checkpoint. Both roles import Diffusers and Transformers only
+from owner-only, read-only Git archive snapshots, stage the small official
+tokenizer and processor authorities the same way, record the exact Python,
+PyTorch, NumPy, CUDA, and Transformers oracle runtime identity in oracle
+evidence, verify that same pinned preparation runtime for both roles, and
+revalidate staged and full-checkpoint identities after inference. The Mold role
+additionally builds from an owner-only Git archive of the exact clean Mold
+revision and uses `cargo run --locked --release` with
+`dev-bins,h3-private-uat,cuda`; its Cargo target directory lives below
+`MOLD_H3_FIXTURE_ROOT`, never in the repository. The binary is not part of any
+shipping feature set, and published-binary verification rejects its private
+claim marker as an independent release-isolation check.
+
+Each role writes two owner-only layer documents and one partial bundle into a
+shared input-addressed directory below
+`MOLD_H3_FIXTURE_ROOT/captures/qwen-layer-50/`. The Mold role additionally
+retains its exact request and raw BF16 response there. All writes use
+create-new semantics and refuse replacement; request and response files are
+sealed read-only before they become evidence, and raw output is capped at 128
+MiB. The documents include shape, dtype, a full-activation content hash and
+statistics, 257 deterministic coordinate/value samples, and the strict
+zero-tolerance/hash-exact policy required by the protected runner. A real
+capture has not passed merely because these producer contracts and CUDA
+typechecks pass; only the protected external campaign may establish numerical
+parity.
 
 ### Opt-in protected GPU validation
 
