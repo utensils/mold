@@ -244,6 +244,43 @@ describe("applyMobileGalleryMetadata", () => {
     expect(form.family).toBe("minimax-h3");
   });
 
+  it.each([
+    ["unavailable", []],
+    [
+      "installed",
+      [
+        {
+          ...model,
+          name: "minimax-h3-ref2va:future-layout",
+          family: "minimax-h3",
+        } as ModelEntry,
+      ],
+    ],
+  ])("keeps an %s unknown H3 one-shot inside its fail-closed family", (_state, installed) => {
+    const replacement = {
+      ...model,
+      name: "flux:replacement",
+      family: "flux",
+    } as ModelEntry;
+    const form = newGenerateForm();
+    const unknown = "minimax-h3-ref2va:future-layout";
+
+    const result = applyMobileGalleryMetadata(
+      form,
+      { ...metadata, model: unknown, output_format: "mp4" },
+      [...installed, replacement],
+    );
+
+    expect(result).toMatchObject({
+      modelName: unknown,
+      substitutedModel: false,
+      sequence: null,
+    });
+    expect(form.model).toBe(unknown);
+    expect(form.family).toBe("minimax-h3");
+    expect(form.model).not.toBe(replacement.name);
+  });
+
   it("restores a wan print's solver and recipe", () => {
     const wan = {
       ...model,
@@ -408,6 +445,39 @@ describe("applyMobileGalleryMetadata — sequence prints", () => {
     expect(form.model).toBe(initialModel);
     expect(form.model).not.toBe(other.name);
   });
+
+  it.each(["unavailable", "installed"])(
+    "refuses an %s unknown H3 sequence without mutating the form",
+    (availability) => {
+      const unknown = "minimax-h3-ref2va:future-layout";
+      const other = {
+        ...sequenceModel,
+        name: "ltx-video-0.9.8-2b-distilled:q8",
+      } as ModelEntry;
+      const installedUnknown = {
+        ...sequenceModel,
+        name: unknown,
+        family: "minimax-h3",
+      } as ModelEntry;
+      const form = newGenerateForm();
+      form.prompt = "parked one shot";
+      const before = structuredClone(form);
+
+      const result = applyMobileGalleryMetadata(
+        form,
+        chainPrint([25, 25], { model: unknown }),
+        availability === "installed" ? [installedUnknown, other] : [other],
+      );
+
+      expect(result).toMatchObject({
+        modelName: unknown,
+        substitutedModel: false,
+        sequence: null,
+      });
+      expect(result.sequenceUnsupportedReason).toContain("cannot render a clip sequence");
+      expect(form).toEqual(before);
+    },
+  );
 
   it("reports what the print could not give back", () => {
     const form = newGenerateForm();

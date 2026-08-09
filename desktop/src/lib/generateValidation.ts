@@ -9,6 +9,7 @@ import {
 } from "@studio/lib/resolutions";
 import { guidanceOverridesError } from "@studio/lib/guidanceOverrides";
 import { wanRecipeError } from "@studio/lib/wanRecipe";
+import { minimaxH3TaskForModel } from "@studio/lib/minimaxH3Authoring";
 
 export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
 // JSON base64 expands bytes by roughly 4/3 and the server body limit is 64
@@ -57,13 +58,14 @@ export function inlineGenerationMediaBytes(
       0,
     );
   }
-  if (exclude !== "h3FirstFrame") {
+  const h3Task = minimaxH3TaskForModel(form.model);
+  if (h3Task === "fl2va" && exclude !== "h3FirstFrame") {
     total += decodedBase64Bytes(form.h3Authoring?.firstFrame?.data);
   }
-  if (exclude !== "h3LastFrame") {
+  if (h3Task === "fl2va" && exclude !== "h3LastFrame") {
     total += decodedBase64Bytes(form.h3Authoring?.lastFrame?.data);
   }
-  if (exclude !== "h3References") {
+  if (h3Task === "ref2va" && exclude !== "h3References") {
     total += (form.h3Authoring?.references ?? []).reduce((sum, draft) => {
       const media = draft.reference.media;
       return sum + (media.authority === "inline" ? decodedBase64Bytes(media.data) : 0);

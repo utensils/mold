@@ -14,7 +14,7 @@ import {
 import { applyMetadataToForm, type GenerateForm } from "../lib/generateForm";
 import { emptyGuidanceOverrides } from "@studio/lib/guidanceOverrides";
 import { emptyWanRecipe } from "@studio/lib/wanRecipe";
-import { canonicalMinimaxH3ModelName } from "@studio/lib/minimaxH3Authoring";
+import { canonicalMinimaxH3ModelName, isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
 
 /** The clip rail a sequence print reloads, plus what it could not give back. */
 export interface MobileSequenceReuse {
@@ -53,6 +53,7 @@ export function applyMobileGalleryMetadata(
   const plan = planSequenceReuse(metadata);
   const oneShotPrompt = form.prompt;
   const canonicalRecordedModel = canonicalMinimaxH3ModelName(metadata.model);
+  const recordedH3Identity = isMinimaxH3Identity(null, metadata.model);
   const installedRecordedModel = models.find(
     (model) =>
       model.name === metadata.model ||
@@ -60,19 +61,19 @@ export function applyMobileGalleryMetadata(
         canonicalMinimaxH3ModelName(model.name) === canonicalRecordedModel),
   );
   const originalModelInstalled = installedRecordedModel !== undefined;
-  // Every released H3 identity binds both task and weight layout. If its exact
-  // checkpoint is not installed, preserve that unavailable selection so the
-  // existing missing-model recovery can repair it; substituting any other
-  // installed model could change the task or quantized/official layout.
-  const preserveMissingH3 = !originalModelInstalled && canonicalRecordedModel !== null;
+  // Every H3-shaped identity is a fail-closed family boundary. Released
+  // aliases canonicalize to their exact task/layout; an unknown future
+  // partition remains byte-for-byte unavailable instead of being guessed or
+  // substituted into another family.
+  const preserveMissingH3 = !originalModelInstalled && recordedH3Identity;
 
   // H3 is one-shot-only. A malformed or future durable snapshot must not turn
   // an H3 chain into an unrelated installed sequence model merely because the
   // original exact checkpoint is absent. Leave the form untouched and give
   // the caller a concrete recovery error instead.
-  if (plan && canonicalRecordedModel !== null) {
+  if (plan && recordedH3Identity) {
     return {
-      modelName: canonicalRecordedModel,
+      modelName: canonicalRecordedModel ?? metadata.model,
       substitutedModel: false,
       sequence: null,
       sequenceUnsupportedReason:
