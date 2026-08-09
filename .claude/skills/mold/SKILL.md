@@ -702,9 +702,18 @@ instance identity must match exactly before recovery reattaches.
 
 **Pull catalog ids:** `mold pull hf:author/repo` and `mold pull cv:618692`
 hit the upstream APIs directly for the recipe. HF separated-bundling entries
-and supported SD1.5, SDXL, FLUX, Z-Image, LTX-Video, LTX-2, and LTX-2.3
+and supported SD1.5, SDXL, FLUX, Z-Image, LTX-Video, LTX-2, LTX-2.3, and Wan
 single-file Civitai checkpoints download with companions and are runnable
-via `mold run cv:<id>`. Z-Image fine-tunes pull `z-image-te`
+via `mold run cv:<id>`. Wan Civitai installs pull `wan-umt5` plus the
+VAE matching the sub-family (`wan21-vae` for everything except TI2V-5B's
+`wan22-vae`). Wan 2.2 A14B fine-tunes are a two-expert pair that Civitai
+publishes as separate High/Low model versions: the catalog pairs the sibling
+versions into one two-file install (high-noise primary + `low-noise-transformer`
+recipe role), shows one row per pair, and resolves either expert's `cv:` id to
+the same install; a version whose counterpart cannot be identified with
+confidence is refused with the reason — never installed as a single expert.
+Half-downloaded pairs report not-installed and a re-install resumes the
+missing half. Z-Image fine-tunes pull `z-image-te`
 (Tongyi-MAI Qwen3 shards + tokenizer + fallback VAE; satisfied by an existing
 `z-image-turbo` install) and use recipe-provided text-encoder files
 when the Civitai version publishes them. Flux.2 fine-tunes pull `flux2-vae` (168 MB

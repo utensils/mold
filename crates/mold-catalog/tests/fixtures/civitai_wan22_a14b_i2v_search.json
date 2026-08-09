@@ -1,0 +1,2651 @@
+{
+ "items": [
+  {
+   "id": 2190659,
+   "name": "\ud83d\udc80\ud83d\udc8b DaSiWa-WAN 2.2 I2V 14B TastySin v8 | Lightspeed | GGUF \ud83d\udc8b\ud83d\udc80",
+   "allowNoCredit": false,
+   "allowCommercialUse": [
+    "RentCivit"
+   ],
+   "allowDerivatives": false,
+   "allowDifferentLicense": true,
+   "type": "Checkpoint",
+   "minor": false,
+   "sfwOnly": false,
+   "poi": false,
+   "nsfw": false,
+   "nsfwLevel": 31,
+   "availability": "Public",
+   "userId": 3300529,
+   "baseModels": [
+    "Wan Video 2.2 I2V-A14B"
+   ],
+   "cosmetic": null,
+   "supportsGeneration": false,
+   "stats": {
+    "downloadCount": 50654,
+    "thumbsUpCount": 1385,
+    "thumbsDownCount": 1,
+    "commentCount": 0,
+    "tippedAmountCount": 1710
+   },
+   "creator": {
+    "username": "Darksidewalker",
+    "image": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/910bb715-4b79-460c-95b9-0824647fd500/width=96/Darksidewalker.jpeg"
+   },
+   "tags": [
+    "lightspeed",
+    "wan 2.2",
+    "base model",
+    "wan22",
+    "dasiwa",
+    "gguf",
+    "i2v",
+    "nsfw"
+   ],
+   "modelVersions": [
+    {
+     "id": 2466604,
+     "index": 0,
+     "name": "Q8 High",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-12-16T20:09:14.458Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 31,
+     "description": "<p>Q8 High</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 18197,
+      "thumbsUpCount": 1134,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2355406,
+       "sizeKB": 15045526.5,
+       "name": "DasiwaWAN22I2V14BTastysinV8_q8High.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-12-03T17:10:20.359Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "242E03FC",
+        "AutoV2": "5FF00D1126",
+        "SHA256": "5FF00D11264AE130503CF1954F89CEDBF00A1DB628F3524120BC966943152172",
+        "CRC32": "78CE8B44",
+        "BLAKE3": "AB7292902F68A3105D4FF398E06B678F698FF0CE539DB14B86C771F8449FBA61",
+        "AutoV3": "611CE590261A"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2466604",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 112636097,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/1b791561-0501-423e-bd94-755d7c7f3b98/original=true/112636097.mp4",
+       "nsfwLevel": 1,
+       "width": 1696,
+       "height": 2176,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2466604"
+    },
+    {
+     "id": 2466822,
+     "index": 1,
+     "name": "Q8 Low",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-12-16T20:09:14.458Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Q8 Low</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 13030,
+      "thumbsUpCount": 233,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2355529,
+       "sizeKB": 15045526.5,
+       "name": "DasiwaWAN22I2V14BTastysinV8_q8Low.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-12-03T17:51:38.281Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "158DFDFD",
+        "AutoV2": "DD74359459",
+        "SHA256": "DD743594590E61F619BBA3E80F7A6C44DBA20DFAA8E123047DE2B21495B8ECDD",
+        "CRC32": "CAA58241",
+        "BLAKE3": "AB9A06F9FF55DD9ED1A78AB783319F2999C87AC7BA40A38A8816B1F8ACD4AB29",
+        "AutoV3": "2AC4D5627B94"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2466822",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 112640419,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/c3d1cad6-606d-4528-a126-8181bbd4379a/original=true/112640419.mp4",
+       "nsfwLevel": 1,
+       "width": 1248,
+       "height": 1824,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2466822"
+    },
+    {
+     "id": 2466991,
+     "index": 2,
+     "name": "Q6 High",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-12-16T20:09:14.458Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 4,
+     "description": "<p>Q6 High</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 3645,
+      "thumbsUpCount": 91,
+      "thumbsDownCount": 1
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2355666,
+       "sizeKB": 11722326.5,
+       "name": "DasiwaWAN22I2V14BTastysinV8_q6High.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-12-03T18:44:32.023Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "242E03FC",
+        "AutoV2": "F8790C511E",
+        "SHA256": "F8790C511EDBF9F3EC54086E9B761B2A6C36362F6CA8DB955BAFD044E3E07459",
+        "CRC32": "7375C0DB",
+        "BLAKE3": "EE8EE732A01B872AE8F66165B7C9408CBEEA9ABE93F71825055451C0CF9F40C7",
+        "AutoV3": "7D7C4DD5538D"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2466991",
+       "primary": true
+      }
+     ],
+     "images": [],
+     "downloadUrl": "https://civitai.com/api/download/models/2466991"
+    },
+    {
+     "id": 2467097,
+     "index": 3,
+     "name": "Q6 Low",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-12-16T20:09:14.458Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 4,
+     "description": "<p>Q6 Low</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 3345,
+      "thumbsUpCount": 61,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2355751,
+       "sizeKB": 11722326.5,
+       "name": "DasiwaWAN22I2V14BTastysinV8_q6Low.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-12-03T19:24:32.790Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "158DFDFD",
+        "AutoV2": "01712C9675",
+        "SHA256": "01712C96752CE6A115B0A907A7BF29C6C8DE17B60C58ADF381248B41A1618E1F",
+        "CRC32": "EB76F66B",
+        "BLAKE3": "1D430461F724DECF8BAF5A1C39E7831517A4C78287D1428D33C02CF3B8EBDB82",
+        "AutoV3": "A1689D85F793"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2467097",
+       "primary": true
+      }
+     ],
+     "images": [],
+     "downloadUrl": "https://civitai.com/api/download/models/2467097"
+    },
+    {
+     "id": 2467166,
+     "index": 4,
+     "name": "Q5 High",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-12-16T20:09:14.458Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 4,
+     "description": "<p>Q5 High</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 2201,
+      "thumbsUpCount": 50,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2355853,
+       "sizeKB": 10539126.5,
+       "name": "DasiwaWAN22I2V14BTastysinV8_q5High.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-12-03T19:58:09.254Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "242E03FC",
+        "AutoV2": "2E7890FF1E",
+        "SHA256": "2E7890FF1E2C198972AE5676117777926256227DE8AC9F3CFA3FD896EDEC67AD",
+        "CRC32": "ADE6530B",
+        "BLAKE3": "506F49A08A657231C904A69330076708B261F4C32C7FCCF7456ACDC76DAB0A1C",
+        "AutoV3": "B2407AFBC14A"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2467166",
+       "primary": true
+      }
+     ],
+     "images": [],
+     "downloadUrl": "https://civitai.com/api/download/models/2467166"
+    },
+    {
+     "id": 2467350,
+     "index": 5,
+     "name": "Q5 Low",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-12-16T20:10:21.168Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 4,
+     "description": "<p>Q5 Low</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 2183,
+      "thumbsUpCount": 35,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2356029,
+       "sizeKB": 10539126.5,
+       "name": "DasiwaWAN22I2V14BTastysinV8_q5Low.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-12-03T21:04:17.071Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "158DFDFD",
+        "AutoV2": "363E99D86B",
+        "SHA256": "363E99D86B5C2D4AE1A4561BF27F1EA38C6CC330E88365A2346EA1360D24A6E4",
+        "CRC32": "F7887146",
+        "BLAKE3": "FB9947EF0095D6E9487E66277FDE6D2AF07D114BEB09909FA1C0BAB42B299CBB",
+        "AutoV3": "3EB8A5B9C3AC"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2467350",
+       "primary": true
+      }
+     ],
+     "images": [],
+     "downloadUrl": "https://civitai.com/api/download/models/2467350"
+    },
+    {
+     "id": 2467458,
+     "index": 6,
+     "name": "Q4 High",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-12-16T20:10:21.168Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 4,
+     "description": "<p>Q4 High</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 3466,
+      "thumbsUpCount": 95,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2356192,
+       "sizeKB": 9425526.5,
+       "name": "DasiwaWAN22I2V14BTastysinV8_q4High.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-12-03T21:54:13.901Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "242E03FC",
+        "AutoV2": "286EEB6723",
+        "SHA256": "286EEB67238E4AF2B68509990E64B406DB7EB343638D1D0354D8ED5FDC56158A",
+        "CRC32": "0906F9CB",
+        "BLAKE3": "BBA93EAD1AC9843F42E1036CB69AD18A2F313BF1FCEA3910289B03702ABF6CD8",
+        "AutoV3": "91C94BFCD9E5"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2467458",
+       "primary": true
+      }
+     ],
+     "images": [],
+     "downloadUrl": "https://civitai.com/api/download/models/2467458"
+    },
+    {
+     "id": 2467457,
+     "index": 7,
+     "name": "Q4 Low",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-12-16T20:10:21.168Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 4,
+     "description": "<p>Q4 Low</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 3209,
+      "thumbsUpCount": 64,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2357362,
+       "sizeKB": 9425526.5,
+       "name": "DasiwaWAN22I2V14BTastysinV8_q4Low.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-12-04T06:48:43.097Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "158DFDFD",
+        "AutoV2": "296B346E5F",
+        "SHA256": "296B346E5FAB05E98A1005A0D8AEFD2E758F5FAF0A9BFB6D0428588440598F3A",
+        "CRC32": "19101788",
+        "BLAKE3": "F872FE9B7B407A93E86F3023773937EE2CE7E663BB8F40F46BDB733046859199",
+        "AutoV3": "8B4E36D2006E"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2467457",
+       "primary": true
+      }
+     ],
+     "images": [],
+     "downloadUrl": "https://civitai.com/api/download/models/2467457"
+    },
+    {
+     "id": 2468793,
+     "index": 8,
+     "name": "Q2 High",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-12-16T20:10:21.168Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 2,
+     "description": "<p>Q2 High</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 712,
+      "thumbsUpCount": 22,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2357425,
+       "sizeKB": 5176726.5,
+       "name": "DasiwaWAN22I2V14BTastysinV8_q2High.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-12-04T07:12:08.858Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "242E03FC",
+        "AutoV2": "C97EE5E1A9",
+        "SHA256": "C97EE5E1A952994DDF67227EA2E053E62BAB8AC8E9DECEA9D7688A7E9BF4A6EF",
+        "CRC32": "3BDC22C9",
+        "BLAKE3": "C2CA1773C146B77977CE4DA3C0635705B519FCC78667BC39675F029433E96E48",
+        "AutoV3": "6AF682D4B385"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2468793",
+       "primary": true
+      }
+     ],
+     "images": [],
+     "downloadUrl": "https://civitai.com/api/download/models/2468793"
+    },
+    {
+     "id": 2468849,
+     "index": 9,
+     "name": "Q2 Low",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-12-16T20:10:21.168Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Q2 Low</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 666,
+      "thumbsUpCount": 10,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2357478,
+       "sizeKB": 5176726.5,
+       "name": "DasiwaWAN22I2V14BTastysinV8_q2Low.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-12-04T07:37:18.955Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "158DFDFD",
+        "AutoV2": "F196E9C244",
+        "SHA256": "F196E9C244B6467E4A9BB0433B8E2F1E0C67E3899F75CABA4C52F0FBA0719CC3",
+        "CRC32": "08015A1B",
+        "BLAKE3": "ADCDECA9D8B7E67E0532F1F51865F8E82538AC32F52D95F7CB9845EC381019F7",
+        "AutoV3": "14D1D54A4A9A"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2468849",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 112638765,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/03f0d77e-f0b9-4340-b41a-d495e64b757f/original=true/112638765.mp4",
+       "nsfwLevel": 1,
+       "width": 624,
+       "height": 912,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2468849"
+    }
+   ]
+  },
+  {
+   "id": 1855105,
+   "name": "Rapid WAN 2.2 I2V GGUF",
+   "allowNoCredit": true,
+   "allowCommercialUse": [
+    "Image",
+    "RentCivit",
+    "Rent",
+    "Sell"
+   ],
+   "allowDerivatives": true,
+   "allowDifferentLicense": true,
+   "type": "Checkpoint",
+   "minor": false,
+   "sfwOnly": false,
+   "poi": false,
+   "nsfw": false,
+   "nsfwLevel": 1,
+   "availability": "Public",
+   "userId": 447737,
+   "baseModels": [
+    "Wan Video 2.2 I2V-A14B"
+   ],
+   "cosmetic": null,
+   "supportsGeneration": false,
+   "stats": {
+    "downloadCount": 19572,
+    "thumbsUpCount": 434,
+    "thumbsDownCount": 0,
+    "commentCount": 0,
+    "tippedAmountCount": 320
+   },
+   "creator": {
+    "username": "DooFY87",
+    "image": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/0deaf408-7ed3-45ac-8255-c61e6ad5da3a/width=96/DooFY87.jpeg"
+   },
+   "tags": [
+    "wan",
+    "base model"
+   ],
+   "modelVersions": [
+    {
+     "id": 2099499,
+     "index": 0,
+     "name": "Q4_K_M Rapid Base",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-08-10T14:28:00.330Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 13616,
+      "thumbsUpCount": 335,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 1995094,
+       "sizeKB": 10594777.75,
+       "name": "rapidWAN22I2VGGUF_q4KMRapidBase.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-08-10T14:30:10.632Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "EDBB95B0",
+        "AutoV2": "6C4360C15F",
+        "SHA256": "6C4360C15FAB2470607A625BA3CA5249499337243F4D410B1B877900D271A2EB",
+        "CRC32": "37FDBF6F",
+        "BLAKE3": "BFFAC3E975775C64A66CA9736FA60866AD09B67F3B2D130B71B35E3D43264BA9",
+        "AutoV3": "A4B41BDD5C03"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2099499",
+       "primary": true
+      },
+      {
+       "id": 2001872,
+       "sizeKB": 2.0234375,
+       "name": "rapidWAN22I2VGGUF_q4KMRapidBase_trainingData.zip",
+       "overrideName": null,
+       "type": "Training Data",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-08-12T16:36:34.822Z",
+       "metadata": {
+        "format": "Other",
+        "size": null,
+        "fp": null
+       },
+       "hashes": {
+        "AutoV2": "948B61C8AC",
+        "SHA256": "948B61C8AC7A3423D6C738B4A567555EBECE3F1370D129D03B6B9AEFE335193A",
+        "CRC32": "40E50169",
+        "BLAKE3": "6F8506A8F4915E2FDA10465781D189E2136311298EAF3224B344B671D38512E4",
+        "AutoV3": "103BC85001C2"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2099499?type=Training%20Data"
+      }
+     ],
+     "images": [
+      {
+       "id": 93436212,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/fbcf045a-9907-47f9-bf56-a4523932461f/original=true/93436212.mp4",
+       "nsfwLevel": 1,
+       "width": 528,
+       "height": 720,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2099499"
+    },
+    {
+     "id": 2110146,
+     "index": 1,
+     "name": "Q3_K_M Rapid Base",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-08-13T15:33:34.473Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": null,
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 931,
+      "thumbsUpCount": 24,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2004864,
+       "sizeKB": 7905177.75,
+       "name": "rapidWAN22I2VGGUF_q3KMRapidBase.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-08-13T15:39:00.361Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "EDBB95B0",
+        "AutoV2": "8F9001844A",
+        "SHA256": "8F9001844ABE7C2FA773E872DEE748B7C61E832E7FECF0554B93492A64DDF4C4",
+        "CRC32": "D9EE6FC1",
+        "BLAKE3": "F77DD1919B4C1AAE69A73E24EDC852E203B63FDD07EBB74B18E751807F124489",
+        "AutoV3": "D433EC70932A"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2110146",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 94049256,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/f476e46b-bbef-444d-abb0-87c52ab3e36b/original=true/94049256.mp4",
+       "nsfwLevel": 1,
+       "width": 528,
+       "height": 720,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2110146"
+    },
+    {
+     "id": 2137014,
+     "index": 2,
+     "name": "Q4_K_M Rapid v9",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-08-22T04:09:38.107Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>based on a rapid v9 version</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 828,
+      "thumbsUpCount": 36,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2030873,
+       "sizeKB": 10594777.75,
+       "name": "rapidWAN22I2VGGUF_q4KMRapidV9.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-08-22T04:17:16.216Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "E30278FD",
+        "AutoV2": "D045C8BE09",
+        "SHA256": "D045C8BE0913C3F1AD413885EE98C17A47C44AA5D40B7F489F7C947CAE75D42B",
+        "CRC32": "A6A677A1",
+        "BLAKE3": "A4EE76CDB2DD6354289DF4770DCC4B87546E4BA81D5176F51EB7A5DCB0ECD2BA",
+        "AutoV3": "F2FCE78018C1"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2137014",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 95756374,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/1982d4aa-9239-41c0-a8eb-2c4743c7e3eb/original=true/95756374.mp4",
+       "nsfwLevel": 1,
+       "width": 528,
+       "height": 720,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2137014"
+    },
+    {
+     "id": 2137082,
+     "index": 3,
+     "name": "Q3_K_M Rapid v9",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-08-22T04:48:01.196Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": null,
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 641,
+      "thumbsUpCount": 15,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2030935,
+       "sizeKB": 7905177.75,
+       "name": "rapidWAN22I2VGGUF_q3KMRapidV9.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-08-22T04:44:49.172Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "E30278FD",
+        "AutoV2": "9FC6B341D7",
+        "SHA256": "9FC6B341D7B922411DC8B97A2FC06956E9882C412B33CFA218B9852BCE6A384E",
+        "CRC32": "9A34B2B6",
+        "BLAKE3": "B64196BA81E0D8393BF1E5418195E64C18382701AE31E386F55AD6338970C23F",
+        "AutoV3": "1A5DAD7A1D37"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2137082",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 95762193,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/eba1f91f-b10b-4fd9-9875-fe10f16f7dd7/original=true/95762193.mp4",
+       "nsfwLevel": 1,
+       "width": 528,
+       "height": 720,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2137082"
+    },
+    {
+     "id": 2182185,
+     "index": 4,
+     "name": "Q4_K_M Rapid v10",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-09-04T16:57:47.713Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": null,
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 3556,
+      "thumbsUpCount": 88,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2075352,
+       "sizeKB": 10594777.75,
+       "name": "rapidWAN22I2VGGUF_q4KMRapidV10.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-09-04T17:11:46.541Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "E30278FD",
+        "AutoV2": "A469BEB406",
+        "SHA256": "A469BEB406E7BDD1683EB5AAC87C561CF560EF3397CC2FE35AD70781E51C8E3F",
+        "CRC32": "0ED2561C",
+        "BLAKE3": "A61EBB582E2BC91D30880BE6428CAC9341116C5A83D706D0471EF2AD8634CB77",
+        "AutoV3": "731E14979B14"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2182185",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 98358382,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/2908d631-bc7f-4458-93d5-57504fde9b2e/original=true/98358382.mp4",
+       "nsfwLevel": 1,
+       "width": 528,
+       "height": 720,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2182185"
+    }
+   ]
+  },
+  {
+   "id": 2269796,
+   "name": "\ud83d\udc80\ud83d\udc8b DaSiWa-WAN 2.2 I2V 14B SynthSeduction v9 | Lightspeed | GGUF \ud83d\udc8b\ud83d\udc80",
+   "allowNoCredit": false,
+   "allowCommercialUse": [
+    "RentCivit",
+    "Image"
+   ],
+   "allowDerivatives": false,
+   "allowDifferentLicense": false,
+   "type": "Checkpoint",
+   "minor": false,
+   "sfwOnly": false,
+   "poi": false,
+   "nsfw": false,
+   "nsfwLevel": 3,
+   "availability": "Public",
+   "userId": 3300529,
+   "baseModels": [
+    "Wan Video 2.2 I2V-A14B"
+   ],
+   "cosmetic": null,
+   "supportsGeneration": false,
+   "stats": {
+    "downloadCount": 19377,
+    "thumbsUpCount": 448,
+    "thumbsDownCount": 1,
+    "commentCount": 0,
+    "tippedAmountCount": 1782
+   },
+   "creator": {
+    "username": "Darksidewalker",
+    "image": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/910bb715-4b79-460c-95b9-0824647fd500/width=96/Darksidewalker.jpeg"
+   },
+   "tags": [
+    "i2v",
+    "dasiwa",
+    "image to video",
+    "base model",
+    "wan22",
+    "gguf",
+    "wan 2.2",
+    "lightspeed"
+   ],
+   "modelVersions": [
+    {
+     "id": 2554882,
+     "index": 0,
+     "name": "Q8 High",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-01-24T14:30:06.623Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Q8 High</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 5927,
+      "thumbsUpCount": 327,
+      "thumbsDownCount": 1
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2444064,
+       "sizeKB": 15045526.5,
+       "name": "DasiwaWAN22I2V14BSynthseduction_q8High.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-01-01T16:10:30.448Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "0D31F10C",
+        "AutoV2": "4DB65F7AE6",
+        "SHA256": "4DB65F7AE6C381562F4ACBCD3131BF83DF46715752C26C3563220597DD79C207",
+        "CRC32": "9DFD1BE7",
+        "BLAKE3": "9C07683BE542C9E76B17D8FBCEE8A53E6FB8FB331D01D676D0A9D842F599B5C1",
+        "AutoV3": "91749775501C"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2554882",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 116149234,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/2e6819d5-e9e1-44d8-96c8-a2b979076eca/original=true/116149234.mp4",
+       "nsfwLevel": 1,
+       "width": 720,
+       "height": 912,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2554882"
+    },
+    {
+     "id": 2554967,
+     "index": 1,
+     "name": "Q8 Low",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-01-24T14:30:06.623Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Q8 Low</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 4514,
+      "thumbsUpCount": 81,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2444571,
+       "sizeKB": 15045526.5,
+       "name": "DasiwaWAN22I2V14BSynthseduction_q8Low.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-01-01T20:21:28.520Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "932AACB2",
+        "AutoV2": "99CDED937D",
+        "SHA256": "99CDED937DE07314C37BE06B82319B46585C4D4FEF1F1F6D3EBA73E4A8FBF102",
+        "CRC32": "FD6ED6AD",
+        "BLAKE3": "4DABFAF5C438C3BAF2149B844B1198546D213FFAA25E596DB1B4262B00F1DF2A",
+        "AutoV3": "6998396E9E3A"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2554967",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 116149257,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/b1e215b1-0aa2-45c7-b989-353b3c8e7490/original=true/116149257.mp4",
+       "nsfwLevel": 1,
+       "width": 720,
+       "height": 912,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2554967"
+    },
+    {
+     "id": 2555065,
+     "index": 2,
+     "name": "Q6 High",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-01-24T14:30:06.623Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Q6 High</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 1501,
+      "thumbsUpCount": 37,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2444118,
+       "sizeKB": 11722326.5,
+       "name": "DasiwaWAN22I2V14BSynthseduction_q6High.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-01-01T16:39:26.063Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "0D31F10C",
+        "AutoV2": "E54ECA74D1",
+        "SHA256": "E54ECA74D1AA92F31A63380F6CB1BFA47DF306DA0F04DDD88EAEFB1B121EC5E7",
+        "CRC32": "F25F657F",
+        "BLAKE3": "4C79609C2C117212C5C6EBE77F0DD21C68BAF09B4A0144B59ED7331A3D311A21",
+        "AutoV3": "EB6074B54502"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2555065",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 116149326,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/c69228eb-204b-4563-8560-0ef3abab9286/original=true/116149326.mp4",
+       "nsfwLevel": 1,
+       "width": 720,
+       "height": 912,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2555065"
+    },
+    {
+     "id": 2555700,
+     "index": 3,
+     "name": "Q6 Low",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-01-24T14:30:06.623Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Q6 Low</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 1453,
+      "thumbsUpCount": 31,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2444677,
+       "sizeKB": 11722326.5,
+       "name": "DasiwaWAN22I2V14BSynthseduction_q6Low.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-01-01T21:03:35.083Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "932AACB2",
+        "AutoV2": "61E8A89F2F",
+        "SHA256": "61E8A89F2FB6F2BF1221947B703B9F2F78510BA434C9BF807297006A664429D3",
+        "CRC32": "D747EB35",
+        "BLAKE3": "3AAB3D02178B4E4EB0CED2F34FB701433731668C685B4C42172B65BDDCAA4D70",
+        "AutoV3": "6686496811DE"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2555700",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 116149403,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/a74d23d1-84bc-4c74-8a5a-f3738ac8fe22/original=true/116149403.mp4",
+       "nsfwLevel": 1,
+       "width": 720,
+       "height": 912,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2555700"
+    },
+    {
+     "id": 2555131,
+     "index": 4,
+     "name": "Q5 High",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-01-24T14:30:06.623Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Q6 High</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 1005,
+      "thumbsUpCount": 22,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2444182,
+       "sizeKB": 10539126.5,
+       "name": "DasiwaWAN22I2V14BSynthseduction_q5High.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-01-01T17:08:56.604Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "0D31F10C",
+        "AutoV2": "B884D3AD17",
+        "SHA256": "B884D3AD17D5E42BCA1075D4898F2C1A798BA73AA9F2F519F3246E1DF596DE99",
+        "CRC32": "28C0C4C2",
+        "BLAKE3": "F6A99CE1D7F0936B74CF136533B8052092A60212F66D02D8450B5719D57E9C8E",
+        "AutoV3": "B0C549666644"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2555131",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 116149465,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/a674c45c-9e28-42b8-920b-9972eb35aa70/original=true/116149465.mp4",
+       "nsfwLevel": 1,
+       "width": 720,
+       "height": 912,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2555131"
+    },
+    {
+     "id": 2555461,
+     "index": 5,
+     "name": "Q5 Low",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-01-24T14:30:06.623Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Q6 Low</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 952,
+      "thumbsUpCount": 19,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2444828,
+       "sizeKB": 10539126.5,
+       "name": "DasiwaWAN22I2V14BSynthseduction_q5Low.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-01-01T22:13:41.816Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "932AACB2",
+        "AutoV2": "60AF1E496D",
+        "SHA256": "60AF1E496D1433AC51D845046313726E55350E4C0481EE9F911AC441B1546074",
+        "CRC32": "823F6627",
+        "BLAKE3": "940D7FE2A38EC1364D4C76449008F6141FBFE2DCCFB93C618990DF5F415542AD",
+        "AutoV3": "27CEE5D94841"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2555461",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 116149507,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/c5419754-a561-4854-8a84-9b7663bbddd8/original=true/116149507.mp4",
+       "nsfwLevel": 1,
+       "width": 720,
+       "height": 912,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2555461"
+    },
+    {
+     "id": 2555194,
+     "index": 6,
+     "name": "Q4 High",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-01-24T14:30:06.623Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Q4 High</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 1409,
+      "thumbsUpCount": 33,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2444301,
+       "sizeKB": 9425526.5,
+       "name": "DasiwaWAN22I2V14BSynthseduction_q4High.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-01-01T18:08:25.032Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "0D31F10C",
+        "AutoV2": "71B2AD7500",
+        "SHA256": "71B2AD750007CAFEEA1F63703C20626F596ED49E9CCC000DC1A300AFDE4BE112",
+        "CRC32": "4A88EB8C",
+        "BLAKE3": "F7E65C61E8C539C30C902B0696A3AEC7D72FB525AD6E3B0D70C0580F3B1F5E4C",
+        "AutoV3": "E8C0C7930D5D"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2555194",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 116149588,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/2cd4208f-ea3e-447e-9f9d-5489802b91d7/original=true/116149588.mp4",
+       "nsfwLevel": 1,
+       "width": 720,
+       "height": 912,
+       "hash": "U27nLA~q0000~q?HV@E100WB_3xtMxM{f+%2",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2555194"
+    },
+    {
+     "id": 2555463,
+     "index": 7,
+     "name": "Q4 Low",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-01-24T14:30:06.623Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Q4 low</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 1399,
+      "thumbsUpCount": 37,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2446143,
+       "sizeKB": 9425526.5,
+       "name": "DasiwaWAN22I2V14BSynthseduction_q4Low.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-01-02T08:48:00.578Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "932AACB2",
+        "AutoV2": "A12283698E",
+        "SHA256": "A12283698EEC32F7A6FB4029F42BB3896A8C7867D7C8BA4DF431BE729FDB1B19",
+        "CRC32": "661B8B60",
+        "BLAKE3": "19C7B64BE42F936C95C4049434083A731C2E1DED45327D8478867638E5258B98",
+        "AutoV3": "9557110B9789"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2555463",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 116149651,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/c7dba037-f67f-4f2e-b920-c46cdb5c6190/original=true/116149651.mp4",
+       "nsfwLevel": 1,
+       "width": 720,
+       "height": 912,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2555463"
+    },
+    {
+     "id": 2555256,
+     "index": 8,
+     "name": "Q3 High",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-01-24T14:30:06.623Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Q3 High</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 403,
+      "thumbsUpCount": 8,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2444334,
+       "sizeKB": 6362326.5,
+       "name": "DasiwaWAN22I2V14BSynthseduction_q3High.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-01-01T18:27:53.654Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "0D31F10C",
+        "AutoV2": "990C5B1D04",
+        "SHA256": "990C5B1D04287B09C4FA94587C2F526DA46B16315F8B34BAADDBDFA696AC1A50",
+        "CRC32": "A0D892D1",
+        "BLAKE3": "3AA0C5F7A67F4B9EF20114AC4F3F1402B44901FEA24A8CBFA10D629187A62367",
+        "AutoV3": "306915B78C00"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2555256",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 116149686,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/3b95ab4a-6661-4da0-b3fc-e34812a4f2ae/original=true/116149686.mp4",
+       "nsfwLevel": 1,
+       "width": 720,
+       "height": 912,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2555256"
+    },
+    {
+     "id": 2555468,
+     "index": 9,
+     "name": "Q3 Low",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-01-24T14:30:06.623Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Q3 Low</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 383,
+      "thumbsUpCount": 8,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2446270,
+       "sizeKB": 6362326.5,
+       "name": "DasiwaWAN22I2V14BSynthseduction_q3Low.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-01-02T09:42:20.607Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "932AACB2",
+        "AutoV2": "34CCC891AF",
+        "SHA256": "34CCC891AFCA4D7CC1D9815D8F319501B13C87EE778200675F8F795A2AF2D324",
+        "CRC32": "992B6C1F",
+        "BLAKE3": "7CE96F5ADCF62E074CA1975A93DE7E637EF53A3326CEFD31454B6497CAA05B19",
+        "AutoV3": "40605F7817C6"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2555468",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 116149785,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/084be292-fed6-4387-a9a5-01109555e8b1/original=true/116149785.mp4",
+       "nsfwLevel": 1,
+       "width": 720,
+       "height": 912,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2555468"
+    },
+    {
+     "id": 2555303,
+     "index": 10,
+     "name": "Q2 High",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-01-24T14:30:06.623Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Q2 High</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 230,
+      "thumbsUpCount": 6,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2444370,
+       "sizeKB": 5176726.5,
+       "name": "DasiwaWAN22I2V14BSynthseduction_q2High.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-01-01T18:42:12.009Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "0D31F10C",
+        "AutoV2": "1CAF16654A",
+        "SHA256": "1CAF16654AE65F2E1A252A2747CD424B895A9E05415E9756F057929771F4FFE7",
+        "CRC32": "EA6DF1B7",
+        "BLAKE3": "0BF2BB8734C34B96A0C24DFB9ED471D697C16D77D801814E510E18A6DF9C3635",
+        "AutoV3": "556559346528"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2555303",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 116149844,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/8aa97f94-4082-4882-85b5-e76519a45863/original=true/116149844.mp4",
+       "nsfwLevel": 1,
+       "width": 720,
+       "height": 912,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2555303"
+    },
+    {
+     "id": 2555465,
+     "index": 11,
+     "name": "Q2 Low",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-01-24T14:30:06.623Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 2,
+     "description": "<p>Q2 Low</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 201,
+      "thumbsUpCount": 4,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2446325,
+       "sizeKB": 5176726.5,
+       "name": "DasiwaWAN22I2V14BSynthseduction_q2Low.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-01-02T10:12:04.081Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "932AACB2",
+        "AutoV2": "D38F0E0CE1",
+        "SHA256": "D38F0E0CE1A8C1D0E68E8D33DA307347509FAC1D673D539E43E15ABAE8D44276",
+        "CRC32": "CC691B12",
+        "BLAKE3": "AC6086158E6C63847BE83CA1393B05032DA9E96CB2897C3782443D2E5FCA935B",
+        "AutoV3": "4436A1A28892"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2555465",
+       "primary": true
+      }
+     ],
+     "images": [],
+     "downloadUrl": "https://civitai.com/api/download/models/2555465"
+    }
+   ]
+  },
+  {
+   "id": 2272580,
+   "name": "\ud83d\udc80\ud83d\udca0 DaSiWa-WAN 2.2 I2V 14B | TrueVision | Safetensors \ud83d\udca0\ud83d\udc80",
+   "allowNoCredit": false,
+   "allowCommercialUse": [
+    "RentCivit",
+    "Image"
+   ],
+   "allowDerivatives": false,
+   "allowDifferentLicense": false,
+   "type": "Checkpoint",
+   "minor": false,
+   "sfwOnly": false,
+   "poi": false,
+   "nsfw": false,
+   "nsfwLevel": 3,
+   "availability": "Public",
+   "userId": 3300529,
+   "baseModels": [
+    "Wan Video 2.2 I2V-A14B"
+   ],
+   "cosmetic": null,
+   "supportsGeneration": false,
+   "stats": {
+    "downloadCount": 18181,
+    "thumbsUpCount": 418,
+    "thumbsDownCount": 0,
+    "commentCount": 0,
+    "tippedAmountCount": 2110
+   },
+   "creator": {
+    "username": "Darksidewalker",
+    "image": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/910bb715-4b79-460c-95b9-0824647fd500/width=96/Darksidewalker.jpeg"
+   },
+   "tags": [
+    "wan22",
+    "dasiwa",
+    "base model",
+    "wan 2.2",
+    "truevision"
+   ],
+   "modelVersions": [
+    {
+     "id": 2959309,
+     "index": 0,
+     "name": "SnatchKiss High v11",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-06-04T09:51:03.238Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 2,
+     "description": null,
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 3196,
+      "thumbsUpCount": 125,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2841257,
+       "sizeKB": 19001026.90625,
+       "name": "DasiwaWAN22I2V14BTruevision_snatchkissHighV11.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": null,
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-05-20T14:16:05.910Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "full",
+        "fp": "fp8",
+        "isRequired": false
+       },
+       "hashes": {
+        "AutoV1": "6BA370C4",
+        "AutoV2": "690F947F1E",
+        "SHA256": "690F947F1EA2748BCCF6BCC3693679FE4A425F2C5C44FE2327182DDD6CADB306",
+        "CRC32": "1D5993B8",
+        "BLAKE3": "6366E8D06CBA0DD111B9D49B7FE048A430CF107428AA1C4EF841D94BAF540C53",
+        "AutoV3": "8B6101905A25"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2959309",
+       "primary": true
+      }
+     ],
+     "images": [],
+     "downloadUrl": "https://civitai.com/api/download/models/2959309"
+    },
+    {
+     "id": 2959520,
+     "index": 1,
+     "name": "SnatchKiss Low v11",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-06-04T09:52:03.603Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 2,
+     "description": null,
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 2677,
+      "thumbsUpCount": 52,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2840642,
+       "sizeKB": 19001026.90625,
+       "name": "DasiwaWAN22I2V14BTruevision_snatchkissLowV11.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": null,
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-05-23T01:53:26.824Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "full",
+        "fp": "fp8",
+        "isRequired": false
+       },
+       "hashes": {
+        "AutoV1": "39D5752B",
+        "AutoV2": "7F306A7F37",
+        "SHA256": "7F306A7F3700412E14984493ADD40E8186B079B0D038ED92475378E20D417C87",
+        "CRC32": "E3F62F83",
+        "BLAKE3": "D4CC748E9CE227346CD6DA9EAF70AC37D79195DE45BF85B6DCB68E560CB8E10E",
+        "AutoV3": "5B21777996F2"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2959520",
+       "primary": true
+      }
+     ],
+     "images": [],
+     "downloadUrl": "https://civitai.com/api/download/models/2959520"
+    },
+    {
+     "id": 2769496,
+     "index": 2,
+     "name": "BoundBite High v10",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-03-31T15:49:12.972Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 2,
+     "description": "<ul><li><p>\u2764\ufe0f\u200d\ud83d\udd25 New level of prompt adherence</p></li><li><p>\ud83e\udde0 Enabling intuitive reasoning over motion, interaction, and causality (VBVR)</p></li><li><p>\ud83e\uddea Best distillation (mixed distillation experts)</p></li><li><p>\ud83d\udcab Stable and fast motions - without sacrificing quality</p></li><li><p>\ud83c\udfa5 Enhanced camera and motion control</p></li><li><p>\ud83e\ude84 Best in-class details even on low resolution</p></li><li><p>\ud83d\udc8e Consistent details over the full video (almost never detail shift)</p></li><li><p>\ud83c\udf8a Better special effects from prompts</p></li><li><p>\ud83d\udc41\ufe0f\u200d\ud83d\udde8\ufe0f Better eye details</p></li><li><p>\ud83c\udfac Highly dynamic video composition</p></li><li><p>\ud83d\udc58 Strengthened visual consistency/understanding for anime</p></li><li><p>\ud83e\udde9 Even more stable LoRa compatibility</p></li><li><p>\ud83e\udee6 Better NSFW understanding, without raising bias too far</p></li><li><p>\ud83d\ude35\u200d\ud83d\udcab Reduced some hallucinations</p></li><li><p>\ud83c\udf29\ufe0f Less flashy frames</p></li><li><p>\ud83e\udee8 No camera drift</p></li></ul>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 3389,
+      "thumbsUpCount": 127,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2656308,
+       "sizeKB": 14186644.8828125,
+       "name": "DasiwaWAN22I2V14BTruevision_boundbiteHighV10.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-03-13T21:36:09.548Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "full",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "7E32F048",
+        "AutoV2": "822E4C5C2D",
+        "SHA256": "822E4C5C2D4D49C17F037CEAC39B4F27E551105CE7A917D237C667F41E9DA6B6",
+        "CRC32": "6A72E5F7",
+        "BLAKE3": "897A577F9BE2B3CDDC5B16B56A187986A19CC04F81F795DCFD30B21CDA6ACD78",
+        "AutoV3": "65F79E3CD2FE"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2769496",
+       "primary": true
+      }
+     ],
+     "images": [],
+     "downloadUrl": "https://civitai.com/api/download/models/2769496"
+    },
+    {
+     "id": 2769497,
+     "index": 3,
+     "name": "BoundBite Low v10",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-03-31T15:50:17.608Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 2,
+     "description": "<p>see high description</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 2856,
+      "thumbsUpCount": 52,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2658992,
+       "sizeKB": 14186644.8828125,
+       "name": "DasiwaWAN22I2V14BTruevision_boundbiteLowV10.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-03-14T22:05:58.254Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "full",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "1605167C",
+        "AutoV2": "1E2D09BAB5",
+        "SHA256": "1E2D09BAB51A295FF553F53E3BCA14E63AB05FBD1D79D135EEC088358B1286A4",
+        "CRC32": "DAF0F68C",
+        "BLAKE3": "228A725CD757B38F72E8AAE8E2BF499959840E38B23A74F67BC8D5F1A2EA23EE",
+        "AutoV3": "E24A6DDFE80E"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2769497",
+       "primary": true
+      }
+     ],
+     "images": [],
+     "downloadUrl": "https://civitai.com/api/download/models/2769497"
+    },
+    {
+     "id": 2557969,
+     "index": 4,
+     "name": "SynthSeduction High v9",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-01-24T14:30:06.623Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>\u2705 Optimisations</p><ul><li><p>\ud83c\udf1f CFGZeroStar patch (better results and prompt adherence)</p></li><li><p>\u23e9 SkyReels V2 for long consistent videos</p></li><li><p>\ud83c\udf40 NSFW optimisation</p></li><li><p>\ud83c\udfac Reward Attention (more realistic movements)</p></li><li><p>\ud83d\udcae VTA (Better completions, transitions, input understanding)</p></li><li><p>\u2728 No or extreme low transformation of details with anime/realistic images (lips, eyes, ears, breasts, genitals, ...)</p></li><li><p>\u2764\ufe0f\u200d\ud83d\udd25 Raised prompt adherence</p></li><li><p>\ud83d\udcab True motions</p></li><li><p>\ud83e\ude84 Best in-class details even on low resolutions</p></li><li><p>\ud83d\udc8e Consistent details over the full video (almost never detail shift)</p></li><li><p>\ud83c\udf8a Better special effects from prompts</p></li><li><p>\ud83d\udc8c Guesstimate better details</p></li><li><p>\ud83c\udf4c Even less tries for good results</p></li><li><p>\ud83e\udde9 Raised compatibility with LoRAs</p></li><li><p>\ud83d\uddbc\ufe0f Usable with your preferred/custom CLIP (if compatible)</p></li><li><p>\ud83d\ude35\u200d\ud83d\udcab Reduced hallucinations</p></li><li><p>\ud83d\udca0 Zero prompt results capable</p></li><li><p>\ud83d\udeab CLIP excluded</p></li><li><p>\ud83d\udeab Distillation excluded</p></li></ul>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 3283,
+      "thumbsUpCount": 182,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2456684,
+       "sizeKB": 14188126.46875,
+       "name": "DasiwaWAN22I2V14BTruevision_synthseductionHighV9.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-01-05T17:20:17.440Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "full",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "28C6184F",
+        "AutoV2": "619AA5540F",
+        "SHA256": "619AA5540F8C0F6F83A989D1C9FFD596DB4FE53C0096ECB60D337D37EC564018",
+        "CRC32": "C82AC6BF",
+        "BLAKE3": "2211F1D7CAC5610A2C5A125BC289198D5356BC6B81CE679BFB572F99B04F63DB",
+        "AutoV3": "F72C012012D0"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2557969",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 116421470,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/cb2903d4-7794-4d0f-9425-702a65503769/original=true/116421470.mp4",
+       "nsfwLevel": 1,
+       "width": 1440,
+       "height": 1824,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2557969"
+    },
+    {
+     "id": 2558260,
+     "index": 5,
+     "name": "SynthSeduction Low v9",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2026-01-24T14:30:06.623Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>See High version</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 2780,
+      "thumbsUpCount": 63,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2456929,
+       "sizeKB": 14188126.46875,
+       "name": "DasiwaWAN22I2V14BTruevision_synthseductionLowV9.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-01-05T18:51:35.368Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "full",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "4386A26B",
+        "AutoV2": "7ED82359A1",
+        "SHA256": "7ED82359A12DA9EFBCB8D917618BDC08A09FC5C07A0929AED2E63684BBB191E8",
+        "CRC32": "29D70AC6",
+        "BLAKE3": "95BAE39A2751F0A4BF62D8AA9A615230D0D2EEFF2FA28733C2A3ABBAEFAA96A9",
+        "AutoV3": "E4EF0E729616"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2558260",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 116424939,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/8893f7c0-9e6d-477b-8cc5-a5b83005dc1d/original=true/116424939.mp4",
+       "nsfwLevel": 1,
+       "width": 1440,
+       "height": 1824,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2558260"
+    }
+   ]
+  },
+  {
+   "id": 1817671,
+   "name": "Wan Video 2.2",
+   "allowNoCredit": true,
+   "allowCommercialUse": [
+    "Image",
+    "RentCivit",
+    "Rent",
+    "Sell"
+   ],
+   "allowDerivatives": true,
+   "allowDifferentLicense": true,
+   "type": "Checkpoint",
+   "minor": false,
+   "sfwOnly": false,
+   "poi": false,
+   "nsfw": false,
+   "nsfwLevel": 1,
+   "availability": "Public",
+   "userId": 12042163,
+   "baseModels": [
+    "Wan Video 2.2 TI2V-5B",
+    "Wan Video 2.2 T2V-A14B",
+    "Wan Video 2.2 I2V-A14B"
+   ],
+   "cosmetic": null,
+   "supportsGeneration": true,
+   "stats": {
+    "downloadCount": 25925,
+    "thumbsUpCount": 2735,
+    "thumbsDownCount": 22,
+    "commentCount": 0,
+    "tippedAmountCount": 30
+   },
+   "creator": {
+    "username": "CivitaiOfficial",
+    "image": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/da8ddaf2-77c7-49f6-add3-d67649cc155a/width=96/CivitaiOfficial.jpeg"
+   },
+   "tags": [
+    "base model"
+   ],
+   "modelVersions": [
+    {
+     "id": 2114157,
+     "index": 2,
+     "name": "14B Image-to-Video",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-08-15T03:15:37.698Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Wan 2.2 14B for Image-to-Video on-site Generation</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 0,
+      "thumbsUpCount": 1617,
+      "thumbsDownCount": 14
+     },
+     "supportsGeneration": true,
+     "files": [
+      {
+       "id": 2008694,
+       "sizeKB": 18605.6064453125,
+       "name": "wanVideo22_14bImageToVideo_trainingData.zip",
+       "overrideName": null,
+       "type": "Training Data",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-08-14T21:51:01.954Z",
+       "metadata": {
+        "format": "Other",
+        "size": null,
+        "fp": null
+       },
+       "hashes": {
+        "AutoV1": "29F6A7F5",
+        "AutoV2": "33FC2F5384",
+        "SHA256": "33FC2F5384D6010C4166558EC490C55C133EE60F20B2B459BEBBDD37F9AA5F89",
+        "CRC32": "A9903FE3",
+        "BLAKE3": "03AD43B329784F61E3D49A65CB547D7A861C2AEACD52A27E4DD23748ABB32A4F",
+        "AutoV3": "CB0752A00914"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2114157",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 94334967,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/d7bb6a2e-a570-4d56-8133-780116ee390c/original=true/94334967.mp4",
+       "nsfwLevel": 1,
+       "width": 832,
+       "height": 1216,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2114157"
+    },
+    {
+     "id": 2057270,
+     "index": 7,
+     "name": "i2v_low_noise_14B_fp8_scd",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-07-28T17:09:47.098Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>wan2.2_i2v_low_noise_14B_fp8_scaled</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 3970,
+      "thumbsUpCount": 100,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 1954179,
+       "sizeKB": 13959709.796875,
+       "name": "wanVideo22_i2vLowNoise14BFp8Scd.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-07-28T17:13:19.942Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "pruned",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "C520652A",
+        "AutoV2": "5471A457B6",
+        "SHA256": "5471A457B6AC404202A5FBE6C11595A3D5641FC766B00F38763F72303FFFC21E",
+        "CRC32": "E4767827",
+        "BLAKE3": "8D25B11AA401E5D7E9F34A1B58DC4FF2473B182C3C37561A39ED8BBA5B0DAEA8",
+        "AutoV3": "AFBDE5842E01"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2057270",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 91012777,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/c00e0424-2c09-4455-9c40-1ab04c44ec71/original=true/91012777.mp4",
+       "nsfwLevel": 1,
+       "width": 1280,
+       "height": 720,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2057270"
+    },
+    {
+     "id": 2057465,
+     "index": 8,
+     "name": "i2v_high_noise_14B_fp8_sd",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-07-28T18:26:24.522Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>wan2.2_i2v_high_noise_14B_fp8_scaled</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 7010,
+      "thumbsUpCount": 249,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 1954246,
+       "sizeKB": 13959709.796875,
+       "name": "wanVideo22_i2vHighNoise14BFp8Sd.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-07-28T17:35:28.241Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "pruned",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "96651951",
+        "AutoV2": "6122E79D55",
+        "SHA256": "6122E79D55E0F235698D11D657F3B196C5273C830DA00B2B013C5A048D5E6A42",
+        "CRC32": "C9498879",
+        "BLAKE3": "88555708950BF6EACAB2CA3677832A6F953C8609E1F595C437F8634F9A1C0263",
+        "AutoV3": "E706C9293181"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2057465",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 91022776,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/d05fadf4-0ed8-4a54-9c7d-9864ee36d31f/original=true/91022776.mp4",
+       "nsfwLevel": 1,
+       "width": 1280,
+       "height": 720,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2057465"
+    },
+    {
+     "id": 2058116,
+     "index": 9,
+     "name": "i2v_low_noise_14B_fp16",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-07-28T22:24:41.196Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>wan2.2_i2v_low_noise_14B_fp16</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 1406,
+      "thumbsUpCount": 32,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 1954961,
+       "sizeKB": 27908119.9140625,
+       "name": "wanVideo22_i2vLowNoise14BFp16.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-07-28T21:55:31.707Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "44A00389",
+        "AutoV2": "EDB89340C8",
+        "SHA256": "EDB89340C8A6FBF1A70E76A839AE01EAF7D289F05EA1EBD6B1A3FC6F533826E9",
+        "CRC32": "89685225",
+        "BLAKE3": "4F5E1ED3FBDC5C981EE65BC6D0AF9F87406B0028AABFA46DB2CD2F0EBD429C6C",
+        "AutoV3": "9666E7A68531"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2058116",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 91056012,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/29df6fb9-ed17-4fb6-b6e7-dc04225673a6/original=true/91056012.mp4",
+       "nsfwLevel": 1,
+       "width": 1280,
+       "height": 720,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2058116"
+    },
+    {
+     "id": 2058318,
+     "index": 10,
+     "name": "i2v_high_noise_14B_fp16",
+     "baseModel": "Wan Video 2.2 I2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-07-28T22:57:06.829Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>wan2.2_i2v_high_noise_14B_fp16</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 1306,
+      "thumbsUpCount": 42,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 1955133,
+       "sizeKB": 27908119.9140625,
+       "name": "wanVideo22_i2vHighNoise14BFp16.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-07-28T23:09:40.368Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "B41800D7",
+        "AutoV2": "C21C21EFA3",
+        "SHA256": "C21C21EFA368D529A982A7D89DD11D86608B5937CAE9A125D0FFE5491918A100",
+        "CRC32": "5E09181C",
+        "BLAKE3": "3F0F6E2DCD39CC40634643B2D5E0FC3D75EE5C8033C0651E686C58378DF3377A",
+        "AutoV3": "9FDDB51D57E5"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2058318",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 91059881,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/fae89fa4-93d5-4fbb-b99e-45b8fd260fe6/original=true/91059881.mp4",
+       "nsfwLevel": 1,
+       "width": 1280,
+       "height": 720,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2058318"
+    }
+   ]
+  }
+ ],
+ "metadata": {
+  "nextCursor": "5197|259|2151205",
+  "nextPage": "https://civitai.com/api/v1/models?baseModels=Wan%20Video%202.2%20I2V-A14B&types=Checkpoint&limit=5&sort=Most%20Downloaded&cursor=5197%7C259%7C2151205"
+ }
+}

@@ -288,6 +288,47 @@ pub(crate) async fn enqueue_catalog_primary_repair(
         })?;
         mold_catalog::entry::require_catalog_entry_activation(&entry)
             .map_err(crate::routes::ApiError::model_activation)?;
+        // Fail closed when the refetched entry can no longer be paired
+        // (the counterpart expert vanished upstream): repairing with a
+        // single-expert recipe would download gigabytes for a model that
+        // cannot run, and rewrite the sidecar without its pair
+        // declaration.
+        if mold_catalog::wan_a14b::entry_is_unpaired_a14b(&entry) {
+            return Err(crate::routes::ApiError::internal_with_status(
+                mold_catalog::wan_a14b::unpaired_reason(&entry.name),
+                StatusCode::CONFLICT,
+            ));
+        }
+        // Canonicalize to the fetched entry's identity: an A14B low-noise
+        // id resolves to the pair's high-noise entry, and sidecar storage,
+        // download grouping, and installed-detection all key off that id.
+        // Repairing under the originally-requested low id would download
+        // into `cv-<low>` while the cached intent checks `cv-<high>` —
+        // recovery completes but the model stays unavailable.
+        let canonical_id = entry.id.as_str().to_string();
+        let sc_path = if canonical_id == id {
+            sc_path
+        } else {
+            let canonical_path =
+                mold_catalog::sidecar::civitai_sidecar_path(&models_dir, &canonical_id);
+            // Re-run the installed check under the canonical identity: a
+            // healthy pair install satisfies a low-id repair without
+            // re-downloading anything.
+            if let Ok(sidecar) = mold_catalog::sidecar::read_sidecar(&canonical_path) {
+                if let Some(parent) = canonical_path.parent() {
+                    mold_catalog::sidecar::require_sidecar_artifact_activation(
+                        &models_dir,
+                        parent,
+                        &sidecar,
+                    )
+                    .map_err(crate::routes::ApiError::model_activation)?;
+                    if mold_catalog::sidecar::primary_path_if_present(parent, &sidecar).is_some() {
+                        return Ok(None);
+                    }
+                }
+            }
+            canonical_path
+        };
 
         let auth = match entry.download_recipe.needs_token {
             Some(mold_catalog::entry::TokenKind::Civitai) => civitai_token
@@ -332,13 +373,13 @@ pub(crate) async fn enqueue_catalog_primary_repair(
             }
         }
         let payload = crate::downloads::RecipePayload {
-            catalog_id: id.to_string(),
+            catalog_id: canonical_id.clone(),
             files,
             auth,
         };
         let (job_id, _, _) = state
             .downloads
-            .enqueue_recipe_in_group(payload, id)
+            .enqueue_recipe_in_group(payload, &canonical_id)
             .await
             .map_err(repair_enqueue_error)?;
         return Ok(Some(job_id));
@@ -1227,6 +1268,9 @@ fn hf_repo_has_one_builtin_model(hf_repo: &str) -> bool {
 }
 
 fn catalog_download_unsupported_reason(entry: &mold_catalog::entry::CatalogEntry) -> String {
+    if mold_catalog::wan_a14b::entry_is_unpaired_a14b(entry) {
+        return mold_catalog::wan_a14b::unpaired_reason(&entry.name);
+    }
     if matches!(entry.source, mold_catalog::entry::Source::Hf) {
         return "This Hugging Face repository is an aggregate or unsupported checkpoint. \
                 Choose a runnable built-in model variant or a supported LoRA."

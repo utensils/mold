@@ -440,37 +440,75 @@ fn civitai_thumbnail_url(raw: &str) -> String {
 
 pub fn from_civitai(item: CivitaiItem) -> Option<CatalogEntry> {
     let version = item.model_versions.first()?;
-    from_civitai_version(&item, version)
+    from_civitai_version(&item, version, A14bEmitPolicy::EmitRequested)
 }
 
 pub fn from_civitai_search_entries(item: CivitaiItem) -> Vec<CatalogEntry> {
     item.model_versions
         .iter()
         .filter(|version| version_is_public(version))
-        .filter_map(|version| from_civitai_version(&item, version))
+        .filter_map(|version| from_civitai_version(&item, version, A14bEmitPolicy::SkipLowNoise))
         .collect()
 }
 
-fn version_is_public(version: &CivitaiVersion) -> bool {
+pub(crate) fn version_is_public(version: &CivitaiVersion) -> bool {
     matches!(
         version.availability.as_deref(),
         None | Some("Public") | Some("public")
     )
 }
 
-fn from_civitai_version(item: &CivitaiItem, version: &CivitaiVersion) -> Option<CatalogEntry> {
+/// How to surface a successfully-paired A14B version whose entry point is
+/// the *low-noise* expert. Search listings skip it (its high-noise sibling
+/// already emits the pair, so one pair is one row); direct `cv:<id>`
+/// lookups emit the pair under the requested id so either expert's id
+/// resolves to the same runnable install.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum A14bEmitPolicy {
+    SkipLowNoise,
+    EmitRequested,
+}
+
+/// Normalize one version with an explicit A14B emit policy. Only the
+/// single-id fetch path (`live::fetch_civitai_version`) needs
+/// `EmitRequested` directly.
+pub(crate) fn from_civitai_version_with_policy(
+    item: &CivitaiItem,
+    version: &CivitaiVersion,
+    policy: A14bEmitPolicy,
+) -> Option<CatalogEntry> {
+    from_civitai_version(item, version, policy)
+}
+
+fn from_civitai_version(
+    item: &CivitaiItem,
+    version: &CivitaiVersion,
+    a14b_policy: A14bEmitPolicy,
+) -> Option<CatalogEntry> {
     let (family, family_role, sub_family) = map_base_model(&version.base_model)?;
     let file = pick_safetensors(&version.files)?;
     // Drop entries whose Civitai type isn't representable in the catalog
     // (TextualInversion, Hypernetwork, etc.) before doing any further work.
     let kind = civitai_kind_to_catalog_kind(&item.kind)?;
+    // 4-bit (NF4/NVFP4) safetensors checkpoints have no Wan load path
+    // (dense, scaled-FP8, and GGUF only) — drop them like the GGUF
+    // publications rather than offering a download that fails at load.
+    if kind == Kind::Checkpoint && family == Family::Wan && !wan_precision_is_loadable(file) {
+        tracing::debug!(
+            target: "catalog.wan_a14b",
+            version_id = version.id,
+            fp = file.metadata.fp.as_deref().unwrap_or_default(),
+            "Wan version dropped: 4-bit safetensors quantization has no Wan load path",
+        );
+        return None;
+    }
     let bundling = if version.base_model_type.as_deref() == Some("Standard") {
         Bundling::SingleFile
     } else {
         Bundling::Separated
     };
     let companions = companions_for(family, sub_family.as_deref(), bundling, kind);
-    let supported = supported_for(family, bundling, kind);
+    let mut supported = supported_for(family, bundling, kind);
     let modality = if family.is_video() {
         Modality::Video
     } else {
@@ -485,6 +523,64 @@ fn from_civitai_version(item: &CivitaiItem, version: &CivitaiVersion) -> Option<
                 text_encoder_file,
                 Some(RecipeFileRole::TextEncoder),
             ));
+        }
+    }
+    // A14B checkpoints denoise with a high/low expert pair that Civitai
+    // publishes as sibling versions. Pair them into one two-file recipe;
+    // when the counterpart cannot be identified with confidence the row
+    // stays visible but un-installable (fail closed, never single-expert).
+    let mut size_bytes = file.size_kb.map(|kb| (kb * 1000.0) as u64);
+    if kind == Kind::Checkpoint
+        && family == Family::Wan
+        && crate::wan_a14b::a14b_sub_family(&version.base_model).is_some()
+    {
+        match crate::wan_a14b::pair_experts(item, version, file) {
+            Ok(pair) => {
+                if pair.requested_role == crate::wan_a14b::ExpertRole::LowNoise {
+                    if a14b_policy == A14bEmitPolicy::SkipLowNoise {
+                        return None;
+                    }
+                    // A direct low-noise lookup canonicalizes to the pair's
+                    // high-noise identity. Search only ever emits the high
+                    // row, and sidecar storage plus installed-detection key
+                    // off `entry.id` — an entry keyed by the low id would
+                    // create a second install of the same pair that
+                    // Discover reports as absent under the high id.
+                    // Recursing from the high version is safe: pairing is
+                    // reciprocal (enforced in `pair_experts`), so the high
+                    // side resolves the same pair with itself as primary
+                    // and cannot recurse again.
+                    let high = item
+                        .model_versions
+                        .iter()
+                        .find(|sibling| sibling.id == pair.high.version_id)?;
+                    return from_civitai_version(item, high, a14b_policy);
+                }
+                recipe_files = vec![
+                    civitai_recipe_file(pair.high.version_id, pair.high.file, None),
+                    civitai_recipe_file(
+                        pair.low.version_id,
+                        pair.low.file,
+                        Some(RecipeFileRole::LowNoiseTransformer),
+                    ),
+                ];
+                size_bytes = pair
+                    .high
+                    .file
+                    .size_kb
+                    .zip(pair.low.file.size_kb)
+                    .map(|(high, low)| ((high + low) * 1000.0) as u64)
+                    .or(size_bytes);
+            }
+            Err(reason) => {
+                tracing::debug!(
+                    target: "catalog.wan_a14b",
+                    version_id = version.id,
+                    %reason,
+                    "A14B version left un-installable: no confident expert pairing",
+                );
+                supported = false;
+            }
         }
     }
 
@@ -522,7 +618,7 @@ fn from_civitai_version(item: &CivitaiItem, version: &CivitaiVersion) -> Option<
         kind,
         file_format: FileFormat::Safetensors,
         bundling,
-        size_bytes: file.size_kb.map(|kb| (kb * 1000.0) as u64),
+        size_bytes,
         download_count: stats.download_count,
         rating: stats.rating,
         likes: stats.favorite_count,
@@ -654,7 +750,7 @@ fn civitai_entry_name(model_name: &str, version_name: Option<&str>) -> String {
 /// Civitai's legacy unsafe `.pt` ("PickleTensor") format is dropped at the
 /// scanner. Arbitrary-code-execution risk on deserialization is not worth
 /// catalog completeness — only safetensors are surfaced.
-fn pick_safetensors(files: &[CivitaiFile]) -> Option<&CivitaiFile> {
+pub(crate) fn pick_safetensors(files: &[CivitaiFile]) -> Option<&CivitaiFile> {
     let is_safetensors = |file: &&CivitaiFile| {
         file.metadata.format.as_deref() == Some("SafeTensor")
             || file.name.to_ascii_lowercase().ends_with(".safetensors")
@@ -668,6 +764,24 @@ fn pick_safetensors(files: &[CivitaiFile]) -> Option<&CivitaiFile> {
                 .is_some_and(|kind| kind.eq_ignore_ascii_case("Model"))
         })
         .or_else(|| files.iter().find(is_safetensors))
+}
+
+/// Whether the Wan loader can read a Civitai safetensors file of this
+/// reported precision. The engine loads dense (fp16/bf16/fp32), scaled-FP8,
+/// and GGUF weights only — 4-bit safetensors quantizations (Civitai `fp`
+/// metadata `nf4` / `fp4` / `nvfp4`, real for A14B I2V expert pairs) have
+/// no load path, so surfacing them would offer a multi-gigabyte download
+/// that fails at load. Mirrors the GGUF handling: the version is dropped,
+/// with the reason logged at the drop site.
+pub(crate) fn wan_precision_is_loadable(file: &CivitaiFile) -> bool {
+    !matches!(
+        file.metadata
+            .fp
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("nf4" | "fp4" | "nvfp4")
+    )
 }
 
 fn pick_civitai_text_encoder(files: &[CivitaiFile]) -> Option<&CivitaiFile> {

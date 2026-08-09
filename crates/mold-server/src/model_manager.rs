@@ -420,6 +420,9 @@ fn require_catalog_intent_activation(
     if let Some(path) = intent.vae_recipe_path.as_deref() {
         mold_core::require_model_artifact_activation(path, Some(artifact_root), family)?;
     }
+    if let Some(path) = intent.low_noise_recipe_path.as_deref() {
+        mold_core::require_model_artifact_activation(path, Some(artifact_root), family)?;
+    }
     for path in &intent.text_encoder_recipe_paths {
         mold_core::require_model_artifact_activation(path, Some(artifact_root), family)?;
     }
@@ -1171,8 +1174,15 @@ fn catalog_sidecar_component_status(
     )?;
 
     let primary = mold_catalog::sidecar::primary_path(&sidecar_dir, &sidecar);
-    let primary_present =
-        mold_catalog::sidecar::primary_path_if_present(&sidecar_dir, &sidecar).is_some();
+    // Per-expert presence: a pair sidecar's whole-install
+    // `primary_path_if_present` is None whenever EITHER half is missing,
+    // which would report the (present) high expert as the missing
+    // component and never name the low-noise file at all. Diagnostics
+    // check each half separately; installed detection elsewhere still
+    // requires both.
+    let pulling = mold_catalog::sidecar::install_pull_in_progress(&sidecar_dir, &sidecar);
+    let primary_present = !pulling
+        && mold_catalog::sidecar::primary_file_if_complete(&sidecar_dir, &sidecar).is_some();
     let mut components = vec![ModelComponentStatus {
         kind: "transformer".to_string(),
         name: "primary checkpoint".to_string(),
@@ -1183,6 +1193,19 @@ fn catalog_sidecar_component_status(
         repair_model: Some(model_name.to_string()),
         options: component_options_for_kind(config, "transformer", primary.as_deref()),
     }];
+    if sidecar.low_noise_filename_rel.is_some() {
+        let low = mold_catalog::sidecar::low_noise_path(&sidecar_dir, &sidecar);
+        let low_present = !pulling
+            && mold_catalog::sidecar::low_noise_file_if_complete(&sidecar_dir, &sidecar).is_some();
+        components.push(ModelComponentStatus {
+            kind: "transformer".to_string(),
+            name: "low-noise transformer".to_string(),
+            present: low_present,
+            path: low.as_ref().map(|path| path.to_string_lossy().to_string()),
+            repair_model: Some(model_name.to_string()),
+            options: component_options_for_kind(config, "transformer", low.as_deref()),
+        });
+    }
 
     let Ok(family) = mold_catalog::families::Family::from_str(&sidecar.family) else {
         return Ok(components);
@@ -1984,6 +2007,7 @@ mod tests {
             primary_recipe_path: PathBuf::from("ordinary/model.safetensors"),
             vae_recipe_path: None,
             text_encoder_recipe_paths: Vec::new(),
+            low_noise_recipe_path: None,
             companions: Vec::new(),
             bundling: mold_catalog::entry::Bundling::SingleFile,
         }
@@ -2120,11 +2144,94 @@ mod tests {
                 supported: true,
                 trained_words: Vec::new(),
                 primary_filename_rel: primary_rel.to_string(),
+                primary_size_bytes: None,
+                low_noise_filename_rel: None,
+                low_noise_size_bytes: None,
                 written_at: 0,
             },
         )
         .unwrap();
         primary
+    }
+
+    /// A pair sidecar with one half missing must name the truly missing
+    /// expert: the whole-install check is false either way, but the
+    /// diagnostic rows report each half's own presence.
+    #[test]
+    fn pair_sidecar_diagnostics_name_the_missing_half() {
+        let root = tempfile::tempdir().unwrap();
+        let _environment = IsolatedModelEnvironment::hermetic();
+        let models_dir = root.path();
+        let install = models_dir.join("cv-2057171");
+        let high_rel = "wan/civitai/2057171/high.safetensors";
+        let low_rel = "wan/civitai/2057100/low.safetensors";
+        let high = install.join(high_rel);
+        let low = install.join(low_rel);
+        std::fs::create_dir_all(high.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(low.parent().unwrap()).unwrap();
+        mold_catalog::sidecar::write_sidecar(
+            &install.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &mold_catalog::sidecar::CatalogSidecar {
+                schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+                id: "cv:2057171".to_string(),
+                source: "civitai".to_string(),
+                source_id: "2057171".to_string(),
+                name: "A14B pair fixture".to_string(),
+                author: None,
+                family: "wan".to_string(),
+                family_role: "base".to_string(),
+                sub_family: Some("wan22-t2v-a14b".to_string()),
+                kind: "checkpoint".to_string(),
+                modality: "video".to_string(),
+                nsfw: None,
+                description: None,
+                tags: Vec::new(),
+                license: None,
+                page_url: None,
+                thumbnail_url: None,
+                size_bytes: Some(7),
+                supported: true,
+                trained_words: Vec::new(),
+                primary_filename_rel: high_rel.to_string(),
+                primary_size_bytes: Some(4),
+                low_noise_filename_rel: Some(low_rel.to_string()),
+                low_noise_size_bytes: Some(3),
+                written_at: 0,
+            },
+        )
+        .unwrap();
+        let config = Config {
+            models_dir: models_dir.display().to_string(),
+            ..Default::default()
+        };
+        let presence =
+            |components: &[ModelComponentStatus], name: &str| -> (bool, Option<String>) {
+                let row = components
+                    .iter()
+                    .find(|component| component.name == name)
+                    .unwrap_or_else(|| panic!("diagnostics must carry a {name:?} row"));
+                (row.present, row.path.clone())
+            };
+
+        // Low missing: the (present) high expert must not be blamed, and
+        // the low-noise row must name the missing file.
+        std::fs::write(&high, b"high").unwrap();
+        let components = catalog_sidecar_component_status(&config, "cv:2057171").unwrap();
+        let (high_present, _) = presence(&components, "primary checkpoint");
+        let (low_present, low_path) = presence(&components, "low-noise transformer");
+        assert!(high_present, "present high expert must not read as missing");
+        assert!(!low_present, "the missing low expert is the repairable row");
+        assert!(low_path.unwrap().ends_with(low_rel));
+
+        // Inverse: high missing, low present.
+        std::fs::remove_file(&high).unwrap();
+        std::fs::write(&low, b"low").unwrap();
+        let components = catalog_sidecar_component_status(&config, "cv:2057171").unwrap();
+        let (high_present, high_path) = presence(&components, "primary checkpoint");
+        let (low_present, _) = presence(&components, "low-noise transformer");
+        assert!(!high_present);
+        assert!(low_present);
+        assert!(high_path.unwrap().ends_with(high_rel));
     }
 
     fn flux2_catalog_config(models_dir: &Path) -> Config {
@@ -2231,6 +2338,130 @@ mod tests {
             assert!(state.catalog_intents.read().await.is_empty());
             assert_eq!(filesystem_snapshot(root.path()), filesystem_before);
         }
+    }
+
+    /// A paired Wan 2.2 A14B sidecar resolves to runtime paths carrying
+    /// BOTH experts, so component status lists the low-noise transformer
+    /// row and the placement/VRAM path sizes the pair as max-over-experts
+    /// (`estimate_peak_memory_sizes_the_larger_expert_of_a_pair` pins the
+    /// estimator side). A half-pair on disk is not installed at all.
+    #[tokio::test]
+    async fn installed_a14b_pair_sidecar_resolves_both_experts() {
+        let root = tempfile::tempdir().unwrap();
+        let _environment = IsolatedModelEnvironment::hermetic();
+        let models_dir = root.path();
+
+        // Wan companions (UMT5 + 2.1 VAE) as installed config entries.
+        let umt5 = models_dir.join("companions/umt5.safetensors");
+        let vae = models_dir.join("companions/wan21_vae.safetensors");
+        std::fs::create_dir_all(umt5.parent().unwrap()).unwrap();
+        for path in [&umt5, &vae] {
+            std::fs::write(path, b"companion").unwrap();
+        }
+        let mut config = Config {
+            models_dir: models_dir.display().to_string(),
+            ..Default::default()
+        };
+        config.models.insert(
+            "wan-umt5".to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(umt5.display().to_string()),
+                vae: Some(umt5.display().to_string()),
+                text_encoder_files: Some(vec![umt5.display().to_string()]),
+                family: Some("companion".to_string()),
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "wan21-vae".to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(vae.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                family: Some("companion".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let install_dir = models_dir.join("cv-2057171");
+        let high_rel = "wan/civitai/2057171/high.safetensors";
+        let low_rel = "wan/civitai/2057100/low.safetensors";
+        let high = install_dir.join(high_rel);
+        let low = install_dir.join(low_rel);
+        std::fs::create_dir_all(high.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(low.parent().unwrap()).unwrap();
+        std::fs::write(&high, b"high").unwrap();
+        let sidecar = mold_catalog::sidecar::CatalogSidecar {
+            schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+            id: "cv:2057171".to_string(),
+            source: "civitai".to_string(),
+            source_id: "2057171".to_string(),
+            name: "Wan Video 2.2 - t2v_high_noise_14B".to_string(),
+            author: None,
+            family: "wan".to_string(),
+            family_role: "finetune".to_string(),
+            sub_family: Some("wan22-t2v-a14b".to_string()),
+            kind: "checkpoint".to_string(),
+            modality: "video".to_string(),
+            nsfw: None,
+            description: None,
+            tags: Vec::new(),
+            license: None,
+            page_url: None,
+            thumbnail_url: None,
+            size_bytes: Some(7),
+            supported: true,
+            trained_words: Vec::new(),
+            primary_filename_rel: high_rel.to_string(),
+            primary_size_bytes: Some(4),
+            low_noise_filename_rel: Some(low_rel.to_string()),
+            low_noise_size_bytes: Some(3),
+            written_at: 0,
+        };
+        mold_catalog::sidecar::write_sidecar(
+            &install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &sidecar,
+        )
+        .unwrap();
+
+        // Half-pair on disk: never resolves as installed.
+        assert!(
+            resolve_existing_model_paths("cv:2057171", &config)
+                .unwrap()
+                .is_none(),
+            "a half-pair must not resolve to runnable paths"
+        );
+
+        // Both experts land: paths carry the pair.
+        std::fs::write(&low, b"low").unwrap();
+        let resolution = resolve_existing_model_paths("cv:2057171", &config)
+            .unwrap()
+            .expect("complete pair resolves");
+        assert_eq!(resolution.paths.transformer, high);
+        assert_eq!(
+            resolution.paths.low_noise_transformer.as_deref(),
+            Some(low.as_path())
+        );
+        assert_eq!(
+            resolution
+                .model_config_overlay
+                .as_ref()
+                .and_then(|model| model.low_noise_transformer.as_deref()),
+            Some(low.display().to_string().as_str())
+        );
+
+        // Component status names the low-noise expert as its own row.
+        let state = AppState::for_tests();
+        *state.config.write().await = config.clone();
+        let status = model_component_status_existing_only(&state, "cv:2057171")
+            .await
+            .unwrap();
+        let low_row = status
+            .components
+            .iter()
+            .find(|component| component.name == "low-noise transformer")
+            .expect("pair install exposes the low-noise transformer component");
+        assert!(low_row.present);
+        assert!(status.components.iter().all(|component| component.present));
     }
 
     #[tokio::test]
@@ -2674,6 +2905,9 @@ mod tests {
             supported: true,
             trained_words: vec![],
             primary_filename_rel: "model.safetensors".into(),
+            primary_size_bytes: None,
+            low_noise_filename_rel: None,
+            low_noise_size_bytes: None,
             written_at: 0,
         };
         mold_catalog::sidecar::write_sidecar(

@@ -11399,6 +11399,9 @@ mod tests {
                 supported: true,
                 trained_words: Vec::new(),
                 primary_filename_rel: "flux2/catalog/model.safetensors".to_string(),
+                primary_size_bytes: None,
+                low_noise_filename_rel: None,
+                low_noise_size_bytes: None,
                 written_at: 0,
             },
         )

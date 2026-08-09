@@ -1,0 +1,1605 @@
+{
+ "items": [
+  {
+   "id": 1933000,
+   "name": "Wan 2.2 T2V A14B GGUF",
+   "allowNoCredit": true,
+   "allowCommercialUse": [
+    "Image",
+    "RentCivit",
+    "Rent",
+    "Sell"
+   ],
+   "allowDerivatives": true,
+   "allowDifferentLicense": true,
+   "type": "Checkpoint",
+   "minor": false,
+   "sfwOnly": false,
+   "poi": false,
+   "nsfw": false,
+   "nsfwLevel": 1,
+   "availability": "Public",
+   "userId": 6672236,
+   "baseModels": [
+    "Wan Video 2.2 T2V-A14B"
+   ],
+   "cosmetic": null,
+   "supportsGeneration": false,
+   "stats": {
+    "downloadCount": 5990,
+    "thumbsUpCount": 140,
+    "thumbsDownCount": 0,
+    "commentCount": 3,
+    "tippedAmountCount": 0
+   },
+   "creator": {
+    "username": "Santodan",
+    "image": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/2ad235a8-4514-47bc-98cb-9b3cd9e1df37/width=96/Santodan.jpeg"
+   },
+   "tags": [
+    "base model",
+    "wan2.2",
+    "gguf",
+    "wan"
+   ],
+   "modelVersions": [
+    {
+     "id": 2192278,
+     "index": 0,
+     "name": "HIGH Q5_0",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-09-07T16:50:54.540Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": null,
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 3191,
+      "thumbsUpCount": 119,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2085422,
+       "sizeKB": 10071116.5,
+       "name": "wan22T2VA14BGGUF_highQ50.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-09-07T17:01:45.793Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "BA54549A",
+        "AutoV2": "694902F318",
+        "SHA256": "694902F318737151C6599BE284605E94B101843A42252803A5F46321E836C1ED",
+        "CRC32": "0F902943",
+        "BLAKE3": "2CDD652D793853A43F10CCBE55E44D787CD65011473E9F1F484C6F429E5C892A",
+        "AutoV3": "707B3170D562"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2192278",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 98950004,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/1adad116-6515-472e-a334-ac9cce0961d7/original=true/98950004.mp4",
+       "nsfwLevel": 1,
+       "width": 480,
+       "height": 832,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2192278"
+    },
+    {
+     "id": 2192174,
+     "index": 1,
+     "name": "LOW Q5_0",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-09-07T15:49:05.277Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": null,
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 1296,
+      "thumbsUpCount": 24,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2085224,
+       "sizeKB": 10071116.5,
+       "name": "wan22T2VA14BGGUF_lowQ50.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-09-07T15:49:54.482Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "96DF76BF",
+        "AutoV2": "9DBCEECCEB",
+        "SHA256": "9DBCEECCEB04C7DFCE9F75330E7E0009E9BAA86330CAC2432A26A83BDD83B72D",
+        "CRC32": "079A2A47",
+        "BLAKE3": "ACA008FC7EEEA74E04DFE3D975A9DDE869227D4995E3ADEEE1AFED17024EF45D",
+        "AutoV3": "B046C18F62D3"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2192174",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 98940705,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/ae94233c-e876-4007-a7a1-c3957bb0e506/original=true/98940705.mp4",
+       "nsfwLevel": 1,
+       "width": 480,
+       "height": 832,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2192174"
+    },
+    {
+     "id": 2192455,
+     "index": 2,
+     "name": "HIGH Q4_0",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-09-07T17:15:48.459Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": null,
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 496,
+      "thumbsUpCount": 10,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2085480,
+       "sizeKB": 8355916.5,
+       "name": "wan22T2VA14BGGUF_highQ40.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-09-07T17:14:49.782Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "A06205AB",
+        "AutoV2": "3BF215A4B6",
+        "SHA256": "3BF215A4B67BF19CAB96ECDAA1CF0CC8F66143E33E2B6BBAB038E3AB0E48B89A",
+        "CRC32": "8E8CB251",
+        "BLAKE3": "0066B471120485FD776AE0151202A1E79E90284CC634D8F68265F4292AD1D096",
+        "AutoV3": "A564183E3F61"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2192455",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 98958729,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/12bb4821-af8f-4534-b1a7-5caab3131f5f/original=true/98958729.mp4",
+       "nsfwLevel": 1,
+       "width": 480,
+       "height": 832,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2192455"
+    },
+    {
+     "id": 2192525,
+     "index": 3,
+     "name": "LOW Q4_0",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-09-07T17:59:33.511Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": null,
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 415,
+      "thumbsUpCount": 5,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2085540,
+       "sizeKB": 8355916.5,
+       "name": "wan22T2VA14BGGUF_lowQ40.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-09-07T17:46:32.333Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "3F4C7E8F",
+        "AutoV2": "892A353EA2",
+        "SHA256": "892A353EA21C6D8A55AB558E2F5CC72CC4AB360485B9F328C3BC780AAC2D38C1",
+        "CRC32": "8CEF20B5",
+        "BLAKE3": "1FAD773F5B1B7D258685366C3125C5D453E0A8AC285EF88518FA8CDC5FB6CD10",
+        "AutoV3": "6EB7DA3E6BA6"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2192525",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 98958565,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/cc6aa0a4-7166-46cf-81ed-631731c3cb75/original=true/98958565.mp4",
+       "nsfwLevel": 1,
+       "width": 480,
+       "height": 832,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2192525"
+    },
+    {
+     "id": 2187811,
+     "index": 4,
+     "name": "HIGH Q3_K_M",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-09-06T09:32:08.613Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": null,
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 279,
+      "thumbsUpCount": 9,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2080784,
+       "sizeKB": 7006316.5,
+       "name": "wan22T2VA14BGGUF_highQ3KM.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-09-06T08:58:47.373Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "pruned",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "91BD1D30",
+        "AutoV2": "0A1166C942",
+        "SHA256": "0A1166C9429630BE04D5A9351ABAE7972ACD18CEE34EA52C130986FF1AB827B6",
+        "CRC32": "82DB6D37",
+        "BLAKE3": "A52A0F9EDB4170C86D830637B1C974BD13C8A25CC9F8FD5F9537D6BFBF4D3C79",
+        "AutoV3": "360C4F15ECC0"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2187811",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 98690317,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/5a364dc4-a73d-4374-bda5-7af8f9d3c860/original=true/98690317.mp4",
+       "nsfwLevel": 1,
+       "width": 480,
+       "height": 832,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2187811"
+    },
+    {
+     "id": 2187955,
+     "index": 5,
+     "name": "LOW Q3_K_M",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-09-06T09:58:13.681Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": null,
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 313,
+      "thumbsUpCount": 11,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2080940,
+       "sizeKB": 7006316.5,
+       "name": "wan22T2VA14BGGUF_lowQ3KM.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-09-06T09:48:58.648Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "711CA6AC",
+        "AutoV2": "13BF25CA46",
+        "SHA256": "13BF25CA46C94D210BD20796093F2F6CEC35D3331004C0E50FF0F961C7B68947",
+        "CRC32": "1F1C3FED",
+        "BLAKE3": "6D175262B85FDB8CF4AA6E5A06A3C1C4F7242D9AFE39FF5ECBBEF03AE5F9EFD4",
+        "AutoV3": "81A21B985955"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2187955",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 98690451,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/7f9e6c30-cba3-4114-bf4d-a9c15783a6f0/original=true/98690451.mp4",
+       "nsfwLevel": 1,
+       "width": 480,
+       "height": 832,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2187955"
+    }
+   ]
+  },
+  {
+   "id": 1817671,
+   "name": "Wan Video 2.2",
+   "allowNoCredit": true,
+   "allowCommercialUse": [
+    "Image",
+    "RentCivit",
+    "Rent",
+    "Sell"
+   ],
+   "allowDerivatives": true,
+   "allowDifferentLicense": true,
+   "type": "Checkpoint",
+   "minor": false,
+   "sfwOnly": false,
+   "poi": false,
+   "nsfw": false,
+   "nsfwLevel": 1,
+   "availability": "Public",
+   "userId": 12042163,
+   "baseModels": [
+    "Wan Video 2.2 TI2V-5B",
+    "Wan Video 2.2 T2V-A14B",
+    "Wan Video 2.2 I2V-A14B"
+   ],
+   "cosmetic": null,
+   "supportsGeneration": true,
+   "stats": {
+    "downloadCount": 25925,
+    "thumbsUpCount": 2735,
+    "thumbsDownCount": 22,
+    "commentCount": 0,
+    "tippedAmountCount": 30
+   },
+   "creator": {
+    "username": "CivitaiOfficial",
+    "image": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/da8ddaf2-77c7-49f6-add3-d67649cc155a/width=96/CivitaiOfficial.jpeg"
+   },
+   "tags": [
+    "base model"
+   ],
+   "modelVersions": [
+    {
+     "id": 2114154,
+     "index": 1,
+     "name": "14B Text-to-Video",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-08-15T01:20:27.694Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Wan 2.2 14B for Text-to-Video on-site Generation</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 0,
+      "thumbsUpCount": 283,
+      "thumbsDownCount": 2
+     },
+     "supportsGeneration": true,
+     "files": [
+      {
+       "id": 2008690,
+       "sizeKB": 18605.6064453125,
+       "name": "wanVideo22_14bTextToVideo_trainingData.zip",
+       "overrideName": null,
+       "type": "Training Data",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-08-14T21:50:59.640Z",
+       "metadata": {
+        "format": "Other",
+        "size": null,
+        "fp": null
+       },
+       "hashes": {
+        "AutoV1": "29F6A7F5",
+        "AutoV2": "33FC2F5384",
+        "SHA256": "33FC2F5384D6010C4166558EC490C55C133EE60F20B2B459BEBBDD37F9AA5F89",
+        "CRC32": "A9903FE3",
+        "BLAKE3": "03AD43B329784F61E3D49A65CB547D7A861C2AEACD52A27E4DD23748ABB32A4F",
+        "AutoV3": "CB0752A00914"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2114154",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 94317504,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/cbce1b3e-b2b3-4983-bf44-30434e2642d3/original=true/94317504.mp4",
+       "nsfwLevel": 1,
+       "width": 832,
+       "height": 1216,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2114154"
+    },
+    {
+     "id": 2057100,
+     "index": 5,
+     "name": "t2v_low_noise_14B",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-07-28T15:42:32.840Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>wan2.2_t2v_low_noise_14B_fp8_scaled</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 1933,
+      "thumbsUpCount": 59,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 1953915,
+       "sizeKB": 13958909.796875,
+       "name": "wanVideo22_t2vLowNoise14B.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-07-28T15:53:05.451Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "pruned",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "053A1060",
+        "AutoV2": "E71B96D7C8",
+        "SHA256": "E71B96D7C82E638694C5E7FB98FAC4BFB0E4DDC5FBBB4B1DF40DA8F0F1278A97",
+        "CRC32": "2E14F608",
+        "BLAKE3": "C91B6776BD509549C533CD3A99B47EBF5F8728F5616A3DA26B605C3317793F9C",
+        "AutoV3": "698EB11168F4"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2057100",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 91000464,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/0cf9f668-561b-4c50-b86d-fb47b635f019/original=true/91000464.mp4",
+       "nsfwLevel": 1,
+       "width": 1280,
+       "height": 720,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2057100"
+    },
+    {
+     "id": 2057171,
+     "index": 6,
+     "name": "t2v_high_noise_14B",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-07-28T16:07:08.840Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>wan2.2_t2v_high_noise_14B_fp8_scaled</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 1845,
+      "thumbsUpCount": 68,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 1954001,
+       "sizeKB": 13958909.796875,
+       "name": "wanVideo22_t2vHighNoise14B.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-07-28T16:12:12.347Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "pruned",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "36716F5A",
+        "AutoV2": "CAD711AE21",
+        "SHA256": "CAD711AE211C8B23455EC68CD6A190A33A3D874234A77EB57266D73F8F0E6C9F",
+        "CRC32": "224196EE",
+        "BLAKE3": "BD71AC0B527FCCB3A334D2EC7B64578E33E192D8362E382181032C3E197F407F",
+        "AutoV3": "4CC4E72C6914"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2057171",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 91004047,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/908a2c84-39a6-443b-920b-d500e34537c4/original=true/91004047.mp4",
+       "nsfwLevel": 1,
+       "width": 1280,
+       "height": 720,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2057171"
+    },
+    {
+     "id": 2057683,
+     "index": 11,
+     "name": "t2v_low_noise_14B_fp16",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-07-28T20:24:12.095Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>wan2.2_t2v_low_noise_14B_fp16</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 634,
+      "thumbsUpCount": 17,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 1954543,
+       "sizeKB": 27907319.9140625,
+       "name": "wanVideo22_t2vLowNoise14BFp16.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-07-28T19:42:29.845Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "4C2BFBDF",
+        "AutoV2": "431D1613FF",
+        "SHA256": "431D1613FFA809AE1F735B661A01788C6D74991F51EFD01F45D5AEE955CCD224",
+        "CRC32": "9B62ECC2",
+        "BLAKE3": "0391A90CE67042E9A1969D9ADBD3970DC6666230733FC40B69208725DB6506C7",
+        "AutoV3": "7F07F1F0F37D"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2057683",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 91040094,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/0c46d337-a9e6-48fd-8f55-4ae2e42a3bca/original=true/91040094.mp4",
+       "nsfwLevel": 1,
+       "width": 1280,
+       "height": 720,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2057683"
+    },
+    {
+     "id": 2057999,
+     "index": 12,
+     "name": "t2v_high_noise_14B_fp16",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-07-28T21:08:56.354Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>wan2.2_t2v_high_noise_14B_fp16</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 546,
+      "thumbsUpCount": 11,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 1954820,
+       "sizeKB": 27907319.9140625,
+       "name": "wanVideo22_t2vHighNoise14BFp16.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-07-28T21:09:33.034Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "full",
+        "fp": "fp16"
+       },
+       "hashes": {
+        "AutoV1": "F096DC06",
+        "AutoV2": "C793E15153",
+        "SHA256": "C793E1515320FC8883AC8F97E2A45270C35EDD8C4E334A6D42D3E95455BD8DA2",
+        "CRC32": "31E72869",
+        "BLAKE3": "E503F3CBE94736A1073134E219C38E210D97AE620204E583784958314183ECCF",
+        "AutoV3": "842BCFAD690A"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2057999",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 91044932,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/a865defc-cfe4-41cd-8507-d1f3d0f3aeef/original=true/91044932.mp4",
+       "nsfwLevel": 1,
+       "width": 1280,
+       "height": 720,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2057999"
+    }
+   ]
+  },
+  {
+   "id": 1927692,
+   "name": "Magic-Wan-Image",
+   "allowNoCredit": true,
+   "allowCommercialUse": [],
+   "allowDerivatives": true,
+   "allowDifferentLicense": true,
+   "type": "Checkpoint",
+   "minor": false,
+   "sfwOnly": false,
+   "poi": false,
+   "nsfw": false,
+   "nsfwLevel": 15,
+   "availability": "Public",
+   "userId": 3849221,
+   "baseModels": [
+    "Wan Video 2.2 T2V-A14B"
+   ],
+   "cosmetic": null,
+   "supportsGeneration": false,
+   "stats": {
+    "downloadCount": 3524,
+    "thumbsUpCount": 259,
+    "thumbsDownCount": 0,
+    "commentCount": 0,
+    "tippedAmountCount": 200
+   },
+   "creator": {
+    "username": "wikeeyang",
+    "image": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/ea2f4967-7070-47eb-8bab-bf8d97673a94/width=96/wikeeyang.jpeg"
+   },
+   "tags": [
+    "base model"
+   ],
+   "modelVersions": [
+    {
+     "id": 2837726,
+     "index": 0,
+     "name": "T2IV-v3.0-fp8mixed",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Refiner",
+     "publishedAt": "2026-04-07T05:35:42.244Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Don't use this safetensors, Pls download from Huggingface or ModelScope.</p><p>\u8bf7\u4e0d\u7528\u4e0b\u8f7d\u8be5\u6743\u91cd\u6587\u4ef6\uff0c\u8bf7\u79fb\u6b65 HF \u6216 Modelscope \u4e0b\u8f7d\u3002</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 599,
+      "thumbsUpCount": 78,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2723923,
+       "sizeKB": 24.0771484375,
+       "name": "magicWanImage_t2ivV30Fp8mixed.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2026-04-07T05:34:29.112Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "pruned",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV2": "C74B4E810B",
+        "SHA256": "C74B4E810B030F6B75FDE959E2DB678C268D07115B85356D3C0138BA5EB42340",
+        "CRC32": "9B6C6647",
+        "BLAKE3": "EDC4D4CA619F612417FC4B463B3B2864E42E8CC5F291835E1312F2A6C8923507",
+        "AutoV3": "9AE1BBC35E56"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2837726",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 126678065,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/2ae8b0b3-eef7-47c6-b167-6ca3311d87eb/original=true/126678065.jpeg",
+       "nsfwLevel": 1,
+       "width": 768,
+       "height": 1376,
+       "hash": "UUL3Mw-;V@s.Ipt7%2t7%LtQNHoM~VogRka|",
+       "type": "image",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2837726"
+    },
+    {
+     "id": 2399857,
+     "index": 1,
+     "name": "v2.0-fp8",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Refiner",
+     "publishedAt": "2025-11-12T12:46:29.213Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 3,
+     "description": "<p>\u903c\u771f\u808c\u80a4\u3001\u6781\u81f4\u9ad8\u6e05\uff0c\u9002\u5408\u4eba\u50cf\u4e0e\u5b9e\u666f\u7167\u7247\u7c7b\u56fe\u50cf\u7684\u751f\u6210\u3002</p><p>Highly realistic skin texture and ultra-high resolution, suitable for generating Portrait and Real-world scenes.</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 999,
+      "thumbsUpCount": 103,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2290281,
+       "sizeKB": 13954693.28125,
+       "name": "magicWanImage_v20Fp8.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-11-12T12:51:29.773Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "pruned",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "63102E72",
+        "AutoV2": "8A4EB6BD24",
+        "SHA256": "8A4EB6BD24EC0AAEACDA3B62303507039D4C4E6C6A7EF6AB96BCDBA233E5DEE4",
+        "CRC32": "F0B035AD",
+        "BLAKE3": "3D2066F04DDD66CD529B11EB1A876A869E60172C977280608F994DE717C31AE9",
+        "AutoV3": "155EF2DC5031"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2399857",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 109926734,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/3b8fce9b-8991-432f-86c4-096fd34fe8fa/original=true/109926734.jpeg",
+       "nsfwLevel": 1,
+       "width": 768,
+       "height": 1376,
+       "hash": "UGIhmjoI9EWY0[oJITM|kZt7bdRk?Ht8x^f6",
+       "type": "image",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2399857"
+    },
+    {
+     "id": 2399900,
+     "index": 2,
+     "name": "v2.0-Q8_0",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Refiner",
+     "publishedAt": "2025-11-12T13:10:39.243Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>\u903c\u771f\u808c\u80a4\u3001\u6781\u81f4\u9ad8\u6e05\uff0c\u9002\u5408\u4eba\u50cf\u4e0e\u5b9e\u666f\u7167\u7247\u7c7b\u56fe\u50cf\u7684\u751f\u6210\u3002</p><p>Highly realistic skin texture and ultra-high resolution, suitable for generating Portrait and Real-world scenes.</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 259,
+      "thumbsUpCount": 21,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2290341,
+       "sizeKB": 15043290.53125,
+       "name": "magicWanImage_v20Q80.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-11-12T13:21:49.738Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "pruned",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "F38B0B48",
+        "AutoV2": "1DC418D231",
+        "SHA256": "1DC418D231FC0C7584775B849CE2B77D38F80717B513E8C00704AABBB13788CB",
+        "CRC32": "C50489DF",
+        "BLAKE3": "074F7273CEB58B623F46F2900B253E819A5A547B75FB740F439C025DDAE48774",
+        "AutoV3": "C59D00A35BF6"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2399900",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 109927315,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/d9cb6702-2daa-48c2-aa43-7ad4a95142c8/original=true/109927315.jpeg",
+       "nsfwLevel": 1,
+       "width": 768,
+       "height": 1376,
+       "hash": "UPH_JZ%h-:?a~V.8%h%Mp0?HRjIp%gj[nhjZ",
+       "type": "image",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2399900"
+    },
+    {
+     "id": 2399959,
+     "index": 3,
+     "name": "v2.0-Q4_1",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Refiner",
+     "publishedAt": "2025-11-12T13:51:48.716Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>\u903c\u771f\u808c\u80a4\u3001\u6781\u81f4\u9ad8\u6e05\uff0c\u9002\u5408\u4eba\u50cf\u4e0e\u5b9e\u666f\u7167\u7247\u7c7b\u56fe\u50cf\u7684\u751f\u6210\u3002</p><p>Highly realistic skin texture and ultra-high resolution, suitable for generating Portrait and Real-world scenes. </p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 144,
+      "thumbsUpCount": 10,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2290415,
+       "sizeKB": 9423290.53125,
+       "name": "magicWanImage_v20Q41.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-11-12T13:58:32.437Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "pruned",
+        "fp": "nf4"
+       },
+       "hashes": {
+        "AutoV1": "0F4E85C7",
+        "AutoV2": "049328D189",
+        "SHA256": "049328D1891F965700ED7ABBD9303F21ED8FB705115EB92EDF492B16E6A92460",
+        "CRC32": "EB0C0836",
+        "BLAKE3": "F04C8CD3EA0D6933B49737CFE43E6BE980803C38B769AF1099778CE35BD45DB0",
+        "AutoV3": "D88AA22C7C75"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2399959",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 109928951,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/aa10fe01-d54d-48f5-bfc6-470135c8b791/original=true/109928951.jpeg",
+       "nsfwLevel": 1,
+       "width": 768,
+       "height": 1376,
+       "hash": "U8CZFHJ2t0RQ~pofDjWXO*%LRNkXtSMyRP%f",
+       "type": "image",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2399959"
+    },
+    {
+     "id": 2181804,
+     "index": 4,
+     "name": "v1.0-fp8-scaled",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Refiner",
+     "publishedAt": "2025-09-04T23:36:41.962Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 13,
+     "description": "<p>Magic-Wan-Image v1.0, \u672c\u6a21\u578b\u76ee\u524d\u8fd8\u662f\u4e00\u4e2a\u5b9e\u9a8c\u6027\u7684\u6a21\u578b\u3002</p><p>Magic-Wan-Image v1.0, This model is an experimental model now.</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 1115,
+      "thumbsUpCount": 91,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2075307,
+       "sizeKB": 13957174.0703125,
+       "name": "magicWanImage_v10Fp8Scaled.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-09-04T16:53:28.831Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "pruned",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "B2E4FBCA",
+        "AutoV2": "E6AD4C6222",
+        "SHA256": "E6AD4C6222C9D7A953D3B46EEB9D13191DA74981D2F87C103CB25F6B571BE49E",
+        "CRC32": "BA679C36",
+        "BLAKE3": "5E58EBE38F10298C4B2D3908DB932110221E64183FCF28377F14BA5E849D250D",
+        "AutoV3": "105F4346DE0D"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2181804",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 98412305,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/339bdb00-833f-4805-8b24-f4431ed2cf02/original=true/98412305.jpeg",
+       "nsfwLevel": 1,
+       "width": 768,
+       "height": 1376,
+       "hash": "UZE3}JtSKQxus^x[b_t3ITWY$ds*GJoc#iog",
+       "type": "image",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2181804"
+    },
+    {
+     "id": 2184505,
+     "index": 5,
+     "name": "v1.0-Q8_0",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Refiner",
+     "publishedAt": "2025-09-05T12:50:55.331Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Q8_0</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 408,
+      "thumbsUpCount": 29,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2077847,
+       "sizeKB": 15043926.5,
+       "name": "magicWanImage_v10Q80.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-09-05T13:05:32.478Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "pruned",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "09BD044B",
+        "AutoV2": "3FB36DF42F",
+        "SHA256": "3FB36DF42F6AF20784C55DF1A67E01A51A4BAA87E32F4E4273FC7D7AC680CBF6",
+        "CRC32": "FDEF87D6",
+        "BLAKE3": "86DFA8F7484535F49668216522F8DFEA69902384BE1B6E4BE6591A260B0C202B",
+        "AutoV3": "1A1EAA02796E"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2184505",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 98504921,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/475dea39-d8fb-476b-87b6-65cabef6f45a/original=true/98504921.jpeg",
+       "nsfwLevel": 1,
+       "width": 768,
+       "height": 1376,
+       "hash": "ULIPC:xu_2kC?b%MRjjs~qoeRjoz-;V@Myof",
+       "type": "image",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2184505"
+    }
+   ]
+  },
+  {
+   "id": 1855944,
+   "name": "Rapid WAN 2.2 T2V GGUF",
+   "allowNoCredit": true,
+   "allowCommercialUse": [
+    "Image",
+    "RentCivit",
+    "Rent",
+    "Sell"
+   ],
+   "allowDerivatives": true,
+   "allowDifferentLicense": true,
+   "type": "Checkpoint",
+   "minor": false,
+   "sfwOnly": false,
+   "poi": false,
+   "nsfw": false,
+   "nsfwLevel": 1,
+   "availability": "Public",
+   "userId": 447737,
+   "baseModels": [
+    "Wan Video 2.2 T2V-A14B"
+   ],
+   "cosmetic": null,
+   "supportsGeneration": false,
+   "stats": {
+    "downloadCount": 1127,
+    "thumbsUpCount": 40,
+    "thumbsDownCount": 0,
+    "commentCount": 9,
+    "tippedAmountCount": 0
+   },
+   "creator": {
+    "username": "DooFY87",
+    "image": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/0deaf408-7ed3-45ac-8255-c61e6ad5da3a/width=96/DooFY87.jpeg"
+   },
+   "tags": [
+    "wan",
+    "base model"
+   ],
+   "modelVersions": [
+    {
+     "id": 2100483,
+     "index": 1,
+     "name": "Q4_K_M Rapid Base",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-08-10T20:39:28.475Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": null,
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 1127,
+      "thumbsUpCount": 40,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 1995970,
+       "sizeKB": 9423926.5,
+       "name": "rapidWAN22T2VGGUF_q4KMRapidBase.gguf",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-08-10T20:44:58.653Z",
+       "metadata": {
+        "format": "GGUF",
+        "size": "full",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "0027F96C",
+        "AutoV2": "B2BE9E9642",
+        "SHA256": "B2BE9E96428C2CCE129E1244B20D4D6FA3806ECE79E73799DC97BA89D7075E5B",
+        "CRC32": "D22D363B",
+        "BLAKE3": "4A2542CA60A3E56FB55CD8FADEFBF46DB19BB5BA98A0175DD7130B642735FF2B",
+        "AutoV3": "D32363A26FBB"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2100483",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 93489910,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/fff4bdd3-4021-400c-bfd2-208d4be15b8c/original=true/93489910.mp4",
+       "nsfwLevel": 1,
+       "width": 512,
+       "height": 512,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": false,
+       "hasPositivePrompt": false,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2100483"
+    }
+   ]
+  },
+  {
+   "id": 2260527,
+   "name": "WAN2.2 FP8 KJ",
+   "allowNoCredit": true,
+   "allowCommercialUse": [
+    "Image",
+    "RentCivit",
+    "Rent",
+    "Sell"
+   ],
+   "allowDerivatives": true,
+   "allowDifferentLicense": true,
+   "type": "Checkpoint",
+   "minor": false,
+   "sfwOnly": false,
+   "poi": false,
+   "nsfw": false,
+   "nsfwLevel": 3,
+   "availability": "Public",
+   "userId": -1,
+   "baseModels": [
+    "Wan Video 2.2 I2V-A14B",
+    "Wan Video 2.2 T2V-A14B",
+    "Wan Video 1.3B t2v"
+   ],
+   "cosmetic": null,
+   "supportsGeneration": false,
+   "stats": {
+    "downloadCount": 5650,
+    "thumbsUpCount": 123,
+    "thumbsDownCount": 0,
+    "commentCount": 0,
+    "tippedAmountCount": 50
+   },
+   "tags": [
+    "wan2.2 t2v",
+    "wan2.2",
+    "wan2.2 i2v",
+    "base model",
+    "wan video"
+   ],
+   "modelVersions": [
+    {
+     "id": 2545187,
+     "index": 2,
+     "name": "T2V A14B HIGH",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-12-29T03:17:26.300Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 1,
+     "description": "<p>Wan2_2-T2V-A14B_HIGH_fp8_e4m3fn_scaled_KJ.</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 605,
+      "thumbsUpCount": 17,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2433545,
+       "sizeKB": 14649767.04882812,
+       "name": "wan22FP8KJ_t2vA14BHIGH.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-12-29T02:10:45.273Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "pruned",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "4711BC34",
+        "AutoV2": "15384A1DA9",
+        "SHA256": "15384A1DA9B5AA463464BA50A596B84F6C0929BFB72EC47DF6BB48CB2E0B6F0C",
+        "CRC32": "C54A099D",
+        "BLAKE3": "164E0BF603FAF6C8060D3C8184B541EEBEA9A4CB854439FA396547A012C85DB0",
+        "AutoV3": "FE4056EEF947"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2545187",
+       "primary": true
+      },
+      {
+       "id": 2433681,
+       "sizeKB": 5.970703125,
+       "name": "wan22FP8KJ_t2vA14BHIGH_trainingData.zip",
+       "overrideName": null,
+       "type": "Training Data",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-12-29T03:10:36.030Z",
+       "metadata": {
+        "format": "Other",
+        "size": null,
+        "fp": null
+       },
+       "hashes": {
+        "AutoV2": "D4DB181903",
+        "SHA256": "D4DB18190303E0BA27D6C6318FFE8EE943A2CDA32608028E9842DB2857F7EE8E",
+        "CRC32": "43BBC18B",
+        "BLAKE3": "153A2E51B87E74C0455EBDD8F91531B5104C796357C18CF9506008A38750A7CF",
+        "AutoV3": "8D63E3031E13"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2545187?type=Training%20Data"
+      }
+     ],
+     "images": [
+      {
+       "id": 115532695,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/89e7ae6f-2e17-458d-8a59-f9b6198b791f/original=true/115532695.mp4",
+       "nsfwLevel": 1,
+       "width": 512,
+       "height": 848,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2545187"
+    },
+    {
+     "id": 2545318,
+     "index": 3,
+     "name": "T2V A14B LOW",
+     "baseModel": "Wan Video 2.2 T2V-A14B",
+     "baseModelType": "Standard",
+     "publishedAt": "2025-12-29T03:17:29.828Z",
+     "flags": 0,
+     "availability": "Public",
+     "nsfwLevel": 3,
+     "description": "<p>Wan2_2-T2V-A14B-LOW_fp8_e4m3fn_scaled_KJ</p>",
+     "trainedWords": [],
+     "vaeId": null,
+     "paidAccess": null,
+     "stats": {
+      "downloadCount": 426,
+      "thumbsUpCount": 11,
+      "thumbsDownCount": 0
+     },
+     "supportsGeneration": false,
+     "files": [
+      {
+       "id": 2433631,
+       "sizeKB": 14649767.04882812,
+       "name": "wan22FP8KJ_t2vA14BLOW.safetensors",
+       "overrideName": null,
+       "type": "Model",
+       "pickleScanResult": "Success",
+       "pickleScanMessage": "No Pickle imports",
+       "virusScanResult": "Success",
+       "virusScanMessage": null,
+       "scannedAt": "2025-12-29T02:56:20.622Z",
+       "metadata": {
+        "format": "SafeTensor",
+        "size": "pruned",
+        "fp": "fp8"
+       },
+       "hashes": {
+        "AutoV1": "BFF5BC8F",
+        "AutoV2": "CE74FFF05E",
+        "SHA256": "CE74FFF05E37F995A0AE845F53510E43F98B838F4E75D846EB3E2929E7F555CC",
+        "CRC32": "02C1E7B4",
+        "BLAKE3": "2FDFA89998D9F19EF512EF9C4FDB446E97A84DBBD927B323928AA543251786B8",
+        "AutoV3": "D0CACE225E54"
+       },
+       "downloadUrl": "https://civitai.com/api/download/models/2545318",
+       "primary": true
+      }
+     ],
+     "images": [
+      {
+       "id": 115539505,
+       "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/165baa9a-a3d6-486d-885e-50e41be4deb1/original=true/115539505.mp4",
+       "nsfwLevel": 1,
+       "width": 512,
+       "height": 848,
+       "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+       "type": "video",
+       "minor": false,
+       "poi": false,
+       "hasMeta": true,
+       "hasPositivePrompt": true,
+       "onSite": false,
+       "remixOfId": null
+      }
+     ],
+     "downloadUrl": "https://civitai.com/api/download/models/2545318"
+    }
+   ]
+  }
+ ],
+ "metadata": {
+  "nextCursor": "57|1|2659386",
+  "nextPage": "https://civitai.com/api/v1/models?baseModels=Wan%20Video%202.2%20T2V-A14B&types=Checkpoint&limit=5&sort=Most%20Downloaded&cursor=57%7C1%7C2659386"
+ }
+}
