@@ -4878,6 +4878,48 @@ describe("MobileApp gallery", () => {
     );
   });
 
+  it("appends a gallery source to the selected Ref2VA partition", async () => {
+    const ref2vaModel: ModelEntry = {
+      ...model,
+      name: "minimax-h3-ref2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      default_steps: 50,
+      default_guidance: 0,
+      default_width: 1344,
+      default_height: 768,
+      default_frames: 124,
+      default_fps: 24,
+      supports_audio: true,
+    };
+    const still = { ...print, filename: "ordered subject.png", format: "png" as const };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([ref2vaModel]);
+      if (path === "/api/gallery") return Promise.resolve([still]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    apiFetchTo.mockResolvedValue({
+      headers: new Headers({ "content-type": "image/png" }),
+      blob: () => Promise.resolve(new Blob(["subject bytes"], { type: "image/png" })),
+    } as Response);
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await wrapper.get("[data-test='gallery-viewer-use-source']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.get("[data-test='mobile-generation-summary']").text()).toContain(
+        "reference 1",
+      ),
+    );
+
+    await wrapper.get("[data-test='mobile-open-advanced']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='h3-reference-0']").text()).toContain("ordered subject.png");
+  });
+
   it("rejects an oversized gallery source before reading or base64 expansion", async () => {
     const still = { ...print, filename: "huge source.png", format: "png" as const };
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
@@ -5036,6 +5078,54 @@ describe("MobileApp gallery", () => {
       "page",
     );
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(false);
+  });
+
+  it("keeps an H3 sequence snapshot in the viewer with an explicit refusal", async () => {
+    const sequenceModel: ModelEntry = {
+      ...model,
+      name: "ltx-video-0.9.8-2b-distilled:bf16",
+      family: "ltx-video",
+      supports_sequence: true,
+    } as ModelEntry;
+    const h3Sequence: GalleryImage = {
+      ...print,
+      filename: "invalid-h3-sequence.mp4",
+      metadata: {
+        ...print.metadata,
+        model: "minimax-h3-fl2va:official-bf16",
+        chain_job_id: "job-h3",
+        chain: {
+          stage_count: 2,
+          motion_tail_frames: 0,
+          stages: [
+            { prompt: "opening", frames: 25, transition: "smooth" },
+            { prompt: "closing", frames: 25, transition: "cut" },
+          ],
+        },
+      },
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([sequenceModel]);
+      if (path === "/api/gallery") return Promise.resolve([h3Sequence]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    const pinia = createPinia();
+    wrapper = mountMobileApp(pinia);
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get(".gallery-viewer-reuse-error").text()).toContain(
+      "cannot render a clip sequence",
+    );
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
+    expect(useSequenceDraftStore(pinia).output).toBe("single");
   });
 
   it("reloads model ownership after removing the active host before reuse", async () => {

@@ -49,6 +49,13 @@ import { allowsNativeContextMenu } from "../lib/shortcuts";
 import { modelDisplayNameForId } from "../lib/models";
 import type { GalleryImage } from "../lib/api/types";
 import { isUpscaledImage } from "../lib/gallery/upscaled";
+import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import {
+  appendMinimaxH3GalleryImageReference,
+  isMinimaxH3Identity,
+  minimaxH3TaskForModel,
+  setMinimaxH3GalleryImageFirstFrame,
+} from "@studio/lib/minimaxH3Authoring";
 
 const GAP = 8;
 const PAD = 16;
@@ -110,12 +117,15 @@ const canReveal = (entry: MergedPrint) =>
 const canSaveLocally = (entry: MergedPrint) =>
   inTauri() && gallery.hostFor(entry.sourceKey)?.kind === "remote" && !gallery.existsLocally(entry);
 
-/** Authed source bytes for a host-gallery item, as base64 (origin-aware). */
-async function fetchItemBase64(entry: MergedPrint): Promise<string> {
+/** Authed source bytes for a host-gallery item (origin-aware). */
+async function fetchItemBlob(entry: MergedPrint): Promise<Blob> {
   const path = mediaPath(entry.item.filename);
   const target = targetFor(entry);
-  const blob = await (target ? apiFetchTo(target, path) : apiFetch(path)).then((r) => r.blob());
-  return blobToBase64(blob);
+  return (target ? apiFetchTo(target, path) : apiFetch(path)).then((r) => r.blob());
+}
+
+async function fetchItemBase64(entry: MergedPrint): Promise<string> {
+  return blobToBase64(await fetchItemBlob(entry));
 }
 
 async function saveToThisMac(entry: MergedPrint) {
@@ -702,16 +712,52 @@ function removeSelected() {
  */
 async function useAsSource(entry: MergedPrint) {
   try {
-    const base64 = await fetchItemBase64(entry);
-    generateForm.form.sourceImage = base64;
-    generateForm.form.sourceImageName = entry.item.filename;
-    generateForm.form.sourceFit = { mode: "lanczos-resize" };
+    const blob = await fetchItemBlob(entry);
+    const base64 = await blobToBase64(blob);
+    const form = generateForm.form;
+    const h3Task = minimaxH3TaskForModel(form.model);
+    if (h3Task) {
+      const dimensions = imageDimensionsFromBase64(base64) ?? {
+        width: entry.item.metadata.width,
+        height: entry.item.metadata.height,
+      };
+      const image = {
+        filename: entry.item.filename,
+        mimeType: galleryImageMimeType(entry.item, blob.type),
+        width: dimensions.width,
+        height: dimensions.height,
+        data: base64,
+      };
+      const result =
+        h3Task === "ref2va"
+          ? appendMinimaxH3GalleryImageReference(form.h3Authoring, image)
+          : setMinimaxH3GalleryImageFirstFrame(form.h3Authoring, image);
+      if (!result.ok) throw new Error(result.error);
+      form.h3Authoring = result.state;
+    } else if (isMinimaxH3Identity(form.family, form.model)) {
+      throw new Error(
+        "Choose an explicit MiniMax H3 FL2VA or Ref2VA model before adding a source.",
+      );
+    } else {
+      form.sourceImage = base64;
+      form.sourceImageName = entry.item.filename;
+      form.sourceFit = { mode: "lanczos-resize" };
+    }
     lightboxOpen.value = false;
-    toasts.push("Loaded as source");
+    toasts.push(h3Task === "ref2va" ? "Added as ordered reference" : "Loaded as source");
     void router.push("/create");
   } catch (error) {
     toasts.push(error instanceof Error ? error.message : String(error), "error");
   }
+}
+
+function galleryImageMimeType(item: GalleryImage, declared: string): string {
+  const mime = declared.split(";", 1)[0]!.trim().toLowerCase();
+  if (mime.startsWith("image/")) return mime;
+  const format = (item.format ?? item.filename.split(".").pop() ?? "")
+    .toLowerCase()
+    .replace("jpg", "jpeg");
+  return format ? `image/${format}` : "application/octet-stream";
 }
 
 async function useSelectedAsSource() {

@@ -242,6 +242,43 @@ describe("LibraryView delete keyboard handling", () => {
     wrapper.unmount();
   });
 
+  it("appends a Library source image to Ref2VA's dedicated ordered references", async () => {
+    const remotePrint: GalleryImage = {
+      ...prints[0]!,
+      filename: "ordered-subject.png",
+      timestamp: 3,
+      metadata: { ...prints[0]!.metadata, seed: 9 },
+    };
+    apiFetchTo.mockResolvedValueOnce(new Response(new Uint8Array([65, 66, 67])));
+    const { wrapper, router } = await mountView(remotePrint);
+    const form = useGenerateFormStore().form;
+    form.model = "minimax-h3-ref2va:comfy-pruned-int8";
+    form.family = "minimax-h3";
+
+    const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
+    expect(tile).toBeDefined();
+    await tile!.trigger("contextmenu");
+    const menu = useContextMenuStore();
+    const sourceEntry = menu.entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Use as source",
+    )!;
+    menu.activate(sourceEntry);
+    await flushPromises();
+
+    expect(form.sourceImage).toBeNull();
+    expect(form.h3Authoring?.references).toHaveLength(1);
+    expect(form.h3Authoring?.references[0]?.reference).toMatchObject({
+      kind: "image",
+      media: { authority: "inline", data: "QUJD" },
+      provenance: { name: "ordered-subject.png" },
+      mime_type: "image/png",
+      width: 1024,
+      height: 1024,
+    });
+    expect(router.currentRoute.value.path).toBe("/create");
+    wrapper.unmount();
+  });
+
   it.each(["Delete", "Backspace"])(
     "prevents %s navigation and only DELETEs after the undo window",
     async (key) => {

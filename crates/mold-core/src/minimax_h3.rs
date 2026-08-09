@@ -367,6 +367,23 @@ pub fn resolve_model_name(input: &str) -> Option<&'static str> {
     }
 }
 
+/// Replace any released H3 alias with the exact task/layout manifest identity.
+///
+/// Server ingress calls this before it derives activation, upload-session,
+/// admission, queue, or persistence identity. Non-H3 model names are left
+/// byte-for-byte unchanged so catalog IDs and configured aliases retain their
+/// existing authority.
+pub fn canonicalize_request_model(request: &mut GenerateRequest) -> bool {
+    let Some(canonical) = resolve_model_name(&request.model) else {
+        return false;
+    };
+    if request.model == canonical {
+        return false;
+    }
+    request.model = canonical.to_string();
+    true
+}
+
 pub const fn valid_frame_count(frames: u32) -> bool {
     frames >= MIN_FRAMES
         && frames <= MAX_FRAMES
@@ -2419,6 +2436,25 @@ mod tests {
             assert_eq!(task_for_model(lookalike), None, "{lookalike}");
             assert_eq!(layout_for_model(lookalike), None, "{lookalike}");
         }
+    }
+
+    #[test]
+    fn request_model_canonicalization_preserves_exact_partition_identity() {
+        let mut ref2va = request();
+        ref2va.model = "MiniMax_H3_Ref2VA".into();
+        assert!(canonicalize_request_model(&mut ref2va));
+        assert_eq!(ref2va.model, REF2VA_COMFY);
+        assert!(!canonicalize_request_model(&mut ref2va));
+
+        let mut official = request();
+        official.model = " MINIMAX_H3_FL2VA:OFFICIAL_BF16 ".into();
+        assert!(canonicalize_request_model(&mut official));
+        assert_eq!(official.model, FL2VA_OFFICIAL);
+
+        let mut opaque = request();
+        opaque.model = "hf:example/custom-checkpoint".into();
+        assert!(!canonicalize_request_model(&mut opaque));
+        assert_eq!(opaque.model, "hf:example/custom-checkpoint");
     }
 
     #[test]

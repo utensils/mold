@@ -63,6 +63,13 @@ import Lightbox from "../components/gallery/Lightbox.vue";
 import { setSequenceHandoff } from "../composables/useSequenceHandoff";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
+import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import {
+  appendMinimaxH3GalleryImageReference,
+  isMinimaxH3Identity,
+  minimaxH3TaskForModel,
+  setMinimaxH3GalleryImageFirstFrame,
+} from "@studio/lib/minimaxH3Authoring";
 
 type FilterKind = "all" | "images" | "video" | "audio";
 type ViewMode = "feed" | "grid";
@@ -666,14 +673,49 @@ async function setAsSource(item: GalleryImage): Promise<boolean> {
     if (!host) throw missingHostError(item);
     const blob = await fetchGalleryBlob(host, item.filename);
     const base64 = await blobToBase64(blob);
-    form.state.value.imageAttachments = [
-      { kind: "gallery", filename: item.filename, base64 },
-    ];
+    const state = form.state.value;
+    const h3Task = minimaxH3TaskForModel(state.model);
+    if (h3Task) {
+      const dimensions = imageDimensionsFromBase64(base64) ?? {
+        width: item.metadata.width,
+        height: item.metadata.height,
+      };
+      const image = {
+        filename: item.filename,
+        mimeType: galleryImageMimeType(item, blob.type),
+        width: dimensions.width,
+        height: dimensions.height,
+        data: base64,
+      };
+      const result =
+        h3Task === "ref2va"
+          ? appendMinimaxH3GalleryImageReference(state.h3Authoring, image)
+          : setMinimaxH3GalleryImageFirstFrame(state.h3Authoring, image);
+      if (!result.ok) throw new Error(result.error);
+      state.h3Authoring = result.state;
+    } else if (isMinimaxH3Identity(state.modelFamily, state.model)) {
+      throw new Error(
+        "Choose an explicit MiniMax H3 FL2VA or Ref2VA model before adding a source.",
+      );
+    } else {
+      state.imageAttachments = [
+        { kind: "gallery", filename: item.filename, base64 },
+      ];
+    }
     return true;
   } catch (err) {
     toast("error", err instanceof Error ? err.message : String(err));
     return false;
   }
+}
+
+function galleryImageMimeType(item: GalleryImage, declared: string): string {
+  const mime = declared.split(";", 1)[0]!.trim().toLowerCase();
+  if (mime.startsWith("image/")) return mime;
+  const format = (item.format ?? item.filename.split(".").pop() ?? "")
+    .toLowerCase()
+    .replace("jpg", "jpeg");
+  return format ? `image/${format}` : "application/octet-stream";
 }
 
 async function onUseAsSource(item: GalleryImage) {

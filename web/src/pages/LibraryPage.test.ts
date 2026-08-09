@@ -269,6 +269,31 @@ describe("LibraryPage", () => {
     );
   });
 
+  it("appends Library source images to Ref2VA's dedicated ordered references", async () => {
+    const form = useGenerateForm();
+    form.state.value.model = "minimax-h3-ref2va:comfy-pruned-int8";
+    form.state.value.modelFamily = "minimax-h3";
+    const wrapper = await mounted();
+
+    await wrapper.get("[data-test='grid-open']").trigger("click");
+    await wrapper.get("[data-test='lb-source']").trigger("click");
+    await flushPromises();
+
+    expect(form.state.value.imageAttachments).toEqual([]);
+    expect(form.state.value.h3Authoring?.references).toHaveLength(1);
+    expect(
+      form.state.value.h3Authoring?.references[0]?.reference,
+    ).toMatchObject({
+      kind: "image",
+      media: { authority: "inline", data: "Ynl0ZXM=" },
+      provenance: { name: "dog.png" },
+      mime_type: "image/png",
+      width: 1024,
+      height: 1024,
+    });
+    expect(pushMock).toHaveBeenCalledWith({ name: "create" });
+  });
+
   it("refreshes the gallery while the page remains visible", async () => {
     vi.useFakeTimers();
     const wrapper = mountPage();
