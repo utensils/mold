@@ -78,6 +78,7 @@ python3 scripts/minimax-h3-conformance.py verify-sources \
   --source minimax-official-code=/absolute/path/to/MiniMax-H3-code \
   --source minimax-official-model=/absolute/path/to/MiniMax-H3-model \
   --source diffusers=/absolute/path/to/diffusers \
+  --source transformers=/absolute/path/to/transformers \
   --source comfyui=/absolute/path/to/ComfyUI \
   --source comfy-checkpoints=/absolute/path/to/Comfy-H3-model \
   --source sglang=/absolute/path/to/sglang \
@@ -180,11 +181,14 @@ The producer fixes one reproducible conditioner case:
 - the exact combined image/video Ref2VA presentation from the pinned Diffusers
   implementation.
 
-It records four manifest-required measurements. Token IDs are length-prefixed
+It records five manifest-required measurements. Token IDs are length-prefixed
 raw and multimodal presentations. Special-token evidence is a length-prefixed
 set of the required token IDs, H3 row tags, Qwen modality type IDs, sampled
 source indices, and millisecond timestamps. Processor shapes use stable numeric
-field IDs followed by rank and dimensions. Processor pixel values are
+field IDs followed by rank and dimensions. `processor-grids` records the actual
+flattened image and video `grid_thw` integer values, not only their tensor
+shapes, so token counts and multimodal rotary geometry are exact evidence.
+Processor pixel values are
 concatenated after an actual CUDA BF16 copy and hashed as canonical typed
 little-endian bytes. The raw generated pixels are not retained; only their
 input hashes and strict tensor summaries leave the process.
@@ -204,6 +208,27 @@ every model metadata file, it verifies both the manifest SHA-256 and the
 Hugging Face local-directory metadata revision. A manually assembled directory
 without revision metadata fails closed even if its visible files happen to
 hash correctly.
+
+The manifest also pins the complete oracle runtime identity used by this
+producer: Python 3.13.13, PyTorch 2.13.0+cu130, NumPy 2.5.1, CUDA 13.0, and the
+full Transformers revision above. The capture script itself is a
+manifest-pinned SHA-256 authority whose repository-relative implementation path
+is traversal-, symlink-, and checkout-containment checked before hashing. Both
+identities are repeated in structured layer and bundle evidence and enforced
+again by the protected runner. Bundles carry a canonical per-layer
+`oracle_adapters` list derived from the manifest contracts for the fixture
+layers they contain. Missing, extra, duplicate, reordered, or cross-wired
+adapter records fail closed, which permits later capture producers to add their
+own adapter contract without weakening or special-casing this one.
+
+Before importing either source or opening model configuration at execution
+time, the producer creates an owner-only temporary directory under the external
+fixture root. It exports each exact Git revision with `git archive` and copies
+each required model component from one no-follow read whose bytes match the
+manifest hash. Runtime imports and `from_pretrained` calls use only this staged
+snapshot. The complete staged file set, sizes, and hashes are revalidated after
+execution and immediately before evidence is written; the original checkouts
+and model paths are never reopened as runtime authority.
 
 Prepare the external paths, including both tokenizer/ and processor/ metadata
 directories from the exact model snapshot, then run:

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 from typing import Any
 
@@ -52,6 +53,7 @@ def sample_evidence() -> Any:
         token_ids=(2, 3, 151652, 151655, 151653, 5, 7, 11),
         special_presentation=(3, 1, 0, 2, 4, 151652, 151653, 151655, 151656),
         processor_shapes=(2, 1, 3, 256, 256, 3, 2, 4, 4, 64, 64, 3),
+        processor_grids=(2, 3, 1, 32, 32, 3, 2, 8, 8),
         sampled_bfloat16_bits=(0xBF80, 0x0000, 0x3F00, 0x3F80, 0x4000),
         prompt_sha256=hashlib.sha256(b"prompt").hexdigest(),
         image_sha256=hashlib.sha256(b"image").hexdigest(),
@@ -110,6 +112,7 @@ class CaptureProducerContractTest(unittest.TestCase):
             sample_evidence(),
             producer.REVIEWED_AUTHORIZATION_EVIDENCE_SHA256,
             "cuda:0",
+            self.manifest["numerical_authority"]["oracle_runtime"],
         )
 
     def assert_gpu_rejects(self, document: dict[str, Any]) -> None:
@@ -159,6 +162,23 @@ class CaptureProducerContractTest(unittest.TestCase):
             producer.TRANSFORMERS_REVISION,
             json.dumps(producer.build_input_descriptor(sample_evidence())),
         )
+        self.assertEqual(
+            document["adapter"]["implementation_sha256"],
+            hashlib.sha256(PRODUCER_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            document["environment"]["oracle_runtime"],
+            self.manifest["numerical_authority"]["oracle_runtime"],
+        )
+        grid = next(
+            output
+            for output in document["outputs"]
+            if output["key"] == "processor-grids"
+        )
+        self.assertEqual(
+            [sample["value"] for sample in grid["samples"]],
+            list(sample_evidence().processor_grids),
+        )
 
     def test_component_authority_drift_is_rejected(self) -> None:
         document = self.build_document()
@@ -189,6 +209,57 @@ class CaptureProducerContractTest(unittest.TestCase):
         tolerance = self.build_document()
         tolerance["comparison"][-1]["absolute"] = 0.5
         self.assert_gpu_rejects(tolerance)
+
+        missing_grid = self.build_document()
+        missing_grid["outputs"] = [
+            output
+            for output in missing_grid["outputs"]
+            if output["key"] != "processor-grids"
+        ]
+        self.assert_gpu_rejects(missing_grid)
+
+        grid_dtype = self.build_document()
+        next(
+            output
+            for output in grid_dtype["outputs"]
+            if output["key"] == "processor-grids"
+        )["dtype"] = "bfloat16"
+        self.assert_gpu_rejects(grid_dtype)
+
+    def test_runtime_and_adapter_authority_cannot_drift(self) -> None:
+        runtime = self.build_document()
+        runtime["environment"]["oracle_runtime"]["torch"] = "0.0.0"
+        self.assert_gpu_rejects(runtime)
+
+        for field, value in (
+            ("id", "different-adapter"),
+            ("command", "python3 unreviewed.py"),
+            ("implementation_sha256", "0" * 64),
+        ):
+            with self.subTest(field=field):
+                adapter = self.build_document()
+                adapter["adapter"][field] = value
+                self.assert_gpu_rejects(adapter)
+
+    def test_observed_runtime_must_equal_the_manifest_pin(self) -> None:
+        runtime = SimpleNamespace(
+            torch=SimpleNamespace(
+                __version__="2.13.0+cu130", version=SimpleNamespace(cuda="13.0")
+            ),
+            numpy=SimpleNamespace(__version__="2.5.1"),
+        )
+        with mock.patch.object(
+            producer.platform, "python_version", return_value="3.13.13"
+        ):
+            self.assertEqual(
+                producer.validate_oracle_runtime(self.manifest, runtime),
+                self.manifest["numerical_authority"]["oracle_runtime"],
+            )
+            runtime.torch.__version__ = "2.13.1+cu130"
+            with self.assertRaisesRegex(
+                producer.CaptureFailure, "runtime identity differs"
+            ):
+                producer.validate_oracle_runtime(self.manifest, runtime)
 
     def test_canonical_tensor_hashes_bind_typed_little_endian_values(self) -> None:
         integer = producer.integer_tensor_record("token-ids", (1, -2, 3))
@@ -365,6 +436,47 @@ class CaptureProducerContractTest(unittest.TestCase):
             with self.assertRaises(producer.CaptureFailure):
                 producer.verify_git_checkout("source", root, revision, repository)
 
+    def test_source_execution_uses_an_immutable_git_archive_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            run(["git", "init"], checkout)
+            run(["git", "config", "user.name", "Capture Contract"], checkout)
+            run(
+                ["git", "config", "user.email", "capture@example.invalid"],
+                checkout,
+            )
+            source = checkout / "src" / "example" / "__init__.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("PIN = 1\n", encoding="utf-8")
+            run(["git", "add", "src/example/__init__.py"], checkout)
+            run(["git", "commit", "-m", "test: pin source"], checkout)
+            revision = run(["git", "rev-parse", "HEAD"], checkout)
+            repository = "https://github.com/example/capture-source"
+            run(["git", "remote", "add", "origin", repository + ".git"], checkout)
+
+            staged = root / "stage"
+            producer.extract_git_source_snapshot(
+                "source",
+                checkout,
+                revision,
+                repository,
+                "example",
+                staged,
+            )
+            authority = producer.StagedSnapshot(staged, producer.snapshot_files(staged))
+            staged_source = staged / "src" / "example" / "__init__.py"
+            self.assertEqual(staged_source.read_text(encoding="utf-8"), "PIN = 1\n")
+            source.write_text("PIN = 2\n", encoding="utf-8")
+            authority.revalidate()
+            self.assertEqual(staged_source.read_text(encoding="utf-8"), "PIN = 1\n")
+            staged_source.write_text("PIN = 3\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                producer.CaptureFailure, "staging snapshot changed"
+            ):
+                authority.revalidate()
+
     def test_model_components_require_hash_and_snapshot_revision_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary).resolve()
@@ -418,6 +530,38 @@ class CaptureProducerContractTest(unittest.TestCase):
             (root / components[-1]["relative_path"]).write_bytes(b"drift")
             with self.assertRaises(producer.CaptureFailure):
                 producer.verify_model_components(root, manifest)
+
+            original = f"{producer.REQUIRED_COMPONENT_IDS[-1]}\n".encode()
+            (root / components[-1]["relative_path"]).write_bytes(original)
+            with tempfile.TemporaryDirectory() as staged_temporary:
+                staged = pathlib.Path(staged_temporary) / "model"
+                producer.stage_model_components(root, staged, manifest)
+                authority = producer.StagedSnapshot(
+                    staged, producer.snapshot_files(staged)
+                )
+                source_component = root / components[0]["relative_path"]
+                staged_component = staged / components[0]["relative_path"]
+                expected = staged_component.read_bytes()
+                source_component.write_bytes(b"mutated after staging")
+                authority.revalidate()
+                self.assertEqual(staged_component.read_bytes(), expected)
+                staged_component.write_bytes(b"mutated staging")
+                with self.assertRaisesRegex(
+                    producer.CaptureFailure, "staging snapshot changed"
+                ):
+                    authority.revalidate()
+
+    def test_model_input_reader_rejects_symlinked_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            model = root / "model"
+            outside = root / "outside"
+            model.mkdir()
+            outside.mkdir()
+            (outside / "config.json").write_text("{}\n", encoding="utf-8")
+            (model / "tokenizer").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(producer.CaptureFailure, "unsafe"):
+                producer.read_regular_file_once(model, "tokenizer/config.json")
 
     def test_external_capture_is_exclusive_schema_checked_and_mode_0600(self) -> None:
         document = self.build_document()

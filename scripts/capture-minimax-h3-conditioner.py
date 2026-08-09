@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import importlib
 import importlib.util
 import inspect
@@ -20,11 +21,14 @@ import json
 import math
 import os
 import pathlib
+import platform
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -92,6 +96,10 @@ EXCLUDED_ACCELERATION_ENV_ALIASES = (
 )
 FALSE_ENVIRONMENT_VALUES = frozenset({"", "0", "false", "no", "off", "disabled"})
 CUDA_DEVICE_PATTERN = re.compile(r"^cuda:([0-9]+)$")
+SOURCE_REPOSITORIES = {
+    "diffusers": "https://github.com/huggingface/diffusers",
+    "transformers": "https://github.com/huggingface/transformers",
+}
 
 
 class CaptureFailure(Exception):
@@ -209,6 +217,21 @@ def command_output(arguments: Sequence[str], cwd: pathlib.Path) -> str:
     return result.stdout.strip()
 
 
+def command_bytes(arguments: Sequence[str], cwd: pathlib.Path) -> bytes:
+    try:
+        result = subprocess.run(
+            list(arguments),
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        fail("capture source snapshot failed")
+    if result.returncode != 0:
+        fail("capture source snapshot failed")
+    return result.stdout
+
+
 def normalized_repository_url(value: str) -> str:
     normalized = value.strip()
     if normalized.startswith("git@github.com:"):
@@ -237,6 +260,174 @@ def verify_git_checkout(
         fail(f"{label} checkout must be clean before capture")
 
 
+@dataclass(frozen=True)
+class SnapshotFile:
+    relative_path: str
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class StagedSnapshot:
+    root: pathlib.Path
+    files: tuple[SnapshotFile, ...]
+
+    def revalidate(self) -> None:
+        observed = snapshot_files(self.root)
+        if observed != self.files:
+            fail("private capture staging snapshot changed during execution")
+
+
+def relative_input_path(value: str) -> pathlib.PurePosixPath:
+    candidate = pathlib.PurePosixPath(value)
+    if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
+        fail("capture input contains an unsafe relative path")
+    return candidate
+
+
+def private_directory(path: pathlib.Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        os.chmod(path, 0o700, follow_symlinks=False)
+    except OSError as error:
+        fail(f"cannot secure private capture staging: {error}")
+
+
+def write_private_file(path: pathlib.Path, encoded: bytes) -> None:
+    private_directory(path.parent)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as error:
+        fail(f"cannot create private capture staging file: {error}")
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as destination:
+            descriptor = -1
+            destination.write(encoded)
+            destination.flush()
+            os.fsync(destination.fileno())
+    except OSError as error:
+        fail(f"cannot write private capture staging file: {error}")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def read_regular_file_once(root: pathlib.Path, relative_path: str) -> bytes:
+    relative = relative_input_path(relative_path)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
+    try:
+        directory = os.open(root, directory_flags)
+    except OSError:
+        fail("required capture input root is unavailable")
+    try:
+        for part in relative.parts[:-1]:
+            try:
+                child = os.open(part, directory_flags, dir_fd=directory)
+            except OSError:
+                fail("required capture input path is unavailable or unsafe")
+            os.close(directory)
+            directory = child
+        flags = os.O_RDONLY | nofollow
+        try:
+            descriptor = os.open(relative.parts[-1], flags, dir_fd=directory)
+        except OSError:
+            fail("required capture input is unavailable or not a regular file")
+    finally:
+        os.close(directory)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            fail("required capture input is not a regular file")
+        chunks: list[bytes] = []
+        observed = 0
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+            observed += len(chunk)
+        if observed != metadata.st_size:
+            fail("required capture input changed while it was read")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def snapshot_files(root: pathlib.Path) -> tuple[SnapshotFile, ...]:
+    files: list[SnapshotFile] = []
+    try:
+        entries = sorted(root.rglob("*"))
+    except OSError as error:
+        fail(f"cannot enumerate private capture staging: {error}")
+    for path in entries:
+        try:
+            metadata = path.lstat()
+        except OSError as error:
+            fail(f"cannot inspect private capture staging: {error}")
+        if stat.S_ISLNK(metadata.st_mode):
+            fail("private capture staging contains a symbolic link")
+        if stat.S_ISDIR(metadata.st_mode):
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            fail("private capture staging contains a non-regular file")
+        relative = path.relative_to(root).as_posix()
+        files.append(
+            SnapshotFile(
+                relative_path=relative,
+                size=metadata.st_size,
+                sha256=sha256_file(path),
+            )
+        )
+    if not files:
+        fail("private capture staging is empty")
+    return tuple(files)
+
+
+def extract_git_source_snapshot(
+    label: str,
+    checkout: pathlib.Path,
+    expected_revision: str,
+    expected_repository: str,
+    package: str,
+    destination: pathlib.Path,
+) -> None:
+    verify_git_checkout(label, checkout, expected_revision, expected_repository)
+    archive_bytes = command_bytes(
+        ["git", "archive", "--format=tar", expected_revision, f"src/{package}"],
+        checkout,
+    )
+    expected_prefix = pathlib.PurePosixPath("src") / package
+    private_directory(destination)
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:")
+    except tarfile.TarError:
+        fail(f"{label} source snapshot is not a valid git archive")
+    with archive:
+        members = archive.getmembers()
+        if not members:
+            fail(f"{label} source snapshot is empty")
+        for member in members:
+            relative = relative_input_path(member.name)
+            if (
+                relative != expected_prefix
+                and expected_prefix not in relative.parents
+                and relative not in expected_prefix.parents
+            ):
+                fail(f"{label} source snapshot contains an unexpected path")
+            target = destination.joinpath(*relative.parts)
+            if member.isdir():
+                private_directory(target)
+                continue
+            if not member.isfile():
+                fail(f"{label} source snapshot contains a non-regular file")
+            source = archive.extractfile(member)
+            if source is None:
+                fail(f"{label} source snapshot cannot be read")
+            encoded = source.read()
+            if len(encoded) != member.size:
+                fail(f"{label} source snapshot changed while it was read")
+            write_private_file(target, encoded)
+
+
 def manifest_component_map(manifest: Mapping[str, Any]) -> dict[str, dict[str, str]]:
     components: dict[str, dict[str, str]] = {}
     for raw in manifest["component_indexes"]:
@@ -252,12 +443,14 @@ def manifest_component_map(manifest: Mapping[str, Any]) -> dict[str, dict[str, s
 
 
 def huggingface_metadata_revision(model_root: pathlib.Path, relative_path: str) -> str:
-    metadata = (
-        model_root / ".cache" / "huggingface" / "download" / f"{relative_path}.metadata"
-    )
+    metadata_path = f".cache/huggingface/download/{relative_path}.metadata"
     try:
-        first_line = metadata.read_text(encoding="utf-8").splitlines()[0]
-    except (OSError, IndexError, UnicodeError):
+        first_line = (
+            read_regular_file_once(model_root, metadata_path)
+            .decode("utf-8")
+            .splitlines()[0]
+        )
+    except (IndexError, UnicodeError):
         fail("official model snapshot lacks revision-bound component metadata")
     return first_line
 
@@ -272,21 +465,37 @@ def verify_model_components(
     for identifier in REQUIRED_COMPONENT_IDS:
         component = component_map[identifier]
         relative_path = component["relative_path"]
-        candidate = model_root / relative_path
-        if candidate.is_symlink():
-            fail("official model component may not be a symbolic link")
-        try:
-            resolved = candidate.resolve(strict=True)
-        except OSError:
-            fail(f"official model component is unavailable: {identifier}")
-        if not resolved.is_file() or not is_relative_to(resolved, model_root):
-            fail(f"official model component escapes the snapshot: {identifier}")
-        if sha256_file(resolved) != component["sha256"]:
+        encoded = read_regular_file_once(model_root, relative_path)
+        if sha256_bytes(encoded) != component["sha256"]:
             fail(f"official model component hash drifted: {identifier}")
         if huggingface_metadata_revision(model_root, relative_path) != MODEL_REVISION:
             fail(f"official model component revision drifted: {identifier}")
         verified.append({"id": identifier, "sha256": component["sha256"]})
     return verified
+
+
+def stage_model_components(
+    model_root: pathlib.Path,
+    destination: pathlib.Path,
+    manifest: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    component_map = manifest_component_map(manifest)
+    if set(REQUIRED_COMPONENT_IDS) - set(component_map):
+        fail("checked manifest lacks conditioner component authority")
+    private_directory(destination)
+    staged: list[dict[str, str]] = []
+    for identifier in REQUIRED_COMPONENT_IDS:
+        component = component_map[identifier]
+        relative_path = component["relative_path"]
+        encoded = read_regular_file_once(model_root, relative_path)
+        if sha256_bytes(encoded) != component["sha256"]:
+            fail(f"official model component hash drifted: {identifier}")
+        if huggingface_metadata_revision(model_root, relative_path) != MODEL_REVISION:
+            fail(f"official model component revision drifted: {identifier}")
+        relative = relative_input_path(relative_path)
+        write_private_file(destination.joinpath(*relative.parts), encoded)
+        staged.append({"id": identifier, "sha256": component["sha256"]})
+    return staged
 
 
 def normalize_acceleration_name(value: str) -> str:
@@ -350,7 +559,9 @@ def finite_statistics(values: Sequence[float | int]) -> dict[str, float | int]:
     }
 
 
-def integer_tensor_record(key: str, values: Sequence[int]) -> dict[str, Any]:
+def integer_tensor_record(
+    key: str, values: Sequence[int], *, sample_all: bool = False
+) -> dict[str, Any]:
     signed_values = [int(value) for value in values]
     if not signed_values or any(
         not -(2**63) <= value <= 2**63 - 1 for value in signed_values
@@ -367,7 +578,11 @@ def integer_tensor_record(key: str, values: Sequence[int]) -> dict[str, Any]:
         "statistics": finite_statistics(signed_values),
         "samples": [
             {"index": [index], "value": signed_values[index]}
-            for index in sample_indexes(len(signed_values))
+            for index in (
+                range(len(signed_values))
+                if sample_all
+                else sample_indexes(len(signed_values))
+            )
         ],
     }
 
@@ -439,6 +654,7 @@ class PrimitiveEvidence:
     token_ids: tuple[int, ...]
     special_presentation: tuple[int, ...]
     processor_shapes: tuple[int, ...]
+    processor_grids: tuple[int, ...]
     sampled_bfloat16_bits: tuple[int, ...]
     prompt_sha256: str
     image_sha256: str
@@ -496,9 +712,18 @@ def layer_contract(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
         "token-ids",
         "special-token-presentation",
         "processor-shapes",
+        "processor-grids",
         "sampled-values",
     ):
         fail("tokenizer/processor measurement contract drifted")
+    expected_adapter = {
+        "id": "minimax-h3-tokenizer-processor-capture-v1",
+        "command_prefix": CAPTURE_COMMAND_PREFIX,
+        "implementation_path": "scripts/capture-minimax-h3-conditioner.py",
+        "implementation_sha256": sha256_file(pathlib.Path(__file__).resolve()),
+    }
+    if layer.get("oracle_adapter") != expected_adapter:
+        fail("tokenizer/processor adapter authority drifted")
     return layer
 
 
@@ -507,6 +732,7 @@ def build_layer_document(
     evidence: PrimitiveEvidence,
     authorization_sha256: str,
     device: str,
+    oracle_runtime: Mapping[str, str],
 ) -> dict[str, Any]:
     contract = layer_contract(manifest)
     component_map = manifest_component_map(manifest)
@@ -538,6 +764,9 @@ def build_layer_document(
             "special-token-presentation", evidence.special_presentation
         ),
         integer_tensor_record("processor-shapes", evidence.processor_shapes),
+        integer_tensor_record(
+            "processor-grids", evidence.processor_grids, sample_all=True
+        ),
         bfloat16_tensor_record("sampled-values", evidence.sampled_bfloat16_bits),
     ]
     comparison = [
@@ -576,16 +805,29 @@ def build_layer_document(
             "id": "minimax-h3-tokenizer-processor-capture-v1",
             "command": command,
             "tensor_hash_encoding": TENSOR_HASH_ENCODING,
+            "implementation_sha256": contract["oracle_adapter"][
+                "implementation_sha256"
+            ],
         },
         "environment": {
             "device": device,
             "dtype": "bfloat16",
             "attention_backend": "none-conditioner-preprocessing",
             "acceleration_policy": policy,
+            "oracle_runtime": dict(oracle_runtime),
             "forbidden_accelerations_disabled": True,
         },
         "provenance": [
             {"key": "source-revision", "value": DIFFUSERS_REVISION},
+            {"key": "transformers-revision", "value": TRANSFORMERS_REVISION},
+            {
+                "key": "adapter-implementation-sha256",
+                "value": contract["oracle_adapter"]["implementation_sha256"],
+            },
+            {
+                "key": "oracle-runtime-sha256",
+                "value": sha256_bytes(canonical_json_bytes(oracle_runtime)),
+            },
             {
                 "key": "tokenizer-hash",
                 "value": component_authority_set_sha256(tokenizer_ids, component_map),
@@ -636,6 +878,17 @@ def build_bundle(
             "attention_backend": "none-conditioner-preprocessing",
             "acceleration_policy": acceleration_policy(manifest),
             "command": layer_document["adapter"]["command"],
+            "oracle_runtime": layer_document["environment"]["oracle_runtime"],
+            "oracle_adapters": [
+                {
+                    "layer": layer_document["layer"],
+                    "id": layer_document["adapter"]["id"],
+                    "command": layer_document["adapter"]["command"],
+                    "implementation_sha256": layer_document["adapter"][
+                        "implementation_sha256"
+                    ],
+                }
+            ],
             "forbidden_accelerations_disabled": True,
         },
         "fixtures": [
@@ -719,6 +972,30 @@ def load_capture_runtime(
         encoder_step=encoder_module.MiniMaxH3Ref2VATextEncoderStep,
         transformers_checkout=transformers_checkout,
     )
+
+
+def observed_oracle_runtime(runtime: SimpleNamespace) -> dict[str, str]:
+    cuda = getattr(getattr(runtime.torch, "version", None), "cuda", None)
+    values = {
+        "python": platform.python_version(),
+        "torch": str(getattr(runtime.torch, "__version__", "")),
+        "numpy": str(getattr(runtime.numpy, "__version__", "")),
+        "cuda": "" if cuda is None else str(cuda),
+        "transformers_revision": TRANSFORMERS_REVISION,
+    }
+    if any(not value for value in values.values()):
+        fail("capture runtime identity is incomplete")
+    return values
+
+
+def validate_oracle_runtime(
+    manifest: Mapping[str, Any], runtime: SimpleNamespace
+) -> dict[str, str]:
+    expected = manifest["numerical_authority"]["oracle_runtime"]
+    observed = observed_oracle_runtime(runtime)
+    if observed != expected:
+        fail("capture runtime identity differs from the reviewed oracle pin")
+    return observed
 
 
 def configure_torch(runtime: SimpleNamespace, device: str) -> Any:
@@ -912,6 +1189,12 @@ def capture_primitives(
             (7, tuple(video_grid.shape)),
         )
     )
+    processor_grids = packed_vectors(
+        (
+            [int(value) for value in image_grid.detach().cpu().reshape(-1).tolist()],
+            [int(value) for value in video_grid.detach().cpu().reshape(-1).tolist()],
+        )
+    )
     special_presentation = packed_vectors(
         (
             special_ids,
@@ -925,6 +1208,7 @@ def capture_primitives(
         token_ids=tuple(packed_vectors((prompt_ids, presentation_ids))),
         special_presentation=tuple(special_presentation),
         processor_shapes=tuple(processor_shapes),
+        processor_grids=tuple(processor_grids),
         sampled_bfloat16_bits=tuple(sampled_bits),
         prompt_sha256=sha256_bytes(prompt.encode("utf-8")),
         image_sha256=sha256_bytes(image.tobytes(order="C")),
@@ -1056,6 +1340,8 @@ def run_tokenizer_processor_capture(
     manifest = conformance_tool.validate_manifest()
     if conformance_tool.EXPECTED_REVISIONS["diffusers"] != DIFFUSERS_REVISION:
         fail("capture Diffusers revision differs from the checked conformance pin")
+    if conformance_tool.EXPECTED_REVISIONS["transformers"] != TRANSFORMERS_REVISION:
+        fail("capture Transformers revision differs from the checked conformance pin")
     if conformance_tool.EXPECTED_REVISIONS["minimax-official-model"] != MODEL_REVISION:
         fail("capture model revision differs from the checked conformance pin")
 
@@ -1076,38 +1362,57 @@ def run_tokenizer_processor_capture(
     transformers_checkout = external_directory(
         "Transformers checkout", values["MOLD_H3_TRANSFORMERS_CHECKOUT"]
     )
-    verify_git_checkout(
-        "Diffusers",
-        diffusers_checkout,
-        DIFFUSERS_REVISION,
-        "https://github.com/huggingface/diffusers",
-    )
-    verify_git_checkout(
-        "Transformers",
-        transformers_checkout,
-        TRANSFORMERS_REVISION,
-        "https://github.com/huggingface/transformers",
-    )
-    verify_model_components(model_root, manifest)
+    manifest_sha256 = sha256_file(MANIFEST_PATH)
+    with tempfile.TemporaryDirectory(
+        prefix=".h3-capture-stage-", dir=fixture_root
+    ) as staged_value:
+        staged_root = pathlib.Path(staged_value).resolve(strict=True)
+        os.chmod(staged_root, 0o700)
+        staged_diffusers = staged_root / "sources" / "diffusers"
+        staged_transformers = staged_root / "sources" / "transformers"
+        staged_model = staged_root / "model"
+        extract_git_source_snapshot(
+            "Diffusers",
+            diffusers_checkout,
+            DIFFUSERS_REVISION,
+            SOURCE_REPOSITORIES["diffusers"],
+            "diffusers",
+            staged_diffusers,
+        )
+        extract_git_source_snapshot(
+            "Transformers",
+            transformers_checkout,
+            TRANSFORMERS_REVISION,
+            SOURCE_REPOSITORIES["transformers"],
+            "transformers",
+            staged_transformers,
+        )
+        stage_model_components(model_root, staged_model, manifest)
+        staged_snapshot = StagedSnapshot(staged_root, snapshot_files(staged_root))
 
-    runtime = load_capture_runtime(diffusers_checkout, transformers_checkout)
-    torch_device = configure_torch(runtime, device)
-    evidence = capture_primitives(runtime, model_root, torch_device)
-    layer_document = build_layer_document(
-        manifest,
-        evidence,
-        authorization["source_document_sha256"],
-        device,
-    )
-    return write_capture(
-        fixture_root,
-        authorization_path,
-        manifest,
-        layer_document,
-        device,
-        conformance_tool,
-        gpu_tool,
-    )
+        runtime = load_capture_runtime(staged_diffusers, staged_transformers)
+        oracle_runtime = validate_oracle_runtime(manifest, runtime)
+        torch_device = configure_torch(runtime, device)
+        evidence = capture_primitives(runtime, staged_model, torch_device)
+        layer_document = build_layer_document(
+            manifest,
+            evidence,
+            authorization["source_document_sha256"],
+            device,
+            oracle_runtime,
+        )
+        staged_snapshot.revalidate()
+        if sha256_file(MANIFEST_PATH) != manifest_sha256:
+            fail("checked conformance manifest changed during capture")
+        return write_capture(
+            fixture_root,
+            authorization_path,
+            manifest,
+            layer_document,
+            device,
+            conformance_tool,
+            gpu_tool,
+        )
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
