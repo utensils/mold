@@ -33,6 +33,7 @@
         "device": { "type": "string", "minLength": 1 },
         "dtype": { "type": "string", "minLength": 1 },
         "attention_backend": { "type": "string", "minLength": 1 },
+        "acceleration_policy": { "$ref": "#/$defs/acceleration_policy" },
         "command": { "type": "string", "minLength": 1 },
         "forbidden_accelerations_disabled": { "const": true }
       }
@@ -51,6 +52,22 @@
     "commit": {
       "type": "string",
       "pattern": "^[0-9a-f]{40}$"
+    },
+    "acceleration_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "disabled"],
+      "properties": {
+        "enabled": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "disabled": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
     },
     "fixture": {
       "type": "object",
@@ -74,6 +91,11 @@
         "relative_path": { "type": "string", "minLength": 1 },
         "sha256": { "$ref": "#/$defs/sha256" },
         "component_index_sha256": { "$ref": "#/$defs/sha256" },
+        "component_indexes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/component_index_authority" }
+        },
         "tensor": {
           "type": "object",
           "additionalProperties": false,
@@ -106,6 +128,15 @@
             "metric": { "type": "string", "minLength": 1 }
           }
         }
+      }
+    },
+    "component_index_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
       }
     }
   }

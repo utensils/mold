@@ -70,6 +70,20 @@ EXPECTED_EXCLUDED_ACCELERATIONS = {
     "approximate-attention",
     "tf32",
 }
+EXPECTED_EXCLUDED_ACCELERATION_ALIASES = {
+    "torch-compile": {"torch-compile", "torch-inductor", "inductor"},
+    "fp8": {"fp8", "float8", "e4m3", "e4m3fn", "e5m2"},
+    "cache-dit": {"cache-dit"},
+    "sageattention": {"sageattention", "sage-attn"},
+    "stochastic-sampling": {"stochastic-sampling", "stochastic", "ancestral"},
+    "approximate-attention": {
+        "approximate-attention",
+        "approximate",
+        "approx-attn",
+        "approx",
+    },
+    "tf32": {"tf32", "tensorfloat32"},
+}
 
 EXPECTED_COMPONENT_INDEXES = {
     "official-license": (
@@ -103,6 +117,58 @@ EXPECTED_COMPONENT_INDEXES = {
     "official-audio-vae-config": (
         "audio_vae/config.json",
         "9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6",
+    ),
+    "official-tokenizer-json": (
+        "tokenizer/tokenizer.json",
+        "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+    ),
+    "official-tokenizer-config": (
+        "tokenizer/tokenizer_config.json",
+        "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+    ),
+    "official-tokenizer-merges": (
+        "tokenizer/merges.txt",
+        "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+    ),
+    "official-tokenizer-vocab": (
+        "tokenizer/vocab.json",
+        "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+    ),
+    "official-processor-config": (
+        "processor/preprocessor_config.json",
+        "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+    ),
+    "official-processor-video-config": (
+        "processor/video_preprocessor_config.json",
+        "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+    ),
+    "official-processor-chat-template": (
+        "processor/chat_template.json",
+        "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce",
+    ),
+    "official-processor-tokenizer-json": (
+        "processor/tokenizer.json",
+        "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+    ),
+    "official-processor-tokenizer-config": (
+        "processor/tokenizer_config.json",
+        "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+    ),
+    "official-processor-merges": (
+        "processor/merges.txt",
+        "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+    ),
+    "official-processor-vocab": (
+        "processor/vocab.json",
+        "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+    ),
+    "official-video-scheduler-config": (
+        "scheduler/scheduler_config.json",
+        "8fa6c3aa70dc9e691e1a6df899fd1b6f75f70481a27cee6e18a303817075c304",
+    ),
+    "official-audio-scheduler-config": (
+        "audio_scheduler/scheduler_config.json",
+        "804780f7133477067bd6bbfbc02dc8b3cf9feeb400f97c08f5b1d5f6cbab3840",
     ),
 }
 
@@ -515,6 +581,21 @@ def validate_layer_output(value: Any, label: str) -> dict[str, Any]:
     }
     if value["input"]["component_index_sha256"] not in component_hashes:
         fail(f"{label} component index hash is not in the pinned authority set")
+    component_indexes = value["input"].get("component_indexes")
+    if component_indexes is not None:
+        component_ids: set[str] = set()
+        for component in component_indexes:
+            identifier = component["id"]
+            if identifier in component_ids:
+                fail(f"{label} component indexes contain duplicate id {identifier!r}")
+            component_ids.add(identifier)
+            expected = EXPECTED_COMPONENT_INDEXES.get(identifier)
+            if expected is None or component["sha256"] != expected[1]:
+                fail(f"{label} component index authority is not pinned")
+        if value["input"]["component_index_sha256"] not in {
+            component["sha256"] for component in component_indexes
+        }:
+            fail(f"{label} component index summary is absent from its authority list")
 
     producer = value["producer"]
     if producer["role"] == "oracle":
@@ -566,8 +647,11 @@ def tolerance_issue(
 ) -> str | None:
     absolute = policy["absolute"]
     relative = policy["relative"]
-    error = abs(mold_value - oracle_value)
-    allowed = absolute + relative * abs(oracle_value)
+    try:
+        error = abs(mold_value - oracle_value)
+        allowed = absolute + relative * abs(oracle_value)
+    except OverflowError:
+        return f"{context} values are outside the finite comparison domain"
     if error <= allowed:
         return None
     return (
@@ -699,6 +783,14 @@ def validate_manifest() -> dict[str, Any]:
         or excluded != EXPECTED_EXCLUDED_ACCELERATIONS
     ):
         fail("ground-truth acceleration exclusions drifted")
+    raw_aliases = manifest["numerical_authority"]["excluded_acceleration_aliases"]
+    aliases = {identifier: set(values) for identifier, values in raw_aliases.items()}
+    if (
+        set(raw_aliases) != excluded
+        or any(len(values) != len(set(values)) for values in raw_aliases.values())
+        or aliases != EXPECTED_EXCLUDED_ACCELERATION_ALIASES
+    ):
+        fail("ground-truth acceleration exclusion aliases drifted")
 
     indexes = {
         item["id"]: (item["relative_path"], item["sha256"])
@@ -716,6 +808,69 @@ def validate_manifest() -> dict[str, Any]:
         or layers != EXPECTED_LAYERS
     ):
         fail("fixture layer coverage is incomplete or contains an unreviewed layer")
+    for layer in manifest["fixture_layers"]:
+        component_ids = layer["required_component_indexes"]
+        if len(component_ids) != len(set(component_ids)) or not set(
+            component_ids
+        ).issubset(EXPECTED_COMPONENT_INDEXES):
+            fail(f"fixture layer {layer['id']} has unreviewed component authority")
+        provenance = layer["required_provenance"]
+        pinned_provenance = layer["pinned_provenance"]
+        pinned_keys = [record["key"] for record in pinned_provenance]
+        pinned_components = [
+            component_id
+            for record in pinned_provenance
+            for component_id in record["component_indexes"]
+        ]
+        invariants = layer["role_invariant_provenance"]
+        if (
+            len(provenance) != len(set(provenance))
+            or len(pinned_keys) != len(set(pinned_keys))
+            or not set(pinned_keys).issubset(provenance)
+            or any(
+                len(record["component_indexes"])
+                != len(set(record["component_indexes"]))
+                or not set(record["component_indexes"]).issubset(component_ids)
+                for record in pinned_provenance
+            )
+            or not set(pinned_components).issubset(EXPECTED_COMPONENT_INDEXES)
+            or not set(pinned_keys).issubset(invariants)
+            or len(invariants) != len(set(invariants))
+            or not set(invariants).issubset(provenance)
+        ):
+            fail(f"fixture layer {layer['id']} has invalid provenance authority")
+        input_contract = layer["input_contract"]
+        expected_task = {
+            "end-to-end-t2va": "t2va",
+            "end-to-end-fl2va": "fl2va",
+            "end-to-end-ref2va": "ref2va",
+        }.get(layer["id"])
+        if expected_task is None:
+            if input_contract != {"kind": "identity-sha256-v1"}:
+                fail(f"fixture layer {layer['id']} has an invalid input contract")
+        elif input_contract != {
+            "kind": "canonical-e2e-json-sha256-v1",
+            "task": expected_task,
+            "algorithm": "minimax-h3-flow-euler-v1",
+            "guidance": "0",
+            "video_shift": "12",
+            "audio_shift": "3",
+            "dimension_multiple": 32,
+            "frame_step": 17,
+            "frame_offset": 5,
+            "min_frames": 124,
+            "max_frames": 362,
+            "max_pixels": 1_069_056,
+            "min_aspect_ratio": "0.25",
+            "max_aspect_ratio": "4",
+            "fps": 24,
+            "video_scheduler_component": "official-video-scheduler-config",
+            "audio_scheduler_component": "official-audio-scheduler-config",
+        } or not {
+            input_contract["video_scheduler_component"],
+            input_contract["audio_scheduler_component"],
+        }.issubset(component_ids):
+            fail(f"fixture layer {layer['id']} has an invalid input contract")
 
     policy = manifest["capture_policy"]
     if not all(
@@ -1074,7 +1229,7 @@ def main(argv: list[str]) -> int:
                 print(f"MiniMax H3 conformance note: {note}")
         print(f"MiniMax H3 conformance {args.command} passed")
         return 0
-    except (ConformanceFailure, OSError) as error:
+    except (ConformanceFailure, OSError, OverflowError) as error:
         print(f"invalid MiniMax H3 conformance evidence: {error}", file=sys.stderr)
         return 1
 

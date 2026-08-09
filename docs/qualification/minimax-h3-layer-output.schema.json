@@ -70,7 +70,22 @@
       "properties": {
         "id": { "$ref": "#/$defs/key" },
         "sha256": { "$ref": "#/$defs/sha256" },
-        "component_index_sha256": { "$ref": "#/$defs/sha256" }
+        "component_index_sha256": { "$ref": "#/$defs/sha256" },
+        "component_indexes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/component_index_authority" }
+        },
+        "conformance": { "$ref": "#/$defs/e2e_input" }
+      }
+    },
+    "component_index_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256"],
+      "properties": {
+        "id": { "$ref": "#/$defs/key" },
+        "sha256": { "$ref": "#/$defs/sha256" }
       }
     },
     "producer": {
@@ -108,7 +123,93 @@
         "device": { "type": "string", "minLength": 1 },
         "dtype": { "type": "string", "minLength": 1 },
         "attention_backend": { "type": "string", "minLength": 1 },
+        "acceleration_policy": { "$ref": "#/$defs/acceleration_policy" },
         "forbidden_accelerations_disabled": { "const": true }
+      }
+    },
+    "acceleration_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "disabled"],
+      "properties": {
+        "enabled": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/key" }
+        },
+        "disabled": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/key" }
+        }
+      }
+    },
+    "e2e_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "task",
+        "prompt_sha256",
+        "negative_prompt_sha256",
+        "conditioning",
+        "seed",
+        "width",
+        "height",
+        "frames",
+        "fps",
+        "video_sampler",
+        "audio_sampler"
+      ],
+      "properties": {
+        "schema_version": { "const": "mold.minimax-h3.e2e-input.v1" },
+        "task": { "enum": ["t2va", "fl2va", "ref2va"] },
+        "prompt_sha256": { "$ref": "#/$defs/sha256" },
+        "negative_prompt_sha256": { "$ref": "#/$defs/sha256" },
+        "conditioning": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/conditioning_input" }
+        },
+        "seed": { "type": "integer" },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "frames": { "type": "integer", "minimum": 1 },
+        "fps": { "type": "integer", "minimum": 1 },
+        "video_sampler": { "$ref": "#/$defs/sampler_input" },
+        "audio_sampler": { "$ref": "#/$defs/sampler_input" }
+      }
+    },
+    "conditioning_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "sha256"],
+      "properties": {
+        "role": {
+          "enum": [
+            "first-frame",
+            "last-frame",
+            "reference-image",
+            "reference-video",
+            "reference-audio"
+          ]
+        },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "sampler_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "steps", "guidance", "shift"],
+      "properties": {
+        "algorithm": { "$ref": "#/$defs/key" },
+        "steps": { "type": "integer", "minimum": 1 },
+        "guidance": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+        },
+        "shift": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+        }
       }
     },
     "provenance": {

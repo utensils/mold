@@ -26,6 +26,13 @@ CHECKOUT_V6_SHA = "d23441a48e516b6c34aea4fa41551a30e30af803"
 CANONICAL_BF16_DTYPE = "bfloat16"
 CANONICAL_INTEGER_DTYPE = "int64"
 CANONICAL_METRIC_DTYPE = "float64"
+CANONICAL_E2E_INPUT_SCHEMA = "mold.minimax-h3.e2e-input.v1"
+COMPONENT_AUTHORITY_SET_SCHEMA = "mold.minimax-h3.component-authority-set.v1"
+E2E_LAYER_TASKS = {
+    "end-to-end-t2va": "t2va",
+    "end-to-end-fl2va": "fl2va",
+    "end-to-end-ref2va": "ref2va",
+}
 TEST_MEASUREMENT_KINDS = {
     "tokenizer-processor": {
         "token-ids": "integer",
@@ -126,6 +133,31 @@ def write_json(path: pathlib.Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
+def canonical_json_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def component_authority_set_sha256(
+    component_ids: list[str], component_authorities: dict[str, str]
+) -> str:
+    return canonical_json_sha256(
+        {
+            "schema_version": COMPONENT_AUTHORITY_SET_SCHEMA,
+            "components": [
+                {"id": identifier, "sha256": component_authorities[identifier]}
+                for identifier in sorted(component_ids)
+            ],
+        }
+    )
+
+
 def expect_failure(action: Callable[[], object], fragment: str) -> None:
     try:
         action()
@@ -167,11 +199,29 @@ def authorization_fixture(
 
 def exact_manifest_layers(tool) -> dict[str, dict[str, object]]:
     manifest = tool.validate_manifest()
-    layers = {
-        layer["id"]: layer
-        for layer in manifest["fixture_layers"]
-        if layer["authority_tier"] == "exact-full-bf16"
+    component_authorities = {
+        component["id"]: component["sha256"]
+        for component in manifest["component_indexes"]
     }
+    layers = {}
+    for raw_layer in manifest["fixture_layers"]:
+        if raw_layer["authority_tier"] != "exact-full-bf16":
+            continue
+        layer = copy.deepcopy(raw_layer)
+        layer["_required_component_authorities"] = [
+            {"id": identifier, "sha256": component_authorities[identifier]}
+            for identifier in layer["required_component_indexes"]
+        ]
+        layer["_pinned_provenance_values"] = {
+            record["key"]: component_authority_set_sha256(
+                record["component_indexes"], component_authorities
+            )
+            for record in layer["pinned_provenance"]
+        }
+        layer["_excluded_accelerations"] = frozenset(
+            manifest["numerical_authority"]["excluded_accelerations"]
+        )
+        layers[layer["id"]] = layer
     assert len(layers) == 11
     assert "dual-sampler" not in layers
     assert set(layers) == set(TEST_MEASUREMENT_KINDS)
@@ -215,19 +265,26 @@ def comparison_fixture(key: str, kind: str) -> dict[str, object]:
         "absolute": 0 if integer else 0.000002,
         "relative": 0 if integer else 0.000001,
         "metric": "elementwise-atol-plus-rtol",
-        "hash_policy": "exact" if integer else "record-only",
+        "hash_policy": "exact",
     }
 
 
 def provenance_fixture(
     manifest_layer: dict[str, object], document: dict[str, object]
 ) -> list[dict[str, str]]:
+    component_indexes = document["input"]["component_indexes"]
+    component_index_hashes = ",".join(
+        f"{component['id']}={component['sha256']}"
+        for component in sorted(
+            component_indexes, key=lambda component: component["id"]
+        )
+    )
     values = {
         "source-revision": document["producer"]["revision"],
-        "tokenizer-hash": hashlib.sha256(b"contract-tokenizer").hexdigest(),
-        "processor-hash": hashlib.sha256(b"contract-processor").hexdigest(),
+        "tokenizer-hash": "0" * 64,
+        "processor-hash": "0" * 64,
         "component-index-hash": document["input"]["component_index_sha256"],
-        "component-index-hashes": document["input"]["component_index_sha256"],
+        "component-index-hashes": component_index_hashes,
         "device": document["environment"]["device"],
         "generator-device": document["environment"]["device"],
         "dtype": document["environment"]["dtype"],
@@ -242,6 +299,7 @@ def provenance_fixture(
         "audio-shift": "5.0",
         "endpoint-signature": "fl2va-v1",
     }
+    values.update(manifest_layer["_pinned_provenance_values"])
     return [
         {"key": key, "value": values[key]}
         for key in manifest_layer["required_provenance"]
@@ -255,7 +313,64 @@ def layer_document(
     manifest_layer: dict[str, object],
 ) -> dict[str, object]:
     layer = manifest_layer["id"]
-    component_sha = next(iter(tool.EXPECTED_COMPONENT_INDEXES.values()))[1]
+    component_indexes = copy.deepcopy(manifest_layer["_required_component_authorities"])
+    input_evidence: dict[str, object] = {
+        "id": f"gpu-contract-{layer}",
+        "sha256": hashlib.sha256(f"input:{layer}".encode()).hexdigest(),
+        "component_index_sha256": component_indexes[0]["sha256"],
+        "component_indexes": component_indexes,
+    }
+    task = E2E_LAYER_TASKS.get(layer)
+    if task is not None:
+        conditioning = []
+        if task == "fl2va":
+            conditioning = [
+                {
+                    "role": "first-frame",
+                    "sha256": hashlib.sha256(b"contract-first-frame").hexdigest(),
+                },
+                {
+                    "role": "last-frame",
+                    "sha256": hashlib.sha256(b"contract-last-frame").hexdigest(),
+                },
+            ]
+        elif task == "ref2va":
+            conditioning = [
+                {
+                    "role": "reference-image",
+                    "sha256": hashlib.sha256(b"contract-reference-image").hexdigest(),
+                },
+                {
+                    "role": "reference-audio",
+                    "sha256": hashlib.sha256(b"contract-reference-audio").hexdigest(),
+                },
+            ]
+        conformance = {
+            "schema_version": CANONICAL_E2E_INPUT_SCHEMA,
+            "task": task,
+            "prompt_sha256": hashlib.sha256(b"contract prompt").hexdigest(),
+            "negative_prompt_sha256": hashlib.sha256(b"").hexdigest(),
+            "conditioning": conditioning,
+            "seed": 42,
+            "width": 1280,
+            "height": 768,
+            "frames": 362,
+            "fps": 24,
+            "video_sampler": {
+                "algorithm": "minimax-h3-flow-euler-v1",
+                "steps": 30,
+                "guidance": "0",
+                "shift": "12",
+            },
+            "audio_sampler": {
+                "algorithm": "minimax-h3-flow-euler-v1",
+                "steps": 30,
+                "guidance": "0",
+                "shift": "3",
+            },
+        }
+        input_evidence["conformance"] = conformance
+        input_evidence["sha256"] = canonical_json_sha256(conformance)
     outputs = [
         output_fixture(layer, key, TEST_MEASUREMENT_KINDS[layer][key])
         for key in manifest_layer["required_measurements"]
@@ -267,11 +382,7 @@ def layer_document(
         "layer": layer,
         "authority_tier": "exact-full-bf16",
         "authorization_document_sha256": authorization_sha,
-        "input": {
-            "id": f"gpu-contract-{layer}",
-            "sha256": hashlib.sha256(f"input:{layer}".encode()).hexdigest(),
-            "component_index_sha256": component_sha,
-        },
+        "input": input_evidence,
         "producer": {
             "role": role,
             "implementation": f"contract-{role}",
@@ -290,6 +401,10 @@ def layer_document(
             "device": "cuda:contract-test",
             "dtype": CANONICAL_BF16_DTYPE,
             "attention_backend": "math",
+            "acceleration_policy": {
+                "enabled": ["math"],
+                "disabled": sorted(manifest_layer["_excluded_accelerations"]),
+            },
             "forbidden_accelerations_disabled": True,
         },
         "outputs": outputs,
@@ -314,6 +429,9 @@ def bundle_fixture(
 ) -> tuple[pathlib.Path, pathlib.Path]:
     manifest_sha = sha256(tool.MANIFEST_PATH)
     manifest_layers = exact_manifest_layers(tool)
+    excluded_accelerations = sorted(
+        tool.validate_manifest()["numerical_authority"]["excluded_accelerations"]
+    )
     bundle_paths: list[pathlib.Path] = []
     for role in ("oracle", "mold"):
         fixtures = []
@@ -335,6 +453,9 @@ def bundle_fixture(
                     "component_index_sha256": document["input"][
                         "component_index_sha256"
                     ],
+                    "component_indexes": copy.deepcopy(
+                        document["input"]["component_indexes"]
+                    ),
                     "tensor": {
                         "shape": output["shape"],
                         "dtype": output["dtype"],
@@ -367,6 +488,10 @@ def bundle_fixture(
                 "device": "cuda:contract-test",
                 "dtype": CANONICAL_BF16_DTYPE,
                 "attention_backend": "math",
+                "acceleration_policy": {
+                    "enabled": ["math"],
+                    "disabled": excluded_accelerations,
+                },
                 "command": f"contract-test {role} capture",
                 "forbidden_accelerations_disabled": True,
             },
@@ -398,9 +523,18 @@ def mutate_evidence(
     bundle_path: pathlib.Path,
     mutate_document: Callable[[dict[str, object]], None] | None = None,
     mutate_fixture: Callable[[dict[str, object]], None] | None = None,
+    fixture_layer: str | None = None,
 ) -> tuple[dict[str, object], pathlib.Path]:
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
-    fixture = bundle["fixtures"][0]
+    fixture = (
+        bundle["fixtures"][0]
+        if fixture_layer is None
+        else next(
+            candidate
+            for candidate in bundle["fixtures"]
+            if candidate["layer"] == fixture_layer
+        )
+    )
     evidence_path = fixture_root / fixture["relative_path"]
     document = json.loads(evidence_path.read_text(encoding="utf-8"))
     if mutate_document is not None:
@@ -417,12 +551,64 @@ def record_by_key(records: list[dict[str, object]], key: str) -> dict[str, objec
     return next(record for record in records if record["key"] == key)
 
 
+def rehash_e2e_input(document: dict[str, object]) -> None:
+    document["input"]["sha256"] = canonical_json_sha256(
+        document["input"]["conformance"]
+    )
+
+
 def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
     manifest = tool.validate_manifest()
     manifest_layers = exact_manifest_layers(tool)
     assert set(runner.exact_layer_contracts(manifest)) == set(manifest_layers)
+    assert manifest_layers["tokenizer-processor"]["_pinned_provenance_values"] == {
+        "tokenizer-hash": (
+            "00c15d010418b4b43af4bf87555435e46a5bf6c1fc2cd4cc1c8c545375ca1547"
+        ),
+        "processor-hash": (
+            "44e3ff907049587aa580bb17f0374bb78e704e74efbf4626ed6366f4d15be287"
+        ),
+    }
+    bfloat16_max = float.fromhex("0x1.fep+127")
+    assert runner.is_exact_bfloat16(bfloat16_max)
+    assert runner.is_exact_bfloat16(-bfloat16_max)
+    assert not runner.is_exact_bfloat16(0.1)
+    assert runner.is_finite_float64(float.fromhex("0x1.fffffffffffffp+1023"))
+    assert runner.is_finite_float64(2**80)
+    assert not runner.is_finite_float64(2**80 + 1)
+
+    remapped_manifest = copy.deepcopy(manifest)
+    tokenizer_contract = next(
+        layer
+        for layer in remapped_manifest["fixture_layers"]
+        if layer["id"] == "tokenizer-processor"
+    )
+    tokenizer_contract["pinned_provenance"][0]["component_indexes"] = [
+        "official-license"
+    ]
+    expect_failure(
+        lambda: runner.exact_layer_contracts(remapped_manifest),
+        "invalid pinned provenance",
+    )
+    narrowed_alias_manifest = copy.deepcopy(manifest)
+    narrowed_alias_manifest["numerical_authority"]["excluded_acceleration_aliases"][
+        "fp8"
+    ].remove("float8")
+    expect_failure(
+        lambda: runner.exact_layer_contracts(narrowed_alias_manifest),
+        "invalid acceleration exclusions",
+    )
+    excluded_accelerations = runner.manifest_excluded_accelerations(manifest)
+    component_authorities = {
+        component["id"]: component["sha256"]
+        for component in manifest["component_indexes"]
+    }
 
     for layer, manifest_layer in manifest_layers.items():
+        assert manifest_layer["_required_component_authorities"]
+        assert set(manifest_layer["role_invariant_provenance"]).issubset(
+            manifest_layer["required_provenance"]
+        )
         for key, kind in TEST_MEASUREMENT_KINDS[layer].items():
             assert runner.MEASUREMENT_DTYPES[layer][key] == DTYPE_BY_KIND[kind]
 
@@ -430,6 +616,276 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
             document = layer_document(tool, role, authorization_sha, manifest_layer)
             tool.validate_layer_output(document, f"valid {role} {layer}")
             runner.validate_manifest_layer_evidence(document, manifest_layer, role)
+
+            wrong_encoding = copy.deepcopy(document)
+            wrong_encoding["adapter"]["tensor_hash_encoding"] = "partial-record-v1"
+            expect_failure(
+                lambda wrong_encoding=wrong_encoding, manifest_layer=manifest_layer, role=role: (
+                    runner.validate_manifest_layer_evidence(
+                        wrong_encoding, manifest_layer, role
+                    )
+                ),
+                "tensor hash encoding is not canonical",
+            )
+
+            for provenance_key in manifest_layer["_pinned_provenance_values"]:
+                unpinned = copy.deepcopy(document)
+                record_by_key(unpinned["provenance"], provenance_key)["value"] = (
+                    "f" * 64
+                )
+                expect_failure(
+                    lambda unpinned=unpinned, manifest_layer=manifest_layer, role=role: (
+                        runner.validate_manifest_layer_evidence(
+                            unpinned, manifest_layer, role
+                        )
+                    ),
+                    f"provenance {provenance_key!r} is not authority-pinned",
+                )
+
+        if len(manifest_layer["_required_component_authorities"]) > 1:
+            reordered_components = layer_document(
+                tool, "oracle", authorization_sha, manifest_layer
+            )
+            reordered_components["input"]["component_indexes"].reverse()
+            tool.validate_layer_output(
+                reordered_components, f"reordered component set {layer}"
+            )
+            runner.validate_manifest_layer_evidence(
+                reordered_components, manifest_layer, "oracle"
+            )
+
+        unrelated_component_id = next(
+            identifier
+            for identifier in component_authorities
+            if identifier not in manifest_layer["required_component_indexes"]
+        )
+        unrelated = layer_document(tool, "oracle", authorization_sha, manifest_layer)
+        unrelated["input"]["component_indexes"][0] = {
+            "id": unrelated_component_id,
+            "sha256": component_authorities[unrelated_component_id],
+        }
+        unrelated["input"]["component_index_sha256"] = component_authorities[
+            unrelated_component_id
+        ]
+        for provenance_key in ("component-index-hash", "component-index-hashes"):
+            if provenance_key not in manifest_layer["required_provenance"]:
+                continue
+            record_by_key(unrelated["provenance"], provenance_key)["value"] = (
+                runner.structured_provenance_value(unrelated, provenance_key)
+            )
+        tool.validate_layer_output(unrelated, f"globally valid unrelated {layer}")
+        expect_failure(
+            lambda unrelated=unrelated, manifest_layer=manifest_layer: (
+                runner.validate_manifest_layer_evidence(
+                    unrelated, manifest_layer, "oracle"
+                )
+            ),
+            "component authorities differ from the manifest",
+        )
+
+        extra_component = layer_document(
+            tool, "oracle", authorization_sha, manifest_layer
+        )
+        extra_component["input"]["component_indexes"].append(
+            {
+                "id": unrelated_component_id,
+                "sha256": component_authorities[unrelated_component_id],
+            }
+        )
+        tool.validate_layer_output(extra_component, f"extra component {layer}")
+        expect_failure(
+            lambda extra_component=extra_component, manifest_layer=manifest_layer: (
+                runner.validate_manifest_layer_evidence(
+                    extra_component, manifest_layer, "oracle"
+                )
+            ),
+            "component authorities differ from the manifest",
+        )
+
+        if len(manifest_layer["_required_component_authorities"]) > 1:
+            missing_one_component = layer_document(
+                tool, "oracle", authorization_sha, manifest_layer
+            )
+            missing_one_component["input"]["component_indexes"].pop()
+            tool.validate_layer_output(
+                missing_one_component, f"missing one component {layer}"
+            )
+            expect_failure(
+                lambda missing_one_component=missing_one_component, manifest_layer=manifest_layer: (
+                    runner.validate_manifest_layer_evidence(
+                        missing_one_component, manifest_layer, "oracle"
+                    )
+                ),
+                "component authorities differ from the manifest",
+            )
+
+        missing_components = layer_document(
+            tool, "oracle", authorization_sha, manifest_layer
+        )
+        del missing_components["input"]["component_indexes"]
+        tool.validate_layer_output(
+            missing_components, f"legacy component summary {layer}"
+        )
+        expect_failure(
+            lambda missing_components=missing_components, manifest_layer=manifest_layer: (
+                runner.validate_manifest_layer_evidence(
+                    missing_components, manifest_layer, "oracle"
+                )
+            ),
+            "non-empty component authority list",
+        )
+
+        if layer in E2E_LAYER_TASKS:
+            for role in ("oracle", "mold"):
+                unsigned_boundary = layer_document(
+                    tool, role, authorization_sha, manifest_layer
+                )
+                unsigned_boundary["input"]["conformance"]["seed"] = (
+                    runner.UNSIGNED_INT64_MAX
+                )
+                rehash_e2e_input(unsigned_boundary)
+                runner.validate_manifest_layer_evidence(
+                    unsigned_boundary, manifest_layer, role
+                )
+
+                unsigned_overflow = layer_document(
+                    tool, role, authorization_sha, manifest_layer
+                )
+                unsigned_overflow["input"]["conformance"]["seed"] = (
+                    runner.UNSIGNED_INT64_MAX + 1
+                )
+                rehash_e2e_input(unsigned_overflow)
+                expect_failure(
+                    lambda unsigned_overflow=unsigned_overflow, manifest_layer=manifest_layer, role=role: (
+                        runner.validate_manifest_layer_evidence(
+                            unsigned_overflow, manifest_layer, role
+                        )
+                    ),
+                    "seed must be unsigned int64",
+                )
+
+                dimension_overflow = layer_document(
+                    tool, role, authorization_sha, manifest_layer
+                )
+                dimension_overflow["input"]["conformance"]["width"] = 2**63
+                rehash_e2e_input(dimension_overflow)
+                expect_failure(
+                    lambda dimension_overflow=dimension_overflow, manifest_layer=manifest_layer, role=role: (
+                        runner.validate_manifest_layer_evidence(
+                            dimension_overflow, manifest_layer, role
+                        )
+                    ),
+                    "width must be a positive signed int64",
+                )
+
+            unhashed_input = layer_document(
+                tool, "oracle", authorization_sha, manifest_layer
+            )
+            unhashed_input["input"]["conformance"]["seed"] = 43
+            expect_failure(
+                lambda unhashed_input=unhashed_input, manifest_layer=manifest_layer: (
+                    runner.validate_manifest_layer_evidence(
+                        unhashed_input, manifest_layer, "oracle"
+                    )
+                ),
+                "input hash does not match canonical evidence",
+            )
+
+            semantic_mutations: list[
+                tuple[Callable[[dict[str, object]], None], str]
+            ] = [
+                (
+                    lambda document: document["input"]["conformance"].update(
+                        {
+                            "task": (
+                                "fl2va" if E2E_LAYER_TASKS[layer] == "t2va" else "t2va"
+                            )
+                        }
+                    ),
+                    "end-to-end input task is invalid",
+                ),
+                (
+                    lambda document: document["input"]["conformance"].update(
+                        {"width": 1279}
+                    ),
+                    "dimensions violate",
+                ),
+                (
+                    lambda document: document["input"]["conformance"].update(
+                        {"frames": 123}
+                    ),
+                    "frame contract is invalid",
+                ),
+                (
+                    lambda document: document["input"]["conformance"].update(
+                        {"fps": 25}
+                    ),
+                    "frame contract is invalid",
+                ),
+                (
+                    lambda document: document["input"]["conformance"][
+                        "video_sampler"
+                    ].update({"guidance": "1"}),
+                    "sampler contract is invalid",
+                ),
+                (
+                    lambda document: document["input"]["conformance"][
+                        "audio_sampler"
+                    ].update({"steps": 29}),
+                    "sampler contract is invalid",
+                ),
+                (
+                    lambda document: document["input"]["conformance"].update(
+                        {"negative_prompt_sha256": "f" * 64}
+                    ),
+                    "negative prompt must be absent",
+                ),
+            ]
+            if layer == "end-to-end-t2va":
+                semantic_mutations.append(
+                    (
+                        lambda document: document["input"]["conformance"].update(
+                            {
+                                "conditioning": [
+                                    {"role": "first-frame", "sha256": "f" * 64}
+                                ]
+                            }
+                        ),
+                        "T2VA input must not carry conditioning media",
+                    )
+                )
+            elif layer == "end-to-end-fl2va":
+                semantic_mutations.append(
+                    (
+                        lambda document: document["input"]["conformance"].update(
+                            {"conditioning": []}
+                        ),
+                        "FL2VA conditioning order is invalid",
+                    )
+                )
+            else:
+                semantic_mutations.append(
+                    (
+                        lambda document: document["input"]["conformance"].update(
+                            {"conditioning": []}
+                        ),
+                        "Ref2VA conditioning order is invalid",
+                    )
+                )
+            for mutate_input, expected_error in semantic_mutations:
+                invalid_input = layer_document(
+                    tool, "oracle", authorization_sha, manifest_layer
+                )
+                mutate_input(invalid_input)
+                rehash_e2e_input(invalid_input)
+                expect_failure(
+                    lambda invalid_input=invalid_input, manifest_layer=manifest_layer: (
+                        runner.validate_manifest_layer_evidence(
+                            invalid_input, manifest_layer, "oracle"
+                        )
+                    ),
+                    expected_error,
+                )
 
         generic = layer_document(tool, "oracle", authorization_sha, manifest_layer)
         generic["outputs"] = [output_fixture(layer, "activation", "activation")]
@@ -535,6 +991,143 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                 "does not match structured evidence",
             )
 
+        if layer == "tokenizer-processor":
+            missing_acceleration_policy = layer_document(
+                tool, "oracle", authorization_sha, manifest_layer
+            )
+            del missing_acceleration_policy["environment"]["acceleration_policy"]
+            expect_failure(
+                lambda: runner.validate_manifest_layer_evidence(
+                    missing_acceleration_policy,
+                    manifest_layer,
+                    "oracle",
+                    excluded_accelerations,
+                ),
+                "lacks structured acceleration evidence",
+            )
+
+        for excluded_acceleration in sorted(excluded_accelerations):
+            missing_exclusion = layer_document(
+                tool, "oracle", authorization_sha, manifest_layer
+            )
+            missing_exclusion["environment"]["acceleration_policy"]["disabled"].remove(
+                excluded_acceleration
+            )
+            expect_failure(
+                lambda missing_exclusion=missing_exclusion, manifest_layer=manifest_layer: (
+                    runner.validate_manifest_layer_evidence(
+                        missing_exclusion,
+                        manifest_layer,
+                        "oracle",
+                        excluded_accelerations,
+                    )
+                ),
+                "does not disable every manifest-excluded acceleration",
+            )
+
+            enabled_exclusion = layer_document(
+                tool, "oracle", authorization_sha, manifest_layer
+            )
+            enabled_exclusion["environment"]["acceleration_policy"]["enabled"].append(
+                excluded_acceleration
+            )
+            expect_failure(
+                lambda enabled_exclusion=enabled_exclusion, manifest_layer=manifest_layer: (
+                    runner.validate_manifest_layer_evidence(
+                        enabled_exclusion,
+                        manifest_layer,
+                        "oracle",
+                        excluded_accelerations,
+                    )
+                ),
+                "enables a manifest-excluded acceleration",
+            )
+
+        for excluded_alias in ("float8-e4m3fn", "sage-attn", "euler-ancestral"):
+            enabled_alias = layer_document(
+                tool, "oracle", authorization_sha, manifest_layer
+            )
+            enabled_alias["environment"]["acceleration_policy"]["enabled"].append(
+                excluded_alias
+            )
+            expect_failure(
+                lambda enabled_alias=enabled_alias, manifest_layer=manifest_layer: (
+                    runner.validate_manifest_layer_evidence(
+                        enabled_alias,
+                        manifest_layer,
+                        "oracle",
+                        excluded_accelerations,
+                    )
+                ),
+                "enables a manifest-excluded acceleration",
+            )
+
+        if layer == "tokenizer-processor":
+            for policy_mutation in ("duplicate", "uppercase"):
+                noncanonical_policy = layer_document(
+                    tool, "oracle", authorization_sha, manifest_layer
+                )
+                disabled = noncanonical_policy["environment"]["acceleration_policy"][
+                    "disabled"
+                ]
+                if policy_mutation == "duplicate":
+                    disabled.append(disabled[0])
+                else:
+                    disabled[0] = disabled[0].upper()
+                expect_failure(
+                    lambda noncanonical_policy=noncanonical_policy: (
+                        runner.validate_manifest_layer_evidence(
+                            noncanonical_policy,
+                            manifest_layer,
+                            "oracle",
+                            excluded_accelerations,
+                        )
+                    ),
+                    "structured acceleration evidence is not canonical",
+                )
+
+        if "attention-backend" in manifest_layer["required_provenance"]:
+            excluded_backend = next(iter(excluded_accelerations))
+            excluded = layer_document(tool, "oracle", authorization_sha, manifest_layer)
+            excluded["environment"]["attention_backend"] = excluded_backend
+            record_by_key(excluded["provenance"], "attention-backend")["value"] = (
+                excluded_backend
+            )
+            expect_failure(
+                lambda excluded=excluded, manifest_layer=manifest_layer: (
+                    runner.validate_manifest_layer_evidence(
+                        excluded,
+                        manifest_layer,
+                        "oracle",
+                        excluded_accelerations,
+                    )
+                ),
+                "manifest-excluded acceleration",
+            )
+            for excluded_alias in (
+                "float8-e4m3fn",
+                "sage-attn",
+                "euler-ancestral",
+            ):
+                excluded = layer_document(
+                    tool, "oracle", authorization_sha, manifest_layer
+                )
+                excluded["environment"]["attention_backend"] = excluded_alias
+                record_by_key(excluded["provenance"], "attention-backend")["value"] = (
+                    excluded_alias
+                )
+                expect_failure(
+                    lambda excluded=excluded, manifest_layer=manifest_layer: (
+                        runner.validate_manifest_layer_evidence(
+                            excluded,
+                            manifest_layer,
+                            "oracle",
+                            excluded_accelerations,
+                        )
+                    ),
+                    "manifest-excluded acceleration",
+                )
+
         for measurement in manifest_layer["required_measurements"]:
             missing = layer_document(tool, "oracle", authorization_sha, manifest_layer)
             missing["outputs"] = [
@@ -586,6 +1179,68 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                 ),
                 "dtype must be",
             )
+
+            for role in ("oracle", "mold"):
+                for summary_key in ("mean", "std"):
+                    summary_overflow = layer_document(
+                        tool, role, authorization_sha, manifest_layer
+                    )
+                    record_by_key(summary_overflow["outputs"], measurement)[
+                        "statistics"
+                    ][summary_key] = 10**400
+                    expect_failure(
+                        lambda summary_overflow=summary_overflow, manifest_layer=manifest_layer, role=role: (
+                            runner.validate_manifest_layer_evidence(
+                                summary_overflow, manifest_layer, role
+                            )
+                        ),
+                        "summary is outside the finite float64 domain",
+                    )
+
+                if kind == "activation":
+                    for invalid_value in (0.1, 10**100):
+                        for location in ("min", "max", "sample"):
+                            invalid_activation = layer_document(
+                                tool, role, authorization_sha, manifest_layer
+                            )
+                            activation_output = record_by_key(
+                                invalid_activation["outputs"], measurement
+                            )
+                            if location == "sample":
+                                activation_output["samples"][0]["value"] = invalid_value
+                            else:
+                                activation_output["statistics"][location] = (
+                                    invalid_value
+                                )
+                            expect_failure(
+                                lambda invalid_activation=invalid_activation, manifest_layer=manifest_layer, role=role: (
+                                    runner.validate_manifest_layer_evidence(
+                                        invalid_activation, manifest_layer, role
+                                    )
+                                ),
+                                "must be exact bfloat16",
+                            )
+                elif kind == "metric":
+                    for invalid_value in (10**400, 2**80 + 1):
+                        for location in ("min", "max", "sample"):
+                            invalid_metric = layer_document(
+                                tool, role, authorization_sha, manifest_layer
+                            )
+                            metric_output = record_by_key(
+                                invalid_metric["outputs"], measurement
+                            )
+                            if location == "sample":
+                                metric_output["samples"][0]["value"] = invalid_value
+                            else:
+                                metric_output["statistics"][location] = invalid_value
+                            expect_failure(
+                                lambda invalid_metric=invalid_metric, manifest_layer=manifest_layer, role=role: (
+                                    runner.validate_manifest_layer_evidence(
+                                        invalid_metric, manifest_layer, role
+                                    )
+                                ),
+                                "must be finite float64",
+                            )
 
             if kind == "integer":
                 fractional_sample = layer_document(
@@ -646,6 +1301,53 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                     fractional_summary, manifest_layer, "oracle"
                 )
 
+                for role in ("oracle", "mold"):
+                    bounded = layer_document(
+                        tool, role, authorization_sha, manifest_layer
+                    )
+                    bounded_output = record_by_key(bounded["outputs"], measurement)
+                    bounded_output["statistics"]["min"] = runner.SIGNED_INT64_MIN
+                    bounded_output["statistics"]["max"] = runner.SIGNED_INT64_MAX
+                    bounded_output["samples"][0]["value"] = runner.SIGNED_INT64_MIN
+                    bounded_output["samples"][1]["value"] = runner.SIGNED_INT64_MAX
+                    runner.validate_manifest_layer_evidence(
+                        bounded, manifest_layer, role
+                    )
+
+                    for field, value in (
+                        ("min", runner.SIGNED_INT64_MIN - 1),
+                        ("max", runner.SIGNED_INT64_MAX + 1),
+                    ):
+                        overflow = layer_document(
+                            tool, role, authorization_sha, manifest_layer
+                        )
+                        record_by_key(overflow["outputs"], measurement)["statistics"][
+                            field
+                        ] = value
+                        expect_failure(
+                            lambda overflow=overflow, manifest_layer=manifest_layer, role=role: (
+                                runner.validate_manifest_layer_evidence(
+                                    overflow, manifest_layer, role
+                                )
+                            ),
+                            "signed int64",
+                        )
+
+                    sample_overflow = layer_document(
+                        tool, role, authorization_sha, manifest_layer
+                    )
+                    record_by_key(sample_overflow["outputs"], measurement)["samples"][
+                        0
+                    ]["value"] = runner.SIGNED_INT64_MAX + 1
+                    expect_failure(
+                        lambda sample_overflow=sample_overflow, manifest_layer=manifest_layer, role=role: (
+                            runner.validate_manifest_layer_evidence(
+                                sample_overflow, manifest_layer, role
+                            )
+                        ),
+                        "signed int64",
+                    )
+
             wrong_policy = layer_document(
                 tool, "oracle", authorization_sha, manifest_layer
             )
@@ -665,11 +1367,28 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                 expected_policy_error,
             )
 
+            if kind != "integer":
+                for policy_key in ("absolute", "relative"):
+                    overflow_policy = layer_document(
+                        tool, "oracle", authorization_sha, manifest_layer
+                    )
+                    record_by_key(overflow_policy["comparison"], measurement)[
+                        policy_key
+                    ] = 10**400
+                    expect_failure(
+                        lambda overflow_policy=overflow_policy, manifest_layer=manifest_layer: (
+                            runner.validate_manifest_layer_evidence(
+                                overflow_policy, manifest_layer, "oracle"
+                            )
+                        ),
+                        "bounded protected policy",
+                    )
+
             wrong_hash_policy = layer_document(
                 tool, "oracle", authorization_sha, manifest_layer
             )
             hash_policy = record_by_key(wrong_hash_policy["comparison"], measurement)
-            hash_policy["hash_policy"] = "record-only" if kind == "integer" else "exact"
+            hash_policy["hash_policy"] = "record-only"
             expect_failure(
                 lambda wrong_hash_policy=wrong_hash_policy, manifest_layer=manifest_layer: (
                     runner.validate_manifest_layer_evidence(
@@ -689,15 +1408,58 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                 "metric": first_policy["metric"],
             }
         }
-        runner.validate_oracle_mold_policy_parity(oracle, fixture, mold, fixture)
+        runner.validate_oracle_mold_policy_parity(
+            oracle, fixture, mold, fixture, manifest_layer
+        )
         mismatched_mold = copy.deepcopy(mold)
         mismatched_mold["outputs"][0]["dtype"] = "float32"
         expect_failure(
             lambda: runner.validate_oracle_mold_policy_parity(
-                oracle, fixture, mismatched_mold, fixture
+                oracle, fixture, mismatched_mold, fixture, manifest_layer
             ),
             "dtypes differ",
         )
+
+        mismatched_hash = copy.deepcopy(mold)
+        mismatched_hash["outputs"][0]["content_sha256"] = "f" * 64
+        expect_failure(
+            lambda: runner.validate_oracle_mold_policy_parity(
+                oracle, fixture, mismatched_hash, fixture, manifest_layer
+            ),
+            "content hashes differ",
+        )
+
+        if layer in E2E_LAYER_TASKS:
+            mismatched_input = copy.deepcopy(mold)
+            mismatched_input["input"]["conformance"]["seed"] = 43
+            rehash_e2e_input(mismatched_input)
+            runner.validate_manifest_layer_evidence(
+                mismatched_input, manifest_layer, "mold"
+            )
+            expect_failure(
+                lambda: runner.validate_oracle_mold_policy_parity(
+                    oracle, fixture, mismatched_input, fixture, manifest_layer
+                ),
+                "input hashes differ",
+            )
+
+        for provenance_key in manifest_layer["role_invariant_provenance"]:
+            mismatched_provenance = copy.deepcopy(mold)
+            record_by_key(mismatched_provenance["provenance"], provenance_key)[
+                "value"
+            ] += "-mold-drift"
+            expect_failure(
+                lambda mismatched_provenance=mismatched_provenance: (
+                    runner.validate_oracle_mold_policy_parity(
+                        oracle,
+                        fixture,
+                        mismatched_provenance,
+                        fixture,
+                        manifest_layer,
+                    )
+                ),
+                f"provenance {provenance_key!r} differs",
+            )
 
 
 def test_runner_contract(runner, tool, temporary: pathlib.Path) -> None:
@@ -841,6 +1603,131 @@ def test_runner_contract(runner, tool, temporary: pathlib.Path) -> None:
         )
 
         environment, _, mold_bundle = reset_campaign()
+        excluded_accelerations = runner.manifest_excluded_accelerations(
+            tool.validate_manifest()
+        )
+        valid_capture_bundle = json.loads(mold_bundle.read_text(encoding="utf-8"))
+        missing_capture_policy = copy.deepcopy(valid_capture_bundle)
+        del missing_capture_policy["capture_environment"]["acceleration_policy"]
+        expect_failure(
+            lambda: runner.validate_capture_environment(
+                tool,
+                missing_capture_policy,
+                "mold",
+                SOURCE_SHA,
+                excluded_accelerations,
+            ),
+            "lacks structured acceleration evidence",
+        )
+        for excluded_acceleration in sorted(excluded_accelerations):
+            missing_exclusion = copy.deepcopy(valid_capture_bundle)
+            missing_exclusion["capture_environment"]["acceleration_policy"][
+                "disabled"
+            ].remove(excluded_acceleration)
+            expect_failure(
+                lambda missing_exclusion=missing_exclusion: (
+                    runner.validate_capture_environment(
+                        tool,
+                        missing_exclusion,
+                        "mold",
+                        SOURCE_SHA,
+                        excluded_accelerations,
+                    )
+                ),
+                "does not disable every manifest-excluded acceleration",
+            )
+
+            enabled_exclusion = copy.deepcopy(valid_capture_bundle)
+            enabled_exclusion["capture_environment"]["acceleration_policy"][
+                "enabled"
+            ].append(excluded_acceleration)
+            expect_failure(
+                lambda enabled_exclusion=enabled_exclusion: (
+                    runner.validate_capture_environment(
+                        tool,
+                        enabled_exclusion,
+                        "mold",
+                        SOURCE_SHA,
+                        excluded_accelerations,
+                    )
+                ),
+                "enables a manifest-excluded acceleration",
+            )
+
+        duplicate_exclusion = copy.deepcopy(valid_capture_bundle)
+        duplicate_exclusion["capture_environment"]["acceleration_policy"][
+            "disabled"
+        ].append(sorted(excluded_accelerations)[0])
+        expect_failure(
+            lambda: runner.validate_capture_environment(
+                tool,
+                duplicate_exclusion,
+                "mold",
+                SOURCE_SHA,
+                excluded_accelerations,
+            ),
+            "structured acceleration evidence is not canonical",
+        )
+
+        uppercase_exclusion = copy.deepcopy(valid_capture_bundle)
+        uppercase_exclusion["capture_environment"]["acceleration_policy"]["disabled"][
+            0
+        ] = uppercase_exclusion["capture_environment"]["acceleration_policy"][
+            "disabled"
+        ][0].upper()
+        expect_failure(
+            lambda: runner.validate_capture_environment(
+                tool,
+                uppercase_exclusion,
+                "mold",
+                SOURCE_SHA,
+                excluded_accelerations,
+            ),
+            "structured acceleration evidence is not canonical",
+        )
+
+        excluded_backend = sorted(excluded_accelerations)[0]
+        capture_backend = json.loads(mold_bundle.read_text(encoding="utf-8"))
+        capture_backend["capture_environment"]["attention_backend"] = excluded_backend
+        write_json(mold_bundle, capture_backend)
+        expect_failure(
+            lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
+            "manifest-excluded acceleration",
+        )
+
+        for excluded_alias in ("float8-e4m3fn", "euler-ancestral"):
+            environment, _, mold_bundle = reset_campaign()
+            capture_alias = json.loads(mold_bundle.read_text(encoding="utf-8"))
+            capture_alias["capture_environment"]["acceleration_policy"][
+                "enabled"
+            ].append(excluded_alias)
+            write_json(mold_bundle, capture_alias)
+            expect_failure(
+                lambda: runner.run_campaign(
+                    environment, lambda: None, lambda: SOURCE_SHA
+                ),
+                "enables a manifest-excluded acceleration",
+            )
+
+        environment, _, mold_bundle = reset_campaign()
+
+        def drift_layer_acceleration_summary(document: dict[str, object]) -> None:
+            document["environment"]["acceleration_policy"]["enabled"].append(
+                "dense-math"
+            )
+
+        mutate_evidence(
+            fixture_root,
+            mold_bundle,
+            drift_layer_acceleration_summary,
+            fixture_layer="qwen-layer-50",
+        )
+        expect_failure(
+            lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
+            "layer acceleration policy differs from its bundle",
+        )
+
+        environment, _, mold_bundle = reset_campaign()
         mutate_evidence(
             fixture_root,
             mold_bundle,
@@ -849,6 +1736,44 @@ def test_runner_contract(runner, tool, temporary: pathlib.Path) -> None:
         expect_failure(
             lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
             "layer environment dtype",
+        )
+
+        environment, _, mold_bundle = reset_campaign()
+
+        def use_excluded_backend(document: dict[str, object]) -> None:
+            document["environment"]["attention_backend"] = excluded_backend
+            record_by_key(document["provenance"], "attention-backend")["value"] = (
+                excluded_backend
+            )
+
+        mutate_evidence(
+            fixture_root,
+            mold_bundle,
+            use_excluded_backend,
+            fixture_layer="transformer-block",
+        )
+        expect_failure(
+            lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
+            "manifest-excluded acceleration",
+        )
+
+        environment, _, mold_bundle = reset_campaign()
+
+        def use_excluded_backend_alias(document: dict[str, object]) -> None:
+            document["environment"]["attention_backend"] = "sage-attn"
+            record_by_key(document["provenance"], "attention-backend")["value"] = (
+                "sage-attn"
+            )
+
+        mutate_evidence(
+            fixture_root,
+            mold_bundle,
+            use_excluded_backend_alias,
+            fixture_layer="transformer-block",
+        )
+        expect_failure(
+            lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
+            "manifest-excluded acceleration",
         )
 
         environment, _, mold_bundle = reset_campaign()
@@ -862,6 +1787,60 @@ def test_runner_contract(runner, tool, temporary: pathlib.Path) -> None:
             lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
             "dtype must be",
         )
+
+        for output_key, location, invalid_value, expected_error in (
+            (
+                "sampled-values",
+                "sample",
+                10**100,
+                "must be exact bfloat16",
+            ),
+            (
+                "statistics",
+                "sample",
+                10**400,
+                "must be finite float64",
+            ),
+            (
+                "statistics",
+                "sample",
+                2**80 + 1,
+                "must be finite float64",
+            ),
+            (
+                "sampled-values",
+                "mean",
+                10**400,
+                "summary is outside the finite float64 domain",
+            ),
+        ):
+            environment, _, mold_bundle = reset_campaign()
+
+            def violate_numeric_domain(
+                document: dict[str, object],
+                output_key: str = output_key,
+                location: str = location,
+                invalid_value: int = invalid_value,
+            ) -> None:
+                output = record_by_key(document["outputs"], output_key)
+                if location == "sample":
+                    output["samples"][0]["value"] = invalid_value
+                else:
+                    output["statistics"][location] = invalid_value
+                    output["statistics"]["max"] = invalid_value
+
+            mutate_evidence(
+                fixture_root,
+                mold_bundle,
+                violate_numeric_domain,
+                fixture_layer="qwen-layer-50",
+            )
+            expect_failure(
+                lambda: runner.run_campaign(
+                    environment, lambda: None, lambda: SOURCE_SHA
+                ),
+                expected_error,
+            )
 
         environment, _, mold_bundle = reset_campaign()
         mutate_evidence(
@@ -910,6 +1889,164 @@ def test_runner_contract(runner, tool, temporary: pathlib.Path) -> None:
         expect_failure(
             lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
             "policy",
+        )
+
+        environment, oracle_bundle, _ = reset_campaign()
+
+        def overflow_floating_policy(document: dict[str, object]) -> None:
+            record_by_key(document["comparison"], "sampled-values")["absolute"] = (
+                10**400
+            )
+
+        mutate_evidence(
+            fixture_root,
+            oracle_bundle,
+            overflow_floating_policy,
+            fixture_layer="qwen-layer-50",
+        )
+        expect_failure(
+            lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
+            "bounded protected policy",
+        )
+
+        environment, _, mold_bundle = reset_campaign()
+
+        def change_floating_content_hash(document: dict[str, object]) -> None:
+            record_by_key(document["outputs"], "sampled-values")["content_sha256"] = (
+                "f" * 64
+            )
+
+        mutate_evidence(
+            fixture_root,
+            mold_bundle,
+            change_floating_content_hash,
+            fixture_layer="qwen-layer-50",
+        )
+        expect_failure(
+            lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
+            "content hashes differ",
+        )
+
+        environment, _, mold_bundle = reset_campaign()
+
+        def change_seed(document: dict[str, object]) -> None:
+            record_by_key(document["provenance"], "seed")["value"] = "43"
+
+        mutate_evidence(
+            fixture_root,
+            mold_bundle,
+            change_seed,
+            fixture_layer="noise-allocation",
+        )
+        expect_failure(
+            lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
+            "provenance 'seed' differs",
+        )
+
+        for provenance_key in ("tokenizer-hash", "processor-hash"):
+            environment, oracle_bundle, mold_bundle = reset_campaign()
+
+            def forge_pinned_provenance(
+                document: dict[str, object], provenance_key: str = provenance_key
+            ) -> None:
+                record_by_key(document["provenance"], provenance_key)["value"] = (
+                    "f" * 64
+                )
+
+            mutate_evidence(
+                fixture_root,
+                oracle_bundle,
+                forge_pinned_provenance,
+                fixture_layer="tokenizer-processor",
+            )
+            mutate_evidence(
+                fixture_root,
+                mold_bundle,
+                forge_pinned_provenance,
+                fixture_layer="tokenizer-processor",
+            )
+            expect_failure(
+                lambda: runner.run_campaign(
+                    environment, lambda: None, lambda: SOURCE_SHA
+                ),
+                f"provenance {provenance_key!r} is not authority-pinned",
+            )
+
+        environment, _, mold_bundle = reset_campaign()
+
+        def change_e2e_seed_without_hash(document: dict[str, object]) -> None:
+            document["input"]["conformance"]["seed"] = 43
+
+        mutate_evidence(
+            fixture_root,
+            mold_bundle,
+            change_e2e_seed_without_hash,
+            fixture_layer="end-to-end-t2va",
+        )
+        expect_failure(
+            lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
+            "input hash does not match canonical evidence",
+        )
+
+        environment, _, mold_bundle = reset_campaign()
+
+        def change_e2e_seed_and_hash(document: dict[str, object]) -> None:
+            document["input"]["conformance"]["seed"] = 43
+            rehash_e2e_input(document)
+
+        mutate_evidence(
+            fixture_root,
+            mold_bundle,
+            change_e2e_seed_and_hash,
+            fixture_layer="end-to-end-t2va",
+        )
+        expect_failure(
+            lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
+            "input hashes differ",
+        )
+
+        environment, _, mold_bundle = reset_campaign()
+        manifest = tool.validate_manifest()
+        component_authorities = {
+            component["id"]: component["sha256"]
+            for component in manifest["component_indexes"]
+        }
+        required_qwen_components = next(
+            layer["required_component_indexes"]
+            for layer in manifest["fixture_layers"]
+            if layer["id"] == "qwen-layer-50"
+        )
+        unrelated_component_id = next(
+            identifier
+            for identifier in component_authorities
+            if identifier not in required_qwen_components
+        )
+        unrelated_component = {
+            "id": unrelated_component_id,
+            "sha256": component_authorities[unrelated_component_id],
+        }
+
+        def use_unrelated_component(document: dict[str, object]) -> None:
+            document["input"]["component_indexes"] = [unrelated_component]
+            document["input"]["component_index_sha256"] = unrelated_component["sha256"]
+            record_by_key(document["provenance"], "component-index-hash")["value"] = (
+                unrelated_component["sha256"]
+            )
+
+        def bundle_unrelated_component(fixture: dict[str, object]) -> None:
+            fixture["component_indexes"] = [unrelated_component]
+            fixture["component_index_sha256"] = unrelated_component["sha256"]
+
+        mutate_evidence(
+            fixture_root,
+            mold_bundle,
+            use_unrelated_component,
+            bundle_unrelated_component,
+            fixture_layer="qwen-layer-50",
+        )
+        expect_failure(
+            lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
+            "component authorities differ from the manifest",
         )
 
         environment, _, mold_bundle = reset_campaign()
@@ -1013,6 +2150,10 @@ def test_workflow_contract() -> None:
         normalized_docs
     )
     assert "Discrete tokenizer, shape, layout" in normalized_docs
+    assert "structured capture attestation" in normalized_docs
+    assert "mold.minimax-h3.component-authority-set.v1" in normalized_docs
+    assert "mold.minimax-h3.e2e-input.v1" in normalized_docs
+    assert "No fixed prompt, media set, seed, dimensions" in normalized_docs
     assert REVIEWED_AUTHORIZATION_EVIDENCE_SHA256 in qualification_docs
 
     ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

@@ -11,12 +11,15 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import pathlib
 import re
+import struct
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
+from fractions import Fraction
 from typing import Any
 
 
@@ -34,8 +37,34 @@ EXACT_AUTHORITY_TIER = "exact-full-bf16"
 CANONICAL_BF16_DTYPE = "bfloat16"
 CANONICAL_INTEGER_DTYPE = "int64"
 CANONICAL_METRIC_DTYPE = "float64"
+CANONICAL_TENSOR_HASH_ENCODING = "canonical-typed-le-v1"
+CANONICAL_E2E_INPUT_SCHEMA = "mold.minimax-h3.e2e-input.v1"
+CANONICAL_E2E_INPUT_KIND = "canonical-e2e-json-sha256-v1"
+IDENTITY_INPUT_KIND = "identity-sha256-v1"
+COMPONENT_AUTHORITY_SET_SCHEMA = "mold.minimax-h3.component-authority-set.v1"
 MAX_EXACT_ABSOLUTE_TOLERANCE = 1.0 / 64.0
 MAX_EXACT_RELATIVE_TOLERANCE = 1.0 / 64.0
+SIGNED_INT64_MIN = -(2**63)
+SIGNED_INT64_MAX = 2**63 - 1
+UNSIGNED_INT64_MAX = 2**64 - 1
+E2E_LAYER_TASKS = {
+    "end-to-end-t2va": "t2va",
+    "end-to-end-fl2va": "fl2va",
+    "end-to-end-ref2va": "ref2va",
+}
+EXPECTED_EXCLUDED_ACCELERATION_ALIASES = {
+    "torch-compile": frozenset({"torch-compile", "torch-inductor", "inductor"}),
+    "fp8": frozenset({"fp8", "float8", "e4m3", "e4m3fn", "e5m2"}),
+    "cache-dit": frozenset({"cache-dit"}),
+    "sageattention": frozenset({"sageattention", "sage-attn"}),
+    "stochastic-sampling": frozenset(
+        {"stochastic-sampling", "stochastic", "ancestral"}
+    ),
+    "approximate-attention": frozenset(
+        {"approximate-attention", "approximate", "approx-attn", "approx"}
+    ),
+    "tf32": frozenset({"tf32", "tensorfloat32"}),
+}
 MEASUREMENT_DTYPES = {
     "tokenizer-processor": {
         "token-ids": CANONICAL_INTEGER_DTYPE,
@@ -114,8 +143,6 @@ MEASUREMENT_DTYPES = {
 PROVENANCE_HASH_KEYS = {
     "tokenizer-hash",
     "processor-hash",
-    "component-index-hash",
-    "component-index-hashes",
 }
 CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 REVIEWED_AUTHORIZATION_EVIDENCE_SHA256 = (
@@ -227,10 +254,69 @@ def is_cuda_environment(value: Any) -> bool:
     return isinstance(value, str) and value.lower().startswith("cuda:")
 
 
+def normalized_acceleration(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def names_excluded_acceleration(
+    value: str, excluded_accelerations: frozenset[str]
+) -> bool:
+    normalized = normalized_acceleration(value)
+    return any(
+        normalized_acceleration(alias) in normalized
+        for identifier in excluded_accelerations
+        for alias in EXPECTED_EXCLUDED_ACCELERATION_ALIASES.get(
+            identifier, frozenset({identifier})
+        )
+        if normalized_acceleration(alias)
+    )
+
+
+def reject_excluded_attention_backend(
+    value: Any, excluded_accelerations: frozenset[str], context: str
+) -> None:
+    if not isinstance(value, str):
+        fail(f"{context} attention backend is invalid")
+    if names_excluded_acceleration(value, excluded_accelerations):
+        fail(f"{context} uses a manifest-excluded acceleration")
+
+
+def validate_acceleration_policy(
+    environment: dict[str, Any],
+    excluded_accelerations: frozenset[str],
+    context: str,
+) -> None:
+    policy = environment.get("acceleration_policy")
+    if not isinstance(policy, dict):
+        fail(f"{context} lacks structured acceleration evidence")
+    enabled = policy.get("enabled")
+    disabled = policy.get("disabled")
+    if not isinstance(enabled, list) or not isinstance(disabled, list):
+        fail(f"{context} structured acceleration evidence is invalid")
+    if (
+        any(
+            not isinstance(value, str) or not value or value != value.strip().lower()
+            for value in [*enabled, *disabled]
+        )
+        or len(enabled) != len(set(enabled))
+        or len(disabled) != len(set(disabled))
+    ):
+        fail(f"{context} structured acceleration evidence is not canonical")
+    if frozenset(disabled) != excluded_accelerations:
+        fail(f"{context} does not disable every manifest-excluded acceleration")
+    if any(
+        names_excluded_acceleration(value, excluded_accelerations) for value in enabled
+    ):
+        fail(f"{context} enables a manifest-excluded acceleration")
+    reject_excluded_attention_backend(
+        environment.get("attention_backend"), excluded_accelerations, context
+    )
+
+
 def call_redacted(tool: Any, context: str, action: Callable[[], Any]) -> Any:
     try:
         return action()
-    except (tool.ConformanceFailure, OSError, ValueError):
+    except (tool.ConformanceFailure, OSError, OverflowError, ValueError):
         fail(f"{context} failed; inspect evidence only on the protected runner")
 
 
@@ -252,7 +338,64 @@ def manifest_layer_tiers(manifest: dict[str, Any]) -> dict[str, str]:
     return tiers
 
 
+def manifest_component_authorities(manifest: dict[str, Any]) -> dict[str, str]:
+    authorities = {
+        component["id"]: component["sha256"]
+        for component in manifest["component_indexes"]
+    }
+    if len(authorities) != len(manifest["component_indexes"]):
+        fail("checked manifest contains duplicate component authority identities")
+    return authorities
+
+
+def manifest_excluded_accelerations(manifest: dict[str, Any]) -> frozenset[str]:
+    values = manifest["numerical_authority"]["excluded_accelerations"]
+    excluded = frozenset(value.lower() for value in values)
+    raw_aliases = manifest["numerical_authority"]["excluded_acceleration_aliases"]
+    aliases = {
+        identifier: frozenset(values) for identifier, values in raw_aliases.items()
+    }
+    if (
+        len(excluded) != len(values)
+        or set(raw_aliases) != excluded
+        or any(len(values) != len(set(values)) for values in raw_aliases.values())
+        or aliases != EXPECTED_EXCLUDED_ACCELERATION_ALIASES
+    ):
+        fail("checked manifest contains invalid acceleration exclusions")
+    return excluded
+
+
+def canonical_json_sha256(value: Any) -> str:
+    try:
+        encoded = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        fail("canonical JSON evidence is invalid")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def component_authority_set_sha256(
+    component_ids: list[str], component_authorities: dict[str, str]
+) -> str:
+    return canonical_json_sha256(
+        {
+            "schema_version": COMPONENT_AUTHORITY_SET_SCHEMA,
+            "components": [
+                {"id": identifier, "sha256": component_authorities[identifier]}
+                for identifier in sorted(component_ids)
+            ],
+        }
+    )
+
+
 def exact_layer_contracts(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    component_authorities = manifest_component_authorities(manifest)
+    excluded_accelerations = manifest_excluded_accelerations(manifest)
     contracts: dict[str, dict[str, Any]] = {}
     for layer in manifest["fixture_layers"]:
         if layer["authority_tier"] != EXACT_AUTHORITY_TIER:
@@ -260,7 +403,71 @@ def exact_layer_contracts(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]
         identifier = layer["id"]
         if identifier in contracts:
             fail("checked manifest contains duplicate exact layer identities")
-        contracts[identifier] = layer
+        required_components = layer["required_component_indexes"]
+        if len(required_components) != len(set(required_components)) or not set(
+            required_components
+        ).issubset(component_authorities):
+            fail(f"checked manifest layer {identifier} has invalid component authority")
+        role_invariants = layer["role_invariant_provenance"]
+        if len(role_invariants) != len(set(role_invariants)) or not set(
+            role_invariants
+        ).issubset(layer["required_provenance"]):
+            fail(f"checked manifest layer {identifier} has invalid provenance parity")
+        pinned_provenance = layer["pinned_provenance"]
+        pinned_keys = [record["key"] for record in pinned_provenance]
+        if (
+            len(pinned_keys) != len(set(pinned_keys))
+            or not set(pinned_keys).issubset(layer["required_provenance"])
+            or not set(pinned_keys).issubset(role_invariants)
+            or any(
+                len(record["component_indexes"])
+                != len(set(record["component_indexes"]))
+                or not set(record["component_indexes"]).issubset(required_components)
+                for record in pinned_provenance
+            )
+        ):
+            fail(f"checked manifest layer {identifier} has invalid pinned provenance")
+        expected_task = E2E_LAYER_TASKS.get(identifier)
+        input_contract = layer["input_contract"]
+        if expected_task is None:
+            if input_contract != {"kind": IDENTITY_INPUT_KIND}:
+                fail(f"checked manifest layer {identifier} has invalid input authority")
+        elif input_contract != {
+            "kind": CANONICAL_E2E_INPUT_KIND,
+            "task": expected_task,
+            "algorithm": "minimax-h3-flow-euler-v1",
+            "guidance": "0",
+            "video_shift": "12",
+            "audio_shift": "3",
+            "dimension_multiple": 32,
+            "frame_step": 17,
+            "frame_offset": 5,
+            "min_frames": 124,
+            "max_frames": 362,
+            "max_pixels": 1_069_056,
+            "min_aspect_ratio": "0.25",
+            "max_aspect_ratio": "4",
+            "fps": 24,
+            "video_scheduler_component": "official-video-scheduler-config",
+            "audio_scheduler_component": "official-audio-scheduler-config",
+        } or not {
+            input_contract["video_scheduler_component"],
+            input_contract["audio_scheduler_component"],
+        }.issubset(required_components):
+            fail(f"checked manifest layer {identifier} has invalid input authority")
+        contract = dict(layer)
+        contract["_required_component_authorities"] = [
+            {"id": component_id, "sha256": component_authorities[component_id]}
+            for component_id in required_components
+        ]
+        contract["_pinned_provenance_values"] = {
+            record["key"]: component_authority_set_sha256(
+                record["component_indexes"], component_authorities
+            )
+            for record in pinned_provenance
+        }
+        contract["_excluded_accelerations"] = excluded_accelerations
+        contracts[identifier] = contract
 
     if set(contracts) != set(MEASUREMENT_DTYPES):
         fail("protected measurement policy does not cover the exact manifest layers")
@@ -306,12 +513,14 @@ def validate_capture_environment(
     bundle: dict[str, Any],
     role: str,
     source_sha: str,
+    excluded_accelerations: frozenset[str],
 ) -> None:
     capture = bundle["capture_environment"]
     if not is_cuda_environment(capture["device"]):
         fail(f"{role} bundle does not declare a CUDA capture environment")
     if capture["dtype"] != CANONICAL_BF16_DTYPE:
         fail(f"{role} bundle capture environment dtype must be {CANONICAL_BF16_DTYPE}")
+    validate_acceleration_policy(capture, excluded_accelerations, f"{role} bundle")
     if role == "oracle":
         expected_framework = "diffusers"
         expected_revision = tool.EXPECTED_REVISIONS["diffusers"]
@@ -361,11 +570,40 @@ def keyed_evidence_records(
     return keyed
 
 
+def keyed_component_records(records: Any, label: str) -> dict[str, str]:
+    if not isinstance(records, list) or not records:
+        fail(f"{label} must be a non-empty component authority list")
+    keyed: dict[str, str] = {}
+    for record in records:
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("id"), str)
+            or not isinstance(record.get("sha256"), str)
+        ):
+            fail(f"{label} contains an invalid component authority")
+        identifier = record["id"]
+        if identifier in keyed:
+            fail(f"{label} contains duplicate component id {identifier!r}")
+        keyed[identifier] = record["sha256"]
+    return keyed
+
+
 def structured_provenance_value(document: dict[str, Any], key: str) -> str | None:
     if key == "source-revision":
         return document["producer"]["revision"]
-    if key in {"component-index-hash", "component-index-hashes"}:
-        return document["input"]["component_index_sha256"]
+    if key == "component-index-hash":
+        components = document["input"]["component_indexes"]
+        if len(components) != 1:
+            fail("singular component provenance requires one component authority")
+        return components[0]["sha256"]
+    if key == "component-index-hashes":
+        components = sorted(
+            document["input"]["component_indexes"],
+            key=lambda component: component["id"],
+        )
+        return ",".join(
+            f"{component['id']}={component['sha256']}" for component in components
+        )
     if key in {"device", "generator-device"}:
         return document["environment"]["device"]
     if key == "dtype":
@@ -381,14 +619,194 @@ def is_json_integer(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def is_signed_int64(value: Any) -> bool:
+    return is_json_integer(value) and SIGNED_INT64_MIN <= value <= SIGNED_INT64_MAX
+
+
+def is_unsigned_int64(value: Any) -> bool:
+    return is_json_integer(value) and 0 <= value <= UNSIGNED_INT64_MAX
+
+
+def is_finite_float64(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        converted = float(value)
+    except (OverflowError, ValueError):
+        return False
+    return math.isfinite(converted) and (
+        not is_json_integer(value) or int(converted) == value
+    )
+
+
+def is_exact_bfloat16(value: Any) -> bool:
+    if not is_finite_float64(value):
+        return False
+    converted = float(value)
+    try:
+        float32_bits = struct.unpack(">I", struct.pack(">f", converted))[0]
+    except (OverflowError, struct.error):
+        return False
+    rounding_bias = 0x7FFF + ((float32_bits >> 16) & 1)
+    bfloat16_bits = (float32_bits + rounding_bias) >> 16
+    if bfloat16_bits & 0x7F80 == 0x7F80:
+        return False
+    reconstructed = struct.unpack(">f", struct.pack(">I", bfloat16_bits << 16))[0]
+    return reconstructed == converted
+
+
+def validate_output_numeric_domain(
+    output: dict[str, Any], expected_dtype: str, context: str
+) -> None:
+    statistics = output["statistics"]
+    samples = output["samples"]
+    if not all(is_finite_float64(statistics[key]) for key in ("mean", "std")):
+        fail(f"{context} summary is outside the finite float64 domain")
+    if expected_dtype == CANONICAL_INTEGER_DTYPE:
+        if (
+            not is_signed_int64(statistics["min"])
+            or not is_signed_int64(statistics["max"])
+            or any(not is_signed_int64(sample["value"]) for sample in samples)
+        ):
+            fail(f"{context} integer min/max and samples must be signed int64")
+        return
+    if expected_dtype == CANONICAL_BF16_DTYPE:
+        if (
+            not is_exact_bfloat16(statistics["min"])
+            or not is_exact_bfloat16(statistics["max"])
+            or any(not is_exact_bfloat16(sample["value"]) for sample in samples)
+        ):
+            fail(f"{context} activation min/max and samples must be exact bfloat16")
+        return
+    if expected_dtype == CANONICAL_METRIC_DTYPE and (
+        not is_finite_float64(statistics["min"])
+        or not is_finite_float64(statistics["max"])
+        or any(not is_finite_float64(sample["value"]) for sample in samples)
+    ):
+        fail(f"{context} metric min/max and samples must be finite float64")
+
+
+def validate_e2e_input_contract(
+    document: dict[str, Any], manifest_layer: dict[str, Any], role: str
+) -> None:
+    layer = manifest_layer["id"]
+    input_contract = manifest_layer["input_contract"]
+    conformance = document["input"].get("conformance")
+    if input_contract["kind"] == IDENTITY_INPUT_KIND:
+        if conformance is not None:
+            fail(f"{role} layer {layer} has unexpected end-to-end input evidence")
+        return
+    if input_contract["kind"] != CANONICAL_E2E_INPUT_KIND:
+        fail(f"protected manifest layer {layer} has an unsupported input contract")
+    if not isinstance(conformance, dict):
+        fail(f"{role} layer {layer} lacks canonical end-to-end input evidence")
+    if (
+        conformance.get("schema_version") != CANONICAL_E2E_INPUT_SCHEMA
+        or conformance.get("task") != input_contract["task"]
+    ):
+        fail(f"{role} layer {layer} end-to-end input task is invalid")
+    if not is_unsigned_int64(conformance.get("seed")):
+        fail(f"{role} layer {layer} end-to-end input seed must be unsigned int64")
+    for key in ("width", "height", "frames", "fps"):
+        if not is_signed_int64(conformance.get(key)) or conformance[key] <= 0:
+            fail(
+                f"{role} layer {layer} end-to-end input {key} "
+                "must be a positive signed int64"
+            )
+    width = conformance["width"]
+    height = conformance["height"]
+    frames = conformance["frames"]
+    aspect_ratio = Fraction(width, height)
+    if (
+        width % input_contract["dimension_multiple"] != 0
+        or height % input_contract["dimension_multiple"] != 0
+        or width * height > input_contract["max_pixels"]
+        or aspect_ratio < Fraction(input_contract["min_aspect_ratio"])
+        or aspect_ratio > Fraction(input_contract["max_aspect_ratio"])
+    ):
+        fail(f"{role} layer {layer} end-to-end dimensions violate the H3 contract")
+    if (
+        frames < input_contract["min_frames"]
+        or frames > input_contract["max_frames"]
+        or (frames - input_contract["frame_offset"]) % input_contract["frame_step"] != 0
+        or conformance["fps"] != input_contract["fps"]
+    ):
+        fail(f"{role} layer {layer} end-to-end frame contract is invalid")
+    video_sampler = conformance["video_sampler"]
+    audio_sampler = conformance["audio_sampler"]
+    if (
+        not is_signed_int64(video_sampler.get("steps"))
+        or video_sampler["steps"] < 2
+        or audio_sampler.get("steps") != video_sampler["steps"]
+        or video_sampler.get("algorithm") != input_contract["algorithm"]
+        or audio_sampler.get("algorithm") != input_contract["algorithm"]
+        or video_sampler.get("guidance") != input_contract["guidance"]
+        or audio_sampler.get("guidance") != input_contract["guidance"]
+        or video_sampler.get("shift") != input_contract["video_shift"]
+        or audio_sampler.get("shift") != input_contract["audio_shift"]
+    ):
+        fail(f"{role} layer {layer} end-to-end sampler contract is invalid")
+    if conformance["negative_prompt_sha256"] != hashlib.sha256(b"").hexdigest():
+        fail(f"{role} layer {layer} end-to-end negative prompt must be absent")
+    conditioning_roles = [item["role"] for item in conformance["conditioning"]]
+    task = conformance["task"]
+    if task == "t2va" and conditioning_roles:
+        fail(f"{role} layer {layer} T2VA input must not carry conditioning media")
+    if task == "fl2va" and conditioning_roles not in (
+        ["first-frame"],
+        ["last-frame"],
+        ["first-frame", "last-frame"],
+    ):
+        fail(f"{role} layer {layer} FL2VA conditioning order is invalid")
+    if task == "ref2va" and (
+        not conditioning_roles
+        or any(not value.startswith("reference-") for value in conditioning_roles)
+    ):
+        fail(f"{role} layer {layer} Ref2VA conditioning order is invalid")
+    if document["input"]["sha256"] != canonical_json_sha256(conformance):
+        fail(f"{role} layer {layer} input hash does not match canonical evidence")
+
+
 def validate_manifest_layer_evidence(
     document: dict[str, Any],
     manifest_layer: dict[str, Any],
     role: str,
+    excluded_accelerations: frozenset[str] | None = None,
 ) -> None:
     layer = manifest_layer["id"]
+    if excluded_accelerations is None:
+        protected_exclusions = manifest_layer.get("_excluded_accelerations")
+        if not isinstance(protected_exclusions, frozenset):
+            fail(f"protected manifest layer {layer} lacks acceleration authority")
+        excluded_accelerations = protected_exclusions
     if document.get("layer") != layer:
         fail(f"{role} evidence does not match manifest layer {layer}")
+    if document["adapter"]["tensor_hash_encoding"] != CANONICAL_TENSOR_HASH_ENCODING:
+        fail(f"{role} layer {layer} tensor hash encoding is not canonical")
+
+    required_components = manifest_layer.get("_required_component_authorities")
+    if not isinstance(required_components, list) or not required_components:
+        fail(f"protected manifest layer {layer} lacks component authority")
+    actual_components = document.get("input", {}).get("component_indexes")
+    expected_component_map = {
+        component["id"]: component["sha256"] for component in required_components
+    }
+    actual_component_map = keyed_component_records(
+        actual_components, f"{role} layer {layer} component authorities"
+    )
+    if actual_component_map != expected_component_map:
+        fail(f"{role} layer {layer} component authorities differ from the manifest")
+    if document["input"]["component_index_sha256"] != required_components[0]["sha256"]:
+        fail(
+            f"{role} layer {layer} component authority summary differs from the manifest"
+        )
+
+    validate_acceleration_policy(
+        document["environment"],
+        excluded_accelerations,
+        f"{role} layer {layer}",
+    )
+    validate_e2e_input_contract(document, manifest_layer, role)
 
     provenance = keyed_evidence_records(
         document.get("provenance"), f"{role} layer {layer} provenance"
@@ -412,6 +830,9 @@ def validate_manifest_layer_evidence(
             fail(f"{role} layer {layer} provenance {key!r} is not canonical")
         if key == "seed" and re.fullmatch(r"0|[1-9][0-9]*", value) is None:
             fail(f"{role} layer {layer} provenance {key!r} is not canonical")
+        pinned_value = manifest_layer["_pinned_provenance_values"].get(key)
+        if pinned_value is not None and value != pinned_value:
+            fail(f"{role} layer {layer} provenance {key!r} is not authority-pinned")
         structured = structured_provenance_value(document, key)
         if structured is not None and value != structured:
             fail(
@@ -447,18 +868,11 @@ def validate_manifest_layer_evidence(
         expected_dtype = expected_dtypes[key]
         if output.get("dtype") != expected_dtype:
             fail(f"{role} layer {layer} output {key!r} dtype must be {expected_dtype}")
-        if expected_dtype == CANONICAL_INTEGER_DTYPE:
-            statistics = output.get("statistics", {})
-            samples = output.get("samples", [])
-            if (
-                not is_json_integer(statistics.get("min"))
-                or not is_json_integer(statistics.get("max"))
-                or any(not is_json_integer(sample.get("value")) for sample in samples)
-            ):
-                fail(
-                    f"{role} layer {layer} output {key!r} integer evidence "
-                    "must use integer min/max and samples"
-                )
+        validate_output_numeric_domain(
+            output,
+            expected_dtype,
+            f"{role} layer {layer} output {key!r}",
+        )
         if role != "oracle":
             continue
         policy = policies[key]
@@ -475,13 +889,13 @@ def validate_manifest_layer_evidence(
                     "must use zero tolerances and exact hashes"
                 )
         elif (
-            not isinstance(policy.get("absolute"), (int, float))
-            or not isinstance(policy.get("relative"), (int, float))
+            not is_finite_float64(policy.get("absolute"))
+            or not is_finite_float64(policy.get("relative"))
             or policy["absolute"] > MAX_EXACT_ABSOLUTE_TOLERANCE
             or policy["relative"] > MAX_EXACT_RELATIVE_TOLERANCE
             or policy["absolute"] < 0
             or policy["relative"] < 0
-            or policy.get("hash_policy") != "record-only"
+            or policy.get("hash_policy") != "exact"
         ):
             fail(
                 f"oracle layer {layer} output {key!r} floating policy "
@@ -494,8 +908,11 @@ def validate_exact_outputs(
     fixture: dict[str, Any],
     manifest_layer: dict[str, Any],
     role: str,
+    excluded_accelerations: frozenset[str],
 ) -> None:
-    validate_manifest_layer_evidence(document, manifest_layer, role)
+    validate_manifest_layer_evidence(
+        document, manifest_layer, role, excluded_accelerations
+    )
 
     first_output = document["outputs"][0]
     if fixture["tensor"] != expected_tensor_summary(first_output):
@@ -518,6 +935,7 @@ def load_layer_documents(
     source_sha: str,
     layer_tiers: dict[str, str],
     layer_contracts: dict[str, dict[str, Any]],
+    excluded_accelerations: frozenset[str],
 ) -> dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]]:
     documents: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
     for position, fixture in enumerate(bundle["fixtures"], start=1):
@@ -576,6 +994,10 @@ def load_layer_documents(
             fail(f"{role} layer does not declare a CUDA execution environment")
         if document["environment"]["dtype"] != CANONICAL_BF16_DTYPE:
             fail(f"{role} layer environment dtype must be {CANONICAL_BF16_DTYPE}")
+        if document["environment"].get("acceleration_policy") != bundle[
+            "capture_environment"
+        ].get("acceleration_policy"):
+            fail(f"{role} layer acceleration policy differs from its bundle")
         if fixture["layer"] != document["layer"]:
             fail(f"{role} bundle layer does not match its evidence")
         if fixture["authority_tier"] != document["authority_tier"]:
@@ -588,7 +1010,18 @@ def load_layer_documents(
         manifest_layer = layer_contracts.get(document["layer"])
         if manifest_layer is None:
             fail(f"{role} layer lacks a protected manifest contract")
-        validate_exact_outputs(document, fixture, manifest_layer, role)
+        fixture_components = keyed_component_records(
+            fixture.get("component_indexes"), f"{role} bundle component authorities"
+        )
+        document_components = keyed_component_records(
+            document["input"].get("component_indexes"),
+            f"{role} layer component authorities",
+        )
+        if fixture_components != document_components:
+            fail(f"{role} bundle component authorities do not match its evidence")
+        validate_exact_outputs(
+            document, fixture, manifest_layer, role, excluded_accelerations
+        )
         key = (document["case_id"], document["layer"])
         if key in documents:
             fail(f"{role} bundle contains duplicate case/layer evidence")
@@ -619,6 +1052,7 @@ def validate_oracle_mold_policy_parity(
     oracle_fixture: dict[str, Any],
     mold_document: dict[str, Any],
     mold_fixture: dict[str, Any],
+    manifest_layer: dict[str, Any],
 ) -> None:
     oracle_outputs = keyed_evidence_records(
         oracle_document["outputs"], "oracle paired outputs"
@@ -631,6 +1065,19 @@ def validate_oracle_mold_policy_parity(
     for key in oracle_outputs:
         if oracle_outputs[key]["dtype"] != mold_outputs[key]["dtype"]:
             fail(f"oracle and Mold output {key!r} dtypes differ")
+        if oracle_outputs[key]["content_sha256"] != mold_outputs[key]["content_sha256"]:
+            fail(f"oracle and Mold output {key!r} content hashes differ")
+    oracle_provenance = keyed_evidence_records(
+        oracle_document["provenance"], "oracle paired provenance"
+    )
+    mold_provenance = keyed_evidence_records(
+        mold_document["provenance"], "Mold paired provenance"
+    )
+    if oracle_document["input"]["sha256"] != mold_document["input"]["sha256"]:
+        fail("oracle and Mold input hashes differ")
+    for key in manifest_layer["role_invariant_provenance"]:
+        if oracle_provenance[key]["value"] != mold_provenance[key]["value"]:
+            fail(f"oracle and Mold provenance {key!r} differs")
     if mold_fixture["tolerance"] != oracle_fixture["tolerance"]:
         fail("Mold bundle tolerance summary differs from oracle policy")
 
@@ -649,6 +1096,7 @@ def run_campaign(
     )
     layer_tiers = manifest_layer_tiers(manifest)
     layer_contracts = exact_layer_contracts(manifest)
+    excluded_accelerations = manifest_excluded_accelerations(manifest)
     fixture_root = call_redacted(
         tool,
         "external fixture root validation",
@@ -691,8 +1139,12 @@ def run_campaign(
         "Mold bundle",
     )
     source_sha = values["MOLD_H3_SOURCE_SHA"]
-    validate_capture_environment(tool, oracle_bundle, "oracle", source_sha)
-    validate_capture_environment(tool, mold_bundle, "mold", source_sha)
+    validate_capture_environment(
+        tool, oracle_bundle, "oracle", source_sha, excluded_accelerations
+    )
+    validate_capture_environment(
+        tool, mold_bundle, "mold", source_sha, excluded_accelerations
+    )
     oracle_documents = load_layer_documents(
         tool,
         fixture_root,
@@ -702,6 +1154,7 @@ def run_campaign(
         source_sha,
         layer_tiers,
         layer_contracts,
+        excluded_accelerations,
     )
     mold_documents = load_layer_documents(
         tool,
@@ -712,6 +1165,7 @@ def run_campaign(
         source_sha,
         layer_tiers,
         layer_contracts,
+        excluded_accelerations,
     )
     require_complete_exact_coverage(oracle_documents, layer_tiers, "oracle")
     require_complete_exact_coverage(mold_documents, layer_tiers, "mold")
@@ -730,6 +1184,7 @@ def run_campaign(
             oracle_fixture,
             mold_document,
             mold_fixture,
+            layer_contracts[key[1]],
         )
         comparison_notes = call_redacted(
             tool,
