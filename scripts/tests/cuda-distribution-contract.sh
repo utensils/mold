@@ -380,7 +380,8 @@ require_text "Dockerfile" \
 require_text "crates/mold-cli/Cargo.toml" 'nvml = ["mold-server/nvml"]'
 require_text "crates/mold-cli/Cargo.toml" '"nvml"'
 require_text "crates/mold-cli/Cargo.toml" 'flash-attn = ["mold-inference/flash-attn", "cuda"]'
-require_text "crates/mold-server/Cargo.toml" 'cuda = ["mold-inference/cuda", "nvml"]'
+require_text "crates/mold-server/Cargo.toml" \
+  'cuda = ["mold-inference/cuda", "nvml", "dep:cudarc"]'
 require_text "desktop/src-tauri/Cargo.toml" 'nvml = ["mold-server/nvml"]'
 require_text "desktop/src-tauri/Cargo.toml" '"nvml"'
 
