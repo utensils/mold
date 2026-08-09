@@ -1890,40 +1890,51 @@ async fn enforce_source_image_capability(
     request: &mold_core::GenerateRequest,
     resolved_family: Option<&str>,
 ) -> Result<(), ApiError> {
-    if resolved_family != Some("wan") {
-        return Ok(());
-    }
+    // The manifest contract binds every family that advertises one — plain
+    // LTX-Video declares Unsupported and its engine really does ignore an
+    // attached image. Only the checkpoint-header probe is wan-specific.
     let capability = match mold_core::manifest::find_manifest(&request.model)
         .and_then(|manifest| manifest.defaults.source_image)
     {
         Some(capability) => Some(capability),
-        None => {
+        None if resolved_family == Some("wan") => {
             let config = state.config.read().await;
             mold_core::ModelPaths::resolve(&request.model, &config).and_then(|paths| {
                 mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
             })
         }
+        None => None,
     };
     // First/last-frame keyframes carry the source frames too (#779): a
     // T2V-only checkpoint can no more render them than a lone source image,
     // and a required-source checkpoint is satisfied by them.
     let has_source =
         request.source_image.is_some() || request.keyframes.as_ref().is_some_and(|k| !k.is_empty());
+    let wan = resolved_family == Some("wan");
     match capability {
         Some(mold_core::SourceImageCapability::Unsupported) if has_source => {
-            Err(ApiError::validation(
+            Err(ApiError::validation(if wan {
                 "this Wan checkpoint is text-to-video only and does not accept a source image \
                  or keyframes — remove them, or pick an I2V-capable checkpoint such as \
                  wan22-ti2v-5b or wan22-i2v-a14b"
-                    .to_string(),
-            ))
+                    .to_string()
+            } else {
+                format!(
+                    "{} is text-to-video only and does not accept a source image — its engine \
+                     has no image-to-video path; remove the image, or pick an image-capable \
+                     checkpoint such as an LTX-2 model",
+                    request.model
+                )
+            }))
         }
         Some(mold_core::SourceImageCapability::Required) if !has_source => {
-            Err(ApiError::validation(
+            Err(ApiError::validation(if wan {
                 "this Wan I2V checkpoint needs a source image; supply one, or pick a \
                  text-to-video checkpoint such as wan22-t2v-a14b"
-                    .to_string(),
-            ))
+                    .to_string()
+            } else {
+                format!("{} needs a source image; supply one", request.model)
+            }))
         }
         _ => Ok(()),
     }

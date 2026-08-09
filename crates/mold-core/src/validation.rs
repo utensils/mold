@@ -1833,6 +1833,23 @@ fn validate_generate_request_after_activation(
     }
     if let Some(keyframes) = &req.keyframes {
         validate_keyframes(keyframes, req.frames, family)?;
+        // TI2V pins endpoints in latent space, where the 2.2 VAE's 4x
+        // temporal stride turns a 5-frame pixel clip into two latent frames —
+        // both anchored, nothing left to denoise. The engine refuses that
+        // degenerate grid after the 10 GB load; admission must agree first.
+        // 9 pixel frames (three latent frames) is the smallest 4k+1 clip with
+        // an interior. Opaque cv:/hf: installs keep the engine's own check.
+        if family == Some("wan")
+            && keyframes.len() == 2
+            && crate::manifest::resolve_model_name(&req.model).starts_with("wan22-ti2v-5b")
+            && req.frames.is_some_and(|frames| frames < 9)
+        {
+            return Err(
+                "wan22-ti2v-5b first/last-frame conditioning needs at least 9 frames — \
+                 shorter clips leave no latent frames to denoise between the pinned endpoints"
+                    .to_string(),
+            );
+        }
     }
     if let Some(audio) = &req.audio_file {
         require_ltx2_family(family, "audio_file")?;
@@ -4751,6 +4768,22 @@ mod tests {
         assert!(err.contains("multi-frame clip"), "got: {err}");
         req.frames = Some(33);
         req.keyframes = Some(vec![keyframe(0), keyframe(32)]);
+
+        // TI2V pins endpoints in latent space: a 5-frame pixel clip is two
+        // latent frames, both anchored — refused before the 10 GB load. The
+        // A14B channel-concat path has no such floor (checked above at 33).
+        let mut ti2v = valid_req();
+        ti2v.model = "wan22-ti2v-5b:fp16".to_string();
+        ti2v.output_format = Some(OutputFormat::Mp4);
+        ti2v.width = 1280;
+        ti2v.height = 704;
+        ti2v.frames = Some(5);
+        ti2v.keyframes = Some(vec![keyframe(0), keyframe(4)]);
+        let err = validate_generate_request(&ti2v).unwrap_err();
+        assert!(err.contains("at least 9 frames"), "got: {err}");
+        ti2v.frames = Some(9);
+        ti2v.keyframes = Some(vec![keyframe(0), keyframe(8)]);
+        assert!(validate_generate_request(&ti2v).is_ok());
 
         // The expansion task treats the pair as boundary anchors, exactly as
         // LTX-2 keyframes classify.

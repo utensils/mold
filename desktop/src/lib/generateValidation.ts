@@ -49,11 +49,11 @@ export function inlineGenerationMediaBytes(
     total += form.imageAttachments.reduce((sum, image) => sum + decodedBase64Bytes(image), 0);
   }
   if (exclude !== "endFrame" && form.endFrame) {
+    // A first/last-frame render ships each still exactly once: the pair
+    // travels as `keyframes` and `source_image` stays off the wire (the
+    // engine refuses both together), so the opening still is already counted
+    // by the `sourceImage` line above.
     total += decodedBase64Bytes(form.endFrame.base64);
-    // A first/last-frame render puts the opening still on the wire twice —
-    // as `source_image`, which admission reads, and as keyframe 0 — so the
-    // budget has to see it twice too.
-    if (exclude !== "sourceImage") total += decodedBase64Bytes(form.sourceImage);
   }
   if (exclude !== "sourceVideo") total += decodedBase64Bytes(form.sourceVideo?.base64);
   if (exclude !== "extendVideo") total += decodedBase64Bytes(form.extendVideo?.base64);
