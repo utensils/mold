@@ -2,6 +2,11 @@ import {
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
 } from "./minimaxH3Authoring";
+import {
+  resolveSourceImageCapability,
+  supportsFirstLastFrames,
+  type SourceImageCapability,
+} from "./sourceImageCapability";
 
 export { isMinimaxH3Family } from "./minimaxH3Authoring";
 
@@ -46,7 +51,25 @@ export interface BaseGenerationCapabilities {
   supportsLora: boolean;
   supportsControlNet: boolean;
   sourceImageMode: SourceImageMode;
+  /**
+   * The effective per-model source-image contract (#772): the model's own
+   * advertised mode when it has one, this family's heuristic otherwise.
+   */
+  sourceImageCapability: SourceImageCapability;
+  /** Whether the source-image well renders at all. */
+  supportsSourceImage: boolean;
+  /** Whether Generate stays gated until a source image is attached. */
+  requiresSourceImage: boolean;
+  /** Whether the optional wan End frame well renders (#779). */
+  supportsEndFrame: boolean;
   supportsMask: boolean;
+  /**
+   * Whether the engine reads `strength` for its source image. Wan pins the
+   * first frame exactly — its conditioning has no denoise-strength knob — so
+   * showing the slider (or serializing the field) would advertise a control
+   * the render ignores.
+   */
+  supportsStrength: boolean;
   forcesBatchSizeOne: boolean;
 }
 
@@ -170,6 +193,13 @@ const CONTROLNET_FAMILIES = new Set(["sd15", "sd1.5", "stable-diffusion-1.5"]);
  */
 const WAN_DISTILL_TIER = /a14b[:-]q[45]$/;
 
+/**
+ * Wan A14B tiers whose fp8-scaled loader refuses every LoRA stack (#777):
+ * an fp8 merge would dequantize each targeted weight, add the delta, and
+ * re-round it to three mantissa bits. The bf16 and GGUF tiers keep adapters.
+ */
+const WAN_FP8_TIER = /a14b[:-]fp8$/;
+
 export const MAX_LORA_STACK = 4;
 
 /**
@@ -196,11 +226,18 @@ export const LORA_CAPABLE_FAMILIES = [
   "z-image",
 ] as const;
 
+/**
+ * `advertisedSourceImage` is the selected model row's additive
+ * `source_image` field (#772). Pass it wherever the row is in scope; omitting
+ * it falls back to the family heuristic below, which is what an older server
+ * — one that enforces nothing at admission — expects.
+ */
 export function baseGenerationCapabilities(
   family: string,
   model = "",
   pipeline?: string | null,
   advertisedGuidance?: AdvertisedGuidanceCapabilities | null,
+  advertisedSourceImage?: string | null,
 ): BaseGenerationCapabilities {
   const normalized = family.trim().toLowerCase();
   const qwenEdit = isQwenImageEditFamily(normalized);
@@ -227,6 +264,20 @@ export function baseGenerationCapabilities(
   const inferredFixedGuidance =
     ltx &&
     (fixedLtxPipeline || (!pipeline && normalizedModel.includes("distilled")));
+  const supportsVideo = h3 || VIDEO_FAMILIES.has(normalized);
+  // The family heuristic behind the advertised contract: every image family
+  // reads a source image, and among the video families only the
+  // image-conditioned ones do. It can say a checkpoint *reads* a source
+  // image, never that it cannot render without one — requiredness comes from
+  // the server alone.
+  const familySourceImage: SourceImageCapability =
+    !supportsVideo || isImageConditionedVideoFamily(normalized) || h3
+      ? "optional"
+      : "unsupported";
+  const sourceImageCapability = resolveSourceImageCapability(
+    advertisedSourceImage,
+    familySourceImage,
+  );
   const advertisedDefault = !pipeline ? advertisedGuidance : null;
   const fixedGuidance = h3
     ? true
@@ -250,10 +301,15 @@ export function baseGenerationCapabilities(
       supportsDistillStrength: wan && WAN_DISTILL_TIER.test(normalizedModel),
     },
     supportsCfgPlus: CFG_PLUS_FAMILIES.has(normalized),
-    supportsVideo: h3 || VIDEO_FAMILIES.has(normalized),
+    supportsVideo,
     supportsAudio: h3 || AUDIO_FAMILIES.has(normalized),
     supportsLora:
       !flux2Dev &&
+      // The wan fp8-scaled tier deliberately refuses every adapter stack —
+      // merging into e4m3 would re-round the delta to three mantissa bits —
+      // so offering the control would advertise a load that always fails.
+      // Mirrors `WanTransformer::from_safetensors_with_loras`.
+      !(wan && WAN_FP8_TIER.test(normalizedModel)) &&
       (LORA_CAPABLE_FAMILIES as readonly string[]).includes(normalized),
     supportsControlNet: CONTROLNET_FAMILIES.has(normalized),
     sourceImageMode: h3Ref2va
@@ -265,7 +321,17 @@ export function baseGenerationCapabilities(
           : qwenEdit
             ? "qwen-edit"
             : "single",
-    supportsMask: !h3 && !qwenEdit && !flux2Dev,
+    sourceImageCapability,
+    supportsSourceImage: sourceImageCapability !== "unsupported",
+    requiresSourceImage: sourceImageCapability === "required",
+    supportsEndFrame: supportsFirstLastFrames(
+      normalized,
+      advertisedSourceImage,
+    ),
+    // Wan pins conditioning frames exactly: no repaint mask, no denoise
+    // strength — the engine rejects the former and never reads the latter.
+    supportsMask: !h3 && !qwenEdit && !flux2Dev && !wan,
+    supportsStrength: !h3 && !qwenEdit && !flux2Dev && !wan,
     forcesBatchSizeOne: h3 || qwenEdit,
   };
 }

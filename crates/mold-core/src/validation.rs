@@ -1148,14 +1148,58 @@ fn validate_keyframes(
 ) -> Result<(), String> {
     match family {
         Some("ltx2") => {}
+        // Wan accepts exactly the first/last endpoint pair (#779) — the
+        // family has no mid-clip keyframe path, so every other layout is
+        // named at admission rather than after the model loads.
+        Some("wan") => {
+            if keyframes.len() != 2 {
+                return Err(format!(
+                    "Wan supports exactly two keyframes — the first and last pixel frames — \
+                     got {}",
+                    keyframes.len()
+                ));
+            }
+            // Without an explicit clip length the closing anchor cannot be
+            // checked here, and the engine would resolve its own default and
+            // reject a mismatched endpoint only after the model loads —
+            // defeating admission-time validation.
+            let Some(frames) = frames else {
+                return Err(
+                    "Wan first/last-frame keyframes require an explicit frames count — the \
+                     closing keyframe must anchor the clip's final frame"
+                        .to_string(),
+                );
+            };
+            // A single-frame clip has coincident endpoints; the generic
+            // duplicate-frame check below would also refuse it, but with a
+            // message that doesn't say why. Name the real problem instead.
+            if frames < 2 {
+                return Err(
+                    "Wan first/last-frame keyframes need a multi-frame clip — frames=1 \
+                     renders a single still, which has no distinct last frame"
+                        .to_string(),
+                );
+            }
+            let last = frames.saturating_sub(1);
+            if keyframes[0].frame != 0 || keyframes[1].frame != last {
+                return Err(format!(
+                    "Wan first/last-frame keyframes must anchor frames 0 and {last} (the \
+                     clip's endpoints), got frames {} and {}",
+                    keyframes[0].frame, keyframes[1].frame
+                ));
+            }
+        }
         None => {
             return Err(
-                "unknown model family; keyframes are only supported for LTX-2 / LTX-2.3 models"
+                "unknown model family; keyframes are only supported for LTX-2 / LTX-2.3 and \
+                 Wan models"
                     .to_string(),
             );
         }
         _ => {
-            return Err("keyframes are only supported for LTX-2 / LTX-2.3 models".to_string());
+            return Err(
+                "keyframes are only supported for LTX-2 / LTX-2.3 and Wan models".to_string(),
+            );
         }
     }
     if keyframes.is_empty() {
@@ -1437,6 +1481,49 @@ pub fn require_generate_request_model_activation(
         )?;
     }
     Ok(())
+}
+
+/// The one wording for a source-image contract violation (#772), shared by
+/// server admission, the CLI preflight, and the Discord preflight so the
+/// rejection reads identically wherever it lands.
+///
+/// `family` selects the family-aware phrasing — Wan keeps its checkpoint-swap
+/// suggestions, every other family (plain LTX-Video today) gets wording that
+/// names the actual model instead of mislabeling it as Wan. `has_source`
+/// counts first/last-frame keyframes as well as a source image (#779): both
+/// carry source frames, so either satisfies a required contract and either is
+/// refused by a text-to-video-only checkpoint. A `None` capability enforces
+/// nothing — the engine remains the authority.
+pub fn source_image_contract_violation(
+    family: Option<&str>,
+    model: &str,
+    capability: Option<crate::types::SourceImageCapability>,
+    has_source: bool,
+) -> Option<String> {
+    use crate::types::SourceImageCapability;
+    let wan = family == Some("wan");
+    match capability {
+        Some(SourceImageCapability::Unsupported) if has_source => Some(if wan {
+            "this Wan checkpoint is text-to-video only and does not accept a source image \
+             or keyframes — remove them, or pick an I2V-capable checkpoint such as \
+             wan22-ti2v-5b or wan22-i2v-a14b"
+                .to_string()
+        } else {
+            format!(
+                "{model} is text-to-video only and does not accept a source image — its \
+                 engine has no image-to-video path; remove the image, or pick an \
+                 image-capable checkpoint such as an LTX-2 model"
+            )
+        }),
+        Some(SourceImageCapability::Required) if !has_source => Some(if wan {
+            "this Wan I2V checkpoint needs a source image; supply one, or pick a \
+             text-to-video checkpoint such as wan22-t2v-a14b"
+                .to_string()
+        } else {
+            format!("{model} needs a source image; supply one")
+        }),
+        _ => None,
+    }
 }
 
 /// Variant of [`validate_generate_request`] that accepts an explicit family
@@ -1798,6 +1885,23 @@ fn validate_generate_request_after_activation(
     }
     if let Some(keyframes) = &req.keyframes {
         validate_keyframes(keyframes, req.frames, family)?;
+        // TI2V pins endpoints in latent space, where the 2.2 VAE's 4x
+        // temporal stride turns a 5-frame pixel clip into two latent frames —
+        // both anchored, nothing left to denoise. The engine refuses that
+        // degenerate grid after the 10 GB load; admission must agree first.
+        // 9 pixel frames (three latent frames) is the smallest 4k+1 clip with
+        // an interior. Opaque cv:/hf: installs keep the engine's own check.
+        if family == Some("wan")
+            && keyframes.len() == 2
+            && crate::manifest::resolve_model_name(&req.model).starts_with("wan22-ti2v-5b")
+            && req.frames.is_some_and(|frames| frames < 9)
+        {
+            return Err(
+                "wan22-ti2v-5b first/last-frame conditioning needs at least 9 frames — \
+                 shorter clips leave no latent frames to denoise between the pinned endpoints"
+                    .to_string(),
+            );
+        }
     }
     if let Some(audio) = &req.audio_file {
         require_ltx2_family(family, "audio_file")?;
@@ -1950,6 +2054,17 @@ fn validate_generate_request_after_activation(
             (OutputFormat::Png | OutputFormat::Jpeg, Some(1)) => {}
             _ => return Err("Wan outputs must use mp4, gif, apng, or webp".to_string()),
         }
+
+        // First/last-frame conditioning (#779): the first frame comes from
+        // either `source_image` or `keyframes[0]`, never both — an ambiguous
+        // mix is refused at admission with the engine's own wording.
+        if req.source_image.is_some() && req.keyframes.as_ref().is_some_and(|k| !k.is_empty()) {
+            return Err(
+                "Wan takes the first frame from either source_image or keyframes[0], not both \
+                 — for a first/last-frame render, put both endpoints in keyframes"
+                    .to_string(),
+            );
+        }
     }
 
     // The scheduler slot is shared by two disjoint solver families (#795):
@@ -1986,6 +2101,23 @@ fn validate_generate_request_after_activation(
         if !shift.is_finite() || shift <= 0.0 {
             return Err(format!(
                 "sample_shift must be finite and positive, got {shift}"
+            ));
+        }
+    }
+
+    // The wan fp8-scaled A14B tier refuses every adapter stack (#777): an fp8
+    // merge would re-round each targeted weight to three mantissa bits, and
+    // the loader fails closed — but only after the UMT5 encode. Name it at
+    // admission instead. Opaque cv:/hf: installs keep the engine's check.
+    if family == Some("wan")
+        && (req.lora.is_some() || req.loras.as_ref().is_some_and(|list| !list.is_empty()))
+    {
+        let canonical = crate::manifest::resolve_model_name(&req.model);
+        if canonical.ends_with(":fp8") && canonical.contains("a14b") {
+            return Err(format!(
+                "{canonical} is fp8-scaled and refuses LoRA stacks — merging would re-round \
+                 every targeted weight to three mantissa bits. Use the :q5/:q8 GGUF or bf16 \
+                 tier for adapters"
             ));
         }
     }
@@ -4636,6 +4768,19 @@ mod tests {
         }
         wan.scheduler = None;
 
+        // The fp8-scaled tier refuses LoRA stacks at admission — its loader
+        // fails closed, but only after the UMT5 encode. GGUF tiers accept.
+        wan.model = "wan22-t2v-a14b:fp8".to_string();
+        wan.loras = Some(vec![crate::LoraWeight {
+            path: "distill.safetensors".to_string(),
+            scale: 1.0,
+        }]);
+        let err = validate_generate_request(&wan).unwrap_err();
+        assert!(err.contains("fp8-scaled"), "got: {err}");
+        wan.model = "wan22-t2v-a14b:q8".to_string();
+        assert!(validate_generate_request(&wan).is_ok());
+        wan.loras = None;
+
         // Distill strengths: the community band is accepted, typos are not.
         wan.distill_strength_high = Some(1.8);
         wan.distill_strength_low = Some(1.0);
@@ -4661,6 +4806,85 @@ mod tests {
         // The UNet schedulers keep working off-family.
         flux.scheduler = Some(Scheduler::Ddim);
         assert!(validate_generate_request(&flux).is_ok());
+    }
+
+    /// #779: wan admits exactly the first/last endpoint keyframe pair, and
+    /// classifies it as boundary-preserving prompt work — parity twin:
+    /// `studio/lib/expandTask.ts`.
+    #[test]
+    fn wan_keyframes_admit_only_the_endpoint_pair() {
+        use crate::{ExpandTask, KeyframeCondition};
+        let keyframe = |frame: u32| KeyframeCondition {
+            frame,
+            // A real PNG header so the image-format check passes.
+            image: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+            name: None,
+        };
+
+        let mut req = valid_req();
+        req.model = "wan22-i2v-a14b:q5".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.frames = Some(33);
+        req.keyframes = Some(vec![keyframe(0), keyframe(32)]);
+        assert!(validate_generate_request(&req).is_ok());
+
+        // Wrong count, wrong anchors, and the ambiguous source+keyframes mix
+        // are named at admission.
+        req.keyframes = Some(vec![keyframe(0)]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("exactly two keyframes"), "got: {err}");
+        req.keyframes = Some(vec![keyframe(0), keyframe(7)]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("frames 0 and 32"), "got: {err}");
+        req.keyframes = Some(vec![keyframe(0), keyframe(32)]);
+        req.source_image = Some(vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("not both"), "got: {err}");
+        req.source_image = None;
+
+        // Without an explicit frames count the closing anchor is uncheckable
+        // here, and the engine would reject a mismatch only after loading.
+        req.frames = None;
+        req.keyframes = Some(vec![keyframe(0), keyframe(32)]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("explicit frames count"), "got: {err}");
+
+        // frames=1 renders a still — its endpoints coincide, so the pair is
+        // refused by name rather than as a generic duplicate frame.
+        req.frames = Some(1);
+        req.keyframes = Some(vec![keyframe(0), keyframe(0)]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("multi-frame clip"), "got: {err}");
+        req.frames = Some(33);
+        req.keyframes = Some(vec![keyframe(0), keyframe(32)]);
+
+        // TI2V pins endpoints in latent space: a 5-frame pixel clip is two
+        // latent frames, both anchored — refused before the 10 GB load. The
+        // A14B channel-concat path has no such floor (checked above at 33).
+        let mut ti2v = valid_req();
+        ti2v.model = "wan22-ti2v-5b:fp16".to_string();
+        ti2v.output_format = Some(OutputFormat::Mp4);
+        ti2v.width = 1280;
+        ti2v.height = 704;
+        ti2v.frames = Some(5);
+        ti2v.keyframes = Some(vec![keyframe(0), keyframe(4)]);
+        let err = validate_generate_request(&ti2v).unwrap_err();
+        assert!(err.contains("at least 9 frames"), "got: {err}");
+        ti2v.frames = Some(9);
+        ti2v.keyframes = Some(vec![keyframe(0), keyframe(8)]);
+        assert!(validate_generate_request(&ti2v).is_ok());
+
+        // The expansion task treats the pair as boundary anchors, exactly as
+        // LTX-2 keyframes classify.
+        assert_eq!(
+            ExpandTask::for_generation("wan", &req),
+            ExpandTask::KeyframeInterpolation
+        );
+
+        // Non-video families keep rejecting keyframes outright.
+        let mut flux = valid_req();
+        flux.keyframes = Some(vec![keyframe(0), keyframe(8)]);
+        assert!(validate_generate_request(&flux).is_err());
     }
 
     /// Buckets are advertised per checkpoint: the 480p-only 1.3B and the

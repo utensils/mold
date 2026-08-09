@@ -208,6 +208,7 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
             primary.is_some(),
         ));
         annotate_audio_capabilities(&mut catalog, &config);
+        annotate_source_image_capabilities(&mut catalog, &config);
         return catalog;
     }
 
@@ -222,6 +223,10 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
         snapshot.is_loaded,
     ));
     annotate_audio_capabilities(&mut catalog, &config);
+    // CPU-fallback / maintenance runtimes (no workers) advertise the same
+    // conditioning contracts: classification reads safetensors headers, not
+    // a GPU.
+    annotate_source_image_capabilities(&mut catalog, &config);
     catalog
 }
 
@@ -235,6 +240,27 @@ fn annotate_audio_capabilities(catalog: &mut [ModelInfoExtended], config: &Confi
         }
         entry.supports_audio = ModelPaths::resolve(&entry.info.name, config)
             .and_then(|paths| mold_inference::audio::output_supported(&entry.info.family, &paths));
+    }
+}
+
+/// Fill `source_image` for downloaded wan checkpoints from their own headers
+/// — the same shape-driven classification the engine applies at generate
+/// time (#772). The probe outranks the manifest's task-structure answer for
+/// a downloaded checkpoint because `ModelPaths` honors config/env path
+/// overrides: the artifacts actually loaded can differ from what the
+/// manifest was assembled from. Cold (not-yet-downloaded) tiers keep the
+/// manifest classification, and an unclassifiable downloaded entry falls
+/// back to it too; entries neither can classify stay `None`, which clients
+/// must read as "unknown", never as one of the three contracts.
+fn annotate_source_image_capabilities(catalog: &mut [ModelInfoExtended], config: &Config) {
+    for entry in catalog {
+        if !entry.downloaded || entry.info.family != "wan" {
+            continue;
+        }
+        let probed = ModelPaths::resolve(&entry.info.name, config).and_then(|paths| {
+            mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
+        });
+        entry.source_image = probed.or(entry.source_image);
     }
 }
 
@@ -714,6 +740,12 @@ fn installed_catalog_models(
                 &format!("{} {} {}", sidecar.id, sidecar.name, primary_path.display()),
                 None,
             )),
+            // Classified from the installed checkpoint's own headers — the
+            // shape-driven read the engine applies — never from the sidecar's
+            // display name (#772). The wan VAE is a shared companion, so the
+            // annotate pass below fills this once paths resolve; a bare
+            // primary file cannot answer alone.
+            source_image: None,
         });
     }
     out

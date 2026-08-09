@@ -360,3 +360,86 @@ describe("SourceImageWell", () => {
     });
   });
 });
+
+describe("SourceImageWell — per-model source conditioning (#772, #779)", () => {
+  beforeEach(() => setActivePinia(createPinia()));
+  afterEach(() => (document.body.innerHTML = ""));
+
+  /** A wan form with the frame budget a first/last-frame render needs. */
+  function wanForm(sourceImage: string | null | undefined): GenerateForm {
+    return reactive({
+      ...newGenerateForm(),
+      family: "wan",
+      model: "wan22-t2v-a14b",
+      frames: 81,
+      sourceImageCapability: sourceImage,
+    });
+  }
+
+  it("keeps today's well and offers no end frame when the server advertises nothing", () => {
+    const form = wanForm(undefined);
+    const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+
+    expect(wrapper.find("[data-test='source-media-controls']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='end-frame-media-controls']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='source-required-badge']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='source-conditioning-error']").exists()).toBe(false);
+  });
+
+  it("renders no source well at all for an advertised text-to-video checkpoint", () => {
+    const form = wanForm("unsupported");
+    const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+
+    expect(wrapper.find("[data-test='source-media-controls']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='source-choose-gallery']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='end-frame-media-controls']").exists()).toBe(false);
+  });
+
+  it("marks the well required and names why until an image is attached", async () => {
+    const form = wanForm("required");
+    const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+
+    expect(wrapper.find("[data-test='source-required-badge']").exists()).toBe(true);
+    expect(wrapper.get("[data-test='source-conditioning-error']").text()).toContain(
+      "Attach a source image",
+    );
+
+    form.sourceImage = "SRC";
+    await flushPromises();
+    expect(wrapper.find("[data-test='source-conditioning-error']").exists()).toBe(false);
+  });
+
+  it("offers the end-frame well on an advertised optional wan checkpoint", async () => {
+    const form = wanForm("optional");
+    const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+
+    expect(wrapper.find("[data-test='end-frame-media-controls']").exists()).toBe(true);
+
+    // Same picker affordance as the source well; the end frame keeps its name.
+    await wrapper.get("[data-test='end-frame-choose-gallery']").trigger("click");
+    wrapper
+      .findAllComponents(ImagePickerModal)[1]!
+      .vm.$emit("pick", [{ filename: "close.png", base64: "ENDB64" }]);
+    await flushPromises();
+    expect(form.endFrame).toEqual({ filename: "close.png", base64: "ENDB64" });
+
+    // An end frame with no first frame is refused with the shared message.
+    expect(wrapper.get("[data-test='source-conditioning-error']").text()).toContain(
+      "An end frame needs a first frame",
+    );
+
+    form.sourceImage = "SRC";
+    await flushPromises();
+    expect(wrapper.find("[data-test='source-conditioning-error']").exists()).toBe(false);
+  });
+
+  it("clears the staged end frame from its own well", async () => {
+    const form = wanForm("optional");
+    form.sourceImage = "SRC";
+    form.endFrame = { filename: "close.png", base64: "ENDB64" };
+    const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+
+    await wrapper.get("[aria-label='Clear end frame']").trigger("click");
+    expect(form.endFrame).toBeNull();
+  });
+});

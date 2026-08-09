@@ -659,3 +659,45 @@ describe("AdvancedSettings — continue a video", () => {
     expect(form.extendOverlapFrames).toBeNull();
   });
 });
+
+describe("AdvancedSettings — per-model source-image contract (#772)", () => {
+  const wanModel = (sourceImage?: string): ModelEntry =>
+    ({
+      name: "wan22-t2v-a14b",
+      family: "wan",
+      downloaded: true,
+      default_width: 1280,
+      default_height: 720,
+      default_steps: 20,
+      default_guidance: 5,
+      ...(sourceImage === undefined ? {} : { source_image: sourceImage }),
+    }) as ModelEntry;
+
+  function wanForm(sourceImage?: string): GenerateForm {
+    return reactive({
+      ...newGenerateForm(),
+      family: "wan",
+      model: "wan22-t2v-a14b",
+      frames: 81,
+      sourceImageCapability: sourceImage ?? null,
+    });
+  }
+
+  it("keeps the Source image section when the server advertises nothing", () => {
+    const wrapper = mountSettings(wanForm(), { selectedModel: wanModel() });
+    expect(accordionTitles(wrapper)).toContain("Source image");
+  });
+
+  it("drops the Source image section for an advertised text-to-video checkpoint", () => {
+    const wrapper = mountSettings(wanForm("unsupported"), {
+      selectedModel: wanModel("unsupported"),
+    });
+    expect(accordionTitles(wrapper)).not.toContain("Source image");
+  });
+
+  it("keeps the section and its required marker for an image-to-video checkpoint", () => {
+    const wrapper = mountSettings(wanForm("required"), { selectedModel: wanModel("required") });
+    expect(accordionTitles(wrapper)).toContain("Source image");
+    expect(wrapper.find("[data-test='source-required-badge']").exists()).toBe(true);
+  });
+});

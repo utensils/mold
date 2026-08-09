@@ -2470,6 +2470,7 @@ mod tests {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: true,
         }
@@ -2627,6 +2628,7 @@ mod tests {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         }
@@ -2697,6 +2699,7 @@ mod tests {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         };

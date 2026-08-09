@@ -88,6 +88,33 @@ describe("baseGenerationCapabilities", () => {
     expect(baseGenerationCapabilities("wan").supportsLora).toBe(true);
   });
 
+  it("hides strength and mask for wan — pinned frames take neither", () => {
+    // Wan pins conditioning frames exactly: the engine never reads
+    // `strength` and rejects `mask_image`, so showing either control
+    // advertises a knob the render ignores or refuses.
+    const wan = baseGenerationCapabilities("wan", "wan22-i2v-a14b:q8");
+    expect(wan.supportsStrength).toBe(false);
+    expect(wan.supportsMask).toBe(false);
+    // LTX-2 image-to-video genuinely consumes strength.
+    expect(baseGenerationCapabilities("ltx2").supportsStrength).toBe(true);
+  });
+
+  it("withholds the LoRA control from the wan fp8-scaled tier", () => {
+    // `WanTransformer::from_safetensors_with_loras` refuses every adapter
+    // stack on fp8-scaled weights (merging would re-round the delta to three
+    // mantissa bits), so offering the control advertises a load that always
+    // fails. GGUF and bf16 tiers keep it.
+    expect(
+      baseGenerationCapabilities("wan", "wan22-t2v-a14b:fp8").supportsLora,
+    ).toBe(false);
+    expect(
+      baseGenerationCapabilities("wan", "wan22-i2v-a14b:fp8").supportsLora,
+    ).toBe(false);
+    expect(
+      baseGenerationCapabilities("wan", "wan22-t2v-a14b:q8").supportsLora,
+    ).toBe(true);
+  });
+
   it("separates image conditioning from the advanced-video panel", () => {
     // Two independent questions that happened to have the same answer while
     // LTX-2 was the only image-conditioned video family. Wan is the case that
@@ -107,6 +134,76 @@ describe("baseGenerationCapabilities", () => {
     // source-image handling and must not be routed through this predicate.
     expect(isImageConditionedVideoFamily("flux")).toBe(false);
     expect(isImageConditionedVideoFamily("")).toBe(false);
+  });
+
+  it("resolves the source-image contract per model, family as fallback", () => {
+    // Advertised wins: the three wan checkpoints split three ways and the
+    // family cannot tell them apart.
+    expect(
+      baseGenerationCapabilities(
+        "wan",
+        "wan22-t2v-a14b",
+        null,
+        null,
+        "unsupported",
+      ),
+    ).toMatchObject({
+      sourceImageCapability: "unsupported",
+      supportsSourceImage: false,
+      requiresSourceImage: false,
+      supportsEndFrame: false,
+    });
+    expect(
+      baseGenerationCapabilities(
+        "wan",
+        "wan22-i2v-a14b",
+        null,
+        null,
+        "required",
+      ),
+    ).toMatchObject({
+      sourceImageCapability: "required",
+      supportsSourceImage: true,
+      requiresSourceImage: true,
+      supportsEndFrame: true,
+    });
+    expect(
+      baseGenerationCapabilities(
+        "wan",
+        "wan22-ti2v-5b",
+        null,
+        null,
+        "optional",
+      ),
+    ).toMatchObject({
+      sourceImageCapability: "optional",
+      supportsSourceImage: true,
+      requiresSourceImage: false,
+      supportsEndFrame: true,
+    });
+
+    // An older server advertises nothing, so every wan checkpoint keeps
+    // today's optional well and nothing is ever gated on a guess.
+    expect(baseGenerationCapabilities("wan", "wan22-i2v-a14b")).toMatchObject({
+      sourceImageCapability: "optional",
+      supportsSourceImage: true,
+      requiresSourceImage: false,
+      supportsEndFrame: false,
+    });
+
+    // Image families read a source image; a video family with no
+    // image-to-video path does not.
+    expect(baseGenerationCapabilities("flux").supportsSourceImage).toBe(true);
+    expect(baseGenerationCapabilities("ltx2").supportsSourceImage).toBe(true);
+    expect(baseGenerationCapabilities("ltx-video").supportsSourceImage).toBe(
+      false,
+    );
+
+    // The end frame is wan's alone even where a source image is advertised.
+    expect(
+      baseGenerationCapabilities("ltx2", "", null, null, "optional")
+        .supportsEndFrame,
+    ).toBe(false);
   });
 
   it("returns independent scheduler option lists", () => {

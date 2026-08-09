@@ -4,10 +4,10 @@
  * Shared family policy lives in `@studio/lib/generationCapabilities`. Two
  * desktop additions:
  *   - `supportsImg2img` — whether the SourceImageWell should render at all.
- *     True for every non-video image family AND for the video families whose
- *     engine reads a still source image, which the shared kit names via
- *     `isImageConditionedVideoFamily`. Plain `ltx-video` stays false — that
- *     engine has no img2vid path and would silently ignore the image.
+ *     An alias for the shared `supportsSourceImage`: the selected model's own
+ *     advertised contract when the server has one, the family answer
+ *     otherwise. Plain `ltx-video` stays false — that engine has no img2vid
+ *     path and would silently ignore the image.
  *   - `pruneRequestForFamily` — strips request fields the target family does
  *     not support, applied on model change so a leftover value never ships.
  *
@@ -19,7 +19,6 @@ import {
   baseGenerationCapabilities,
   isAdvancedVideoFamily,
   isFlux2DevModel,
-  isImageConditionedVideoFamily,
   isMinimaxH3Family,
   isQwenImageEditFamily,
   MAX_LORA_STACK,
@@ -46,18 +45,24 @@ export function generationCapabilitiesForFamily(
   model = "",
   pipeline?: string | null,
   advertisedGuidance?: Parameters<typeof baseGenerationCapabilities>[3],
+  advertisedSourceImage?: string | null,
 ): GenerationCapabilities {
-  const shared = baseGenerationCapabilities(family, model, pipeline, advertisedGuidance);
+  const shared = baseGenerationCapabilities(
+    family,
+    model,
+    pipeline,
+    advertisedGuidance,
+    advertisedSourceImage,
+  );
   const supportsAdvancedVideo = isAdvancedVideoFamily(family);
   return {
     ...shared,
     // Image conditioning is its own capability, not a consequence of having
-    // the advanced-video panel. Deriving it from `supportsAdvancedVideo` was
-    // correct only while LTX-2 was the sole image-conditioned video family:
-    // Wan is video, is not advanced-video, and reads a source image — and
-    // `wan22-i2v-a14b` cannot generate without one.
-    supportsImg2img:
-      !shared.supportsVideo || isImageConditionedVideoFamily(family) || isMinimaxH3Family(family),
+    // the advanced-video panel, and since #772 it is per model rather than
+    // per family: the three wan checkpoints split three ways and only the
+    // server can tell them apart. The family answer behind
+    // `supportsSourceImage` is what an older server still gets.
+    supportsImg2img: shared.supportsSourceImage,
     supportsMask: shared.supportsMask && !shared.supportsVideo,
     supportsAdvancedVideo,
   };
@@ -100,8 +105,9 @@ export function pruneRequestForFamily(
   req: GenerateRequest,
   family: string,
   model = "",
+  advertisedSourceImage?: string | null,
 ): GenerateRequest {
-  const caps = generationCapabilitiesForFamily(family, model);
+  const caps = generationCapabilitiesForFamily(family, model, null, null, advertisedSourceImage);
   const next: GenerateRequest = { ...req };
 
   // MiniMax H3 has its own final serializer in `minimaxH3Authoring`; do not
@@ -186,10 +192,15 @@ export function pruneRequestForFamily(
     delete next.fps;
   }
   if (!caps.supportsAudio) delete next.enable_audio;
+  // Wan reaches the keyframes field too — its first/last-frame layout rides
+  // the LTX-2 contract — so the keyframe strip is its own question, not part
+  // of the advanced-video panel's.
+  if (!caps.supportsAdvancedVideo && !caps.supportsEndFrame) {
+    delete next.keyframes;
+  }
   if (!caps.supportsAdvancedVideo) {
     delete next.audio_file;
     delete next.source_video;
-    delete next.keyframes;
     delete next.pipeline;
     delete next.ic_lora_control;
     delete next.retake_range;

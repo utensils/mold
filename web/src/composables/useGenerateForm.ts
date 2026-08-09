@@ -34,6 +34,7 @@ import {
   syncCameraMotionLora,
 } from "@studio/lib/cameraMotion";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
+import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
 import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
 import {
   emptyGuidanceOverrides,
@@ -130,6 +131,8 @@ function defaultForm(): GenerateFormState {
     steps: 20,
     guidance: 3.5,
     guidanceCapabilities: null,
+    sourceImageCapability: null,
+    endFrame: null,
     seedMode: "random",
     seed: null,
     batchSize: 1,
@@ -188,6 +191,7 @@ export function sanitizePersistedForm(
   // in memory even though those bytes were immediately stripped below.
   const {
     imageAttachments,
+    endFrame,
     maskImage,
     controlImage,
     audioFile,
@@ -201,6 +205,7 @@ export function sanitizePersistedForm(
     ...cloneFormState(metadata),
     version: FORM_VERSION,
     imageAttachments: imageAttachments.map(stripMediaBytes),
+    endFrame: endFrame ? stripMediaBytes(endFrame) : null,
     maskImage: maskImage ? stripMediaBytes(maskImage) : null,
     controlImage: controlImage ? stripMediaBytes(controlImage) : null,
     audioFile: audioFile ? stripMediaBytes(audioFile) : null,
@@ -236,12 +241,19 @@ function modelDefaultsPatch(
     steps: model.default_steps,
     guidance: model.default_guidance,
     guidanceCapabilities: model.guidance_capabilities ?? null,
+    // Snapshotted like `guidanceCapabilities`: request assembly runs long
+    // after the catalog row went out of scope, and a stale snapshot from the
+    // previously selected checkpoint would be worse than none.
+    sourceImageCapability: model.source_image ?? null,
     loras: [],
     icLoraControl: null,
   };
   const capabilities = generationCapabilitiesForFamily(
     model.family,
     model.name,
+    null,
+    null,
+    model.source_image,
   );
   if (capabilities.supportsVideo) {
     next.frames = isMinimaxH3Family(model.family)
@@ -305,6 +317,17 @@ function modelDefaultsPatch(
     next.guidanceOverrides = emptyGuidanceOverrides();
     next.cameraControl = null;
   }
+  // The closing still belongs to wan's first/last-frame contract alone; a
+  // checkpoint that cannot read one must not keep it staged where nothing
+  // shows it, and a checkpoint that reads no source image at all keeps
+  // neither well's contents.
+  if (!capabilities.supportsEndFrame) next.endFrame = null;
+  if (!capabilities.supportsSourceImage) {
+    next.imageAttachments = [];
+    next.maskImage = null;
+  }
+  // Wan reads a source image but rejects a repaint mask outright.
+  if (!capabilities.supportsMask) next.maskImage = null;
   if (capabilities.sourceImageMode !== "single") {
     if (capabilities.sourceImageMode !== "references") {
       next.batchSize = 1;
@@ -444,6 +467,10 @@ export function applyMetadataToForm(
     fps: metadata.fps ?? null,
     outputFormat: outputFormat ?? next.outputFormat,
     imageAttachments: [],
+    // Saved keyframe metadata is name + sha256 with no payload, so a
+    // first/last-frame render's closing still cannot be rebuilt from it. The
+    // page says so out loud rather than leaving Generate looking ready.
+    endFrame: null,
     maskImage: null,
     controlImage: null,
     audioFile: null,
@@ -509,6 +536,7 @@ function ensureDraftIds(state: GenerateFormState) {
     if (media?.base64 && !media.draftId) media.draftId = newDraftId();
   };
   state.imageAttachments.forEach(ensure);
+  ensure(state.endFrame);
   ensure(state.maskImage);
   ensure(state.controlImage);
   ensure(state.audioFile);
@@ -549,6 +577,7 @@ function h3MediaFromState(state: GenerateFormState): DraftMediaRecord[] {
 function mediaFromState(state: GenerateFormState): DraftMediaRecord[] {
   const ordinary = [
     ...state.imageAttachments,
+    state.endFrame,
     state.maskImage,
     state.controlImage,
     state.audioFile,
@@ -592,6 +621,10 @@ async function hydrateDraftMedia(state: GenerateFormState) {
   ) {
     state.imageAttachments = attachments;
   }
+
+  const endFrameId = state.endFrame?.draftId ?? "";
+  const endFrame = await hydrate(state.endFrame);
+  if ((state.endFrame?.draftId ?? "") === endFrameId) state.endFrame = endFrame;
 
   const maskId = state.maskImage?.draftId ?? "";
   const mask = await hydrate(state.maskImage);
@@ -835,9 +868,36 @@ export function useGenerateForm(): UseGenerateForm {
         s.model,
         s.pipeline,
         s.guidanceCapabilities,
+        // The resolved catalog row is the final authority at submit time, the
+        // same way it is for `enable_audio`; the snapshot covers a form
+        // restored before the inventory landed.
+        model?.source_image ?? s.sourceImageCapability,
       );
       const attachmentMode = capabilities.sourceImageMode !== "single";
       const attachments = s.imageAttachments ?? [];
+      // Wan's first/last-frame render (#779) rides the existing `keyframes`
+      // contract: both stills travel there and `source_image` stays home —
+      // the engine refuses a request carrying both, and admission counts
+      // keyframes as source presence for an I2V-required checkpoint. The
+      // closing index is derived from the frame count THIS request carries,
+      // so changing the clip length after attaching the end frame can never
+      // ship a stale index. A lone source image is an ordinary
+      // image-to-video request and sends none.
+      const firstLastFrames =
+        capabilities.supportsEndFrame && !attachmentMode
+          ? firstLastFrameKeyframes(
+              attachments[0]?.base64
+                ? {
+                    base64: attachments[0].base64,
+                    filename: attachments[0].filename,
+                  }
+                : null,
+              s.endFrame?.base64
+                ? { base64: s.endFrame.base64, filename: s.endFrame.filename }
+                : null,
+              capabilities.supportsVideo ? s.frames : null,
+            )
+          : null;
       const requestForcesBatchSizeOne =
         capabilities.forcesBatchSizeOne ||
         (capabilities.sourceImageMode === "references" &&
@@ -903,12 +963,27 @@ export function useGenerateForm(): UseGenerateForm {
               edit_images: attachments.map((image) => image.base64),
             }
           : {
-              source_image: attachments[0]?.base64 ?? null,
-              source_image_name: attachments[0]?.base64
-                ? attachments[0].filename
-                : undefined,
-              strength: attachments[0]?.base64 ? s.strength : undefined,
-              mask_image: s.maskImage?.base64 ?? undefined,
+              // A first/last-frame render ships BOTH stills as `keyframes`
+              // and no `source_image` — the engine refuses a request
+              // carrying both, and admission counts keyframes as source
+              // presence for an I2V-required checkpoint.
+              source_image: firstLastFrames
+                ? null
+                : (attachments[0]?.base64 ?? null),
+              source_image_name:
+                !firstLastFrames && attachments[0]?.base64
+                  ? attachments[0].filename
+                  : undefined,
+              // Wan pins the first frame exactly; it never reads strength.
+              strength:
+                !firstLastFrames &&
+                capabilities.supportsStrength &&
+                attachments[0]?.base64
+                  ? s.strength
+                  : undefined,
+              mask_image: firstLastFrames
+                ? undefined
+                : (s.maskImage?.base64 ?? undefined),
               control_image: capabilities.supportsControlNet
                 ? (s.controlImage?.base64 ?? undefined)
                 : undefined,
@@ -916,6 +991,7 @@ export function useGenerateForm(): UseGenerateForm {
                 s.controlImage && controlModel ? controlModel : undefined,
               control_scale:
                 s.controlImage && controlModel ? s.controlScale : undefined,
+              ...(firstLastFrames ? { keyframes: firstLastFrames } : {}),
             }),
         expand: s.expand.enabled || undefined,
         frames: capabilities.supportsVideo ? s.frames : undefined,

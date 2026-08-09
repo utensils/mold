@@ -161,6 +161,10 @@ pub fn build_model_catalog(
                 &manifest.name,
                 None,
             )),
+            // Recorded where the manifest was built — the one place that
+            // structurally knows the task (#772). Cold tiers advertise
+            // correctly before any file exists.
+            source_image: manifest.defaults.source_image,
         });
     }
 
@@ -250,6 +254,10 @@ pub fn build_model_catalog(
                 &guidance_identity,
                 None,
             )),
+            // Config-only models have local weights: the server's annotate
+            // pass derives the contract from checkpoint headers, the same
+            // classification the engine applies (#772).
+            source_image: None,
         });
     }
 
@@ -696,6 +704,7 @@ mod tests {
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
+                source_image: None,
             }
         }
 

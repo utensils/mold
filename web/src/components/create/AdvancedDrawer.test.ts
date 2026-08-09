@@ -851,3 +851,128 @@ describe("AdvancedDrawer interactions", () => {
     expect(wrapper.emitted("close")).toHaveLength(1);
   });
 });
+
+/**
+ * Per-model source-image conditioning (#772) and the wan End frame well
+ * (#779). Every gate here comes from the shared capability kit — the drawer
+ * never reads `source_image` or a family set of its own.
+ */
+describe("AdvancedDrawer source-image contract", () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => __testing__.resetForTest());
+
+  function wanModel(source_image?: string | null): ModelInfoExtended {
+    return {
+      name: "wan22-ti2v-5b:fp16",
+      family: "wan",
+      size_gb: 10,
+      is_loaded: false,
+      last_used: null,
+      hf_repo: "",
+      downloaded: true,
+      default_steps: 20,
+      default_guidance: 3.5,
+      default_width: 1280,
+      default_height: 704,
+      default_frames: 81,
+      default_fps: 24,
+      description: "Wan 2.2 TI2V 5B",
+      ...(source_image === undefined ? {} : { source_image }),
+    } as ModelInfoExtended;
+  }
+
+  function wan(
+    source_image?: string | null,
+    overrides: Partial<GenerateFormState> = {},
+  ) {
+    return factory(
+      "wan",
+      {
+        model: "wan22-ti2v-5b:fp16",
+        modelFamily: "wan",
+        frames: 81,
+        fps: 24,
+        sourceImageCapability: source_image ?? null,
+        ...overrides,
+      },
+      { models: [wanModel(source_image)] },
+    );
+  }
+
+  it("keeps today's source well when the server advertises nothing", () => {
+    const wrapper = wan(undefined);
+    expect(wrapper.find("[data-test='section-source']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='source-required-badge']").exists()).toBe(
+      false,
+    );
+    // An older server rejects wan keyframes outright, so absence hides the well.
+    expect(wrapper.find("[data-test='end-frame-well']").exists()).toBe(false);
+  });
+
+  it("hides the whole source section for a text-to-video checkpoint", () => {
+    const wrapper = wan("unsupported");
+    expect(wrapper.find("[data-test='section-source']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='end-frame-well']").exists()).toBe(false);
+  });
+
+  it("marks the source required and names why the request would be refused", () => {
+    const wrapper = wan("required");
+    expect(wrapper.find("[data-test='source-required-badge']").exists()).toBe(
+      true,
+    );
+    expect(wrapper.get("[data-test='source-conditioning-error']").text()).toBe(
+      "This checkpoint is image-to-video only. Attach a source image to use as the first frame.",
+    );
+  });
+
+  it("clears the inline message once the opening frame is attached", () => {
+    const wrapper = wan("required", {
+      imageAttachments: [
+        { kind: "upload", filename: "open.png", base64: "FIRST" },
+      ],
+    });
+    expect(
+      wrapper.find("[data-test='source-conditioning-error']").exists(),
+    ).toBe(false);
+  });
+
+  it("offers the optional End frame well and its attach/remove affordances", async () => {
+    const wrapper = wan("optional");
+    expect(wrapper.get("[data-test='end-frame-well']").text()).toContain(
+      "Optional",
+    );
+    await wrapper.get("[data-test='end-frame-attach']").trigger("click");
+    expect(wrapper.emitted("open-end-frame-picker")).toHaveLength(1);
+
+    const attached = wan("optional", {
+      imageAttachments: [
+        { kind: "upload", filename: "open.png", base64: "FIRST" },
+      ],
+      endFrame: { kind: "upload", filename: "close.png", base64: "LAST" },
+    });
+    expect(attached.get("[data-test='end-frame-well']").text()).toContain(
+      "close.png",
+    );
+    await attached.get("[data-test='end-frame-remove']").trigger("click");
+    expect(attached.emitted("clear-end-frame")).toHaveLength(1);
+  });
+
+  it("explains an end frame with no first frame", () => {
+    const wrapper = wan("optional", {
+      endFrame: { kind: "upload", filename: "close.png", base64: "LAST" },
+    });
+    expect(wrapper.get("[data-test='source-conditioning-error']").text()).toBe(
+      "An end frame needs a first frame. Attach a source image, or remove the end frame.",
+    );
+  });
+
+  it("never offers an End frame well outside wan", () => {
+    const wrapper = factory("ltx2", {
+      model: "ltx-2-19b:fp8",
+      modelFamily: "ltx2",
+      sourceImageCapability: "optional",
+    });
+    expect(wrapper.find("[data-test='section-source']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='end-frame-well']").exists()).toBe(false);
+  });
+});

@@ -90,6 +90,12 @@ pub struct ManifestDefaults {
     pub frames: Option<u32>,
     /// Default video FPS. None for image-only models.
     pub fps: Option<u32>,
+    /// Per-model source-image conditioning contract (#772). Recorded where
+    /// the manifest is BUILT — the one place that structurally knows the
+    /// task (e.g. which A14B expert repo pair it assembled) — so cold,
+    /// not-yet-downloaded tiers advertise correctly without any name
+    /// parsing. `None` omits the wire field (image families).
+    pub source_image: Option<crate::types::SourceImageCapability>,
 }
 
 #[derive(Debug, Clone)]
@@ -558,6 +564,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -589,6 +596,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -620,6 +628,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -651,6 +660,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -681,6 +691,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -711,6 +722,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -742,6 +754,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -773,6 +786,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -804,6 +818,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -836,6 +851,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -868,6 +884,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -898,6 +915,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -928,6 +946,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -958,6 +977,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -988,6 +1008,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1018,6 +1039,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1049,6 +1071,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1080,6 +1103,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1111,6 +1135,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1142,6 +1167,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1172,6 +1198,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1202,6 +1229,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1232,6 +1260,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1263,6 +1292,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1392,6 +1422,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1421,6 +1452,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1451,6 +1483,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1481,6 +1514,7 @@ fn sd3_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1549,6 +1583,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1581,6 +1616,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1612,6 +1648,7 @@ fn sd15_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1696,6 +1733,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1727,6 +1765,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1758,6 +1797,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1789,6 +1829,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1820,6 +1861,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1850,6 +1892,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1879,6 +1922,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -1911,6 +1955,7 @@ fn sdxl_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -2022,6 +2067,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -2054,6 +2100,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -2085,6 +2132,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -2116,6 +2164,7 @@ fn zimage_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -2281,6 +2330,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -2311,6 +2361,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -2340,6 +2391,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -2369,6 +2421,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -2412,6 +2465,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -2441,6 +2495,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -2470,6 +2525,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -2499,6 +2555,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -2571,6 +2628,7 @@ fn flux2_manifests() -> Vec<ModelManifest> {
             negative_prompt: None,
             frames: None,
             fps: None,
+            source_image: None,
         },
         hidden: false,
     });
@@ -2812,6 +2870,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         negative_prompt: None,
         frames: None,
         fps: None,
+        source_image: None,
     };
     let qwen_2512_defaults = base_defaults.clone();
     let qwen_edit_defaults = ManifestDefaults {
@@ -2824,6 +2883,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         negative_prompt: None,
         frames: None,
         fps: None,
+        source_image: None,
     };
 
     vec![
@@ -3232,6 +3292,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -3263,6 +3324,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: false,
         },
@@ -3448,6 +3510,7 @@ fn wuerstchen_manifests() -> Vec<ModelManifest> {
         ),
         frames: None,
         fps: None,
+        source_image: None,
     };
     vec![ModelManifest {
         name: "wuerstchen-v2:fp16".to_string(),
@@ -4132,6 +4195,10 @@ pub fn paths_from_downloads(
 }
 
 fn ltx_video_manifests() -> Vec<ModelManifest> {
+    // Plain LTX-Video has no image-to-video path — its engine never reads
+    // `source_image` (chain stages render independently and stitch). Only
+    // LTX-2 conditions on a still, so these advertise Unsupported and
+    // admission rejects an attached image instead of silently ignoring it.
     let dev_defaults = ManifestDefaults {
         steps: 40,
         guidance: 3.0,
@@ -4142,6 +4209,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
         negative_prompt: None,
         frames: Some(25),
         fps: Some(30),
+        source_image: Some(crate::types::SourceImageCapability::Unsupported),
     };
     let distilled_defaults = ManifestDefaults {
         steps: 8,
@@ -4153,6 +4221,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
         negative_prompt: None,
         frames: Some(25),
         fps: Some(30),
+        source_image: Some(crate::types::SourceImageCapability::Unsupported),
     };
     let multiscale_distilled_defaults = ManifestDefaults {
         steps: 7,
@@ -4164,6 +4233,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
         negative_prompt: None,
         frames: Some(25),
         fps: Some(30),
+        source_image: Some(crate::types::SourceImageCapability::Unsupported),
     };
     let multiscale_dev_defaults = ManifestDefaults {
         steps: 30,
@@ -4175,6 +4245,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
         negative_prompt: None,
         frames: Some(25),
         fps: Some(30),
+        source_image: Some(crate::types::SourceImageCapability::Unsupported),
     };
     let shared_t5_files = vec![
         // T5-XXL FP16 text encoder (shared with FLUX)
@@ -4415,6 +4486,7 @@ fn ltx2_manifests() -> Vec<ModelManifest> {
         negative_prompt: None,
         frames: Some(97),
         fps: Some(24),
+        source_image: Some(crate::types::SourceImageCapability::Optional),
     };
 
     let make_manifest = |name: &str,
@@ -4654,6 +4726,7 @@ fn ltx2_control_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: true,
         })
@@ -4685,6 +4758,7 @@ fn ltx2_camera_control_manifests() -> Vec<ModelManifest> {
                 negative_prompt: None,
                 frames: None,
                 fps: None,
+                source_image: None,
             },
             hidden: true,
         })
@@ -4702,6 +4776,7 @@ fn controlnet_manifests() -> Vec<ModelManifest> {
         negative_prompt: None,
         frames: None,
         fps: None,
+        source_image: None,
     };
     vec![
         ModelManifest {
@@ -4763,6 +4838,7 @@ fn qwen3_expand_manifests() -> Vec<ModelManifest> {
         negative_prompt: None,
         frames: None,
         fps: None,
+        source_image: None,
     };
 
     vec![
@@ -4896,6 +4972,10 @@ fn wan_manifests() -> Vec<ModelManifest> {
         negative_prompt: Some(WAN_DEFAULT_NEGATIVE_PROMPT.to_string()),
         frames: Some(81),
         fps: Some(16),
+        // The 1.3B is a pure T2V DiT (16-channel patch embedding, no
+        // conditioning concat or inpaint path) — a supplied source image is
+        // rejected, so admission should refuse it before the queue (#772).
+        source_image: Some(crate::types::SourceImageCapability::Unsupported),
     };
     let defaults_ti2v = ManifestDefaults {
         // ComfyUI's TI2V-5B template: 20 steps, cfg 5, uni_pc, 121f @ 24 fps.
@@ -4908,6 +4988,9 @@ fn wan_manifests() -> Vec<ModelManifest> {
         negative_prompt: Some(WAN_DEFAULT_NEGATIVE_PROMPT.to_string()),
         frames: Some(121),
         fps: Some(24),
+        // TI2V renders text-to-video and, when a source is supplied,
+        // pins it as frame 0 through the latent-inpaint path (#772).
+        source_image: Some(crate::types::SourceImageCapability::Optional),
     };
 
     vec![
@@ -5016,9 +5099,11 @@ fn wan_manifests() -> Vec<ModelManifest> {
         a14b_manifest(A14bTier::Fast, A14bTask::T2v),
         a14b_manifest(A14bTier::Quality, A14bTask::T2v),
         a14b_manifest(A14bTier::Compact, A14bTask::T2v),
+        a14b_manifest(A14bTier::Fp8, A14bTask::T2v),
         a14b_manifest(A14bTier::Fast, A14bTask::I2v),
         a14b_manifest(A14bTier::Quality, A14bTask::I2v),
         a14b_manifest(A14bTier::Compact, A14bTask::I2v),
+        a14b_manifest(A14bTier::Fp8, A14bTask::I2v),
     ]
 }
 
@@ -5048,9 +5133,10 @@ impl A14bTask {
     }
 }
 
-/// The three shipped A14B tiers. They are the same weights at different
-/// quantizations; what actually separates them is the four-step distill, which
-/// only the Lightning tiers carry.
+/// The four shipped A14B tiers. The GGUF tiers are the same weights at
+/// different quantizations; what actually separates them is the four-step
+/// distill, which only the Lightning tiers carry. The fp8 tier is a different
+/// container entirely (#777).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum A14bTier {
     /// Q5_K_M plus the lightx2v four-step distill pair.
@@ -5062,6 +5148,17 @@ enum A14bTier {
     /// cards. Q4_K_M is the community floor before the quality cliff; the
     /// Q4/Q5 boundary is where GGUF Wan degrades visibly (#794).
     Compact,
+    /// Comfy-Org's `*_fp8_scaled` e4m3 safetensors experts (~14.3 GB each,
+    /// max-of-pair residency on 24 GB cards), running the 20-step quality
+    /// recipe. Measured against `:q8` at 33f/832x480 on an RTX 4090: step
+    /// time is a wash (~28 s/step both — the denoise is compute-bound, not
+    /// weight-decode-bound), but peak VRAM drops 20,278 → 17,646 MiB. That
+    /// headroom, plus the LoRA story, is the tier: unlike GGUF, user LoRAs
+    /// (including the lightx2v pair passed via `--lora`) merge into fp8
+    /// weights at load instead of running as a per-step branch. Bare-name
+    /// resolution deliberately stays on `:q8` (#777 tier-semantics
+    /// decision).
+    Fp8,
 }
 
 impl A14bTier {
@@ -5070,6 +5167,7 @@ impl A14bTier {
             Self::Fast => "q5",
             Self::Quality => "q8",
             Self::Compact => "q4",
+            Self::Fp8 => "fp8",
         }
     }
 
@@ -5078,14 +5176,16 @@ impl A14bTier {
             Self::Fast => "Q5_K_M",
             Self::Quality => "Q8_0",
             Self::Compact => "Q4_K_M",
+            Self::Fp8 => unreachable!("the fp8 tier ships safetensors, not GGUF"),
         }
     }
 
     /// Whether the tier ships the lightx2v four-step Lightning distill pair.
     /// The adapters were trained against the bf16 weights, so the Q5 and Q4
-    /// tiers pull byte-identical files.
+    /// tiers pull byte-identical files. The fp8 tier merges user adapters at
+    /// load instead of shipping one.
     fn has_distill(self) -> bool {
-        !matches!(self, Self::Quality)
+        matches!(self, Self::Fast | Self::Compact)
     }
 }
 
@@ -5148,6 +5248,27 @@ fn a14b_expert_facts(task: A14bTask, tier: A14bTier, low_noise: bool) -> FileFac
             9_651_728_896,
             "e2f98d834af009d035c6b0918268f2eba0aa8a63025ce942277e2384d40b0866",
         ),
+        // The Comfy-Org fp8-scaled safetensors pairs (#777), read from the
+        // Hugging Face API like every row above. Comfy-Org over Kijai's `_KJ`
+        // exports: same e4m3 ComfyUI marker contract the loader shipped
+        // against in #747, ~1 GB smaller per expert, and the repository this
+        // family's VAE/encoder rows already pull from.
+        (A14bTask::T2v, A14bTier::Fp8, false) => (
+            14_293_923_632,
+            "cad711ae211c8b23455ec68cd6a190a33a3d874234a77eb57266d73f8f0e6c9f",
+        ),
+        (A14bTask::T2v, A14bTier::Fp8, true) => (
+            14_293_923_632,
+            "e71b96d7c82e638694c5e7fb98fac4bfb0e4ddc5fbbb4b1df40da8f0f1278a97",
+        ),
+        (A14bTask::I2v, A14bTier::Fp8, false) => (
+            14_294_742_832,
+            "6122e79d55e0f235698d11d657f3b196c5273c830da00b2b013c5a048d5e6a42",
+        ),
+        (A14bTask::I2v, A14bTier::Fp8, true) => (
+            14_294_742_832,
+            "5471a457b6ac404202a5fbe6c11595a3d5641fc766b00f38763f72303fffc21e",
+        ),
     }
 }
 
@@ -5208,19 +5329,30 @@ fn a14b_distill_facts(task: A14bTask, low_noise: bool) -> (&'static str, FileFac
 /// that budget.
 fn a14b_manifest(tier: A14bTier, task: A14bTask) -> ModelManifest {
     let expert_file = |low_noise: bool| {
-        let (folder, noise) = if low_noise {
-            ("LowNoise", "LowNoise")
-        } else {
-            ("HighNoise", "HighNoise")
-        };
         let (size_bytes, sha256) = a14b_expert_facts(task, tier, low_noise);
+        let (hf_repo, hf_filename) = if tier == A14bTier::Fp8 {
+            (
+                "Comfy-Org/Wan_2.2_ComfyUI_Repackaged".to_string(),
+                format!(
+                    "split_files/diffusion_models/wan2.2_{}_{}_noise_14B_fp8_scaled.safetensors",
+                    task.slug(),
+                    if low_noise { "low" } else { "high" },
+                ),
+            )
+        } else {
+            let folder = if low_noise { "LowNoise" } else { "HighNoise" };
+            (
+                task.gguf_repo().to_string(),
+                format!(
+                    "{folder}/Wan2.2-{}-A14B-{folder}-{}.gguf",
+                    task.slug().to_uppercase(),
+                    tier.gguf_quant()
+                ),
+            )
+        };
         ModelFile {
-            hf_repo: task.gguf_repo().to_string(),
-            hf_filename: format!(
-                "{folder}/Wan2.2-{}-A14B-{noise}-{}.gguf",
-                task.slug().to_uppercase(),
-                tier.gguf_quant()
-            ),
+            hf_repo,
+            hf_filename,
             component: if low_noise {
                 ModelComponent::LowNoiseTransformer
             } else {
@@ -5271,19 +5403,23 @@ fn a14b_manifest(tier: A14bTier, task: A14bTask) -> ModelManifest {
         // step, which is half of where the speed comes from.
         A14bTier::Fast | A14bTier::Compact => (4, 1.0, "4-step Lightning distill"),
         A14bTier::Quality => (20, WAN_A14B_QUALITY_GUIDANCE, "20-step, no distill"),
+        A14bTier::Fp8 => (20, WAN_A14B_QUALITY_GUIDANCE, "20-step, fp8-scaled"),
     };
     let task_label = match task {
         A14bTask::T2v => "text-to-video",
         A14bTask::I2v => "image-to-video",
+    };
+    let container_label = match tier {
+        A14bTier::Fp8 => "FP8-scaled".to_string(),
+        _ => tier.gguf_quant().to_string(),
     };
 
     ModelManifest {
         name: format!("wan22-{}-a14b:{}", task.slug(), tier.tag()),
         family: "wan".to_string(),
         description: format!(
-            "Wan 2.2 A14B {} {} — 480p16 {task_label}, two-expert MoE ({tier_note})",
+            "Wan 2.2 A14B {} {container_label} — 480p16 {task_label}, two-expert MoE ({tier_note})",
             task.slug().to_uppercase(),
-            tier.gguf_quant(),
         ),
         files,
         defaults: ManifestDefaults {
@@ -5306,9 +5442,20 @@ fn a14b_manifest(tier: A14bTier, task: A14bTask) -> ModelManifest {
             // measured 21,372 MiB at 832x480 x 53f on an RTX 4090 (#794).
             frames: Some(match tier {
                 A14bTier::Fast | A14bTier::Compact => 53,
-                A14bTier::Quality => 33,
+                // The fp8 resident expert (~14.3 GB) sits between Q8's
+                // 15.4 GB and Q5's 10.8 GB, so it inherits the quality tier's
+                // conservative default until its own envelope is measured.
+                A14bTier::Quality | A14bTier::Fp8 => 33,
             }),
             fps: Some(16),
+            // Recorded from the task this manifest was assembled for, not
+            // its name: the I2V pair denoises a 36-channel mask-plus-image
+            // concat and cannot generate without the image; the T2V pair has
+            // no conditioning input at all (#772).
+            source_image: Some(match task {
+                A14bTask::T2v => crate::types::SourceImageCapability::Unsupported,
+                A14bTask::I2v => crate::types::SourceImageCapability::Required,
+            }),
         },
         hidden: false,
     }
@@ -5325,6 +5472,7 @@ fn companion_manifests() -> Vec<ModelManifest> {
         negative_prompt: None,
         frames: None,
         fps: None,
+        source_image: None,
     };
 
     vec![
@@ -5837,6 +5985,7 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
         negative_prompt: None,
         frames: None,
         fps: None,
+        source_image: None,
     };
 
     vec![
@@ -6575,7 +6724,9 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 9 Wan + 4 compliance-hidden MiniMax H3 contracts + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 147
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 11 Wan + 4 compliance-hidden MiniMax H3 contracts + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 149
+        // Wan fp8 bump (#777): +wan22-{t2v,i2v}-a14b:fp8 — the Comfy-Org
+        // fp8-scaled expert pairs.
         // Wan bump: +wan22-{t2v,i2v}-a14b:{q5,q8} — the two-expert A14B tiers.
         // Wan low-VRAM bump (#794): +wan22-{t2v,i2v}-a14b:q4 and
         // +wan22-ti2v-5b:q8.
@@ -6585,7 +6736,7 @@ mod tests {
         // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
         // Gemma 3 12B text encoder); +wan-umt5, +wan21-vae, +wan22-vae for
         // single-file Wan checkpoints.
-        assert_eq!(known_manifests().len(), 147);
+        assert_eq!(known_manifests().len(), 149);
     }
 
     #[test]

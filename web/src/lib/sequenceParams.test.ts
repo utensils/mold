@@ -14,6 +14,8 @@ function formState(): GenerateFormState {
     height: 704,
     steps: 8,
     guidance: 3.5,
+    sourceImageCapability: null,
+    endFrame: null,
     seedMode: "random",
     seed: null,
     batchSize: 1,

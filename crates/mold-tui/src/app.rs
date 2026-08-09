@@ -1897,6 +1897,10 @@ impl App {
                 .iter()
                 .find(|model| model.name == params.model)
                 .and_then(|model| model.guidance_capabilities),
+            catalog
+                .iter()
+                .find(|model| model.name == params.model)
+                .and_then(|model| model.source_image),
         );
 
         let model_description = mold_core::manifest::find_manifest(&params.model)
@@ -2195,10 +2199,29 @@ impl App {
         self.sync_generate_capabilities();
     }
 
+    /// The selected checkpoint's source-image contract (#772): the server's
+    /// advertised classification first, then the built-in manifest, whose
+    /// tiers are structural and so answer for a server too old to advertise
+    /// the field. `None` — an installed catalog checkpoint neither could
+    /// classify — is read as "unknown", never as a contract, and leaves the
+    /// name heuristic in [`capabilities_for_model`] as the last resort.
+    fn source_image_contract(&self, model: &str) -> Option<mold_core::SourceImageCapability> {
+        self.models
+            .catalog
+            .iter()
+            .find(|entry| entry.name == model)
+            .and_then(|entry| entry.source_image)
+            .or_else(|| {
+                mold_core::manifest::find_manifest(model)
+                    .and_then(|manifest| manifest.defaults.source_image)
+            })
+    }
+
     /// Recompute Create rows from the selected model's family and the current
-    /// catalog's checkpoint-specific audio and guidance facts. An incompatible
-    /// model clears stale audio plus LTX-2 pipeline and latent-upscale overrides
-    /// before they can leak into another family.
+    /// catalog's checkpoint-specific audio, guidance, and source-image facts.
+    /// An incompatible model clears stale audio, source image, plus LTX-2
+    /// pipeline and latent-upscale overrides before they can leak into
+    /// another family.
     fn sync_generate_capabilities(&mut self) {
         let model = self.generate.params.model.clone();
         let family = family_for_model(&model, &self.config);
@@ -2227,10 +2250,17 @@ impl App {
             &model,
             advertised_audio_support,
             effective_guidance,
+            self.source_image_contract(&model),
         );
         normalize_generate_params_for_family(&mut self.generate.params, &family);
         if !self.generate.capabilities.supports_audio {
             self.generate.params.enable_audio = None;
+        }
+        // The Source row is gone, so a path carried in from persistence or a
+        // gallery reuse has no editor left to clear it — and submitting it
+        // would only earn a rejection the user cannot act on.
+        if !self.generate.capabilities.supports_source_image {
+            self.generate.params.source_image_path = None;
         }
         if !self.generate.capabilities.supports_references {
             self.generate.params.reference_paths.clear();
@@ -6304,6 +6334,17 @@ impl App {
                 "Ordered references require an explicitly authorized MiniMax H3 Ref2VA model"
                     .to_string(),
             );
+            return;
+        }
+
+        // A required source image is the one contract the Create form cannot
+        // express by hiding a row: the row is visible and simply unset, so
+        // dispatch has to be the gate.
+        if let Some(message) = crate::model_info::source_image_contract_error(
+            self.source_image_contract(&self.generate.params.model),
+            self.generate.params.source_image_path.is_some(),
+        ) {
+            self.generate.error_message = Some(message.to_string());
             return;
         }
 
@@ -11740,6 +11781,7 @@ mod tests {
             &app.generate.params.model,
             None,
             None,
+            None,
         );
         app.generate.params.pipeline = Some(Ltx2PipelineMode::Distilled);
         app.generate.params.guidance = 7.0;
@@ -11873,6 +11915,7 @@ mod tests {
             &app.generate.params.model,
             None,
             None,
+            None,
         );
         app.generate.params.guidance = 7.0;
         app.adjust_field(ParamField::Guidance, 1);
@@ -11882,6 +11925,7 @@ mod tests {
         app.generate.capabilities = crate::model_info::capabilities_for_model(
             "ltx2",
             &app.generate.params.model,
+            None,
             None,
             None,
         );
@@ -12669,6 +12713,7 @@ mod tests {
             supports_sequence: None,
             extend_default_overlap_frames: None,
             guidance_capabilities: None,
+            source_image: None,
         }
     }
 
@@ -14339,6 +14384,7 @@ mod tests {
             supports_sequence: None,
             extend_default_overlap_frames: None,
             guidance_capabilities: None,
+            source_image: None,
         }
     }
 
@@ -14994,6 +15040,126 @@ mod tests {
         };
         assert_eq!(current_prompt, "current edited prompt");
         assert_eq!(root_prompt, "original idea");
+    }
+
+    /// Build a catalog entry for a wan checkpoint advertising `capability`,
+    /// the way a current server's `/api/models` row arrives.
+    fn wan_catalog_entry(
+        name: &str,
+        capability: Option<mold_core::SourceImageCapability>,
+    ) -> ModelInfoExtended {
+        let mut entry = make_test_catalog_entry(name, 20, 5.0, 832, 480, "wan test checkpoint");
+        entry.info.family = "wan".to_string();
+        entry.source_image = capability;
+        entry
+    }
+
+    /// An I2V checkpoint keeps its Source row visible and unset, so nothing
+    /// short of the submit gate can stop the request — and it would otherwise
+    /// fail only after the queue slot, the UMT5 encode, and the expert load.
+    #[tokio::test]
+    async fn required_source_image_blocks_dispatch_with_the_servers_own_message() {
+        let mut app = make_settings_test_app();
+        app.models.catalog = vec![wan_catalog_entry(
+            "wan22-i2v-a14b:q5",
+            Some(mold_core::SourceImageCapability::Required),
+        )];
+        app.generate.params.model = "wan22-i2v-a14b:q5".into();
+        app.set_prompt_text("a cat leaping a fence");
+        app.sync_generate_capabilities();
+        assert!(
+            app.generate.capabilities.supports_source_image,
+            "the row stays so the contract can be satisfied"
+        );
+
+        app.start_generation();
+
+        assert!(!app.generate.generating);
+        assert!(app
+            .generate
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("needs a source image")));
+
+        // Satisfying the contract clears the gate. Asserted through the
+        // decision function rather than a second `start_generation`, which
+        // would dispatch a real job from a unit test.
+        app.generate.params.source_image_path = Some("/tmp/first-frame.png".into());
+        assert_eq!(
+            crate::model_info::source_image_contract_error(
+                app.source_image_contract(&app.generate.params.model),
+                app.generate.params.source_image_path.is_some(),
+            ),
+            None
+        );
+    }
+
+    /// An advertised `unsupported` hides the row, so a path carried in from
+    /// persistence or a gallery reuse has to be dropped here — leaving it
+    /// would submit a request the user has no control left to fix.
+    #[tokio::test]
+    async fn unsupported_source_image_hides_the_row_and_drops_a_stale_path() {
+        let mut app = make_settings_test_app();
+        app.models.catalog = vec![wan_catalog_entry(
+            // A name the older-server heuristic reads as image-to-video.
+            "wan22-i2v-styled-t2v:q5",
+            Some(mold_core::SourceImageCapability::Unsupported),
+        )];
+        app.generate.params.model = "wan22-i2v-styled-t2v:q5".into();
+        app.generate.params.source_image_path = Some("/tmp/stale.png".into());
+
+        app.sync_generate_capabilities();
+
+        assert!(!app.generate.capabilities.supports_source_image);
+        assert_eq!(app.generate.params.source_image_path, None);
+    }
+
+    /// A community fine-tune has no manifest tier, and an older server omits
+    /// the field: the name heuristic is the only answer left, and it decides
+    /// row visibility without ever blocking a request.
+    #[tokio::test]
+    async fn unknown_source_image_contract_preserves_the_name_heuristic() {
+        let mut app = make_settings_test_app();
+        app.models.catalog = vec![wan_catalog_entry("wan-community-i2v-finetune", None)];
+        app.generate.params.model = "wan-community-i2v-finetune".into();
+        app.generate.params.source_image_path = Some("/tmp/first-frame.png".into());
+
+        app.sync_generate_capabilities();
+
+        assert!(app.generate.capabilities.supports_source_image);
+        assert_eq!(
+            app.generate.params.source_image_path.as_deref(),
+            Some("/tmp/first-frame.png")
+        );
+        assert_eq!(
+            crate::model_info::source_image_contract_error(
+                app.source_image_contract(&app.generate.params.model),
+                false,
+            ),
+            None,
+            "an unknown contract must not start rejecting requests"
+        );
+    }
+
+    /// A manifest tier's contract is structural, so it holds against a server
+    /// too old to advertise the field — where the name heuristic alone could
+    /// only ever offer the row, never require it.
+    #[tokio::test]
+    async fn manifest_tier_supplies_the_contract_an_older_server_omits() {
+        let mut app = make_settings_test_app();
+        app.models.catalog = vec![wan_catalog_entry("wan22-i2v-a14b:q5", None)];
+        app.generate.params.model = "wan22-i2v-a14b:q5".into();
+        app.set_prompt_text("a cat leaping a fence");
+        app.sync_generate_capabilities();
+
+        app.start_generation();
+
+        assert!(!app.generate.generating);
+        assert!(app
+            .generate
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("needs a source image")));
     }
 
     #[tokio::test]

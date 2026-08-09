@@ -46,6 +46,7 @@ import {
 } from "@studio/lib/sequence";
 import { OPTIONAL_PROMPT_GUIDANCE, promptRequired } from "@studio/lib/promptRequirement";
 import { minimaxH3AuthoringError } from "@studio/lib/minimaxH3Authoring";
+import { firstLastFrameRestoreNotice } from "@studio/lib/sourceImageCapability";
 import {
   clampClipsToMotionTail,
   isPrintOfChainJob,
@@ -101,6 +102,7 @@ import {
   fpsValidationError,
   guidanceValidationError,
   resolutionValidationError,
+  sourceConditioningValidationError,
   stepsValidationError,
   wanRecipeValidationError,
 } from "../lib/generateValidation";
@@ -503,7 +505,18 @@ const jobErrorCopy = computed(() =>
   job.value?.error ? copyableError(job.value.error, jobErrorMessage.value) : jobErrorMessage.value,
 );
 const siblings = computed(() => generation.siblings);
-const caps = computed(() => generationCapabilitiesForFamily(form.family, form.model));
+// Resolved with the same five inputs the form and its validators use, so the
+// view can never disagree with them about the selected checkpoint's advertised
+// source-image contract (#772) or its first/last-frame layout (#779).
+const caps = computed(() =>
+  generationCapabilitiesForFamily(
+    form.family,
+    form.model,
+    form.pipeline,
+    form.guidanceCapabilities,
+    form.sourceImageCapability,
+  ),
+);
 const formValidationError = computed(
   () =>
     resolutionValidationError(
@@ -520,6 +533,7 @@ const formValidationError = computed(
     (caps.value.supportsVideo ? fpsValidationError(form.fps) : null) ??
     cameraControlValidationError(form) ??
     audioOutputValidationError(form) ??
+    sourceConditioningValidationError(form) ??
     advancedVideoValidationError(form) ??
     wanRecipeValidationError(form),
 );
@@ -2267,7 +2281,13 @@ async function preprocessSourceFit(
   route: HostRoute | null,
   draft: ReturnType<typeof cloneGenerateForm>,
 ): Promise<boolean> {
-  const draftCaps = generationCapabilitiesForFamily(draft.family, draft.model);
+  const draftCaps = generationCapabilitiesForFamily(
+    draft.family,
+    draft.model,
+    draft.pipeline,
+    draft.guidanceCapabilities,
+    draft.sourceImageCapability,
+  );
   if (!draftCaps.supportsImg2img || draftCaps.sourceImageMode !== "single") return true;
   if (!draft.sourceImage) return true;
   try {
@@ -2746,6 +2766,20 @@ function applyPrefill() {
   // history / jobs keep the legacy scalar copy.
   applyPrefillToForm(form, prefill, installedModels.value);
   if ("metadata" in prefill && prefill.metadata) {
+    // A first/last-frame print restores every knob except its closing still:
+    // saved metadata records each keyframe's name and digest, never the bytes
+    // (`applyMetadataToForm` already cleared `form.endFrame`). Say so, the same
+    // way an unrestorable source video does, rather than letting Generate look
+    // ready to reproduce the render.
+    const endFrameNotice = firstLastFrameRestoreNotice(
+      caps.value.supportsEndFrame,
+      prefill.metadata.keyframes,
+      // A first/last print carries its opening frame only in keyframes[0];
+      // the stash/gallery restore below keys on source provenance, so
+      // without it both endpoints need reattaching and the notice says so.
+      Boolean(prefill.metadata.source_image_sha256 ?? prefill.metadata.source_image_name),
+    );
+    if (endFrameNotice) toasts.push(endFrameNotice, "error");
     void restorePrefillSource(prefill.metadata, restoreEpoch);
   }
   void nextTick(() => composerRef.value?.focus?.());

@@ -892,6 +892,7 @@ async fn prepare_generation(
     if let Err(e) = validate_generate_request(validation_request, resolved_family.as_deref()) {
         return Err(ApiError::validation(e));
     }
+    enforce_source_image_capability(state, request, resolved_family.as_deref()).await?;
 
     let resolved_references = if request.references.is_some() {
         let identity = reference_identity
@@ -1881,6 +1882,56 @@ fn validate_generate_request(
     family_hint: Option<&str>,
 ) -> Result<(), String> {
     mold_core::validate_generate_request_with_family(req, family_hint)
+}
+
+/// Enforce the per-model source-image contract at admission (#772), with the
+/// engine's own wording — both failure modes used to surface only after the
+/// user had paid for the UMT5 encode and the expert load.
+///
+/// The contract resolves manifest-first (cold tiers classify from their own
+/// task structure) and falls back to the downloaded checkpoint's headers.
+/// An unknown contract enforces nothing: the engine remains the authority
+/// and its late error is no worse than today's behavior.
+async fn enforce_source_image_capability(
+    state: &AppState,
+    request: &mold_core::GenerateRequest,
+    resolved_family: Option<&str>,
+) -> Result<(), ApiError> {
+    // Wan probes the resolved checkpoint's own headers FIRST: `ModelPaths`
+    // honors config/env path overrides, so the artifacts actually loaded can
+    // differ from the manifest's task structure — the shape-driven read is
+    // the engine's exact truth. The manifest stays the cold fallback (not
+    // yet downloaded, unreadable headers). Non-wan families have no header
+    // probe; their manifest contract binds directly — plain LTX-Video
+    // declares Unsupported and its engine really does ignore an attached
+    // image.
+    let manifest_contract = mold_core::manifest::find_manifest(&request.model)
+        .and_then(|manifest| manifest.defaults.source_image);
+    let capability = if resolved_family == Some("wan") {
+        let probed = {
+            let config = state.config.read().await;
+            mold_core::ModelPaths::resolve(&request.model, &config).and_then(|paths| {
+                mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
+            })
+        };
+        probed.or(manifest_contract)
+    } else {
+        manifest_contract
+    };
+    // First/last-frame keyframes carry the source frames too (#779): a
+    // T2V-only checkpoint can no more render them than a lone source image,
+    // and a required-source checkpoint is satisfied by them.
+    let has_source =
+        request.source_image.is_some() || request.keyframes.as_ref().is_some_and(|k| !k.is_empty());
+    match mold_core::validation::source_image_contract_violation(
+        resolved_family,
+        &request.model,
+        capability,
+        has_source,
+    ) {
+        Some(message) => Err(ApiError::validation(message)),
+        None => Ok(()),
+    }
 }
 
 async fn apply_default_metadata_setting(state: &AppState, req: &mut mold_core::GenerateRequest) {
@@ -2875,7 +2926,21 @@ pub(crate) async fn placement_preview_for_request(
         response.authoritative = true;
         return response;
     }
-    if let Err(error) = require_server_model_activation(state, &request.model).await {
+    let resolved_family = match require_server_model_activation(state, &request.model).await {
+        Ok(family) => family,
+        Err(error) => {
+            let mut response = unavailable("infeasible", error.error);
+            response.authoritative = true;
+            return response;
+        }
+    };
+    // The source-image contract (#772) is part of admission: a preview that
+    // says `planned` for a request generation would 422 breaks the
+    // authoritative-preview contract, so the same gate answers here as an
+    // authoritative infeasible.
+    if let Err(error) =
+        enforce_source_image_capability(state, &request, resolved_family.as_deref()).await
+    {
         let mut response = unavailable("infeasible", error.error);
         response.authoritative = true;
         return response;

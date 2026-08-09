@@ -81,6 +81,7 @@ import {
   minimaxH3TaskForModel,
   type MinimaxH3AuthoringState,
 } from "@studio/lib/minimaxH3Authoring";
+import { sourceImageValidationError } from "@studio/lib/sourceImageCapability";
 
 const props = withDefaults(
   defineProps<{
@@ -122,6 +123,10 @@ const emit = defineEmits<{
   close: [];
   "open-picker": [];
   "clear-source": [];
+  /** Wan first/last-frame conditioning (#779). The closing still gets its own
+   * picker so it can never overwrite the opening one. */
+  "open-end-frame-picker": [];
+  "clear-end-frame": [];
   "open-mask": [];
   "append-prompt": [phrase: string];
 }>();
@@ -210,12 +215,18 @@ const NEG_CHIPS = [
 // column. Phone: render inside the Advanced sheet.
 const inline = computed(() => !props.mobile);
 
+// The fifth argument is the selected checkpoint's own advertised
+// source-image contract (#772): wan's checkpoints split T2V / I2V-optional /
+// I2V-required and only the server can tell them apart. Never read
+// `source_image` (or a family set) here — the shared kit owns the
+// absent-field fallback that keeps older servers on today's behaviour.
 const caps = computed(() =>
   generationCapabilitiesForFamily(
     props.family,
     props.modelValue.model,
     props.modelValue.pipeline,
     selectedModel.value?.guidance_capabilities,
+    selectedModel.value?.source_image ?? props.modelValue.sourceImageCapability,
   ),
 );
 const flux2Dev = computed(() => isFlux2DevModel(props.modelValue.model));
@@ -311,6 +322,22 @@ function addNegative(word: string) {
 
 // ── Source image ──────────────────────────────────────────────────────
 const hasSource = computed(() => props.modelValue.imageAttachments.length > 0);
+const hasEndFrame = computed(
+  () => caps.value.supportsEndFrame && props.modelValue.endFrame != null,
+);
+/** Why the attached conditioning would be refused, in the server's own order.
+ * H3 keeps its own authoring validator, which names its boundaries precisely. */
+const sourceConditioningError = computed(() =>
+  h3Family.value
+    ? null
+    : sourceImageValidationError({
+        capability: caps.value.sourceImageCapability,
+        hasSourceImage: hasSource.value,
+        hasEndFrame: hasEndFrame.value,
+        frames: caps.value.supportsVideo ? props.modelValue.frames : null,
+        model: props.modelValue.model,
+      }),
+);
 const fitOptions = [
   { value: "pad-fit", label: "Contain" },
   { value: "crop-fill", label: "Cover" },
@@ -470,6 +497,7 @@ function resetAdvanced() {
     scheduler: null,
     cfgPlus: false,
     imageAttachments: [],
+    endFrame: null,
     maskImage: null,
     controlImage: null,
     controlModel: "",
@@ -949,8 +977,11 @@ function setSequenceCameraMode(mode: string) {
           </div>
         </AccordionSection>
 
+        <!-- Hidden outright for a checkpoint the server says takes no source
+             image: admission rejects one, so offering the well can only
+             produce a refused request. -->
         <AccordionSection
-          v-if="!h3Family"
+          v-if="!h3Family && caps.supportsSourceImage"
           icon="image"
           :title="
             caps.sourceImageMode !== 'single'
@@ -974,11 +1005,23 @@ function setSequenceCameraMode(mode: string) {
           :header-interactive="false"
           data-test="section-source"
         >
+          <!-- Requiredness is never inferred: only an explicit advertised
+               `required` marks the well, because a family heuristic can say a
+               checkpoint reads a source image, not that it cannot render
+               without one. -->
+          <p
+            v-if="caps.requiresSourceImage"
+            class="adv__required"
+            data-test="source-required-badge"
+          >
+            Required — this checkpoint renders from an image.
+          </p>
           <button
             v-if="!hasSource"
             type="button"
             class="adv__dropzone"
             data-test="source-attach"
+            :aria-required="caps.requiresSourceImage || undefined"
             @click="emit('open-picker')"
           >
             {{
@@ -1003,8 +1046,9 @@ function setSequenceCameraMode(mode: string) {
                 Remove
               </button>
             </div>
+            <!-- Wan pins the first frame exactly and never reads strength. -->
             <SliderRow
-              v-if="caps.sourceImageMode === 'single'"
+              v-if="caps.sourceImageMode === 'single' && caps.supportsStrength"
               label="Denoise strength"
               :model-value="modelValue.strength"
               :min="0"
@@ -1035,6 +1079,56 @@ function setSequenceCameraMode(mode: string) {
                   : "Edit inpaint mask"
               }}
             </button>
+          </div>
+
+          <!-- Why the attached conditioning would be refused. One message at a
+               time, in the same order admission checks them. -->
+          <p
+            v-if="sourceConditioningError"
+            class="adv__error"
+            role="alert"
+            data-test="source-conditioning-error"
+          >
+            {{ sourceConditioningError }}
+          </p>
+
+          <!-- End frame (wan first/last-frame conditioning, #779). Offered
+               only when the server advertised a source-image contract for this
+               checkpoint: a host old enough to omit the field rejects wan
+               keyframes outright. -->
+          <div
+            v-if="caps.supportsEndFrame"
+            class="adv__end-frame"
+            data-test="end-frame-well"
+          >
+            <div class="adv__subhead">End frame <span>· Optional</span></div>
+            <button
+              v-if="!modelValue.endFrame"
+              type="button"
+              class="adv__dropzone"
+              data-test="end-frame-attach"
+              @click="emit('open-end-frame-picker')"
+            >
+              Drop the closing image or
+              <span class="adv__accent">browse</span>
+            </button>
+            <div v-else class="adv__source-row">
+              <span class="adv__source-name">{{
+                modelValue.endFrame.filename
+              }}</span>
+              <button
+                type="button"
+                class="adv__remove"
+                data-test="end-frame-remove"
+                @click="emit('clear-end-frame')"
+              >
+                Remove
+              </button>
+            </div>
+            <p class="adv__hint">
+              Renders a first/last-frame clip: the source image opens it, this
+              one closes it.
+            </p>
           </div>
 
           <div
@@ -1525,10 +1619,20 @@ function setSequenceCameraMode(mode: string) {
 .adv__label .adv__input {
   margin-top: 6px;
 }
+/* Textual, never colour alone: the requirement has to survive a monochrome
+ * or high-contrast rendering. */
+.adv__required {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--safelight);
+  margin: 0 0 10px;
+}
+/* One error style serves the recipe controls and the end-frame well. */
 .adv__error {
   font-size: 11.5px;
+  line-height: 1.45;
   color: var(--stop);
-  margin-top: 6px;
+  margin: 10px 0 0;
 }
 .adv__reset {
   margin-top: 10px;
@@ -1541,6 +1645,7 @@ function setSequenceCameraMode(mode: string) {
   height: 28px;
   padding: 0 10px;
 }
+.adv__end-frame,
 .adv__controlnet {
   margin-top: 14px;
   padding-top: 14px;

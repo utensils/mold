@@ -16,17 +16,26 @@ export interface GenerationCapabilities extends Omit<
   schedulerOptions: Scheduler[];
 }
 
+/**
+ * `advertisedSourceImage` is the selected `/api/models` row's additive
+ * `source_image` field (#772). Pass it wherever that row is in scope — the
+ * shared kit owns both the absent-field fallback to the family heuristic and
+ * wan's first/last-frame gate, so no view should read the raw field or a
+ * family set of its own.
+ */
 export function generationCapabilitiesForFamily(
   family: string,
   model = "",
   pipeline?: string | null,
   advertisedGuidance?: Parameters<typeof baseGenerationCapabilities>[3],
+  advertisedSourceImage?: string | null,
 ): GenerationCapabilities {
   return baseGenerationCapabilities(
     family,
     model,
     pipeline,
     advertisedGuidance,
+    advertisedSourceImage,
   );
 }
 

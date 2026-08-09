@@ -2252,6 +2252,9 @@ fn defaults() -> ManifestDefaults {
         negative_prompt: None,
         frames: Some(MIN_FRAMES),
         fps: Some(FIXED_FPS),
+        // T2VA runs unconditioned; FL2VA's boundary frames ride the
+        // dedicated first/last contract, not the generic source well.
+        source_image: None,
     }
 }
 

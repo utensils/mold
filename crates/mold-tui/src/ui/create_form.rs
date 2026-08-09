@@ -512,6 +512,7 @@ mod tests {
             mold_core::minimax_h3::REF2VA_COMFY,
             None,
             None,
+            None,
         );
         assert_eq!(
             section_fields(AdvSection::Source, &caps),

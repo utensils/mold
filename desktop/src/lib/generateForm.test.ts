@@ -133,6 +133,86 @@ describe("buildRequest — MiniMax H3 authoring", () => {
   });
 });
 
+describe("buildRequest — wan first/last frames", () => {
+  function wanFlfForm() {
+    const form = newGenerateForm();
+    applyModelDefaults(form, {
+      ...ltx2Model(),
+      name: "wan22-i2v-a14b:q8",
+      family: "wan",
+      default_frames: 81,
+      default_fps: 16,
+      source_image: "optional",
+    });
+    form.frames = 81;
+    form.sourceImage = "FIRST";
+    form.sourceImageName = "open.png";
+    return form;
+  }
+
+  it("ships the pair only as keyframes — never beside source_image", () => {
+    const form = wanFlfForm();
+    form.endFrame = { filename: "close.png", base64: "LAST" };
+    const req = buildRequest(form);
+    // The engine refuses `source_image` + `keyframes` together ("not both"),
+    // and admission counts keyframes as source presence.
+    expect(req.source_image).toBeUndefined();
+    expect(req.source_image_name).toBeUndefined();
+    expect(req.strength).toBeUndefined();
+    expect(req.keyframes).toEqual([
+      { frame: 0, image: "FIRST", name: "open.png" },
+      { frame: 80, image: "LAST", name: "close.png" },
+    ]);
+  });
+
+  it("keeps a lone source image an ordinary image-to-video request", () => {
+    const req = buildRequest(wanFlfForm());
+    expect(req.source_image).toBe("FIRST");
+    expect(req.keyframes).toBeUndefined();
+  });
+
+  it("clears a staged end frame on metadata reuse — metadata carries no bytes", () => {
+    const form = wanFlfForm();
+    form.endFrame = { filename: "stale.png", base64: "STALE" };
+    applyMetadataToForm(form, {
+      prompt: "a lantern drifting downriver",
+      model: "wan22-i2v-a14b:q8",
+      seed: 7,
+      steps: 20,
+      guidance: 3.5,
+      width: 832,
+      height: 480,
+      version: "test",
+    } as OutputMetadata);
+    // A previous draft's closing image must never silently pair with this
+    // print's restored or newly attached opening image.
+    expect(form.endFrame).toBeNull();
+  });
+
+  it("restores a keyframes-only request back into the two wells", () => {
+    const form = wanFlfForm();
+    form.endFrame = { filename: "close.png", base64: "LAST" };
+    const req = buildRequest(form);
+
+    const restored = newGenerateForm();
+    applyPrefillToForm(restored, { request: req }, [
+      {
+        ...ltx2Model(),
+        name: "wan22-i2v-a14b:q8",
+        family: "wan",
+        default_frames: 81,
+        default_fps: 16,
+        source_image: "optional",
+      },
+    ]);
+    expect(restored.sourceImage).toBe("FIRST");
+    expect(restored.sourceImageName).toBe("open.png");
+    expect(restored.endFrame).toEqual({ filename: "close.png", base64: "LAST" });
+    // Wan has no mid-clip keyframe panel; the raw list must not linger.
+    expect(restored.keyframes).toEqual([]);
+  });
+});
+
 describe("newGenerateForm advanced-video defaults", () => {
   it("starts with the LTX-2 advanced fields empty (optional-safe)", () => {
     const form = newGenerateForm();

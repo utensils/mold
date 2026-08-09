@@ -732,6 +732,19 @@ Examples:
         #[arg(long, help_heading = "Video")]
         keyframe: Vec<String>,
 
+        /// Closing frame for a Wan first/last-frame render. Pairs with the
+        /// --image opening frame: the two travel as the clip's endpoint
+        /// keyframes and replace the plain source image, so it is mutually
+        /// exclusive with hand-written --keyframe entries.
+        #[arg(
+            long,
+            help_heading = "Video",
+            value_hint = ValueHint::FilePath,
+            requires = "image",
+            conflicts_with = "keyframe",
+        )]
+        last_image: Option<String>,
+
         /// MiniMax H3 FL2VA opening-frame condition.
         #[arg(
             long,
@@ -1769,6 +1782,7 @@ async fn run() -> anyhow::Result<()> {
             extend,
             extend_overlap,
             keyframe,
+            last_image,
             first_frame,
             last_frame,
             reference,
@@ -1940,6 +1954,7 @@ async fn run() -> anyhow::Result<()> {
                 extend,
                 extend_overlap,
                 keyframe,
+                last_image,
                 first_frame,
                 last_frame,
                 reference,
@@ -3259,6 +3274,60 @@ mod tests {
         .err()
         .expect("first-frame and image must conflict");
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    /// `--last-image` is only ever the closing half of a pair, and it builds
+    /// the keyframe list itself — a hand-written `--keyframe` alongside it
+    /// would be two conflicting answers to the same question.
+    #[test]
+    fn run_last_image_requires_an_opening_image_and_owns_the_keyframes() {
+        let missing_opening = try_parse(&[
+            "run",
+            "wan22-i2v-a14b:q5",
+            "a cat leaping a fence",
+            "--last-image",
+            "/tmp/last.png",
+        ])
+        .err()
+        .expect("last-image must require image");
+        assert_eq!(
+            missing_opening.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let conflicting = try_parse(&[
+            "run",
+            "wan22-i2v-a14b:q5",
+            "a cat leaping a fence",
+            "--image",
+            "/tmp/first.png",
+            "--last-image",
+            "/tmp/last.png",
+            "--keyframe",
+            "0:/tmp/other.png",
+        ])
+        .err()
+        .expect("last-image and keyframe must conflict");
+        assert_eq!(conflicting.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let cli = parse(&[
+            "run",
+            "wan22-i2v-a14b:q5",
+            "a cat leaping a fence",
+            "--image",
+            "/tmp/first.png",
+            "--last-image",
+            "/tmp/last.png",
+        ]);
+        match cli.command {
+            Commands::Run {
+                image, last_image, ..
+            } => {
+                assert_eq!(image, vec!["/tmp/first.png".to_string()]);
+                assert_eq!(last_image.as_deref(), Some("/tmp/last.png"));
+            }
+            _ => panic!("expected a Run command"),
+        }
     }
 
     #[test]

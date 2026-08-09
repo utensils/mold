@@ -251,10 +251,25 @@ pub(crate) struct WanTi2vInpaint {
     /// `[1, 1, latent_frames, h, w]`.
     mask: Tensor,
     geometry: WanLatentGeometry,
+    /// Which endpoint latent frames are pinned clean — decides which token
+    /// blocks report timestep 0.
+    anchors: WanImageAnchors,
 }
 
 impl WanTi2vInpaint {
     pub fn new(geometry: WanLatentGeometry, device: &Device, dtype: DType) -> Result<Self> {
+        Self::with_anchors(geometry, WanImageAnchors::FirstFrame, device, dtype)
+    }
+
+    /// Build the inpaint mask for the given endpoint anchors (#779). FLF is
+    /// diffusers' `last_image` shape on the same path: the final latent frame
+    /// is pinned exactly as frame 0 is.
+    pub fn with_anchors(
+        geometry: WanLatentGeometry,
+        anchors: WanImageAnchors,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Self> {
         let WanLatentGeometry {
             latent_frames,
             latent_height,
@@ -273,10 +288,23 @@ impl WanTi2vInpaint {
                 mold_core::validation::WAN_TEMPORAL_SCALE
             );
         }
+        if anchors == WanImageAnchors::FirstAndLastFrame && latent_frames == 2 {
+            // Both latent frames would be pinned clean; the degenerate twin
+            // of the single-frame case above.
+            bail!(
+                "Wan TI2V conditioning: a first-and-last-frame render over 2 latent frames \
+                 leaves nothing to denoise — both endpoints are pinned. Ask for more frames."
+            );
+        }
         let per_frame = latent_height * latent_width;
         let mut values = vec![1f32; latent_frames * per_frame];
         for slot in values.iter_mut().take(per_frame) {
             *slot = 0.0;
+        }
+        if anchors == WanImageAnchors::FirstAndLastFrame {
+            for slot in values.iter_mut().skip((latent_frames - 1) * per_frame) {
+                *slot = 0.0;
+            }
         }
         let mask = Tensor::from_vec(
             values,
@@ -284,7 +312,11 @@ impl WanTi2vInpaint {
             device,
         )?
         .to_dtype(dtype)?;
-        Ok(Self { mask, geometry })
+        Ok(Self {
+            mask,
+            geometry,
+            anchors,
+        })
     }
 
     pub fn mask(&self) -> &Tensor {
@@ -358,6 +390,14 @@ impl WanTi2vInpaint {
         let mut values = vec![timestep as f32; total];
         for slot in values.iter_mut().take(tokens_per_frame) {
             *slot = 0.0;
+        }
+        if self.anchors == WanImageAnchors::FirstAndLastFrame {
+            // The final latent frame's token block is pinned clean too; any
+            // padding past `tokens` keeps the noise timestep.
+            let last_start = tokens - tokens_per_frame;
+            for slot in values.iter_mut().take(tokens).skip(last_start) {
+                *slot = 0.0;
+            }
         }
         Tensor::from_vec(values, (1, total), device).map_err(Into::into)
     }
@@ -4678,6 +4718,73 @@ mod tests {
         .unwrap();
         let plain = values(&plain);
         assert_eq!(plain[(3 * 3 + 2) * per_frame], 0.0);
+    }
+
+    /// #779: the dual-anchor TI2V inpaint pins BOTH endpoint latent frames —
+    /// mask, blend, and per-token timesteps all agree — while every interior
+    /// frame keeps denoising, and the two degenerate grids are refused.
+    #[test]
+    fn flf_inpaint_pins_both_endpoint_frames() {
+        let geometry = WanLatentGeometry {
+            latent_frames: 4,
+            latent_height: 2,
+            latent_width: 2,
+        };
+        let inpaint = WanTi2vInpaint::with_anchors(
+            geometry,
+            WanImageAnchors::FirstAndLastFrame,
+            &cpu(),
+            DType::F32,
+        )
+        .unwrap();
+
+        // Mask: 0 (pinned clean) at frames 0 and 3, 1 elsewhere.
+        let per_frame = 4;
+        let mask = values(inpaint.mask());
+        for frame in 0..4 {
+            let want = if frame == 0 || frame == 3 { 0.0 } else { 1.0 };
+            assert_eq!(mask[frame * per_frame], want, "mask frame {frame}");
+        }
+
+        // Blend: endpoint frames come from the condition, interior from the
+        // sampler's latents.
+        let condition = Tensor::full(7.0f32, (1, 1, 4, 2, 2), &cpu()).unwrap();
+        let latents = Tensor::full(2.0f32, (1, 1, 4, 2, 2), &cpu()).unwrap();
+        let blended = values(&inpaint.blend(&condition, &latents).unwrap());
+        for frame in 0..4 {
+            let want = if frame == 0 || frame == 3 { 7.0 } else { 2.0 };
+            assert_eq!(blended[frame * per_frame], want, "blend frame {frame}");
+        }
+
+        // Per-token timesteps: 0 for both endpoint token blocks, `t` between,
+        // and padding keeps the noise timestep.
+        let ts = values(
+            &inpaint
+                .per_token_timesteps(937.0, 2, Some(5), &cpu())
+                .unwrap(),
+        );
+        assert_eq!(ts, vec![0.0, 937.0, 937.0, 0.0, 937.0]);
+
+        // A first-frame-only inpaint is unchanged by the new arm.
+        let single = WanTi2vInpaint::new(geometry, &cpu(), DType::F32).unwrap();
+        let ts = values(&single.per_token_timesteps(937.0, 2, None, &cpu()).unwrap());
+        assert_eq!(ts, vec![0.0, 937.0, 937.0, 937.0]);
+
+        // Degenerate grids are refused before any render begins.
+        let two_frames = WanLatentGeometry {
+            latent_frames: 2,
+            latent_height: 2,
+            latent_width: 2,
+        };
+        let error = WanTi2vInpaint::with_anchors(
+            two_frames,
+            WanImageAnchors::FirstAndLastFrame,
+            &cpu(),
+            DType::F32,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("nothing to denoise"), "{error}");
     }
 
     struct Ti2vCase {

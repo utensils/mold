@@ -335,6 +335,38 @@ fn validate_image_args_for_model(family: &str, model: &str, image: &[String]) ->
     Ok(())
 }
 
+/// Reject a request the selected checkpoint's source-image contract (#772)
+/// already refuses, before it costs a queue slot, a UMT5 encode, and an
+/// expert load. Delegates to the shared `mold-core` builder so the wording is
+/// identical wherever the rejection lands — and family-aware, so a plain
+/// LTX-Video refusal names LTX-Video, never Wan.
+///
+/// A `None` capability — a checkpoint whose contract this side cannot
+/// resolve — enforces nothing: the engine remains the authority and its late
+/// error is no worse than today's behavior.
+///
+/// `has_source` counts first/last-frame keyframes as well as a source image
+/// (#779), matching admission: both carry source frames, so either satisfies
+/// a required contract and either is refused by a T2V-only checkpoint.
+fn source_image_contract_error(
+    family: Option<&str>,
+    model: &str,
+    capability: Option<mold_core::SourceImageCapability>,
+    has_source: bool,
+) -> Option<String> {
+    mold_core::validation::source_image_contract_violation(family, model, capability, has_source)
+}
+
+/// The manifest is the same source the server's admission gate consults
+/// for cold tiers, and it is on disk here — so this preflight costs no round
+/// trip and works identically for a remote run, a local fallback, and
+/// `--local`. An installed `cv:`/`hf:` checkpoint has no manifest entry; its
+/// contract stays unknown, exactly as it does for a server that cannot
+/// classify it.
+fn manifest_source_image_contract(model: &str) -> Option<mold_core::SourceImageCapability> {
+    mold_core::manifest::find_manifest(model).and_then(|manifest| manifest.defaults.source_image)
+}
+
 fn parse_pipeline(value: Option<Ltx2PipelineArg>) -> Option<Ltx2PipelineMode> {
     value.map(|value| match value {
         Ltx2PipelineArg::OneStage => Ltx2PipelineMode::OneStage,
@@ -617,6 +649,53 @@ fn parse_keyframes(values: &[String]) -> Result<Option<Vec<KeyframeCondition>>> 
     Ok(Some(keyframes))
 }
 
+/// Anchor `--image` and `--last-image` on the clip's own frame grid as the
+/// two-entry layout the Wan engine accepts (#779).
+///
+/// `resolve_endpoint_images` in `mold-inference` is the contract: exactly two
+/// keyframes, at frame 0 and `frames - 1`, and never alongside a
+/// `source_image` — the engine reads the opening frame from one or the other
+/// and refuses both as ambiguous, so the caller drops the source image it
+/// would otherwise have sent. The indices come from the resolved frame count
+/// the request will carry, never from a flag that may be absent.
+fn endpoint_keyframes(
+    model: &str,
+    first_image: Vec<u8>,
+    first_name: Option<String>,
+    last_image: Vec<u8>,
+    last_name: Option<String>,
+    frames: u32,
+) -> Result<Vec<KeyframeCondition>> {
+    if frames < 2 {
+        anyhow::bail!(
+            "--last-image needs a clip of at least two frames to have distinct endpoints, got \
+             {frames}"
+        );
+    }
+    // TI2V pins endpoints in latent space (4x temporal stride): below nine
+    // pixel frames both latent frames are anchored and nothing remains to
+    // denoise. Mirrors the server's admission floor so the flag fails here,
+    // not after dispatch.
+    if mold_core::manifest::resolve_model_name(model).starts_with("wan22-ti2v-5b") && frames < 9 {
+        anyhow::bail!(
+            "--last-image on wan22-ti2v-5b needs at least 9 frames — shorter clips leave no \
+             latent frames to denoise between the pinned endpoints, got {frames}"
+        );
+    }
+    Ok(vec![
+        KeyframeCondition {
+            frame: 0,
+            image: first_image,
+            name: first_name,
+        },
+        KeyframeCondition {
+            frame: frames - 1,
+            image: last_image,
+            name: last_name,
+        },
+    ])
+}
+
 #[allow(clippy::too_many_arguments)]
 /// CLI device-placement overrides collected from the seven `--device-*` flags.
 /// Each field is the raw user-supplied string (e.g. `"cpu"`, `"gpu:1"`); parsing
@@ -725,6 +804,7 @@ pub async fn run(
     extend: Option<String>,
     extend_overlap: Option<u32>,
     keyframe: Vec<String>,
+    last_image: Option<String>,
     first_frame: Option<PathBuf>,
     last_frame: Option<PathBuf>,
     references: Vec<ReferenceArg>,
@@ -887,6 +967,30 @@ pub async fn run(
 
     validate_image_args_for_model(&family, &model, &image)?;
 
+    // `--last-image` is Wan-only sugar. Every other family reaches its own
+    // boundary conditioning through --keyframe or ordered --image references,
+    // and silently ignoring the flag would render the wrong clip.
+    if last_image.is_some() && family != "wan" {
+        anyhow::bail!(
+            "--last-image is Wan first/last-frame conditioning; the {family} family does not \
+             accept it — use --keyframe for LTX-2 interpolation"
+        );
+    }
+
+    // Before any image is read and before dispatch: an impossible pairing
+    // costs nothing here and minutes on the server. Every flag that can carry
+    // a source frame counts, so a boundary-image run is never mistaken for
+    // text-to-video — withholding the check is recoverable at admission,
+    // rejecting a satisfied contract is not.
+    if let Some(message) = source_image_contract_error(
+        Some(family.as_str()),
+        &model,
+        manifest_source_image_contract(&model),
+        !image.is_empty() || !keyframe.is_empty() || first_frame.is_some() || last_frame.is_some(),
+    ) {
+        anyhow::bail!(message);
+    }
+
     let loaded_images = if let Some(source) = h3_authoring.source_image.take() {
         vec![source]
     } else {
@@ -944,6 +1048,40 @@ pub async fn run(
     } else {
         parse_keyframes(&keyframe)?
     };
+
+    // Fold the endpoint pair into keyframes and surrender the source image:
+    // the Wan engine takes the opening frame from one or the other, never
+    // both. The last index is the frame count this request will carry, which
+    // is the CLI flag or the model's own default — the same resolution
+    // `generate::run` performs.
+    let (source_image, keyframes) = if let Some(ref last_image_path) = last_image {
+        let last_bytes = std::fs::read(last_image_path)
+            .map_err(|e| anyhow::anyhow!("failed to read --last-image '{last_image_path}': {e}"))?;
+        let first_bytes = source_image.ok_or_else(|| {
+            anyhow::anyhow!("--last-image needs --image for the clip's opening frame")
+        })?;
+        let endpoint_frames = frames
+            .or_else(|| config.resolved_model_config(&model).effective_frames())
+            .ok_or_else(|| anyhow::anyhow!("--last-image needs a clip length; pass --frames"))?;
+        let keyframes = endpoint_keyframes(
+            &model,
+            first_bytes,
+            image
+                .first()
+                .filter(|path| path.as_str() != "-")
+                .and_then(|path| Path::new(path).file_name())
+                .map(|name| name.to_string_lossy().into_owned()),
+            last_bytes,
+            Path::new(last_image_path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+            endpoint_frames,
+        )?;
+        (None, Some(keyframes))
+    } else {
+        (source_image, keyframes)
+    };
+
     let pipeline = resolve_ic_lora_pipeline(
         parse_pipeline(pipeline),
         ic_lora_control.as_deref(),
@@ -1475,6 +1613,134 @@ mod placement_flag_tests {
 mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
+
+    /// The pre-dispatch contract check. Identical table in `mold-ai-tui` and
+    /// `mold-ai-discord`; all three must agree with the server's admission
+    /// gate, whose wording they reuse verbatim.
+    #[test]
+    fn source_image_contract_rejects_exactly_what_admission_rejects() {
+        use mold_core::SourceImageCapability::{Optional, Required, Unsupported};
+
+        for (capability, has_source, rejected) in [
+            // Unknown contract — an installed catalog checkpoint, or an
+            // older manifest — enforces nothing.
+            (None, false, false),
+            (None, true, false),
+            (Some(Optional), false, false),
+            (Some(Optional), true, false),
+            (Some(Unsupported), false, false),
+            (Some(Unsupported), true, true),
+            (Some(Required), false, true),
+            (Some(Required), true, false),
+        ] {
+            assert_eq!(
+                source_image_contract_error(
+                    Some("wan"),
+                    "wan22-t2v-a14b:q8",
+                    capability,
+                    has_source
+                )
+                .is_some(),
+                rejected,
+                "{capability:?} with has_source={has_source}"
+            );
+        }
+
+        assert!(source_image_contract_error(
+            Some("wan"),
+            "wan22-t2v-a14b:q8",
+            Some(Unsupported),
+            true
+        )
+        .is_some_and(|message| message.contains("wan22-ti2v-5b")));
+        assert!(source_image_contract_error(
+            Some("wan"),
+            "wan22-i2v-a14b:q8",
+            Some(Required),
+            false
+        )
+        .is_some_and(|message| message.contains("needs a source image")));
+        // Family-aware: a plain LTX-Video refusal names the actual model, not Wan.
+        let message = source_image_contract_error(
+            Some("ltx-video"),
+            "ltx-video-0.9.8-13b-dev:bf16",
+            Some(Unsupported),
+            true,
+        )
+        .expect("unsupported + source refuses");
+        assert!(message.contains("ltx-video-0.9.8-13b-dev"), "{message}");
+        assert!(!message.contains("Wan"), "{message}");
+    }
+
+    /// The closing anchor is derived from the clip length, never from a fixed
+    /// index: `resolve_endpoint_images` rejects any pair not sitting on 0 and
+    /// `frames - 1`, so a stale index renders nothing at all.
+    #[test]
+    fn endpoint_keyframes_anchor_the_resolved_clip_length() {
+        for frames in [2, 53, 81, 121] {
+            let keyframes = endpoint_keyframes(
+                "wan22-i2v-a14b:q5",
+                vec![1, 2, 3],
+                Some("first.png".into()),
+                vec![4, 5, 6],
+                Some("last.png".into()),
+                frames,
+            )
+            .unwrap();
+            assert_eq!(keyframes.len(), 2, "the engine accepts exactly two");
+            assert_eq!(keyframes[0].frame, 0);
+            assert_eq!(keyframes[1].frame, frames - 1);
+            assert_eq!(keyframes[0].image, vec![1, 2, 3]);
+            assert_eq!(keyframes[1].image, vec![4, 5, 6]);
+            assert_eq!(keyframes[0].name.as_deref(), Some("first.png"));
+            assert_eq!(keyframes[1].name.as_deref(), Some("last.png"));
+        }
+
+        // A one-frame clip has no distinct endpoints, and anchoring both on
+        // frame 0 would pass the engine's check while meaning nothing.
+        for frames in [0, 1] {
+            let error =
+                endpoint_keyframes("wan22-i2v-a14b:q5", vec![1], None, vec![2], None, frames)
+                    .unwrap_err()
+                    .to_string();
+            assert!(error.contains("at least two frames"), "{error}");
+        }
+
+        // TI2V pins endpoints in latent space: 5 pixel frames is two latent
+        // frames, both anchored — the server floor is mirrored here.
+        let error = endpoint_keyframes("wan22-ti2v-5b:fp16", vec![1], None, vec![2], None, 5)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("at least 9 frames"), "{error}");
+        assert!(endpoint_keyframes("wan22-ti2v-5b:fp16", vec![1], None, vec![2], None, 9).is_ok());
+    }
+
+    /// The shipped Wan manifests are what this preflight reads, so a drift
+    /// between the tiers and their recorded contract shows up here.
+    #[test]
+    fn wan_manifest_contracts_drive_the_preflight() {
+        use mold_core::SourceImageCapability::{Optional, Required, Unsupported};
+
+        assert_eq!(
+            manifest_source_image_contract("wan22-i2v-a14b:q5"),
+            Some(Required)
+        );
+        assert_eq!(
+            manifest_source_image_contract("wan22-t2v-a14b:q5"),
+            Some(Unsupported)
+        );
+        assert_eq!(
+            manifest_source_image_contract("wan21-t2v-1.3b:bf16"),
+            Some(Unsupported)
+        );
+        assert_eq!(
+            manifest_source_image_contract("wan22-ti2v-5b:fp16"),
+            Some(Optional)
+        );
+        // Not a manifest tier: the contract stays unknown and the engine
+        // remains the authority.
+        assert_eq!(manifest_source_image_contract("cv:12345"), None);
+    }
 
     #[test]
     fn official_control_selects_ic_lora_for_every_canonical_id() {

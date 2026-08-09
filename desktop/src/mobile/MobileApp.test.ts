@@ -4053,6 +4053,215 @@ describe("MobileApp generation queue", () => {
   });
 });
 
+describe("MobileApp wan source conditioning", () => {
+  const wanModel: ModelEntry = {
+    name: "wan22-i2v-a14b",
+    family: "wan",
+    size_gb: 30,
+    is_loaded: false,
+    hf_repo: "example/wan",
+    default_steps: 20,
+    default_guidance: 3.5,
+    default_width: 832,
+    default_height: 480,
+    description: "Wan video model",
+    downloaded: true,
+  };
+
+  function serveWan(entry: ModelEntry, gallery: GalleryImage[] = []): void {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([entry]);
+      if (path === "/api/gallery") return Promise.resolve(gallery);
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path.startsWith("/api/catalog/installed")) return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+  }
+
+  async function pickInto(title: string, filename: string, base64: string): Promise<void> {
+    const sheet = wrapper
+      ?.findAllComponents(MobileImagePickerSheet)
+      .find((candidate) => candidate.props("title") === title);
+    if (!sheet) throw new Error(`Missing ${title} picker`);
+    sheet.vm.$emit("pick", { filename, base64 });
+    await flushPromises();
+  }
+
+  it("keeps the well and offers no end frame when the host advertises no contract", async () => {
+    serveWan(wanModel);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-source-add']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='mobile-end-frame-add']").exists()).toBe(false);
+    await fieldControl("Prompt").setValue("a lantern drifting downriver");
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).not.toHaveProperty(
+      "disabled",
+    );
+  });
+
+  it("hides the source well for an advertised text-to-video checkpoint", async () => {
+    serveWan({ ...wanModel, name: "wan22-t2v-a14b", source_image: "unsupported" });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-source-controls']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-source-add']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-end-frame-add']").exists()).toBe(false);
+    await fieldControl("Prompt").setValue("a lantern drifting downriver");
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).not.toHaveProperty(
+      "disabled",
+    );
+  });
+
+  it("holds Develop when a hidden well still holds a rejected source image", async () => {
+    // The well is gone on an advertised text-to-video checkpoint, so it can no
+    // longer report anything: only the app-level gate stands between a stale
+    // source image and a request admission would refuse.
+    serveWan({ ...wanModel, name: "wan22-t2v-a14b", source_image: "unsupported" });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a lantern drifting downriver");
+
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceImage = btoa("stale opening");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-source-controls']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-source-conditioning-gate']").text()).toContain(
+      "text-to-video only",
+    );
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).toHaveProperty(
+      "disabled",
+    );
+  });
+
+  it("holds Develop with a visible reason until a required source is attached", async () => {
+    serveWan({ ...wanModel, source_image: "required" });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a lantern drifting downriver");
+
+    expect(wrapper.get("[data-test='mobile-source-conditioning-gate']").text()).toContain(
+      "image-to-video only",
+    );
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).toHaveProperty(
+      "disabled",
+    );
+    // The collapsed disclosure has to say the section is not optional, and it
+    // opens itself so the well is one tap away.
+    const disclosure = wrapper.get("[data-test='mobile-source-disclosure']");
+    expect(disclosure.get("summary small").text()).toBe("Required");
+    expect(disclosure.attributes("open")).toBeDefined();
+
+    await pickInto("Source image", "opening.png", btoa("opening"));
+    expect(wrapper.find("[data-test='mobile-source-conditioning-gate']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).not.toHaveProperty(
+      "disabled",
+    );
+  });
+
+  it("refuses an end-frame-only draft and queues the pair as two keyframes", async () => {
+    serveWan({ ...wanModel, source_image: "optional" });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a lantern drifting downriver");
+    await fieldControl("Frames").setValue("97");
+    await flushPromises();
+
+    await pickInto("End frame", "closing.png", btoa("closing"));
+    expect(wrapper.get("[data-test='mobile-source-conditioning-gate']").text()).toContain(
+      "needs a first frame",
+    );
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).toHaveProperty(
+      "disabled",
+    );
+
+    await pickInto("Source image", "opening.png", btoa("opening"));
+    expect(wrapper.get("[data-test='mobile-source-disclosure']").get("summary small").text()).toBe(
+      "opening.png · end frame",
+    );
+    // The closing index follows the frame count held at submit time, not the
+    // one that was current when the end frame was attached.
+    await fieldControl("Frames").setValue("81");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(1);
+    expect(openStreams[0]?.path).toBe("/api/generate/stream");
+    expect(openStreams[0]?.options.body).toMatchObject({
+      keyframes: [
+        { frame: 0, image: btoa("opening"), name: "opening.png" },
+        { frame: 80, image: btoa("closing"), name: "closing.png" },
+      ],
+    });
+    // The engine refuses `source_image` + `keyframes` together ("not both");
+    // the pair travels only as keyframes.
+    expect(openStreams[0]?.options.body.source_image).toBeFalsy();
+  });
+
+  it("sends no keyframes for a lone source image", async () => {
+    serveWan({ ...wanModel, source_image: "optional" });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a lantern drifting downriver");
+    await fieldControl("Frames").setValue("81");
+    await pickInto("Source image", "opening.png", btoa("opening"));
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(1);
+    expect(openStreams[0]?.options.body.source_image).toBe(btoa("opening"));
+    expect(openStreams[0]?.options.body).not.toHaveProperty("keyframes");
+  });
+
+  it("says the reused end frame cannot be restored from saved metadata", async () => {
+    const flfPrint: GalleryImage = {
+      filename: "river.mp4",
+      timestamp: 1_700_000_100,
+      format: "mp4",
+      metadata: {
+        prompt: "a lantern drifting downriver",
+        model: wanModel.name,
+        seed: 11,
+        steps: 20,
+        guidance: 3.5,
+        width: 832,
+        height: 480,
+        frames: 81,
+        output_format: "mp4",
+        keyframes: [
+          { frame: 0, name: "opening.png", sha256: "aa" },
+          { frame: 80, name: "closing.png", sha256: "bb" },
+        ],
+      },
+    };
+    serveWan({ ...wanModel, source_image: "optional" }, [flfPrint]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await flushPromises();
+
+    const summary = wrapper.get("[data-test='mobile-generation-summary']").text();
+    // No source provenance in a first/last print — both endpoints are named.
+    expect(summary).toContain(
+      "The end frame (closing.png) and the first frame (opening.png) can't be restored",
+    );
+    expect(summary).toContain("Prompt settings restored");
+    expect(wrapper.find("[data-test='mobile-generation-error']").exists()).toBe(true);
+  });
+});
+
 describe("MobileApp transport error copy", () => {
   it("humanizes a dead connection when saving a host", async () => {
     apiJsonTo.mockImplementation((apiTarget: { baseUrl: string }, path: string) => {

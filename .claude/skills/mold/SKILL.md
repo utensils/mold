@@ -275,6 +275,12 @@ mold run wan22-t2v-a14b:q8 "storm waves" --sample-shift 12          # upstream 7
 mold run wan22-t2v-a14b:q5 "storm waves" --sample-solver euler      # the Lightning-tuned solver
 mold run wan22-t2v-a14b:q5 "storm waves" --distill-strength high=1.8,low=1.0 --steps 6  # motion-restore recipe
 
+# Wan first/last-frame interpolation (A14B I2V or TI2V-5B; endpoints only, no mid-clip keyframes)
+mold run wan22-i2v-a14b:q5 "the sapling grows into an oak" --image sapling.png --last-image oak.png
+
+# Wan fp8-scaled A14B quality tier (20-step recipe; same speed as :q8, ~2.6 GB lower peak VRAM)
+mold run wan22-t2v-a14b:fp8 "storm waves crash over the lighthouse"
+
 # WebP animated output
 mold run ltx-video-0.9.6-distilled:bf16 "a waterfall" --frames 9 --format webp -o waterfall.webp
 ```

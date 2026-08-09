@@ -12,6 +12,7 @@ import {
   inlineGenerationMediaBytes,
   MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
   MOBILE_MEDIA_BUDGET_ERROR,
+  sourceConditioningValidationError,
   type InlineGenerationMediaField,
 } from "../lib/generateValidation";
 import { base64ToDataUrl, fileToBase64, isStillImageFile } from "../lib/image";
@@ -36,17 +37,38 @@ const emit = defineEmits<{
   "validity-change": [valid: boolean];
 }>();
 
-const caps = computed(() => generationCapabilitiesForFamily(props.form.family, props.form.model));
+// The selected checkpoint's own advertised source-image contract (#772) rides
+// as the fifth argument, exactly as it does in the desktop well: wan's
+// checkpoints split T2V / I2V-optional / I2V-required and only the server can
+// tell them apart. Never read `source_image` (or a family set) here — the
+// helper owns the absent-field fallback that keeps older servers on today's
+// behaviour, and `supportsEndFrame` (#779) rides the same resolution.
+const caps = computed(() =>
+  generationCapabilitiesForFamily(
+    props.form.family,
+    props.form.model,
+    props.form.pipeline,
+    props.form.guidanceCapabilities,
+    props.form.sourceImageCapability,
+  ),
+);
 const isAttachmentMode = computed(() => caps.value.sourceImageMode !== "single");
 const flux2Dev = computed(() => isFlux2DevModel(props.form.model));
 const error = ref("");
 const maskOpen = ref(false);
 const sourcePickerOpen = ref(false);
+const endFramePickerOpen = ref(false);
 const sourcePickerMaxBytes = computed(() =>
   Math.max(
     0,
     MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES -
       inlineGenerationMediaBytes(props.form, "sourceImage"),
+  ),
+);
+const endFramePickerMaxBytes = computed(() =>
+  Math.max(
+    0,
+    MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES - inlineGenerationMediaBytes(props.form, "endFrame"),
   ),
 );
 
@@ -76,8 +98,15 @@ const validationError = computed(() => {
   }
   return null;
 });
+/**
+ * Why the attached conditioning would be refused, in the order admission
+ * checks it. Its own slot rather than a branch of `validationError`, because
+ * the ControlNet paragraph must keep naming the ControlNet problem.
+ */
+const conditioningError = computed(() => sourceConditioningValidationError(props.form));
+const valid = computed(() => !validationError.value && !conditioningError.value);
 
-watch(validationError, (next) => emit("validity-change", !next), { immediate: true });
+watch(valid, (next) => emit("validity-change", next), { immediate: true });
 
 // `/api/models` covers built-in ControlNet manifests, while ControlNet weights
 // pulled from Catalog are discoverable through the installed-sidecar endpoint.
@@ -206,6 +235,19 @@ function pickSource(image: MobilePickedImage): void {
   props.form.sourceImageName = image.filename || null;
   props.form.sourceFit = { mode: "lanczos-resize" };
   sourcePickerOpen.value = false;
+}
+
+/** The closing still of a wan first/last-frame render (#779). It keeps its own
+ * name because that name — with the digest — is all saved metadata will ever
+ * hold of it. */
+function pickEndFrame(image: MobilePickedImage): void {
+  error.value = "";
+  props.form.endFrame = { filename: image.filename, base64: image.base64 };
+  endFramePickerOpen.value = false;
+}
+
+function removeEndFrame(): void {
+  props.form.endFrame = null;
 }
 
 async function pickEditImages(event: Event): Promise<void> {
@@ -394,12 +436,17 @@ function applyMask(mask: string): void {
     </fieldset>
 
     <fieldset v-else class="mobile-source-controls" data-test="mobile-source-controls">
-      <legend class="mobile-source-legend">Source</legend>
+      <legend class="mobile-source-legend">
+        Source<span v-if="caps.requiresSourceImage" data-test="mobile-source-required">
+          · Required</span
+        >
+      </legend>
 
       <button
         v-if="!form.sourceImage"
         type="button"
         class="secondary-button mobile-source-pick"
+        :aria-required="caps.requiresSourceImage ? 'true' : undefined"
         data-test="mobile-source-add"
         @click="sourcePickerOpen = true"
       >
@@ -434,7 +481,8 @@ function applyMask(mask: string): void {
           </button>
         </div>
 
-        <label class="mobile-range-field">
+        <!-- Wan pins the first frame exactly and never reads strength. -->
+        <label v-if="caps.supportsStrength" class="mobile-range-field">
           <span
             >Strength <output>{{ form.strength.toFixed(2) }}</output></span
           >
@@ -472,6 +520,70 @@ function applyMask(mask: string): void {
           }}
         </p>
       </template>
+
+      <!-- One message at a time, in the order admission checks them. The same
+           text is repeated beside Develop so a disabled button is never a dead
+           end while this sheet is closed. -->
+      <p
+        v-if="conditioningError"
+        class="mobile-source-error"
+        role="alert"
+        data-test="mobile-source-conditioning-error"
+      >
+        {{ conditioningError }}
+      </p>
+
+      <!-- End frame (wan first/last-frame conditioning). Offered only when the
+           server advertised a source-image contract for this checkpoint — an
+           older server rejects wan keyframes outright. -->
+      <fieldset
+        v-if="caps.supportsEndFrame"
+        class="mobile-source-subsection"
+        data-test="mobile-end-frame-controls"
+      >
+        <legend>End frame</legend>
+        <p class="mobile-source-note">
+          Optional. The source opens the clip and this photo closes it.
+        </p>
+        <button
+          v-if="!form.endFrame"
+          type="button"
+          class="secondary-button mobile-source-pick"
+          data-test="mobile-end-frame-add"
+          @click="endFramePickerOpen = true"
+        >
+          Choose end frame
+        </button>
+        <template v-else>
+          <figure class="mobile-source-preview-wrap">
+            <img
+              class="mobile-source-preview"
+              data-test="mobile-end-frame-preview"
+              :src="base64ToDataUrl(form.endFrame.base64)"
+              :alt="form.endFrame.filename || 'End frame photo'"
+            />
+            <figcaption v-if="form.endFrame.filename">{{ form.endFrame.filename }}</figcaption>
+          </figure>
+          <div class="mobile-media-actions">
+            <button
+              type="button"
+              class="secondary-button"
+              data-test="mobile-end-frame-replace"
+              @click="endFramePickerOpen = true"
+            >
+              Replace photo
+            </button>
+            <button
+              type="button"
+              class="secondary-button"
+              data-test="mobile-end-frame-remove"
+              @click="removeEndFrame"
+            >
+              Remove
+            </button>
+          </div>
+        </template>
+      </fieldset>
 
       <fieldset v-if="caps.supportsMask && form.sourceImage" class="mobile-source-subsection">
         <legend>Mask</legend>
@@ -645,6 +757,16 @@ function applyMask(mask: string): void {
       :oversize-message="MOBILE_MEDIA_BUDGET_ERROR"
       @pick="pickSource"
       @close="sourcePickerOpen = false"
+    />
+    <MobileImagePickerSheet
+      v-if="!isAttachmentMode && caps.supportsEndFrame"
+      :open="endFramePickerOpen"
+      :target="target"
+      title="End frame"
+      :max-bytes="endFramePickerMaxBytes"
+      :oversize-message="MOBILE_MEDIA_BUDGET_ERROR"
+      @pick="pickEndFrame"
+      @close="endFramePickerOpen = false"
     />
   </template>
 </template>

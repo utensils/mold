@@ -293,14 +293,16 @@ pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
 }
 
 /// Refine family capabilities with the selected checkpoint's additive
-/// `/api/models[].supports_audio` fact. Older servers omit the field, so
-/// `None` preserves the family-level LTX-2 capability; a current server's
-/// explicit `false` hides a control the checkpoint cannot honor.
+/// `/api/models[].supports_audio` and `[].source_image` facts. Older servers
+/// omit the fields, so `None` preserves the family-level LTX-2 capability and
+/// the Wan name heuristic; a current server's explicit value hides a control
+/// the checkpoint cannot honor, or keeps one it cannot run without.
 pub fn capabilities_for_model(
     family: &str,
     model: &str,
     advertised_audio_support: Option<bool>,
     advertised_guidance: Option<mold_core::GuidanceCapabilities>,
+    advertised_source_image: Option<mold_core::SourceImageCapability>,
 ) -> ModelCapabilities {
     let mut caps = capabilities_for_family(family);
     caps.supports_references = mold_core::minimax_h3::is_family(family)
@@ -321,10 +323,67 @@ pub fn capabilities_for_model(
     if family == "wan" {
         caps.supports_source_image = wan_model_takes_source_image(model);
     }
+    // The advertised contract is the server's own classification of this
+    // checkpoint, so it outranks both the family default and the name
+    // heuristic above. H3 stays out: its form shape is static and
+    // compliance-gated, and contradictory metadata may not reshape it.
+    if !mold_core::minimax_h3::is_family(family) {
+        match advertised_source_image {
+            Some(mold_core::SourceImageCapability::Unsupported) => {
+                caps.supports_source_image = false;
+            }
+            // A required source is still a source: keep the row so the user
+            // has somewhere to satisfy the contract.
+            Some(
+                mold_core::SourceImageCapability::Optional
+                | mold_core::SourceImageCapability::Required,
+            ) => {
+                caps.supports_source_image = true;
+            }
+            None => {}
+        }
+    }
     caps
 }
 
+/// Reject a request the selected checkpoint's advertised source-image
+/// contract (#772) already refuses, before it costs a queue slot, a UMT5
+/// encode, and an expert load. Returns the server's own admission wording so
+/// the message is identical wherever the rejection lands.
+///
+/// `None` — an older server, or a checkpoint the server could not classify —
+/// enforces nothing: the engine remains the authority and its late error is no
+/// worse than today's behavior. Only Wan checkpoints advertise a non-optional
+/// contract, which is why both messages name the family.
+///
+/// `has_source` counts first/last-frame keyframes as well as a source image
+/// (#779), matching admission: both carry source frames, so either satisfies
+/// a required contract and either is refused by a T2V-only checkpoint. The
+/// TUI Create form has no keyframe control, so its callers pass the source
+/// image alone.
+pub fn source_image_contract_error(
+    capability: Option<mold_core::SourceImageCapability>,
+    has_source: bool,
+) -> Option<&'static str> {
+    match capability {
+        Some(mold_core::SourceImageCapability::Unsupported) if has_source => Some(
+            "this Wan checkpoint is text-to-video only and does not accept a source image \
+             or keyframes — remove them, or pick an I2V-capable checkpoint such as \
+             wan22-ti2v-5b or wan22-i2v-a14b",
+        ),
+        Some(mold_core::SourceImageCapability::Required) if !has_source => Some(
+            "this Wan I2V checkpoint needs a source image; supply one, or pick a \
+             text-to-video checkpoint such as wan22-t2v-a14b",
+        ),
+        _ => None,
+    }
+}
+
 /// Whether a Wan checkpoint reads a source image, from its name.
+///
+/// This is the older-server fallback only: a current server advertises the
+/// contract per model in `/api/models[].source_image`, classified from the
+/// checkpoint's own headers, and [`capabilities_for_model`] prefers it.
 ///
 /// The family as a whole conditions on images, but individual checkpoints do
 /// not: `WanEngine::build_image_conditioning` refuses one outright on a
@@ -372,10 +431,12 @@ mod tests {
             mold_core::minimax_h3::REF2VA_COMFY,
             None,
             None,
+            None,
         );
         let fl2va = capabilities_for_model(
             mold_core::minimax_h3::FAMILY,
             mold_core::minimax_h3::FL2VA_COMFY,
+            None,
             None,
             None,
         );
@@ -460,14 +521,16 @@ mod tests {
         // The per-model refinement must not resurrect audio for wan the way
         // an advertised `supports_audio` can for LTX-2.
         assert!(
-            !capabilities_for_model("wan", "wan22-t2v-a14b:q5", Some(true), None).supports_audio
+            !capabilities_for_model("wan", "wan22-t2v-a14b:q5", Some(true), None, None)
+                .supports_audio
         );
     }
 
     /// The family conditions on images; individual checkpoints do not. A
     /// text-to-video checkpoint offered the source-image field would have it
     /// rejected by `build_image_conditioning` at generate time, after the
-    /// user picked a file.
+    /// user picked a file. This is the older-server path, where the name is
+    /// all the TUI has.
     #[test]
     fn wan_source_image_follows_the_selected_checkpoint() {
         for model in [
@@ -477,7 +540,7 @@ mod tests {
             "wan22-ti2v-5b:fp16",
         ] {
             assert!(
-                capabilities_for_model("wan", model, None, None).supports_source_image,
+                capabilities_for_model("wan", model, None, None, None).supports_source_image,
                 "{model} takes a source image"
             );
         }
@@ -489,13 +552,87 @@ mod tests {
             "cv:12345",
         ] {
             assert!(
-                !capabilities_for_model("wan", model, None, None).supports_source_image,
+                !capabilities_for_model("wan", model, None, None, None).supports_source_image,
                 "{model} is text-to-video; the engine rejects an image"
             );
         }
 
         // Other families are untouched by the wan-specific narrowing.
-        assert!(capabilities_for_model("sdxl", "sdxl:fp16", None, None).supports_source_image);
+        assert!(
+            capabilities_for_model("sdxl", "sdxl:fp16", None, None, None).supports_source_image
+        );
+    }
+
+    /// A current server classifies the checkpoint from its own headers, which
+    /// is the only way an installed `cv:`/`hf:` I2V fine-tune with an
+    /// unhelpful name gets its Source row — and the only way a T2V fine-tune
+    /// named `...i2v-style...` loses one it cannot use.
+    #[test]
+    fn advertised_source_image_contract_outranks_the_name_heuristic() {
+        use mold_core::SourceImageCapability::{Optional, Required, Unsupported};
+
+        for capability in [Optional, Required] {
+            assert!(
+                capabilities_for_model("wan", "cv:12345", None, None, Some(capability))
+                    .supports_source_image,
+                "{capability:?} keeps the Source row on a name the heuristic reads as T2V"
+            );
+        }
+        assert!(
+            !capabilities_for_model(
+                "wan",
+                "some-i2v-flavored-t2v",
+                None,
+                None,
+                Some(Unsupported)
+            )
+            .supports_source_image
+        );
+
+        // H3's static, compliance-gated form shape is never reshaped by
+        // checkpoint metadata.
+        assert!(
+            !capabilities_for_model(
+                mold_core::minimax_h3::FAMILY,
+                mold_core::minimax_h3::FL2VA_COMFY,
+                None,
+                None,
+                Some(Required),
+            )
+            .supports_source_image
+        );
+    }
+
+    /// The pre-dispatch contract check. Identical table in `mold-ai` and
+    /// `mold-ai-discord`; all three must agree with the server's admission
+    /// gate, whose wording they reuse verbatim.
+    #[test]
+    fn source_image_contract_rejects_exactly_what_admission_rejects() {
+        use mold_core::SourceImageCapability::{Optional, Required, Unsupported};
+
+        for (capability, has_source, rejected) in [
+            // Unknown contract — older server, or a checkpoint the server
+            // could not classify — enforces nothing.
+            (None, false, false),
+            (None, true, false),
+            (Some(Optional), false, false),
+            (Some(Optional), true, false),
+            (Some(Unsupported), false, false),
+            (Some(Unsupported), true, true),
+            (Some(Required), false, true),
+            (Some(Required), true, false),
+        ] {
+            assert_eq!(
+                source_image_contract_error(capability, has_source).is_some(),
+                rejected,
+                "{capability:?} with has_source={has_source}"
+            );
+        }
+
+        assert!(source_image_contract_error(Some(Unsupported), true)
+            .is_some_and(|message| message.contains("text-to-video only")));
+        assert!(source_image_contract_error(Some(Required), false)
+            .is_some_and(|message| message.contains("needs a source image")));
     }
 
     #[test]
@@ -520,16 +657,20 @@ mod tests {
 
     #[test]
     fn checkpoint_audio_fact_narrows_optional_audio_but_not_mandatory_h3_audio() {
-        assert!(capabilities_for_model("ltx2", "ltx-2-dev", None, None).supports_audio);
-        assert!(capabilities_for_model("ltx2", "ltx-2-dev", Some(true), None).supports_audio);
-        assert!(!capabilities_for_model("ltx2", "ltx-2-dev", Some(false), None).supports_audio);
+        assert!(capabilities_for_model("ltx2", "ltx-2-dev", None, None, None).supports_audio);
+        assert!(capabilities_for_model("ltx2", "ltx-2-dev", Some(true), None, None).supports_audio);
         assert!(
-            !capabilities_for_model("ltx-video", "ltx-video-dev", Some(true), None).supports_audio
+            !capabilities_for_model("ltx2", "ltx-2-dev", Some(false), None, None).supports_audio
+        );
+        assert!(
+            !capabilities_for_model("ltx-video", "ltx-video-dev", Some(true), None, None)
+                .supports_audio
         );
         let mandatory_h3 = capabilities_for_model(
             mold_core::minimax_h3::FAMILY,
             mold_core::minimax_h3::FL2VA_COMFY,
             Some(false),
+            None,
             None,
         );
         assert!(mandatory_h3.supports_audio);
@@ -539,16 +680,22 @@ mod tests {
     #[test]
     fn ltx_negative_prompt_support_tracks_the_checkpoint_recipe() {
         assert!(
-            capabilities_for_model("ltx2", "ltx-2.3-22b-dev:fp8", None, None)
+            capabilities_for_model("ltx2", "ltx-2.3-22b-dev:fp8", None, None, None)
                 .supports_negative_prompt
         );
         assert!(
-            !capabilities_for_model("ltx2", "ltx-2.3-22b-distilled:fp8", None, None)
+            !capabilities_for_model("ltx2", "ltx-2.3-22b-distilled:fp8", None, None, None)
                 .supports_negative_prompt
         );
         assert!(
-            capabilities_for_model("ltx-video", "ltx-video-0.9.8-13b-dev:bf16", None, None,)
-                .supports_negative_prompt
+            capabilities_for_model(
+                "ltx-video",
+                "ltx-video-0.9.8-13b-dev:bf16",
+                None,
+                None,
+                None
+            )
+            .supports_negative_prompt
         );
         assert!(
             !capabilities_for_model(
@@ -556,6 +703,7 @@ mod tests {
                 "hf:opaque/checkpoint",
                 None,
                 Some(mold_core::GuidanceCapabilities::FIXED_ONE),
+                None,
             )
             .supports_negative_prompt
         );
@@ -632,6 +780,7 @@ mod tests {
             mold_core::minimax_h3::FL2VA_COMFY,
             Some(false),
             Some(mold_core::GuidanceCapabilities::ADJUSTABLE_CFG),
+            None,
         );
         assert!(contradictory.audio_required);
         assert!(contradictory.supports_audio);

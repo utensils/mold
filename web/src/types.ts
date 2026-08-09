@@ -371,6 +371,14 @@ export interface ModelInfoExtended extends ModelDefaults {
   extend_default_overlap_frames?: number | null;
   /** Model-specific sequence support; absent on older servers. */
   supports_sequence?: boolean | null;
+  /**
+   * Per-model source-image conditioning contract (#772): `"unsupported"`,
+   * `"optional"`, or `"required"`. Additive — absent on older servers AND on
+   * entries the current server could not classify, in which case the family
+   * heuristic answers. Always read it through
+   * `generationCapabilitiesForFamily`'s fifth argument, never raw.
+   */
+  source_image?: string | null;
   guidance_capabilities?: {
     adjustable: boolean;
     supports_negative_prompt: boolean;
@@ -875,6 +883,15 @@ export interface GenerateFormState {
   steps: number;
   guidance: number;
   guidanceCapabilities?: ModelInfoExtended["guidance_capabilities"];
+  /** The selected model's advertised source-image contract (#772),
+   * snapshotted on model change exactly like `guidanceCapabilities`. `null`
+   * means the host advertised nothing and the family heuristic answers. */
+  sourceImageCapability: string | null;
+  /** Wan first/last-frame conditioning (#779): the closing still. Offered
+   * only on a checkpoint whose advertised contract accepts a source image,
+   * and meaningless without one — the pair ships as the two-entry `keyframes`
+   * layout, never a lone keyframe. */
+  endFrame: SourceImageState | null;
   seedMode: SeedMode;
   seed: number | null; // null = random
   batchSize: number;
