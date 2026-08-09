@@ -402,8 +402,45 @@ async fn h3_upstream_change_invalidates_cached_ordinary_repair_intent_before_wri
 /// official Wan 2.2 repack) — shared with mold-catalog's pairing tests.
 const WAN22_VERSION_2057171_HIGH: &str =
     include_str!("../../mold-catalog/tests/fixtures/civitai_wan22_version_2057171_high.json");
+const WAN22_VERSION_2057100_LOW: &str =
+    include_str!("../../mold-catalog/tests/fixtures/civitai_wan22_version_2057100_low.json");
 const WAN22_MODEL_1817671: &str =
     include_str!("../../mold-catalog/tests/fixtures/civitai_wan22_model_1817671.json");
+
+/// Pins `CIVITAI_TOKEN` for the guard's lifetime under the process env
+/// lock, so the repair path's server-resolved credential is present
+/// without racing other env-sensitive tests.
+struct CivitaiTokenGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl CivitaiTokenGuard {
+    fn set(token: &str) -> Self {
+        let lock = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("CIVITAI_TOKEN");
+        unsafe {
+            std::env::set_var("CIVITAI_TOKEN", token);
+        }
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+impl Drop for CivitaiTokenGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("CIVITAI_TOKEN", value),
+                None => std::env::remove_var("CIVITAI_TOKEN"),
+            }
+        }
+    }
+}
 
 fn wan_a14b_pair_sidecar(size_on_disk: u64) -> CatalogSidecar {
     CatalogSidecar {
@@ -504,6 +541,83 @@ async fn a14b_pair_download_enqueues_both_experts() {
         Some("wan/civitai/2057100/wanVideo22_t2vLowNoise14B.safetensors")
     );
     server.verify().await;
+}
+
+/// A repair requested by the LOW-noise id must key everything by the
+/// canonical high-noise identity: the fetched entry canonicalizes to
+/// `cv:2057171`, so the download job, its group, and the written sidecar
+/// must all use that id — otherwise the pull lands under `cv-2057100`
+/// while installed-detection checks `cv-2057171`, and recovery completes
+/// with the model still reported unavailable. A healthy canonical install
+/// must also satisfy a low-id repair without re-downloading.
+// Each #[tokio::test] runs on its own thread and runtime, so holding the
+// process env lock across await points serializes env-sensitive tests
+// without starving an executor.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a14b_repair_by_low_id_keys_the_canonical_identity() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/model-versions/2057100"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(WAN22_VERSION_2057100_LOW))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/models/1817671"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(WAN22_MODEL_1817671))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _token = CivitaiTokenGuard::set("cv_test");
+    let state = AppState::for_tests().with_civitai_base(server.uri());
+    state.config.write().await.models_dir = tmp.path().display().to_string();
+
+    // Nothing installed: the low-id repair enqueues under the canonical id.
+    let job_id = super::enqueue_catalog_primary_repair(&state, "cv:2057100")
+        .await
+        .expect("low-id repair resolves via the canonical pair")
+        .expect("a missing install enqueues a repair job");
+    let listing = state.downloads.listing().await;
+    let job = listing
+        .queued
+        .iter()
+        .chain(listing.active_jobs.iter())
+        .find(|job| job.id == job_id)
+        .expect("repair job queued");
+    assert_eq!(
+        job.model, "cv:2057171",
+        "the download job must be keyed by the canonical high-noise id"
+    );
+    assert_eq!(job.files_total, 2, "the recipe carries both experts");
+
+    // The sidecar lands at the canonical install path, never the low id's.
+    let canonical_sidecar = mold_catalog::sidecar::civitai_sidecar_path(tmp.path(), "cv:2057171");
+    let low_sidecar = mold_catalog::sidecar::civitai_sidecar_path(tmp.path(), "cv:2057100");
+    let sidecar = mold_catalog::sidecar::read_sidecar(&canonical_sidecar)
+        .expect("sidecar written under the canonical id");
+    assert_eq!(sidecar.id, "cv:2057171");
+    assert!(
+        !low_sidecar.exists(),
+        "no second install may be created under the low id"
+    );
+
+    // Healthy canonical install: a low-id repair is already satisfied.
+    let install_dir = canonical_sidecar.parent().unwrap();
+    let high = install_dir.join("wan/civitai/2057171/wanVideo22_t2vHighNoise14B.safetensors");
+    let low = install_dir.join("wan/civitai/2057100/wanVideo22_t2vLowNoise14B.safetensors");
+    std::fs::create_dir_all(high.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(low.parent().unwrap()).unwrap();
+    std::fs::write(&high, b"high").unwrap();
+    std::fs::write(&low, b"high").unwrap();
+    write_sidecar(&canonical_sidecar, &wan_a14b_pair_sidecar(4)).unwrap();
+    let outcome = super::enqueue_catalog_primary_repair(&state, "cv:2057100")
+        .await
+        .expect("low-id repair of a healthy pair resolves");
+    assert_eq!(
+        outcome, None,
+        "a healthy canonical install satisfies the low-id repair without re-downloading"
+    );
 }
 
 /// When the counterpart expert can no longer be identified upstream (the
@@ -839,8 +953,20 @@ const NEWEST_FLUX_LORA_FIXTURE: &str = r#"{
 /// same query issued with two different sorts must forward each sort
 /// upstream and keep separate cache entries — repeated requests per sort
 /// return that sort's rows, never the other's.
+// Each #[tokio::test] runs on its own thread and runtime, so holding the
+// process env lock across await points serializes env-sensitive tests
+// without starving an executor.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn live_search_forwards_sort_and_keys_cache_per_sort() {
+    // Search cache keys include the resolved Civitai token, so ambient
+    // token changes (CivitaiTokenGuard tests) mid-test would split the
+    // cache and break the upstream call-count expectations. Hold the env
+    // lock for the duration.
+    let _env = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(wm_path("/api/v1/models"))
@@ -894,8 +1020,20 @@ async fn live_search_forwards_sort_and_keys_cache_per_sort() {
 
 /// Omitting `?sort=` keeps the historical most-downloaded ordering, and
 /// an explicit `sort=downloads` shares its cache entry (same opts).
+// Each #[tokio::test] runs on its own thread and runtime, so holding the
+// process env lock across await points serializes env-sensitive tests
+// without starving an executor.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn live_search_defaults_to_downloads_sort() {
+    // Search cache keys include the resolved Civitai token, so ambient
+    // token changes (CivitaiTokenGuard tests) mid-test would split the
+    // cache and break the upstream call-count expectations. Hold the env
+    // lock for the duration.
+    let _env = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(wm_path("/api/v1/models"))
@@ -1015,8 +1153,18 @@ async fn catalog_download_enqueues_manual_component_companion() {
     assert_eq!(parsed["companion_jobs"].as_array().unwrap().len(), 0);
 }
 
+// Each #[tokio::test] runs on its own thread and runtime, so holding the
+// process env lock across await points serializes env-sensitive tests
+// without starving an executor.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn catalog_download_rejects_missing_token_before_enqueuing_companions() {
+    // Hold the env lock for the whole test: it exercises the
+    // no-credential server path, and other tests (CivitaiTokenGuard)
+    // inject CIVITAI_TOKEN under this lock.
+    let _env = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if std::env::var("CIVITAI_TOKEN").is_ok() {
         // This regression exercises the no-credential server path. Environments
         // that deliberately inject a token cannot represent that state.

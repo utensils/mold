@@ -1399,7 +1399,13 @@ pub async fn fetch_civitai_version(
     // missing `modelId` or a version absent from its own parent falls
     // through to the single-version item, which normalizes as an
     // un-installable unpaired entry — fail closed, never single-expert.
-    if crate::wan_a14b::a14b_sub_family(&detail.version.base_model).is_some() {
+    // Only checkpoints pair: a LoRA (or any non-checkpoint) on an A14B
+    // base is self-contained, and fetching its parent model would make a
+    // direct pull fail whenever that endpoint is unavailable/forbidden.
+    if crate::wan_a14b::a14b_sub_family(&detail.version.base_model).is_some()
+        && crate::normalizer::civitai_kind_to_catalog_kind(&detail.model.kind)
+            == Some(crate::entry::Kind::Checkpoint)
+    {
         if let Some(model_id) = detail.model_id {
             let item = fetch_civitai_model_item(civitai_base, model_id, civitai_token).await?;
             if let Some(entry) = item
@@ -2467,6 +2473,36 @@ mod tests {
                 "entry size {total} must be the sum of both experts (~{per_file})"
             );
         }
+    }
+
+    /// Only checkpoints pair: a LoRA published against an A14B base model
+    /// is self-contained, so its version detail must resolve without the
+    /// parent-model fetch — a direct pull must not fail just because the
+    /// parent endpoint is unavailable or forbidden.
+    #[tokio::test]
+    async fn a14b_lora_version_resolves_without_the_parent_model_fetch() {
+        let server = MockServer::start().await;
+        let mut detail: serde_json::Value =
+            serde_json::from_str(&fixture("civitai_wan22_version_2057171_high.json")).unwrap();
+        detail["model"]["type"] = "LORA".into();
+        Mock::given(method("GET"))
+            .and(path("/api/v1/model-versions/2057171"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&detail))
+            .mount(&server)
+            .await;
+        // The parent model endpoint is down AND must never be consulted.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models/1817671"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let entry = fetch_civitai_version(&server.uri(), "2057171", None)
+            .await
+            .expect("a self-contained A14B LoRA resolves without pairing");
+        assert_eq!(entry.kind, crate::entry::Kind::Lora);
+        assert_eq!(entry.download_recipe.files.len(), 1);
     }
 
     /// When the parent model publishes no counterpart, the version still

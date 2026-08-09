@@ -195,9 +195,93 @@ pub fn classify_expert(version: &CivitaiVersion, file: &CivitaiFile) -> Option<E
     }
 }
 
+/// Token spans of `name` (char indices): maximal alphanumeric runs split
+/// at non-alphanumeric separators (space, underscore, hyphen, dot, …),
+/// letter↔digit transitions, and camel-case boundaries. Markers are
+/// matched against whole tokens so "Glow" never reads as a low marker
+/// and "highlight" never reads as a high one.
+fn token_spans(chars: &[char]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_ascii_alphanumeric() {
+            if let Some(s) = start.take() {
+                spans.push((s, i));
+            }
+            continue;
+        }
+        if let Some(s) = start {
+            let p = chars[i - 1];
+            let boundary = p.is_ascii_digit() != c.is_ascii_digit()
+                || (p.is_ascii_lowercase() && c.is_ascii_uppercase())
+                || (p.is_ascii_uppercase()
+                    && c.is_ascii_uppercase()
+                    && chars.get(i + 1).is_some_and(|n| n.is_ascii_lowercase()));
+            if boundary {
+                spans.push((s, i));
+                start = Some(i);
+            }
+        } else {
+            start = Some(i);
+        }
+    }
+    if let Some(s) = start {
+        spans.push((s, chars.len()));
+    }
+    spans
+}
+
+/// Marker classification for one token. A token IS a marker when it
+/// equals `high`/`low`. One published convention glues the marker onto a
+/// parameter-size suffix with no case boundary (`…_t2vA14BHIGH` /
+/// `…_t2vA14BLOW`), so a token immediately preceded by a digit may also
+/// END with a marker when at most two characters remain before it —
+/// "14B" + "HIGH". Space-delimited words like "SLOW" or "Glow" are never
+/// digit-preceded, so they stay non-markers. The returned prefix length
+/// is what [`expert_key`] preserves ahead of the placeholder.
+fn token_marker_suffix(chars: &[char], span: (usize, usize)) -> Option<(usize, NameMarker)> {
+    let token: String = chars[span.0..span.1]
+        .iter()
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let marker = |s: &str| match s {
+        "high" => Some(NameMarker::High),
+        "low" => Some(NameMarker::Low),
+        _ => None,
+    };
+    if let Some(m) = marker(&token) {
+        return Some((0, m));
+    }
+    let digit_preceded = span.0 > 0 && chars[span.0 - 1].is_ascii_digit();
+    if !digit_preceded {
+        return None;
+    }
+    for suffix in ["high", "low"] {
+        if let Some(prefix) = token.strip_suffix(suffix) {
+            if prefix.len() <= 2 {
+                return Some((prefix.len(), marker(suffix).expect("marker suffix")));
+            }
+        }
+    }
+    None
+}
+
+fn token_is_marker(chars: &[char], span: (usize, usize)) -> Option<NameMarker> {
+    token_marker_suffix(chars, span).map(|(_, marker)| marker)
+}
+
 fn classify_name(name: &str) -> NameMarker {
-    let lower = name.to_ascii_lowercase();
-    match (lower.contains("high"), lower.contains("low")) {
+    let chars: Vec<char> = name.chars().collect();
+    let mut has_high = false;
+    let mut has_low = false;
+    for span in token_spans(&chars) {
+        match token_is_marker(&chars, span) {
+            Some(NameMarker::High) => has_high = true,
+            Some(NameMarker::Low) => has_low = true,
+            _ => {}
+        }
+    }
+    match (has_high, has_low) {
         (true, false) => NameMarker::High,
         (false, true) => NameMarker::Low,
         // Merged republications, plain "v2.0-fp8" — no marker at all.
@@ -207,14 +291,37 @@ fn classify_name(name: &str) -> NameMarker {
     }
 }
 
-/// Normalized comparison key: lowercase with every `high`/`low` marker
-/// replaced by a shared placeholder, so `"HIGH Q5_0"` and `"LOW Q5_0"`
-/// (or `"t2v_high_noise_14B"` / `"t2v_low_noise_14B"`) produce the same
-/// key.
+/// Normalized comparison key: lowercase with every standalone `high`/`low`
+/// marker token replaced by a shared placeholder, so `"HIGH Q5_0"` and
+/// `"LOW Q5_0"` (or `"t2v_high_noise_14B"` / `"t2v_low_noise_14B"`)
+/// produce the same key while non-marker words like "Glow" survive
+/// intact.
 fn expert_key(name: &str) -> String {
-    name.to_ascii_lowercase()
-        .replace("high", "{expert}")
-        .replace("low", "{expert}")
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::with_capacity(name.len());
+    let mut i = 0;
+    for span in token_spans(&chars) {
+        while i < span.0 {
+            out.push(chars[i].to_ascii_lowercase());
+            i += 1;
+        }
+        if let Some((prefix_len, _)) = token_marker_suffix(&chars, span) {
+            out.extend(
+                chars[span.0..span.0 + prefix_len]
+                    .iter()
+                    .map(|c| c.to_ascii_lowercase()),
+            );
+            out.push_str("{expert}");
+        } else {
+            out.extend(chars[span.0..span.1].iter().map(|c| c.to_ascii_lowercase()));
+        }
+        i = span.1;
+    }
+    while i < chars.len() {
+        out.push(chars[i].to_ascii_lowercase());
+        i += 1;
+    }
+    out
 }
 
 fn version_key(version: &CivitaiVersion, file: &CivitaiFile) -> (String, String) {
@@ -573,6 +680,44 @@ mod tests {
         ] {
             assert_eq!(classify_name(name), want, "{name:?}");
         }
+    }
+
+    /// Markers are standalone tokens (separator-delimited or camel-case
+    /// bounded), never substrings: "Glow" must not read as a low marker
+    /// and "highlight" must not read as a high one.
+    #[test]
+    fn marker_detection_matches_standalone_tokens_only() {
+        for (name, want) in [
+            ("Glow High v1", NameMarker::High),
+            ("Glow Low v1", NameMarker::Low),
+            ("glow_high_v1", NameMarker::High),
+            ("GlowHigh v1", NameMarker::High),
+            ("glow-low.v1", NameMarker::Low),
+            ("highlight reel", NameMarker::NoMarker),
+            ("Blowout v2", NameMarker::NoMarker),
+            ("Mellow Yellow", NameMarker::NoMarker),
+            ("SLOW MOTION", NameMarker::NoMarker),
+            ("wanVideo22_t2vHighNoise14B.safetensors", NameMarker::High),
+            ("wanVideo22_t2vLowNoise14B.safetensors", NameMarker::Low),
+            // The KJ convention glues the marker to the parameter-size
+            // suffix with no case boundary; the digit-preceded suffix
+            // rule keeps it classified without readmitting substrings.
+            ("wan22FP8KJ_t2vA14BHIGH.safetensors", NameMarker::High),
+            ("wan22FP8KJ_t2vA14BLOW.safetensors", NameMarker::Low),
+        ] {
+            assert_eq!(classify_name(name), want, "{name:?}");
+        }
+        assert_eq!(
+            expert_key("wan22FP8KJ_t2vA14BHIGH.safetensors"),
+            expert_key("wan22FP8KJ_t2vA14BLOW.safetensors"),
+        );
+
+        // The pairing key normalizes the same standalone tokens, so the
+        // Glow pair reduces to one shared key while non-marker words
+        // survive intact.
+        assert_eq!(expert_key("Glow High v1"), "glow {expert} v1");
+        assert_eq!(expert_key("Glow High v1"), expert_key("Glow Low v1"));
+        assert_eq!(expert_key("highlight reel"), "highlight reel");
     }
 
     fn version_with_file(version_name: Option<&str>, file_name: &str) -> CivitaiVersion {
