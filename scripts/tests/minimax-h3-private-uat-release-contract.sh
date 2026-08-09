@@ -70,6 +70,27 @@ require_text crates/mold-inference/src/minimax_h3/private_vae_adapter.rs \
 require_text crates/mold-inference/Cargo.toml \
   'required-features = ["dev-bins", "h3-private-uat"]' \
   "the private H3 artifact qualifier is reachable without both development features"
+qwen_capture_bin=$(sed -n \
+  '/name = "h3_qwen_layer50_capture"/,/^$/p' \
+  crates/mold-inference/Cargo.toml)
+if ! grep -Fq 'path = "src/bin/h3_qwen_layer50_capture.rs"' <<<"$qwen_capture_bin" \
+  || ! grep -Fq 'required-features = ["dev-bins", "h3-private-uat"]' \
+    <<<"$qwen_capture_bin"; then
+  fail "the exact-BF16 Qwen capture adapter is reachable outside private development builds"
+fi
+require_text crates/mold-inference/src/bin/h3_qwen_layer50_capture.rs \
+  'load_bf16_conditioner' \
+  "the Qwen layer-50 capture adapter does not use the official dense BF16 loader"
+require_text crates/mold-inference/src/bin/h3_qwen_layer50_capture.rs \
+  'Device::new_cuda' \
+  "the exact-BF16 Qwen capture adapter does not fail closed to CUDA execution"
+require_text crates/mold-inference/src/bin/h3_qwen_layer50_capture.rs \
+  'mold.minimax-h3.private-uat-exact-bf16-qwen-layer50-capture.v1' \
+  "the exact-BF16 Qwen capture adapter has no release-rejectable claim marker"
+if grep -Eq 'load_h3_qwen_nvfp4_conditioner|private_qwen' \
+  crates/mold-inference/src/bin/h3_qwen_layer50_capture.rs; then
+  fail "the exact-BF16 Qwen capture adapter references the quantized deployment loader"
+fi
 require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
   '"mold.minimax-h3.private-uat-artifact-reader.v1"' \
   "the private H3 artifact reader has no release-rejectable claim marker"
@@ -584,9 +605,18 @@ require_text scripts/verify-h3-release-exclusion.sh \
 require_text scripts/verify-h3-release-exclusion.sh \
   "private_qwen_support_marker='mold.minimax-h3.private-uat-qwen-support-loader.v1'" \
   "published binary verification does not reject the private H3 Qwen support marker"
+require_text scripts/verify-h3-release-exclusion.sh \
+  "private_qwen_capture_marker='mold.minimax-h3.private-uat-exact-bf16-qwen-layer50-capture.v1'" \
+  "published binary verification does not reject the exact-BF16 Qwen capture marker"
 require_text .github/workflows/ci.yml \
   'cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_artifact_qualification -- -D warnings' \
   "CI does not compile the authorization-bound artifact qualifier"
+require_text .github/workflows/ci.yml \
+  'cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_qwen_layer50_capture -- -D warnings' \
+  "CUDA CI does not compile the exact-BF16 Qwen capture adapter"
+require_text .github/workflows/ci.yml \
+  'python3 scripts/tests/minimax-h3-qwen-layer50-capture-contract.py' \
+  "CI does not run the exact-BF16 Qwen capture contract"
 require_text .github/workflows/ci.yml \
   'cargo test -p mold-ai-inference --lib --features h3-private-uat minimax_h3' \
   "CI does not execute the private H3 foundation tests"
@@ -608,6 +638,9 @@ require_text docs/qualification/minimax-h3.md \
 require_text docs/qualification/minimax-h3.md \
   '--authorization-record' \
   "the private artifact qualifier runbook omits its external authorization record"
+require_text docs/qualification/minimax-h3-conformance.md \
+  'capture-minimax-h3-qwen-layer50.py' \
+  "the exact-BF16 Qwen capture adapter has no operator runbook"
 
 # Ref2VA may share the one-shot owner protocol, but it must retain a distinct
 # runtime qualification, ordered-reference authority, and publication fence.
@@ -640,6 +673,7 @@ ordinary_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:g
 private_marker='mold.minimax-h3.private-uat-artifact-reader.v1'
 private_qwen_support_marker='mold.minimax-h3.private-uat-qwen-support-loader.v1'
 private_runtime_record_marker='mold.minimax-h3.private-runtime-record-producer.v1'
+private_qwen_capture_marker='mold.minimax-h3.private-uat-exact-bf16-qwen-layer50-capture.v1'
 printf '%s\n' "$ordinary_marker" >"$scratch_dir/ordinary"
 scripts/verify-h3-release-exclusion.sh "$scratch_dir/ordinary" >/dev/null
 printf '%s\n%s\n' "$ordinary_marker" "$private_marker" >"$scratch_dir/private"
@@ -655,6 +689,11 @@ printf '%s\n%s\n' "$ordinary_marker" "$private_runtime_record_marker" \
   >"$scratch_dir/private-runtime-record"
 if scripts/verify-h3-release-exclusion.sh "$scratch_dir/private-runtime-record" >/dev/null 2>&1; then
   fail "release exclusion verifier accepted the private H3 runtime-record producer"
+fi
+printf '%s\n%s\n' "$ordinary_marker" "$private_qwen_capture_marker" \
+  >"$scratch_dir/private-qwen-capture"
+if scripts/verify-h3-release-exclusion.sh "$scratch_dir/private-qwen-capture" >/dev/null 2>&1; then
+  fail "release exclusion verifier accepted the exact-BF16 Qwen capture adapter"
 fi
 
 echo "PASS: MiniMax H3 private-UAT release contract"
