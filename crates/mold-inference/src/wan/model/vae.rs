@@ -2031,4 +2031,624 @@ mod tests {
         cfg.temporal_downsample = vec![true, true];
         assert!(cfg.validate().is_err());
     }
+    const GOLDEN_V21_ENCODE: &[f64] = &[
+        0.28541356900077336,
+        0.2854779783399573,
+        0.2849592488731112,
+        0.28462007658875604,
+        0.28587250766186384,
+        0.285986133376414,
+        0.2849381118891893,
+        0.2842693655482159,
+        0.28633305768391243,
+        0.2864878131362548,
+        0.28490583362153965,
+        0.2839131283182757,
+        0.5158684705079641,
+        0.5164692006638391,
+        0.5160656614792941,
+        0.5152511828001655,
+        0.5164174426594018,
+        0.5175868689652523,
+        0.5167235093951997,
+        0.5150967749390558,
+        0.5169855807057634,
+        0.5187058639863205,
+        0.5173538172854946,
+        0.514917375935914,
+        0.39303017523591066,
+        0.3935343282129457,
+        0.3937714086148528,
+        0.3933928333662576,
+        0.39300643045117384,
+        0.3940020907060312,
+        0.39443450165483596,
+        0.393667882673651,
+        0.3929993074630696,
+        0.3944789798771493,
+        0.395084397724926,
+        0.3939254056543181,
+        -0.05469010139812205,
+        -0.05433367355321547,
+        -0.053790444613519506,
+        -0.05385913258616982,
+        -0.05502295205111126,
+        -0.05430974754519419,
+        -0.05324922885475277,
+        -0.05340069320659375,
+        -0.05534370094135719,
+        -0.05427414125996143,
+        -0.05271087420627365,
+        -0.052952395765917405,
+    ];
+    const GOLDEN_V21_DECODE_PROBES: &[f64] = &[
+        0.16625932155248263,
+        -0.12115336595087728,
+        0.027538322902072615,
+        0.12264302361714854,
+        -0.08837984426123152,
+        -0.06631215999373327,
+        -0.28519628547689696,
+        0.23146329319588269,
+        0.39532782841697867,
+        -0.26331574592236706,
+        -0.5727164088170484,
+        0.5265851918424986,
+        0.5110159750901077,
+        -0.1897449280286741,
+        0.29411696320988934,
+        -0.47864286709180404,
+        0.23114645354550642,
+        0.02400039745187403,
+        -0.4884599190628749,
+        0.3611099804399578,
+        0.5184515210192773,
+        -0.24576728369224254,
+        -0.3724960791007724,
+        0.3915723188535392,
+        -0.17333997898291761,
+        0.5052012177363836,
+        -0.2936996039566173,
+        -0.3504736460609408,
+        0.5049720152940144,
+        0.5886325473406522,
+        -0.4533156902236791,
+        -0.2570521878789533,
+        0.2179693138017445,
+        -0.3210584571652122,
+        0.635608484919898,
+        -0.3856066354753301,
+        0.45984046349587687,
+        0.6048214440671047,
+        -0.4086633552888846,
+        -0.5012196938273352,
+        0.5098503351666063,
+        0.5198939560991449,
+        -0.35869520289199397,
+        0.24202374084373682,
+        -0.13532571848624592,
+        0.10618413079126568,
+        0.06892443768290694,
+        -0.11062519960151651,
+        -0.044060631040436574,
+        0.25437073019322304,
+        -0.09473325301937456,
+        -0.22455337145888782,
+        0.1952248939703132,
+        -0.0733028116944058,
+        0.3814629179080815,
+        -0.30506174737504843,
+        -0.4643352959392758,
+        0.28970039727062047,
+        0.652335508563302,
+        -0.28809907696241344,
+        -0.2606882834716587,
+        0.23494724859243044,
+        -0.287183137617253,
+        0.43970306092245753,
+        -0.02636397819298452,
+        0.4436718597942721,
+        0.5011157971688744,
+        -0.34067491004138445,
+        -0.3708122573222803,
+        0.33323682135272736,
+        0.5643696223080777,
+        -0.25058925367638224,
+        0.09779817856647358,
+        -0.5718459754651022,
+        0.07354787736003637,
+        0.10389367277988812,
+        -0.2999616647044435,
+        -0.2549566073708456,
+        0.30636661246979424,
+        0.0597126813992296,
+        -0.16918803162140256,
+        0.2534171006122905,
+        -0.12783982846532221,
+        0.3736702615935804,
+        -0.42620958907381534,
+        -0.4911651820788838,
+        0.2932027074074878,
+        0.15040861283186308,
+        -0.0709132783302632,
+        -0.12282590247737019,
+        -0.025621703596399772,
+        -0.06315050523861535,
+        0.19413230200946854,
+        -0.07457217911362429,
+        0.18778319166284482,
+        0.21397598528452927,
+        0.02523663510195856,
+        -0.6500622999069068,
+        0.057271340595747566,
+        0.33768817318769684,
+        -0.09106082999472911,
+        -0.11830054099948066,
+        -0.6582814038620244,
+        0.06726527844425154,
+        0.15903580010900387,
+        -0.16461331234939713,
+        -0.15161422221270363,
+        0.06797850685802607,
+        0.007421079167583659,
+        -0.3401335158953277,
+        0.02207817067026556,
+        -0.06386815517163284,
+        0.011396135414276282,
+        -0.4254440951535722,
+        -0.5442627209986586,
+        0.1783024835459659,
+        0.5342845850446121,
+        -0.16105436183193161,
+        -0.5092218153457324,
+        0.12678379516030483,
+        -0.12548043509036422,
+        0.6089659197954271,
+        0.004572699448491396,
+        0.2845932560254896,
+        0.28410811882297937,
+        -0.022281984524130695,
+        -0.15220816498438913,
+        0.0344479352060832,
+        0.2969360798600738,
+        -0.09214966476273068,
+        -0.11762290329740069,
+    ];
+    const GOLDEN_V21_DECODE_MEANS: &[f64] = &[
+        0.03805848636620867,
+        0.029949290005471727,
+        0.022720027557631597,
+        0.028222674154902185,
+        0.03577845297749539,
+        0.043093200782860844,
+        0.04678087930184359,
+        0.04755195734439171,
+        0.04764026180434472,
+        0.007742924255844283,
+        0.0003078346608151763,
+        -0.006243895476616,
+        -0.00030125979172917713,
+        0.007818820949232993,
+        0.01558219956587743,
+        0.01918395823390586,
+        0.01966682917099028,
+        0.019471755364957218,
+        -0.03332768896357434,
+        -0.038894175330822345,
+        -0.043715792389939855,
+        -0.038287891871119965,
+        -0.03090805360605773,
+        -0.02394328178263102,
+        -0.021006089103686114,
+        -0.02088900166170011,
+        -0.02133611384316795,
+    ];
+    const V21_DECODE_PROBE_STRIDE: usize = 53;
+    const GOLDEN_V22_ENCODE: &[f64] = &[
+        0.578887949169003,
+        0.5793844800510664,
+        0.5772781594778871,
+        0.5756659434769039,
+        0.5810756431177437,
+        0.5822339211663885,
+        0.5777497421074441,
+        0.5742162645161261,
+        0.5833517485095251,
+        0.5850537456855252,
+        0.5780463988829697,
+        0.5726327195600197,
+        0.04447544122814935,
+        0.04520356153221614,
+        0.04497720916019134,
+        0.04412919353601716,
+        0.044884712080283495,
+        0.04649920638166051,
+        0.04608723295222926,
+        0.04425452269446394,
+        0.045382196300032526,
+        0.04783641284937808,
+        0.0471180079553113,
+        0.04428326346545179,
+        0.3004770962800196,
+        0.3025460464921017,
+        0.30396336944733837,
+        0.3026451530635571,
+        0.29962531177949525,
+        0.3041524057302224,
+        0.3074187468976297,
+        0.30462178254311867,
+        0.2989943583236483,
+        0.3059380438413197,
+        0.3107765443565484,
+        0.30639573666569436,
+        0.16807672104390503,
+        0.1686710649916246,
+        0.16972182594982288,
+        0.16968405367106348,
+        0.16720271993153316,
+        0.1684843184524432,
+        0.17080854376223992,
+        0.17075805096213623,
+        0.1663828400314555,
+        0.16836818350833738,
+        0.17190708805257915,
+        0.17179624692351533,
+    ];
+    const GOLDEN_V22_DECODE_PROBES: &[f64] = &[
+        0.03669274765739762,
+        -0.011128194758272921,
+        0.0006995477855355724,
+        -0.15836558351372154,
+        0.010408146608942272,
+        0.08491417841329593,
+        0.07940674351099837,
+        0.21184352104285128,
+        0.07831760888139341,
+        -0.22721896519028079,
+        0.09804939270958955,
+        -0.01854592919511735,
+        0.4051273570950103,
+        -0.2473833837059608,
+        0.0773347164196987,
+        -0.09078650369417247,
+        -0.0950901630386532,
+        0.098378756209385,
+        0.4223827080395486,
+        -0.2636111636607852,
+        -0.03045316516055916,
+        -0.40348865385555116,
+        0.07061612110164783,
+        0.30408648266732813,
+        0.04586649339639466,
+        0.047575886761668656,
+        -0.29638326435119816,
+        -0.15647109582256097,
+        -0.06737639866289115,
+        0.002406507714996904,
+        0.03755530293737295,
+        -0.19122729890868476,
+        -0.161107002730314,
+        0.07331025220413621,
+        -0.03547937750535386,
+        0.03682013843970408,
+        -0.1267639257974948,
+        -0.3090213013471819,
+        -0.034859653116398756,
+        0.19506506772703425,
+        0.1548596140855497,
+        0.379998915300898,
+        0.0883853426638555,
+        -0.1373185991157287,
+        -0.1051356081875133,
+        0.08699093449834817,
+        0.02910379451329255,
+        0.0006543025261491683,
+        -0.07965089820606422,
+        -0.046667611395539974,
+        0.13285787034116348,
+        0.21955911882056886,
+        0.1757171825956764,
+        0.0043100009403996345,
+        0.05318229900423725,
+        -0.003916562160084007,
+        0.2442580766413583,
+        -0.14491234747368464,
+        0.05575482216131211,
+        0.21038301287687852,
+        -0.2041597819074612,
+        -0.022161674969508827,
+        0.1278914507880594,
+        0.0690253976953623,
+        -0.2169801067987848,
+        -0.038023863404272995,
+        -0.12613555504726703,
+        0.2777114652650926,
+        0.26569563686976966,
+        0.010002675967217614,
+        -0.12523672833449623,
+        -0.12563625199087994,
+        -0.17823531257423803,
+        0.1698869883239067,
+        -0.0003575802822664764,
+        -0.07540047010987183,
+        -0.2510119010649144,
+        0.11484937330224267,
+        -0.17401204040500445,
+        0.2899673768989237,
+        0.05789762409011828,
+        -0.06788048489059438,
+        -0.28340047081467745,
+        -0.017198521592735758,
+        0.25070424050138335,
+        0.30791201840281635,
+        0.04434960204304954,
+        0.06804030717011932,
+        0.015188933101956488,
+        0.04110964319013985,
+        0.030998861058837243,
+        -0.05383384247873771,
+        0.03123244405461103,
+        -0.054241924280065947,
+        0.16947762091020238,
+        0.08578853134926417,
+        -0.027643949340217897,
+        -0.06918610250684525,
+        -0.3065127427494863,
+        0.057642551139872045,
+        0.13306853322095738,
+        0.1099227069030648,
+        0.015138930179777186,
+        -0.14254285898827462,
+        0.0511254952588006,
+        0.1120086768008419,
+        0.0013522161603959412,
+        -0.31894585221690663,
+        0.07270183580737968,
+        -0.4884396810524618,
+        0.10997978375321443,
+        0.3355239861032197,
+        0.020131903089855768,
+        -0.6370070857777832,
+        -0.48253880085056866,
+        -0.40776325698406246,
+        0.010136268171453834,
+        0.09215352628106208,
+        0.45255659463452913,
+        -0.17097309263432992,
+        -0.4006765738528502,
+        0.23750678967630034,
+        0.09703001550862543,
+        0.10163547696086705,
+        -0.03367749892484226,
+        -0.1324564457726731,
+        -0.02513917366713095,
+        -0.06817185882573065,
+        0.2616706199220633,
+        0.17983172416411217,
+        -0.037453460630965024,
+        -0.047318683768292194,
+    ];
+    const GOLDEN_V22_DECODE_MEANS: &[f64] = &[
+        -0.007222604528508958,
+        -0.011413653339580736,
+        -0.015625826746444263,
+        -0.014894179068466268,
+        -0.013456312980547497,
+        -0.012070595098062662,
+        -0.01190152479021657,
+        -0.012109961904850398,
+        -0.012291641691096774,
+        0.0181608029397836,
+        0.019907239187345955,
+        0.02116209165604031,
+        0.02022396368012063,
+        0.02041935470005219,
+        0.021053413804810524,
+        0.021124672354297838,
+        0.020944329735150008,
+        0.020754481748075957,
+        -0.020674824450836952,
+        -0.016635368206490652,
+        -0.012532116713242218,
+        -0.013182334130490829,
+        -0.014637160510478437,
+        -0.016077915438201362,
+        -0.01625317106179453,
+        -0.016029080006687867,
+        -0.01583092120729866,
+    ];
+    const V22_DECODE_PROBE_STRIDE: usize = 211;
+
+    // ---------------------------------------------------------------------
+    // Golden parity with the upstream reference implementations (#789).
+    //
+    // Weights, inputs, and expected outputs are shared with the capture
+    // script `tmp/wan-research/gen-wan-vae-goldens.py`, which runs upstream's
+    // own modules — `tmp/Wan2.1/wan/modules/vae.py` `WanVAE_.encode`/`decode`
+    // (vae.py:516-568) and `tmp/Wan2.2/wan/modules/vae2_2.py`
+    // `WanVAE_.encode`/`decode` (vae2_2.py:783-839) — in float64 over the
+    // same float32-cast synthesized weights before emitting the literals
+    // (`wan-vae-golden.json`). The 2.1 fixture is additionally cross-checked
+    // against diffusers 0.38.0 `AutoencoderKLWan` (exact key-set match after
+    // renaming); the 2.2 fixture is pinned against upstream `vae2_2.py`
+    // alone — diffusers' `is_residual` key naming diverges enough that a
+    // second rename map would itself be a fixture risk, and upstream
+    // Wan-Video is the canonical reference per CLAUDE.md.
+    //
+    // Every golden covers three streaming chunks (encode plan [1, 4, 4];
+    // decode plan [1, 1, 1]), so the feat-cache protocol — slot visit order,
+    // two-frame tail carry, the upsample3d 'Rep' sentinel, downsample3d's
+    // self-spliced carry, and 2.2's `first_chunk` frame drop — sits inside
+    // the parity boundary instead of only being self-consistent. Mutation
+    // spot-checks recorded when the fixture landed: truncating the causal
+    // tail carry to one frame moves the decode probes by 8.5e-3 (and the
+    // weakest signal, 2.2 encode, by 3.5e-5); swapping the upsample3d
+    // even/odd interleave moves the decode probes by 4.3e-4 while every
+    // chunk-plan-invariance test stays green — exactly the class of
+    // wrong-but-consistent port this fixture exists to catch.
+    // ---------------------------------------------------------------------
+
+    /// The capture script's deterministic parameter fill, keyed on the
+    /// checkpoint tensor name (identical in both layouts):
+    /// gammas `1 + 0.25*sin(0.5*i + off)`, biases `0.05*sin(0.9*i + off)`,
+    /// weights `0.015*sin(0.7*i + off)`, with
+    /// `off(name) = (sum of utf8 bytes % 97) * 0.1`, row-major, f64 -> f32.
+    fn synth_offset(name: &str) -> f64 {
+        (name.bytes().map(u64::from).sum::<u64>() % 97) as f64 * 0.1
+    }
+
+    fn synth_param(name: &str, count: usize) -> Vec<f32> {
+        let off = synth_offset(name);
+        (0..count)
+            .map(|i| {
+                let i = i as f64;
+                let v = if name.ends_with("gamma") {
+                    1.0 + 0.25 * (0.5 * i + off).sin()
+                } else if name.ends_with("bias") {
+                    0.05 * (0.9 * i + off).sin()
+                } else {
+                    0.015 * (0.7 * i + off).sin()
+                };
+                v as f32
+            })
+            .collect()
+    }
+
+    /// `scale * sin(freq * i + off(name))`, the script's input synthesis.
+    fn synth_input(name: &str, shape: &[usize], scale: f64, freq: f64) -> Tensor {
+        let off = synth_offset(name);
+        let count: usize = shape.iter().product();
+        let values: Vec<f32> = (0..count)
+            .map(|i| (scale * (freq * i as f64 + off).sin()) as f32)
+            .collect();
+        Tensor::from_vec(values, shape, &Device::Cpu).unwrap()
+    }
+
+    /// Materialize the tiny config once through a VarMap to learn the exact
+    /// (name, shape) set mold's loader reads, then rebuild from synthesized
+    /// tensors under those names. The Python side fills upstream's
+    /// `state_dict()` the same way, so any key-layout divergence between the
+    /// two ports shows up as parity error, not silence.
+    fn golden_vae(config: WanVaeConfig) -> WanVideoVae {
+        let device = Device::Cpu;
+        let (_probe, varmap) = build(config.clone());
+        let mut tensors = std::collections::HashMap::new();
+        for (name, var) in varmap.data().lock().unwrap().iter() {
+            let dims = var.dims().to_vec();
+            let count: usize = dims.iter().product();
+            let tensor = Tensor::from_vec(synth_param(name, count), dims, &device).unwrap();
+            tensors.insert(name.clone(), tensor);
+        }
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
+        WanVideoVae::from_var_builder(vb, config, &device, DType::F32)
+            .expect("golden Wan VAE constructs from synthesized tensors")
+    }
+
+    /// Goldens carry the reference's f64 precision; mold runs in f32, so
+    /// widening our values to compare is the honest direction.
+    fn assert_matches_golden(got: &[f32], want: &[f64], tolerance: f64, what: &str) {
+        assert_eq!(got.len(), want.len(), "{what}: length mismatch");
+        let mut worst = 0.0f64;
+        for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            let err = (f64::from(*g) - w).abs();
+            assert!(
+                err < tolerance,
+                "{what}[{i}]: got {g}, want {w}, err {err:e}"
+            );
+            worst = worst.max(err);
+        }
+        assert!(worst < tolerance, "{what}: worst error {worst:e}");
+    }
+
+    fn flat(t: &Tensor) -> Vec<f32> {
+        t.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+    }
+
+    /// Per-(channel, frame) means, row-major over (c, f) — the reference's
+    /// `dec.mean(dim=(0, 3, 4))`.
+    fn frame_channel_means(t: &Tensor) -> Vec<f32> {
+        flat(&t.mean(4).unwrap().mean(3).unwrap())
+    }
+
+    fn probe(values: &[f32], stride: usize) -> Vec<f32> {
+        values.iter().copied().step_by(stride).collect()
+    }
+
+    /// Observed agreement with the f64 reference is 7.5e-7 at worst (f32
+    /// accumulation through the full streamed decoder). 5e-6 keeps ~7x
+    /// headroom over that noise while sitting 7x below the weakest mutation
+    /// signal observed during capture (3.5e-5).
+    const VAE_GOLDEN_TOLERANCE: f64 = 5e-6;
+
+    #[test]
+    fn wan21_encode_matches_the_upstream_golden() {
+        let vae = golden_vae(WanVaeConfig::tiny_v2_1());
+        let video = synth_input("encode.video.v21", &[1, 3, 9, 16, 16], 0.9, 0.31);
+        let latents = vae.encode(&video).unwrap();
+        assert_eq!(latents.dims(), &[1, 4, 3, 2, 2]);
+        assert_matches_golden(
+            &flat(&latents),
+            GOLDEN_V21_ENCODE,
+            VAE_GOLDEN_TOLERANCE,
+            "wan2.1 encode",
+        );
+    }
+
+    #[test]
+    fn wan21_decode_matches_the_upstream_golden() {
+        let vae = golden_vae(WanVaeConfig::tiny_v2_1());
+        let latents = synth_input("decode.latents.v21", &[1, 4, 3, 2, 2], 0.8, 0.53);
+        let decoded = vae.decode(&latents).unwrap();
+        assert_eq!(decoded.dims(), &[1, 3, 9, 16, 16]);
+        // The fixture keeps |pixels| < 0.98 so mold's clamp is the identity
+        // and parity stays visible at every probe.
+        let values = flat(&decoded);
+        assert_matches_golden(
+            &probe(&values, V21_DECODE_PROBE_STRIDE),
+            GOLDEN_V21_DECODE_PROBES,
+            VAE_GOLDEN_TOLERANCE,
+            "wan2.1 decode probes",
+        );
+        assert_matches_golden(
+            &frame_channel_means(&decoded),
+            GOLDEN_V21_DECODE_MEANS,
+            VAE_GOLDEN_TOLERANCE,
+            "wan2.1 decode means",
+        );
+    }
+
+    #[test]
+    fn wan22_encode_matches_the_upstream_golden() {
+        let vae = golden_vae(WanVaeConfig::tiny_v2_2());
+        let video = synth_input("encode.video.v22", &[1, 3, 9, 32, 32], 0.9, 0.31);
+        let latents = vae.encode(&video).unwrap();
+        assert_eq!(latents.dims(), &[1, 4, 3, 2, 2]);
+        assert_matches_golden(
+            &flat(&latents),
+            GOLDEN_V22_ENCODE,
+            VAE_GOLDEN_TOLERANCE,
+            "wan2.2 encode",
+        );
+    }
+
+    #[test]
+    fn wan22_decode_matches_the_upstream_golden() {
+        let vae = golden_vae(WanVaeConfig::tiny_v2_2());
+        let latents = synth_input("decode.latents.v22", &[1, 4, 3, 2, 2], 0.8, 0.53);
+        let decoded = vae.decode(&latents).unwrap();
+        assert_eq!(decoded.dims(), &[1, 3, 9, 32, 32]);
+        let values = flat(&decoded);
+        assert_matches_golden(
+            &probe(&values, V22_DECODE_PROBE_STRIDE),
+            GOLDEN_V22_DECODE_PROBES,
+            VAE_GOLDEN_TOLERANCE,
+            "wan2.2 decode probes",
+        );
+        assert_matches_golden(
+            &frame_channel_means(&decoded),
+            GOLDEN_V22_DECODE_MEANS,
+            VAE_GOLDEN_TOLERANCE,
+            "wan2.2 decode means",
+        );
+    }
 }

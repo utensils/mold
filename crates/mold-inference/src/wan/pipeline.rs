@@ -2531,15 +2531,53 @@ mod tests {
         assert!(detect_vae_generation(&foreign).is_err());
     }
 
+    /// Deterministically fill a test VarMap: per-name seeds in sorted-name
+    /// order, norm gains near 1, biases small, weights at 0.05 sigma. This is
+    /// what makes [`tiny_engine_run`] reproducible run-to-run so its pixels
+    /// can be pinned (#789) — `VarMap`'s own `Init::Randn` draws from a
+    /// process-global RNG.
+    fn seed_varmap(varmap: &VarMap, base: u64) {
+        let data = varmap.data().lock().unwrap();
+        let mut names: Vec<String> = data.keys().cloned().collect();
+        names.sort();
+        for (index, name) in names.iter().enumerate() {
+            let var = &data[name];
+            let (scale, shift) = if name.ends_with("gamma") {
+                (0.1, 1.0)
+            } else if name.ends_with("bias") {
+                (0.02, 0.0)
+            } else {
+                (0.05, 0.0)
+            };
+            let values = seeded_randn(base + index as u64, var.dims(), &Device::Cpu, DType::F32)
+                .unwrap()
+                .affine(scale, shift)
+                .unwrap();
+            var.set(&values).unwrap();
+        }
+    }
+
     /// End-to-end on CPU at toy widths: tiny DiT + tiny VAE + a real
     /// FlowUniPC schedule, exercising the whole denoise/decode path including
-    /// the CFG branch and the artifact encode.
+    /// the CFG branch and the artifact encode. Weights are deterministic, so
+    /// two calls (and two processes) produce identical frames.
     fn tiny_engine_run(guidance: f64, steps: u32) -> Vec<image::RgbImage> {
         let device = Device::Cpu;
         let dtype = DType::F32;
 
         let vae_config = WanVaeConfig::tiny_v2_1();
         let varmap = VarMap::new();
+        WanVideoVae::from_var_builder(
+            VarBuilder::from_varmap(&varmap, dtype, &device),
+            vae_config.clone(),
+            &device,
+            dtype,
+        )
+        .unwrap();
+        seed_varmap(&varmap, 300);
+        // Rebuild after seeding: `WanCausalConv3d` slices its 3-D weight into
+        // per-tap `Conv2d`s at load time, so mutating the Vars afterwards is
+        // invisible to an already-built model.
         let vae = WanVideoVae::from_var_builder(
             VarBuilder::from_varmap(&varmap, dtype, &device),
             vae_config.clone(),
@@ -2557,6 +2595,12 @@ mod tests {
             ..WanTransformerConfig::tiny(16, 2, 2)
         };
         let transformer_map = VarMap::new();
+        WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&transformer_map, dtype, &device),
+            transformer_config.clone(),
+        )
+        .unwrap();
+        seed_varmap(&transformer_map, 700);
         let transformer = WanTransformer::from_var_builder(
             VarBuilder::from_varmap(&transformer_map, dtype, &device),
             transformer_config.clone(),
@@ -2569,7 +2613,11 @@ mod tests {
         let latent_h = height as usize / vae_config.spatial_compression();
         let latent_w = width as usize / vae_config.spatial_compression();
 
-        let context = Tensor::zeros((1, 6, 32), dtype, &device).unwrap();
+        // Distinct cond/uncond contexts: identical ones make `cond == uncond`,
+        // so the CFG scale drops out and the pinned pixels cannot see a
+        // guidance regression (codex review).
+        let context = seeded_randn(11, &[1, 6, 32], &device, dtype).unwrap();
+        let uncond_context = seeded_randn(13, &[1, 6, 32], &device, dtype).unwrap();
         let schedule = WanSchedule::new(WanScheduleConfig::new(steps as usize, 8.0)).unwrap();
         let mut solver = WanSolver::UniPc(FlowUniPc::new(schedule.clone()));
         let mut latents = seeded_randn(
@@ -2588,7 +2636,7 @@ mod tests {
                 .unwrap();
             let velocity = if needs_cfg_pass(guidance) {
                 let uncond = transformer
-                    .forward_with_rope(&latents, &t, &context, &rope)
+                    .forward_with_rope(&latents, &t, &uncond_context, &rope)
                     .unwrap();
                 apply_cfg(&cond, &uncond, guidance).unwrap()
             } else {
@@ -2618,6 +2666,76 @@ mod tests {
         assert!(!apng.is_empty());
         let thumbnail = video_enc::first_frame_png(&frames).unwrap();
         assert!(!thumbnail.is_empty());
+    }
+
+    /// Pinned pixels for the deterministic tiny run (#789): seed 7 noise,
+    /// 4-step FlowUniPC at shift 8, CFG 5 over DISTINCT seed-11 cond /
+    /// seed-13 uncond contexts (identical ones would cancel the guidance
+    /// term), seeded weights. Any schedule,
+    /// solver, CFG, noise-layout, or VAE-decode regression moves these
+    /// numbers; before this pin such a change could only be caught by UAT.
+    ///
+    /// Per-frame RGB channel means (5 frames x 3, u8 units) and the pixels at
+    /// (3,5), (17,11), (29,27) of every frame. The run is exactly
+    /// reproducible on CPU (verified across processes and test-thread
+    /// counts), so the tolerances only absorb hypothetical cross-platform
+    /// f32 wiggle at the u8 quantization boundary: ±0.35 on a mean, ±1 on a
+    /// probe. Regenerate by printing the same reductions from
+    /// `tiny_engine_run(5.0, 4)` after an *intentional* pipeline change.
+    const TINY_RUN_FRAME_CHANNEL_MEANS: &[f64] = &[
+        120.32421875,
+        121.3203125,
+        130.8427734375,
+        143.0107421875,
+        140.90234375,
+        149.431640625,
+        153.169921875,
+        157.9775390625,
+        146.2822265625,
+        134.2734375,
+        155.7646484375,
+        148.080078125,
+        146.45703125,
+        175.630859375,
+        125.720703125,
+    ];
+    const TINY_RUN_PROBE_PIXELS: &[u8] = &[
+        141, 80, 170, 120, 130, 121, 128, 131, 89, 137, 140, 158, 120, 152, 113, 168, 137, 85, 95,
+        210, 182, 136, 101, 164, 163, 137, 188, 153, 179, 143, 110, 196, 94, 170, 197, 102, 160,
+        158, 150, 117, 185, 91, 227, 150, 180,
+    ];
+
+    #[test]
+    fn tiny_end_to_end_pixels_are_pinned() {
+        let frames = tiny_engine_run(5.0, 4);
+        assert_eq!(frames.len(), 5);
+        let mut means = Vec::new();
+        let mut probes = Vec::new();
+        for frame in &frames {
+            for c in 0..3 {
+                let sum: u64 = frame.pixels().map(|p| u64::from(p.0[c])).sum();
+                means.push(sum as f64 / (32.0 * 32.0));
+            }
+            for (x, y) in [(3u32, 5u32), (17, 11), (29, 27)] {
+                probes.extend_from_slice(&frame.get_pixel(x, y).0);
+            }
+        }
+        assert_eq!(means.len(), TINY_RUN_FRAME_CHANNEL_MEANS.len());
+        for (i, (got, want)) in means
+            .iter()
+            .zip(TINY_RUN_FRAME_CHANNEL_MEANS.iter())
+            .enumerate()
+        {
+            assert!(
+                (got - want).abs() <= 0.35,
+                "frame-channel mean {i}: got {got}, want {want}"
+            );
+        }
+        assert_eq!(probes.len(), TINY_RUN_PROBE_PIXELS.len());
+        for (i, (got, want)) in probes.iter().zip(TINY_RUN_PROBE_PIXELS.iter()).enumerate() {
+            let diff = (i16::from(*got) - i16::from(*want)).abs();
+            assert!(diff <= 1, "probe {i}: got {got}, want {want}");
+        }
     }
 
     /// The single-pass path must reach the same shapes as the CFG path — the
