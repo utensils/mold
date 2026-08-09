@@ -325,7 +325,7 @@ impl H3PrivateComfyStorageAuthority {
         )
     }
 
-    fn validate_opened_components(
+    pub(crate) fn validate_opened_components(
         &self,
         support: &H3PrivateQwenSupport,
         transformer: &H3ComfyOpenedInt8Checkpoint,
@@ -542,6 +542,16 @@ pub(crate) struct H3PrivatePreparedFl2VaFactoryInputs {
     _transformer_support: H3PrivateOpenedTaskConfigAuthority,
 }
 
+/// Artifact-backed half of a consumed preparation. The concrete tensor request
+/// is split out exactly once for `pipeline::execute_staged`; this retention
+/// remains alive through mux and continues to pin the task-config descriptor
+/// plus immutable attempt/budget identities.
+pub(crate) struct H3PrivatePreparedFl2VaRetention {
+    factory_attempt: H3FactoryPreparedAttemptInput,
+    budget_echo: H3FactoryExecutionBudgetEchoInput,
+    transformer_support: H3PrivateOpenedTaskConfigAuthority,
+}
+
 impl H3PrivatePreparedFl2VaAttempt {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare(
@@ -618,6 +628,185 @@ impl H3PrivatePreparedFl2VaAttempt {
             _transformer_support: self._transformer_support,
         }
     }
+}
+
+impl H3PrivatePreparedFl2VaFactoryInputs {
+    /// Revalidate the complete one-shot preparation without reopening any
+    /// artifact path. The task-config descriptor remains shared-locked inside
+    /// this value until terminal attempt cleanup.
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        self._transformer_support.revalidate()?;
+        require_sha256(
+            &self.factory_attempt.identity_sha256,
+            "private H3 prepared attempt",
+        )?;
+        require_sha256(
+            &self.factory_attempt.target_budget.identity_sha256,
+            "private H3 target budget",
+        )?;
+        if self.factory_attempt.request.canonical_model != contract::FL2VA_COMFY
+            || self.factory_attempt.request.task != Task::Fl2va
+            || self.factory_attempt.identity_sha256
+                != expected_h3_factory_prepared_attempt_identity(&self.factory_attempt)
+            || self.factory_attempt.target_budget.identity_sha256
+                != expected_h3_factory_target_budget_identity(&self.factory_attempt.target_budget)
+            || self.budget_echo.prepared_attempt_identity_sha256
+                != self.factory_attempt.identity_sha256
+            || self.budget_echo.device_peak_bytes
+                != self
+                    .factory_attempt
+                    .target_budget
+                    .predicted_device_peak_bytes
+            || self.budget_echo.host_increment_bytes
+                != self
+                    .factory_attempt
+                    .target_budget
+                    .predicted_host_increment_bytes
+        {
+            bail!("private H3 prepared runtime input changed after opened-evidence binding")
+        }
+        validate_prepared_runtime_request(&self.prepared, &self.factory_attempt.request)?;
+        Ok(())
+    }
+
+    pub(crate) fn prepared_attempt_identity_sha256(&self) -> &str {
+        &self.factory_attempt.identity_sha256
+    }
+
+    pub(crate) fn target_budget_identity_sha256(&self) -> &str {
+        &self.factory_attempt.target_budget.identity_sha256
+    }
+
+    pub(crate) fn into_runtime_parts(
+        self,
+    ) -> (H3PreparedFl2VaRequest, H3PrivatePreparedFl2VaRetention) {
+        (
+            self.prepared,
+            H3PrivatePreparedFl2VaRetention {
+                factory_attempt: self.factory_attempt,
+                budget_echo: self.budget_echo,
+                transformer_support: self._transformer_support,
+            },
+        )
+    }
+}
+
+impl H3PrivatePreparedFl2VaRetention {
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        self.transformer_support.revalidate()?;
+        if self.factory_attempt.identity_sha256
+            != expected_h3_factory_prepared_attempt_identity(&self.factory_attempt)
+            || self.factory_attempt.target_budget.identity_sha256
+                != expected_h3_factory_target_budget_identity(&self.factory_attempt.target_budget)
+            || self.budget_echo.prepared_attempt_identity_sha256
+                != self.factory_attempt.identity_sha256
+            || self.budget_echo.device_peak_bytes
+                != self
+                    .factory_attempt
+                    .target_budget
+                    .predicted_device_peak_bytes
+            || self.budget_echo.host_increment_bytes
+                != self
+                    .factory_attempt
+                    .target_budget
+                    .predicted_host_increment_bytes
+        {
+            bail!("private H3 retained attempt or budget identity changed")
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepared_attempt_identity_sha256(&self) -> &str {
+        &self.factory_attempt.identity_sha256
+    }
+
+    pub(crate) fn target_budget_identity_sha256(&self) -> &str {
+        &self.factory_attempt.target_budget.identity_sha256
+    }
+
+    pub(crate) fn denoise_forward_count(&self) -> Result<usize> {
+        usize::try_from(self.factory_attempt.request.denoise_forward_count)
+            .map_err(|_| anyhow!("private H3 retained denoise count exceeds usize"))
+    }
+}
+
+fn validate_prepared_runtime_request(
+    prepared: &H3PreparedFl2VaRequest,
+    frozen: &H3FactoryPreparedRequestInput,
+) -> Result<()> {
+    let geometry = &prepared.geometry;
+    let counts = H3DualSchedule::new(prepared.grid_points)?.counts();
+    let mut current_endpoints = Vec::with_capacity(prepared.endpoints.len());
+    for (prepared_endpoint, frozen_endpoint) in
+        prepared.endpoints.iter().zip(frozen.endpoints.iter())
+    {
+        let pixels = prepared_endpoint.pixels.flatten_all()?.to_vec1::<u8>()?;
+        let shape = prepared_endpoint
+            .pixels
+            .dims5()
+            .map(|(b, c, t, h, w)| [b, c, t, h, w])?
+            .map(u32::try_from)
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let shape: [u32; 5] = shape
+            .try_into()
+            .map_err(|_| anyhow!("private H3 prepared endpoint shape changed"))?;
+        let current = H3FactoryEndpointInput {
+            anchor: factory_anchor(prepared_endpoint.anchor),
+            encoded_bytes: frozen_endpoint.encoded_bytes,
+            encoded_content_sha256: frozen_endpoint.encoded_content_sha256.clone(),
+            preprocess: frozen_endpoint.preprocess,
+            normalized_shape: shape,
+            normalized_cpu_bytes: pixels.len() as u64,
+            normalized_cpu_content_sha256: sha256(&pixels),
+        };
+        if current.anchor != frozen_endpoint.anchor
+            || current.normalized_shape != frozen_endpoint.normalized_shape
+            || current.normalized_cpu_bytes != frozen_endpoint.normalized_cpu_bytes
+            || current.normalized_cpu_content_sha256
+                != frozen_endpoint.normalized_cpu_content_sha256
+        {
+            bail!("private H3 prepared endpoint changed after target-budget binding")
+        }
+        current_endpoints.push(current);
+    }
+    let condition_visual_rows = u64::try_from(geometry.condition_video_rows)?;
+    let target_video_rows = u64::try_from(geometry.generated_video_rows)?;
+    let target_audio_rows = u64::try_from(geometry.generated_audio_rows)?;
+    let total_packed_rows = [
+        frozen.rows.qwen_output_text_rows,
+        condition_visual_rows,
+        target_video_rows,
+        target_audio_rows,
+    ]
+    .into_iter()
+    .try_fold(0_u64, |sum, rows| sum.checked_add(rows))
+    .ok_or_else(|| anyhow!("private H3 prepared row total overflow"))?;
+    if prepared.endpoints.len() != frozen.endpoints.len()
+        || sha256(prepared.prompt.as_bytes()) != frozen.prompt_sha256
+        || prepared.seed != frozen.seed
+        || prepared.grid_points != usize::try_from(frozen.grid_points)?
+        || u32::try_from(counts.transformer_evaluations)? != frozen.denoise_forward_count
+        || geometry.mode != frozen.mode
+        || geometry.width != usize::try_from(frozen.width)?
+        || geometry.height != usize::try_from(frozen.height)?
+        || geometry.frames != usize::try_from(frozen.frames)?
+        || geometry.latent_frames != usize::try_from(frozen.video_latent_frames)?
+        || geometry.audio_latents_per_channel != usize::try_from(frozen.audio_latents_per_channel)?
+        || frozen.audio_samples_per_channel
+            != u64::try_from(geometry.audio_latents_per_channel)?
+                .checked_mul(800)
+                .ok_or_else(|| anyhow!("private H3 prepared audio sample count overflow"))?
+        || frozen.rows.condition_visual_rows != condition_visual_rows
+        || frozen.rows.condition_audio_rows != 0
+        || frozen.rows.target_video_rows != target_video_rows
+        || frozen.rows.target_audio_rows != target_audio_rows
+        || frozen.rows.total_packed_rows != total_packed_rows
+        || conditioning_fingerprint(&current_endpoints) != frozen.conditioning_fingerprint
+    {
+        bail!("private H3 prepared prompt, geometry, rows, or conditioning changed")
+    }
+    Ok(())
 }
 
 fn prepared_request_input(
@@ -1265,6 +1454,93 @@ fn sha256(bytes: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::minimax_h3::pipeline::H3PreparedEndpoint;
+    use candle_core::DType;
+
+    fn prepared_runtime_pair() -> (H3PreparedFl2VaRequest, H3FactoryPreparedRequestInput) {
+        let prompt = "bound prompt".to_string();
+        let endpoint = H3PreparedEndpoint {
+            anchor: H3EndpointAnchor::First,
+            source_width: 64,
+            source_height: 64,
+            resize: super::super::pipeline::H3EndpointResize::Identity,
+            pixels: candle_core::Tensor::zeros((1, 3, 1, 64, 64), DType::U8, &Device::Cpu).unwrap(),
+        };
+        let factory_endpoint = H3FactoryEndpointInput {
+            anchor: H3FactoryEndpointAnchor::First,
+            encoded_bytes: 7,
+            encoded_content_sha256: sha256(b"encoded"),
+            preprocess: H3FactoryEndpointPreprocess::PillowLanczosRgbU8CpuV1,
+            normalized_shape: [1, 3, 1, 64, 64],
+            normalized_cpu_bytes: 12_288,
+            normalized_cpu_content_sha256: sha256(vec![0_u8; 12_288]),
+        };
+        let geometry = super::super::pipeline::H3Fl2VaGeometry {
+            mode: Mode::FirstFrameToAudioVideo,
+            width: 64,
+            height: 64,
+            frames: 33,
+            latent_frames: 4,
+            latent_width: 4,
+            latent_height: 4,
+            audio_latents_per_channel: 40,
+            rows_per_video_frame: 4,
+            condition_video_rows: 4,
+            generated_video_rows: 16,
+            generated_audio_rows: 80,
+        };
+        let grid_points = 5;
+        let denoise_forward_count = u32::try_from(
+            H3DualSchedule::new(grid_points)
+                .unwrap()
+                .counts()
+                .transformer_evaluations,
+        )
+        .unwrap();
+        let prepared = H3PreparedFl2VaRequest {
+            geometry,
+            endpoints: vec![endpoint],
+            prompt: prompt.clone(),
+            seed: 42,
+            grid_points,
+        };
+        let current_endpoints = vec![factory_endpoint.clone()];
+        let frozen = H3FactoryPreparedRequestInput {
+            identity_sha256: sha256(b"request"),
+            canonical_model: contract::FL2VA_COMFY.into(),
+            task: Task::Fl2va,
+            mode: Mode::FirstFrameToAudioVideo,
+            prompt_sha256: sha256(prompt.as_bytes()),
+            seed: 42,
+            grid_points: u32::try_from(grid_points).unwrap(),
+            denoise_forward_count,
+            guidance_f64_bits: 0,
+            strength_f64_bits: 0,
+            batch_size: 1,
+            width: 64,
+            height: 64,
+            frames: 33,
+            fps: contract::FIXED_FPS,
+            synchronized_audio: true,
+            mp4_output: true,
+            video_latent_frames: 4,
+            audio_latents_per_channel: 40,
+            audio_samples_per_channel: 32_000,
+            conditioning_fingerprint: conditioning_fingerprint(&current_endpoints),
+            reference_fingerprint: sha256(b"mold.minimax-h3.fl2va-no-references.v1"),
+            endpoints: vec![factory_endpoint],
+            rows: H3FactoryPreparedRowsInput {
+                qwen_output_text_rows: 3,
+                qwen_vision_rows: 64,
+                condition_visual_rows: 4,
+                condition_audio_rows: 0,
+                target_video_rows: 16,
+                target_audio_rows: 80,
+                total_packed_rows: 103,
+            },
+        };
+        (prepared, frozen)
+    }
 
     #[test]
     fn opened_authorities_and_prepared_attempt_are_single_consumption() {
@@ -1426,5 +1702,19 @@ mod tests {
             conditioning_fingerprint(&[first]),
             conditioning_fingerprint(&[second])
         );
+    }
+
+    #[test]
+    fn prepared_runtime_rejects_same_shape_prompt_and_pixel_mutation() {
+        let (mut prepared, frozen) = prepared_runtime_pair();
+        validate_prepared_runtime_request(&prepared, &frozen).unwrap();
+
+        prepared.prompt = "mutated prompt".into();
+        assert!(validate_prepared_runtime_request(&prepared, &frozen).is_err());
+
+        let (mut prepared, frozen) = prepared_runtime_pair();
+        prepared.endpoints[0].pixels =
+            candle_core::Tensor::ones((1, 3, 1, 64, 64), DType::U8, &Device::Cpu).unwrap();
+        assert!(validate_prepared_runtime_request(&prepared, &frozen).is_err());
     }
 }

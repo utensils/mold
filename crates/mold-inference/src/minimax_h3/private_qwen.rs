@@ -124,41 +124,6 @@ pub(crate) unsafe trait H3PrivateQwenArtifactLease: H3BackendArtifactLease {
     fn weight_policy_identity_sha256(&self) -> &str;
 }
 
-// SAFETY: the borrowed projection retains the same immutable artifact lease
-// and delegates every authenticated identity without widening its lifetime.
-unsafe impl<T> H3PrivateQwenArtifactLease for &T
-where
-    T: H3PrivateQwenArtifactLease + ?Sized,
-{
-    fn factory_identity_sha256(&self) -> &str {
-        T::factory_identity_sha256(self)
-    }
-
-    fn conditioner_component_content_sha256(&self) -> &str {
-        T::conditioner_component_content_sha256(self)
-    }
-
-    fn conditioner_component_validation_sha256(&self) -> &str {
-        T::conditioner_component_validation_sha256(self)
-    }
-
-    fn support_identity_sha256(&self) -> &str {
-        T::support_identity_sha256(self)
-    }
-
-    fn weight_identity_sha256(&self) -> &str {
-        T::weight_identity_sha256(self)
-    }
-
-    fn weight_header_identity_sha256(&self) -> &str {
-        T::weight_header_identity_sha256(self)
-    }
-
-    fn weight_policy_identity_sha256(&self) -> &str {
-        T::weight_policy_identity_sha256(self)
-    }
-}
-
 /// Field order is load-bearing. `model` is explicitly taken before releasing
 /// the conditioner lease. The adapter owns only lightweight execution and
 /// artifact projections; the singular underlying leases remain owned by the
@@ -254,15 +219,19 @@ where
         )?;
 
         let opened = {
-            let mut observer = H3PrivateQwenLoadCheckpoint::new(checkpoint, || {
-                poll_active_authorities(
-                    &resources.support,
-                    &resources.conditioner_lease,
-                    &execution_lease,
-                    &artifact_lease,
-                    authority,
-                )
-            });
+            let mut observer = H3PrivateQwenLoadCheckpoint::new(
+                checkpoint,
+                H3PipelinePhase::QwenLoadChunk,
+                || {
+                    poll_active_authorities(
+                        &resources.support,
+                        &resources.conditioner_lease,
+                        &execution_lease,
+                        &artifact_lease,
+                        authority,
+                    )
+                },
+            );
             // SAFETY: every immutable attempt/lease binding was validated
             // above and is polled at each bounded authentication checkpoint.
             let result = unsafe {
@@ -286,17 +255,100 @@ where
         let loaded = {
             let config = resources.support.conditioner_config();
             let device = resources.conditioner_lease.device();
-            let mut observer = H3PrivateQwenLoadCheckpoint::new(checkpoint, || {
-                poll_active_authorities(
-                    &resources.support,
-                    &resources.conditioner_lease,
-                    &execution_lease,
-                    &artifact_lease,
-                    authority,
-                )
-            });
+            let mut observer = H3PrivateQwenLoadCheckpoint::new(
+                checkpoint,
+                H3PipelinePhase::QwenLoadChunk,
+                || {
+                    poll_active_authorities(
+                        &resources.support,
+                        &resources.conditioner_lease,
+                        &execution_lease,
+                        &artifact_lease,
+                        authority,
+                    )
+                },
+            );
             // SAFETY: `opened` is the non-Clone authority validated at the
             // allocation boundary above. It is consumed exactly once here.
+            let result = unsafe {
+                load_h3_qwen_nvfp4_conditioner_from_authority(opened, config, device, &mut observer)
+            };
+            observer.finish(result)?
+        };
+        validate_output_dtype(loaded.dtype_profile().output_dtype)?;
+        resources.model = Some(loaded);
+        let adapter = Self {
+            resources,
+            execution_lease,
+            artifact_lease,
+            authority,
+        };
+        adapter.validate_active_authorities()?;
+        Ok(adapter)
+    }
+
+    /// Consume an already-authenticated, non-Clone Qwen authority. Unlike the
+    /// legacy private helper above, this path cannot reopen a caller-selected
+    /// pathname between target-budget preparation and allocation.
+    pub(crate) fn load_authorized_from_opened(
+        opened: H3AuthenticatedQwenNvfp4Authority,
+        support: H3PrivateQwenSupport,
+        conditioner_lease: C,
+        execution_lease: E,
+        artifact_lease: A,
+        authority: &'authority FrozenH3FactoryAuthority,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<Self> {
+        let mut resources = H3PrivateQwenResources {
+            model: None,
+            support,
+            conditioner_lease,
+            conditioner_released: false,
+        };
+        let memory_facts = opened.memory_facts().clone();
+        let expected_placement = if resources.conditioner_lease.device().is_cpu() {
+            H3QwenNvfp4RuntimePlacement::Cpu
+        } else {
+            H3QwenNvfp4RuntimePlacement::Accelerated
+        };
+        if opened.placement() != expected_placement {
+            bail!("private H3 opened Qwen placement differs before allocation")
+        }
+        validate_preload_authorities(
+            &resources.support,
+            &resources.conditioner_lease,
+            &execution_lease,
+            &artifact_lease,
+            authority,
+            &memory_facts,
+        )?;
+        validate_opened_qwen_authority(&opened, &artifact_lease, authority, &memory_facts)?;
+        poll_active_authorities(
+            &resources.support,
+            &resources.conditioner_lease,
+            &execution_lease,
+            &artifact_lease,
+            authority,
+        )?;
+
+        let loaded = {
+            let config = resources.support.conditioner_config();
+            let device = resources.conditioner_lease.device();
+            let mut observer = H3PrivateQwenLoadCheckpoint::new(
+                checkpoint,
+                H3PipelinePhase::QwenLoadChunk,
+                || {
+                    poll_active_authorities(
+                        &resources.support,
+                        &resources.conditioner_lease,
+                        &execution_lease,
+                        &artifact_lease,
+                        authority,
+                    )
+                },
+            );
+            // SAFETY: the opened authority and all attempt projections were
+            // validated above and remain polled at every tensor-load boundary.
             let result = unsafe {
                 load_h3_qwen_nvfp4_conditioner_from_authority(opened, config, device, &mut observer)
             };
@@ -353,15 +405,19 @@ where
                 )
             },
             || {
-                let mut observer = H3PrivateQwenLoadCheckpoint::new(checkpoint, || {
-                    poll_active_authorities(
-                        &resources.support,
-                        &resources.conditioner_lease,
-                        &execution_lease,
-                        &artifact_lease,
-                        authority,
-                    )
-                });
+                let mut observer = H3PrivateQwenLoadCheckpoint::new(
+                    checkpoint,
+                    H3PipelinePhase::QwenLoadChunk,
+                    || {
+                        poll_active_authorities(
+                            &resources.support,
+                            &resources.conditioner_lease,
+                            &execution_lease,
+                            &artifact_lease,
+                            authority,
+                        )
+                    },
+                );
                 let result = loader(
                     weights_path,
                     resources.support.conditioner_config(),
@@ -1469,6 +1525,7 @@ impl VisionAccumulator {
 /// checkpoint while satisfying Candle's boolean load callback.
 struct H3PrivateQwenLoadCheckpoint<'a, V> {
     checkpoint: &'a mut dyn H3PipelineCheckpoint,
+    phase: H3PipelinePhase,
     validate_authorities: V,
     first_error: Option<anyhow::Error>,
 }
@@ -1477,9 +1534,14 @@ impl<'a, V> H3PrivateQwenLoadCheckpoint<'a, V>
 where
     V: FnMut() -> Result<()>,
 {
-    fn new(checkpoint: &'a mut dyn H3PipelineCheckpoint, validate_authorities: V) -> Self {
+    fn new(
+        checkpoint: &'a mut dyn H3PipelineCheckpoint,
+        phase: H3PipelinePhase,
+        validate_authorities: V,
+    ) -> Self {
         Self {
             checkpoint,
+            phase,
             validate_authorities,
             first_error: None,
         }
@@ -1517,7 +1579,7 @@ where
         let completed = usize::try_from(completed).unwrap_or(usize::MAX).min(total);
         let result = (self.validate_authorities)().and_then(|()| {
             self.checkpoint.checkpoint(H3PipelineEvent {
-                phase: H3PipelinePhase::QwenEncodeChunk,
+                phase: self.phase,
                 completed,
                 total,
             })
@@ -1811,7 +1873,11 @@ mod tests {
     #[test]
     fn load_observer_preserves_typed_inference_cancellation() {
         let mut checkpoint = CancelCheckpoint;
-        let mut observer = H3PrivateQwenLoadCheckpoint::new(&mut checkpoint, || Ok(()));
+        let mut observer = H3PrivateQwenLoadCheckpoint::new(
+            &mut checkpoint,
+            H3PipelinePhase::QwenLoadChunk,
+            || Ok(()),
+        );
         assert!(
             observer.should_cancel(&H3QwenNvfp4LoadEvent::Authenticating {
                 completed_bytes: 1,
@@ -1829,14 +1895,18 @@ mod tests {
         let active = Cell::new(true);
         let validations = Cell::new(0);
         let mut checkpoint = RecordingCheckpoint::default();
-        let mut observer = H3PrivateQwenLoadCheckpoint::new(&mut checkpoint, || {
-            validations.set(validations.get() + 1);
-            if active.get() {
-                Ok(())
-            } else {
-                bail!("artifact authority revoked while loading")
-            }
-        });
+        let mut observer = H3PrivateQwenLoadCheckpoint::new(
+            &mut checkpoint,
+            H3PipelinePhase::QwenLoadChunk,
+            || {
+                validations.set(validations.get() + 1);
+                if active.get() {
+                    Ok(())
+                } else {
+                    bail!("artifact authority revoked while loading")
+                }
+            },
+        );
         let first = H3QwenNvfp4LoadEvent::Authenticating {
             completed_bytes: 1,
             total_bytes: 3,
@@ -1878,10 +1948,14 @@ mod tests {
 
         let mut checkpoint = CancelCheckpoint;
         let validation_calls = Cell::new(0);
-        let mut observer = H3PrivateQwenLoadCheckpoint::new(&mut checkpoint, || {
-            validation_calls.set(validation_calls.get() + 1);
-            Ok(())
-        });
+        let mut observer = H3PrivateQwenLoadCheckpoint::new(
+            &mut checkpoint,
+            H3PipelinePhase::QwenLoadChunk,
+            || {
+                validation_calls.set(validation_calls.get() + 1);
+                Ok(())
+            },
+        );
         let first = H3QwenNvfp4LoadEvent::Authenticating {
             completed_bytes: 1,
             total_bytes: 2,

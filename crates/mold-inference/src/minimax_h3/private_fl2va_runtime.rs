@@ -8,38 +8,49 @@
 //! consumes a fresh session per job; this private composer remains additionally
 //! sealed until every artifact, memory, and execution authority is available.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use candle_core::{Device, DeviceLocation, Tensor};
 use mold_candle::minimax_h3::{
-    H3AttentionDevice, H3AttentionRuntimeAuthority, H3ComfyOpenedInt8Checkpoint, H3ForwardInput,
-    H3FrozenPackedLayout, H3TransformerOutput, H3TransformerTask, StereoLatents, StereoWaveform,
+    H3AttentionDevice, H3AttentionRuntimeAuthority, H3AuthenticatedQwenNvfp4Authority,
+    H3ComfyOpenedInt8Checkpoint, H3ForwardInput, H3FrozenPackedLayout, H3TransformerOutput,
+    H3TransformerTask, StereoLatents, StereoWaveform,
 };
 use mold_core::minimax_h3::{self as contract, Task};
 use sha2::{Digest, Sha256};
 
 use super::backend::{H3BackendArtifactLease, H3BackendExecutionLease, H3CandleBackendDevice};
-use super::engine::{H3BlockStreamedDenoiser, H3PipelineRuntime, H3StreamedDenoiser};
+use super::engine::{H3BlockStreamedDenoiser, H3StreamedDenoiser};
 use super::offload::H3BlockLease;
+#[cfg(feature = "mp4")]
+use super::pipeline::H3PipelineObserver;
 use super::pipeline::{
     H3Fl2VaBackend, H3PipelineBackendIdentity, H3PipelineBackendKind, H3PipelineCheckpoint,
-    H3PreparedEndpoint, H3TextConditioning, H3VideoEncodeSink,
+    H3PipelineEvent, H3PipelinePhase, H3PreparedEndpoint, H3TextConditioning, H3VideoEncodeSink,
+};
+use super::private_opened_evidence::{
+    H3PrivateComfyStorageAuthority, H3PrivatePreparedFl2VaFactoryInputs,
+    H3PrivatePreparedFl2VaRetention,
 };
 use super::private_qwen::{
     H3PrivateQwenAdapter, H3PrivateQwenArtifactLease, H3PrivateQwenConditionerLease,
 };
 use super::private_qwen_support::H3PrivateQwenSupport;
 use super::private_runtime::{
-    bind_private_comfy_stream, load_and_pair_private_comfy_stream,
+    bind_private_comfy_stream, load_and_pair_private_comfy_stream, H3PrivateBoundComfyStream,
     H3PrivateComfyBindingExpectation, H3PrivateComfyBlockLoader, H3PrivateComfyCancellationGuard,
     H3PrivateComfyCancellationSlot, H3PrivateComfyCheckpointFacts, H3PrivateComfyStreamAuthority,
     H3PrivateComfyTransformerExecutor,
 };
-use super::private_vae_adapter::H3PrivateComfyVaeAdapter;
-use super::vae_runtime::H3ComfyVaeRuntimeBundle;
-use crate::h3_factory::{H3PrivateFl2VaFactoryAuthority, H3PrivateVaeFactoryAuthority};
+use super::private_vae_adapter::H3PrivateVaeRuntime;
+use super::vae_runtime::{
+    load_h3_comfy_vae_runtime_from_authority, H3AuthenticatedComfyVaeAuthority,
+    H3ComfyVaeLoadEvent, H3ComfyVaeLoadObserver, H3ComfyVaeRuntimeBundle,
+};
+use crate::h3_factory::{
+    H3FactoryTargetLoadDropPolicy, H3PrivateFl2VaFactoryAuthority, H3PrivateVaeFactoryAuthority,
+};
 use crate::progress::ProgressReporter;
 use crate::{FrozenH3FactoryAuthority, H3FactoryQuantizationAuthority};
 
@@ -82,9 +93,11 @@ pub(crate) unsafe trait H3PrivateFl2VaArtifactLease:
 /// `_activation` is an uninhabited type, making the otherwise concrete
 /// composer unreachable from safe code until a scheduler-owned frozen-memory
 /// projection is reviewed and added.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct H3PrivateFl2VaMemoryOverlapAuthority {
     factory_identity_sha256: String,
+    prepared_attempt_identity_sha256: String,
+    target_budget_identity_sha256: String,
     condition_visual_rows: u64,
     condition_backing_host_bytes: u64,
     condition_backing_device_bytes: u64,
@@ -113,6 +126,8 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         factory_identity_sha256: impl Into<String>,
+        prepared_attempt_identity_sha256: impl Into<String>,
+        target_budget_identity_sha256: impl Into<String>,
         condition_visual_rows: u64,
         condition_backing_host_bytes: u64,
         condition_backing_device_bytes: u64,
@@ -125,6 +140,8 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
     ) -> Result<Self> {
         let mut authority = Self {
             factory_identity_sha256: factory_identity_sha256.into(),
+            prepared_attempt_identity_sha256: prepared_attempt_identity_sha256.into(),
+            target_budget_identity_sha256: target_budget_identity_sha256.into(),
             condition_visual_rows,
             condition_backing_host_bytes,
             condition_backing_device_bytes,
@@ -148,6 +165,8 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
 
     fn validate(&self) -> Result<()> {
         if !valid_sha256(&self.factory_identity_sha256)
+            || !valid_sha256(&self.prepared_attempt_identity_sha256)
+            || !valid_sha256(&self.target_budget_identity_sha256)
             || self.target_audio_latent_device_bytes == 0
             || self.visual_vae_resident_device_bytes == 0
             || self.audio_vae_resident_device_bytes == 0
@@ -186,10 +205,15 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
     }
 }
 
+const H3_PRIVATE_FL2VA_OVERLAP_IDENTITY_DOMAIN: &[u8] =
+    b"mold.minimax-h3.private-fl2va-overlap.v2\0";
+
 fn memory_overlap_identity(authority: &H3PrivateFl2VaMemoryOverlapAuthority) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"mold.minimax-h3.private-fl2va-overlap.v1\0");
+    hash.update(H3_PRIVATE_FL2VA_OVERLAP_IDENTITY_DOMAIN);
     hash.update(authority.factory_identity_sha256.as_bytes());
+    hash.update(authority.prepared_attempt_identity_sha256.as_bytes());
+    hash.update(authority.target_budget_identity_sha256.as_bytes());
     hash.update(authority.condition_visual_rows.to_le_bytes());
     for bytes in [
         authority.condition_backing_host_bytes,
@@ -285,14 +309,6 @@ struct H3PrivateAttemptOwner<E, A> {
 /// artifact-backed tensor has dropped.
 pub(crate) struct H3PrivateAttemptAuthority<E, A> {
     owner: Arc<H3PrivateAttemptOwner<E, A>>,
-}
-
-impl<E, A> Clone for H3PrivateAttemptAuthority<E, A> {
-    fn clone(&self) -> Self {
-        Self {
-            owner: Arc::clone(&self.owner),
-        }
-    }
 }
 
 impl<E, A> H3PrivateAttemptAuthority<E, A> {
@@ -921,9 +937,6 @@ type H3PrivateComfyCore<'authority, C, E, A> = H3PrivateVaeFreeStreamedCore<
     A,
 >;
 
-type H3PrivateComfyPipelineRuntime<'authority, C, E, A> =
-    H3PipelineRuntime<H3PrivateComfyVaeAdapter<H3PrivateComfyCore<'authority, C, E, A>>>;
-
 /// Consuming proof that one execution lease and one retained Candle device
 /// passed route validation together. Keeping the fields private and this type
 /// non-cloneable prevents production composition from mixing authorities.
@@ -1000,69 +1013,66 @@ where
     Ok(H3PrivateBoundExecution { execution, device })
 }
 
-/// Structural composition proof for one private FL2VA attempt. It is private
-/// to this module and its overlap argument is uninhabited in non-test builds,
-/// so there is deliberately no production construction escape yet.
+/// One consuming scheduler-to-runtime handoff. It owns every opened artifact,
+/// lease, prepared tensor, and typed factory record needed by one attempt.
+/// Neither this root nor the retained overlap record implements `Clone`.
 ///
-/// The engine already consumes one fresh session per job. Activating this
-/// sealed composer must also accept authenticated VAE plans/opened descriptors
-/// and load both VAEs inside this same owner and cancellation scope; a
-/// preloaded bundle does not prove allocation or cancellation provenance and
-/// is not sufficient. The binding below freezes the exact execution route,
-/// Candle device, concrete attention authority, and opened transformer
-/// identity before Qwen or transformer allocation, without activating any
-/// shipping path.
-#[allow(clippy::too_many_arguments)]
+/// The safe constructor below remains unreachable in production today because
+/// `private_fl2va_runtime_authority` retains all activation prerequisites and
+/// `H3PrivateFl2VaMemoryOverlapAuthority` has no non-test constructor.
 #[allow(dead_code)]
-fn compose_private_comfy_fl2va_runtime<'authority, C, E, A>(
-    qwen_weights_path: &Path,
+pub(crate) struct H3PrivatePhaseRuntimeOwner<C, E, A> {
+    authority: FrozenH3FactoryAuthority,
+    admitted: H3PrivateFl2VaFactoryAuthority,
+    prepared: H3PrivatePreparedFl2VaFactoryInputs,
+    storage: H3PrivateComfyStorageAuthority,
     qwen_support: H3PrivateQwenSupport,
+    opened_qwen: H3AuthenticatedQwenNvfp4Authority,
+    opened_vae: H3AuthenticatedComfyVaeAuthority,
+    bound_transformer: H3PrivateBoundComfyStream,
+    stream_authority: H3PrivateComfyStreamAuthority,
+    qwen_artifact_authority: H3PrivateQwenArtifactAuthority,
     conditioner_lease: C,
+    memory_overlap: H3PrivateFl2VaMemoryOverlapAuthority,
+    // The singular attempt root is declared last so all opened/component state
+    // releases before the scheduler execution and artifact leases.
+    attempt: H3PrivateAttemptAuthority<E, A>,
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
+pub(crate) fn bind_private_comfy_fl2va_phase_owner<C, E, A>(
+    authority: FrozenH3FactoryAuthority,
+    prepared: H3PrivatePreparedFl2VaFactoryInputs,
+    storage: H3PrivateComfyStorageAuthority,
+    qwen_support: H3PrivateQwenSupport,
     opened_transformer: H3ComfyOpenedInt8Checkpoint,
+    opened_qwen: H3AuthenticatedQwenNvfp4Authority,
+    opened_vae: H3AuthenticatedComfyVaeAuthority,
     attention: H3AttentionRuntimeAuthority,
-    vae: H3ComfyVaeRuntimeBundle,
+    conditioner_lease: C,
     execution_lease: E,
     artifact_lease: A,
     memory_overlap: H3PrivateFl2VaMemoryOverlapAuthority,
-    authority: &'authority FrozenH3FactoryAuthority,
-    progress: &ProgressReporter,
-    checkpoint: &mut dyn H3PipelineCheckpoint,
-) -> Result<H3PrivateComfyPipelineRuntime<'authority, C, E, A>>
+) -> Result<H3PrivatePhaseRuntimeOwner<C, E, A>>
 where
     C: H3PrivateQwenConditionerLease + Send + Sync,
     E: H3BackendExecutionLease + Send + Sync,
     A: H3PrivateFl2VaArtifactLease + Send + Sync,
 {
     let admitted = authority.private_fl2va_runtime_authority()?;
+    prepared.revalidate()?;
+    storage.validate_opened_components(
+        &qwen_support,
+        &opened_transformer,
+        &opened_qwen,
+        &opened_vae,
+    )?;
+    let qwen_artifact_authority =
+        H3PrivateQwenArtifactAuthority::capture(&qwen_support, &opened_qwen)?;
+    validate_prepared_overlap_binding(&authority, &admitted, &prepared, &memory_overlap)?;
     let bound_execution = capture_private_execution_route(execution_lease, &admitted)?;
-    memory_overlap.validate()?;
-    if memory_overlap.factory_identity_sha256 != admitted.factory_identity_sha256
-        || memory_overlap.identity_sha256() != artifact_lease.memory_overlap_identity_sha256()
-    {
-        bail!("private MiniMax H3 overlap authority differs before component loading");
-    }
-    let expected_transformer_policy = match &admitted.quantization {
-        H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
-            transformer_policy_sha256,
-            ..
-        } => transformer_policy_sha256,
-        H3FactoryQuantizationAuthority::OfficialBf16 => {
-            bail!("private MiniMax H3 Comfy runtime requires quantized transformer authority")
-        }
-    };
-    if !artifact_lease.is_active()
-        || artifact_lease.transformer_task() != H3TransformerTask::T2VaFl2Va
-        || artifact_lease.transformer_policy_identity_sha256() != expected_transformer_policy
-        || artifact_lease.attention_runtime_identity_sha256()
-            != admitted.attention.runtime_identity_sha256
-        || artifact_lease.attention_kernel_identity()
-            != admitted.attention.qualification_kernel_identity
-        || artifact_lease.attention_qualification_sha256()
-            != admitted.attention.qualification_sha256
-    {
-        bail!("private MiniMax H3 artifact lease differs before component loading");
-    }
-    let bound_stream = bind_private_comfy_stream(
+    validate_initial_artifact_authority(&admitted, &artifact_lease, &memory_overlap)?;
+    let bound_transformer = bind_private_comfy_stream(
         opened_transformer,
         bound_execution.device(),
         attention,
@@ -1085,52 +1095,1191 @@ where
             },
         },
     )?;
+    let stream_authority = bound_transformer.authority().clone();
+    validate_private_artifact_authority(
+        &admitted,
+        &stream_authority,
+        &qwen_artifact_authority,
+        &memory_overlap,
+        &artifact_lease,
+    )?;
     let attempt = H3PrivateAttemptAuthority::new(bound_execution, artifact_lease);
-    let (qwen_execution, qwen_artifacts) = attempt.qwen_projections();
-    let block_execution = attempt.block_projection();
-    let core_execution = attempt.block_projection();
-    let core_artifacts = attempt.artifact_projection();
-    let cancellation_slot = H3PrivateComfyCancellationSlot::default();
-    let cancellation_guard = cancellation_slot.install(progress)?;
-    let qwen = H3PrivateQwenAdapter::load_authorized(
-        qwen_weights_path,
-        qwen_support,
-        conditioner_lease,
-        qwen_execution,
-        qwen_artifacts,
+    Ok(H3PrivatePhaseRuntimeOwner {
         authority,
-        checkpoint,
-    )?;
-    let stream = load_and_pair_private_comfy_stream(
-        bound_stream,
-        &admitted.block_streaming,
-        cancellation_slot,
-    )?;
-    let identity = H3PipelineBackendIdentity {
-        kind: H3PipelineBackendKind::Cuda,
-        device_id: admitted.device_id.clone(),
-        execution_fingerprint: admitted.execution_fingerprint.clone(),
-    };
-    let denoiser = H3BlockStreamedDenoiser::new(
-        identity,
-        admitted.block_streaming.clone(),
-        block_execution,
-        stream.loader,
-        stream.executor,
-    )?;
-    let core = H3PrivateVaeFreeStreamedCore::new(
-        qwen,
-        denoiser,
-        cancellation_guard,
-        core_execution,
-        core_artifacts,
         admitted,
-        stream.authority,
+        prepared,
+        storage,
+        qwen_support,
+        opened_qwen,
+        opened_vae,
+        bound_transformer,
+        stream_authority,
+        qwen_artifact_authority,
+        conditioner_lease,
         memory_overlap,
         attempt,
+    })
+}
+
+fn validate_prepared_overlap_binding(
+    authority: &FrozenH3FactoryAuthority,
+    admitted: &H3PrivateFl2VaFactoryAuthority,
+    prepared: &H3PrivatePreparedFl2VaFactoryInputs,
+    overlap: &H3PrivateFl2VaMemoryOverlapAuthority,
+) -> Result<()> {
+    prepared.revalidate()?;
+    overlap.validate()?;
+    let identities = authority
+        .prepared_target_attempt_identities()
+        .ok_or_else(|| anyhow::anyhow!("private H3 factory has no prepared target identities"))?;
+    let request = &prepared.factory_attempt.request;
+    let budget = &prepared.factory_attempt.target_budget;
+    if identities
+        != (
+            prepared.prepared_attempt_identity_sha256(),
+            prepared.target_budget_identity_sha256(),
+        )
+        || overlap.factory_identity_sha256 != admitted.factory_identity_sha256
+        || overlap.prepared_attempt_identity_sha256 != identities.0
+        || overlap.target_budget_identity_sha256 != identities.1
+        || request.canonical_model != contract::FL2VA_COMFY
+        || request.task != Task::Fl2va
+        || request.rows.condition_visual_rows != admitted.condition_visual_rows
+        || overlap.condition_visual_rows != request.rows.condition_visual_rows
+        || overlap.condition_backing_host_bytes != budget.condition_backing_host_bytes
+        || overlap.condition_backing_device_bytes
+            != budget.condition_latent_backing_device_bytes
+        || overlap.target_audio_latent_device_bytes != budget.target_audio_latent_device_bytes
+        || overlap.visual_vae_resident_device_bytes
+            != budget.visual_vae_resident_device_bytes
+        || overlap.audio_vae_resident_device_bytes != budget.audio_vae_resident_device_bytes
+        || overlap.attempt_resident_vae_device_bytes
+            != budget.attempt_resident_vae_device_bytes
+        || overlap.visual_decode_peak_device_bytes != budget.visual_decode_phase_device_bytes
+        || overlap.normalized_endpoint_host_bytes != budget.normalized_endpoint_host_bytes
+        || budget.load_drop_policy
+            != H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsAllocateNoiseLoadTransformerDenoiseDropTransformerDecodeVisualAudioDropVaesMux
+    {
+        bail!("private H3 prepared attempt, target budget, and overlap authority differ before VAE allocation")
+    }
+    Ok(())
+}
+
+fn validate_initial_artifact_authority<A>(
+    admitted: &H3PrivateFl2VaFactoryAuthority,
+    artifacts: &A,
+    overlap: &H3PrivateFl2VaMemoryOverlapAuthority,
+) -> Result<()>
+where
+    A: H3PrivateFl2VaArtifactLease,
+{
+    let expected_transformer_policy = match &admitted.quantization {
+        H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
+            transformer_policy_sha256,
+            ..
+        } => transformer_policy_sha256,
+        H3FactoryQuantizationAuthority::OfficialBf16 => {
+            bail!("private MiniMax H3 Comfy runtime requires quantized transformer authority")
+        }
+    };
+    if !artifacts.is_active()
+        || artifacts.factory_identity_sha256() != admitted.factory_identity_sha256
+        || artifacts.component_set_identity() != admitted.component_set_identity_sha256
+        || artifacts.memory_overlap_identity_sha256() != overlap.identity_sha256()
+        || artifacts.transformer_task() != H3TransformerTask::T2VaFl2Va
+        || artifacts.transformer_policy_identity_sha256() != expected_transformer_policy
+        || artifacts.attention_runtime_identity_sha256()
+            != admitted.attention.runtime_identity_sha256
+        || artifacts.attention_kernel_identity() != admitted.attention.qualification_kernel_identity
+        || artifacts.attention_qualification_sha256() != admitted.attention.qualification_sha256
+    {
+        bail!("private MiniMax H3 artifact lease differs before component loading")
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct H3PrivateQwenArtifactAuthority {
+    support_identity_sha256: String,
+    weight_identity_sha256: String,
+    weight_header_identity_sha256: String,
+    weight_policy_identity_sha256: String,
+}
+
+impl H3PrivateQwenArtifactAuthority {
+    fn capture(
+        support: &H3PrivateQwenSupport,
+        opened: &H3AuthenticatedQwenNvfp4Authority,
+    ) -> Result<Self> {
+        opened.revalidate()?;
+        if support.model() != contract::FL2VA_COMFY || support.task() != Task::Fl2va {
+            bail!("private H3 retained Qwen support has the wrong task partition")
+        }
+        let authority = Self {
+            support_identity_sha256: support.support_identity_sha256().into(),
+            weight_identity_sha256: opened.artifact_identity_sha256().into(),
+            weight_header_identity_sha256: opened.header_identity_sha256().into(),
+            weight_policy_identity_sha256: opened.policy_identity_sha256().into(),
+        };
+        if [
+            authority.support_identity_sha256.as_str(),
+            authority.weight_identity_sha256.as_str(),
+            authority.weight_header_identity_sha256.as_str(),
+            authority.weight_policy_identity_sha256.as_str(),
+        ]
+        .into_iter()
+        .any(|identity| !valid_sha256(identity))
+        {
+            bail!("private H3 retained Qwen artifact authority is not exact SHA-256 evidence")
+        }
+        Ok(authority)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct H3PrivateArtifactAuthorityFacts {
+    active: bool,
+    factory_identity_sha256: String,
+    backend_plan_identity_sha256: String,
+    component_set_identity_sha256: String,
+    conditioner_component_content_sha256: String,
+    conditioner_component_validation_sha256: String,
+    support_identity_sha256: String,
+    weight_identity_sha256: String,
+    weight_header_identity_sha256: String,
+    weight_policy_identity_sha256: String,
+    transformer_component_content_sha256: String,
+    transformer_component_validation_sha256: String,
+    visual_vae_component_content_sha256: String,
+    visual_vae_component_validation_sha256: String,
+    audio_vae_component_content_sha256: String,
+    audio_vae_component_validation_sha256: String,
+    vae_artifact_plan_identity_sha256: String,
+    transformer_task: H3TransformerTask,
+    transformer_checkpoint_content_sha256: String,
+    transformer_checkpoint_layout_identity_sha256: String,
+    transformer_checkpoint_identity_sha256: String,
+    transformer_policy_identity_sha256: String,
+    pruned_adaln_table_identity_sha256: String,
+    attention_runtime_identity_sha256: String,
+    attention_kernel_identity: String,
+    attention_qualification_sha256: String,
+    memory_overlap_identity_sha256: String,
+}
+
+impl H3PrivateArtifactAuthorityFacts {
+    fn capture<A>(artifacts: &A) -> Self
+    where
+        A: H3PrivateFl2VaArtifactLease,
+    {
+        Self {
+            active: H3BackendArtifactLease::is_active(artifacts),
+            factory_identity_sha256: artifacts.factory_identity_sha256().into(),
+            backend_plan_identity_sha256: artifacts.backend_plan_identity_sha256().into(),
+            component_set_identity_sha256: artifacts.component_set_identity().into(),
+            conditioner_component_content_sha256: artifacts
+                .conditioner_component_content_sha256()
+                .into(),
+            conditioner_component_validation_sha256: artifacts
+                .conditioner_component_validation_sha256()
+                .into(),
+            support_identity_sha256: artifacts.support_identity_sha256().into(),
+            weight_identity_sha256: artifacts.weight_identity_sha256().into(),
+            weight_header_identity_sha256: artifacts.weight_header_identity_sha256().into(),
+            weight_policy_identity_sha256: artifacts.weight_policy_identity_sha256().into(),
+            transformer_component_content_sha256: artifacts
+                .transformer_component_content_sha256()
+                .into(),
+            transformer_component_validation_sha256: artifacts
+                .transformer_component_validation_sha256()
+                .into(),
+            visual_vae_component_content_sha256: artifacts
+                .visual_vae_component_content_sha256()
+                .into(),
+            visual_vae_component_validation_sha256: artifacts
+                .visual_vae_component_validation_sha256()
+                .into(),
+            audio_vae_component_content_sha256: artifacts
+                .audio_vae_component_content_sha256()
+                .into(),
+            audio_vae_component_validation_sha256: artifacts
+                .audio_vae_component_validation_sha256()
+                .into(),
+            vae_artifact_plan_identity_sha256: artifacts.vae_artifact_plan_identity_sha256().into(),
+            transformer_task: artifacts.transformer_task(),
+            transformer_checkpoint_content_sha256: artifacts
+                .transformer_checkpoint_content_sha256()
+                .into(),
+            transformer_checkpoint_layout_identity_sha256: artifacts
+                .transformer_checkpoint_layout_identity_sha256()
+                .into(),
+            transformer_checkpoint_identity_sha256: artifacts
+                .transformer_checkpoint_identity_sha256()
+                .into(),
+            transformer_policy_identity_sha256: artifacts
+                .transformer_policy_identity_sha256()
+                .into(),
+            pruned_adaln_table_identity_sha256: artifacts
+                .pruned_adaln_table_identity_sha256()
+                .into(),
+            attention_runtime_identity_sha256: artifacts.attention_runtime_identity_sha256().into(),
+            attention_kernel_identity: artifacts.attention_kernel_identity().into(),
+            attention_qualification_sha256: artifacts.attention_qualification_sha256().into(),
+            memory_overlap_identity_sha256: artifacts.memory_overlap_identity_sha256().into(),
+        }
+    }
+}
+
+fn validate_private_artifact_facts(
+    admitted: &H3PrivateFl2VaFactoryAuthority,
+    stream: &H3PrivateComfyStreamAuthority,
+    qwen: &H3PrivateQwenArtifactAuthority,
+    overlap: &H3PrivateFl2VaMemoryOverlapAuthority,
+    facts: &H3PrivateArtifactAuthorityFacts,
+) -> Result<()> {
+    admitted.block_streaming.validate()?;
+    overlap.validate()?;
+    if admitted.task != Task::Fl2va
+        || admitted.canonical_model != contract::FL2VA_COMFY
+        || overlap.factory_identity_sha256 != admitted.factory_identity_sha256
+        || overlap.condition_visual_rows != admitted.condition_visual_rows
+        || facts.memory_overlap_identity_sha256 != overlap.identity_sha256()
+        || !facts.active
+        || facts.factory_identity_sha256 != admitted.factory_identity_sha256
+        || facts.backend_plan_identity_sha256 != admitted.backend_plan_identity_sha256
+        || facts.component_set_identity_sha256 != admitted.component_set_identity_sha256
+        || facts.conditioner_component_content_sha256
+            != admitted.conditioner_component_content_sha256
+        || facts.conditioner_component_validation_sha256
+            != admitted.conditioner_component_validation_sha256
+        || facts.support_identity_sha256 != qwen.support_identity_sha256
+        || facts.weight_identity_sha256 != qwen.weight_identity_sha256
+        || facts.weight_header_identity_sha256 != qwen.weight_header_identity_sha256
+        || facts.weight_policy_identity_sha256 != qwen.weight_policy_identity_sha256
+        || facts.transformer_component_content_sha256
+            != admitted.transformer_component_content_sha256
+        || facts.transformer_component_validation_sha256
+            != admitted.transformer_component_validation_sha256
+        || facts.visual_vae_component_content_sha256 != admitted.visual_vae_component_content_sha256
+        || facts.visual_vae_component_validation_sha256
+            != admitted.visual_vae_component_validation_sha256
+        || facts.audio_vae_component_content_sha256 != admitted.audio_vae_component_content_sha256
+        || facts.audio_vae_component_validation_sha256
+            != admitted.audio_vae_component_validation_sha256
+        || facts.vae_artifact_plan_identity_sha256 != admitted.vae_artifact_plan_identity_sha256
+        || stream.task != H3TransformerTask::T2VaFl2Va
+        || facts.transformer_task != stream.task
+        || facts.transformer_checkpoint_content_sha256 != stream.transformer_content_sha256
+        || facts.transformer_checkpoint_layout_identity_sha256
+            != stream.transformer_layout_identity_sha256
+        || facts.transformer_checkpoint_identity_sha256 != stream.checkpoint_identity_sha256
+        || facts.transformer_policy_identity_sha256 != stream.transformer_policy_identity_sha256
+        || facts.attention_runtime_identity_sha256 != stream.attention_runtime_identity_sha256
+        || facts.attention_runtime_identity_sha256 != admitted.attention.runtime_identity_sha256
+        || facts.attention_kernel_identity != admitted.attention.qualification_kernel_identity
+        || facts.attention_qualification_sha256 != admitted.attention.qualification_sha256
+    {
+        bail!("private MiniMax H3 continuing artifact authority differs from its bound stream")
+    }
+    match &admitted.quantization {
+        H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
+            transformer_policy_sha256,
+            qwen_policy_sha256,
+            pruned_adaln_table_sha256,
+            ..
+        } if transformer_policy_sha256 == &facts.transformer_policy_identity_sha256
+            && transformer_policy_sha256 == &stream.transformer_policy_identity_sha256
+            && qwen_policy_sha256 == &qwen.weight_policy_identity_sha256
+            && pruned_adaln_table_sha256 == &facts.pruned_adaln_table_identity_sha256 => {}
+        _ => bail!("private MiniMax H3 continuing quantization authority differs"),
+    }
+    Ok(())
+}
+
+fn validate_private_artifact_authority<A>(
+    admitted: &H3PrivateFl2VaFactoryAuthority,
+    stream: &H3PrivateComfyStreamAuthority,
+    qwen: &H3PrivateQwenArtifactAuthority,
+    overlap: &H3PrivateFl2VaMemoryOverlapAuthority,
+    artifacts: &A,
+) -> Result<String>
+where
+    A: H3PrivateFl2VaArtifactLease,
+{
+    let facts = H3PrivateArtifactAuthorityFacts::capture(artifacts);
+    validate_private_artifact_facts(admitted, stream, qwen, overlap, &facts)?;
+    Ok(facts.component_set_identity_sha256)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum H3PrivatePhaseState {
+    Bound,
+    VaesLoaded,
+    QwenLoaded,
+    QwenDropped,
+    ConditionsEncoded,
+    TransformerLoaded,
+    TransformerDropped,
+    VisualDecoded,
+    Empty,
+}
+
+/// Task-neutral load/drop ledger shared by the FL2VA coordinator and the
+/// future Ref2VA coordinator. It contains no artifact facts and cannot itself
+/// activate either task partition.
+struct H3PrivatePhaseLedger {
+    state: H3PrivatePhaseState,
+    expected_denoise_forwards: usize,
+    completed_denoise_forwards: usize,
+}
+
+impl H3PrivatePhaseLedger {
+    fn new(expected_denoise_forwards: usize) -> Result<Self> {
+        if expected_denoise_forwards == 0 {
+            bail!("private H3 phase ledger requires at least one denoise forward")
+        }
+        Ok(Self {
+            state: H3PrivatePhaseState::Bound,
+            expected_denoise_forwards,
+            completed_denoise_forwards: 0,
+        })
+    }
+
+    fn transition(
+        &mut self,
+        expected: &[H3PrivatePhaseState],
+        next: H3PrivatePhaseState,
+        label: &str,
+    ) -> Result<()> {
+        if !expected.contains(&self.state) {
+            bail!("private H3 {label} occurred in phase {:?}", self.state)
+        }
+        self.state = next;
+        Ok(())
+    }
+
+    fn vaes_loaded(&mut self) -> Result<()> {
+        self.transition(
+            &[H3PrivatePhaseState::Bound],
+            H3PrivatePhaseState::VaesLoaded,
+            "VAE load",
+        )
+    }
+
+    fn qwen_loaded(&mut self) -> Result<()> {
+        self.transition(
+            &[H3PrivatePhaseState::VaesLoaded],
+            H3PrivatePhaseState::QwenLoaded,
+            "Qwen load",
+        )
+    }
+
+    fn qwen_dropped(&mut self) -> Result<()> {
+        self.transition(
+            &[H3PrivatePhaseState::QwenLoaded],
+            H3PrivatePhaseState::QwenDropped,
+            "Qwen drop",
+        )
+    }
+
+    fn conditions_encoded(&mut self) -> Result<()> {
+        self.transition(
+            &[
+                H3PrivatePhaseState::QwenDropped,
+                H3PrivatePhaseState::ConditionsEncoded,
+            ],
+            H3PrivatePhaseState::ConditionsEncoded,
+            "condition encode",
+        )
+    }
+
+    fn transformer_loaded(&mut self) -> Result<()> {
+        self.transition(
+            &[
+                H3PrivatePhaseState::QwenDropped,
+                H3PrivatePhaseState::ConditionsEncoded,
+            ],
+            H3PrivatePhaseState::TransformerLoaded,
+            "transformer load",
+        )
+    }
+
+    fn visual_decoded(&mut self) -> Result<()> {
+        self.transition(
+            &[H3PrivatePhaseState::TransformerDropped],
+            H3PrivatePhaseState::VisualDecoded,
+            "visual decode",
+        )
+    }
+
+    fn vaes_dropped(&mut self) -> Result<()> {
+        self.transition(
+            &[H3PrivatePhaseState::VisualDecoded],
+            H3PrivatePhaseState::Empty,
+            "VAE drop",
+        )
+    }
+
+    fn denoise_completed(&mut self) -> Result<bool> {
+        if self.state != H3PrivatePhaseState::TransformerLoaded
+            || self.completed_denoise_forwards >= self.expected_denoise_forwards
+        {
+            bail!("private H3 denoise crossed its frozen phase count")
+        }
+        self.completed_denoise_forwards += 1;
+        let last = self.completed_denoise_forwards == self.expected_denoise_forwards;
+        if last {
+            self.state = H3PrivatePhaseState::TransformerDropped;
+        }
+        Ok(last)
+    }
+
+    fn is_terminal(&self) -> bool {
+        self.state == H3PrivatePhaseState::Empty
+            && self.completed_denoise_forwards == self.expected_denoise_forwards
+    }
+}
+
+type H3PrivatePhaseDenoiser<E, A> = H3BlockStreamedDenoiser<
+    H3PrivateComfyBlockLoader,
+    H3PrivateExecutionProjection<E, A>,
+    H3PrivateComfyTransformerExecutor,
+>;
+
+struct H3PrivatePhaseBackend<C, E, A>
+where
+    C: H3PrivateQwenConditionerLease,
+    E: H3BackendExecutionLease,
+    A: H3PrivateFl2VaArtifactLease,
+{
+    vae: Option<H3ComfyVaeRuntimeBundle>,
+    denoiser: Option<H3PrivatePhaseDenoiser<E, A>>,
+    opened_vae: Option<H3AuthenticatedComfyVaeAuthority>,
+    opened_qwen: Option<H3AuthenticatedQwenNvfp4Authority>,
+    qwen_support: Option<H3PrivateQwenSupport>,
+    conditioner_lease: Option<C>,
+    bound_transformer: Option<H3PrivateBoundComfyStream>,
+    stream_authority: H3PrivateComfyStreamAuthority,
+    qwen_artifact_authority: H3PrivateQwenArtifactAuthority,
+    qwen_execution: Option<H3PrivateExecutionProjection<E, A>>,
+    qwen_artifacts: Option<H3PrivateArtifactProjection<E, A>>,
+    block_execution: Option<H3PrivateExecutionProjection<E, A>>,
+    continuing_execution: H3PrivateExecutionProjection<E, A>,
+    continuing_artifacts: H3PrivateArtifactProjection<E, A>,
+    identity: H3PipelineBackendIdentity,
+    authority: FrozenH3FactoryAuthority,
+    admitted: H3PrivateFl2VaFactoryAuthority,
+    ledger: H3PrivatePhaseLedger,
+    storage: H3PrivateComfyStorageAuthority,
+    retention: H3PrivatePreparedFl2VaRetention,
+    memory_overlap: H3PrivateFl2VaMemoryOverlapAuthority,
+    cancellation_slot: H3PrivateComfyCancellationSlot,
+    cancellation_guard: H3PrivateComfyCancellationGuard,
+    // Last: singular scheduler/artifact owner outlives every projection.
+    attempt: H3PrivateAttemptAuthority<E, A>,
+}
+
+impl<C, E, A> H3PrivatePhaseRuntimeOwner<C, E, A>
+where
+    C: H3PrivateQwenConditionerLease + Send + Sync,
+    E: H3BackendExecutionLease + Send + Sync,
+    A: H3PrivateFl2VaArtifactLease + Send + Sync,
+{
+    fn into_backend(
+        self,
+        progress: &ProgressReporter,
+    ) -> Result<(
+        super::pipeline::H3PreparedFl2VaRequest,
+        H3PrivatePhaseBackend<C, E, A>,
+    )> {
+        let Self {
+            authority,
+            admitted,
+            prepared,
+            storage,
+            qwen_support,
+            opened_qwen,
+            opened_vae,
+            bound_transformer,
+            stream_authority,
+            qwen_artifact_authority,
+            conditioner_lease,
+            memory_overlap,
+            attempt,
+        } = self;
+        let (prepared, retention) = prepared.into_runtime_parts();
+        retention.revalidate()?;
+        let expected_denoise_forwards = super::sampler::H3DualSchedule::new(prepared.grid_points)?
+            .counts()
+            .transformer_evaluations;
+        if expected_denoise_forwards != retention.denoise_forward_count()? {
+            bail!("private H3 prepared denoise count differs from retained factory authority")
+        }
+        let (qwen_execution, qwen_artifacts) = attempt.qwen_projections();
+        let block_execution = attempt.block_projection();
+        let continuing_execution = attempt.block_projection();
+        let continuing_artifacts = attempt.artifact_projection();
+        let cancellation_slot = H3PrivateComfyCancellationSlot::default();
+        let cancellation_guard = cancellation_slot.install(progress)?;
+        let identity = H3PipelineBackendIdentity {
+            kind: H3PipelineBackendKind::Cuda,
+            device_id: admitted.device_id.clone(),
+            execution_fingerprint: admitted.execution_fingerprint.clone(),
+        };
+        let backend = H3PrivatePhaseBackend {
+            vae: None,
+            denoiser: None,
+            opened_vae: Some(opened_vae),
+            opened_qwen: Some(opened_qwen),
+            qwen_support: Some(qwen_support),
+            conditioner_lease: Some(conditioner_lease),
+            bound_transformer: Some(bound_transformer),
+            stream_authority,
+            qwen_artifact_authority,
+            qwen_execution: Some(qwen_execution),
+            qwen_artifacts: Some(qwen_artifacts),
+            block_execution: Some(block_execution),
+            continuing_execution,
+            continuing_artifacts,
+            identity,
+            authority,
+            admitted,
+            ledger: H3PrivatePhaseLedger::new(expected_denoise_forwards)?,
+            storage,
+            retention,
+            memory_overlap,
+            cancellation_slot,
+            cancellation_guard,
+            attempt,
+        };
+        backend.validate_continuing_authority()?;
+        Ok((prepared, backend))
+    }
+}
+
+impl<C, E, A> H3PrivatePhaseBackend<C, E, A>
+where
+    C: H3PrivateQwenConditionerLease + Send + Sync,
+    E: H3BackendExecutionLease + Send + Sync,
+    A: H3PrivateFl2VaArtifactLease + Send + Sync,
+{
+    fn validate_continuing_authority(&self) -> Result<()> {
+        validate_private_continuing_authority(
+            &self.authority,
+            &self.admitted,
+            &self.stream_authority,
+            &self.qwen_artifact_authority,
+            &self.storage,
+            &self.retention,
+            &self.memory_overlap,
+            &self.continuing_execution,
+            &self.continuing_artifacts,
+            &self.attempt,
+        )?;
+        if let Some(vae) = self.vae.as_ref() {
+            vae.validate_authority()?;
+            if vae.task() != Task::Fl2va
+                || vae.canonical_model() != contract::FL2VA_COMFY
+                || vae.artifact_plan_identity_sha256()
+                    != self.admitted.vae_artifact_plan_identity_sha256
+                || !vae.device().same_device(self.continuing_execution.device())
+            {
+                bail!("private H3 retained VAE differs from the consuming attempt")
+            }
+        }
+        Ok(())
+    }
+
+    fn into_empty(self) -> Result<H3PrivateTerminalAttempt<E, A>> {
+        self.validate_continuing_authority()?;
+        if !self.ledger.is_terminal()
+            || self.vae.is_some()
+            || self.denoiser.is_some()
+            || self.opened_vae.is_some()
+            || self.opened_qwen.is_some()
+            || self.qwen_support.is_some()
+            || self.conditioner_lease.is_some()
+            || self.bound_transformer.is_some()
+            || self.qwen_execution.is_some()
+            || self.qwen_artifacts.is_some()
+            || self.block_execution.is_some()
+        {
+            bail!("private H3 mux requires an empty terminal component state")
+        }
+        let Self {
+            vae: _,
+            denoiser: _,
+            opened_vae: _,
+            opened_qwen: _,
+            qwen_support: _,
+            conditioner_lease: _,
+            bound_transformer: _,
+            stream_authority,
+            qwen_artifact_authority,
+            qwen_execution: _,
+            qwen_artifacts: _,
+            block_execution: _,
+            continuing_execution,
+            continuing_artifacts,
+            identity: _,
+            authority,
+            admitted,
+            ledger: _,
+            storage,
+            retention,
+            memory_overlap,
+            cancellation_slot: _,
+            cancellation_guard,
+            attempt,
+        } = self;
+        Ok(H3PrivateTerminalAttempt {
+            continuing_execution,
+            continuing_artifacts,
+            authority,
+            admitted,
+            stream_authority,
+            qwen_artifact_authority,
+            storage,
+            retention,
+            memory_overlap,
+            cancellation_guard,
+            attempt,
+        })
+    }
+}
+
+impl<C, E, A> H3Fl2VaBackend for H3PrivatePhaseBackend<C, E, A>
+where
+    C: H3PrivateQwenConditionerLease + Send + Sync,
+    E: H3BackendExecutionLease + Send + Sync,
+    A: H3PrivateFl2VaArtifactLease + Send + Sync,
+{
+    fn identity(&self) -> H3PipelineBackendIdentity {
+        self.identity.clone()
+    }
+
+    fn device(&self) -> &Device {
+        self.continuing_execution.device()
+    }
+
+    fn encode_text(
+        &mut self,
+        prompt: &str,
+        endpoints: &[H3PreparedEndpoint],
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<H3TextConditioning> {
+        self.validate_continuing_authority()?;
+        self.ledger.vaes_loaded()?;
+        checkpoint.checkpoint(H3PipelineEvent {
+            phase: H3PipelinePhase::VaeLoad,
+            completed: 0,
+            total: 1,
+        })?;
+        let opened_vae = self
+            .opened_vae
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
+        let authority = &self.authority;
+        let admitted = &self.admitted;
+        let stream_authority = &self.stream_authority;
+        let qwen_artifact_authority = &self.qwen_artifact_authority;
+        let storage = &self.storage;
+        let retention = &self.retention;
+        let memory_overlap = &self.memory_overlap;
+        let continuing_execution = &self.continuing_execution;
+        let continuing_artifacts = &self.continuing_artifacts;
+        let attempt = &self.attempt;
+        let mut vae_observer = H3PrivateVaeLoadCheckpoint::new(checkpoint, || {
+            validate_private_continuing_authority(
+                authority,
+                admitted,
+                stream_authority,
+                qwen_artifact_authority,
+                storage,
+                retention,
+                memory_overlap,
+                continuing_execution,
+                continuing_artifacts,
+                attempt,
+            )
+            .map(|_| ())
+        });
+        let loaded = load_h3_comfy_vae_runtime_from_authority(
+            opened_vae,
+            self.continuing_execution.device(),
+            &mut vae_observer,
+        );
+        let vae = vae_observer.finish(loaded)?;
+        self.vae = Some(vae);
+        checkpoint.checkpoint(H3PipelineEvent {
+            phase: H3PipelinePhase::VaeLoad,
+            completed: 1,
+            total: 1,
+        })?;
+        self.validate_continuing_authority()?;
+
+        self.ledger.qwen_loaded()?;
+        checkpoint.checkpoint(H3PipelineEvent {
+            phase: H3PipelinePhase::QwenLoad,
+            completed: 0,
+            total: 1,
+        })?;
+        let mut qwen = H3PrivateQwenAdapter::load_authorized_from_opened(
+            self.opened_qwen
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("private H3 Qwen authority was already consumed"))?,
+            self.qwen_support
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("private H3 Qwen support was already consumed"))?,
+            self.conditioner_lease.take().ok_or_else(|| {
+                anyhow::anyhow!("private H3 conditioner lease was already consumed")
+            })?,
+            self.qwen_execution
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("private H3 Qwen execution was already consumed"))?,
+            self.qwen_artifacts.take().ok_or_else(|| {
+                anyhow::anyhow!("private H3 Qwen artifacts were already consumed")
+            })?,
+            &self.authority,
+            checkpoint,
+        )?;
+        checkpoint.checkpoint(H3PipelineEvent {
+            phase: H3PipelinePhase::QwenLoad,
+            completed: 1,
+            total: 1,
+        })?;
+        let text = qwen.encode_fl2va(prompt, endpoints, checkpoint);
+        let continuing = qwen.validate_continuing_authorities();
+        drop(qwen);
+        self.ledger.qwen_dropped()?;
+        let text = text?;
+        continuing?;
+        self.validate_continuing_authority()?;
+        Ok(text)
+    }
+
+    fn encode_visual_condition(
+        &mut self,
+        endpoint: &H3PreparedEndpoint,
+        mode: mold_candle::minimax_h3::ConditionEncodeMode,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<Tensor> {
+        self.validate_continuing_authority()?;
+        if !matches!(
+            self.ledger.state,
+            H3PrivatePhaseState::QwenDropped | H3PrivatePhaseState::ConditionsEncoded
+        ) {
+            bail!("private H3 condition encode occurred before Qwen drop")
+        }
+        let result = self
+            .vae
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("private H3 VAE was not retained"))?
+            .encode_visual_condition(endpoint, mode, checkpoint)?;
+        self.ledger.conditions_encoded()?;
+        self.validate_continuing_authority()?;
+        Ok(result)
+    }
+
+    fn denoise(
+        &mut self,
+        input: H3ForwardInput<'_>,
+        layout: &H3FrozenPackedLayout,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<H3TransformerOutput> {
+        self.validate_continuing_authority()?;
+        if self.denoiser.is_none() {
+            self.ledger.transformer_loaded()?;
+            checkpoint.checkpoint(H3PipelineEvent {
+                phase: H3PipelinePhase::TransformerLoad,
+                completed: 0,
+                total: 1,
+            })?;
+            let stream = load_and_pair_private_comfy_stream(
+                self.bound_transformer.take().ok_or_else(|| {
+                    anyhow::anyhow!("private H3 transformer authority was already consumed")
+                })?,
+                &self.admitted.block_streaming,
+                self.cancellation_slot.clone(),
+            )?;
+            if stream.authority != self.stream_authority {
+                bail!("private H3 loaded transformer differs from its retained bound authority")
+            }
+            let denoiser = H3BlockStreamedDenoiser::new(
+                self.identity.clone(),
+                self.admitted.block_streaming.clone(),
+                self.block_execution.take().ok_or_else(|| {
+                    anyhow::anyhow!("private H3 block execution was already consumed")
+                })?,
+                stream.loader,
+                stream.executor,
+            )?;
+            self.denoiser = Some(denoiser);
+            checkpoint.checkpoint(H3PipelineEvent {
+                phase: H3PipelinePhase::TransformerLoad,
+                completed: 1,
+                total: 1,
+            })?;
+        }
+        let output = self
+            .denoiser
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("private H3 transformer was not loaded"))?
+            .denoise(input, layout, checkpoint)?;
+        if self.ledger.denoise_completed()? {
+            drop(self.denoiser.take());
+        }
+        self.validate_continuing_authority()?;
+        Ok(output)
+    }
+
+    fn decode_video(
+        &mut self,
+        latents: &Tensor,
+        sink: &mut H3VideoEncodeSink,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<()> {
+        self.validate_continuing_authority()?;
+        self.ledger.visual_decoded()?;
+        self.vae
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("private H3 VAE was not retained for visual decode"))?
+            .decode_video(latents, sink, checkpoint)?;
+        self.validate_continuing_authority()
+    }
+
+    fn decode_audio(
+        &mut self,
+        latents: &StereoLatents,
+        checkpoint: &mut dyn H3PipelineCheckpoint,
+    ) -> Result<StereoWaveform> {
+        self.validate_continuing_authority()?;
+        if self.ledger.state != H3PrivatePhaseState::VisualDecoded {
+            bail!("private H3 audio decode occurred before visual decode")
+        }
+        let vae = self
+            .vae
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("private H3 VAE was not retained for audio decode"))?;
+        let waveform = vae.decode_audio(latents, checkpoint);
+        drop(vae);
+        let waveform = waveform?;
+        self.ledger.vaes_dropped()?;
+        self.validate_continuing_authority()?;
+        Ok(waveform)
+    }
+}
+
+struct H3PrivateTerminalAttempt<E, A> {
+    continuing_execution: H3PrivateExecutionProjection<E, A>,
+    continuing_artifacts: H3PrivateArtifactProjection<E, A>,
+    authority: FrozenH3FactoryAuthority,
+    admitted: H3PrivateFl2VaFactoryAuthority,
+    stream_authority: H3PrivateComfyStreamAuthority,
+    qwen_artifact_authority: H3PrivateQwenArtifactAuthority,
+    storage: H3PrivateComfyStorageAuthority,
+    retention: H3PrivatePreparedFl2VaRetention,
+    memory_overlap: H3PrivateFl2VaMemoryOverlapAuthority,
+    cancellation_guard: H3PrivateComfyCancellationGuard,
+    // Last: leases remain active until mux and terminal validation finish.
+    attempt: H3PrivateAttemptAuthority<E, A>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct H3PrivatePhaseIdentityEcho {
+    pub(crate) device_id: String,
+    pub(crate) execution_fingerprint: String,
+    pub(crate) prepared_attempt_identity_sha256: String,
+    pub(crate) target_budget_identity_sha256: String,
+    pub(crate) component_set_identity_sha256: String,
+}
+
+#[cfg(feature = "mp4")]
+pub(crate) struct H3PrivatePhaseRuntimeOutput {
+    pub(crate) output: super::pipeline::H3PipelineOutput,
+    pub(crate) identity_echo: H3PrivatePhaseIdentityEcho,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct H3PrivateValidatedLiveIdentity {
+    device_id: String,
+    execution_fingerprint: String,
+    component_set_identity_sha256: String,
+}
+
+impl<E, A> H3PrivateTerminalAttempt<E, A>
+where
+    E: H3BackendExecutionLease,
+    A: H3PrivateFl2VaArtifactLease,
+{
+    fn validate(&self) -> Result<H3PrivateValidatedLiveIdentity> {
+        let live = validate_private_continuing_authority(
+            &self.authority,
+            &self.admitted,
+            &self.stream_authority,
+            &self.qwen_artifact_authority,
+            &self.storage,
+            &self.retention,
+            &self.memory_overlap,
+            &self.continuing_execution,
+            &self.continuing_artifacts,
+            &self.attempt,
+        )?;
+        let _ = &self.cancellation_guard;
+        Ok(live)
+    }
+
+    fn identity_echo(&self) -> Result<H3PrivatePhaseIdentityEcho> {
+        let live = self.validate()?;
+        let prepared_attempt_identity_sha256 =
+            self.retention.prepared_attempt_identity_sha256().to_owned();
+        let target_budget_identity_sha256 =
+            self.retention.target_budget_identity_sha256().to_owned();
+        if !valid_sha256(&prepared_attempt_identity_sha256)
+            || !valid_sha256(&target_budget_identity_sha256)
+            || !valid_sha256(&live.component_set_identity_sha256)
+        {
+            bail!("private H3 terminal identity echo contains an invalid digest")
+        }
+        Ok(H3PrivatePhaseIdentityEcho {
+            device_id: live.device_id,
+            execution_fingerprint: live.execution_fingerprint,
+            prepared_attempt_identity_sha256,
+            target_budget_identity_sha256,
+            component_set_identity_sha256: live.component_set_identity_sha256,
+        })
+    }
+}
+
+fn snapshot_private_continuing_route<E, A>(
+    execution: &H3PrivateExecutionProjection<E, A>,
+) -> H3PrivateExecutionRouteFacts
+where
+    E: H3BackendExecutionLease,
+{
+    let device = H3BackendExecutionLease::device(execution);
+    H3PrivateExecutionRouteFacts {
+        active: H3BackendExecutionLease::is_active(execution),
+        lease_id: H3BackendExecutionLease::lease_id(execution).into(),
+        device_id: H3BackendExecutionLease::device_id(execution).into(),
+        execution_fingerprint: H3BackendExecutionLease::execution_fingerprint(execution).into(),
+        backend: H3BackendExecutionLease::backend(execution),
+        location: device.location(),
+        attention_device: H3AttentionDevice::from_candle(device),
+    }
+}
+
+fn validate_private_continuing_execution_route_facts(
+    actual: &H3PrivateExecutionRouteFacts,
+    admitted: &H3PrivateFl2VaFactoryAuthority,
+) -> Result<()> {
+    if cfg!(test)
+        && actual.location == DeviceLocation::Cpu
+        && actual.attention_device == H3AttentionDevice::Cpu
+    {
+        if !actual.active
+            || actual.lease_id.trim().is_empty()
+            || actual.device_id != admitted.device_id
+            || actual.execution_fingerprint != admitted.execution_fingerprint
+            || actual.backend
+                != (H3CandleBackendDevice::Cuda {
+                    compute_capability: admitted.compute_capability,
+                })
+        {
+            bail!("private MiniMax H3 continuing synthetic route differs from admission")
+        }
+        return Ok(());
+    }
+    validate_private_execution_route_facts(actual, admitted)
+}
+
+fn validate_private_live_attempt_authority<E, A>(
+    admitted: &H3PrivateFl2VaFactoryAuthority,
+    stream_authority: &H3PrivateComfyStreamAuthority,
+    qwen_artifact_authority: &H3PrivateQwenArtifactAuthority,
+    memory_overlap: &H3PrivateFl2VaMemoryOverlapAuthority,
+    continuing_execution: &H3PrivateExecutionProjection<E, A>,
+    continuing_artifacts: &H3PrivateArtifactProjection<E, A>,
+    attempt: &H3PrivateAttemptAuthority<E, A>,
+) -> Result<H3PrivateValidatedLiveIdentity>
+where
+    E: H3BackendExecutionLease,
+    A: H3PrivateFl2VaArtifactLease,
+{
+    if !continuing_execution.belongs_to(attempt) || !continuing_artifacts.belongs_to(attempt) {
+        bail!("private H3 phase projections came from different attempts")
+    }
+    let route = snapshot_private_continuing_route(continuing_execution);
+    validate_private_continuing_execution_route_facts(&route, admitted)?;
+    let component_set_identity_sha256 = validate_private_artifact_authority(
+        admitted,
+        stream_authority,
+        qwen_artifact_authority,
+        memory_overlap,
+        continuing_artifacts,
     )?;
-    let backend = H3PrivateComfyVaeAdapter::new(core, vae, authority)?;
-    H3PipelineRuntime::new(backend, authority)
+    Ok(H3PrivateValidatedLiveIdentity {
+        device_id: route.device_id,
+        execution_fingerprint: route.execution_fingerprint,
+        component_set_identity_sha256,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_private_continuing_authority<E, A>(
+    authority: &FrozenH3FactoryAuthority,
+    admitted: &H3PrivateFl2VaFactoryAuthority,
+    stream_authority: &H3PrivateComfyStreamAuthority,
+    qwen_artifact_authority: &H3PrivateQwenArtifactAuthority,
+    storage: &H3PrivateComfyStorageAuthority,
+    retention: &H3PrivatePreparedFl2VaRetention,
+    memory_overlap: &H3PrivateFl2VaMemoryOverlapAuthority,
+    continuing_execution: &H3PrivateExecutionProjection<E, A>,
+    continuing_artifacts: &H3PrivateArtifactProjection<E, A>,
+    attempt: &H3PrivateAttemptAuthority<E, A>,
+) -> Result<H3PrivateValidatedLiveIdentity>
+where
+    E: H3BackendExecutionLease,
+    A: H3PrivateFl2VaArtifactLease,
+{
+    retention.revalidate()?;
+    storage.validate()?;
+    memory_overlap.validate()?;
+    authority.validate_engine_seam(
+        contract::FL2VA_COMFY,
+        admitted.device_ordinal,
+        authority.block_offload(),
+    )?;
+    if retention.prepared_attempt_identity_sha256()
+        != memory_overlap.prepared_attempt_identity_sha256
+        || retention.target_budget_identity_sha256() != memory_overlap.target_budget_identity_sha256
+    {
+        bail!("private H3 phase authority changed during the consuming attempt")
+    }
+    validate_private_live_attempt_authority(
+        admitted,
+        stream_authority,
+        qwen_artifact_authority,
+        memory_overlap,
+        continuing_execution,
+        continuing_artifacts,
+        attempt,
+    )
+}
+
+struct H3PrivateVaeLoadCheckpoint<'a, F> {
+    checkpoint: &'a mut dyn H3PipelineCheckpoint,
+    revalidate: F,
+    first_error: Option<anyhow::Error>,
+}
+
+impl<'a, F> H3PrivateVaeLoadCheckpoint<'a, F>
+where
+    F: FnMut() -> Result<()>,
+{
+    fn new(checkpoint: &'a mut dyn H3PipelineCheckpoint, revalidate: F) -> Self {
+        Self {
+            checkpoint,
+            revalidate,
+            first_error: None,
+        }
+    }
+
+    fn finish<T>(
+        self,
+        result: std::result::Result<T, super::vae_runtime::H3ComfyVaeLoadError>,
+    ) -> Result<T> {
+        if let Some(error) = self.first_error {
+            Err(error)
+        } else {
+            Ok(result?)
+        }
+    }
+}
+
+impl<F> H3ComfyVaeLoadObserver for H3PrivateVaeLoadCheckpoint<'_, F>
+where
+    F: FnMut() -> Result<()>,
+{
+    fn checkpoint(&mut self, event: H3ComfyVaeLoadEvent) -> bool {
+        if self.first_error.is_some() {
+            return false;
+        }
+        if let Err(error) = (self.revalidate)() {
+            self.first_error = Some(error);
+            return false;
+        }
+        let total = usize::try_from(event.total).unwrap_or(usize::MAX).max(1);
+        let completed = usize::try_from(event.completed)
+            .unwrap_or(usize::MAX)
+            .min(total);
+        if let Err(error) = self.checkpoint.checkpoint(H3PipelineEvent {
+            phase: H3PipelinePhase::VaeLoadChunk,
+            completed,
+            total,
+        }) {
+            self.first_error = Some(error);
+            false
+        } else {
+            true
+        }
+    }
+}
+
+/// The sole private FL2VA mux path. It consumes an empty terminal proof and
+/// retains the singular attempt authority across the complete AAC mux.
+#[cfg(feature = "mp4")]
+#[allow(dead_code)]
+pub(crate) fn run_private_comfy_fl2va_attempt<C, E, A>(
+    owner: H3PrivatePhaseRuntimeOwner<C, E, A>,
+    progress: &ProgressReporter,
+    observer: &mut dyn H3PipelineObserver,
+) -> Result<H3PrivatePhaseRuntimeOutput>
+where
+    C: H3PrivateQwenConditionerLease + Send + Sync,
+    E: H3BackendExecutionLease + Send + Sync,
+    A: H3PrivateFl2VaArtifactLease + Send + Sync,
+{
+    let (prepared, mut backend) = owner.into_backend(progress)?;
+    let staged = super::pipeline::execute_staged(&prepared, &mut backend, progress, observer)?;
+    let terminal = backend.into_empty()?;
+    let identity_echo = terminal.identity_echo()?;
+    let output = super::pipeline::finalize_av(staged, progress, observer)?;
+    let post_mux_identity = terminal.validate()?;
+    if output.provenance.device_id != identity_echo.device_id
+        || output.provenance.execution_fingerprint != identity_echo.execution_fingerprint
+        || post_mux_identity.device_id != identity_echo.device_id
+        || post_mux_identity.execution_fingerprint != identity_echo.execution_fingerprint
+        || post_mux_identity.component_set_identity_sha256
+            != identity_echo.component_set_identity_sha256
+    {
+        bail!("private H3 mux output identity differs from the terminal authority")
+    }
+    drop(terminal);
+    Ok(H3PrivatePhaseRuntimeOutput {
+        output,
+        identity_echo,
+    })
+}
+
+mod ref2va_opened_seal {
+    #[cfg(not(test))]
+    pub enum Token {}
+
+    #[cfg(test)]
+    pub struct Token;
+}
+
+/// Shared phase machinery is ready for Ref2VA, but no safe owner can exist
+/// until that partition lands its own exact opened/prepared evidence.
+#[allow(dead_code)]
+pub(crate) struct H3PrivateRef2VaPhaseOwner {
+    _opened_evidence: ref2va_opened_seal::Token,
+}
+
+#[allow(dead_code)]
+pub(crate) fn run_private_comfy_ref2va_attempt(_owner: H3PrivateRef2VaPhaseOwner) -> Result<()> {
+    bail!("private H3 Ref2VA runtime has no exact opened/prepared evidence authority")
 }
 
 #[cfg(test)]
@@ -1148,7 +2297,7 @@ mod tests {
     use crate::minimax_h3::pipeline::{
         H3EndpointAnchor, H3EndpointResize, H3PipelineEvent, H3PipelinePhase,
     };
-    use crate::minimax_h3::private_vae_adapter::H3PrivateVaeRuntime;
+    use crate::minimax_h3::private_vae_adapter::H3PrivateComfyVaeAdapter;
     use crate::progress::{is_inference_cancelled, InferenceCancelled};
     use crate::{
         H3FactoryAuthorityInput, H3FactoryComponentAuthority, H3FactoryComponentRole,
@@ -1241,12 +2390,17 @@ mod tests {
     }
 
     #[test]
-    fn every_execution_route_axis_fails_closed_before_binding() {
+    fn every_execution_route_axis_fails_closed_at_binding_and_continuing_validation() {
         let admitted = authority()
             .private_fl2va_runtime_authority_for_schema_tests()
             .unwrap();
         validate_private_execution_route_facts(&exact_execution_route_facts(&admitted), &admitted)
             .unwrap();
+        validate_private_continuing_execution_route_facts(
+            &exact_execution_route_facts(&admitted),
+            &admitted,
+        )
+        .unwrap();
 
         for axis in [
             "active",
@@ -1282,6 +2436,10 @@ mod tests {
             assert!(
                 error.to_string().contains("execution route"),
                 "{axis}: {error}"
+            );
+            assert!(
+                validate_private_continuing_execution_route_facts(&facts, &admitted).is_err(),
+                "continuing {axis}"
             );
         }
     }
@@ -1371,6 +2529,8 @@ mod tests {
             };
         H3PrivateFl2VaMemoryOverlapAuthority::new(
             admitted.factory_identity_sha256.clone(),
+            sha('a'),
+            sha('b'),
             admitted.condition_visual_rows,
             condition_host,
             condition_device,
@@ -1503,7 +2663,15 @@ mod tests {
         }
 
         fn weight_policy_identity_sha256(&self) -> &str {
-            "4444444444444444444444444444444444444444444444444444444444444444"
+            match &self.admitted.quantization {
+                H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
+                    qwen_policy_sha256,
+                    ..
+                } => qwen_policy_sha256,
+                H3FactoryQuantizationAuthority::OfficialBf16 => {
+                    unreachable!("synthetic private FL2VA authority must be quantized")
+                }
+            }
         }
     }
 
@@ -1819,6 +2987,8 @@ mod tests {
             Some(AuthorityMismatch::ConditionShape) => {
                 overlap = H3PrivateFl2VaMemoryOverlapAuthority::new(
                     admitted.factory_identity_sha256.clone(),
+                    sha('a'),
+                    sha('b'),
                     0,
                     0,
                     0,
@@ -2192,6 +3362,8 @@ mod tests {
             .unwrap();
         let error = H3PrivateFl2VaMemoryOverlapAuthority::new(
             admitted.factory_identity_sha256.clone(),
+            sha('a'),
+            sha('b'),
             admitted.condition_visual_rows,
             0,
             20,
@@ -2207,6 +3379,8 @@ mod tests {
 
         let error = H3PrivateFl2VaMemoryOverlapAuthority::new(
             admitted.factory_identity_sha256.clone(),
+            sha('a'),
+            sha('b'),
             admitted.condition_visual_rows,
             10,
             20,
@@ -2222,6 +3396,8 @@ mod tests {
 
         let error = H3PrivateFl2VaMemoryOverlapAuthority::new(
             admitted.factory_identity_sha256,
+            sha('a'),
+            sha('b'),
             admitted.condition_visual_rows,
             10,
             20,
@@ -2240,6 +3416,8 @@ mod tests {
             .unwrap();
         H3PrivateFl2VaMemoryOverlapAuthority::new(
             t2va.factory_identity_sha256.clone(),
+            sha('a'),
+            sha('b'),
             0,
             0,
             0,
@@ -2253,6 +3431,8 @@ mod tests {
         .unwrap();
         let error = H3PrivateFl2VaMemoryOverlapAuthority::new(
             t2va.factory_identity_sha256,
+            sha('a'),
+            sha('b'),
             0,
             1,
             0,
@@ -2278,6 +3458,277 @@ mod tests {
             admitted.transformer_component_content_sha256
         );
         assert!(valid_sha256(&stream.checkpoint_identity_sha256));
+    }
+
+    fn qwen_artifact_authority_from_facts(
+        facts: &H3PrivateArtifactAuthorityFacts,
+    ) -> H3PrivateQwenArtifactAuthority {
+        H3PrivateQwenArtifactAuthority {
+            support_identity_sha256: facts.support_identity_sha256.clone(),
+            weight_identity_sha256: facts.weight_identity_sha256.clone(),
+            weight_header_identity_sha256: facts.weight_header_identity_sha256.clone(),
+            weight_policy_identity_sha256: facts.weight_policy_identity_sha256.clone(),
+        }
+    }
+
+    fn exact_continuing_artifact_facts() -> (
+        H3PrivateFl2VaFactoryAuthority,
+        H3PrivateComfyStreamAuthority,
+        H3PrivateQwenArtifactAuthority,
+        H3PrivateFl2VaMemoryOverlapAuthority,
+        H3PrivateArtifactAuthorityFacts,
+    ) {
+        let admitted = authority()
+            .private_fl2va_runtime_authority_for_schema_tests()
+            .unwrap();
+        let stream = stream_authority(&admitted);
+        let overlap = overlap(&admitted);
+        let artifacts = FakeArtifacts {
+            admitted: admitted.clone(),
+            stream: stream.clone(),
+            overlap_identity_sha256: overlap.identity_sha256().into(),
+            active: Arc::new(AtomicBool::new(true)),
+            events: Arc::new(Mutex::new(Vec::new())),
+        };
+        let facts = H3PrivateArtifactAuthorityFacts::capture(&artifacts);
+        let qwen = qwen_artifact_authority_from_facts(&facts);
+        (admitted, stream, qwen, overlap, facts)
+    }
+
+    #[test]
+    fn every_continuing_artifact_and_bound_stream_axis_fails_closed() {
+        let (admitted, stream, qwen, overlap, exact) = exact_continuing_artifact_facts();
+        validate_private_artifact_facts(&admitted, &stream, &qwen, &overlap, &exact).unwrap();
+
+        for axis in [
+            "active",
+            "factory",
+            "backend-plan",
+            "component-set",
+            "conditioner-content",
+            "conditioner-validation",
+            "qwen-support",
+            "qwen-weight",
+            "qwen-header",
+            "qwen-policy",
+            "transformer-component-content",
+            "transformer-component-validation",
+            "visual-vae-content",
+            "visual-vae-validation",
+            "audio-vae-content",
+            "audio-vae-validation",
+            "vae-plan",
+            "transformer-task",
+            "checkpoint-content",
+            "checkpoint-layout",
+            "opened-checkpoint",
+            "transformer-policy",
+            "pruned-adaln",
+            "attention-runtime",
+            "attention-kernel",
+            "attention-qualification",
+            "memory-overlap",
+        ] {
+            let mut facts = exact.clone();
+            match axis {
+                "active" => facts.active = false,
+                "factory" => facts.factory_identity_sha256 = sha('f'),
+                "backend-plan" => facts.backend_plan_identity_sha256 = sha('f'),
+                "component-set" => facts.component_set_identity_sha256 = sha('f'),
+                "conditioner-content" => facts.conditioner_component_content_sha256 = sha('f'),
+                "conditioner-validation" => {
+                    facts.conditioner_component_validation_sha256 = sha('f')
+                }
+                "qwen-support" => facts.support_identity_sha256 = sha('f'),
+                "qwen-weight" => facts.weight_identity_sha256 = sha('f'),
+                "qwen-header" => facts.weight_header_identity_sha256 = sha('f'),
+                "qwen-policy" => facts.weight_policy_identity_sha256 = sha('f'),
+                "transformer-component-content" => {
+                    facts.transformer_component_content_sha256 = sha('f')
+                }
+                "transformer-component-validation" => {
+                    facts.transformer_component_validation_sha256 = sha('f')
+                }
+                "visual-vae-content" => facts.visual_vae_component_content_sha256 = sha('f'),
+                "visual-vae-validation" => facts.visual_vae_component_validation_sha256 = sha('f'),
+                "audio-vae-content" => facts.audio_vae_component_content_sha256 = sha('f'),
+                "audio-vae-validation" => facts.audio_vae_component_validation_sha256 = sha('f'),
+                "vae-plan" => facts.vae_artifact_plan_identity_sha256 = sha('f'),
+                "transformer-task" => facts.transformer_task = H3TransformerTask::Ref2Va,
+                "checkpoint-content" => facts.transformer_checkpoint_content_sha256 = sha('f'),
+                "checkpoint-layout" => {
+                    facts.transformer_checkpoint_layout_identity_sha256 = sha('f')
+                }
+                "opened-checkpoint" => facts.transformer_checkpoint_identity_sha256 = sha('f'),
+                "transformer-policy" => facts.transformer_policy_identity_sha256 = sha('f'),
+                "pruned-adaln" => facts.pruned_adaln_table_identity_sha256 = sha('f'),
+                "attention-runtime" => facts.attention_runtime_identity_sha256 = sha('f'),
+                "attention-kernel" => facts.attention_kernel_identity = "other-kernel".into(),
+                "attention-qualification" => facts.attention_qualification_sha256 = sha('f'),
+                "memory-overlap" => facts.memory_overlap_identity_sha256 = sha('f'),
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_private_artifact_facts(&admitted, &stream, &qwen, &overlap, &facts)
+                    .is_err(),
+                "{axis}"
+            );
+        }
+
+        for axis in ["support", "weight", "header", "policy"] {
+            let mut changed = qwen.clone();
+            match axis {
+                "support" => changed.support_identity_sha256 = sha('f'),
+                "weight" => changed.weight_identity_sha256 = sha('f'),
+                "header" => changed.weight_header_identity_sha256 = sha('f'),
+                "policy" => changed.weight_policy_identity_sha256 = sha('f'),
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_private_artifact_facts(&admitted, &stream, &changed, &overlap, &exact)
+                    .is_err(),
+                "retained Qwen {axis}"
+            );
+        }
+
+        for axis in [
+            "task",
+            "checkpoint-content",
+            "checkpoint-layout",
+            "opened-checkpoint",
+            "transformer-policy",
+            "attention-runtime",
+        ] {
+            let mut changed = stream.clone();
+            match axis {
+                "task" => changed.task = H3TransformerTask::Ref2Va,
+                "checkpoint-content" => changed.transformer_content_sha256 = sha('f'),
+                "checkpoint-layout" => changed.transformer_layout_identity_sha256 = sha('f'),
+                "opened-checkpoint" => changed.checkpoint_identity_sha256 = sha('f'),
+                "transformer-policy" => changed.transformer_policy_identity_sha256 = sha('f'),
+                "attention-runtime" => changed.attention_runtime_identity_sha256 = sha('f'),
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_private_artifact_facts(&admitted, &changed, &qwen, &overlap, &exact)
+                    .is_err(),
+                "stream {axis}"
+            );
+        }
+
+        let mut changed = admitted.clone();
+        changed.task = Task::Ref2va;
+        assert!(
+            validate_private_artifact_facts(&changed, &stream, &qwen, &overlap, &exact).is_err()
+        );
+        let mut changed = admitted;
+        changed.canonical_model = contract::REF2VA_COMFY.into();
+        assert!(
+            validate_private_artifact_facts(&changed, &stream, &qwen, &overlap, &exact).is_err()
+        );
+    }
+
+    #[test]
+    fn overlap_identity_uses_the_version_two_serializer_domain() {
+        assert_eq!(
+            H3_PRIVATE_FL2VA_OVERLAP_IDENTITY_DOMAIN,
+            b"mold.minimax-h3.private-fl2va-overlap.v2\0"
+        );
+    }
+
+    struct MutableEchoExecution {
+        device: Device,
+        changed: Arc<AtomicBool>,
+        admitted_device_id: String,
+        changed_device_id: String,
+        execution_fingerprint: String,
+        compute_capability: (u16, u16),
+    }
+
+    impl H3BackendExecutionLease for MutableEchoExecution {
+        fn lease_id(&self) -> &str {
+            "mutable-echo-lease"
+        }
+
+        fn device_id(&self) -> &str {
+            if self.changed.load(Ordering::SeqCst) {
+                &self.changed_device_id
+            } else {
+                &self.admitted_device_id
+            }
+        }
+
+        fn backend(&self) -> H3CandleBackendDevice {
+            H3CandleBackendDevice::Cuda {
+                compute_capability: self.compute_capability,
+            }
+        }
+
+        fn execution_fingerprint(&self) -> &str {
+            &self.execution_fingerprint
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
+
+        fn is_active(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn terminal_live_validation_rejects_mutated_echo_axis_before_publication() {
+        let admitted = authority()
+            .private_fl2va_runtime_authority_for_schema_tests()
+            .unwrap();
+        let stream = stream_authority(&admitted);
+        let overlap = overlap(&admitted);
+        let changed = Arc::new(AtomicBool::new(false));
+        let artifact_lease = FakeArtifacts {
+            admitted: admitted.clone(),
+            stream: stream.clone(),
+            overlap_identity_sha256: overlap.identity_sha256().into(),
+            active: Arc::new(AtomicBool::new(true)),
+            events: Arc::new(Mutex::new(Vec::new())),
+        };
+        let qwen = qwen_artifact_authority_from_facts(&H3PrivateArtifactAuthorityFacts::capture(
+            &artifact_lease,
+        ));
+        let attempt = H3PrivateAttemptAuthority::new_unchecked_for_test(
+            MutableEchoExecution {
+                device: Device::Cpu,
+                changed: Arc::clone(&changed),
+                admitted_device_id: admitted.device_id.clone(),
+                changed_device_id: "mutated-device".into(),
+                execution_fingerprint: admitted.execution_fingerprint.clone(),
+                compute_capability: admitted.compute_capability,
+            },
+            artifact_lease,
+            Device::Cpu,
+        );
+        let execution = attempt.block_projection();
+        let artifacts = attempt.artifact_projection();
+        let initial = validate_private_live_attempt_authority(
+            &admitted, &stream, &qwen, &overlap, &execution, &artifacts, &attempt,
+        )
+        .unwrap();
+        assert_eq!(initial.device_id, admitted.device_id);
+        assert_eq!(
+            initial.component_set_identity_sha256,
+            admitted.component_set_identity_sha256
+        );
+
+        changed.store(true, Ordering::SeqCst);
+        let publications = AtomicUsize::new(0);
+        let result = validate_private_live_attempt_authority(
+            &admitted, &stream, &qwen, &overlap, &execution, &artifacts, &attempt,
+        )
+        .inspect(|_| {
+            publications.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(result.unwrap_err().to_string().contains("route"));
+        assert_eq!(publications.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -2386,6 +3837,138 @@ mod tests {
     }
 
     #[test]
+    fn phase_ledger_enforces_exact_load_drop_order_and_terminal_mux_gate() {
+        fn try_mux(ledger: &H3PrivatePhaseLedger, calls: &AtomicUsize) -> Result<()> {
+            if !ledger.is_terminal() {
+                bail!("synthetic mux requires Empty")
+            }
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mux_calls = AtomicUsize::new(0);
+        let mut ledger = H3PrivatePhaseLedger::new(3).unwrap();
+        assert!(H3PrivatePhaseLedger::new(0).is_err());
+        assert!(ledger.qwen_loaded().is_err());
+        assert!(ledger.denoise_completed().is_err());
+        assert!(ledger.visual_decoded().is_err());
+        assert!(ledger.vaes_dropped().is_err());
+        assert!(try_mux(&ledger, &mux_calls).is_err());
+
+        let vae = DropCount {
+            name: "vae",
+            events: Arc::clone(&events),
+        };
+        ledger.vaes_loaded().unwrap();
+        assert!(ledger.vaes_loaded().is_err());
+        assert!(try_mux(&ledger, &mux_calls).is_err());
+
+        let qwen = DropCount {
+            name: "qwen",
+            events: Arc::clone(&events),
+        };
+        ledger.qwen_loaded().unwrap();
+        assert!(ledger.transformer_loaded().is_err());
+        drop(qwen);
+        ledger.qwen_dropped().unwrap();
+        assert_eq!(*events.lock().unwrap(), ["qwen"]);
+        ledger.conditions_encoded().unwrap();
+        ledger.conditions_encoded().unwrap();
+
+        let transformer = DropCount {
+            name: "transformer",
+            events: Arc::clone(&events),
+        };
+        ledger.transformer_loaded().unwrap();
+        assert!(!ledger.denoise_completed().unwrap());
+        assert!(!ledger.denoise_completed().unwrap());
+        assert_eq!(*events.lock().unwrap(), ["qwen"]);
+        assert!(ledger.visual_decoded().is_err());
+        assert!(try_mux(&ledger, &mux_calls).is_err());
+
+        assert!(ledger.denoise_completed().unwrap());
+        drop(transformer);
+        assert_eq!(*events.lock().unwrap(), ["qwen", "transformer"]);
+        assert!(ledger.denoise_completed().is_err());
+        ledger.visual_decoded().unwrap();
+        assert!(try_mux(&ledger, &mux_calls).is_err());
+
+        drop(vae);
+        assert_eq!(*events.lock().unwrap(), ["qwen", "transformer", "vae"]);
+        ledger.vaes_dropped().unwrap();
+        assert!(ledger.is_terminal());
+        assert!(ledger.vaes_dropped().is_err());
+        try_mux(&ledger, &mux_calls).unwrap();
+        assert_eq!(mux_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn vae_load_revocation_cleans_attempt_scope_and_never_reaches_mux() {
+        struct RevokeAfterFirstCheckpoint {
+            active: Arc<AtomicBool>,
+            events: usize,
+        }
+
+        impl H3PipelineCheckpoint for RevokeAfterFirstCheckpoint {
+            fn checkpoint(&mut self, _event: H3PipelineEvent) -> Result<()> {
+                self.events += 1;
+                if self.events == 1 {
+                    self.active.store(false, Ordering::SeqCst);
+                }
+                Ok(())
+            }
+        }
+
+        let active = Arc::new(AtomicBool::new(true));
+        let validator_active = Arc::clone(&active);
+        let drops = Arc::new(Mutex::new(Vec::new()));
+        let mux_calls = AtomicUsize::new(0);
+        let result = (|| -> Result<()> {
+            let _attempt_scope = DropCount {
+                name: "attempt",
+                events: Arc::clone(&drops),
+            };
+            let mut checkpoint = RevokeAfterFirstCheckpoint { active, events: 0 };
+            let mut observer = H3PrivateVaeLoadCheckpoint::new(&mut checkpoint, move || {
+                if !validator_active.load(Ordering::SeqCst) {
+                    bail!("synthetic VAE authority revoked")
+                }
+                Ok(())
+            });
+            assert!(observer.checkpoint(H3ComfyVaeLoadEvent {
+                role: super::super::vae_runtime::H3ComfyVaeArtifactRole::VisualConfig,
+                phase: super::super::vae_runtime::H3ComfyVaeLoadPhase::Open,
+                completed: 1,
+                total: 2,
+            }));
+            assert!(!observer.checkpoint(H3ComfyVaeLoadEvent {
+                role: super::super::vae_runtime::H3ComfyVaeArtifactRole::VisualWeights,
+                phase: super::super::vae_runtime::H3ComfyVaeLoadPhase::Stage,
+                completed: 2,
+                total: 2,
+            }));
+            observer.finish(Ok(()))?;
+            mux_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })();
+        assert!(result.unwrap_err().to_string().contains("revoked"));
+        assert_eq!(*drops.lock().unwrap(), ["attempt"]);
+        assert_eq!(mux_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn ref2va_phase_owner_remains_sealed_and_fail_closed() {
+        let error = run_private_comfy_ref2va_attempt(H3PrivateRef2VaPhaseOwner {
+            _opened_evidence: ref2va_opened_seal::Token,
+        })
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("no exact opened/prepared evidence"));
+    }
+
+    #[test]
     fn singular_attempt_owner_drops_each_underlying_lease_once() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let execution = DropCount {
@@ -2408,5 +3991,24 @@ mod tests {
 
         drop(attempt);
         assert_eq!(*events.lock().unwrap(), ["execution", "artifacts"]);
+    }
+
+    #[test]
+    fn attempt_and_overlap_roots_are_consuming_while_projections_remain_cloneable() {
+        trait AmbiguousIfClone<Marker> {
+            fn assert_not_implemented() {}
+        }
+        impl<T: ?Sized> AmbiguousIfClone<()> for T {}
+        struct ImplementsClone;
+        impl<T: Clone> AmbiguousIfClone<ImplementsClone> for T {}
+
+        <H3PrivateAttemptAuthority<(), ()> as AmbiguousIfClone<_>>::assert_not_implemented();
+        <H3PrivateFl2VaMemoryOverlapAuthority as AmbiguousIfClone<_>>::assert_not_implemented();
+        <H3PrivatePhaseRuntimeOwner<(), (), ()> as AmbiguousIfClone<_>>::assert_not_implemented();
+        <H3PrivateRef2VaPhaseOwner as AmbiguousIfClone<_>>::assert_not_implemented();
+
+        fn assert_clone<T: Clone>() {}
+        assert_clone::<H3PrivateExecutionProjection<(), ()>>();
+        assert_clone::<H3PrivateArtifactProjection<(), ()>>();
     }
 }
