@@ -159,6 +159,85 @@ shape/dtype/statistics/sampled values, evidence hash, and numerical tolerance.
 Quantized Comfy results use structural, temporal, and audio quality metrics;
 they are never mislabeled as bit-identical full-precision evidence.
 
+### Tokenizer and processor capture producer
+
+The first production capture slice is
+scripts/capture-minimax-h3-conditioner.py tokenizer-processor. It is an opt-in
+evidence producer, not a Mold runtime command. It has no Cargo feature, binary
+entry point, release dependency, automatic workflow trigger, or model download
+path. Its Python ML imports occur only after the authorization, external-root,
+source, and component preflights pass.
+
+The producer fixes one reproducible conditioner case:
+
+- a UTF-8 raw prompt containing both non-ASCII text and a literal Qwen vision
+  token spelling, with no chat template and no added special tokens;
+- one generated 256 by 256 RGB image, chosen to meet the pinned processor
+  minimum without a resize;
+- one generated 37-frame, 24 fps, 64 by 64 RGB video, sampled through the
+  pinned Diffusers helper at 2 fps into source frames 0, 12, 24, and 36 and
+  paired into timestamped Qwen vision blocks;
+- the exact combined image/video Ref2VA presentation from the pinned Diffusers
+  implementation.
+
+It records four manifest-required measurements. Token IDs are length-prefixed
+raw and multimodal presentations. Special-token evidence is a length-prefixed
+set of the required token IDs, H3 row tags, Qwen modality type IDs, sampled
+source indices, and millisecond timestamps. Processor shapes use stable numeric
+field IDs followed by rank and dimensions. Processor pixel values are
+concatenated after an actual CUDA BF16 copy and hashed as canonical typed
+little-endian bytes. The raw generated pixels are not retained; only their
+input hashes and strict tensor summaries leave the process.
+
+Capture requires clean external checkouts at these exact revisions:
+
+- Diffusers: 9c6a68c32b3b2a64db91800b624d33cec6e25ab8
+- Transformers: 42f189ded85d18d00b51161d694cafd325e32b91
+- MiniMaxAI/MiniMax-H3 snapshot:
+  bfc8ed0353f5a9733be73e6b2c98ec0948195b86
+
+The Transformers revision is the main-tree companion available when the
+pinned Diffusers H3 integration landed and includes the exact
+create_mm_token_type_ids authority that integration calls. The producer
+resolves both imported implementations back into those clean checkouts. For
+every model metadata file, it verifies both the manifest SHA-256 and the
+Hugging Face local-directory metadata revision. A manually assembled directory
+without revision metadata fails closed even if its visible files happen to
+hash correctly.
+
+Prepare the external paths, including both tokenizer/ and processor/ metadata
+directories from the exact model snapshot, then run:
+
+    export MOLD_H3_FIXTURE_ROOT=/external/h3/evidence
+    export MOLD_H3_AUTHORIZATION_RECORD=/external/h3/compliance/authorization.json
+    export MOLD_H3_OFFICIAL_MODEL=/external/h3/models/MiniMax-H3
+    export MOLD_H3_DIFFUSERS_CHECKOUT=/external/h3/src/diffusers
+    export MOLD_H3_TRANSFORMERS_CHECKOUT=/external/h3/src/transformers
+    python3 scripts/capture-minimax-h3-conditioner.py \
+      tokenizer-processor --device cuda:0
+
+The producer disables TF32, flash and memory-efficient SDPA, cuDNN SDPA,
+non-deterministic algorithms, and every manifest-excluded acceleration before
+the CUDA copy. Environment variables that configure an excluded acceleration
+are rejected before any ML package import. It writes mode-0600 oracle.json and
+oracle-bundle.json files under a new, input-addressed directory below
+MOLD_H3_FIXTURE_ROOT and refuses to overwrite an existing capture.
+
+The emitted partial bundle is independently valid under
+mold.minimax-h3.fixture-bundle.v1, and its layer is accepted by the exact
+protected measurement validator. It is intentionally not a complete campaign:
+the protected runner still requires paired oracle and Mold evidence for all
+exact-full-bf16 layers.
+
+Qwen layer 50 is the next conditioner boundary, not part of this producer.
+The released Mold private conditioner currently exercises the deployment
+NVFP4/AWQ route, while the qwen-layer-50 manifest layer is
+exact-full-bf16. Relabeling that quantized output would be false evidence. The
+next slice must add an authorization-bound exact-BF16 Mold adapter and paired
+Diffusers capture for text-only and representative multimodal presentations,
+both recording the unnormalized hidden state after language layer 49, before
+this partial bundle can expand to that layer.
+
 ### Opt-in protected GPU validation
 
 The manual `MiniMax H3 private conformance` workflow validates an approved,
