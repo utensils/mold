@@ -60,6 +60,12 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     "MOLD_T5_VARIANT",
     "MOLD_VAE_DTYPE",
     "MOLD_VAE_TILED",
+    // #775 diagnostics: forcing the quantized-matmul fallback changes
+    // numerics, runtime, and transient F32 memory; the profiler's per-phase
+    // device syncs change runtime. Neither may share a fingerprint or a
+    // learned-timing bucket with normal execution.
+    "MOLD_WAN_FORCE_DMMV",
+    "MOLD_WAN_STEP_PROFILE",
     "MOLD_WUERSTCHEN_DECODER_GUIDANCE",
 ];
 

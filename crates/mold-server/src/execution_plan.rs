@@ -296,6 +296,8 @@ pub enum RuntimeSemanticVariable {
     T5Variant,
     VaeDtype,
     VaeTiled,
+    WanForceDmmv,
+    WanStepProfile,
     WuerstchenDecoderGuidance,
 }
 
@@ -620,6 +622,12 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_T5_VARIANT" => RuntimeSemanticVariable::T5Variant,
         "MOLD_VAE_DTYPE" => RuntimeSemanticVariable::VaeDtype,
         "MOLD_VAE_TILED" => RuntimeSemanticVariable::VaeTiled,
+        // #775 diagnostics: forcing the quantized-matmul fallback changes
+        // numerics/runtime/memory; the profiler's per-phase syncs change
+        // runtime. Distinct classes keep their fingerprints and learned
+        // timings out of normal buckets.
+        "MOLD_WAN_FORCE_DMMV" => RuntimeSemanticVariable::WanForceDmmv,
+        "MOLD_WAN_STEP_PROFILE" => RuntimeSemanticVariable::WanStepProfile,
         "MOLD_WUERSTCHEN_DECODER_GUIDANCE" => RuntimeSemanticVariable::WuerstchenDecoderGuidance,
         // A new engine-shaping input must never silently collapse into an old
         // equivalence class. `None` here surfaces as a per-job
