@@ -486,8 +486,8 @@ function setSourceFitMode(e: Event) {
       </p>
     </template>
 
-    <!-- Strength -->
-    <template v-if="form.sourceImage">
+    <!-- Strength (wan pins the first frame exactly and never reads it) -->
+    <template v-if="form.sourceImage && caps.supportsStrength">
       <label class="mt-3 flex items-center justify-between text-caption text-ink-2">
         Strength <span class="data-mono text-ink">{{ form.strength.toFixed(2) }}</span>
       </label>

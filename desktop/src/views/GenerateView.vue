@@ -2774,6 +2774,10 @@ function applyPrefill() {
     const endFrameNotice = firstLastFrameRestoreNotice(
       caps.value.supportsEndFrame,
       prefill.metadata.keyframes,
+      // A first/last print carries its opening frame only in keyframes[0];
+      // the stash/gallery restore below keys on source provenance, so
+      // without it both endpoints need reattaching and the notice says so.
+      Boolean(prefill.metadata.source_image_sha256 ?? prefill.metadata.source_image_name),
     );
     if (endFrameNotice) toasts.push(endFrameNotice, "error");
     void restorePrefillSource(prefill.metadata, restoreEpoch);

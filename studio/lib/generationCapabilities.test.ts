@@ -88,6 +88,17 @@ describe("baseGenerationCapabilities", () => {
     expect(baseGenerationCapabilities("wan").supportsLora).toBe(true);
   });
 
+  it("hides strength and mask for wan — pinned frames take neither", () => {
+    // Wan pins conditioning frames exactly: the engine never reads
+    // `strength` and rejects `mask_image`, so showing either control
+    // advertises a knob the render ignores or refuses.
+    const wan = baseGenerationCapabilities("wan", "wan22-i2v-a14b:q8");
+    expect(wan.supportsStrength).toBe(false);
+    expect(wan.supportsMask).toBe(false);
+    // LTX-2 image-to-video genuinely consumes strength.
+    expect(baseGenerationCapabilities("ltx2").supportsStrength).toBe(true);
+  });
+
   it("withholds the LoRA control from the wan fp8-scaled tier", () => {
     // `WanTransformer::from_safetensors_with_loras` refuses every adapter
     // stack on fp8-scaled weights (merging would re-round the delta to three

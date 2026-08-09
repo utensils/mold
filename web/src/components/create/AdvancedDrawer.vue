@@ -1046,8 +1046,9 @@ function setSequenceCameraMode(mode: string) {
                 Remove
               </button>
             </div>
+            <!-- Wan pins the first frame exactly and never reads strength. -->
             <SliderRow
-              v-if="caps.sourceImageMode === 'single'"
+              v-if="caps.sourceImageMode === 'single' && caps.supportsStrength"
               label="Denoise strength"
               :model-value="modelValue.strength"
               :min="0"

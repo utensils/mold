@@ -112,16 +112,30 @@ describe("firstLastFrameKeyframes", () => {
 });
 
 describe("firstLastFrameRestoreNotice", () => {
-  it("names the end frame a reused print cannot bring back", () => {
-    expect(
-      firstLastFrameRestoreNotice(true, [
-        { name: "open.png" },
-        { name: "close.png" },
-      ]),
-    ).toMatch(/end frame \(close\.png\) can't be restored/);
+  it("names BOTH endpoints when the opening frame has no restore handle", () => {
+    // A first/last print carries its opening frame only in keyframes[0]
+    // (the request holds no source_image), so without independent source
+    // provenance the notice must not pretend only the end frame is missing.
+    const notice = firstLastFrameRestoreNotice(true, [
+      { name: "open.png" },
+      { name: "close.png" },
+    ]);
+    expect(notice).toMatch(/end frame \(close\.png\)/);
+    expect(notice).toMatch(/first frame \(open\.png\)/);
+    expect(notice).toMatch(/Attach both again/);
     expect(firstLastFrameRestoreNotice(true, [{}, {}])).toMatch(
-      /end frame can't be restored/,
+      /end frame and the first frame can't be restored/i,
     );
+  });
+
+  it("names only the end frame when the opening frame is restorable", () => {
+    expect(
+      firstLastFrameRestoreNotice(
+        true,
+        [{ name: "open.png" }, { name: "close.png" }],
+        true,
+      ),
+    ).toMatch(/end frame \(close\.png\) can't be restored/);
   });
 
   it("stays quiet for prints that are not first/last-frame renders", () => {

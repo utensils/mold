@@ -22,6 +22,7 @@ export type GenerationTemplateSort =
 export interface GenerationTemplateMediaReference {
   field:
     | "imageAttachments"
+    | "endFrame"
     | "maskImage"
     | "controlImage"
     | "audioFile"
@@ -78,6 +79,7 @@ export function collectTemplateMediaReferences(
       kind: image.kind,
       filename: image.filename,
     })),
+    mediaRef("endFrame", form.endFrame),
     mediaRef("maskImage", form.maskImage),
     mediaRef("controlImage", form.controlImage),
     form.audioFile
@@ -303,6 +305,11 @@ export async function hydrateGenerationTemplate(
   // Legacy byte-free attachment markers must not masquerade as usable source
   // images. New templates rebuild the ordered list from durable assets below.
   form.imageAttachments = [];
+  // Same rule for the wan closing frame: templates store no end-frame bytes,
+  // and a byte-free marker would pass validation while the serializer quietly
+  // queued an ordinary source-only render. The media reference tells the user
+  // to reattach it.
+  form.endFrame = null;
   const assets = template.mediaAssets ?? [];
   const { media, missing } = await hydrateGenerationTemplateMedia(
     assets,

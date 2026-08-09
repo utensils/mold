@@ -528,7 +528,8 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     } else {
       req.source_image = form.sourceImage;
       if (form.sourceImageName) req.source_image_name = form.sourceImageName;
-      req.strength = form.strength;
+      // Wan pins the first frame exactly; it never reads strength.
+      if (caps.supportsStrength) req.strength = form.strength;
       if (caps.supportsMask && form.maskImage) req.mask_image = form.maskImage;
     }
   }

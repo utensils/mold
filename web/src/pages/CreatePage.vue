@@ -1773,6 +1773,9 @@ function noticeFirstLastFrameRestore(metadata: OutputMetadata) {
   const notice = firstLastFrameRestoreNotice(
     capabilities.value.supportsEndFrame,
     metadata.keyframes,
+    // A first/last print carries its opening frame only in keyframes[0], so
+    // without a source provenance handle both endpoints need reattaching.
+    Boolean(metadata.source_image_sha256 ?? metadata.source_image_name),
   );
   if (notice) toast("error", notice);
 }

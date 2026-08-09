@@ -3866,6 +3866,9 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     const endFrameNotice = firstLastFrameRestoreNotice(
       caps.value.supportsEndFrame,
       print.metadata.keyframes,
+      // A first/last print carries its opening frame only in keyframes[0];
+      // without source provenance both endpoints need reattaching.
+      Boolean(print.metadata.source_image_sha256 ?? print.metadata.source_image_name),
     );
     if (endFrameNotice) notes.push(endFrameNotice);
     setGenerationStatus(notes.join(" · "), !!endFrameNotice);

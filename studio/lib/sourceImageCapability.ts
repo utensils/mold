@@ -132,16 +132,28 @@ export interface KeyframeProvenance {
  *
  * Saved metadata carries each keyframe's name and digest and no payload, so
  * the closing still cannot be rebuilt from it — the same position source
- * videos are already in. Every other knob restores; this says the one thing
- * that did not, rather than letting Generate look ready.
+ * videos are already in. A first/last render also carries its OPENING frame
+ * only as `keyframes[0]` (the request holds no `source_image`), so unless the
+ * caller has an independent restore handle for it, both endpoints are gone
+ * and the notice must say so — telling users to attach only the end frame
+ * would leave a required-source checkpoint still blocked.
  */
 export function firstLastFrameRestoreNotice(
   supportsEndFrame: boolean,
   keyframes: readonly KeyframeProvenance[] | null | undefined,
+  openingRestorable = false,
 ): string | null {
   if (!supportsEndFrame || (keyframes?.length ?? 0) < 2) return null;
-  const name = keyframes?.[keyframes.length - 1]?.name?.trim();
-  return `${name ? `The end frame (${name})` : "The end frame"} can't be restored — saved metadata records its name and digest, not the image. Attach it again to reproduce this first/last-frame render.`;
+  const endName = keyframes?.[keyframes.length - 1]?.name?.trim();
+  const end = endName ? `The end frame (${endName})` : "The end frame";
+  if (openingRestorable) {
+    return `${end} can't be restored — saved metadata records its name and digest, not the image. Attach it again to reproduce this first/last-frame render.`;
+  }
+  const firstName = keyframes?.[0]?.name?.trim();
+  const first = firstName
+    ? `the first frame (${firstName})`
+    : "the first frame";
+  return `${end} and ${first} can't be restored — saved metadata records names and digests, not the images. Attach both again to reproduce this first/last-frame render.`;
 }
 
 export interface SourceImageValidationInput {

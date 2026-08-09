@@ -2916,7 +2916,21 @@ pub(crate) async fn placement_preview_for_request(
         response.authoritative = true;
         return response;
     }
-    if let Err(error) = require_server_model_activation(state, &request.model).await {
+    let resolved_family = match require_server_model_activation(state, &request.model).await {
+        Ok(family) => family,
+        Err(error) => {
+            let mut response = unavailable("infeasible", error.error);
+            response.authoritative = true;
+            return response;
+        }
+    };
+    // The source-image contract (#772) is part of admission: a preview that
+    // says `planned` for a request generation would 422 breaks the
+    // authoritative-preview contract, so the same gate answers here as an
+    // authoritative infeasible.
+    if let Err(error) =
+        enforce_source_image_capability(state, &request, resolved_family.as_deref()).await
+    {
         let mut response = unavailable("infeasible", error.error);
         response.authoritative = true;
         return response;

@@ -965,11 +965,14 @@ describe("CreatePage layout and behavior", () => {
     await flushPromises();
 
     expect(useGenerateForm().state.value.endFrame).toBeNull();
-    expect(
-      useNotifications()
-        .toasts.map((item) => item.text)
-        .join(" "),
-    ).toContain("The end frame (close.png) can't be restored");
+    // A first/last print carries its opening frame only in keyframes[0]
+    // (no source provenance), so BOTH endpoints are named.
+    const toastText = useNotifications()
+      .toasts.map((item) => item.text)
+      .join(" ");
+    expect(toastText).toContain(
+      "The end frame (close.png) and the first frame (open.png) can't be restored",
+    );
   });
 
   it("submits Qwen edit images without sending stale mask state", async () => {

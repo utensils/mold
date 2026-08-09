@@ -326,6 +326,8 @@ function modelDefaultsPatch(
     next.imageAttachments = [];
     next.maskImage = null;
   }
+  // Wan reads a source image but rejects a repaint mask outright.
+  if (!capabilities.supportsMask) next.maskImage = null;
   if (capabilities.sourceImageMode !== "single") {
     if (capabilities.sourceImageMode !== "references") {
       next.batchSize = 1;
@@ -972,8 +974,11 @@ export function useGenerateForm(): UseGenerateForm {
                 !firstLastFrames && attachments[0]?.base64
                   ? attachments[0].filename
                   : undefined,
+              // Wan pins the first frame exactly; it never reads strength.
               strength:
-                !firstLastFrames && attachments[0]?.base64
+                !firstLastFrames &&
+                capabilities.supportsStrength &&
+                attachments[0]?.base64
                   ? s.strength
                   : undefined,
               mask_image: firstLastFrames

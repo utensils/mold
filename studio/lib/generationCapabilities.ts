@@ -63,6 +63,13 @@ export interface BaseGenerationCapabilities {
   /** Whether the optional wan End frame well renders (#779). */
   supportsEndFrame: boolean;
   supportsMask: boolean;
+  /**
+   * Whether the engine reads `strength` for its source image. Wan pins the
+   * first frame exactly — its conditioning has no denoise-strength knob — so
+   * showing the slider (or serializing the field) would advertise a control
+   * the render ignores.
+   */
+  supportsStrength: boolean;
   forcesBatchSizeOne: boolean;
 }
 
@@ -321,7 +328,10 @@ export function baseGenerationCapabilities(
       normalized,
       advertisedSourceImage,
     ),
-    supportsMask: !h3 && !qwenEdit && !flux2Dev,
+    // Wan pins conditioning frames exactly: no repaint mask, no denoise
+    // strength — the engine rejects the former and never reads the latter.
+    supportsMask: !h3 && !qwenEdit && !flux2Dev && !wan,
+    supportsStrength: !h3 && !qwenEdit && !flux2Dev && !wan,
     forcesBatchSizeOne: h3 || qwenEdit,
   };
 }

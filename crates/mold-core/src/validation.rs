@@ -2105,6 +2105,23 @@ fn validate_generate_request_after_activation(
         }
     }
 
+    // The wan fp8-scaled A14B tier refuses every adapter stack (#777): an fp8
+    // merge would re-round each targeted weight to three mantissa bits, and
+    // the loader fails closed — but only after the UMT5 encode. Name it at
+    // admission instead. Opaque cv:/hf: installs keep the engine's check.
+    if family == Some("wan")
+        && (req.lora.is_some() || req.loras.as_ref().is_some_and(|list| !list.is_empty()))
+    {
+        let canonical = crate::manifest::resolve_model_name(&req.model);
+        if canonical.ends_with(":fp8") && canonical.contains("a14b") {
+            return Err(format!(
+                "{canonical} is fp8-scaled and refuses LoRA stacks — merging would re-round \
+                 every targeted weight to three mantissa bits. Use the :q5/:q8 GGUF or bf16 \
+                 tier for adapters"
+            ));
+        }
+    }
+
     // Wan Lightning distill strengths (#795): wan only, within the accepted
     // band. Whether the model actually ships a distill in the addressed slot
     // is the engine's check — it knows the resolved component paths.
@@ -4750,6 +4767,19 @@ mod tests {
             assert!(err.contains("UNet scheduler"), "got: {err}");
         }
         wan.scheduler = None;
+
+        // The fp8-scaled tier refuses LoRA stacks at admission — its loader
+        // fails closed, but only after the UMT5 encode. GGUF tiers accept.
+        wan.model = "wan22-t2v-a14b:fp8".to_string();
+        wan.loras = Some(vec![crate::LoraWeight {
+            path: "distill.safetensors".to_string(),
+            scale: 1.0,
+        }]);
+        let err = validate_generate_request(&wan).unwrap_err();
+        assert!(err.contains("fp8-scaled"), "got: {err}");
+        wan.model = "wan22-t2v-a14b:q8".to_string();
+        assert!(validate_generate_request(&wan).is_ok());
+        wan.loras = None;
 
         // Distill strengths: the community band is accepted, typos are not.
         wan.distill_strength_high = Some(1.8);

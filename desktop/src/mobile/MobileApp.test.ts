@@ -4253,7 +4253,10 @@ describe("MobileApp wan source conditioning", () => {
     await flushPromises();
 
     const summary = wrapper.get("[data-test='mobile-generation-summary']").text();
-    expect(summary).toContain("The end frame (closing.png) can't be restored");
+    // No source provenance in a first/last print — both endpoints are named.
+    expect(summary).toContain(
+      "The end frame (closing.png) and the first frame (opening.png) can't be restored",
+    );
     expect(summary).toContain("Prompt settings restored");
     expect(wrapper.find("[data-test='mobile-generation-error']").exists()).toBe(true);
   });

@@ -481,7 +481,8 @@ function applyMask(mask: string): void {
           </button>
         </div>
 
-        <label class="mobile-range-field">
+        <!-- Wan pins the first frame exactly and never reads strength. -->
+        <label v-if="caps.supportsStrength" class="mobile-range-field">
           <span
             >Strength <output>{{ form.strength.toFixed(2) }}</output></span
           >
