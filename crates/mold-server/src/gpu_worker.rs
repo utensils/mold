@@ -2655,27 +2655,50 @@ fn process_job(
     let Some(h3_attempt) = h3_attempt else {
         return process_job_with_sink(worker, job, GenerationEventSink::V2(scheduler_tx), None);
     };
-    let current = match crate::h3_attempt::rebuild_generation_current(
-        worker,
-        current_worker_generation,
-        &job,
-    ) {
-        Ok(current) => current,
-        Err(error) => return reject_unstarted_h3_generation(job, error),
-    };
+    with_claimed_h3_generation_cleanup(job, |job| {
+        let current = match crate::h3_attempt::rebuild_generation_current(
+            worker,
+            current_worker_generation,
+            &job,
+        ) {
+            Ok(current) => current,
+            Err(error) => return reject_claimed_h3_generation(job, error),
+        };
+        process_claimed_h3_generation_attempt(job, h3_attempt, current)
+    })
+}
+
+/// Hold the queue/registry cleanup guard before any claimed-attempt operation
+/// can move the job. This single guard spans current-fence validation, runtime
+/// execution, error reporting, and panic unwinding.
+fn with_claimed_h3_generation_cleanup<T>(job: GpuJob, consume: impl FnOnce(GpuJob) -> T) -> T {
+    let _cleanup = GenerationCleanup::new(&job);
+    consume(job)
+}
+
+/// Consume one claimed H3 owner attempt without exposing it to the generic
+/// retained-engine path. The concrete private runtime bridge is intentionally
+/// absent, so the only production outcome is a clean fail-closed rejection.
+///
+/// This function has no worker, model-cache, or engine argument by design. A
+/// future executable bridge must remain owner-stack-local and consume the
+/// scope directly instead of re-entering `process_job_with_sink`.
+fn process_claimed_h3_generation_attempt(
+    job: GpuJob,
+    h3_attempt: crate::h3_attempt::H3GenerationAttempt,
+    current: crate::h3_attempt::H3AttemptCurrent,
+) -> bool {
     let mut pending_job = Some(job);
     match h3_attempt.run_once(current, |scope| {
-        process_job_with_sink(
-            worker,
+        process_claimed_h3_generation(
             pending_job
                 .take()
                 .expect("H3 attempt consumes its generation job once"),
-            GenerationEventSink::V2(scheduler_tx),
-            Some(scope.cancellation_token()),
+            scope,
         )
     }) {
         Ok(successful) => successful,
-        Err(error) => reject_unstarted_h3_generation(
+        Err(error) => reject_claimed_h3_generation(
             pending_job
                 .take()
                 .expect("cancelled H3 attempt retains its unstarted generation job"),
@@ -2684,8 +2707,19 @@ fn process_job(
     }
 }
 
-fn reject_unstarted_h3_generation(job: GpuJob, error: crate::h3_attempt::H3AttemptError) -> bool {
-    let _cleanup = GenerationCleanup::new(&job);
+fn process_claimed_h3_generation(
+    job: GpuJob,
+    scope: crate::h3_attempt::H3AttemptScope<'_>,
+) -> bool {
+    let error = if scope.cancellation_token().checkpoint().is_err() {
+        crate::h3_attempt::H3AttemptError::Cancelled
+    } else {
+        crate::h3_attempt::H3AttemptError::RuntimeUnavailable
+    };
+    reject_claimed_h3_generation(job, error)
+}
+
+fn reject_claimed_h3_generation(job: GpuJob, error: crate::h3_attempt::H3AttemptError) -> bool {
     let error = error.to_string();
     if let Some(progress_tx) = &job.progress_tx {
         let _ = progress_tx.send(SseMessage::Error(SseErrorEvent {
@@ -4691,6 +4725,202 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, RwLock};
     use std::time::Duration;
+
+    #[test]
+    fn claimed_h3_attempt_has_a_cache_free_execution_route() {
+        let source = include_str!("gpu_worker.rs");
+        let process_start = source.find("fn process_job(").expect("generation handler");
+        let process_end = source[process_start..]
+            .find("\nenum GenerationEventSink")
+            .map(|offset| process_start + offset)
+            .expect("generation handler boundary");
+        let process = &source[process_start..process_end];
+        assert!(process.contains("process_claimed_h3_generation_attempt("));
+        let cleanup = process
+            .find("with_claimed_h3_generation_cleanup(job")
+            .expect("claimed H3 cleanup guard");
+        let rebuild = process
+            .find("rebuild_generation_current(")
+            .expect("claimed H3 current-fence rebuild");
+        assert!(
+            cleanup < rebuild,
+            "claimed H3 cleanup must wrap current-fence validation and attempt consumption"
+        );
+
+        let claimed_start = source
+            .find("fn process_claimed_h3_generation_attempt(")
+            .expect("claimed H3 attempt handler");
+        let claimed_end = source[claimed_start..]
+            .find("\nenum GenerationEventSink")
+            .map(|offset| claimed_start + offset)
+            .expect("claimed H3 attempt handler boundary");
+        let claimed = &source[claimed_start..claimed_end];
+        for forbidden in [
+            "process_job_with_sink(",
+            "ensure_model_ready_sync_inner_guarded(",
+            ".model_cache",
+            "cache.take(",
+            "cache.restore(",
+            "InferenceEngine",
+        ] {
+            assert!(
+                !claimed.contains(forbidden),
+                "claimed H3 attempt handler must not retain generic runtime path {forbidden}",
+            );
+        }
+    }
+
+    async fn claimed_h3_job_fixture(
+        id: &str,
+    ) -> (
+        GpuJob,
+        tokio::sync::oneshot::Receiver<Result<GenerationJobResult, String>>,
+        tokio::sync::mpsc::UnboundedReceiver<SseMessage>,
+        tokio::sync::mpsc::Receiver<GenerationJob>,
+        QueueHandle,
+        crate::job_registry::SharedJobRegistry,
+    ) {
+        let mut request = fake_upscale_job(Config::default(), "unused").request;
+        request.model = mold_core::minimax_h3::FL2VA_COMFY.to_string();
+        request.upscale_model = None;
+        let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(2);
+        let queue = QueueHandle::new(queue_tx);
+        for index in 0..2 {
+            let (placeholder_tx, _placeholder_rx) = tokio::sync::oneshot::channel();
+            queue
+                .submit(
+                    GenerationJob {
+                        id: format!("{id}-reserved-{index}"),
+                        request: request.clone(),
+                        resolved_references: None,
+                        completion_payload: SseCompletionPayload::Full,
+                        progress_tx: None,
+                        result_tx: placeholder_tx,
+                        output_dir: None,
+                        batch_child: None,
+                    },
+                    2,
+                )
+                .await
+                .unwrap();
+        }
+        let registry = JobRegistry::new();
+        registry.register(id, request.model.clone());
+        let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let job = GpuJob {
+            id: id.to_string(),
+            model: request.model.clone(),
+            request,
+            resolved_references: None,
+            completion_payload: SseCompletionPayload::Full,
+            progress_tx: Some(progress_tx),
+            result_tx,
+            output_dir: None,
+            config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+            metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            queue: queue.clone(),
+            registry: registry.clone(),
+            events: crate::events::EventBroadcaster::new(),
+            execution_plan: None,
+            prepared_execution_inputs: None,
+            lease: None,
+            batch_child: None,
+        };
+        (job, result_rx, progress_rx, queue_rx, queue, registry)
+    }
+
+    #[tokio::test]
+    async fn claimed_h3_attempt_rejects_without_generic_runtime_or_duplicate_cleanup() {
+        let id = "claimed-h3-runtime-unavailable";
+        let (job, result_rx, mut progress_rx, _queue_rx, queue, registry) =
+            claimed_h3_job_fixture(id).await;
+        let (attempt, current, settlements) = crate::h3_attempt::generation_attempt_for_test(
+            id,
+            mold_inference::InferenceCancellationToken::default(),
+        );
+
+        assert!(!with_claimed_h3_generation_cleanup(job, |job| {
+            process_claimed_h3_generation_attempt(job, attempt, current)
+        }));
+
+        let error = match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("unavailable H3 runtime unexpectedly completed"),
+        };
+        assert!(error.contains("claimed-attempt runtime bridge is not available"));
+        assert!(matches!(
+            progress_rx.recv().await,
+            Some(SseMessage::Error(SseErrorEvent { message }))
+                if message.contains("claimed-attempt runtime bridge is not available")
+        ));
+        assert_eq!(settlements.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            queue.pending(),
+            1,
+            "one H3 completion must release exactly one reserved queue slot"
+        );
+        assert!(registry.snapshot().entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_claimed_h3_attempt_settles_and_cleans_up_once() {
+        let id = "claimed-h3-cancelled";
+        let (job, result_rx, mut progress_rx, _queue_rx, queue, registry) =
+            claimed_h3_job_fixture(id).await;
+        let cancellation = mold_inference::InferenceCancellationToken::default();
+        cancellation.cancel();
+        let (attempt, current, settlements) =
+            crate::h3_attempt::generation_attempt_for_test(id, cancellation);
+
+        assert!(!with_claimed_h3_generation_cleanup(job, |job| {
+            process_claimed_h3_generation_attempt(job, attempt, current)
+        }));
+
+        let error = match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("cancelled H3 attempt unexpectedly completed"),
+        };
+        assert!(error.contains("cancelled before execution"));
+        assert!(matches!(
+            progress_rx.recv().await,
+            Some(SseMessage::Error(SseErrorEvent { message }))
+                if message.contains("cancelled before execution")
+        ));
+        assert_eq!(settlements.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            queue.pending(),
+            1,
+            "one cancelled H3 completion must release exactly one reserved queue slot"
+        );
+        assert!(registry.snapshot().entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn claimed_h3_cleanup_guard_releases_ownership_during_panic() {
+        let id = "claimed-h3-cleanup-panic";
+        let (job, result_rx, _progress_rx, _queue_rx, queue, registry) =
+            claimed_h3_job_fixture(id).await;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_claimed_h3_generation_cleanup(job, |_job| -> () {
+                panic!("synthetic claimed H3 runtime panic")
+            })
+        }));
+
+        assert!(result.is_err());
+        assert!(
+            result_rx.await.is_err(),
+            "panicking runtime must drop result ownership"
+        );
+        assert_eq!(
+            queue.pending(),
+            1,
+            "one panicking H3 completion must release exactly one reserved queue slot"
+        );
+        assert!(registry.snapshot().entries.is_empty());
+    }
 
     #[test]
     fn scheduled_chain_stage_wraps_render_with_dispatch_and_memory_observability() {
