@@ -11,6 +11,8 @@ pub(crate) mod pipeline;
 #[cfg(feature = "h3-private-uat")]
 pub(crate) mod private_fl2va_runtime;
 #[cfg(feature = "h3-private-uat")]
+pub(crate) mod private_opened_evidence;
+#[cfg(feature = "h3-private-uat")]
 pub mod private_qualification;
 #[cfg(feature = "h3-private-uat")]
 pub(crate) mod private_qwen;

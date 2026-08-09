@@ -20,7 +20,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::fs::{File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -31,6 +31,9 @@ use serde::de::{DeserializeOwned, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use super::attention::{
     H3AttentionDType, H3AttentionDevice, H3AttentionModelContract, H3AttentionRuntimeAuthority,
@@ -359,6 +362,37 @@ pub struct H3ComfyInt8BlockMemory {
     pub protected_device_bytes: u64,
 }
 
+/// Exact pre-allocation record for one authenticated main block.
+///
+/// The content digest covers the block's complete encoded safetensors payload
+/// in file order, including the authenticated quantization sidecars. The
+/// memory record deliberately excludes those sidecars because they are policy
+/// metadata and are never retained by the block loader.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct H3ComfyOpenedBlockMemoryEvidence {
+    pub index: u16,
+    pub memory: H3ComfyInt8BlockMemory,
+    pub content_sha256: String,
+}
+
+/// Exact pre-allocation memory evidence derived from the same retained file
+/// descriptor that later supplies the resident core and streamed blocks.
+///
+/// `fixed_*` covers every non-main-block tensor that the resident transformer
+/// loads. F16 curve projections are charged at their logical F32 residency.
+/// The fifty block records are ordered and exhaustive for released H3.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct H3ComfyOpenedMemoryEvidence {
+    pub verified_file_bytes: u64,
+    pub header_bytes: u64,
+    pub fixed_encoded_host_bytes: u64,
+    pub fixed_protected_device_bytes: u64,
+    pub fixed_max_host_read_staging_bytes: u64,
+    pub fixed_max_device_weight_staging_bytes: u64,
+    pub blocks: Vec<H3ComfyOpenedBlockMemoryEvidence>,
+    pub identity_sha256: String,
+}
+
 /// An exact, already-opened Comfy INT8 artifact authority.
 ///
 /// Header parsing, schema/policy validation, full-content hashing, resident
@@ -370,6 +404,7 @@ pub struct H3ComfyOpenedInt8Checkpoint {
     config: H3TransformerConfig,
     source: Arc<H3ComfyOpenedSource>,
     checkpoint_identity_sha256: String,
+    memory_evidence: H3ComfyOpenedMemoryEvidence,
 }
 
 impl fmt::Debug for H3ComfyOpenedInt8Checkpoint {
@@ -395,8 +430,36 @@ impl H3ComfyOpenedInt8Checkpoint {
         &self.checkpoint_identity_sha256
     }
 
+    pub fn content_sha256(&self) -> &str {
+        &self.source.content_sha256
+    }
+
+    pub fn source_path(&self) -> &Path {
+        &self.source.path
+    }
+
+    pub fn revalidate(&self) -> InspectionResult<()> {
+        self.source.revalidate_authority()
+    }
+
+    pub fn config_identity_sha256(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"mold.minimax-h3.comfy-transformer-config.v1\0");
+        digest.update(
+            serde_json::to_vec(&self.config)
+                .expect("validated H3 transformer configuration is serializable"),
+        );
+        hex_digest(digest.finalize())
+    }
+
     pub fn verified_file_bytes(&self) -> u64 {
         self.source.identity.len
+    }
+
+    /// Immutable host/device/staging facts established before any Candle
+    /// model tensor is allocated.
+    pub fn memory_evidence(&self) -> &H3ComfyOpenedMemoryEvidence {
+        &self.memory_evidence
     }
 
     pub fn bytes_read_after_verification(&self) -> u64 {
@@ -576,18 +639,31 @@ fn open_h3_comfy_int8_checkpoint(
             "H3 Comfy execution authority must be opened from a regular non-symlink file",
         ));
     }
-    let mut file = File::open(path).map_err(|error| {
+    #[cfg(unix)]
+    if symlink_metadata.permissions().mode() & 0o022 != 0 {
+        return Err(failure(
+            H3ComfyCheckpointErrorCode::FileIdentityChanged,
+            "H3 Comfy execution authority must not be group/other writable",
+        ));
+    }
+    let canonical_path = std::fs::canonicalize(path).map_err(|error| {
+        failure(
+            H3ComfyCheckpointErrorCode::Io,
+            format!("failed to canonicalize H3 Comfy checkpoint: {error}"),
+        )
+    })?;
+    let mut file = File::open(&canonical_path).map_err(|error| {
         failure(
             H3ComfyCheckpointErrorCode::Io,
             format!("failed to open H3 Comfy checkpoint: {error}"),
         )
     })?;
-    let identity = H3OpenedFileIdentity::from_metadata(
-        &file
-            .metadata()
-            .map_err(|error| failure(H3ComfyCheckpointErrorCode::Io, error.to_string()))?,
-    );
-    if identity.len != symlink_metadata.len() {
+    let requested_identity = H3OpenedFileIdentity::from_metadata(&symlink_metadata);
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| failure(H3ComfyCheckpointErrorCode::Io, error.to_string()))?;
+    let identity = H3OpenedFileIdentity::from_metadata(&opened_metadata);
+    if identity != requested_identity {
         return Err(failure(
             H3ComfyCheckpointErrorCode::FileIdentityChanged,
             "H3 Comfy checkpoint changed while its descriptor was opened",
@@ -620,7 +696,10 @@ fn open_h3_comfy_int8_checkpoint(
             cancellation,
         )?;
     }
-    let content_sha256 = hash_open_file(&mut file, parsed.file_len, cancellation)?;
+    let H3ComfyOpenedHashes {
+        content_sha256,
+        block_content_sha256,
+    } = hash_open_file(&mut file, &parsed, config.num_layers, cancellation)?;
     if let Some((_, expected_sha256)) = expected_content {
         if content_sha256 != expected_sha256 {
             return Err(failure(
@@ -646,10 +725,17 @@ fn open_h3_comfy_int8_checkpoint(
     let f16_curve_projection_tensors = published_artifact
         .map(|_| published_int8_curve_projection_tensors(&config))
         .unwrap_or_default();
+    let memory_evidence = calculate_opened_memory_evidence(
+        &parsed,
+        &f16_curve_projection_tensors,
+        config.num_layers,
+        &block_content_sha256,
+    )?;
     Ok(H3ComfyOpenedInt8Checkpoint {
         candidate,
         config,
         source: Arc::new(H3ComfyOpenedSource {
+            path: canonical_path,
             file: Mutex::new(file),
             header: parsed,
             identity,
@@ -659,6 +745,7 @@ fn open_h3_comfy_int8_checkpoint(
             f16_curve_projection_upcast_loads: AtomicU64::new(0),
         }),
         checkpoint_identity_sha256,
+        memory_evidence,
     })
 }
 
@@ -723,6 +810,7 @@ impl H3OpenedFileIdentity {
 }
 
 struct H3ComfyOpenedSource {
+    path: PathBuf,
     file: Mutex<File>,
     header: ParsedHeader,
     identity: H3OpenedFileIdentity,
@@ -1030,11 +1118,17 @@ fn validate_published_int8_quantization_sidecars(
     cancellation_boundary_inspection(cancellation)
 }
 
+struct H3ComfyOpenedHashes {
+    content_sha256: String,
+    block_content_sha256: Vec<String>,
+}
+
 fn hash_open_file(
     file: &mut File,
-    file_len: u64,
+    parsed: &ParsedHeader,
+    block_count: usize,
     cancellation: &dyn H3ComfyInt8Cancellation,
-) -> InspectionResult<String> {
+) -> InspectionResult<H3ComfyOpenedHashes> {
     file.seek(SeekFrom::Start(0)).map_err(|error| {
         failure(
             H3ComfyCheckpointErrorCode::Io,
@@ -1042,17 +1136,62 @@ fn hash_open_file(
         )
     })?;
     let mut digest = Sha256::new();
+    let data_start = 8_u64.checked_add(parsed.header_len).ok_or_else(|| {
+        failure(
+            H3ComfyCheckpointErrorCode::InvalidHeader,
+            "H3 Comfy data offset overflows",
+        )
+    })?;
+    let mut block_ranges = Vec::with_capacity(block_count);
+    for index in 0..block_count {
+        let prefix = format!("blocks.{index}.");
+        let mut ranges = parsed
+            .tensors
+            .range(prefix.clone()..)
+            .take_while(|(name, _)| name.starts_with(&prefix))
+            .map(|(_, tensor)| {
+                Ok([
+                    data_start
+                        .checked_add(tensor.data_offsets[0])
+                        .ok_or_else(|| {
+                            failure(
+                                H3ComfyCheckpointErrorCode::InvalidHeader,
+                                "H3 Comfy block start offset overflows",
+                            )
+                        })?,
+                    data_start
+                        .checked_add(tensor.data_offsets[1])
+                        .ok_or_else(|| {
+                            failure(
+                                H3ComfyCheckpointErrorCode::InvalidHeader,
+                                "H3 Comfy block end offset overflows",
+                            )
+                        })?,
+                ])
+            })
+            .collect::<InspectionResult<Vec<_>>>()?;
+        ranges.sort_by_key(|range| range[0]);
+        if ranges.is_empty() {
+            return Err(failure(
+                H3ComfyCheckpointErrorCode::TensorSchemaMismatch,
+                format!("H3 Comfy opened checkpoint has no tensors for block {index}"),
+            ));
+        }
+        block_ranges.push(ranges);
+    }
+    let mut block_digests = (0..block_count).map(|_| Sha256::new()).collect::<Vec<_>>();
     let mut verified = 0u64;
     let mut buffer = vec![0u8; FILE_READ_CHUNK_BYTES];
-    while verified < file_len {
+    while verified < parsed.file_len {
         cancellation_boundary_inspection(cancellation)?;
-        let remaining = usize::try_from((file_len - verified).min(FILE_READ_CHUNK_BYTES as u64))
-            .map_err(|_| {
-                failure(
-                    H3ComfyCheckpointErrorCode::Io,
-                    "H3 Comfy hash read size does not fit this platform",
-                )
-            })?;
+        let remaining =
+            usize::try_from((parsed.file_len - verified).min(FILE_READ_CHUNK_BYTES as u64))
+                .map_err(|_| {
+                    failure(
+                        H3ComfyCheckpointErrorCode::Io,
+                        "H3 Comfy hash read size does not fit this platform",
+                    )
+                })?;
         file.read_exact(&mut buffer[..remaining]).map_err(|error| {
             failure(
                 H3ComfyCheckpointErrorCode::Io,
@@ -1060,10 +1199,30 @@ fn hash_open_file(
             )
         })?;
         digest.update(&buffer[..remaining]);
+        let chunk_end = verified + remaining as u64;
+        for (block_digest, ranges) in block_digests.iter_mut().zip(&block_ranges) {
+            for [start, end] in ranges {
+                let overlap_start = verified.max(*start);
+                let overlap_end = chunk_end.min(*end);
+                if overlap_start < overlap_end {
+                    let start =
+                        usize::try_from(overlap_start - verified).expect("chunk offset fits usize");
+                    let end =
+                        usize::try_from(overlap_end - verified).expect("chunk offset fits usize");
+                    block_digest.update(&buffer[start..end]);
+                }
+            }
+        }
         verified += remaining as u64;
     }
     cancellation_boundary_inspection(cancellation)?;
-    Ok(hex_digest(digest.finalize()))
+    Ok(H3ComfyOpenedHashes {
+        content_sha256: hex_digest(digest.finalize()),
+        block_content_sha256: block_digests
+            .into_iter()
+            .map(|digest| hex_digest(digest.finalize()))
+            .collect(),
+    })
 }
 
 fn comfy_checkpoint_identity(
@@ -1087,6 +1246,36 @@ fn comfy_checkpoint_identity(
 }
 
 impl H3ComfyOpenedSource {
+    fn revalidate_authority(&self) -> InspectionResult<()> {
+        let path_metadata = std::fs::symlink_metadata(&self.path).map_err(|error| {
+            failure(
+                H3ComfyCheckpointErrorCode::FileIdentityChanged,
+                format!("opened H3 Comfy checkpoint path disappeared: {error}"),
+            )
+        })?;
+        if path_metadata.file_type().is_symlink()
+            || !path_metadata.file_type().is_file()
+            || H3OpenedFileIdentity::from_metadata(&path_metadata) != self.identity
+        {
+            return Err(failure(
+                H3ComfyCheckpointErrorCode::FileIdentityChanged,
+                "opened H3 Comfy checkpoint path no longer names the authenticated file",
+            ));
+        }
+        let file = self.file.lock().map_err(|_| {
+            failure(
+                H3ComfyCheckpointErrorCode::Io,
+                "opened H3 Comfy checkpoint lock is poisoned",
+            )
+        })?;
+        self.verify_identity(&file).map_err(|error| {
+            failure(
+                H3ComfyCheckpointErrorCode::FileIdentityChanged,
+                error.to_string(),
+            )
+        })
+    }
+
     fn verify_identity(&self, file: &File) -> candle::Result<()> {
         let current = file.metadata().map_err(|error| {
             candle::Error::Msg(format!(
@@ -1436,6 +1625,164 @@ fn calculate_block_memory(
         max_device_weight_staging_bytes,
         protected_device_bytes,
     })
+}
+
+fn calculate_opened_memory_evidence(
+    parsed: &ParsedHeader,
+    f16_curve_projection_tensors: &BTreeSet<String>,
+    block_count: usize,
+    block_content_sha256: &[String],
+) -> InspectionResult<H3ComfyOpenedMemoryEvidence> {
+    if block_count == 0
+        || block_content_sha256.len() != block_count
+        || block_content_sha256.iter().any(|digest| {
+            digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return Err(failure(
+            H3ComfyCheckpointErrorCode::TensorSchemaMismatch,
+            "H3 Comfy opened checkpoint block evidence is incomplete",
+        ));
+    }
+
+    let mut fixed_encoded_host_bytes = 0_u64;
+    let mut fixed_protected_device_bytes = 0_u64;
+    let mut fixed_max_host_read_staging_bytes = 0_u64;
+    let mut fixed_max_device_weight_staging_bytes = 0_u64;
+    for (name, tensor) in &parsed.tensors {
+        if name.starts_with("blocks.") || name.ends_with(".comfy_quant") {
+            continue;
+        }
+        let encoded = tensor.data_offsets[1] - tensor.data_offsets[0];
+        let logical_device = if tensor.dtype == "F16" && f16_curve_projection_tensors.contains(name)
+        {
+            tensor
+                .shape
+                .iter()
+                .try_fold(1_u64, |elements, dimension| {
+                    elements.checked_mul(*dimension as u64)
+                })
+                .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>() as u64))
+                .ok_or_else(|| {
+                    failure(
+                        H3ComfyCheckpointErrorCode::TensorSchemaMismatch,
+                        "H3 Comfy fixed logical device bytes overflow",
+                    )
+                })?
+        } else {
+            encoded
+        };
+        fixed_encoded_host_bytes =
+            fixed_encoded_host_bytes
+                .checked_add(encoded)
+                .ok_or_else(|| {
+                    failure(
+                        H3ComfyCheckpointErrorCode::TensorSchemaMismatch,
+                        "H3 Comfy fixed host bytes overflow",
+                    )
+                })?;
+        fixed_protected_device_bytes = fixed_protected_device_bytes
+            .checked_add(logical_device)
+            .ok_or_else(|| {
+                failure(
+                    H3ComfyCheckpointErrorCode::TensorSchemaMismatch,
+                    "H3 Comfy fixed device bytes overflow",
+                )
+            })?;
+        fixed_max_host_read_staging_bytes = fixed_max_host_read_staging_bytes.max(encoded);
+        fixed_max_device_weight_staging_bytes =
+            fixed_max_device_weight_staging_bytes.max(logical_device);
+    }
+    if fixed_encoded_host_bytes == 0
+        || fixed_protected_device_bytes == 0
+        || fixed_max_host_read_staging_bytes == 0
+        || fixed_max_device_weight_staging_bytes == 0
+    {
+        return Err(failure(
+            H3ComfyCheckpointErrorCode::TensorSchemaMismatch,
+            "H3 Comfy opened checkpoint has incomplete fixed memory evidence",
+        ));
+    }
+
+    let blocks = (0..block_count)
+        .map(|index| {
+            let memory =
+                calculate_block_memory(parsed, f16_curve_projection_tensors, index, block_count)
+                    .map_err(|error| {
+                        failure(
+                            H3ComfyCheckpointErrorCode::TensorSchemaMismatch,
+                            error.to_string(),
+                        )
+                    })?;
+            if memory.encoded_host_bytes == 0
+                || memory.protected_device_bytes == 0
+                || memory.max_host_read_staging_bytes == 0
+                || memory.max_device_weight_staging_bytes == 0
+            {
+                return Err(failure(
+                    H3ComfyCheckpointErrorCode::TensorSchemaMismatch,
+                    format!("H3 Comfy block {index} has incomplete memory evidence"),
+                ));
+            }
+            Ok(H3ComfyOpenedBlockMemoryEvidence {
+                index: u16::try_from(index).map_err(|_| {
+                    failure(
+                        H3ComfyCheckpointErrorCode::TensorSchemaMismatch,
+                        "H3 Comfy block index exceeds u16",
+                    )
+                })?,
+                memory,
+                content_sha256: block_content_sha256[index].clone(),
+            })
+        })
+        .collect::<InspectionResult<Vec<_>>>()?;
+    let header_bytes = parsed.header_len.checked_add(8).ok_or_else(|| {
+        failure(
+            H3ComfyCheckpointErrorCode::InvalidHeader,
+            "H3 Comfy header byte charge overflows",
+        )
+    })?;
+    let mut evidence = H3ComfyOpenedMemoryEvidence {
+        verified_file_bytes: parsed.file_len,
+        header_bytes,
+        fixed_encoded_host_bytes,
+        fixed_protected_device_bytes,
+        fixed_max_host_read_staging_bytes,
+        fixed_max_device_weight_staging_bytes,
+        blocks,
+        identity_sha256: String::new(),
+    };
+    evidence.identity_sha256 = opened_memory_evidence_identity(&evidence);
+    Ok(evidence)
+}
+
+fn opened_memory_evidence_identity(evidence: &H3ComfyOpenedMemoryEvidence) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"mold.minimax-h3.comfy-opened-memory-evidence.v1\0");
+    for value in [
+        evidence.verified_file_bytes,
+        evidence.header_bytes,
+        evidence.fixed_encoded_host_bytes,
+        evidence.fixed_protected_device_bytes,
+        evidence.fixed_max_host_read_staging_bytes,
+        evidence.fixed_max_device_weight_staging_bytes,
+    ] {
+        digest.update(value.to_le_bytes());
+    }
+    digest.update((evidence.blocks.len() as u64).to_le_bytes());
+    for block in &evidence.blocks {
+        digest.update(block.index.to_le_bytes());
+        for value in [
+            block.memory.encoded_host_bytes,
+            block.memory.protected_device_bytes,
+            block.memory.max_device_weight_staging_bytes,
+            block.memory.max_host_read_staging_bytes,
+        ] {
+            digest.update(value.to_le_bytes());
+        }
+        digest.update(block.content_sha256.as_bytes());
+    }
+    hex_digest(digest.finalize())
 }
 
 #[derive(Deserialize)]
@@ -3157,6 +3504,7 @@ mod tests {
             let file = File::open(&path).unwrap();
             let identity = H3OpenedFileIdentity::from_metadata(&file.metadata().unwrap());
             H3ComfyOpenedSource {
+                path: std::fs::canonicalize(&path).unwrap(),
                 file: Mutex::new(file),
                 header: parsed.clone(),
                 identity,
@@ -3251,6 +3599,63 @@ mod tests {
     }
 
     #[test]
+    fn opened_memory_evidence_freezes_all_fifty_block_records() {
+        let mut tensors = BTreeMap::from([(
+            "x_embedder.weight".into(),
+            HeaderTensor {
+                dtype: "F32".into(),
+                shape: vec![1],
+                data_offsets: [0, 4],
+            },
+        )]);
+        for index in 0..50 {
+            let start = 4 + index as u64 * 12;
+            tensors.insert(
+                format!("blocks.{index}.attn.qkv_proj.weight"),
+                HeaderTensor {
+                    dtype: "I8".into(),
+                    shape: vec![1, 4],
+                    data_offsets: [start, start + 4],
+                },
+            );
+            tensors.insert(
+                format!("blocks.{index}.attn.qkv_proj.weight_scale"),
+                HeaderTensor {
+                    dtype: "F32".into(),
+                    shape: vec![1, 1],
+                    data_offsets: [start + 4, start + 8],
+                },
+            );
+            tensors.insert(
+                format!("blocks.{index}.norm1.weight"),
+                HeaderTensor {
+                    dtype: "F32".into(),
+                    shape: vec![1],
+                    data_offsets: [start + 8, start + 12],
+                },
+            );
+        }
+        let parsed = ParsedHeader {
+            metadata: BTreeMap::new(),
+            tensors,
+            header_len: 128,
+            file_len: 8 + 128 + 4 + 50 * 12,
+            header_identity_sha256: "a".repeat(64),
+        };
+        let digests = (0..50)
+            .map(|index| format!("{index:064x}"))
+            .collect::<Vec<_>>();
+        let evidence =
+            calculate_opened_memory_evidence(&parsed, &BTreeSet::new(), 50, &digests).unwrap();
+        assert_eq!(evidence.blocks.len(), 50);
+        assert_eq!(evidence.blocks[49].index, 49);
+        assert_eq!(evidence.blocks[49].content_sha256, digests[49]);
+        assert_eq!(evidence.fixed_encoded_host_bytes, 4);
+        assert_eq!(evidence.fixed_protected_device_bytes, 4);
+        assert_eq!(evidence.identity_sha256.len(), 64);
+    }
+
+    #[test]
     fn opened_int8_runtime_streams_exactly_one_cpu_packed_block() -> candle::Result<()> {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<H3ComfyOpenedInt8Checkpoint>();
@@ -3269,6 +3674,21 @@ mod tests {
         .map_err(|error| candle::Error::Msg(error.to_string()))?;
         assert_eq!(opened.bytes_read_after_verification(), 0);
         assert_eq!(opened.checkpoint_identity_sha256().len(), 64);
+        let opened_memory = opened.memory_evidence().clone();
+        assert_eq!(
+            opened_memory.verified_file_bytes,
+            std::fs::metadata(&path).unwrap().len()
+        );
+        assert_eq!(opened_memory.blocks.len(), 2);
+        assert_eq!(opened_memory.identity_sha256.len(), 64);
+        assert!(opened_memory.fixed_encoded_host_bytes > 0);
+        assert!(opened_memory.fixed_protected_device_bytes > 0);
+        assert!(opened_memory.fixed_max_host_read_staging_bytes > 0);
+        assert!(opened_memory.fixed_max_device_weight_staging_bytes > 0);
+        for (index, block) in opened_memory.blocks.iter().enumerate() {
+            assert_eq!(usize::from(block.index), index);
+            assert_eq!(block.content_sha256.len(), 64);
+        }
         let expected_identity = opened.checkpoint_identity_sha256().to_owned();
         let (transformer, mut loader) = opened.load(&Device::Cpu)?;
         assert!(loader.is_exact_pair_for(&transformer));
@@ -3282,6 +3702,9 @@ mod tests {
             loader.bytes_read() > 0,
             "resident weights must be file-backed"
         );
+        for block in &opened_memory.blocks {
+            assert_eq!(loader.block_memory(usize::from(block.index))?, block.memory);
+        }
         let memory = loader.block_memory(0)?;
         assert!(memory.encoded_host_bytes > 0);
         assert!(memory.max_host_read_staging_bytes > 0);
@@ -3439,6 +3862,25 @@ mod tests {
         mutable.sync_all().unwrap();
         let error = opened.load(&Device::Cpu).unwrap_err().to_string();
         assert!(error.contains("changed after full verification"), "{error}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_int8_runtime_rejects_group_writable_source() {
+        let (config, header, data) = runtime_fixture();
+        let path = write_fixture(&header, &data, "opened-permissions");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let error = open_h3_comfy_int8_checkpoint(
+            &path,
+            config,
+            H3TransformerTask::T2VaFl2Va,
+            None,
+            None,
+            &H3ComfyNeverCancel,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, H3ComfyCheckpointErrorCode::FileIdentityChanged);
         let _ = std::fs::remove_file(path);
     }
 
