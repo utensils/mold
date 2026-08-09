@@ -397,11 +397,53 @@ mod tests {
         update_dtype: String,
     }
 
+    #[derive(Debug, Deserialize)]
+    struct SyntheticLayerDocument {
+        outputs: Vec<SyntheticLayerTensor>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SyntheticLayerTensor {
+        key: String,
+        shape: Vec<usize>,
+        dtype: String,
+        samples: Vec<SyntheticLayerSample>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SyntheticLayerSample {
+        index: Vec<usize>,
+        value: f32,
+    }
+
     fn synthetic_fixture() -> SyntheticFixture {
         serde_json::from_str(include_str!(
             "../../../../tests/fixtures/minimax_h3/synthetic-v1.json"
         ))
         .expect("the checked-in MiniMax H3 synthetic fixture must be valid")
+    }
+
+    fn synthetic_oracle_values(key: &str) -> Vec<f32> {
+        let document: SyntheticLayerDocument = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/minimax_h3/synthetic-oracle-v1.json"
+        ))
+        .expect("the checked-in MiniMax H3 synthetic layer oracle must be valid");
+        let output = document
+            .outputs
+            .into_iter()
+            .find(|output| output.key == key)
+            .unwrap_or_else(|| panic!("synthetic layer oracle lacks {key}"));
+        assert_eq!(output.dtype, "float32");
+        assert_eq!(output.shape, [output.samples.len()]);
+        output
+            .samples
+            .into_iter()
+            .enumerate()
+            .map(|(offset, sample)| {
+                assert_eq!(sample.index, [offset]);
+                sample.value
+            })
+            .collect()
     }
 
     fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
@@ -483,16 +525,12 @@ mod tests {
             .expect("fixture step must exist in its schedule");
         let (video, audio) =
             euler_step_pair(&video, &audio, &video_velocity, &audio_velocity, step).unwrap();
-        assert_close(
-            &video.to_vec1::<f32>().unwrap(),
-            &update.video_next,
-            f32::EPSILON,
-        );
-        assert_close(
-            &audio.to_vec1::<f32>().unwrap(),
-            &update.audio_next,
-            f32::EPSILON,
-        );
+        let video = video.to_vec1::<f32>().unwrap();
+        let audio = audio.to_vec1::<f32>().unwrap();
+        assert_close(&video, &update.video_next, f32::EPSILON);
+        assert_close(&audio, &update.audio_next, f32::EPSILON);
+        assert_close(&video, &synthetic_oracle_values("video_next"), f32::EPSILON);
+        assert_close(&audio, &synthetic_oracle_values("audio_next"), f32::EPSILON);
     }
 
     #[test]

@@ -360,8 +360,9 @@ def synthetic_tensor(key: str, values: list[float]) -> dict[str, Any]:
 
 def synthetic_layer_outputs() -> tuple[dict[str, Any], dict[str, Any]]:
     """Build the checked weight-free producer/adaptor comparison pair."""
-    video_values = [0.25, -0.5, 1.0, -2.0]
-    oracle_audio_values = [0.125, -0.25, 0.5, -1.0]
+    coupled_update = synthetic_fixture()["coupled_update"]
+    video_values = coupled_update["video_next"]
+    oracle_audio_values = coupled_update["audio_next"]
     mold_audio_values = [f32(value + 0.000001) for value in oracle_audio_values]
     input_record = {
         "id": "synthetic-v1",

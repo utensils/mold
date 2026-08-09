@@ -64,6 +64,12 @@ python3 scripts/minimax-h3-conformance.py print-synthetic-output --role oracle
 python3 scripts/minimax-h3-conformance.py print-synthetic-output --role mold
 ```
 
+Both documents serialize the fixture's actual coupled Euler outputs rather
+than placeholder vectors. The ordinary CPU sampler test executes that update
+through Candle and compares its video and audio tensors directly with the
+schema-bound oracle samples, while the Python contract independently verifies
+their provenance, hashes, statistics, and declared tolerances.
+
 `verify-sources` can verify pinned code checkouts and metadata-only model
 checkouts without executing a checkpoint:
 
