@@ -13,9 +13,9 @@ use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
 use image::RgbImage;
 use mold_candle::minimax_h3::{
-    AudioSoundtrackAssociation, AudioVaePhase, DecodeSink, H3ForwardInput, H3FrozenPackedLayout,
-    H3TransformerOutput, StereoLatents, StereoWaveform, Uint8RgbPixels, VisualVaeEvent,
-    VisualVaeObserver,
+    AudioSoundtrackAssociation, AudioVae, AudioVaePhase, DecodeSink, H3ForwardInput,
+    H3FrozenPackedLayout, H3TransformerOutput, StereoLatents, StereoWaveform, Uint8RgbPixels,
+    VisualVaeEvent, VisualVaeObserver,
 };
 use mold_core::minimax_h3::{self as contract, Task};
 
@@ -29,6 +29,23 @@ use super::pipeline::{
 };
 use super::private_fl2va_runtime::H3PrivateVaeFreeInnerAuthority;
 use super::vae_runtime::{H3ComfyVaeRuntimeBundle, H3ComfyVaeRuntimeMemory};
+
+/// Encode one already-normalized reference waveform while preserving typed
+/// pipeline failures across Candle's callback error boundary.
+///
+/// The dormant Ref2VA composer will own media lookup and association. This
+/// seam deliberately accepts only an already-associated reference waveform
+/// and exposes no registry, factory, server, or public-engine activation.
+#[allow(dead_code)]
+pub(crate) fn encode_private_audio_reference(
+    audio_vae: &AudioVae,
+    waveform: &StereoWaveform,
+    checkpoint: &mut dyn H3PipelineCheckpoint,
+) -> Result<StereoLatents> {
+    encode_private_audio_reference_with(waveform, checkpoint, |phase_checkpoint| {
+        audio_vae.encode_with_phase_checkpoint(waveform, phase_checkpoint)
+    })
+}
 
 pub(crate) trait H3PrivateVaeRuntime: Send + Sync {
     fn task(&self) -> Task;
@@ -367,6 +384,70 @@ where
 
 fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn encode_private_audio_reference_with(
+    waveform: &StereoWaveform,
+    checkpoint: &mut dyn H3PipelineCheckpoint,
+    encode: impl FnOnce(
+        &mut dyn FnMut(AudioVaePhase) -> candle_core::Result<()>,
+    ) -> candle_core::Result<StereoLatents>,
+) -> Result<StereoLatents> {
+    validate_reference_audio_association(waveform.association())?;
+    let error_bridge = H3CallbackErrorBridge::default();
+    let mut phase_checkpoint =
+        |phase| checkpoint_audio_encode_phase(checkpoint, phase, &error_bridge);
+    let result = encode(&mut phase_checkpoint);
+    let latents = error_bridge.finish(result)?;
+    checkpoint.checkpoint(H3PipelineEvent {
+        phase: H3PipelinePhase::ReferenceAudioEncodeChunk,
+        completed: 4,
+        total: 4,
+    })?;
+    Ok(latents)
+}
+
+fn validate_reference_audio_association(association: AudioSoundtrackAssociation) -> Result<()> {
+    match association {
+        AudioSoundtrackAssociation::StandaloneReference { reference_index }
+        | AudioSoundtrackAssociation::VideoSoundtrack { reference_index }
+            if reference_index > 0 =>
+        {
+            Ok(())
+        }
+        AudioSoundtrackAssociation::StandaloneReference { .. }
+        | AudioSoundtrackAssociation::VideoSoundtrack { .. } => {
+            bail!("private MiniMax H3 audio reference index must be one-based")
+        }
+        AudioSoundtrackAssociation::Generated => {
+            bail!("private MiniMax H3 reference encoder received generated audio")
+        }
+    }
+}
+
+fn audio_encode_phase_progress(phase: AudioVaePhase) -> candle_core::Result<usize> {
+    match phase {
+        AudioVaePhase::EncodePreprocess => Ok(0),
+        AudioVaePhase::EncodeDac => Ok(1),
+        AudioVaePhase::EncodeProjection => Ok(2),
+        AudioVaePhase::EncodePosterior => Ok(3),
+        _ => candle_core::bail!("MiniMax H3 audio encoder reported a decode-only phase"),
+    }
+}
+
+fn checkpoint_audio_encode_phase(
+    checkpoint: &mut dyn H3PipelineCheckpoint,
+    phase: AudioVaePhase,
+    error_bridge: &H3CallbackErrorBridge,
+) -> candle_core::Result<()> {
+    let completed = audio_encode_phase_progress(phase)?;
+    checkpoint
+        .checkpoint(H3PipelineEvent {
+            phase: H3PipelinePhase::ReferenceAudioEncodeChunk,
+            completed,
+            total: 4,
+        })
+        .map_err(|error| error_bridge.capture(error))
 }
 
 fn audio_decode_phase_progress(phase: AudioVaePhase) -> candle_core::Result<usize> {
@@ -1201,6 +1282,129 @@ mod tests {
             assert!(is_inference_cancelled(&error), "phase {phase:?}");
         }
         assert!(audio_decode_phase_progress(AudioVaePhase::EncodeDac).is_err());
+    }
+
+    #[test]
+    fn audio_reference_encode_bridge_preserves_typed_cancellation_before_during_and_after() {
+        struct CancelAtEvent {
+            event: usize,
+            events: Vec<H3PipelineEvent>,
+        }
+
+        impl H3PipelineCheckpoint for CancelAtEvent {
+            fn checkpoint(&mut self, event: H3PipelineEvent) -> Result<()> {
+                self.events.push(event);
+                if self.events.len() == self.event {
+                    Err(InferenceCancelled.into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        let phases = [
+            AudioVaePhase::EncodePreprocess,
+            AudioVaePhase::EncodeDac,
+            AudioVaePhase::EncodeProjection,
+            AudioVaePhase::EncodePosterior,
+        ];
+        let waveform = StereoWaveform::new(
+            Tensor::zeros((1, 2, 8), DType::F32, &Device::Cpu).unwrap(),
+            32_000,
+            AudioSoundtrackAssociation::StandaloneReference { reference_index: 7 },
+        )
+        .unwrap();
+        let latents = StereoLatents::new(
+            Tensor::zeros((1, LATENT_CHANNELS, 2, 1), DType::F32, &Device::Cpu).unwrap(),
+            &AudioVaeConfig::default(),
+        )
+        .unwrap();
+
+        for event in [1, 3, 5] {
+            let mut checkpoint = CancelAtEvent {
+                event,
+                events: Vec::new(),
+            };
+            let error = encode_private_audio_reference_with(
+                &waveform,
+                &mut checkpoint,
+                |phase_checkpoint| {
+                    for phase in phases {
+                        phase_checkpoint(phase)?;
+                    }
+                    Ok(latents.clone())
+                },
+            )
+            .unwrap_err();
+            assert!(is_inference_cancelled(&error), "event {event}");
+            assert_eq!(checkpoint.events.len(), event);
+            assert!(checkpoint.events.iter().all(|progress| {
+                progress.phase == H3PipelinePhase::ReferenceAudioEncodeChunk && progress.total == 4
+            }));
+            assert_eq!(
+                waveform.association(),
+                AudioSoundtrackAssociation::StandaloneReference { reference_index: 7 }
+            );
+        }
+    }
+
+    #[test]
+    fn audio_reference_encode_bridge_preserves_association_index_and_phase_order() {
+        let phases = [
+            AudioVaePhase::EncodePreprocess,
+            AudioVaePhase::EncodeDac,
+            AudioVaePhase::EncodeProjection,
+            AudioVaePhase::EncodePosterior,
+        ];
+        for association in [
+            AudioSoundtrackAssociation::StandaloneReference { reference_index: 3 },
+            AudioSoundtrackAssociation::VideoSoundtrack { reference_index: 9 },
+        ] {
+            let waveform = StereoWaveform::new(
+                Tensor::zeros((1, 2, 8), DType::F32, &Device::Cpu).unwrap(),
+                32_000,
+                association,
+            )
+            .unwrap();
+            let latents = StereoLatents::new(
+                Tensor::zeros((1, LATENT_CHANNELS, 2, 1), DType::F32, &Device::Cpu).unwrap(),
+                &AudioVaeConfig::default(),
+            )
+            .unwrap();
+            let mut checkpoint = RecordingCheckpoint::default();
+            let encoded = encode_private_audio_reference_with(
+                &waveform,
+                &mut checkpoint,
+                |phase_checkpoint| {
+                    for phase in phases {
+                        phase_checkpoint(phase)?;
+                    }
+                    Ok(latents.clone())
+                },
+            )
+            .unwrap();
+            assert_eq!(encoded.normalized().dims(), [1, LATENT_CHANNELS, 2, 1]);
+            assert_eq!(waveform.association(), association);
+            assert_eq!(
+                checkpoint
+                    .events
+                    .iter()
+                    .map(|event| (event.phase, event.completed, event.total))
+                    .collect::<Vec<_>>(),
+                (0..=4)
+                    .map(|completed| { (H3PipelinePhase::ReferenceAudioEncodeChunk, completed, 4) })
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        assert!(
+            validate_reference_audio_association(AudioSoundtrackAssociation::Generated).is_err()
+        );
+        assert!(validate_reference_audio_association(
+            AudioSoundtrackAssociation::StandaloneReference { reference_index: 0 }
+        )
+        .is_err());
+        assert!(audio_encode_phase_progress(AudioVaePhase::DecodeProjection).is_err());
     }
 
     #[test]

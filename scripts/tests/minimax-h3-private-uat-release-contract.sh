@@ -22,6 +22,22 @@ require_text crates/mold-candle/Cargo.toml \
 require_text crates/mold-inference/Cargo.toml \
   'h3-private-uat = ["mold-candle/h3-private-uat"]' \
   "mold-inference does not narrowly forward the private H3 runtime feature"
+audio_encode_checkpoint=$(sed -n \
+  '/This developer-only seam lets a private Ref2VA runtime/,/fn encode_with_checkpoint/p' \
+  crates/mold-candle/src/minimax_h3/audio.rs)
+if ! grep -Fq '#[cfg(feature = "h3-private-uat")]' <<<"$audio_encode_checkpoint" \
+  || ! grep -Fq 'pub fn encode_with_phase_checkpoint(' <<<"$audio_encode_checkpoint"; then
+  fail "the typed H3 audio encode checkpoint is not private-feature-gated"
+fi
+require_text crates/mold-inference/src/minimax_h3/private_vae_adapter.rs \
+  'pub(crate) fn encode_private_audio_reference(' \
+  "the private H3 VAE adapter omits the reference-audio encode seam"
+require_text crates/mold-inference/src/minimax_h3/private_vae_adapter.rs \
+  'audio_vae.encode_with_phase_checkpoint(waveform, phase_checkpoint)' \
+  "the private H3 VAE adapter bypasses the typed audio encode checkpoint"
+require_text crates/mold-inference/src/minimax_h3/private_vae_adapter.rs \
+  'phase: H3PipelinePhase::ReferenceAudioEncodeChunk,' \
+  "the private H3 audio encode seam omits attempt-scoped phase checkpoints"
 require_text crates/mold-inference/Cargo.toml \
   'required-features = ["dev-bins", "h3-private-uat"]' \
   "the private H3 artifact qualifier is reachable without both development features"

@@ -1026,21 +1026,31 @@ impl AudioVae {
         waveform: &StereoWaveform,
         cancellation: &dyn AudioVaeCancellation,
     ) -> Result<(AudioPosterior, usize)> {
-        cancellation_boundary(cancellation, AudioVaePhase::EncodePreprocess)?;
+        self.encode_posterior_with_checkpoint(waveform, &mut |phase| {
+            cancellation_boundary(cancellation, phase)
+        })
+    }
+
+    fn encode_posterior_with_checkpoint(
+        &self,
+        waveform: &StereoWaveform,
+        checkpoint: &mut dyn FnMut(AudioVaePhase) -> Result<()>,
+    ) -> Result<(AudioPosterior, usize)> {
+        checkpoint(AudioVaePhase::EncodePreprocess)?;
         let (batch, _, samples) = waveform.samples().dims3()?;
         let padded = self.config.padded_samples(samples)?;
         let mut mono = waveform.pack_mono_batch()?;
         if padded > samples {
             mono = mono.pad_with_zeros(2, 0, padded - samples)?;
         }
-        cancellation_boundary(cancellation, AudioVaePhase::EncodeDac)?;
+        checkpoint(AudioVaePhase::EncodeDac)?;
         let encoded = self.encoder.forward(&mono)?;
-        cancellation_boundary(cancellation, AudioVaePhase::EncodeProjection)?;
+        checkpoint(AudioVaePhase::EncodeProjection)?;
         let projected = self
             .pre_block
             .forward(&encoded.transpose(1, 2)?)?
             .transpose(1, 2)?;
-        cancellation_boundary(cancellation, AudioVaePhase::EncodePosterior)?;
+        checkpoint(AudioVaePhase::EncodePosterior)?;
         let mean = self.mean_proj.forward(&projected)?;
         let logs = self.logs_proj.forward(&projected)?;
         Ok((AudioPosterior::new(mean, logs)?, batch))
@@ -1052,7 +1062,32 @@ impl AudioVae {
         waveform: &StereoWaveform,
         cancellation: &dyn AudioVaeCancellation,
     ) -> Result<StereoLatents> {
-        let (posterior, batch) = self.encode_posterior(waveform, cancellation)?;
+        self.encode_with_checkpoint(waveform, &mut |phase| {
+            cancellation_boundary(cancellation, phase)
+        })
+    }
+
+    /// Encode with a fallible callback at each named audio safe point.
+    ///
+    /// This developer-only seam lets a private Ref2VA runtime retain the
+    /// original request-scoped cancellation error instead of reducing it to
+    /// the string-only [`AudioVaeCancellation`] transport.
+    #[cfg(feature = "h3-private-uat")]
+    #[doc(hidden)]
+    pub fn encode_with_phase_checkpoint(
+        &self,
+        waveform: &StereoWaveform,
+        checkpoint: &mut dyn FnMut(AudioVaePhase) -> Result<()>,
+    ) -> Result<StereoLatents> {
+        self.encode_with_checkpoint(waveform, checkpoint)
+    }
+
+    fn encode_with_checkpoint(
+        &self,
+        waveform: &StereoWaveform,
+        checkpoint: &mut dyn FnMut(AudioVaePhase) -> Result<()>,
+    ) -> Result<StereoLatents> {
+        let (posterior, batch) = self.encode_posterior_with_checkpoint(waveform, checkpoint)?;
         let normalized = self.normalize_mono_latents(&posterior.mode())?;
         StereoLatents::from_mono_batch(normalized, batch, &self.config)
     }
@@ -1541,6 +1576,60 @@ mod tests {
         }
         #[cfg(feature = "h3-private-uat")]
         {
+            let encode_phases = [
+                AudioVaePhase::EncodePreprocess,
+                AudioVaePhase::EncodeDac,
+                AudioVaePhase::EncodeProjection,
+                AudioVaePhase::EncodePosterior,
+            ];
+            let mut phases = Vec::new();
+            let checkpoint_latents = vae.encode_with_phase_checkpoint(&waveform, &mut |phase| {
+                phases.push(phase);
+                Ok(())
+            })?;
+            assert_eq!(checkpoint_latents.normalized().dims4()?, (1, 2, 2, 2));
+            assert_eq!(phases, encode_phases);
+            assert_eq!(
+                waveform.association(),
+                AudioSoundtrackAssociation::StandaloneReference { reference_index: 1 }
+            );
+
+            for cancelled_phase in [
+                AudioVaePhase::EncodePreprocess,
+                AudioVaePhase::EncodeProjection,
+                AudioVaePhase::EncodePosterior,
+            ] {
+                let mut seen = Vec::new();
+                let error = vae
+                    .encode_with_phase_checkpoint(&waveform, &mut |phase| {
+                        seen.push(phase);
+                        if phase == cancelled_phase {
+                            bail!("synthetic pipeline cancellation at {phase:?}")
+                        }
+                        Ok(())
+                    })
+                    .unwrap_err();
+                assert_eq!(seen.last(), Some(&cancelled_phase));
+                assert!(error
+                    .to_string()
+                    .contains("synthetic pipeline cancellation"));
+                assert_eq!(
+                    waveform.association(),
+                    AudioSoundtrackAssociation::StandaloneReference { reference_index: 1 }
+                );
+            }
+
+            let soundtrack = StereoWaveform::new_for_config(
+                waveform.samples().clone(),
+                &config,
+                AudioSoundtrackAssociation::VideoSoundtrack { reference_index: 4 },
+            )?;
+            vae.encode_with_phase_checkpoint(&soundtrack, &mut |_phase| Ok(()))?;
+            assert_eq!(
+                soundtrack.association(),
+                AudioSoundtrackAssociation::VideoSoundtrack { reference_index: 4 }
+            );
+
             let mut phases = Vec::new();
             vae.decode_with_phase_checkpoint(
                 &latents,
