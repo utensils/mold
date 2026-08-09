@@ -10,6 +10,7 @@ mkdir -p "$tmp/bin" "$tmp/run" "$tmp/state"
 cat > "$tmp/bin/magick" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" > "${MOLD_FAKE_STATE:?}/magick-args-$(basename "${@: -1}")"
 printf '%s\n' "$*" > "${MOLD_FAKE_STATE:?}/magick-args"
 out="${@: -1}"
 printf 'fake image\n' > "$out"
@@ -71,7 +72,10 @@ MOLD_REGRESSION_RUN_ID=source-image \
 MOLD_REGRESSION_TIMEOUT_IMAGE=10 \
 "$repo_root/scripts/regression-matrix.sh" > "$tmp/stdout" 2> "$tmp/stderr"
 
-args="$(<"$tmp/state/magick-args")"
+# The harness now synthesizes a second still for wan first/last-frame
+# cases, so assert against the source.png invocation specifically rather
+# than whichever magick call happened to run last.
+args="$(<"$tmp/state/magick-args-source.png")"
 if [[ "$args" != *"ellipse 512,560"* || "$args" != *"arc 300,430 455,665"* || "$args" != *"path 'M 690,520"* ]]; then
   echo "expected regression source image to draw a teapot body, handle, and spout" >&2
   echo "$args" >&2

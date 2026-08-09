@@ -14,6 +14,7 @@ FAILURE_LOCK="$RUN_DIR/failures.lock"
 LOG_LOCK="$RUN_DIR/results.lock"
 ATTEMPT_LOCK="$RUN_DIR/attempt-errors.lock"
 SOURCE_IMAGE="$RUN_DIR/source.png"
+SOURCE_IMAGE_B="$RUN_DIR/source-b.png"
 
 PROMPT_IMAGE="${MOLD_REGRESSION_PROMPT_IMAGE:-a small ceramic teapot on a wooden table, soft window light, realistic}"
 PROMPT_VIDEO="${MOLD_REGRESSION_PROMPT_VIDEO:-a small ceramic teapot on a wooden table as the camera slowly pushes in, soft window light}"
@@ -63,6 +64,16 @@ magick -size 1024x1024 gradient:'#c8d8df-#f7ead8' \
   -draw "path 'M 690,520 C 790,455 900,485 925,565 C 840,565 790,610 700,620 Z'" \
   "$SOURCE_IMAGE"
 
+# A visibly different second still for wan's first/last-frame cases (#779):
+# reusing the same image for both endpoints would let a broken last-frame
+# pin pass, since the render would look correct either way.
+magick -size 1024x1024 gradient:'#1a2740'-'#4d6fa8' \
+  -fill '#ffd9a0' -stroke '#3a2d1e' -strokewidth 12 \
+  -draw 'roundrectangle 330,300 700,760 40,40' \
+  -fill '#3a2d1e' -draw 'ellipse 515,530 90,90 0,360' \
+  -fill '#ffd9a0' -draw 'ellipse 515,530 42,42 0,360' \
+  "$SOURCE_IMAGE_B"
+
 models_json="$RUN_DIR/models.json"
 loras_json="$RUN_DIR/loras.json"
 curl -fsS "$HOST/api/models" > "$models_json"
@@ -72,7 +83,7 @@ jq -r '
   [
     .[]
     | select(.downloaded == true)
-    | select(.family | IN("flux","flux2","sd15","sdxl","sd3","z-image","qwen-image","wuerstchen","ltx-video","ltx2"))
+    | select(.family | IN("flux","flux2","sd15","sdxl","sd3","z-image","qwen-image","wuerstchen","ltx-video","ltx2","wan"))
     | select((.family != "ltx2") or (((.description // "") | ascii_downcase | contains("fp4") | not) and ((.description // "") | ascii_downcase | contains("nvfp4") | not)))
   ]
   | sort_by(.name)
@@ -80,7 +91,7 @@ jq -r '
   | .[]
   | select(length == 1)
   | .[0]
-  | [.name, .family, (.default_steps|tostring), (.default_width|tostring), (.default_height|tostring)]
+  | [.name, .family, (.default_steps|tostring), (.default_width|tostring), (.default_height|tostring), ((.dimension_alignment // 0)|tostring), ((.source_image // "")|tostring)]
   | @tsv
 ' "$models_json" > "$RUN_DIR/models.tsv"
 
@@ -88,7 +99,7 @@ jq -r '
   [
     .[]
     | select(.downloaded == true)
-    | select(.family | IN("flux","flux2","sd15","sdxl","sd3","z-image","qwen-image","wuerstchen","ltx-video","ltx2"))
+    | select(.family | IN("flux","flux2","sd15","sdxl","sd3","z-image","qwen-image","wuerstchen","ltx-video","ltx2","wan"))
     | select((.family != "ltx2") or (((.description // "") | ascii_downcase | contains("fp4") | not) and ((.description // "") | ascii_downcase | contains("nvfp4") | not)))
   ]
   | sort_by(.name)
@@ -410,7 +421,7 @@ run_mixed_queue() {
     IFS='|' read -r model family case_name <<< "$spec"
     local row default_steps default_width default_height width height steps safe_model prompt output timeout_s
     row="$(model_row "$model")"
-    IFS=$'\t' read -r _ _ default_steps default_width default_height <<< "$row"
+    IFS=$'\t' read -r _ _ default_steps default_width default_height _ _ <<< "$row"
     width="$default_width"
     height="$default_height"
     steps="$default_steps"
@@ -469,10 +480,10 @@ if [[ "$MODE" == "mixed-queue" ]]; then
   exit 0
 fi
 
-while IFS=$'\t' read -r model family default_steps default_width default_height; do
+while IFS=$'\t' read -r model family default_steps default_width default_height dim_align source_image; do
   safe_model="$(case_stem "$family" "$model")"
   prompt="$PROMPT_IMAGE"
-  [[ "$family" == ltx-video || "$family" == ltx2 ]] && prompt="$PROMPT_VIDEO"
+  [[ "$family" == ltx-video || "$family" == ltx2 || "$family" == wan ]] && prompt="$PROMPT_VIDEO"
 
   width="$default_width"
   height="$default_height"
@@ -489,8 +500,83 @@ while IFS=$'\t' read -r model family default_steps default_width default_height;
     width="${MOLD_REGRESSION_LTX_VIDEO_WIDTH:-768}"
     height="${MOLD_REGRESSION_LTX_VIDEO_HEIGHT:-512}"
   fi
-  [[ -n "$STEPS_IMAGE" && "$family" != ltx-video && "$family" != ltx2 ]] && steps="$STEPS_IMAGE"
+  # Wan sizes from what the checkpoint itself advertises: TI2V-5B needs a /32
+  # grid where the A14B tiers take /16, and a family constant would put one
+  # of them off-grid. The advertised alignment is authoritative; the width
+  # and height already came from the same row.
+  if [[ "$family" == wan && "${dim_align:-0}" -gt 0 ]]; then
+    width=$(( (width / dim_align) * dim_align ))
+    height=$(( (height / dim_align) * dim_align ))
+  fi
+
+  [[ -n "$STEPS_IMAGE" && "$family" != ltx-video && "$family" != ltx2 && "$family" != wan ]] && steps="$STEPS_IMAGE"
   [[ -n "$STEPS_VIDEO" && ( "$family" == ltx-video || "$family" == ltx2 ) ]] && steps="$STEPS_VIDEO"
+  # Deliberately NOT step-flattened (#790): wan's tiers ARE the recipe — the
+  # 4-step Lightning tiers and the 20-step quality tiers exercise different
+  # code (distill branch vs none, CFG vs single forward). Overriding steps
+  # would collapse them into one case that tests neither.
+
+  if [[ "$family" == wan ]]; then
+    # The conditioning contract the server advertises decides the cases: a
+    # T2V-only checkpoint has no source case to run, and an I2V-required one
+    # cannot render a bare base case at all (#772).
+    #
+    # An ABSENT contract means unknown — an older server, or a checkpoint
+    # whose headers this build could not classify — not "unsupported".
+    # Guessing either way produces a misleading result: assume T2V and an
+    # I2V-required checkpoint fails for missing input; assume I2V and a
+    # T2V-only one fails for supplying it. Skip the model and say so, so the
+    # run reports a coverage gap rather than a fake regression.
+    if [[ -z "$source_image" ]]; then
+      printf 'skipping %s: server advertises no source_image contract (unknown, not unsupported)\n' \
+        "$model" >&2
+      printf '%s\t%s\tunclassified-source-contract\n' "$model" "$family" \
+        >> "$RUN_DIR/SKIPPED_MODELS.tsv"
+      continue
+    fi
+
+    if [[ "$source_image" != "required" ]]; then
+      base_out="$RUN_DIR/${safe_model}.base.mp4"
+      queue_case "$model" "$family" base "$base_out" "$TIMEOUT_VIDEO" \
+        "$MOLD_BIN" run --host "$HOST" "$model" "$prompt" \
+        --output "$base_out" --format mp4 --frames "$FRAMES_VIDEO" --fps "$FPS_VIDEO" \
+        --width "$width" --height "$height" --steps "$steps"
+    fi
+
+    if [[ "$source_image" == "required" || "$source_image" == "optional" ]]; then
+      src_out="$RUN_DIR/${safe_model}.source.mp4"
+      queue_case "$model" "$family" source "$src_out" "$TIMEOUT_VIDEO" \
+        "$MOLD_BIN" run --host "$HOST" "$model" "$prompt" \
+        --output "$src_out" --format mp4 --frames "$FRAMES_VIDEO" --fps "$FPS_VIDEO" \
+        --width "$width" --height "$height" --steps "$steps" --image "$SOURCE_IMAGE"
+
+      # First/last-frame (#779). The nine-frame floor is TI2V's alone — it
+      # pins both endpoints in latent space, so a shorter clip leaves nothing
+      # to denoise. A14B concatenates its conditioning and happily takes any
+      # valid 4k+1 clip, so applying the floor family-wide would silently
+      # drop its endpoint case at a small FRAMES_VIDEO.
+      flf_min=1
+      [[ "$model" == wan22-ti2v-5b* ]] && flf_min=9
+      if [[ "$FRAMES_VIDEO" -ge "$flf_min" ]]; then
+        flf_out="$RUN_DIR/${safe_model}.flf.mp4"
+        queue_case "$model" "$family" flf "$flf_out" "$TIMEOUT_VIDEO" \
+          "$MOLD_BIN" run --host "$HOST" "$model" "$prompt" \
+          --output "$flf_out" --format mp4 --frames "$FRAMES_VIDEO" --fps "$FPS_VIDEO" \
+          --width "$width" --height "$height" --steps "$steps" \
+          --image "$SOURCE_IMAGE" --last-image "$SOURCE_IMAGE_B"
+      fi
+    fi
+
+    # Single-frame still (#798): wan is the only video family that renders a
+    # PNG, and the format default flips with the frame count.
+    if [[ "$source_image" != "required" ]]; then
+      still_out="$RUN_DIR/${safe_model}.still.png"
+      queue_case "$model" "$family" still "$still_out" "$TIMEOUT_IMAGE" \
+        "$MOLD_BIN" run --host "$HOST" "$model" "$prompt" \
+        --output "$still_out" --format png --frames 1 \
+        --width "$width" --height "$height" --steps "$steps"
+    fi
+  fi
 
   if [[ "$family" == ltx-video || "$family" == ltx2 ]]; then
     base_out="$RUN_DIR/${safe_model}.base.mp4"
@@ -540,7 +626,10 @@ while IFS=$'\t' read -r model family default_steps default_width default_height;
       queue_case "$model" "$family" chain-audio-source "$chain_audio_source_out" "$TIMEOUT_VIDEO" \
         "$MOLD_BIN" run --host "$HOST" --script "$chain_audio_source_script" --output "$chain_audio_source_out"
     fi
-  else
+  elif [[ "$family" != wan ]]; then
+    # wan is handled by its own arm above. Without this guard it would ALSO
+    # take the image-family cases, queueing a bare PNG base case that an
+    # I2V-required checkpoint rejects outright and a duplicate still.
     base_out="$RUN_DIR/${safe_model}.base.png"
     queue_case "$model" "$family" base "$base_out" "$TIMEOUT_IMAGE" \
       "$MOLD_BIN" run --host "$HOST" "$model" "$prompt" \

@@ -771,8 +771,6 @@ fn validate_prepared_facts_against_plan(
         || facts.predicted_host_increment_bytes != plan.predicted_host_increment_bytes
         || facts.media.canonical_model != authority.canonical_model()
         || facts.media.task != authority.task()
-        || facts.media.task != mold_core::minimax_h3::Task::Fl2va
-        || facts.media.mode == mold_core::minimax_h3::Mode::ReferenceToAudioVideo
         || facts.media.fps != mold_core::minimax_h3::FIXED_FPS
         || !valid_sha256(&facts.prepared_attempt_identity_sha256)
         || !valid_sha256(&facts.target_budget_identity_sha256)
@@ -785,6 +783,34 @@ fn validate_prepared_facts_against_plan(
         || facts.memory_ledger_sequence == 0
     {
         return Err(H3AttemptError::IdentityMismatch);
+    }
+    match facts.media.task {
+        mold_core::minimax_h3::Task::Fl2va => {
+            if facts.media.mode == mold_core::minimax_h3::Mode::ReferenceToAudioVideo
+                || facts.media.reference_count != 0
+                || facts.media.reference_fingerprint_sha256.is_some()
+                || facts.media.resolved_reference_fingerprint_sha256.is_some()
+            {
+                return Err(H3AttemptError::IdentityMismatch);
+            }
+        }
+        mold_core::minimax_h3::Task::Ref2va => {
+            if facts.media.mode != mold_core::minimax_h3::Mode::ReferenceToAudioVideo
+                || facts.media.reference_count == 0
+                || !facts
+                    .media
+                    .reference_fingerprint_sha256
+                    .as_deref()
+                    .is_some_and(valid_sha256)
+                || !facts
+                    .media
+                    .resolved_reference_fingerprint_sha256
+                    .as_deref()
+                    .is_some_and(valid_sha256)
+            {
+                return Err(H3AttemptError::IdentityMismatch);
+            }
+        }
     }
     Ok(())
 }
@@ -803,7 +829,7 @@ fn validate_private_prepared_binding(
         .h3_private_ingress_grant
         .as_ref()
         .ok_or(H3AttemptError::IdentityMismatch)?
-        .validate_for_request(&job.request)
+        .validate_bound_request(&job.request)
         .map_err(|_| H3AttemptError::IdentityMismatch)?;
     let evidence = prepared
         .h3_private_admission_by_device

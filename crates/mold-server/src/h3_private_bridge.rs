@@ -19,7 +19,9 @@ pub(crate) const H3_PRIVATE_RUNTIME_UNAVAILABLE: &str = "MINIMAX_H3_PRIVATE_RUNT
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct H3PrivateIngressGrant {
     canonical_model: String,
+    task: mold_core::minimax_h3::Task,
     authenticated_identity_sha256: String,
+    instance_identity_sha256: String,
     partition_identity_sha256: String,
     policy_identity_sha256: String,
     request_authority_sha256: String,
@@ -38,7 +40,9 @@ impl H3PrivateIngressGrant {
             b"mold.minimax-h3.private-ingress-grant.v1\0",
             &[
                 self.canonical_model.as_bytes(),
+                h3_task_label(self.task),
                 self.authenticated_identity_sha256.as_bytes(),
+                self.instance_identity_sha256.as_bytes(),
                 self.partition_identity_sha256.as_bytes(),
                 self.policy_identity_sha256.as_bytes(),
                 self.request_authority_sha256.as_bytes(),
@@ -49,20 +53,40 @@ impl H3PrivateIngressGrant {
     pub(crate) fn validate_for_request(
         &self,
         request: &mold_core::GenerateRequest,
+        instance_id: &str,
     ) -> Result<(), String> {
-        if request.model != self.canonical_model {
-            return Err("MiniMax H3 ingress authority model changed after authentication".into());
+        self.validate_bound_request(request)?;
+        if self.instance_identity_sha256 != private_instance_identity_sha256(instance_id) {
+            return Err("MiniMax H3 private ingress server instance changed".into());
+        }
+        Ok(())
+    }
+
+    /// Revalidate the immutable request portion when the current server
+    /// instance was already cross-bound into the prepared-input authority.
+    pub(crate) fn validate_bound_request(
+        &self,
+        request: &mold_core::GenerateRequest,
+    ) -> Result<(), String> {
+        if request.model != self.canonical_model
+            || mold_core::minimax_h3::task_for_model(&request.model) != Some(self.task)
+        {
+            return Err(
+                "MiniMax H3 ingress authority task or model changed after authentication".into(),
+            );
         }
         let request_authority_sha256 = request_authority_sha256(request)?;
         if request_authority_sha256 != self.request_authority_sha256 {
             return Err("MiniMax H3 request changed after authenticated ingress".into());
         }
         if self.authenticated_identity_sha256.len() != 64
-            || self.partition_identity_sha256 != private_ingress_partition_identity_sha256()
+            || self.instance_identity_sha256.len() != 64
+            || self.partition_identity_sha256
+                != private_ingress_partition_identity_sha256(self.task)
         {
-            return Err("MiniMax H3 private ingress identity is malformed".into());
+            return Err("MiniMax H3 private ingress route or instance identity changed".into());
         }
-        if self.policy_identity_sha256 != private_ingress_policy_identity_sha256() {
+        if self.policy_identity_sha256 != private_ingress_policy_identity_sha256(self.task) {
             return Err("MiniMax H3 private ingress policy identity changed".into());
         }
         Ok(())
@@ -75,8 +99,9 @@ impl H3PrivateIngressGrant {
         &self,
         submitted: &mold_core::GenerateRequest,
         resolved: &mold_core::GenerateRequest,
+        instance_id: &str,
     ) -> Result<Self, String> {
-        self.validate_for_request(submitted)?;
+        self.validate_for_request(submitted, instance_id)?;
         let mut expected = submitted.clone();
         match (submitted.seed, resolved.seed) {
             (None, Some(seed)) => expected.seed = Some(seed),
@@ -88,13 +113,18 @@ impl H3PrivateIngressGrant {
         }
         let mut rebound = self.clone();
         rebound.request_authority_sha256 = request_authority_sha256(resolved)?;
-        rebound.validate_for_request(resolved)?;
+        rebound.validate_for_request(resolved, instance_id)?;
         Ok(rebound)
     }
 
     #[cfg(test)]
     fn authenticated_identity_sha256(&self) -> &str {
         &self.authenticated_identity_sha256
+    }
+
+    #[cfg(test)]
+    fn instance_identity_sha256(&self) -> &str {
+        &self.instance_identity_sha256
     }
 
     #[cfg(test)]
@@ -121,10 +151,12 @@ impl H3PrivateIngressGrant {
 pub(crate) fn classify_h3_private_ingress(
     request: &mold_core::GenerateRequest,
     authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
+    instance_id: &str,
 ) -> Result<Option<H3PrivateIngressGrant>, crate::routes::ApiError> {
     classify_h3_private_ingress_with_runtime(
         request,
         authenticated,
+        instance_id,
         reviewed_h3_private_runtime_available,
     )
 }
@@ -133,7 +165,8 @@ pub(crate) fn classify_h3_private_ingress(
 fn classify_h3_private_ingress_with_runtime(
     request: &mold_core::GenerateRequest,
     authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
-    runtime_available: impl FnOnce() -> bool,
+    instance_id: &str,
+    runtime_available: impl FnOnce(mold_core::minimax_h3::Task) -> bool,
 ) -> Result<Option<H3PrivateIngressGrant>, crate::routes::ApiError> {
     use axum::http::StatusCode;
 
@@ -152,23 +185,32 @@ fn classify_h3_private_ingress_with_runtime(
     let output_format = request
         .output_format
         .unwrap_or(mold_core::OutputFormat::Mp4);
+    let references_match_task = match contract.task {
+        mold_core::minimax_h3::Task::Fl2va => request.references.is_none(),
+        mold_core::minimax_h3::Task::Ref2va => request
+            .references
+            .as_ref()
+            .is_some_and(|references| !references.is_empty()),
+    };
     let exact_partition = request.model == contract.canonical_model
-        && contract.canonical_model == mold_core::minimax_h3::FL2VA_COMFY
-        && contract.task == mold_core::minimax_h3::Task::Fl2va
+        && matches!(
+            contract.canonical_model,
+            mold_core::minimax_h3::FL2VA_COMFY | mold_core::minimax_h3::REF2VA_COMFY
+        )
         && contract.layout == mold_core::minimax_h3::Layout::ComfyPrunedInt8ConvrotNvfp4Awq
         && request.batch_size == 1
         && output_format == mold_core::OutputFormat::Mp4
         && request.expand != Some(true)
         && request.upscale_model.is_none()
-        && request.references.is_none();
+        && references_match_task;
     if !exact_partition {
         return Err(crate::routes::ApiError::with_code(
-            "MiniMax H3 private ingress accepts only authenticated FL2VA Comfy batch-1 MP4 requests without expansion, upscaling, or ordered references",
+            "MiniMax H3 private ingress accepts only an exact authenticated Comfy task partition with its required conditioning contract",
             H3_PRIVATE_PARTITION_REJECTED,
             StatusCode::UNPROCESSABLE_ENTITY,
         ));
     }
-    if !runtime_available() {
+    if !runtime_available(contract.task) {
         return Err(crate::routes::ApiError::with_code(
             "MiniMax H3 private runtime has no reviewed server admission implementation",
             H3_PRIVATE_RUNTIME_UNAVAILABLE,
@@ -176,7 +218,7 @@ fn classify_h3_private_ingress_with_runtime(
         ));
     }
 
-    let partition_identity_sha256 = private_ingress_partition_identity_sha256();
+    let partition_identity_sha256 = private_ingress_partition_identity_sha256(contract.task);
     let request_authority_sha256 = request_authority_sha256(request).map_err(|error| {
         crate::routes::ApiError::with_code(
             error,
@@ -186,12 +228,14 @@ fn classify_h3_private_ingress_with_runtime(
     })?;
     Ok(Some(H3PrivateIngressGrant {
         canonical_model: contract.canonical_model.to_string(),
+        task: contract.task,
         authenticated_identity_sha256: ingress_digest(
             b"mold.minimax-h3.private-authenticated-identity.v1\0",
             &[authenticated.identity.as_bytes()],
         ),
+        instance_identity_sha256: private_instance_identity_sha256(instance_id),
         partition_identity_sha256,
-        policy_identity_sha256: private_ingress_policy_identity_sha256(),
+        policy_identity_sha256: private_ingress_policy_identity_sha256(contract.task),
         request_authority_sha256,
     }))
 }
@@ -199,13 +243,13 @@ fn classify_h3_private_ingress_with_runtime(
 /// Fail closed until the inference facade contains at least one exact reviewed
 /// private-runtime qualification record. This check performs no path access.
 #[cfg(feature = "h3-private-uat")]
-fn reviewed_h3_private_runtime_available() -> bool {
-    mold_inference::reviewed_h3_private_runtime_available()
+fn reviewed_h3_private_runtime_available(task: mold_core::minimax_h3::Task) -> bool {
+    mold_inference::reviewed_h3_private_runtime_available_for_task(task)
 }
 
 #[cfg(all(test, not(feature = "h3-private-uat")))]
 #[allow(dead_code)]
-fn reviewed_h3_private_runtime_available() -> bool {
+fn reviewed_h3_private_runtime_available(_task: mold_core::minimax_h3::Task) -> bool {
     false
 }
 
@@ -223,36 +267,72 @@ fn ingress_digest(domain: &[u8], values: &[&[u8]]) -> String {
 }
 
 #[cfg(any(test, feature = "h3-private-uat"))]
-fn private_ingress_policy_identity_sha256() -> String {
+fn h3_task_label(task: mold_core::minimax_h3::Task) -> &'static [u8] {
+    match task {
+        mold_core::minimax_h3::Task::Fl2va => b"fl2va",
+        mold_core::minimax_h3::Task::Ref2va => b"ref2va",
+    }
+}
+
+#[cfg(any(test, feature = "h3-private-uat"))]
+fn private_instance_identity_sha256(instance_id: &str) -> String {
+    ingress_digest(
+        b"mold.minimax-h3.private-server-instance.v1\0",
+        &[instance_id.as_bytes()],
+    )
+}
+
+#[cfg(any(test, feature = "h3-private-uat"))]
+fn private_ingress_policy_identity_sha256(task: mold_core::minimax_h3::Task) -> String {
+    let (model, references) = match task {
+        mold_core::minimax_h3::Task::Fl2va => (
+            mold_core::minimax_h3::FL2VA_COMFY,
+            b"no-references".as_slice(),
+        ),
+        mold_core::minimax_h3::Task::Ref2va => (
+            mold_core::minimax_h3::REF2VA_COMFY,
+            b"ordered-heterogeneous-references".as_slice(),
+        ),
+    };
     ingress_digest(
         b"mold.minimax-h3.private-ingress-policy.v1\0",
         &[
-            mold_core::minimax_h3::FL2VA_COMFY.as_bytes(),
-            b"fl2va",
+            model.as_bytes(),
+            h3_task_label(task),
             b"comfy-pruned-int8",
             b"batch-1",
             b"mp4",
             b"no-expand",
             b"no-upscale",
-            b"no-references",
+            references,
             b"api-key-authenticated",
         ],
     )
 }
 
 #[cfg(any(test, feature = "h3-private-uat"))]
-fn private_ingress_partition_identity_sha256() -> String {
+fn private_ingress_partition_identity_sha256(task: mold_core::minimax_h3::Task) -> String {
+    let (model, references) = match task {
+        mold_core::minimax_h3::Task::Fl2va => (
+            mold_core::minimax_h3::FL2VA_COMFY,
+            b"no-references".as_slice(),
+        ),
+        mold_core::minimax_h3::Task::Ref2va => (
+            mold_core::minimax_h3::REF2VA_COMFY,
+            b"ordered-heterogeneous-references".as_slice(),
+        ),
+    };
     ingress_digest(
         b"mold.minimax-h3.private-ingress-partition.v1\0",
         &[
-            mold_core::minimax_h3::FL2VA_COMFY.as_bytes(),
-            b"fl2va",
+            model.as_bytes(),
+            h3_task_label(task),
             b"comfy-pruned-int8",
             b"batch-1",
             b"mp4",
             b"no-expand",
             b"no-upscale",
-            b"no-references",
+            references,
         ],
     )
 }
@@ -345,6 +425,113 @@ pub(crate) struct H3PreparedMediaContract {
     pub(crate) height: u32,
     pub(crate) frames: u32,
     pub(crate) fps: u32,
+    /// Fingerprint of the target-duration prepared reference metadata in
+    /// exact request order. Ref2VA requires this; FL2VA must leave it absent.
+    pub(crate) reference_fingerprint_sha256: Option<String>,
+    /// Fingerprint of the probed descriptor set that owns the private staged
+    /// files. This separately detects byte/probe replacement even when the
+    /// target-duration prepared shapes are unchanged.
+    pub(crate) resolved_reference_fingerprint_sha256: Option<String>,
+    pub(crate) reference_count: u32,
+}
+
+impl H3PreparedMediaContract {
+    pub(crate) fn from_request(
+        request: &mold_core::GenerateRequest,
+        resolved_reference_fingerprint_sha256: Option<&str>,
+    ) -> Result<Self, String> {
+        let task = mold_core::minimax_h3::task_for_model(&request.model)
+            .ok_or_else(|| "MiniMax H3 prepared media lost its task partition".to_string())?;
+        let mode = match task {
+            mold_core::minimax_h3::Task::Fl2va => {
+                mold_core::minimax_h3::validate_request_contract(request, task)
+            }
+            mold_core::minimax_h3::Task::Ref2va => {
+                mold_core::minimax_h3::validate_resolved_request_contract(request, task)
+            }
+        }
+        .map_err(|error| format!("{}: {}", error.code, error.message))?;
+        let seed = request
+            .seed
+            .ok_or_else(|| "MiniMax H3 prepared media has no frozen seed".to_string())?;
+        let frames = request.frames.unwrap_or(mold_core::minimax_h3::MIN_FRAMES);
+        let (reference_fingerprint_sha256, resolved_fingerprint, reference_count) = match task {
+            mold_core::minimax_h3::Task::Fl2va => {
+                if resolved_reference_fingerprint_sha256.is_some() {
+                    return Err(
+                        "MiniMax H3 FL2VA cannot inherit resolved Ref2VA authority".to_string()
+                    );
+                }
+                (None, None, 0)
+            }
+            mold_core::minimax_h3::Task::Ref2va => {
+                let references = request.references.as_deref().ok_or_else(|| {
+                    "MiniMax H3 Ref2VA prepared media lost ordered references".to_string()
+                })?;
+                let reference_count = u32::try_from(references.len())
+                    .map_err(|_| "MiniMax H3 Ref2VA reference count exceeded u32".to_string())?;
+                let resolved_fingerprint =
+                    resolved_reference_fingerprint_sha256.ok_or_else(|| {
+                        "MiniMax H3 Ref2VA prepared media lost resolved reference authority"
+                            .to_string()
+                    })?;
+                let resolved_metadata = references
+                    .iter()
+                    .enumerate()
+                    .map(|(index, reference)| reference.redacted_metadata_lossless(index))
+                    .collect::<Vec<_>>();
+                let expected_resolved =
+                    mold_core::generation_reference_fingerprint(&resolved_metadata);
+                if expected_resolved != resolved_fingerprint {
+                    return Err(
+                        "MiniMax H3 Ref2VA resolved reference order or artifact identity changed"
+                            .to_string(),
+                    );
+                }
+                let prepared_metadata = references
+                    .iter()
+                    .enumerate()
+                    .map(|(index, reference)| {
+                        reference.redacted_metadata_lossless_for_target(index, frames)
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    Some(mold_core::generation_reference_fingerprint(
+                        &prepared_metadata,
+                    )),
+                    Some(resolved_fingerprint.to_string()),
+                    reference_count,
+                )
+            }
+        };
+        Ok(Self {
+            canonical_model: request.model.clone(),
+            task,
+            mode,
+            seed,
+            width: request.width,
+            height: request.height,
+            frames,
+            fps: mold_core::minimax_h3::FIXED_FPS,
+            reference_fingerprint_sha256,
+            resolved_reference_fingerprint_sha256: resolved_fingerprint,
+            reference_count,
+        })
+    }
+
+    pub(crate) fn validate_for_request(
+        &self,
+        request: &mold_core::GenerateRequest,
+        resolved_reference_fingerprint_sha256: Option<&str>,
+    ) -> Result<(), String> {
+        let expected = Self::from_request(request, resolved_reference_fingerprint_sha256)?;
+        if &expected != self {
+            return Err(
+                "MiniMax H3 prepared media changed from its ordered request authority".to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 pub(crate) struct H3ClaimedRunOutput {
@@ -554,6 +741,9 @@ fn inference_media(media: mold_inference::H3PrivateFl2VaMediaContract) -> H3Prep
         height: media.height,
         frames: media.frames,
         fps: media.fps,
+        reference_fingerprint_sha256: None,
+        resolved_reference_fingerprint_sha256: None,
+        reference_count: 0,
     }
 }
 
@@ -593,7 +783,13 @@ pub(crate) fn prepare_for_owner(
         .h3_private_ingress_grant
         .as_ref()
         .ok_or_else(|| "MiniMax H3 private preparation lost its ingress grant".to_string())?;
-    ingress_grant.validate_for_request(&job.request)?;
+    ingress_grant.validate_bound_request(&job.request)?;
+    let expected_media = H3PreparedMediaContract::from_request(
+        &job.request,
+        job.resolved_references
+            .as_ref()
+            .map(crate::reference_uploads::ResolvedReferenceSet::fingerprint),
+    )?;
     let compute_capability = worker.gpu.compute_capability.ok_or_else(|| {
         "MiniMax H3 private preparation requires exact CUDA compute capability".to_string()
     })?;
@@ -722,15 +918,6 @@ pub(crate) fn prepare_for_owner(
 
     let boxed = InferenceH3PreparedAttempt::boxed(prepared);
     let facts = boxed.facts();
-    let expected_mode = mold_core::minimax_h3::validate_request_contract(
-        &job.request,
-        mold_core::minimax_h3::Task::Fl2va,
-    )
-    .map_err(|error| format!("{}: {}", error.code, error.message))?;
-    let expected_frames = job
-        .request
-        .frames
-        .unwrap_or(mold_core::minimax_h3::MIN_FRAMES);
     if facts.device_id != device_id
         || facts.device_ordinal != worker.gpu.ordinal
         || facts.execution_identity_sha256 != admission_evidence.execution_fingerprint()
@@ -754,14 +941,7 @@ pub(crate) fn prepare_for_owner(
             .consumption_identity_sha256
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
-        || facts.media.canonical_model != mold_core::minimax_h3::FL2VA_COMFY
-        || facts.media.task != mold_core::minimax_h3::Task::Fl2va
-        || facts.media.mode != expected_mode
-        || facts.media.width != job.request.width
-        || facts.media.height != job.request.height
-        || facts.media.frames != expected_frames
-        || facts.media.fps != mold_core::minimax_h3::FIXED_FPS
-        || job.request.seed != Some(facts.media.seed)
+        || facts.media != expected_media
     {
         return Err("MiniMax H3 prepared attempt changed from the frozen owner admission".into());
     }
@@ -827,6 +1007,8 @@ mod tests {
 mod structural_tests {
     use super::BoxedH3PreparedAttempt;
 
+    const INSTANCE_ID: &str = "test-server-instance";
+
     fn request(model: &str) -> mold_core::GenerateRequest {
         serde_json::from_value(serde_json::json!({
             "prompt": "private prompt bytes must not enter the ingress grant",
@@ -844,6 +1026,44 @@ mod structural_tests {
         crate::auth::ApiKeyAuthenticated {
             identity: "process-local-auth-marker".to_string(),
         }
+    }
+
+    fn ref2va_request(swapped: bool) -> mold_core::GenerateRequest {
+        use mold_core::{
+            GenerationReference, GenerationReferenceAuthority, GenerationReferenceProvenance,
+        };
+
+        let provenance = |name: &str, byte: u8| GenerationReferenceProvenance {
+            name: Some(name.to_string()),
+            sha256: Some(format!("{byte:02x}").repeat(32)),
+        };
+        let image = GenerationReference::Image {
+            media: GenerationReferenceAuthority::Descriptor,
+            provenance: provenance("subject.png", 1),
+            mime_type: "image/png".to_string(),
+            width: 1024,
+            height: 768,
+        };
+        let audio = GenerationReference::Audio {
+            media: GenerationReferenceAuthority::Descriptor,
+            provenance: provenance("voice.wav", 2),
+            mime_type: "audio/wav".to_string(),
+            duration_ms: 2_000,
+            sample_rate: 48_000,
+            channels: 1,
+            sample_count: Some(96_000),
+        };
+        let mut request = request(mold_core::minimax_h3::REF2VA_COMFY);
+        request.seed = Some(7);
+        request.guidance = 0.0;
+        request.strength = 1.0;
+        request.enable_audio = Some(true);
+        request.references = Some(if swapped {
+            vec![audio, image]
+        } else {
+            vec![image, audio]
+        });
+        request
     }
 
     #[test]
@@ -878,7 +1098,8 @@ mod structural_tests {
         let grant = super::classify_h3_private_ingress_with_runtime(
             &request("flux-schnell:q8"),
             None,
-            || {
+            INSTANCE_ID,
+            |_| {
                 runtime_checked.set(true);
                 true
             },
@@ -897,7 +1118,8 @@ mod structural_tests {
         let error = super::classify_h3_private_ingress_with_runtime(
             &request(mold_core::minimax_h3::FL2VA_COMFY),
             None,
-            || {
+            INSTANCE_ID,
+            |_| {
                 runtime_checked.set(true);
                 true
             },
@@ -919,7 +1141,8 @@ mod structural_tests {
         let grant = super::classify_h3_private_ingress_with_runtime(
             &submitted,
             Some(&authenticated()),
-            || true,
+            INSTANCE_ID,
+            |_| true,
         )
         .expect("exact authenticated partition")
         .expect("private grant");
@@ -927,17 +1150,141 @@ mod structural_tests {
         let mut resolved = submitted.clone();
         resolved.seed = Some(42);
         let rebound = grant
-            .rebind_resolved_request(&submitted, &resolved)
+            .rebind_resolved_request(&submitted, &resolved, INSTANCE_ID)
             .expect("one omitted seed may be resolved once");
-        assert!(grant.validate_for_request(&resolved).is_err());
+        assert!(grant.validate_for_request(&resolved, INSTANCE_ID).is_err());
         rebound
-            .validate_for_request(&resolved)
+            .validate_for_request(&resolved, INSTANCE_ID)
             .expect("rebound grant must bind the exact resolved request");
 
         let mut mutated = resolved.clone();
         mutated.prompt.push_str(" changed");
-        assert!(rebound.validate_for_request(&mutated).is_err());
-        assert!(grant.rebind_resolved_request(&submitted, &mutated).is_err());
+        assert!(rebound.validate_for_request(&mutated, INSTANCE_ID).is_err());
+        assert!(grant
+            .rebind_resolved_request(&submitted, &mutated, INSTANCE_ID)
+            .is_err());
+    }
+
+    #[test]
+    fn ref2va_ingress_is_task_scoped_and_server_instance_bound() {
+        use axum::response::IntoResponse;
+
+        let request = ref2va_request(false);
+        let seen_task = std::cell::Cell::new(None);
+        let grant = super::classify_h3_private_ingress_with_runtime(
+            &request,
+            Some(&authenticated()),
+            INSTANCE_ID,
+            |task| {
+                seen_task.set(Some(task));
+                task == mold_core::minimax_h3::Task::Ref2va
+            },
+        )
+        .expect("exact Ref2VA partition must classify with injected authority")
+        .expect("exact Ref2VA partition must return a grant");
+        assert_eq!(seen_task.get(), Some(mold_core::minimax_h3::Task::Ref2va));
+        grant
+            .validate_for_request(&request, INSTANCE_ID)
+            .expect("unchanged task and server instance must validate");
+        assert!(grant
+            .validate_for_request(&request, "replacement-server-instance")
+            .is_err());
+
+        let error = super::classify_h3_private_ingress_with_runtime(
+            &request,
+            Some(&authenticated()),
+            INSTANCE_ID,
+            |task| task == mold_core::minimax_h3::Task::Fl2va,
+        )
+        .expect_err("an FL2VA qualification must not authorize Ref2VA");
+        assert_eq!(error.code, super::H3_PRIVATE_RUNTIME_UNAVAILABLE);
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn ref2va_preparation_binds_swapped_order_and_resolved_artifact_identity() {
+        let original = ref2va_request(false);
+        let original_resolved =
+            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&original);
+        let original_media = super::H3PreparedMediaContract::from_request(
+            &original,
+            Some(original_resolved.fingerprint()),
+        )
+        .expect("resolved Ref2VA request must freeze ordered authority");
+
+        let swapped = ref2va_request(true);
+        let swapped_resolved =
+            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&swapped);
+        let swapped_media = super::H3PreparedMediaContract::from_request(
+            &swapped,
+            Some(swapped_resolved.fingerprint()),
+        )
+        .expect("swapped Ref2VA request must freeze its distinct order");
+
+        assert_ne!(
+            original_media.reference_fingerprint_sha256,
+            swapped_media.reference_fingerprint_sha256
+        );
+        assert_ne!(
+            original_media.resolved_reference_fingerprint_sha256,
+            swapped_media.resolved_reference_fingerprint_sha256
+        );
+        assert!(original_media
+            .validate_for_request(&swapped, Some(swapped_resolved.fingerprint()))
+            .is_err());
+
+        let mut replaced = original.clone();
+        let first = replaced
+            .references
+            .as_mut()
+            .and_then(|references| references.first_mut())
+            .expect("fixture reference");
+        match first {
+            mold_core::GenerationReference::Image { provenance, .. }
+            | mold_core::GenerationReference::Video { provenance, .. }
+            | mold_core::GenerationReference::Audio { provenance, .. } => {
+                provenance.sha256 = Some("03".repeat(32));
+            }
+        }
+        assert!(super::H3PreparedMediaContract::from_request(
+            &replaced,
+            Some(original_resolved.fingerprint()),
+        )
+        .is_err());
+
+        let metadata = mold_core::OutputMetadata::from_generate_request(&original, 7, None, "test");
+        let durable = metadata.references.expect("durable ordered references");
+        assert_eq!(
+            durable.iter().map(|item| item.index).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(
+            mold_core::generation_reference_fingerprint(&durable),
+            original_media
+                .reference_fingerprint_sha256
+                .as_deref()
+                .expect("prepared reference fingerprint")
+        );
+        let serialized = serde_json::to_string(&durable).unwrap();
+        for private in ["descriptor", "upload", "server_path", "api_key"] {
+            assert!(!serialized.contains(private));
+        }
+
+        let replay_request: mold_core::GenerateRequest =
+            serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
+        let replay_resolved =
+            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(
+                &replay_request,
+            );
+        let replay_media = super::H3PreparedMediaContract::from_request(
+            &replay_request,
+            Some(replay_resolved.fingerprint()),
+        )
+        .expect("descriptor-only durable replay must retain exact order identity");
+        assert_eq!(replay_media, original_media);
     }
 
     #[test]
@@ -948,23 +1295,31 @@ mod structural_tests {
             request(mold_core::minimax_h3::FL2VA_OFFICIAL),
         ] {
             let runtime_checked = std::cell::Cell::new(false);
-            let error =
-                super::classify_h3_private_ingress_with_runtime(&invalid, Some(&auth), || {
+            let error = super::classify_h3_private_ingress_with_runtime(
+                &invalid,
+                Some(&auth),
+                INSTANCE_ID,
+                |_| {
                     runtime_checked.set(true);
                     true
-                })
-                .expect_err("wrong H3 task/layout must fail closed");
+                },
+            )
+            .expect_err("wrong H3 task/layout must fail closed");
             assert_eq!(error.code, super::H3_PRIVATE_PARTITION_REJECTED);
             assert!(!runtime_checked.get());
 
             invalid.model = mold_core::minimax_h3::FL2VA_COMFY.to_string();
             invalid.batch_size = 2;
-            let error =
-                super::classify_h3_private_ingress_with_runtime(&invalid, Some(&auth), || {
+            let error = super::classify_h3_private_ingress_with_runtime(
+                &invalid,
+                Some(&auth),
+                INSTANCE_ID,
+                |_| {
                     runtime_checked.set(true);
                     true
-                })
-                .expect_err("batch H3 ingress must fail closed");
+                },
+            )
+            .expect_err("batch H3 ingress must fail closed");
             assert_eq!(error.code, super::H3_PRIVATE_PARTITION_REJECTED);
             assert!(!runtime_checked.get());
         }
@@ -974,22 +1329,28 @@ mod structural_tests {
     fn accepted_ingress_grant_is_cloneable_and_payload_free() {
         let auth = authenticated();
         let request = request(mold_core::minimax_h3::FL2VA_COMFY);
-        let grant = super::classify_h3_private_ingress_with_runtime(&request, Some(&auth), || true)
-            .expect("exact private partition must classify")
-            .expect("exact private partition must return a grant");
+        let grant = super::classify_h3_private_ingress_with_runtime(
+            &request,
+            Some(&auth),
+            INSTANCE_ID,
+            |_| true,
+        )
+        .expect("exact private partition must classify")
+        .expect("exact private partition must return a grant");
         let cloned = grant.clone();
 
         assert_eq!(cloned.canonical_model(), mold_core::minimax_h3::FL2VA_COMFY);
         assert_eq!(cloned.authenticated_identity_sha256().len(), 64);
+        assert_eq!(cloned.instance_identity_sha256().len(), 64);
         assert_eq!(cloned.partition_identity_sha256().len(), 64);
         assert_eq!(cloned.policy_identity_sha256().len(), 64);
         assert_eq!(cloned.request_authority_sha256().len(), 64);
         cloned
-            .validate_for_request(&request)
+            .validate_for_request(&request, INSTANCE_ID)
             .expect("unmodified canonical request must retain its grant");
         let mut mutated = request.clone();
         mutated.prompt.push_str(" changed");
-        assert!(cloned.validate_for_request(&mutated).is_err());
+        assert!(cloned.validate_for_request(&mutated, INSTANCE_ID).is_err());
         let debug = format!("{cloned:?}");
         assert!(!debug.contains(&auth.identity));
         assert!(!debug.contains(&request.prompt));

@@ -51,12 +51,20 @@ EXPECTED_REVISIONS = {
     "minimax-official-code": "8d8824efaf94586c0cc9ac7ad8d0723d4d6420ea",
     "minimax-official-model": "bfc8ed0353f5a9733be73e6b2c98ec0948195b86",
     "diffusers": "9c6a68c32b3b2a64db91800b624d33cec6e25ab8",
+    "transformers": "42f189ded85d18d00b51161d694cafd325e32b91",
     "comfyui": "a464ac33588ae182f81a090d910cfbf21e255b73",
     "comfy-checkpoints": "eb8a16107c595128b3a578f82d2ce2f75920c355",
     "sglang": "0c3a76fa0a5bfab410b645f4143e7e8e3cc25c77",
     "vllm-omni": "3d7fc3b9ba3cac88d579d4dc35b78b0b641675fc",
 }
 
+EXPECTED_ORACLE_RUNTIME = {
+    "python": "3.13.13",
+    "torch": "2.13.0+cu130",
+    "numpy": "2.5.1",
+    "cuda": "13.0",
+    "transformers_revision": EXPECTED_REVISIONS["transformers"],
+}
 EXPECTED_LICENSE_SHA256 = (
     "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44"
 )
@@ -229,6 +237,36 @@ def sha256_file(path: pathlib.Path) -> str:
     except OSError as error:
         fail(f"cannot hash {path}: {error}")
     return digest.hexdigest()
+
+
+def checked_repository_implementation_path(value: str) -> pathlib.Path:
+    relative = pathlib.PurePosixPath(value)
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or relative.parts[0] != "scripts"
+        or ".." in relative.parts
+    ):
+        fail("oracle adapter implementation path escapes the reviewed checkout")
+    current = REPO_ROOT
+    for index, part in enumerate(relative.parts):
+        current = current / part
+        try:
+            current.lstat()
+        except OSError:
+            fail("oracle adapter implementation path is unavailable")
+        if pathlib.Path(current).is_symlink():
+            fail("oracle adapter implementation path may not traverse a symbolic link")
+        if index < len(relative.parts) - 1 and not current.is_dir():
+            fail("oracle adapter implementation path has a non-directory parent")
+    try:
+        resolved = current.resolve(strict=True)
+        resolved.relative_to(REPO_ROOT.resolve(strict=True))
+    except (OSError, ValueError):
+        fail("oracle adapter implementation path escapes the reviewed checkout")
+    if not resolved.is_file():
+        fail("oracle adapter implementation path is not a regular file")
+    return resolved
 
 
 def schema_helper() -> Any:
@@ -775,6 +813,8 @@ def validate_manifest() -> dict[str, Any]:
         or revisions != EXPECTED_REVISIONS
     ):
         fail("source revisions drifted from the reviewed H3 authority set")
+    if manifest["numerical_authority"].get("oracle_runtime") != EXPECTED_ORACLE_RUNTIME:
+        fail("oracle runtime identity drifted from the reviewed H3 authority set")
 
     excluded = set(manifest["numerical_authority"]["excluded_accelerations"])
     if (
@@ -809,6 +849,18 @@ def validate_manifest() -> dict[str, Any]:
     ):
         fail("fixture layer coverage is incomplete or contains an unreviewed layer")
     for layer in manifest["fixture_layers"]:
+        oracle_adapter = layer.get("oracle_adapter")
+        if oracle_adapter is not None:
+            implementation_path = checked_repository_implementation_path(
+                oracle_adapter["implementation_path"]
+            )
+            if oracle_adapter["implementation_sha256"] != sha256_file(
+                implementation_path
+            ):
+                fail(f"fixture layer {layer['id']} adapter authority drifted")
+            expected_command_start = f"python3 {oracle_adapter['implementation_path']} "
+            if not oracle_adapter["command_prefix"].startswith(expected_command_start):
+                fail(f"fixture layer {layer['id']} adapter command is not path-bound")
         component_ids = layer["required_component_indexes"]
         if len(component_ids) != len(set(component_ids)) or not set(
             component_ids

@@ -106,7 +106,20 @@ const REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256: &[&str] = &[];
 /// qualification record. This performs no filesystem access and is suitable
 /// for an authenticated ingress gate before queue or dependency setup.
 pub const fn reviewed_h3_private_runtime_available() -> bool {
-    !REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256.is_empty()
+    reviewed_h3_private_runtime_available_for_task(Task::Fl2va)
+}
+
+/// Report whether this binary contains a reviewed qualification for the
+/// exact private task partition. A qualification for one H3 transformer task
+/// must never authorize another task with different artifacts, conditioning,
+/// and peak-memory behavior.
+pub const fn reviewed_h3_private_runtime_available_for_task(task: Task) -> bool {
+    match task {
+        Task::Fl2va => !REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256.is_empty(),
+        // Ref2VA remains sealed until its own artifact and runtime campaign is
+        // reviewed. Do not infer authority from an FL2VA record.
+        Task::Ref2va => false,
+    }
 }
 
 const PRIVATE_ACTIVATION_COVERAGE: [H3FactoryActivationPrerequisite; 9] = [
@@ -3960,6 +3973,10 @@ mod tests {
     #[test]
     fn empty_reviewed_allowlist_rejects_before_any_path_access() {
         assert!(!reviewed_h3_private_runtime_available());
+        assert!(!reviewed_h3_private_runtime_available_for_task(Task::Fl2va));
+        assert!(!reviewed_h3_private_runtime_available_for_task(
+            Task::Ref2va
+        ));
         let factory = base_factory();
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "prompt": "test",

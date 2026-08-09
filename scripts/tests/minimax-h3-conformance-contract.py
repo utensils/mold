@@ -55,6 +55,30 @@ def test_manifest_drift(tool, temporary: pathlib.Path) -> None:
         expect_failure(tool.validate_manifest, "source revisions drifted")
     finally:
         tool.MANIFEST_PATH = original_path
+    manifest = json.loads(original_path.read_text(encoding="utf-8"))
+    manifest["numerical_authority"]["oracle_runtime"]["torch"] = "0.0.0"
+    changed = temporary / "changed-runtime-manifest.json"
+    write_json(changed, manifest)
+    tool.MANIFEST_PATH = changed
+    try:
+        expect_failure(tool.validate_manifest, "oracle runtime identity drifted")
+    finally:
+        tool.MANIFEST_PATH = original_path
+
+    manifest = json.loads(original_path.read_text(encoding="utf-8"))
+    tokenizer_layer = next(
+        layer
+        for layer in manifest["fixture_layers"]
+        if layer["id"] == "tokenizer-processor"
+    )
+    tokenizer_layer["oracle_adapter"]["implementation_sha256"] = "0" * 64
+    changed = temporary / "changed-adapter-manifest.json"
+    write_json(changed, manifest)
+    tool.MANIFEST_PATH = changed
+    try:
+        expect_failure(tool.validate_manifest, "adapter authority drifted")
+    finally:
+        tool.MANIFEST_PATH = original_path
 
     manifest = json.loads(original_path.read_text(encoding="utf-8"))
     tokenizer_layer = next(
@@ -82,6 +106,47 @@ def test_manifest_drift(tool, temporary: pathlib.Path) -> None:
         expect_failure(tool.validate_manifest, "exclusion aliases drifted")
     finally:
         tool.MANIFEST_PATH = original_path
+
+
+def test_adapter_implementation_path_boundary(tool, temporary: pathlib.Path) -> None:
+    original_root = tool.REPO_ROOT
+    checkout = temporary / "adapter-checkout"
+    scripts = checkout / "scripts"
+    outside = temporary / "outside-adapter.py"
+    scripts.mkdir(parents=True)
+    outside.write_text("VALUE = 1\n", encoding="utf-8")
+    implementation = scripts / "capture.py"
+    implementation.write_text("VALUE = 2\n", encoding="utf-8")
+    tool.REPO_ROOT = checkout
+    try:
+        assert (
+            tool.checked_repository_implementation_path("scripts/capture.py")
+            == implementation.resolve()
+        )
+        expect_failure(
+            lambda: tool.checked_repository_implementation_path(
+                "scripts/../outside-adapter.py"
+            ),
+            "escapes the reviewed checkout",
+        )
+        implementation.unlink()
+        implementation.symlink_to(outside)
+        expect_failure(
+            lambda: tool.checked_repository_implementation_path("scripts/capture.py"),
+            "symbolic link",
+        )
+        implementation.unlink()
+        scripts.rmdir()
+        outside_directory = temporary / "outside-scripts"
+        outside_directory.mkdir()
+        (outside_directory / "capture.py").write_text("VALUE = 3\n", encoding="utf-8")
+        scripts.symlink_to(outside_directory, target_is_directory=True)
+        expect_failure(
+            lambda: tool.checked_repository_implementation_path("scripts/capture.py"),
+            "symbolic link",
+        )
+    finally:
+        tool.REPO_ROOT = original_root
 
 
 def test_synthetic_drift(tool, temporary: pathlib.Path) -> None:
@@ -420,6 +485,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="mold-h3-contract-") as value:
         temporary = pathlib.Path(value).resolve()
         test_manifest_drift(tool, temporary)
+        test_adapter_implementation_path_boundary(tool, temporary)
         test_synthetic_drift(tool, temporary)
         test_synthetic_comparison_uses_fixture_math(tool)
         test_comparison_diagnostics(tool)

@@ -4394,6 +4394,22 @@ mod tests {
         assert!(references[0].has_audio);
         assert_eq!(references[0].audio_sample_rate, Some(48_000));
         assert_eq!(references[2].index, 3);
+        let saved_fingerprint = mold_core::generation_reference_fingerprint(references);
+        let mut swapped_request = request.clone();
+        swapped_request
+            .references
+            .as_mut()
+            .expect("ordered references")
+            .swap(0, 1);
+        let swapped_metadata =
+            OutputMetadata::from_generate_request(&swapped_request, 42, None, "test");
+        let swapped_fingerprint = mold_core::generation_reference_fingerprint(
+            swapped_metadata
+                .references
+                .as_deref()
+                .expect("swapped ordered metadata"),
+        );
+        assert_ne!(saved_fingerprint, swapped_fingerprint);
         let durable_json = serde_json::to_string(&rows[0].metadata).unwrap();
         for secret in ["authority", "handle", "server_path", "/synthetic/"] {
             assert!(!durable_json.contains(secret));

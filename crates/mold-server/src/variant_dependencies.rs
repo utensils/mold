@@ -1004,7 +1004,10 @@ async fn prepare_inputs_for_devices(
 ) -> Result<PreparedExecutionInputs, String> {
     #[cfg(feature = "h3-private-uat")]
     if let Some(grant) = context.h3_private_ingress_grant.clone() {
-        grant.validate_for_request(request)?;
+        let live_state = state.ok_or_else(|| {
+            "MiniMax H3 private dependency preparation has no server instance authority".to_string()
+        })?;
+        grant.validate_for_request(request, live_state.instance_id.as_str())?;
         return prepare_h3_private_inputs_for_devices(
             state, work_id, request, config, devices, progress, policy, grant,
         )
@@ -1245,7 +1248,7 @@ async fn prepare_inputs_for_devices(
 #[cfg(feature = "h3-private-uat")]
 #[allow(clippy::too_many_arguments)]
 async fn prepare_h3_private_inputs_for_devices(
-    _state: Option<&AppState>,
+    state: Option<&AppState>,
     _work_id: &str,
     request: &GenerateRequest,
     config: &Config,
@@ -1349,7 +1352,14 @@ async fn prepare_h3_private_inputs_for_devices(
         ));
     }
 
-    let rebound_grant = ingress_grant.rebind_resolved_request(request, &resolved_request)?;
+    let instance_id = state
+        .ok_or_else(|| {
+            "MiniMax H3 private admission lost its server instance authority".to_string()
+        })?
+        .instance_id
+        .as_str();
+    let rebound_grant =
+        ingress_grant.rebind_resolved_request(request, &resolved_request, instance_id)?;
     let engine_paths = ModelPaths::resolve(&resolved_request.model, config).ok_or_else(|| {
         "reviewed MiniMax H3 admission could not project its verified manifest paths".to_string()
     })?;

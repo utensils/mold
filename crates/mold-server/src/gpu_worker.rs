@@ -2913,19 +2913,18 @@ fn run_claimed_h3_generation(
         tracing::debug!(gpu = ordinal, model = %model_name, "skipping claimed H3 job — client disconnected");
         return false;
     }
-    if mold_core::minimax_h3::task_for_model(&job.request.model)
-        != Some(mold_core::minimax_h3::Task::Fl2va)
-    {
-        return reject_claimed_h3_generation_message(
-            job,
-            "MiniMax H3 private owner bridge accepts only the sealed FL2VA partition".to_string(),
-        );
-    }
-
     let scope_facts = scope.facts();
     let prepared_facts = prepared.facts();
     if let Err(error) = validate_h3_prepared_attempt_facts(scope_facts, &prepared_facts) {
         return reject_claimed_h3_generation_message(job, error.to_string());
+    }
+    if let Err(error) = prepared_facts.media.validate_for_request(
+        &job.request,
+        job.resolved_references
+            .as_ref()
+            .map(crate::reference_uploads::ResolvedReferenceSet::fingerprint),
+    ) {
+        return reject_claimed_h3_generation_message(job, error);
     }
     let lease = match job.lease.clone() {
         Some(lease) if scope_facts.matches_lease(&lease) => lease,
@@ -3236,11 +3235,14 @@ fn validate_h3_publication_contract(
     output: &crate::h3_private_bridge::H3ClaimedRunOutput,
 ) -> anyhow::Result<()> {
     let contract = &prepared.media;
-    let expected_mode = mold_core::minimax_h3::validate_request_contract(
-        &job.request,
-        mold_core::minimax_h3::Task::Fl2va,
-    )
-    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+    contract
+        .validate_for_request(
+            &job.request,
+            job.resolved_references
+                .as_ref()
+                .map(crate::reference_uploads::ResolvedReferenceSet::fingerprint),
+        )
+        .map_err(anyhow::Error::msg)?;
     let expected_seed = job
         .request
         .seed
@@ -3259,9 +3261,17 @@ fn validate_h3_publication_contract(
         .video
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("private H3 response has no video"))?;
-    if contract.canonical_model != mold_core::minimax_h3::FL2VA_COMFY
-        || contract.task != mold_core::minimax_h3::Task::Fl2va
-        || contract.mode != expected_mode
+    let durable_metadata = mold_core::OutputMetadata::from_generate_request(
+        &job.request,
+        expected_seed,
+        None,
+        "private-owner-publication-validation",
+    );
+    let durable_reference_fingerprint = durable_metadata
+        .references
+        .as_deref()
+        .map(mold_core::generation_reference_fingerprint);
+    if contract.canonical_model != job.request.model
         || contract.seed != expected_seed
         || contract.width != job.request.width
         || contract.height != job.request.height
@@ -3280,8 +3290,9 @@ fn validate_h3_publication_contract(
             .all(|byte| byte.is_ascii_hexdigit())
         || !output.response.images.is_empty()
         || output.response.audio.is_some()
-        || output.response.model != mold_core::minimax_h3::FL2VA_COMFY
+        || output.response.model != contract.canonical_model
         || output.response.seed_used != expected_seed
+        || durable_reference_fingerprint != contract.reference_fingerprint_sha256
         || video.data.is_empty()
         || video.thumbnail.is_empty()
         || video.format != OutputFormat::Mp4
@@ -5667,8 +5678,42 @@ mod tests {
                 height: mold_core::minimax_h3::DEFAULT_HEIGHT,
                 frames: mold_core::minimax_h3::MIN_FRAMES,
                 fps: mold_core::minimax_h3::FIXED_FPS,
+                reference_fingerprint_sha256: None,
+                resolved_reference_fingerprint_sha256: None,
+                reference_count: 0,
             },
         }
+    }
+
+    fn fake_ref2va_request(mut request: mold_core::GenerateRequest) -> mold_core::GenerateRequest {
+        use mold_core::{
+            GenerationReference, GenerationReferenceAuthority, GenerationReferenceProvenance,
+        };
+
+        let provenance = |name: &str, byte: u8| GenerationReferenceProvenance {
+            name: Some(name.to_string()),
+            sha256: Some(format!("{byte:02x}").repeat(32)),
+        };
+        request.model = mold_core::minimax_h3::REF2VA_COMFY.to_string();
+        request.references = Some(vec![
+            GenerationReference::Image {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("subject.png", 1),
+                mime_type: "image/png".to_string(),
+                width: 1024,
+                height: 768,
+            },
+            GenerationReference::Audio {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("voice.wav", 2),
+                mime_type: "audio/wav".to_string(),
+                duration_ms: 2_000,
+                sample_rate: 48_000,
+                channels: 1,
+                sample_count: Some(96_000),
+            },
+        ]);
+        request
     }
 
     fn fake_h3_output(
@@ -5698,8 +5743,8 @@ mod tests {
                 video,
                 audio: None,
                 generation_time_ms: 42,
-                model: mold_core::minimax_h3::FL2VA_COMFY.to_string(),
-                seed_used: 7,
+                model: facts.media.canonical_model.clone(),
+                seed_used: facts.media.seed,
                 gpu: None,
             },
             identity_echo: crate::h3_private_bridge::H3TerminalIdentityEcho {
@@ -5737,6 +5782,14 @@ mod tests {
         job: &mut GpuJob,
         outcome: FakeH3Outcome,
     ) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        install_fake_h3_attempt_with_facts(job, outcome, fake_h3_facts())
+    }
+
+    fn install_fake_h3_attempt_with_facts(
+        job: &mut GpuJob,
+        outcome: FakeH3Outcome,
+        facts: crate::h3_private_bridge::H3PreparedAttemptFacts,
+    ) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
         let runs = Arc::new(AtomicUsize::new(0));
         let drops = Arc::new(AtomicUsize::new(0));
         job.lease = Some(crate::scheduler::LeaseFence {
@@ -5750,7 +5803,7 @@ mod tests {
             memory_ledger_sequence: 23,
         });
         job.h3_prepared_attempt = Some(Box::new(FakeH3PreparedAttempt {
-            facts: fake_h3_facts(),
+            facts,
             outcome: Some(outcome),
             runs: Arc::clone(&runs),
             drops: Arc::clone(&drops),
@@ -5873,6 +5926,187 @@ mod tests {
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "mp4"))
             .count();
         assert_eq!(published, 1);
+    }
+
+    #[tokio::test]
+    async fn claimed_ref2va_success_publishes_exact_ordered_durable_metadata() {
+        let id = "claimed-h3-ref2va-ordered-publication";
+        let (mut job, result_rx, mut progress_rx, _queue_rx, queue, registry) =
+            claimed_h3_job_fixture(id).await;
+        let output = tempfile::tempdir().unwrap();
+        job.output_dir = Some(output.path().to_path_buf());
+        job.request = fake_ref2va_request(job.request);
+        job.model = job.request.model.clone();
+        let resolved =
+            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request);
+        let mut facts = fake_h3_facts();
+        facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(
+            &job.request,
+            Some(resolved.fingerprint()),
+        )
+        .expect("synthetic resolved Ref2VA authority");
+        let reference_fingerprint = facts
+            .media
+            .reference_fingerprint_sha256
+            .clone()
+            .expect("Ref2VA fingerprint");
+        job.resolved_references = Some(resolved);
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        job.metadata_db = Arc::clone(&db);
+        let (runs, drops) =
+            install_fake_h3_attempt_with_facts(&mut job, FakeH3Outcome::Success, facts);
+        let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
+        let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let owner_worker = Arc::clone(&worker);
+        let owner_scheduler = scheduler_tx.clone();
+        let settlements =
+            std::thread::spawn(move || run_fake_claimed_h3(&owner_worker, job, &owner_scheduler))
+                .join()
+                .expect("fake Ref2VA owner thread must not panic");
+        let result = result_rx.await.unwrap().expect("fake Ref2VA success");
+
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(settlements.load(Ordering::SeqCst), 1);
+        assert_eq!(queue.pending(), 1);
+        assert!(registry.snapshot().entries.is_empty());
+        assert_eq!(result.response.model, mold_core::minimax_h3::REF2VA_COMFY);
+        assert!(matches!(
+            scheduler_rx.try_recv(),
+            Ok(crate::scheduler::WorkerEvent::AllocationCommitted { work_id, .. }) if work_id == id
+        ));
+
+        let rows = db
+            .as_ref()
+            .as_ref()
+            .expect("metadata database")
+            .list(Some(output.path()))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let references = rows[0]
+            .metadata
+            .references
+            .as_deref()
+            .expect("saved Ref2VA references");
+        assert_eq!(
+            references
+                .iter()
+                .map(|reference| (reference.index, reference.kind))
+                .collect::<Vec<_>>(),
+            [
+                (1, mold_core::GenerationReferenceKind::Image),
+                (2, mold_core::GenerationReferenceKind::Audio),
+            ]
+        );
+        assert_eq!(
+            mold_core::generation_reference_fingerprint(references),
+            reference_fingerprint
+        );
+        let durable = serde_json::to_string(&rows[0].metadata).unwrap();
+        for private in ["descriptor", "upload", "server_path", "api_key"] {
+            assert!(!durable.contains(private));
+        }
+        assert!(progress_rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn claimed_ref2va_rejects_order_drift_before_runtime_or_publication() {
+        let id = "claimed-h3-ref2va-order-drift";
+        let (mut job, result_rx, _progress_rx, _queue_rx, queue, registry) =
+            claimed_h3_job_fixture(id).await;
+        let output = tempfile::tempdir().unwrap();
+        job.output_dir = Some(output.path().to_path_buf());
+        job.request = fake_ref2va_request(job.request);
+        job.model = job.request.model.clone();
+        let admitted =
+            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request);
+        let mut facts = fake_h3_facts();
+        facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(
+            &job.request,
+            Some(admitted.fingerprint()),
+        )
+        .expect("synthetic admitted Ref2VA authority");
+        job.resolved_references = Some(admitted);
+        let (runs, drops) =
+            install_fake_h3_attempt_with_facts(&mut job, FakeH3Outcome::Success, facts);
+
+        job.request
+            .references
+            .as_mut()
+            .expect("ordered references")
+            .reverse();
+        job.resolved_references = Some(
+            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request),
+        );
+        let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
+        let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+        let owner_worker = Arc::clone(&worker);
+        let owner_scheduler = scheduler_tx.clone();
+        let settlements =
+            std::thread::spawn(move || run_fake_claimed_h3(&owner_worker, job, &owner_scheduler))
+                .join()
+                .expect("order-drift owner thread must not panic");
+        let error = match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("reordered Ref2VA authority unexpectedly published"),
+        };
+
+        assert!(error.contains("ordered request authority"));
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(settlements.load(Ordering::SeqCst), 1);
+        assert_eq!(queue.pending(), 1);
+        assert!(registry.snapshot().entries.is_empty());
+        assert!(scheduler_rx.try_recv().is_err());
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn claimed_ref2va_cancellation_keeps_authority_and_publishes_nothing() {
+        let id = "claimed-h3-ref2va-cancelled";
+        let (mut job, result_rx, _progress_rx, _queue_rx, queue, registry) =
+            claimed_h3_job_fixture(id).await;
+        let output = tempfile::tempdir().unwrap();
+        job.output_dir = Some(output.path().to_path_buf());
+        job.request = fake_ref2va_request(job.request);
+        job.model = job.request.model.clone();
+        let resolved =
+            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request);
+        let mut facts = fake_h3_facts();
+        facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(
+            &job.request,
+            Some(resolved.fingerprint()),
+        )
+        .expect("synthetic cancellation authority");
+        job.resolved_references = Some(resolved);
+        let (runs, drops) =
+            install_fake_h3_attempt_with_facts(&mut job, FakeH3Outcome::Cancelled, facts);
+        let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
+        let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+        let owner_worker = Arc::clone(&worker);
+        let owner_scheduler = scheduler_tx.clone();
+        let settlements =
+            std::thread::spawn(move || run_fake_claimed_h3(&owner_worker, job, &owner_scheduler))
+                .join()
+                .expect("cancelled Ref2VA owner thread must not panic");
+        let error = match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("cancelled Ref2VA attempt unexpectedly published"),
+        };
+
+        assert!(error.contains("cancelled"));
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(settlements.load(Ordering::SeqCst), 1);
+        assert_eq!(queue.pending(), 1);
+        assert!(registry.snapshot().entries.is_empty());
+        assert!(matches!(
+            scheduler_rx.try_recv(),
+            Ok(crate::scheduler::WorkerEvent::AllocationCommitted { work_id, .. }) if work_id == id
+        ));
+        assert!(scheduler_rx.try_recv().is_err());
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]
