@@ -241,6 +241,23 @@ parameter and dequantize per call against their per-module scale. The `e5m2`
 variants some repositories publish beside them are refused by name — mold
 reads the e4m3 flavour only.
 
+### Checkpoint key layouts
+
+Three safetensors key layouts load, and mold picks between them by reading the
+file's own header — never its filename:
+
+- **Upstream / ComfyUI** names at the file root (`blocks.0.self_attn.q.*`).
+- **Comfy-Org repacks**, the same names under a `model.diffusion_model.` prefix.
+- **diffusers** `WanTransformer3DModel` exports (`blocks.0.attn1.to_q.*`,
+  `condition_embedder.*`, `ffn.net.0.proj`), translated at load through the
+  same rename table the golden parity test uses — including diffusers'
+  `norm2`/`norm3` swap.
+
+`patch_embedding.weight` is spelled identically in all three, so the
+self-attention query projection is what actually distinguishes them. A
+checkpoint matching none of the layouts is refused by name at load rather than
+constructing a transformer from default weights and rendering noise.
+
 ## Discovery
 
 The models in the table above install by name. Community Wan fine-tunes are

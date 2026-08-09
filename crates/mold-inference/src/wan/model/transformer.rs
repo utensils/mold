@@ -522,6 +522,93 @@ pub(crate) fn original_to_diffusers(name: &str) -> Option<String> {
     translate(name, false)
 }
 
+/// Which key layout a safetensors DiT export uses (#803).
+///
+/// Detection is header-driven and never reads a filename: the first
+/// self-attention query projection is the discriminator, because
+/// `patch_embedding.weight` is spelled identically in every layout and so
+/// cannot distinguish them on its own.
+/// Prefix and naming are independent facts, so the layout carries both: a
+/// repack of a diffusers export needs the prefix stripped AND the names
+/// translated, and collapsing them into one enum variant silently drops one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WanKeyLayout {
+    /// The prefix every key carries, empty at file root.
+    pub(crate) prefix: &'static str,
+    /// Whether loads must translate diffusers names to the original ones.
+    pub(crate) diffusers_names: bool,
+}
+
+/// The Comfy-Org repack prefix.
+const COMFY_PREFIX: &str = "model.diffusion_model.";
+
+impl WanKeyLayout {
+    const NATIVE: Self = Self {
+        prefix: "",
+        diffusers_names: false,
+    };
+    const COMFY: Self = Self {
+        prefix: COMFY_PREFIX,
+        diffusers_names: false,
+    };
+    const DIFFUSERS: Self = Self {
+        prefix: "",
+        diffusers_names: true,
+    };
+    const COMFY_DIFFUSERS: Self = Self {
+        prefix: COMFY_PREFIX,
+        diffusers_names: true,
+    };
+}
+
+/// Wrap `vb` so every name this module asks for is translated into the
+/// checkpoint's diffusers spelling (#803). A no-op for native layouts.
+///
+/// The construction order matters: the prefix is applied by the caller with
+/// `pp` BEFORE this wrapper, so the renamer only ever sees module-relative
+/// original names — exactly what [`original_to_diffusers`] expects.
+///
+/// A name the table does not cover passes through unchanged, which surfaces
+/// as candle's own missing-tensor error naming that key. That is the right
+/// failure: the alternative — silently substituting a default — is the
+/// partial-model load the layout check above exists to prevent.
+pub(crate) fn apply_diffusers_renaming<'a>(
+    vb: VarBuilder<'a>,
+    layout: WanKeyLayout,
+) -> VarBuilder<'a> {
+    if !layout.diffusers_names {
+        return vb;
+    }
+    vb.rename_f(|name: &str| original_to_diffusers(name).unwrap_or_else(|| name.to_string()))
+}
+
+/// Classify a checkpoint's key layout from a `contains` probe.
+///
+/// Order matters only for clarity — the four probes are mutually exclusive.
+/// An export matching none of them is `None`, which the caller turns into a
+/// named error rather than loading a partial model: a checkpoint whose block
+/// keys this build cannot address would otherwise construct with whatever
+/// `VarBuilder` defaults exist and render garbage.
+pub(crate) fn classify_key_layout(contains: impl Fn(&str) -> bool) -> Option<WanKeyLayout> {
+    const NATIVE_PROBE: &str = "blocks.0.self_attn.q.weight";
+    const DIFFUSERS_PROBE: &str = "blocks.0.attn1.to_q.weight";
+    if contains(NATIVE_PROBE) {
+        return Some(WanKeyLayout::NATIVE);
+    }
+    if contains(DIFFUSERS_PROBE) {
+        return Some(WanKeyLayout::DIFFUSERS);
+    }
+    if contains(&format!("{COMFY_PREFIX}{NATIVE_PROBE}")) {
+        return Some(WanKeyLayout::COMFY);
+    }
+    // A Comfy-Org repack of a diffusers export is not something upstream
+    // publishes, but the probe is free and keeps the classification total.
+    if contains(&format!("{COMFY_PREFIX}{DIFFUSERS_PROBE}")) {
+        return Some(WanKeyLayout::COMFY_DIFFUSERS);
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // primitives
 // ---------------------------------------------------------------------------
@@ -903,15 +990,26 @@ impl WanTransformer {
             }
         }
 
-        // The shipped Comfy-Org repacks prefix every DiT key; bare exports and
-        // the GGUF layout do not. Probe once and reuse for both paths.
+        // Layout is header-driven (#803): the shipped Comfy-Org repacks prefix
+        // every DiT key, diffusers exports rename them, and bare upstream
+        // exports do neither. `patch_embedding.weight` is spelled the same in
+        // all of them, so the self-attention query projection is the probe
+        // that actually discriminates. Classify once and reuse for both paths.
         let probe = unsafe { VarBuilder::from_mmaped_safetensors(paths, dtype, device)? };
-        let prefix = if probe.contains_tensor("patch_embedding.weight") {
-            String::new()
-        } else {
-            "model.diffusion_model.".to_string()
-        };
+        let layout = classify_key_layout(|name| probe.contains_tensor(name));
         drop(probe);
+        let Some(layout) = layout else {
+            let first = paths.first().map(PathBuf::as_path).unwrap_or(Path::new(""));
+            bail!(
+                "{} does not carry Wan DiT block weights this build can address — it has \
+                 neither the upstream `blocks.0.self_attn.q` nor the diffusers \
+                 `blocks.0.attn1.to_q` layout, with or without the Comfy-Org \
+                 `model.diffusion_model.` prefix. Loading it would build a transformer from \
+                 default weights and render noise.",
+                first.display()
+            );
+        };
+        let prefix = layout.prefix.trim_end_matches('.').to_string();
 
         if let Some(checkpoint) = scaled_fp8 {
             // Native dtypes all the way in: the weights stay fp8 and the
@@ -924,6 +1022,7 @@ impl WanTransformer {
             } else {
                 vb.pp("model.diffusion_model")
             };
+            let vb = apply_diffusers_renaming(vb, layout);
             return Self::from_weights(&WanWeights::fp8(vb, checkpoint.marker), config);
         }
 
@@ -934,6 +1033,7 @@ impl WanTransformer {
             } else {
                 vb.pp("model.diffusion_model")
             };
+            let vb = apply_diffusers_renaming(vb, layout);
             return Self::from_var_builder(vb, config);
         }
 
@@ -2386,6 +2486,104 @@ mod tests {
         // Out-of-scope names are declined, not mangled.
         assert!(diffusers_to_original("condition_embedder.image_embedder.norm1.weight").is_none());
         assert!(diffusers_to_original("vace_blocks.0.proj.weight").is_none());
+    }
+
+    /// #803: layout classification is header-driven, and every probe is a
+    /// key name — never a filename, never a config field.
+    #[test]
+    fn key_layout_is_classified_from_block_keys() {
+        let native = |name: &str| name == "blocks.0.self_attn.q.weight";
+        assert_eq!(classify_key_layout(native).unwrap(), WanKeyLayout::NATIVE);
+
+        let diffusers = |name: &str| name == "blocks.0.attn1.to_q.weight";
+        assert_eq!(
+            classify_key_layout(diffusers).unwrap(),
+            WanKeyLayout::DIFFUSERS
+        );
+
+        let comfy = |name: &str| name == "model.diffusion_model.blocks.0.self_attn.q.weight";
+        assert_eq!(classify_key_layout(comfy).unwrap(), WanKeyLayout::COMFY);
+
+        let comfy_diffusers =
+            |name: &str| name == "model.diffusion_model.blocks.0.attn1.to_q.weight";
+        assert_eq!(
+            classify_key_layout(comfy_diffusers).unwrap(),
+            WanKeyLayout::COMFY_DIFFUSERS
+        );
+        // Prefix and naming are independent facts; a repacked diffusers
+        // export needs both, which one enum variant per layout would drop.
+        assert_eq!(
+            classify_key_layout(comfy_diffusers).unwrap().prefix,
+            COMFY_PREFIX
+        );
+        assert!(
+            classify_key_layout(comfy_diffusers)
+                .unwrap()
+                .diffusers_names
+        );
+
+        // `patch_embedding.weight` is spelled identically in every layout, so
+        // it can never be the discriminator — a checkpoint carrying only it
+        // is unclassifiable and must fail closed rather than load partially.
+        let ambiguous = |name: &str| name == "patch_embedding.weight";
+        assert!(classify_key_layout(ambiguous).is_none());
+        assert!(classify_key_layout(|_| false).is_none());
+    }
+
+    /// A diffusers-named checkpoint must construct the same transformer as
+    /// the equivalent native one, not merely load without error.
+    #[test]
+    fn diffusers_named_weights_load_through_the_rename_hook() {
+        let config = tiny_config();
+
+        // Native: the loader asks for original names directly.
+        let native_map = VarMap::new();
+        WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&native_map, DType::F32, &Device::Cpu),
+            config.clone(),
+        )
+        .expect("native layout materializes");
+
+        // Diffusers: the same construction through the rename hook must
+        // request the diffusers spellings instead.
+        let diffusers_map = VarMap::new();
+        let vb = apply_diffusers_renaming(
+            VarBuilder::from_varmap(&diffusers_map, DType::F32, &Device::Cpu),
+            WanKeyLayout::DIFFUSERS,
+        );
+        WanTransformer::from_var_builder(vb, config)
+            .expect("diffusers layout materializes through the rename");
+
+        let native_keys = key_set(&native_map);
+        let diffusers_keys = key_set(&diffusers_map);
+        assert_eq!(
+            native_keys.len(),
+            diffusers_keys.len(),
+            "the same parameter set must be requested either way"
+        );
+        // Every requested name is the translated twin of the native one.
+        let expected: Vec<String> = {
+            let mut names: Vec<String> = native_keys
+                .iter()
+                .map(|k| original_to_diffusers(k).unwrap_or_else(|| k.clone()))
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(diffusers_keys, expected);
+        // The distinguishing spellings really did change.
+        assert!(diffusers_keys.iter().any(|k| k.contains("attn1.to_q")));
+        assert!(diffusers_keys.iter().any(|k| k.contains("ffn.net.0.proj")));
+        assert!(diffusers_keys
+            .iter()
+            .any(|k| k.contains("condition_embedder.")));
+        assert!(!diffusers_keys.iter().any(|k| k.contains("self_attn.q")));
+        // A native load is untouched by the hook.
+        let untouched = apply_diffusers_renaming(
+            VarBuilder::from_varmap(&VarMap::new(), DType::F32, &Device::Cpu),
+            WanKeyLayout::NATIVE,
+        );
+        assert!(!untouched.contains_tensor("blocks.0.attn1.to_q.weight"));
     }
 
     fn key_set(varmap: &VarMap) -> Vec<String> {
