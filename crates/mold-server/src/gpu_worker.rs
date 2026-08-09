@@ -724,7 +724,7 @@ fn run_gpu_owner_loop(
             _ => None,
         };
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            process_owner_work(worker, *grant, &scheduler_tx)
+            process_owner_work(worker, *grant, &scheduler_tx, generation)
         }));
         let load_ms = take_lease_load_ms();
         let phase_timings = take_lease_phase_timings(load_ms);
@@ -1132,6 +1132,7 @@ fn process_owner_work(
     worker: &GpuWorker,
     mut grant: LeaseGrant,
     scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+    current_worker_generation: u64,
 ) -> OwnerProcessOutcome {
     if let Err(error) = ensure_owner_thread(worker) {
         let error = error.to_string();
@@ -1153,6 +1154,39 @@ fn process_owner_work(
             };
         }
     }
+    if let OwnerWork::Generation(job) = &grant.work {
+        if let Err(error) = validate_scheduled_generation_before_cuda(worker, job) {
+            return OwnerProcessOutcome::PlanInvalidated {
+                grant: Box::new(grant),
+                error,
+            };
+        }
+    }
+    // This is intentionally later than both owner-thread validation and the
+    // second pre-CUDA plan fence, but earlier than any model/cache allocation.
+    // Production H3 admission still lacks the complete target identity triad,
+    // so the claim remains absent until the other typed prerequisites land.
+    let h3_attempt = match &grant.work {
+        OwnerWork::Generation(job) => {
+            match crate::h3_attempt::claim_generation_attempt(
+                worker,
+                current_worker_generation,
+                &grant.fence,
+                job,
+            ) {
+                Ok(attempt) => attempt,
+                Err(error) => {
+                    return OwnerProcessOutcome::PlanInvalidated {
+                        grant: Box::new(grant),
+                        error: crate::execution_plan::ExecutionPlanError::PlanInvalidated(
+                            error.to_string(),
+                        ),
+                    };
+                }
+            }
+        }
+        _ => None,
+    };
     if let OwnerWork::ChainStage(job) = &mut grant.work {
         if let Some(error) = job
             .on_leased
@@ -1169,7 +1203,13 @@ fn process_owner_work(
     match grant.work {
         OwnerWork::Generation(mut job) => {
             job.lease = Some(grant.fence);
-            let successful = process_job(worker, *job, scheduler_tx);
+            let successful = process_job(
+                worker,
+                *job,
+                scheduler_tx,
+                current_worker_generation,
+                h3_attempt,
+            );
             OwnerProcessOutcome::Completed {
                 successful,
                 chain_result: None,
@@ -1244,6 +1284,26 @@ fn process_owner_work(
     }
 }
 
+fn validate_scheduled_generation_before_cuda(
+    worker: &GpuWorker,
+    job: &GpuJob,
+) -> Result<(), crate::execution_plan::ExecutionPlanError> {
+    let Some(plan) = job.execution_plan.as_ref() else {
+        // Legacy unit adapters are handled by the separate rollback owner and
+        // never gain an H3 one-shot root through this path.
+        return Ok(());
+    };
+    let config = job.config.blocking_read();
+    crate::execution_plan::validate_before_cuda(
+        plan,
+        &crate::scheduler::worker_device_id(worker),
+        worker.gpu.ordinal,
+        &config,
+        &job.request,
+        job.prepared_execution_inputs.as_ref(),
+    )
+}
+
 fn validate_scheduled_chain_stage_before_cuda(
     worker: &GpuWorker,
     job: &crate::chain_job_runner::ScheduledChainStageWork,
@@ -1287,8 +1347,12 @@ fn process_legacy_owner_work(
     }
     match grant.work {
         OwnerWork::Generation(job) => {
-            let _ =
-                process_job_with_sink(worker, *job, GenerationEventSink::Legacy(owner_event_tx));
+            let _ = process_job_with_sink(
+                worker,
+                *job,
+                GenerationEventSink::Legacy(owner_event_tx),
+                None,
+            );
         }
         OwnerWork::PromptExpansion(job) => {
             let _ = process_prompt_expansion(worker, *job);
@@ -2585,8 +2649,51 @@ fn process_job(
     worker: &GpuWorker,
     job: GpuJob,
     scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+    current_worker_generation: u64,
+    h3_attempt: Option<crate::h3_attempt::H3GenerationAttempt>,
 ) -> bool {
-    process_job_with_sink(worker, job, GenerationEventSink::V2(scheduler_tx))
+    let Some(h3_attempt) = h3_attempt else {
+        return process_job_with_sink(worker, job, GenerationEventSink::V2(scheduler_tx), None);
+    };
+    let current = match crate::h3_attempt::rebuild_generation_current(
+        worker,
+        current_worker_generation,
+        &job,
+    ) {
+        Ok(current) => current,
+        Err(error) => return reject_unstarted_h3_generation(job, error),
+    };
+    let mut pending_job = Some(job);
+    match h3_attempt.run_once(current, |scope| {
+        process_job_with_sink(
+            worker,
+            pending_job
+                .take()
+                .expect("H3 attempt consumes its generation job once"),
+            GenerationEventSink::V2(scheduler_tx),
+            Some(scope.cancellation_token()),
+        )
+    }) {
+        Ok(successful) => successful,
+        Err(error) => reject_unstarted_h3_generation(
+            pending_job
+                .take()
+                .expect("cancelled H3 attempt retains its unstarted generation job"),
+            error,
+        ),
+    }
+}
+
+fn reject_unstarted_h3_generation(job: GpuJob, error: crate::h3_attempt::H3AttemptError) -> bool {
+    let _cleanup = GenerationCleanup::new(&job);
+    let error = error.to_string();
+    if let Some(progress_tx) = &job.progress_tx {
+        let _ = progress_tx.send(SseMessage::Error(SseErrorEvent {
+            message: error.clone(),
+        }));
+    }
+    let _ = job.result_tx.send(Err(error));
+    false
 }
 
 enum GenerationEventSink<'a> {
@@ -2632,6 +2739,7 @@ fn process_job_with_sink(
     worker: &GpuWorker,
     job: GpuJob,
     event_sink: GenerationEventSink<'_>,
+    h3_attempt_cancellation: Option<mold_inference::InferenceCancellationToken>,
 ) -> bool {
     let model_name = job.model.clone();
     let ordinal = worker.gpu.ordinal;
@@ -2673,10 +2781,13 @@ fn process_job_with_sink(
         .batch_child
         .as_ref()
         .map(|child| child.cancellation.clone());
+    let inference_cancellation = h3_attempt_cancellation
+        .as_ref()
+        .or(batch_cancellation.as_ref());
     let reference_bindings = match crate::reference_uploads::inference_bindings_for_request(
         &job.request,
         job.resolved_references.as_ref(),
-        batch_cancellation.as_ref(),
+        inference_cancellation,
     ) {
         Ok(bindings) => bindings,
         Err(error) => {
@@ -2906,7 +3017,7 @@ fn process_job_with_sink(
     // Run inference — cache mutex is FREE during this.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ensure_worker_not_poisoned(worker, &model_name)?;
-        match batch_cancellation.as_ref() {
+        match inference_cancellation {
             Some(cancellation) => mold_inference::with_inference_cancellation(
                 &mut *cached_engine.engine,
                 cancellation.clone(),
@@ -8095,6 +8206,8 @@ mod tests {
                 batch_child: None,
             },
             &event_tx,
+            1,
+            None,
         );
 
         let result = match result_rx.await.unwrap() {
@@ -8183,6 +8296,8 @@ mod tests {
                     batch_child: None,
                 },
                 &scheduler_tx,
+                1,
+                None,
             );
         })
         .await
@@ -8247,6 +8362,8 @@ mod tests {
                     batch_child: None,
                 },
                 &scheduler_tx,
+                1,
+                None,
             );
         })
         .await
@@ -8658,8 +8775,12 @@ mod tests {
 
         let (owner_event_tx, mut owner_event_rx) =
             tokio::sync::mpsc::unbounded_channel::<LegacyOwnerEvent>();
-        let successful =
-            process_job_with_sink(&worker, job, GenerationEventSink::Legacy(&owner_event_tx));
+        let successful = process_job_with_sink(
+            &worker,
+            job,
+            GenerationEventSink::Legacy(&owner_event_tx),
+            None,
+        );
 
         assert!(successful, "completed generation remains successful");
         let completed = result_rx
