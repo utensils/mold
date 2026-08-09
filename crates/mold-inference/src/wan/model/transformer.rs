@@ -197,6 +197,73 @@ impl<'a> WanWeights<'a> {
     }
 }
 
+/// Per-phase denoise-step attribution for the #775 audit, gated on
+/// `MOLD_WAN_STEP_PROFILE=1`. Each phase is timed under a device sync on both
+/// sides so kernel time lands in its own bucket; `report` prints one line per
+/// denoise step and clears. Buckets nest — `cast` time inside a linear also
+/// counts toward that linear's phase — so the split reads as "of the phase,
+/// how much was the cast", not as disjoint sums. Zero-cost when disabled
+/// beyond one cached env read.
+pub(crate) mod step_profile {
+    use candle_core::Device;
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    fn enabled() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| std::env::var("MOLD_WAN_STEP_PROFILE").is_ok_and(|value| value == "1"))
+    }
+
+    thread_local! {
+        static BUCKETS: RefCell<BTreeMap<&'static str, (f64, u32)>> =
+            const { RefCell::new(BTreeMap::new()) };
+    }
+
+    pub(crate) fn time<T>(
+        label: &'static str,
+        device: &Device,
+        f: impl FnOnce() -> candle_core::Result<T>,
+    ) -> candle_core::Result<T> {
+        if !enabled() {
+            return f();
+        }
+        device.synchronize()?;
+        let start = Instant::now();
+        let out = f()?;
+        device.synchronize()?;
+        let elapsed = start.elapsed().as_secs_f64();
+        BUCKETS.with(|buckets| {
+            let mut buckets = buckets.borrow_mut();
+            let entry = buckets.entry(label).or_insert((0.0, 0));
+            entry.0 += elapsed;
+            entry.1 += 1;
+        });
+        Ok(out)
+    }
+
+    /// Print the step's buckets to stderr and clear them. Called from the
+    /// denoise loop on the same (blocking) thread every forward ran on.
+    pub(crate) fn report(step: usize) {
+        if !enabled() {
+            return;
+        }
+        BUCKETS.with(|buckets| {
+            let mut buckets = buckets.borrow_mut();
+            if buckets.is_empty() {
+                return;
+            }
+            let mut line = format!("[wan-step-profile] step {step}:");
+            for (label, (secs, calls)) in buckets.iter() {
+                line.push_str(&format!(" {label}={secs:.3}s/{calls}"));
+            }
+            eprintln!("{line}");
+            buckets.clear();
+        });
+    }
+}
+
 /// IO-dtype boundary around a quantized linear: the surrounding graph runs in
 /// the model dtype (BF16 on GPU), while `QMatMul` and the Lightning adapter
 /// branch compute in F32 internally. Casting at this boundary keeps every F32
@@ -204,6 +271,12 @@ impl<'a> WanWeights<'a> {
 /// ops is what blew past 24 GB at 20k+ tokens (measured: ~3.4 GB of
 /// activations at 4.7k tokens on the 9-frame probe). A no-op when the model
 /// dtype is already F32 (CPU).
+///
+/// The BF16→F32 input cast is NOT redundant work relative to the MMQ fast
+/// path: candle's `fast_mmq::try_fwd` accepts BF16 but converts it to F32
+/// internally before its q8_1 quantize (`fast_mmq.rs:296-300` on the pinned
+/// branch), so the copy happens on one side or the other either way. The
+/// boundary keeps it on mold's side where the LoRA branch can share it.
 struct CastBoundary {
     inner: WanLinear,
     io: DType,
@@ -220,9 +293,10 @@ impl CastBoundary {
 
 impl Module for CastBoundary {
     fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
-        self.inner
-            .forward(&xs.to_dtype(DType::F32)?)?
-            .to_dtype(self.io)
+        let device = xs.device();
+        let input = step_profile::time("cast", device, || xs.to_dtype(DType::F32))?;
+        let out = step_profile::time("qlinear", device, || self.inner.forward(&input))?;
+        step_profile::time("cast", device, || out.to_dtype(self.io))
     }
 }
 
@@ -562,28 +636,41 @@ impl WanAttention {
         let split = |t: Tensor, len: usize| -> Result<Tensor> {
             t.reshape((batch, len, self.heads, self.head_dim))
         };
-        let q = split(self.norm_q.forward(&self.q.forward(x)?)?, tokens)?;
-        let k = split(self.norm_k.forward(&self.k.forward(kv_source)?)?, kv_tokens)?;
-        let v = split(self.v.forward(kv_source)?, kv_tokens)?;
+        // #775 profile labels: the projections (whose `qlinear`/`cast`
+        // sub-buckets nest inside) vs the SDPA kernel itself.
+        let phase = if context.is_some() {
+            ("cross_attn.proj", "cross_attn.sdpa")
+        } else {
+            ("self_attn.proj", "self_attn.sdpa")
+        };
+        let device = x.device().clone();
+        let (q, k, v) = step_profile::time(phase.0, &device, || {
+            let q = split(self.norm_q.forward(&self.q.forward(x)?)?, tokens)?;
+            let k = split(self.norm_k.forward(&self.k.forward(kv_source)?)?, kv_tokens)?;
+            let v = split(self.v.forward(kv_source)?, kv_tokens)?;
+            Ok((q, k, v))
+        })?;
 
         let (q, k) = match rope {
             Some((cos, sin)) => (apply_rope(&q, cos, sin)?, apply_rope(&k, cos, sin)?),
             None => (q, k),
         };
 
-        // `crate::attention::attention` wants [batch, heads, seq, head_dim].
-        let q = q.transpose(1, 2)?.contiguous()?;
-        let k = k.transpose(1, 2)?.contiguous()?;
-        let v = v.transpose(1, 2)?.contiguous()?;
-        let scale = 1.0 / (self.head_dim as f32).sqrt();
-        let attn = crate::attention::attention(&q, &k, &v, scale)?;
+        let attn = step_profile::time(phase.1, &device, || {
+            // `crate::attention::attention` wants [batch, heads, seq, head_dim].
+            let q = q.transpose(1, 2)?.contiguous()?;
+            let k = k.transpose(1, 2)?.contiguous()?;
+            let v = v.transpose(1, 2)?.contiguous()?;
+            let scale = 1.0 / (self.head_dim as f32).sqrt();
+            crate::attention::attention(&q, &k, &v, scale)
+        })?;
 
         let merged = attn.transpose(1, 2)?.contiguous()?.reshape((
             batch,
             tokens,
             self.heads * self.head_dim,
         ))?;
-        self.o.forward(&merged)
+        step_profile::time(phase.0, &device, || self.o.forward(&merged))
     }
 }
 
@@ -603,7 +690,9 @@ impl WanFeedForward {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        self.down.forward(&self.up.forward(x)?.gelu()?)
+        step_profile::time("ffn", x.device(), || {
+            self.down.forward(&self.up.forward(x)?.gelu()?)
+        })
     }
 }
 
@@ -1149,6 +1238,21 @@ mod tests {
     use super::*;
     use candle_nn::VarMap;
     use std::collections::HashMap;
+
+    /// The #775 profiler must be inert when its env is unset: `time` is a
+    /// straight pass-through (values and errors) and `report` never prints or
+    /// panics. The enabled path is exercised by the audit itself, not CI —
+    /// its device syncs would serialize every test's GPU work.
+    #[test]
+    fn step_profile_is_inert_when_disabled() {
+        let device = Device::Cpu;
+        let out = step_profile::time("test", &device, || Ok(41 + 1)).unwrap();
+        assert_eq!(out, 42);
+        let err = step_profile::time::<()>("test", &device, || candle_core::bail!("propagated"))
+            .unwrap_err();
+        assert!(err.to_string().contains("propagated"));
+        step_profile::report(1);
+    }
 
     /// Every diffusers `WanTransformer3DModel` parameter in the fixture, with
     /// its shape. Weights are synthesized from these names, then loaded under

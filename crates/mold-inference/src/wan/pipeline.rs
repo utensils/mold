@@ -755,6 +755,23 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
         previewer,
     } = inputs;
 
+    // #775 A/B switch: `MOLD_WAN_FORCE_DMMV=1` forces candle's quantized
+    // matmuls onto the dequantize-per-forward fallback, so a normal run vs a
+    // forced run measures whether the MMQ fast path is engaging and what it
+    // is worth. Diagnostic only — never set in production.
+    #[cfg(feature = "cuda")]
+    {
+        static FORCE_DMMV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let force = *FORCE_DMMV
+            .get_or_init(|| std::env::var("MOLD_WAN_FORCE_DMMV").is_ok_and(|value| value == "1"));
+        if force {
+            candle_core::quantized::cuda::set_force_dmmv(true);
+            tracing::warn!(
+                "wan: MOLD_WAN_FORCE_DMMV=1 — quantized matmuls on the dequant fallback"
+            );
+        }
+    }
+
     let total = schedule.timesteps.len();
     for (index, timestep) in schedule.timesteps.iter().enumerate() {
         progress.checkpoint()?;
@@ -802,6 +819,7 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
             _ => cond,
         };
         latents = solver.step(&velocity, index, &latents)?;
+        crate::wan::model::transformer::step_profile::report(index + 1);
 
         // Re-impose the clean frame after the step (Wan-native
         // `textimage2video.py:598`). Without this the final latent carries a

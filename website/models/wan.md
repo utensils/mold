@@ -86,6 +86,26 @@ stacks (merging would re-round every targeted weight to three mantissa
 bits), so adapters — the Lightning distills included — need the GGUF or
 bf16 tiers.
 
+## Where an A14B step actually goes
+
+A kernel-level audit (RTX 4090, 33f/832x480 — 14,040 video tokens) attributes
+the quality-tier step. Under the device-synced profiler the step measures
+~42.5 s, of which **dense self-attention SDPA is ~21 s**, the quantized
+matmuls ~7 s — the GGUF fast path (MMQ) engages for every shipped quant mix,
+and forcing the dequantize-per-forward fallback triples that bucket to ~21 s
+while leaving attention untouched — and the BF16↔F32 boundary casts are
+~1.5 s. Per-phase syncs inflate the many small ops far more than the 80
+large attention kernels, so against the real ~28 s step SDPA's share sits
+between half and roughly three quarters: attention dominates. Weight
+size barely matters: measured denoise time is **28.2 s/step at `:q8`
+quality, 30.2 at `:q5` quality** (its Lightning adapter runs as a per-step
+parallel branch on GGUF), and **15.9 at `:q5` fast** (guidance 1 skips the
+uncond forward — exactly half a CFG step). Two diagnostic env knobs ship for
+re-running the audit: `MOLD_WAN_STEP_PROFILE=1` prints a per-phase,
+device-synced timing line per denoise step, and `MOLD_WAN_FORCE_DMMV=1`
+forces the quantized-matmul fallback for A/B comparison — neither belongs in
+production use.
+
 At `--frames 1` Wan renders a still: png/jpeg output is admitted (and png is
 the default there), the image embeds the same `mold:parameters` provenance as
 every image family, and the gallery treats it as an upscale-eligible still.
