@@ -3371,7 +3371,7 @@ onBeforeUnmount(() => {
 
         <div
           data-test="create-bottom-panel"
-          class="flex min-h-0 shrink-0 flex-col overflow-x-hidden overflow-y-auto bg-desk"
+          class="flex min-h-0 shrink-0 flex-col overflow-hidden bg-desk"
           :style="{
             height: `${benchHeight}px`,
             containerType: 'size',
@@ -3409,23 +3409,32 @@ onBeforeUnmount(() => {
               </button>
             </template>
           </EmptyStateBlock>
-          <SequenceComposer
+          <!-- Protect the sequence's hard chrome floor from Activity. The
+               composer itself stays min-h-0 so its filmstrip can squash, but
+               this parent flex item makes Activity yield before the footer or
+               Generate button can clip at the supported 390px bench floor. -->
+          <div
             v-else-if="isSequence"
-            data-test="generate-sequence-composer"
-            class="flex-1"
-            :form="form"
-            :selected-model="selectedSequenceEntry"
-            :chain-limits="chainLimits"
-            :installed-models="installedModels"
-            :submitting="sequenceSubmitting"
-            :chain-level-dirty="chainLevelDirty"
-            :stage-media-by-clip-id="sequenceFilmstripMediaByClipId"
-            :playing-clip-id="playingSequenceClipId"
-            :target="sequenceTarget"
-            @submit="generateSequence"
-            @duplicate="duplicateSequenceAsNew"
-            @play-clip="playSequenceClip"
-          />
+            data-test="generate-sequence-shell"
+            class="flex min-h-[300px] flex-[1_0_300px] overflow-hidden"
+          >
+            <SequenceComposer
+              data-test="generate-sequence-composer"
+              class="min-h-0 flex-1"
+              :form="form"
+              :selected-model="selectedSequenceEntry"
+              :chain-limits="chainLimits"
+              :installed-models="installedModels"
+              :submitting="sequenceSubmitting"
+              :chain-level-dirty="chainLevelDirty"
+              :stage-media-by-clip-id="sequenceFilmstripMediaByClipId"
+              :playing-clip-id="playingSequenceClipId"
+              :target="sequenceTarget"
+              @submit="generateSequence"
+              @duplicate="duplicateSequenceAsNew"
+              @play-clip="playSequenceClip"
+            />
+          </div>
           <ComposerCard
             v-else
             ref="composerRef"

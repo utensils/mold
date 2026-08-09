@@ -657,10 +657,10 @@ async function copyToml() {
    * min-height the bench is floored at its own min-content — which counts
    * the rail's 204px preferred basis, not its 104px floor — so the panel
    * grew a scrollbar before the filmstrip's shrink weight ever engaged.
-   * Zero lets the bench take exactly the panel's space and flex the rail
-   * down for real; the internal floors below keep content honest, and a
-   * genuinely impossible height overflows into the panel's scrollbar
-   * rather than clipping the Generate button invisibly.
+   * Zero lets the bench take exactly its protected parent shell's space and
+   * flex the rail down for real. GenerateView gives that shell a 300px floor,
+   * so Activity yields before the internal floors below or the Generate
+   * button can clip.
    */
   min-height: 0;
   border-top: 1px solid var(--edge);
