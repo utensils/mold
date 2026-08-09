@@ -36,6 +36,7 @@ h3-private-bridge = []
 h3-private-uat = [
     "h3-private-bridge",
     "mold-inference/h3-private-uat",
+    "mold-inference/dev-bins",
     "mold-inference/h3-attention-rc",
     "mp4",
     "cuda",

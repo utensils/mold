@@ -27,7 +27,7 @@
     inputs:
     let
       # Git metadata for build info — available from the flake's self reference.
-      gitShortRev = inputs.self.shortRev or inputs.self.dirtyShortRev or "unknown";
+      gitRev = inputs.self.rev or "unknown";
       gitDate =
         let
           raw = toString (inputs.self.lastModifiedDate or "unknown");
@@ -102,7 +102,7 @@
             strictDeps = true;
 
             # Pass git metadata so build.rs can embed it (no .git in Nix sandbox).
-            MOLD_GIT_SHA = gitShortRev;
+            MOLD_GIT_SHA = gitRev;
             MOLD_BUILD_DATE = gitDate;
             cargoVendorDir = craneLib.vendorCargoDeps {
               inherit src;
@@ -484,7 +484,7 @@
               };
               buildFeatures = [ desktopFeature ];
 
-              MOLD_GIT_SHA = gitShortRev;
+              MOLD_GIT_SHA = gitRev;
               MOLD_BUILD_DATE = gitDate;
               # The embedded engine serves the regular web SPA to browsers.
               MOLD_WEB_DIST = "${mold-web}";

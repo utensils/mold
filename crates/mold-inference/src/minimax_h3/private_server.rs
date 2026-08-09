@@ -14,7 +14,7 @@ const H3_CUDA_ATTEMPT_RETAINED_MARKER: &str =
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 #[cfg(feature = "mp4")]
 use std::time::Instant;
 
@@ -90,9 +90,10 @@ use crate::{
     H3FactoryQuantizationAuthority,
 };
 
-const RUNTIME_QUALIFICATION_SCHEMA: &str = "mold.minimax-h3.private-runtime-qualification.v1";
-const RUNTIME_QUALIFICATION_DECISION: &str = "qualified-private-fl2va-runtime";
-const MAX_RUNTIME_QUALIFICATION_BYTES: u64 = 128 * 1024;
+pub(crate) const RUNTIME_QUALIFICATION_SCHEMA: &str =
+    "mold.minimax-h3.private-runtime-qualification.v1";
+pub(crate) const RUNTIME_QUALIFICATION_DECISION: &str = "qualified-private-fl2va-runtime";
+pub(crate) const MAX_RUNTIME_QUALIFICATION_BYTES: u64 = 128 * 1024;
 
 /// Exact reviewed runtime-qualification record hashes.
 ///
@@ -136,20 +137,20 @@ const PRIVATE_ACTIVATION_COVERAGE: [H3FactoryActivationPrerequisite; 9] = [
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct H3PrivateRuntimeBoundRecord {
-    fixed_runtime_host_bytes: u64,
-    fixed_runtime_device_bytes: u64,
-    qwen_activation_workspace_bytes: u64,
-    vae_construction_device_workspace_bytes: u64,
-    condition_vae_workspace_device_bytes: u64,
-    attention_workspace_device_bytes: u64,
-    ffn_workspace_device_bytes: u64,
-    decoder_tile_workspace_device_bytes: u64,
-    audio_decode_workspace_device_bytes: u64,
-    encoded_video_host_bytes_bound: u64,
-    thumbnail_host_bytes_bound: u64,
-    mux_output_host_bytes_bound: u64,
-    aac_mux_staging_host_bytes: u64,
+pub(crate) struct H3PrivateRuntimeBoundRecord {
+    pub(crate) fixed_runtime_host_bytes: u64,
+    pub(crate) fixed_runtime_device_bytes: u64,
+    pub(crate) qwen_activation_workspace_bytes: u64,
+    pub(crate) vae_construction_device_workspace_bytes: u64,
+    pub(crate) condition_vae_workspace_device_bytes: u64,
+    pub(crate) attention_workspace_device_bytes: u64,
+    pub(crate) ffn_workspace_device_bytes: u64,
+    pub(crate) decoder_tile_workspace_device_bytes: u64,
+    pub(crate) audio_decode_workspace_device_bytes: u64,
+    pub(crate) encoded_video_host_bytes_bound: u64,
+    pub(crate) thumbnail_host_bytes_bound: u64,
+    pub(crate) mux_output_host_bytes_bound: u64,
+    pub(crate) aac_mux_staging_host_bytes: u64,
 }
 
 impl H3PrivateRuntimeBoundRecord {
@@ -217,32 +218,36 @@ impl H3PrivateRuntimeBoundRecord {
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct H3PrivateRuntimeEvidenceArtifact {
-    relative_path: String,
-    bytes: u64,
-    sha256: String,
+pub(crate) struct H3PrivateRuntimeEvidenceArtifact {
+    pub(crate) relative_path: String,
+    pub(crate) bytes: u64,
+    pub(crate) sha256: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct H3PrivateRuntimeQualificationRecord {
-    schema: String,
-    decision: String,
-    canonical_model: String,
-    task: String,
-    authorization_record_sha256: String,
-    authorization_source_document_sha256: String,
-    artifact_qualification_identity_sha256: String,
-    artifact_total_bytes: u64,
-    device_id: String,
-    device_ordinal: usize,
-    compute_capability: [u16; 2],
-    attention_runtime_identity_sha256: String,
-    attention_kernel_identity: String,
-    attention_qualification_sha256: String,
-    bounds: H3PrivateRuntimeBoundRecord,
-    evidence_artifacts: Vec<H3PrivateRuntimeEvidenceArtifact>,
-    identity_sha256: String,
+pub(crate) struct H3PrivateRuntimeQualificationRecord {
+    pub(crate) schema: String,
+    pub(crate) decision: String,
+    pub(crate) canonical_model: String,
+    pub(crate) task: String,
+    pub(crate) campaign_source_sha: String,
+    pub(crate) campaign_runtime_code_identity_sha256: String,
+    pub(crate) measured_server_executable_relative_path: String,
+    pub(crate) measured_server_executable_sha256: String,
+    pub(crate) authorization_record_sha256: String,
+    pub(crate) authorization_source_document_sha256: String,
+    pub(crate) artifact_qualification_identity_sha256: String,
+    pub(crate) artifact_total_bytes: u64,
+    pub(crate) device_id: String,
+    pub(crate) device_ordinal: usize,
+    pub(crate) compute_capability: [u16; 2],
+    pub(crate) attention_runtime_identity_sha256: String,
+    pub(crate) attention_kernel_identity: String,
+    pub(crate) attention_qualification_sha256: String,
+    pub(crate) bounds: H3PrivateRuntimeBoundRecord,
+    pub(crate) evidence_artifacts: Vec<H3PrivateRuntimeEvidenceArtifact>,
+    pub(crate) identity_sha256: String,
 }
 
 /// Payload-free identities expected by one private owner attempt.
@@ -3518,6 +3523,28 @@ fn open_reviewed_h3_private_runtime_qualification(
     if reviewed_record_sha256.is_empty() {
         bail!("private H3 runtime qualification has no reviewed evidence allowlist")
     }
+    let executing_source_sha = exact_h3_runtime_build_source_sha()?;
+    open_reviewed_h3_private_runtime_qualification_for_source(
+        path,
+        reviewed_record_sha256,
+        executing_source_sha,
+        super::PRIVATE_RUNTIME_CODE_IDENTITY_SHA256,
+    )
+}
+
+fn open_reviewed_h3_private_runtime_qualification_for_source(
+    path: &Path,
+    reviewed_record_sha256: &[&str],
+    executing_source_sha: &str,
+    executing_runtime_code_identity_sha256: &str,
+) -> Result<H3PrivateReviewedRuntimeQualification> {
+    if reviewed_record_sha256.is_empty() {
+        bail!("private H3 runtime qualification has no reviewed evidence allowlist")
+    }
+    validate_h3_runtime_build_identity(
+        executing_source_sha,
+        executing_runtime_code_identity_sha256,
+    )?;
     if !path.is_absolute() {
         bail!("private H3 runtime qualification path must be absolute")
     }
@@ -3540,6 +3567,9 @@ fn open_reviewed_h3_private_runtime_qualification(
     let record: H3PrivateRuntimeQualificationRecord = serde_json::from_slice(&bytes)
         .context("invalid private H3 runtime qualification record")?;
     validate_runtime_qualification_record_shape(&record)?;
+    if record.campaign_runtime_code_identity_sha256 != executing_runtime_code_identity_sha256 {
+        bail!("private H3 runtime qualification was measured by different runtime code")
+    }
     let reviewed = H3PrivateReviewedRuntimeQualification {
         path: path.to_path_buf(),
         file,
@@ -3603,6 +3633,38 @@ fn authenticate_h3_private_runtime_qualification_with_allowlist(
     )
 }
 
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn authenticate_h3_private_runtime_qualification_for_source(
+    path: &Path,
+    artifact_qualification: &H3PrivateArtifactQualificationReport,
+    device_id: &str,
+    device_ordinal: usize,
+    compute_capability: (u16, u16),
+    attention_runtime_identity_sha256: &str,
+    attention_kernel_identity: &str,
+    attention_qualification_sha256: &str,
+    reviewed_record_sha256: &[&str],
+    executing_source_sha: &str,
+    executing_runtime_code_identity_sha256: &str,
+) -> Result<H3PrivateRuntimeQualificationAuthority> {
+    open_reviewed_h3_private_runtime_qualification_for_source(
+        path,
+        reviewed_record_sha256,
+        executing_source_sha,
+        executing_runtime_code_identity_sha256,
+    )?
+    .authenticate(
+        artifact_qualification,
+        device_id,
+        device_ordinal,
+        compute_capability,
+        attention_runtime_identity_sha256,
+        attention_kernel_identity,
+        attention_qualification_sha256,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_runtime_qualification_record_binding(
     record: &H3PrivateRuntimeQualificationRecord,
@@ -3634,11 +3696,13 @@ fn validate_runtime_qualification_record_binding(
     Ok(())
 }
 
-fn validate_runtime_qualification_record_shape(
+pub(crate) fn validate_runtime_qualification_record_shape(
     record: &H3PrivateRuntimeQualificationRecord,
 ) -> Result<()> {
     record.bounds.validate()?;
     let sha_values = [
+        record.campaign_runtime_code_identity_sha256.as_str(),
+        record.measured_server_executable_sha256.as_str(),
         record.authorization_record_sha256.as_str(),
         record.authorization_source_document_sha256.as_str(),
         record.artifact_qualification_identity_sha256.as_str(),
@@ -3646,13 +3710,34 @@ fn validate_runtime_qualification_record_shape(
         record.attention_qualification_sha256.as_str(),
         record.identity_sha256.as_str(),
     ];
-    if sha_values.into_iter().any(|value| !valid_sha256(value))
+    if !valid_lower_hex(&record.campaign_source_sha, 40)
+        || sha_values
+            .into_iter()
+            .any(|value| !valid_lower_hex(value, 64))
         || record.evidence_artifacts.iter().any(|evidence| {
-            evidence.relative_path.trim().is_empty()
+            !valid_runtime_evidence_relative_path(&evidence.relative_path)
                 || evidence.bytes == 0
-                || !valid_sha256(&evidence.sha256)
+                || !valid_lower_hex(&evidence.sha256, 64)
         })
         || record.evidence_artifacts.is_empty()
+        || record
+            .evidence_artifacts
+            .windows(2)
+            .any(|pair| pair[0].relative_path >= pair[1].relative_path)
+        || record.artifact_total_bytes == 0
+        || record.device_id != format!("cuda:{}", record.device_ordinal)
+        || !(1..=99).contains(&record.compute_capability[0])
+        || record.compute_capability[1] > 99
+        || !valid_runtime_evidence_relative_path(&record.measured_server_executable_relative_path)
+        || record
+            .evidence_artifacts
+            .iter()
+            .filter(|evidence| {
+                evidence.relative_path == record.measured_server_executable_relative_path
+                    && evidence.sha256 == record.measured_server_executable_sha256
+            })
+            .count()
+            != 1
     {
         bail!("private H3 runtime qualification contains incomplete evidence identities")
     }
@@ -3667,7 +3752,9 @@ fn validate_runtime_qualification_record_shape(
     Ok(())
 }
 
-fn runtime_qualification_identity(record: &H3PrivateRuntimeQualificationRecord) -> String {
+pub(crate) fn runtime_qualification_identity(
+    record: &H3PrivateRuntimeQualificationRecord,
+) -> String {
     let mut digest = Sha256::new();
     digest.update(b"mold.minimax-h3.private-runtime-qualification.v1\0");
     for value in [
@@ -3675,6 +3762,10 @@ fn runtime_qualification_identity(record: &H3PrivateRuntimeQualificationRecord) 
         record.decision.as_str(),
         record.canonical_model.as_str(),
         record.task.as_str(),
+        record.campaign_source_sha.as_str(),
+        record.campaign_runtime_code_identity_sha256.as_str(),
+        record.measured_server_executable_relative_path.as_str(),
+        record.measured_server_executable_sha256.as_str(),
         record.authorization_record_sha256.as_str(),
         record.authorization_source_document_sha256.as_str(),
         record.artifact_qualification_identity_sha256.as_str(),
@@ -3708,6 +3799,45 @@ fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn valid_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn exact_h3_runtime_build_source_sha() -> Result<&'static str> {
+    let source_sha = mold_core::build_info::GIT_SHA;
+    if !valid_lower_hex(source_sha, 40) {
+        bail!("private H3 runtime activation requires an exact embedded source SHA")
+    }
+    Ok(source_sha)
+}
+
+fn validate_h3_runtime_build_identity(
+    source_sha: &str,
+    runtime_code_identity_sha256: &str,
+) -> Result<()> {
+    if !valid_lower_hex(source_sha, 40) || !valid_lower_hex(runtime_code_identity_sha256, 64) {
+        bail!("private H3 runtime activation requires exact embedded build identities")
+    }
+    Ok(())
+}
+
+fn valid_runtime_evidence_relative_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && !value.contains('\\')
+        && !value.chars().any(char::is_control)
+        && value
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -3722,6 +3852,10 @@ mod tests {
 
     fn sha(byte: char) -> String {
         std::iter::repeat_n(byte, 64).collect()
+    }
+
+    fn source_sha(byte: char) -> String {
+        std::iter::repeat_n(byte, 40).collect()
     }
 
     fn media() -> H3PrivateFl2VaMediaContract {
@@ -3770,6 +3904,10 @@ mod tests {
             decision: RUNTIME_QUALIFICATION_DECISION.into(),
             canonical_model: contract::FL2VA_COMFY.into(),
             task: "fl2va".into(),
+            campaign_source_sha: source_sha('d'),
+            campaign_runtime_code_identity_sha256: sha('5'),
+            measured_server_executable_relative_path: "bin/mold-campaign".into(),
+            measured_server_executable_sha256: sha('4'),
             authorization_record_sha256: sha('a'),
             authorization_source_document_sha256: sha('b'),
             artifact_qualification_identity_sha256: sha('c'),
@@ -3795,11 +3933,18 @@ mod tests {
                 mux_output_host_bytes_bound: 12,
                 aac_mux_staging_host_bytes: 13,
             },
-            evidence_artifacts: vec![H3PrivateRuntimeEvidenceArtifact {
-                relative_path: "runtime-report.json".into(),
-                bytes: 99,
-                sha256: sha('3'),
-            }],
+            evidence_artifacts: vec![
+                H3PrivateRuntimeEvidenceArtifact {
+                    relative_path: "bin/mold-campaign".into(),
+                    bytes: 1_024,
+                    sha256: sha('4'),
+                },
+                H3PrivateRuntimeEvidenceArtifact {
+                    relative_path: "runtime-report.json".into(),
+                    bytes: 99,
+                    sha256: sha('3'),
+                },
+            ],
             identity_sha256: String::new(),
         };
         record.identity_sha256 = runtime_qualification_identity(&record);
@@ -4071,10 +4216,12 @@ mod tests {
 
     #[test]
     fn reviewed_record_binds_all_thirteen_bounds_and_identity_axes() {
-        let (_root, path) = write_record(&record());
+        let record = record();
+        let (_root, path) = write_record(&record);
         let file = open_regular_file_no_follow(&path).unwrap();
         let digest = sha256_open_file(&file).unwrap();
-        let authority = authenticate_h3_private_runtime_qualification_with_allowlist(
+        let reviewed = [digest.as_str()];
+        let authority = authenticate_h3_private_runtime_qualification_for_source(
             &path,
             &artifact_report(),
             "cuda:0",
@@ -4083,7 +4230,9 @@ mod tests {
             &sha('1'),
             "qualified-kernel",
             &sha('2'),
-            &[digest.as_str()],
+            &reviewed,
+            &record.campaign_source_sha,
+            &record.campaign_runtime_code_identity_sha256,
         )
         .unwrap();
         authority.revalidate().unwrap();
@@ -4091,11 +4240,39 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_record_requires_exact_runtime_code_identity() {
+        let record = record();
+        let (_root, path) = write_record(&record);
+        let digest = sha256_open_file(&open_regular_file_no_follow(&path).unwrap()).unwrap();
+        let reviewed = [digest.as_str()];
+
+        open_reviewed_h3_private_runtime_qualification_for_source(
+            &path,
+            &reviewed,
+            &source_sha('e'),
+            &record.campaign_runtime_code_identity_sha256,
+        )
+        .expect("an allowlist-only rebuild retains the normalized runtime identity");
+
+        let error = open_reviewed_h3_private_runtime_qualification_for_source(
+            &path,
+            &reviewed,
+            &record.campaign_source_sha,
+            &sha('6'),
+        )
+        .err()
+        .expect("changed runtime code must invalidate the campaign");
+        assert!(error.to_string().contains("different runtime code"));
+    }
+
+    #[test]
     fn reviewed_record_rejects_crossed_device_or_artifact_authority() {
-        let (_root, path) = write_record(&record());
+        let record = record();
+        let (_root, path) = write_record(&record);
         let file = open_regular_file_no_follow(&path).unwrap();
         let digest = sha256_open_file(&file).unwrap();
-        let error = authenticate_h3_private_runtime_qualification_with_allowlist(
+        let reviewed = [digest.as_str()];
+        let error = authenticate_h3_private_runtime_qualification_for_source(
             &path,
             &artifact_report(),
             "cuda:1",
@@ -4104,7 +4281,9 @@ mod tests {
             &sha('1'),
             "qualified-kernel",
             &sha('2'),
-            &[digest.as_str()],
+            &reviewed,
+            &record.campaign_source_sha,
+            &record.campaign_runtime_code_identity_sha256,
         )
         .unwrap_err();
         assert!(error
@@ -4114,16 +4293,23 @@ mod tests {
 
     #[test]
     fn reviewed_record_rejects_each_crossed_route_before_artifact_qualification() {
-        let (_root, path) = write_record(&record());
+        let record = record();
+        let (_root, path) = write_record(&record);
         let file = open_regular_file_no_follow(&path).unwrap();
         let digest = sha256_open_file(&file).unwrap();
+        let reviewed_records = [digest.as_str()];
         for (device_id, device_ordinal, compute_capability) in [
             ("cuda:1", 0, (8, 9)),
             ("cuda:0", 1, (8, 9)),
             ("cuda:0", 0, (9, 0)),
         ] {
-            let reviewed =
-                open_reviewed_h3_private_runtime_qualification(&path, &[digest.as_str()]).unwrap();
+            let reviewed = open_reviewed_h3_private_runtime_qualification_for_source(
+                &path,
+                &reviewed_records,
+                &record.campaign_source_sha,
+                &record.campaign_runtime_code_identity_sha256,
+            )
+            .unwrap();
             let error = reviewed
                 .validate_route(device_id, device_ordinal, compute_capability)
                 .unwrap_err();
@@ -4152,9 +4338,16 @@ mod tests {
             file.write_all(&bytes).unwrap();
             file.flush().unwrap();
             let digest = sha256_open_file(&open_regular_file_no_follow(&path).unwrap()).unwrap();
-            let error = open_reviewed_h3_private_runtime_qualification(&path, &[digest.as_str()])
-                .err()
-                .expect("unsupported runtime identity claim must be rejected");
+            let canonical = record();
+            let reviewed = [digest.as_str()];
+            let error = open_reviewed_h3_private_runtime_qualification_for_source(
+                &path,
+                &reviewed,
+                &canonical.campaign_source_sha,
+                &canonical.campaign_runtime_code_identity_sha256,
+            )
+            .err()
+            .expect("unsupported runtime identity claim must be rejected");
             assert!(
                 error
                     .to_string()

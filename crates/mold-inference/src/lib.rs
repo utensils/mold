@@ -43,6 +43,12 @@ pub use minimax_h3::private_qwen::{
 };
 #[cfg(feature = "h3-private-uat")]
 #[doc(hidden)]
+pub use minimax_h3::private_runtime_qualification::{
+    produce_h3_private_runtime_qualification_candidate, H3PrivateRuntimeQualificationCandidate,
+    H3_PRIVATE_RUNTIME_RECORD_PRODUCER_MARKER,
+};
+#[cfg(feature = "h3-private-uat")]
+#[doc(hidden)]
 pub use minimax_h3::private_server::{
     authenticate_h3_private_runtime_qualification, prepare_h3_private_fl2va_admission,
     prepare_h3_private_fl2va_attempt, reviewed_h3_private_runtime_available,

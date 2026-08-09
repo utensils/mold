@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://utensils.io/mold/schemas/minimax-h3-private-runtime-bound-capture-v1.json",
+  "title": "Mold private MiniMax H3 runtime-bound capture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "canonical_model",
+    "task",
+    "source_sha",
+    "runtime_code_identity_sha256",
+    "measured_server_executable",
+    "authorization_record_sha256",
+    "authorization_source_document_sha256",
+    "artifact_qualification_identity_sha256",
+    "device_id",
+    "device_ordinal",
+    "compute_capability",
+    "attention_runtime_identity_sha256",
+    "attention_kernel_identity",
+    "attention_qualification_sha256",
+    "bounds",
+    "evidence_artifacts"
+  ],
+  "properties": {
+    "schema": {
+      "const": "mold.minimax-h3.private-runtime-bound-capture.v1"
+    },
+    "canonical_model": {
+      "const": "minimax-h3-fl2va:comfy-pruned-int8"
+    },
+    "task": { "const": "fl2va" },
+    "source_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "runtime_code_identity_sha256": { "$ref": "#/$defs/sha256" },
+    "measured_server_executable": { "$ref": "#/$defs/relativePath" },
+    "authorization_record_sha256": { "$ref": "#/$defs/sha256" },
+    "authorization_source_document_sha256": { "$ref": "#/$defs/sha256" },
+    "artifact_qualification_identity_sha256": { "$ref": "#/$defs/sha256" },
+    "device_id": { "type": "string", "pattern": "^cuda:[0-9]+$" },
+    "device_ordinal": { "type": "integer", "minimum": 0 },
+    "compute_capability": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "integer", "minimum": 1, "maximum": 99 },
+        { "type": "integer", "minimum": 0, "maximum": 99 }
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "attention_runtime_identity_sha256": { "$ref": "#/$defs/sha256" },
+    "attention_kernel_identity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "attention_qualification_sha256": { "$ref": "#/$defs/sha256" },
+    "bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fixed_runtime_host_bytes",
+        "fixed_runtime_device_bytes",
+        "qwen_activation_workspace_bytes",
+        "vae_construction_device_workspace_bytes",
+        "condition_vae_workspace_device_bytes",
+        "attention_workspace_device_bytes",
+        "ffn_workspace_device_bytes",
+        "decoder_tile_workspace_device_bytes",
+        "audio_decode_workspace_device_bytes",
+        "encoded_video_host_bytes_bound",
+        "thumbnail_host_bytes_bound",
+        "mux_output_host_bytes_bound",
+        "aac_mux_staging_host_bytes"
+      ],
+      "properties": {
+        "fixed_runtime_host_bytes": { "$ref": "#/$defs/bound" },
+        "fixed_runtime_device_bytes": { "$ref": "#/$defs/bound" },
+        "qwen_activation_workspace_bytes": { "$ref": "#/$defs/bound" },
+        "vae_construction_device_workspace_bytes": { "$ref": "#/$defs/bound" },
+        "condition_vae_workspace_device_bytes": { "$ref": "#/$defs/bound" },
+        "attention_workspace_device_bytes": { "$ref": "#/$defs/bound" },
+        "ffn_workspace_device_bytes": { "$ref": "#/$defs/bound" },
+        "decoder_tile_workspace_device_bytes": { "$ref": "#/$defs/bound" },
+        "audio_decode_workspace_device_bytes": { "$ref": "#/$defs/bound" },
+        "encoded_video_host_bytes_bound": { "$ref": "#/$defs/bound" },
+        "thumbnail_host_bytes_bound": { "$ref": "#/$defs/bound" },
+        "mux_output_host_bytes_bound": { "$ref": "#/$defs/bound" },
+        "aac_mux_staging_host_bytes": { "$ref": "#/$defs/bound" }
+      }
+    },
+    "evidence_artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/relativePath" }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*\\\\)[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "bound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed_bytes", "bound_bytes", "evidence_artifact"],
+      "properties": {
+        "observed_bytes": { "type": "integer", "minimum": 1 },
+        "bound_bytes": { "type": "integer", "minimum": 1 },
+        "evidence_artifact": { "$ref": "#/$defs/relativePath" }
+      }
+    }
+  }
+}

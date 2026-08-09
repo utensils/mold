@@ -276,6 +276,119 @@ for its claim marker and rejected if the private reader is present. This
 qualifies artifact identity only. It does not satisfy numerical parity, CUDA
 generation UAT, public authorization, or release activation.
 
+### Private runtime-record candidate
+
+The server's reviewed runtime-record allowlist remains empty until a separate
+CUDA campaign measures and reviews all thirteen non-artifact bounds. The
+development-only `h3_runtime_qualification_record` binary breaks the evidence
+collection/review cycle without self-authorizing: it re-hashes the complete
+42.5 GB FL2VA artifact set, validates an owner-only capture manifest, hashes
+every retained evidence file, and writes deterministic record bytes to stdout.
+It never edits the source allowlist, constructs the runtime, or activates a
+public capability. Published-binary verification rejects its dedicated claim
+marker as well as the underlying private artifact reader.
+
+The capture manifest uses
+[`mold.minimax-h3.private-runtime-bound-capture.v1`](./minimax-h3-private-runtime-capture.schema.json).
+It binds the exact 40-character Mold source SHA, the stable runtime-code
+identity, the measured server executable, artifact/authorization identities,
+`cuda:<ordinal>` route, compute capability, attention
+runtime/kernel/qualification identities, and a sorted list of relative
+evidence paths. The candidate producer requires its own embedded source SHA and
+runtime-code identity to equal the capture and proves that both exact values
+occur in the retained ELF server executable before recording that executable's
+independently measured SHA-256. Each of these bounds has an
+independent `{observed_bytes,bound_bytes,evidence_artifact}` record, with a
+nonzero observation no larger than its proposed bound:
+
+- fixed runtime host and device bytes;
+- Qwen activation and VAE-construction device workspaces;
+- condition-VAE, attention, FFN, decoder-tile, and audio-decode device
+  workspaces;
+- encoded-video, thumbnail, mux-output, and AAC-staging host bounds.
+
+The evidence root and every parent directory must be mode `0700`; the capture
+and evidence files must be mode `0600`, process-owned, regular, non-symlink
+files outside the checkout. The measured server executable must be one of those
+files. Paths must be sorted, unique, and canonical.
+
+The producer authenticates and retains that ELF, but it does not itself prove
+that external profiler or log samples came from the process executing that
+file. The live campaign must therefore retain process/executable attestation
+alongside each sample, and the independent review must verify that binding
+before accepting any measured bound.
+
+The stable runtime-code identity hashes `Cargo.toml`, `Cargo.lock`, Cargo build
+configuration, and every regular manifest, build script, Rust source, and
+non-Rust compiled input in the complete local `mold-server` dependency closure:
+core, catalog, database, scheduler, Candle adapter, inference, and server.
+Traversal fails on symbolic links and non-regular entries. The only normalized
+source region is the reviewed runtime-record allowlist value array, which
+avoids an executable-hash fixed point: a later review-only allowlist rebuild
+may have a different exact source SHA and executable SHA, but activation still
+requires the same runtime-code identity. Any other local runtime or dependency
+input change invalidates the campaign. `Cargo.lock` binds external registry and
+Git dependency revisions. The identity also binds `rustc -vV`, host and target,
+profile and optimization mode, the sorted Cargo feature and target-cfg axes,
+encoded Rust flags, and relevant compiler, linker, and CUDA configuration. The
+build script declares every captured environment key as a rebuild input. The
+private server build separately rejects any feature set beyond the canonical
+CUDA, private bridge/runtime, MP4, and NVML campaign edge, and that canonical
+server feature set is itself part of the composite identity. That validation
+lives in `crates/mold-server/build_support/` rather than being shared from
+`mold-inference`, because `mold-ai-server` is published to crates.io and a
+published `.crate` cannot carry a sibling crate's files; the release contract
+fails if the two copies of the canonical feature set drift.
+
+Configuration paths are not compiler identities. `CUDA_HOME` and the host
+compiler variables record *where* the toolchain is, so a toolkit upgraded in
+place under the same prefix would otherwise leave the identity unchanged while
+producing a different executable. The identity therefore also binds the
+resolved absolute path and self-reported version of both `nvcc` and the host
+compiler, and the build script watches those two binaries so replacing either
+invalidates a cached identity. Resolution mirrors `cudaforge`'s own search
+order — `NVCC`, then `PATH`, then `CUDA_HOME`, then `CUDA_PATH` — and takes the
+host compiler from `NVCC_CCBIN` before `CC`, because naming a different
+compiler than the one that built the kernels would be worse than naming none.
+A CUDA campaign build whose `nvcc` cannot be resolved or run fails rather than
+producing an identity that cannot tell two toolkits apart.
+
+**The measured build must start from a clean target directory.** Watching the
+compiler binaries reruns only Mold's own build scripts. The CUDA objects are
+produced by dependency build scripts — `candle-kernels`, `candle-flash-attn` —
+whose cached outputs Mold cannot invalidate, so a toolchain replaced under an
+existing `target/` yields an executable that links objects from the previous
+compiler while the identity reports the new one. Nothing in the build can
+detect that, which makes it a campaign procedure requirement rather than a
+code-enforced invariant: run `cargo clean` (or build into a fresh target
+directory) before the measured build, and record that in the campaign notes
+alongside the measured server ELF hash.
+
+```bash
+umask 077
+evidence_root=/Volumes/ExternalStorage/mold/uat-h3/evidence/runtime-candidate
+capture_manifest="$evidence_root/runtime-bound-capture.json"
+
+nix develop --offline --no-write-lock-file -c \
+  cargo run --locked --offline --release \
+  -p mold-ai-inference \
+  --features dev-bins,h3-private-uat,h3-attention-rc,mp4,cuda \
+  --bin h3_runtime_qualification_record -- \
+  --models-root "$MOLD_HOME/models" \
+  --authorization-record "$authorization_record" \
+  --evidence-root "$evidence_root" \
+  --capture-manifest "$capture_manifest" \
+  > "$evidence_root/runtime-qualification.candidate.json"
+```
+
+The final stderr line names the exact candidate file SHA-256, record identity,
+and retained evidence count. Treat that hash as unreviewed input. A later PR
+must independently inspect the measurements, reproduce the bounds, and add the
+exact candidate file hash to the allowlist; generating a candidate is not a
+passing runtime qualification or permission to run the server path. Candidate
+serialization and activation share one 128 KiB record limit, so the producer
+cannot emit a record the runtime will refuse solely for size.
+
 ### Parity and approximate-path rules
 
 - Official full-precision outputs and intermediates must be compared with the

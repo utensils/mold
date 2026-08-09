@@ -76,6 +76,93 @@ require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
 require_text crates/mold-inference/src/minimax_h3/private_qwen_support.rs \
   '"mold.minimax-h3.private-uat-qwen-support-loader.v1"' \
   "the private H3 Qwen support loader has no release-rejectable claim marker"
+require_text crates/mold-inference/Cargo.toml \
+  'name = "h3_runtime_qualification_record"' \
+  "the private H3 runtime-record producer is not an explicit development binary"
+require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
+  '"mold.minimax-h3.private-runtime-record-producer.v1"' \
+  "the private H3 runtime-record producer has no release-rejectable claim marker"
+require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
+  'qualify_private_artifacts(' \
+  "the private H3 runtime-record producer does not re-authenticate the full artifact set"
+require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
+  'fn entries(&self) -> [(&' \
+  "the private H3 runtime-record producer has no fixed bound-cardinality contract"
+require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
+  'H3PrivateRuntimeQualificationCandidate' \
+  "the private H3 runtime-record producer does not emit a review-only candidate"
+require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
+  'hash_measured_server_executable(' \
+  "the private H3 runtime-record producer does not authenticate its measured server"
+require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
+  'MAX_RUNTIME_QUALIFICATION_BYTES' \
+  "the private H3 runtime-record producer does not share the activation record limit"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'campaign_runtime_code_identity_sha256: String,' \
+  "the private H3 runtime record omits its stable campaign code identity"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'measured_server_executable_sha256: String,' \
+  "the private H3 runtime record omits its measured server identity"
+require_text crates/mold-inference/build_support/h3_runtime_code_identity.rs \
+  'const LOCAL_RUNTIME_CRATES: &[&str] = &[' \
+  "the private H3 runtime code identity omits its reviewed local dependency closure"
+require_text crates/mold-inference/build_support/h3_runtime_code_identity.rs \
+  'runtime identity entry {} is a symbolic link' \
+  "the private H3 runtime code identity does not reject linked traversal entries"
+require_text crates/mold-inference/build_support/h3_runtime_code_identity.rs \
+  'RUSTC_VERBOSE_VERSION' \
+  "the private H3 runtime code identity omits the compiler identity"
+require_text crates/mold-inference/build_support/h3_runtime_code_identity.rs \
+  'key.starts_with("CARGO_FEATURE_")' \
+  "the private H3 runtime code identity omits enabled Cargo features"
+require_text crates/mold-inference/build.rs \
+  'cargo:rerun-if-env-changed={key}' \
+  "the private H3 runtime code identity does not track build-environment changes"
+require_text crates/mold-inference/build.rs \
+  'if std::env::var_os("CARGO_FEATURE_H3_PRIVATE_UAT").is_none()' \
+  "ordinary builds are not isolated from the private H3 identity collector"
+require_text crates/mold-server/Cargo.toml \
+  '"mold-inference/dev-bins",' \
+  "the measured private server does not match the producer inference feature set"
+require_text crates/mold-server/build.rs \
+  'validate_canonical_h3_server_features()' \
+  "the measured private server does not reject non-canonical campaign features"
+require_text crates/mold-inference/build_support/h3_runtime_code_identity.rs \
+  '"MOLD_H3_CANONICAL_SERVER_FEATURES"' \
+  "the private H3 runtime identity omits the canonical server feature set"
+require_text crates/mold-inference/build_support/h3_runtime_code_identity.rs \
+  '"MOLD_H3_NVCC_VERSION"' \
+  "the private H3 runtime identity cannot distinguish an in-place CUDA toolkit upgrade"
+require_text crates/mold-inference/build.rs \
+  'collect_native_toolchain_identity()' \
+  "the private H3 identity does not invalidate when a native compiler is replaced"
+# mold-ai-server is published to crates.io, and a published `.crate` carries
+# only its own crate directory, so its build script cannot read the inference
+# copy of this list. The two are separate files on purpose; they must not drift,
+# because one enforces the campaign feature set and the other hashes it into the
+# runtime-code identity.
+canonical_features_of() {
+  sed -n '/CANONICAL_H3_SERVER_FEATURES: &\[&str\] = &\[/,/^\];/p' "$1" \
+    | sed -n 's/^ *"\(CARGO_FEATURE_[A-Z0-9_]*\)",$/\1/p'
+}
+inference_canonical_features=$(
+  canonical_features_of crates/mold-inference/build_support/h3_runtime_code_identity.rs
+)
+server_canonical_features=$(
+  canonical_features_of crates/mold-server/build_support/h3_server_features.rs
+)
+if [[ -z "$inference_canonical_features" || -z "$server_canonical_features" ]]; then
+  fail "the canonical private H3 server feature set could not be read from both build-support files"
+fi
+if [[ "$inference_canonical_features" != "$server_canonical_features" ]]; then
+  fail "the canonical private H3 server feature set drifted between mold-inference and mold-server"
+fi
+require_text crates/mold-server/build_support/h3_server_features.rs \
+  'CARGO_FEATURE_H3_PRIVATE_UAT' \
+  "the measured private server build support omits its own campaign gate"
+require_text scripts/verify-h3-release-exclusion.sh \
+  'private_runtime_record_marker=' \
+  "published-binary verification does not reject the private runtime-record producer"
 require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
   '_activation: admitted_overlap_seal::Token,' \
   "private H3 FL2VA overlap authority no longer contains its private issuer token"
@@ -465,13 +552,14 @@ h3_uat_feature=$(sed -n '/^h3-private-uat = \[/,/^\]/p' crates/mold-server/Cargo
 for edge in \
   h3-private-bridge \
   mold-inference/h3-private-uat \
+  mold-inference/dev-bins \
   mold-inference/h3-attention-rc \
   mp4 \
   cuda; do
   grep -Fq "\"${edge}\"" <<<"$h3_uat_feature" \
     || fail "mold-ai-server private H3 UAT feature omits ${edge}"
 done
-if [[ $(grep -Ec '^[[:space:]]*"[^"]+",?$' <<<"$h3_uat_feature") -ne 5 ]]; then
+if [[ $(grep -Ec '^[[:space:]]*"[^"]+",?$' <<<"$h3_uat_feature") -ne 6 ]]; then
   fail "mold-ai-server private H3 UAT feature contains an unexpected runtime edge"
 fi
 
@@ -551,6 +639,7 @@ trap 'rm -rf "$scratch_dir"' EXIT
 ordinary_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=omitted'
 private_marker='mold.minimax-h3.private-uat-artifact-reader.v1'
 private_qwen_support_marker='mold.minimax-h3.private-uat-qwen-support-loader.v1'
+private_runtime_record_marker='mold.minimax-h3.private-runtime-record-producer.v1'
 printf '%s\n' "$ordinary_marker" >"$scratch_dir/ordinary"
 scripts/verify-h3-release-exclusion.sh "$scratch_dir/ordinary" >/dev/null
 printf '%s\n%s\n' "$ordinary_marker" "$private_marker" >"$scratch_dir/private"
@@ -561,6 +650,11 @@ printf '%s\n%s\n' "$ordinary_marker" "$private_qwen_support_marker" \
   >"$scratch_dir/private-qwen-support"
 if scripts/verify-h3-release-exclusion.sh "$scratch_dir/private-qwen-support" >/dev/null 2>&1; then
   fail "release exclusion verifier accepted the private H3 Qwen support loader"
+fi
+printf '%s\n%s\n' "$ordinary_marker" "$private_runtime_record_marker" \
+  >"$scratch_dir/private-runtime-record"
+if scripts/verify-h3-release-exclusion.sh "$scratch_dir/private-runtime-record" >/dev/null 2>&1; then
+  fail "release exclusion verifier accepted the private H3 runtime-record producer"
 fi
 
 echo "PASS: MiniMax H3 private-UAT release contract"
