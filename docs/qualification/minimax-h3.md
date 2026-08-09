@@ -276,6 +276,60 @@ for its claim marker and rejected if the private reader is present. This
 qualifies artifact identity only. It does not satisfy numerical parity, CUDA
 generation UAT, public authorization, or release activation.
 
+### Private runtime-record candidate
+
+The server's reviewed runtime-record allowlist remains empty until a separate
+CUDA campaign measures and reviews all thirteen non-artifact bounds. The
+development-only `h3_runtime_qualification_record` binary breaks the evidence
+collection/review cycle without self-authorizing: it re-hashes the complete
+42.5 GB FL2VA artifact set, validates an owner-only capture manifest, hashes
+every retained evidence file, and writes deterministic record bytes to stdout.
+It never edits the source allowlist, constructs the runtime, or activates a
+public capability. Published-binary verification rejects its dedicated claim
+marker as well as the underlying private artifact reader.
+
+The capture manifest uses
+[`mold.minimax-h3.private-runtime-bound-capture.v1`](./minimax-h3-private-runtime-capture.schema.json).
+It binds the exact Mold
+source SHA, artifact/authorization identities, `cuda:<ordinal>` route,
+compute capability, attention runtime/kernel/qualification identities, and a
+sorted list of relative evidence paths. Each of these bounds has an
+independent `{observed_bytes,bound_bytes,evidence_artifact}` record, with a
+nonzero observation no larger than its proposed bound:
+
+- fixed runtime host and device bytes;
+- Qwen activation and VAE-construction device workspaces;
+- condition-VAE, attention, FFN, decoder-tile, and audio-decode device
+  workspaces;
+- encoded-video, thumbnail, mux-output, and AAC-staging host bounds.
+
+The evidence root and every parent directory must be mode `0700`; the capture
+and evidence files must be mode `0600`, process-owned, regular, non-symlink
+files outside the checkout. Paths must be sorted, unique, and canonical.
+
+```bash
+umask 077
+evidence_root=/Volumes/ExternalStorage/mold/uat-h3/evidence/runtime-candidate
+capture_manifest="$evidence_root/runtime-bound-capture.json"
+
+nix develop --offline --no-write-lock-file -c \
+  cargo run --locked --offline --release \
+  -p mold-ai-inference \
+  --features dev-bins,h3-private-uat \
+  --bin h3_runtime_qualification_record -- \
+  --models-root "$MOLD_HOME/models" \
+  --authorization-record "$authorization_record" \
+  --evidence-root "$evidence_root" \
+  --capture-manifest "$capture_manifest" \
+  > "$evidence_root/runtime-qualification.candidate.json"
+```
+
+The final stderr line names the exact candidate file SHA-256, record identity,
+and retained evidence count. Treat that hash as unreviewed input. A later PR
+must independently inspect the measurements, reproduce the bounds, and add the
+exact candidate file hash to the allowlist; generating a candidate is not a
+passing runtime qualification or permission to run the server path.
+
 ### Parity and approximate-path rules
 
 - Official full-precision outputs and intermediates must be compared with the

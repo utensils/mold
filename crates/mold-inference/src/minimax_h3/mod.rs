@@ -21,6 +21,8 @@ pub(crate) mod private_qwen_support;
 #[cfg(feature = "h3-private-uat")]
 pub(crate) mod private_runtime;
 #[cfg(feature = "h3-private-uat")]
+pub mod private_runtime_qualification;
+#[cfg(feature = "h3-private-uat")]
 pub(crate) mod private_server;
 #[cfg(feature = "h3-private-uat")]
 pub(crate) mod private_vae_adapter;

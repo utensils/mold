@@ -83,6 +83,11 @@ name = "h3_artifact_qualification"
 path = "src/bin/h3_artifact_qualification.rs"
 required-features = ["dev-bins", "h3-private-uat"]
 
+[[bin]]
+name = "h3_runtime_qualification_record"
+path = "src/bin/h3_runtime_qualification_record.rs"
+required-features = ["dev-bins", "h3-private-uat"]
+
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.21.0" }
 mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.21.0" }

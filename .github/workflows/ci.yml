@@ -428,6 +428,9 @@ jobs:
       - name: Clippy the private MiniMax H3 artifact qualifier
         if: env.RUN_RUST_SUITE == 'true'
         run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_artifact_qualification -- -D warnings
+      - name: Clippy the private MiniMax H3 runtime-record producer
+        if: env.RUN_RUST_SUITE == 'true'
+        run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_runtime_qualification_record -- -D warnings
       - name: Test private MiniMax H3 foundations
         if: env.RUN_RUST_SUITE == 'true'
         run: cargo test -p mold-ai-inference --lib --features h3-private-uat minimax_h3

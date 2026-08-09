@@ -90,8 +90,9 @@ use crate::{
     H3FactoryQuantizationAuthority,
 };
 
-const RUNTIME_QUALIFICATION_SCHEMA: &str = "mold.minimax-h3.private-runtime-qualification.v1";
-const RUNTIME_QUALIFICATION_DECISION: &str = "qualified-private-fl2va-runtime";
+pub(crate) const RUNTIME_QUALIFICATION_SCHEMA: &str =
+    "mold.minimax-h3.private-runtime-qualification.v1";
+pub(crate) const RUNTIME_QUALIFICATION_DECISION: &str = "qualified-private-fl2va-runtime";
 const MAX_RUNTIME_QUALIFICATION_BYTES: u64 = 128 * 1024;
 
 /// Exact reviewed runtime-qualification record hashes.
@@ -136,20 +137,20 @@ const PRIVATE_ACTIVATION_COVERAGE: [H3FactoryActivationPrerequisite; 9] = [
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct H3PrivateRuntimeBoundRecord {
-    fixed_runtime_host_bytes: u64,
-    fixed_runtime_device_bytes: u64,
-    qwen_activation_workspace_bytes: u64,
-    vae_construction_device_workspace_bytes: u64,
-    condition_vae_workspace_device_bytes: u64,
-    attention_workspace_device_bytes: u64,
-    ffn_workspace_device_bytes: u64,
-    decoder_tile_workspace_device_bytes: u64,
-    audio_decode_workspace_device_bytes: u64,
-    encoded_video_host_bytes_bound: u64,
-    thumbnail_host_bytes_bound: u64,
-    mux_output_host_bytes_bound: u64,
-    aac_mux_staging_host_bytes: u64,
+pub(crate) struct H3PrivateRuntimeBoundRecord {
+    pub(crate) fixed_runtime_host_bytes: u64,
+    pub(crate) fixed_runtime_device_bytes: u64,
+    pub(crate) qwen_activation_workspace_bytes: u64,
+    pub(crate) vae_construction_device_workspace_bytes: u64,
+    pub(crate) condition_vae_workspace_device_bytes: u64,
+    pub(crate) attention_workspace_device_bytes: u64,
+    pub(crate) ffn_workspace_device_bytes: u64,
+    pub(crate) decoder_tile_workspace_device_bytes: u64,
+    pub(crate) audio_decode_workspace_device_bytes: u64,
+    pub(crate) encoded_video_host_bytes_bound: u64,
+    pub(crate) thumbnail_host_bytes_bound: u64,
+    pub(crate) mux_output_host_bytes_bound: u64,
+    pub(crate) aac_mux_staging_host_bytes: u64,
 }
 
 impl H3PrivateRuntimeBoundRecord {
@@ -217,32 +218,32 @@ impl H3PrivateRuntimeBoundRecord {
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct H3PrivateRuntimeEvidenceArtifact {
-    relative_path: String,
-    bytes: u64,
-    sha256: String,
+pub(crate) struct H3PrivateRuntimeEvidenceArtifact {
+    pub(crate) relative_path: String,
+    pub(crate) bytes: u64,
+    pub(crate) sha256: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct H3PrivateRuntimeQualificationRecord {
-    schema: String,
-    decision: String,
-    canonical_model: String,
-    task: String,
-    authorization_record_sha256: String,
-    authorization_source_document_sha256: String,
-    artifact_qualification_identity_sha256: String,
-    artifact_total_bytes: u64,
-    device_id: String,
-    device_ordinal: usize,
-    compute_capability: [u16; 2],
-    attention_runtime_identity_sha256: String,
-    attention_kernel_identity: String,
-    attention_qualification_sha256: String,
-    bounds: H3PrivateRuntimeBoundRecord,
-    evidence_artifacts: Vec<H3PrivateRuntimeEvidenceArtifact>,
-    identity_sha256: String,
+pub(crate) struct H3PrivateRuntimeQualificationRecord {
+    pub(crate) schema: String,
+    pub(crate) decision: String,
+    pub(crate) canonical_model: String,
+    pub(crate) task: String,
+    pub(crate) authorization_record_sha256: String,
+    pub(crate) authorization_source_document_sha256: String,
+    pub(crate) artifact_qualification_identity_sha256: String,
+    pub(crate) artifact_total_bytes: u64,
+    pub(crate) device_id: String,
+    pub(crate) device_ordinal: usize,
+    pub(crate) compute_capability: [u16; 2],
+    pub(crate) attention_runtime_identity_sha256: String,
+    pub(crate) attention_kernel_identity: String,
+    pub(crate) attention_qualification_sha256: String,
+    pub(crate) bounds: H3PrivateRuntimeBoundRecord,
+    pub(crate) evidence_artifacts: Vec<H3PrivateRuntimeEvidenceArtifact>,
+    pub(crate) identity_sha256: String,
 }
 
 /// Payload-free identities expected by one private owner attempt.
@@ -3634,7 +3635,7 @@ fn validate_runtime_qualification_record_binding(
     Ok(())
 }
 
-fn validate_runtime_qualification_record_shape(
+pub(crate) fn validate_runtime_qualification_record_shape(
     record: &H3PrivateRuntimeQualificationRecord,
 ) -> Result<()> {
     record.bounds.validate()?;
@@ -3667,7 +3668,9 @@ fn validate_runtime_qualification_record_shape(
     Ok(())
 }
 
-fn runtime_qualification_identity(record: &H3PrivateRuntimeQualificationRecord) -> String {
+pub(crate) fn runtime_qualification_identity(
+    record: &H3PrivateRuntimeQualificationRecord,
+) -> String {
     let mut digest = Sha256::new();
     digest.update(b"mold.minimax-h3.private-runtime-qualification.v1\0");
     for value in [
