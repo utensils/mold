@@ -3434,6 +3434,7 @@ mod tests {
                 frames: 9,
                 fps: 24,
                 pipeline: None,
+                pipeline_provenance_sha256: None,
                 thumbnail: Vec::new(),
                 gif_preview: Vec::new(),
                 has_audio: false,

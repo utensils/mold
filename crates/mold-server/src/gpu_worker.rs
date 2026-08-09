@@ -1164,28 +1164,59 @@ fn process_owner_work(
     }
     // This is intentionally later than both owner-thread validation and the
     // second pre-CUDA plan fence, but earlier than any model/cache allocation.
-    // Production H3 admission still lacks the complete target identity triad,
-    // so the claim remains absent until the other typed prerequisites land.
-    let h3_attempt = match &grant.work {
-        OwnerWork::Generation(job) => {
-            match crate::h3_attempt::claim_generation_attempt(
-                worker,
-                current_worker_generation,
-                &grant.fence,
-                job,
-            ) {
-                Ok(attempt) => attempt,
-                Err(error) => {
-                    return OwnerProcessOutcome::PlanInvalidated {
-                        grant: Box::new(grant),
-                        error: crate::execution_plan::ExecutionPlanError::PlanInvalidated(
-                            error.to_string(),
-                        ),
-                    };
-                }
-            }
+    // The private feature atomically prepares an opaque one-shot value here;
+    // the scheduler only ever retained the empty GpuJob slot.
+    let h3_cancellation = match &grant.work {
+        OwnerWork::Generation(job)
+            if job
+                .execution_plan
+                .as_ref()
+                .is_some_and(|plan| mold_core::minimax_h3::is_family(&plan.model_family)) =>
+        {
+            Some(job.batch_child.as_ref().map_or_else(
+                mold_inference::InferenceCancellationToken::default,
+                |child| child.cancellation.clone(),
+            ))
         }
         _ => None,
+    };
+    #[cfg(feature = "h3-private-uat")]
+    let h3_prepare_error = match (&mut grant.work, h3_cancellation.as_ref()) {
+        (OwnerWork::Generation(job), Some(cancellation)) => {
+            crate::h3_private_bridge::prepare_for_owner(
+                worker,
+                &grant.fence,
+                job,
+                cancellation.clone(),
+            )
+            .err()
+        }
+        _ => None,
+    };
+    #[cfg(not(feature = "h3-private-uat"))]
+    let h3_prepare_error: Option<String> = None;
+    let h3_claim = if h3_prepare_error.is_none() {
+        match (&grant.work, h3_cancellation) {
+            (OwnerWork::Generation(job), Some(cancellation)) => {
+                Some(crate::h3_attempt::claim_generation_attempt(
+                    worker,
+                    current_worker_generation,
+                    &grant.fence,
+                    job,
+                    cancellation,
+                ))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let h3_attempt = match h3_claim {
+        Some(Ok(attempt)) => attempt,
+        Some(Err(error)) => {
+            return complete_h3_claim_failure(grant, error.to_string());
+        }
+        None => None,
     };
     if let OwnerWork::ChainStage(job) = &mut grant.work {
         if let Some(error) = job
@@ -1203,6 +1234,15 @@ fn process_owner_work(
     match grant.work {
         OwnerWork::Generation(mut job) => {
             job.lease = Some(grant.fence);
+            if let Some(error) = h3_prepare_error {
+                let successful = with_claimed_h3_generation_cleanup(*job, |job| {
+                    reject_claimed_h3_generation_message(job, error)
+                });
+                return OwnerProcessOutcome::Completed {
+                    successful,
+                    chain_result: None,
+                };
+            }
             let successful = process_job(
                 worker,
                 *job,
@@ -1281,6 +1321,20 @@ fn process_owner_work(
                 chain_result: None,
             }
         }
+    }
+}
+
+fn complete_h3_claim_failure(grant: LeaseGrant, error: String) -> OwnerProcessOutcome {
+    let OwnerWork::Generation(mut job) = grant.work else {
+        unreachable!("only generation work can fail a private H3 attempt claim")
+    };
+    job.lease = Some(grant.fence);
+    let successful = with_claimed_h3_generation_cleanup(*job, |job| {
+        reject_claimed_h3_generation_message(job, error)
+    });
+    OwnerProcessOutcome::Completed {
+        successful,
+        chain_result: None,
     }
 }
 
@@ -2076,6 +2130,17 @@ fn progress_to_sse(event: mold_inference::ProgressEvent) -> SseProgressEvent {
     event.into()
 }
 
+#[cfg(feature = "h3-private-uat")]
+pub(crate) fn record_h3_progress(
+    event: mold_inference::ProgressEvent,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+) {
+    record_phase_timing(&event);
+    if let Some(progress_tx) = progress_tx {
+        let _ = progress_tx.send(SseMessage::Progress(progress_to_sse(event)));
+    }
+}
+
 /// Detect a CUDA out-of-memory error anywhere in the anyhow cause chain.
 ///
 /// Candle surfaces these as `DriverError(CUDA_ERROR_OUT_OF_MEMORY, …)` wrapped
@@ -2247,7 +2312,7 @@ fn synchronize_after_oom(worker: &GpuWorker) -> bool {
     }
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(any(test, feature = "cuda", feature = "h3-private-uat"))]
 fn device_memory_api_error(error: device::DeviceMemoryError) -> crate::routes::ApiError {
     if error.is_fatal_cuda() {
         crate::routes::ApiError::internal(error.to_string())
@@ -2645,6 +2710,18 @@ impl Drop for GenerationCleanup {
     }
 }
 
+#[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+struct ActiveGenerationCleanup<'a> {
+    worker: &'a GpuWorker,
+}
+
+#[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+impl Drop for ActiveGenerationCleanup<'_> {
+    fn drop(&mut self) {
+        clear_active_generation(self.worker);
+    }
+}
+
 fn process_job(
     worker: &GpuWorker,
     job: GpuJob,
@@ -2664,7 +2741,7 @@ fn process_job(
             Ok(current) => current,
             Err(error) => return reject_claimed_h3_generation(job, error),
         };
-        process_claimed_h3_generation_attempt(job, h3_attempt, current)
+        process_claimed_h3_generation_attempt(worker, job, scheduler_tx, h3_attempt, current)
     })
 }
 
@@ -2677,24 +2754,25 @@ fn with_claimed_h3_generation_cleanup<T>(job: GpuJob, consume: impl FnOnce(GpuJo
 }
 
 /// Consume one claimed H3 owner attempt without exposing it to the generic
-/// retained-engine path. The concrete private runtime bridge is intentionally
-/// absent, so the only production outcome is a clean fail-closed rejection.
-///
-/// This function has no worker, model-cache, or engine argument by design. A
-/// future executable bridge must remain owner-stack-local and consume the
-/// scope directly instead of re-entering `process_job_with_sink`.
+/// retained-engine path. Ordinary builds keep the clean fail-closed outcome;
+/// the private feature can consume only the opaque value attached during the
+/// final owner dispatch.
 fn process_claimed_h3_generation_attempt(
+    worker: &GpuWorker,
     job: GpuJob,
+    scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
     h3_attempt: crate::h3_attempt::H3GenerationAttempt,
     current: crate::h3_attempt::H3AttemptCurrent,
 ) -> bool {
     let mut pending_job = Some(job);
     match h3_attempt.run_once(current, |scope| {
         process_claimed_h3_generation(
+            worker,
             pending_job
                 .take()
                 .expect("H3 attempt consumes its generation job once"),
             scope,
+            scheduler_tx,
         )
     }) {
         Ok(successful) => successful,
@@ -2708,9 +2786,20 @@ fn process_claimed_h3_generation_attempt(
 }
 
 fn process_claimed_h3_generation(
+    worker: &GpuWorker,
     job: GpuJob,
     scope: crate::h3_attempt::H3AttemptScope<'_>,
+    scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
 ) -> bool {
+    #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+    let mut job = job;
+
+    #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+    if let Some(prepared) = job.h3_prepared_attempt.take() {
+        return run_claimed_h3_generation(worker, job, scope, scheduler_tx, prepared);
+    }
+
+    let _ = (worker, scheduler_tx);
     let error = if scope.cancellation_token().checkpoint().is_err() {
         crate::h3_attempt::H3AttemptError::Cancelled
     } else {
@@ -2719,8 +2808,404 @@ fn process_claimed_h3_generation(
     reject_claimed_h3_generation(job, error)
 }
 
-fn reject_claimed_h3_generation(job: GpuJob, error: crate::h3_attempt::H3AttemptError) -> bool {
-    let error = error.to_string();
+#[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+fn run_claimed_h3_generation(
+    worker: &GpuWorker,
+    job: GpuJob,
+    scope: crate::h3_attempt::H3AttemptScope<'_>,
+    scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+    prepared: crate::h3_private_bridge::BoxedH3PreparedAttempt,
+) -> bool {
+    let model_name = job.model.clone();
+    let ordinal = worker.gpu.ordinal;
+    if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
+        return reject_claimed_h3_generation_message(job, error.to_string());
+    }
+    if job.result_tx.is_closed() {
+        tracing::debug!(gpu = ordinal, model = %model_name, "skipping claimed H3 job — client disconnected");
+        return false;
+    }
+    if mold_core::minimax_h3::task_for_model(&job.request.model)
+        != Some(mold_core::minimax_h3::Task::Fl2va)
+    {
+        return reject_claimed_h3_generation_message(
+            job,
+            "MiniMax H3 private owner bridge accepts only the sealed FL2VA partition".to_string(),
+        );
+    }
+
+    let scope_facts = scope.facts();
+    let prepared_facts = prepared.facts();
+    if let Err(error) = validate_h3_prepared_attempt_facts(scope_facts, &prepared_facts) {
+        return reject_claimed_h3_generation_message(job, error.to_string());
+    }
+    let lease = match job.lease.clone() {
+        Some(lease) if scope_facts.matches_lease(&lease) => lease,
+        _ => {
+            return reject_claimed_h3_generation_message(
+                job,
+                crate::h3_attempt::H3AttemptError::StaleOwnerFence.to_string(),
+            );
+        }
+    };
+
+    #[cfg(feature = "h3-private-uat")]
+    let _private_load_lock = match worker.model_load_lock.lock() {
+        Ok(lock) => lock,
+        Err(error) => {
+            return reject_claimed_h3_generation_message(
+                job,
+                format!("MiniMax H3 owner memory lock was poisoned: {error}"),
+            );
+        }
+    };
+    #[cfg(feature = "h3-private-uat")]
+    if let Err(error) = prepare_private_h3_allocation_boundary(
+        worker,
+        &model_name,
+        prepared_facts.predicted_device_peak_bytes,
+        prepared_facts.predicted_host_increment_bytes,
+    ) {
+        return reject_claimed_h3_generation_message(job, error.error);
+    }
+
+    // The exact target-budget peak is installed before the facade can invoke
+    // its first allocation checkpoint and remains scoped through terminal
+    // validation. It is cleared on every return and panic path.
+    let Some(_vram_grant) =
+        ScopedThreadVramGrant::enter(Some(prepared_facts.predicted_device_peak_bytes))
+    else {
+        return reject_claimed_h3_generation_message(
+            job,
+            "MiniMax H3 prepared attempt has no exact device-memory grant".to_string(),
+        );
+    };
+
+    {
+        let mut active = worker.active_generation.write().unwrap();
+        *active = Some(ActiveGeneration {
+            model: model_name.clone(),
+            prompt_sha256: format!("{:x}", Sha256::digest(job.request.prompt.as_bytes())),
+            started_at_unix_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            started_at: Instant::now(),
+        });
+    }
+    let _active_cleanup = ActiveGenerationCleanup { worker };
+
+    let progress_tx = job.progress_tx.clone();
+    let mut progress = mold_inference::progress::ProgressReporter::default();
+    progress.set_callback(Box::new(move |event| {
+        record_phase_timing(&event);
+        if let Some(tx) = &progress_tx {
+            let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
+        }
+    }));
+
+    let allocation_commits = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let allocation_violation = Arc::new(std::sync::Mutex::new(None::<String>));
+    let expected_grant = prepared_facts.predicted_device_peak_bytes;
+    let allocation_commits_for_callback = Arc::clone(&allocation_commits);
+    let allocation_violation_for_callback = Arc::clone(&allocation_violation);
+    let scheduler_tx = scheduler_tx.clone();
+    let allocation_commit = crate::h3_private_bridge::H3AllocationCommit::new(move || {
+        let previous = allocation_commits_for_callback.fetch_add(1, Ordering::SeqCst);
+        if previous != 0 {
+            let error = "MiniMax H3 allocation checkpoint was committed more than once".to_string();
+            *allocation_violation_for_callback.lock().unwrap() = Some(error.clone());
+            anyhow::bail!(error);
+        }
+        if mold_inference::device::thread_vram_grant_bytes() != Some(expected_grant) {
+            let error =
+                "MiniMax H3 allocation checkpoint ran without its exact VRAM grant".to_string();
+            *allocation_violation_for_callback.lock().unwrap() = Some(error.clone());
+            anyhow::bail!(error);
+        }
+        if scheduler_tx
+            .send(crate::scheduler::WorkerEvent::AllocationCommitted {
+                device_id: lease.device_id.clone(),
+                work_id: lease.work_id.clone(),
+                owner_epoch: lease.owner_epoch,
+                worker_generation: lease.worker_generation,
+            })
+            .is_err()
+        {
+            let error =
+                "MiniMax H3 allocation checkpoint could not reach the scheduler".to_string();
+            *allocation_violation_for_callback.lock().unwrap() = Some(error.clone());
+            anyhow::bail!(error);
+        }
+        Ok(())
+    });
+
+    // Keep the opaque runtime owner out of destructor paths after a fatal
+    // driver fault or panic. The adapter consumes its one-shot inference value
+    // internally; normal and ordinary-error paths explicitly release it.
+    let mut prepared = std::mem::ManuallyDrop::new(prepared);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        prepared.run_once(scope, &mut progress, allocation_commit)
+    }));
+    progress.clear_callback();
+
+    let release_prepared = |prepared: &mut std::mem::ManuallyDrop<
+        crate::h3_private_bridge::BoxedH3PreparedAttempt,
+    >| {
+        // SAFETY: this helper is called at most once and only on paths where
+        // the CUDA context remains safe for normal destruction.
+        unsafe { std::mem::ManuallyDrop::drop(prepared) }
+    };
+
+    match result {
+        Err(payload) => {
+            quarantine_poisoned_worker(worker);
+            contain_worker_cache(worker);
+            let message = panic_payload_message(payload.as_ref());
+            reject_claimed_h3_generation_message(
+                job,
+                format!(
+                    "MiniMax H3 inference panicked on GPU {ordinal}: {message}; CUDA owner was quarantined and the server must restart"
+                ),
+            )
+        }
+        Ok(Err(error)) if is_fatal_cuda_error(&error) => {
+            quarantine_poisoned_worker(worker);
+            contain_worker_cache(worker);
+            reject_claimed_h3_generation_message(job, fatal_cuda_user_message(&model_name))
+        }
+        Ok(Err(error)) => {
+            if let Some(violation) = allocation_violation.lock().unwrap().take() {
+                release_prepared(&mut prepared);
+                return reject_claimed_h3_generation_message(job, violation);
+            }
+            if mold_inference::is_inference_cancelled(&error) {
+                release_prepared(&mut prepared);
+                return reject_claimed_h3_generation_message(
+                    job,
+                    "MiniMax H3 generation cancelled".to_string(),
+                );
+            }
+            if is_cuda_oom(&error) {
+                let synchronized = synchronize_after_oom(worker);
+                let message = if synchronized {
+                    release_prepared(&mut prepared);
+                    cuda_oom_user_message_with_plan(
+                        worker,
+                        &model_name,
+                        Some("minimax-h3"),
+                        Some(&job.request),
+                        job.execution_plan.as_ref().map(|plan| &plan.engine_paths),
+                        Some(prepared_facts.predicted_device_peak_bytes),
+                    )
+                    .0
+                } else {
+                    fatal_cuda_user_message(&model_name)
+                };
+                return reject_claimed_h3_generation_message(job, message);
+            }
+            release_prepared(&mut prepared);
+            record_failure(worker);
+            reject_claimed_h3_generation_message(
+                job,
+                format!("generation error: {}", clean_error_message(&error)),
+            )
+        }
+        Ok(Ok(output)) => {
+            release_prepared(&mut prepared);
+            if let Some(violation) = allocation_violation.lock().unwrap().take() {
+                return reject_claimed_h3_generation_message(job, violation);
+            }
+            if allocation_commits.load(Ordering::SeqCst) != 1 {
+                return reject_claimed_h3_generation_message(
+                    job,
+                    "MiniMax H3 runtime returned without one allocation commit".to_string(),
+                );
+            }
+            finish_claimed_h3_success(worker, job, scope_facts, &prepared_facts, output)
+        }
+    }
+}
+
+#[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+fn validate_h3_prepared_attempt_facts(
+    scope: crate::h3_attempt::H3AttemptScopeFacts<'_>,
+    prepared: &crate::h3_private_bridge::H3PreparedAttemptFacts,
+) -> anyhow::Result<()> {
+    #[cfg(feature = "h3-private-uat")]
+    if !scope.matches_private_run_binding(
+        &prepared.work_identity_sha256,
+        &prepared.cancellation_scope_identity_sha256,
+        prepared.memory_ledger_sequence,
+    ) {
+        anyhow::bail!("MiniMax H3 prepared attempt changed its owner run binding")
+    }
+    let digests = [
+        prepared.execution_identity_sha256.as_str(),
+        prepared.prepared_attempt_identity_sha256.as_str(),
+        prepared.target_budget_identity_sha256.as_str(),
+        prepared.component_set_identity_sha256.as_str(),
+        prepared.admission_evidence_identity_sha256.as_str(),
+        prepared.artifact_qualification_identity_sha256.as_str(),
+        prepared.runtime_qualification_identity_sha256.as_str(),
+        prepared.work_identity_sha256.as_str(),
+        prepared.cancellation_scope_identity_sha256.as_str(),
+        prepared.consumption_identity_sha256.as_str(),
+    ];
+    if prepared.device_id != scope.device_id()
+        || prepared.device_ordinal != scope.device_ordinal()
+        || prepared.execution_identity_sha256 != scope.execution_identity_sha256()
+        || prepared.prepared_attempt_identity_sha256 != scope.prepared_attempt_identity_sha256()
+        || prepared.target_budget_identity_sha256 != scope.target_budget_identity_sha256()
+        || prepared.component_set_identity_sha256 != scope.component_set_identity_sha256()
+        || prepared.predicted_device_peak_bytes != scope.predicted_device_peak_bytes()
+        || prepared.predicted_host_increment_bytes != scope.predicted_host_increment_bytes()
+        || prepared.predicted_device_peak_bytes == 0
+        || prepared.predicted_host_increment_bytes == 0
+        || prepared.memory_ledger_sequence == 0
+        || digests
+            .into_iter()
+            .any(|value| value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        anyhow::bail!("MiniMax H3 prepared attempt differs from the claimed owner scope")
+    }
+    Ok(())
+}
+
+#[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+fn finish_claimed_h3_success(
+    worker: &GpuWorker,
+    job: GpuJob,
+    scope: crate::h3_attempt::H3AttemptScopeFacts<'_>,
+    prepared: &crate::h3_private_bridge::H3PreparedAttemptFacts,
+    mut output: crate::h3_private_bridge::H3ClaimedRunOutput,
+) -> bool {
+    let echo = &output.identity_echo;
+    if echo.device_id != scope.device_id()
+        || echo.device_ordinal != scope.device_ordinal()
+        || echo.execution_identity_sha256 != scope.execution_identity_sha256()
+        || echo.prepared_attempt_identity_sha256 != scope.prepared_attempt_identity_sha256()
+        || echo.target_budget_identity_sha256 != scope.target_budget_identity_sha256()
+        || echo.component_set_identity_sha256 != scope.component_set_identity_sha256()
+        || echo.device_id != prepared.device_id
+        || echo.execution_identity_sha256 != prepared.execution_identity_sha256
+        || echo.prepared_attempt_identity_sha256 != prepared.prepared_attempt_identity_sha256
+        || echo.target_budget_identity_sha256 != prepared.target_budget_identity_sha256
+        || echo.component_set_identity_sha256 != prepared.component_set_identity_sha256
+        || echo.admission_evidence_identity_sha256 != prepared.admission_evidence_identity_sha256
+        || echo.artifact_qualification_identity_sha256
+            != prepared.artifact_qualification_identity_sha256
+        || echo.runtime_qualification_identity_sha256
+            != prepared.runtime_qualification_identity_sha256
+        || echo.consumption_identity_sha256 != prepared.consumption_identity_sha256
+        || echo.media != prepared.media
+    {
+        return reject_claimed_h3_generation_message(
+            job,
+            crate::h3_attempt::H3AttemptError::IdentityMismatch.to_string(),
+        );
+    }
+    if validate_h3_publication_contract(worker, &job, prepared, &output).is_err() {
+        return reject_claimed_h3_generation_message(
+            job,
+            "generation error: MiniMax H3 terminal output differs from the frozen publication contract"
+                .to_string(),
+        );
+    }
+    output.response.gpu = Some(worker.gpu.ordinal);
+    let video = output
+        .response
+        .video
+        .as_ref()
+        .expect("validated H3 video output");
+    let image = ImageData {
+        data: video.thumbnail.clone(),
+        format: OutputFormat::Png,
+        width: video.width,
+        height: video.height,
+        index: 0,
+    };
+    worker.consecutive_failures.store(0, Ordering::SeqCst);
+    crate::gpu_pool::clear_model_cuda_oom(&job.model);
+    finish_generation_success(job, output.response, image, None);
+    true
+}
+
+#[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+fn validate_h3_publication_contract(
+    worker: &GpuWorker,
+    job: &GpuJob,
+    prepared: &crate::h3_private_bridge::H3PreparedAttemptFacts,
+    output: &crate::h3_private_bridge::H3ClaimedRunOutput,
+) -> anyhow::Result<()> {
+    let contract = &prepared.media;
+    let expected_mode = mold_core::minimax_h3::validate_request_contract(
+        &job.request,
+        mold_core::minimax_h3::Task::Fl2va,
+    )
+    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+    let expected_seed = job
+        .request
+        .seed
+        .ok_or_else(|| anyhow::anyhow!("private H3 request has no frozen seed"))?;
+    let expected_frames = job
+        .request
+        .frames
+        .unwrap_or(mold_core::minimax_h3::MIN_FRAMES);
+    let expected_duration_ms = u64::from(expected_frames)
+        .checked_mul(1_000)
+        .ok_or_else(|| anyhow::anyhow!("private H3 duration overflow"))?
+        / u64::from(mold_core::minimax_h3::FIXED_FPS);
+    let echo = &output.identity_echo;
+    let video = output
+        .response
+        .video
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("private H3 response has no video"))?;
+    if contract.canonical_model != mold_core::minimax_h3::FL2VA_COMFY
+        || contract.task != mold_core::minimax_h3::Task::Fl2va
+        || contract.mode != expected_mode
+        || contract.seed != expected_seed
+        || contract.width != job.request.width
+        || contract.height != job.request.height
+        || contract.frames != expected_frames
+        || contract.fps != mold_core::minimax_h3::FIXED_FPS
+        || echo.device_ordinal != worker.gpu.ordinal
+        || echo.media != *contract
+        || echo.duration_ms != expected_duration_ms
+        || echo.audio_sample_rate != mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ
+        || u32::from(echo.audio_channels) != mold_core::minimax_h3::AUDIO_CHANNELS
+        || !echo.synchronized_audio_video
+        || echo.pipeline_provenance_sha256.len() != 64
+        || !echo
+            .pipeline_provenance_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || !output.response.images.is_empty()
+        || output.response.audio.is_some()
+        || output.response.model != mold_core::minimax_h3::FL2VA_COMFY
+        || output.response.seed_used != expected_seed
+        || video.data.is_empty()
+        || video.thumbnail.is_empty()
+        || video.format != OutputFormat::Mp4
+        || video.width != contract.width
+        || video.height != contract.height
+        || video.frames != contract.frames
+        || video.fps != mold_core::minimax_h3::FIXED_FPS
+        || video.pipeline.is_some()
+        || video.pipeline_provenance_sha256.as_deref()
+            != Some(echo.pipeline_provenance_sha256.as_str())
+        || !video.has_audio
+        || video.duration_ms != Some(expected_duration_ms)
+        || video.audio_sample_rate != Some(mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ)
+        || video.audio_channels != Some(mold_core::minimax_h3::AUDIO_CHANNELS)
+    {
+        anyhow::bail!("private H3 terminal media provenance mismatch")
+    }
+    Ok(())
+}
+
+fn reject_claimed_h3_generation_message(job: GpuJob, error: String) -> bool {
     if let Some(progress_tx) = &job.progress_tx {
         let _ = progress_tx.send(SseMessage::Error(SseErrorEvent {
             message: error.clone(),
@@ -2728,6 +3213,10 @@ fn reject_claimed_h3_generation(job: GpuJob, error: crate::h3_attempt::H3Attempt
     }
     let _ = job.result_tx.send(Err(error));
     false
+}
+
+fn reject_claimed_h3_generation(job: GpuJob, error: crate::h3_attempt::H3AttemptError) -> bool {
+    reject_claimed_h3_generation_message(job, error.to_string())
 }
 
 enum GenerationEventSink<'a> {
@@ -3712,6 +4201,86 @@ pub(crate) fn planned_recheck_peak_bytes(
     learned_vram_envelope_bytes: u64,
 ) -> u64 {
     predicted_vram_peak_bytes.max(learned_vram_envelope_bytes)
+}
+
+/// Reclaim the ordinary retained-engine residency, then prove the exact
+/// private target peak against a post-drop driver sample immediately before
+/// the one-shot runtime can reach its first allocation checkpoint.
+///
+/// The private runtime does not use `ensure_model_ready`, so this is its
+/// equivalent physical-pressure fence. It never substitutes the legacy
+/// path-based estimator for the immutable inference-derived peaks. Releasing
+/// the owner-known active cache entry before sampling also avoids inventing
+/// reusable capacity from missing or zero process-attribution telemetry: the
+/// post-drop driver reading is the sole device-capacity authority.
+#[cfg(feature = "h3-private-uat")]
+pub(crate) fn prepare_private_h3_allocation_boundary(
+    worker: &GpuWorker,
+    model_name: &str,
+    predicted_device_peak_bytes: u64,
+    predicted_host_increment_bytes: u64,
+) -> Result<(u64, u64), crate::routes::ApiError> {
+    let unloaded = worker
+        .model_cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unload_active()
+        .is_some();
+    if unloaded {
+        worker.set_resident_model(None);
+    }
+    let available_device_bytes = device::post_drop_free_vram_bytes(worker.gpu.ordinal)
+        .map_err(|error| private_h3_memory_sample_error(worker, error))?;
+    let ram = crate::resources::ram_snapshot();
+    let available_host_bytes = ram
+        .available
+        .unwrap_or_else(|| ram.total.saturating_sub(ram.used));
+    validate_private_h3_physical_capacity(
+        model_name,
+        predicted_device_peak_bytes,
+        available_device_bytes,
+        predicted_host_increment_bytes,
+        available_host_bytes,
+    )?;
+    Ok((available_device_bytes, available_host_bytes))
+}
+
+#[cfg(any(test, feature = "h3-private-uat"))]
+fn private_h3_memory_sample_error(
+    worker: &GpuWorker,
+    error: device::DeviceMemoryError,
+) -> crate::routes::ApiError {
+    let fatal = error.is_fatal_cuda();
+    let api_error = device_memory_api_error(error);
+    if fatal {
+        quarantine_poisoned_worker(worker);
+        contain_worker_cache(worker);
+    }
+    api_error
+}
+
+#[cfg(any(test, feature = "h3-private-uat"))]
+fn validate_private_h3_physical_capacity(
+    model_name: &str,
+    predicted_device_peak_bytes: u64,
+    available_device_bytes: u64,
+    predicted_host_increment_bytes: u64,
+    available_host_bytes: u64,
+) -> Result<(), crate::routes::ApiError> {
+    crate::memory_preflight::check_planned_memory_budget(
+        model_name,
+        predicted_device_peak_bytes,
+        available_device_bytes,
+        crate::memory_preflight::rejection_suggestion(None),
+    )?;
+    if predicted_host_increment_bytes > available_host_bytes {
+        return Err(crate::routes::ApiError::insufficient_memory(format!(
+            "model '{model_name}' frozen private host-memory increment ~{:.1} GB no longer fits the current ~{:.1} GB physical host-memory budget; memory pressure changed after scheduler admission",
+            predicted_host_increment_bytes as f64 / 1_000_000_000.0,
+            available_host_bytes as f64 / 1_000_000_000.0,
+        )));
+    }
+    Ok(())
 }
 
 fn ensure_model_ready_sync_inner(
@@ -4729,6 +5298,23 @@ mod tests {
     #[test]
     fn claimed_h3_attempt_has_a_cache_free_execution_route() {
         let source = include_str!("gpu_worker.rs");
+        let owner_start = source
+            .find("fn process_owner_work(")
+            .expect("owner work handler");
+        let owner_end = source[owner_start..]
+            .find("\nfn process_legacy_owner_work(")
+            .map(|offset| owner_start + offset)
+            .expect("owner work handler boundary");
+        let owner = &source[owner_start..owner_end];
+        let prepare = owner
+            .find("h3_private_bridge::prepare_for_owner(")
+            .expect("private final-dispatch preparation");
+        let claim = owner
+            .find("h3_attempt::claim_generation_attempt(")
+            .expect("private owner attempt claim");
+        let dispatch = owner.find("process_job(").expect("generation dispatch");
+        assert!(prepare < claim && claim < dispatch);
+
         let process_start = source.find("fn process_job(").expect("generation handler");
         let process_end = source[process_start..]
             .find("\nenum GenerationEventSink")
@@ -4782,6 +5368,15 @@ mod tests {
     ) {
         let mut request = fake_upscale_job(Config::default(), "unused").request;
         request.model = mold_core::minimax_h3::FL2VA_COMFY.to_string();
+        request.width = mold_core::minimax_h3::DEFAULT_WIDTH;
+        request.height = mold_core::minimax_h3::DEFAULT_HEIGHT;
+        request.frames = Some(mold_core::minimax_h3::MIN_FRAMES);
+        request.fps = Some(mold_core::minimax_h3::FIXED_FPS);
+        request.seed = Some(7);
+        request.guidance = 0.0;
+        request.strength = 1.0;
+        request.output_format = Some(OutputFormat::Mp4);
+        request.enable_audio = Some(true);
         request.upscale_model = None;
         let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(2);
         let queue = QueueHandle::new(queue_tx);
@@ -4798,6 +5393,8 @@ mod tests {
                         result_tx: placeholder_tx,
                         output_dir: None,
                         batch_child: None,
+                        #[cfg(feature = "h3-private-uat")]
+                        h3_private_ingress_grant: None,
                     },
                     2,
                 )
@@ -4825,10 +5422,618 @@ mod tests {
             events: crate::events::EventBroadcaster::new(),
             execution_plan: None,
             prepared_execution_inputs: None,
+            h3_prepared_attempt: None,
             lease: None,
             batch_child: None,
         };
         (job, result_rx, progress_rx, queue_rx, queue, registry)
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum FakeH3Outcome {
+        Success,
+        NoAllocationCommit,
+        SwallowAllocationCommitFailure,
+        EmptyOutput,
+        TerminalIdentityMismatch,
+        Cancelled,
+        Error,
+        FatalCuda,
+        Panic,
+        PublicationFault(FakeH3PublicationFault),
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum FakeH3PublicationFault {
+        Model,
+        Seed,
+        Width,
+        Fps,
+        Duration,
+        AudioRate,
+        Synchronization,
+        Provenance,
+    }
+
+    struct FakeH3PreparedAttempt {
+        facts: crate::h3_private_bridge::H3PreparedAttemptFacts,
+        outcome: Option<FakeH3Outcome>,
+        runs: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for FakeH3PreparedAttempt {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl crate::h3_private_bridge::H3PreparedAttempt for FakeH3PreparedAttempt {
+        fn facts(&self) -> crate::h3_private_bridge::H3PreparedAttemptFacts {
+            self.facts.clone()
+        }
+
+        fn run_once(
+            &mut self,
+            scope: crate::h3_attempt::H3AttemptScope<'_>,
+            progress: &mut mold_inference::progress::ProgressReporter,
+            mut allocation_commit: crate::h3_private_bridge::H3AllocationCommit,
+        ) -> anyhow::Result<crate::h3_private_bridge::H3ClaimedRunOutput> {
+            scope.cancellation_token().checkpoint()?;
+            assert_eq!(self.runs.fetch_add(1, Ordering::SeqCst), 0);
+            progress.emit(mold_inference::ProgressEvent::StageStart {
+                name: "Private H3 fake runtime".to_string(),
+            });
+            let outcome = self
+                .outcome
+                .take()
+                .expect("a fake H3 attempt can only run once");
+            match outcome {
+                FakeH3Outcome::NoAllocationCommit => {}
+                FakeH3Outcome::SwallowAllocationCommitFailure => {
+                    let _ = allocation_commit.commit_once();
+                }
+                _ => allocation_commit.commit_once()?,
+            }
+            match outcome {
+                FakeH3Outcome::Success
+                | FakeH3Outcome::NoAllocationCommit
+                | FakeH3Outcome::SwallowAllocationCommitFailure => {
+                    Ok(fake_h3_output(&self.facts, true, false))
+                }
+                FakeH3Outcome::EmptyOutput => Ok(fake_h3_output(&self.facts, false, false)),
+                FakeH3Outcome::TerminalIdentityMismatch => {
+                    Ok(fake_h3_output(&self.facts, true, true))
+                }
+                FakeH3Outcome::Cancelled => {
+                    Err(anyhow::Error::new(mold_inference::InferenceCancelled))
+                }
+                FakeH3Outcome::Error => anyhow::bail!("synthetic private H3 failure"),
+                FakeH3Outcome::FatalCuda => {
+                    anyhow::bail!("CUDA_ERROR_ILLEGAL_ADDRESS: synthetic private H3 fault")
+                }
+                FakeH3Outcome::Panic => panic!("synthetic private H3 panic"),
+                FakeH3Outcome::PublicationFault(fault) => {
+                    let mut output = fake_h3_output(&self.facts, true, false);
+                    let video = output.response.video.as_mut().unwrap();
+                    match fault {
+                        FakeH3PublicationFault::Model => output.response.model = "other".into(),
+                        FakeH3PublicationFault::Seed => output.response.seed_used += 1,
+                        FakeH3PublicationFault::Width => video.width += 32,
+                        FakeH3PublicationFault::Fps => video.fps += 1,
+                        FakeH3PublicationFault::Duration => {
+                            video.duration_ms = video.duration_ms.map(|duration| duration + 1)
+                        }
+                        FakeH3PublicationFault::AudioRate => video.audio_sample_rate = Some(48_000),
+                        FakeH3PublicationFault::Synchronization => {
+                            output.identity_echo.synchronized_audio_video = false
+                        }
+                        FakeH3PublicationFault::Provenance => {
+                            video.pipeline_provenance_sha256 =
+                                Some(std::iter::repeat_n('e', 64).collect())
+                        }
+                    }
+                    Ok(output)
+                }
+            }
+        }
+    }
+
+    fn fake_h3_facts() -> crate::h3_private_bridge::H3PreparedAttemptFacts {
+        let identity = |byte: char| std::iter::repeat_n(byte, 64).collect::<String>();
+        crate::h3_private_bridge::H3PreparedAttemptFacts {
+            device_id: "cuda:0".to_string(),
+            device_ordinal: 0,
+            execution_identity_sha256: identity('a'),
+            prepared_attempt_identity_sha256: identity('b'),
+            target_budget_identity_sha256: identity('c'),
+            component_set_identity_sha256: identity('d'),
+            admission_evidence_identity_sha256: identity('e'),
+            artifact_qualification_identity_sha256: identity('f'),
+            runtime_qualification_identity_sha256: identity('1'),
+            work_identity_sha256: identity('2'),
+            cancellation_scope_identity_sha256: identity('3'),
+            memory_ledger_sequence: 23,
+            consumption_identity_sha256: identity('4'),
+            predicted_device_peak_bytes: 11_000_000_000,
+            predicted_host_increment_bytes: 2_000_000_000,
+            media: crate::h3_private_bridge::H3PreparedMediaContract {
+                canonical_model: mold_core::minimax_h3::FL2VA_COMFY.to_string(),
+                task: mold_core::minimax_h3::Task::Fl2va,
+                mode: mold_core::minimax_h3::Mode::TextToAudioVideo,
+                seed: 7,
+                width: mold_core::minimax_h3::DEFAULT_WIDTH,
+                height: mold_core::minimax_h3::DEFAULT_HEIGHT,
+                frames: mold_core::minimax_h3::MIN_FRAMES,
+                fps: mold_core::minimax_h3::FIXED_FPS,
+            },
+        }
+    }
+
+    fn fake_h3_output(
+        facts: &crate::h3_private_bridge::H3PreparedAttemptFacts,
+        complete: bool,
+        mismatched_echo: bool,
+    ) -> crate::h3_private_bridge::H3ClaimedRunOutput {
+        let video = complete.then(|| mold_core::VideoData {
+            data: vec![0, 0, 0, 24, b'f', b't', b'y', b'p'],
+            format: OutputFormat::Mp4,
+            width: facts.media.width,
+            height: facts.media.height,
+            frames: facts.media.frames,
+            fps: facts.media.fps,
+            pipeline: None,
+            pipeline_provenance_sha256: Some(std::iter::repeat_n('f', 64).collect()),
+            thumbnail: vec![0x89, b'P', b'N', b'G'],
+            gif_preview: Vec::new(),
+            has_audio: true,
+            duration_ms: Some(u64::from(facts.media.frames) * 1_000 / u64::from(facts.media.fps)),
+            audio_sample_rate: Some(mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ),
+            audio_channels: Some(mold_core::minimax_h3::AUDIO_CHANNELS),
+        });
+        crate::h3_private_bridge::H3ClaimedRunOutput {
+            response: GenerateResponse {
+                images: Vec::new(),
+                video,
+                audio: None,
+                generation_time_ms: 42,
+                model: mold_core::minimax_h3::FL2VA_COMFY.to_string(),
+                seed_used: 7,
+                gpu: None,
+            },
+            identity_echo: crate::h3_private_bridge::H3TerminalIdentityEcho {
+                device_id: facts.device_id.clone(),
+                device_ordinal: facts.device_ordinal,
+                execution_identity_sha256: facts.execution_identity_sha256.clone(),
+                prepared_attempt_identity_sha256: if mismatched_echo {
+                    std::iter::repeat_n('e', 64).collect()
+                } else {
+                    facts.prepared_attempt_identity_sha256.clone()
+                },
+                target_budget_identity_sha256: facts.target_budget_identity_sha256.clone(),
+                component_set_identity_sha256: facts.component_set_identity_sha256.clone(),
+                admission_evidence_identity_sha256: facts
+                    .admission_evidence_identity_sha256
+                    .clone(),
+                artifact_qualification_identity_sha256: facts
+                    .artifact_qualification_identity_sha256
+                    .clone(),
+                runtime_qualification_identity_sha256: facts
+                    .runtime_qualification_identity_sha256
+                    .clone(),
+                consumption_identity_sha256: facts.consumption_identity_sha256.clone(),
+                media: facts.media.clone(),
+                duration_ms: u64::from(facts.media.frames) * 1_000 / u64::from(facts.media.fps),
+                audio_sample_rate: mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ,
+                audio_channels: u16::try_from(mold_core::minimax_h3::AUDIO_CHANNELS).unwrap(),
+                synchronized_audio_video: true,
+                pipeline_provenance_sha256: std::iter::repeat_n('f', 64).collect(),
+            },
+        }
+    }
+
+    fn install_fake_h3_attempt(
+        job: &mut GpuJob,
+        outcome: FakeH3Outcome,
+    ) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        job.lease = Some(crate::scheduler::LeaseFence {
+            work_id: job.id.clone(),
+            device_id: "cuda:0".to_string(),
+            owner_epoch: 7,
+            state_version: 13,
+            plan_version: 17,
+            worker_generation: 11,
+            memory_sample_generation: 19,
+            memory_ledger_sequence: 23,
+        });
+        job.h3_prepared_attempt = Some(Box::new(FakeH3PreparedAttempt {
+            facts: fake_h3_facts(),
+            outcome: Some(outcome),
+            runs: Arc::clone(&runs),
+            drops: Arc::clone(&drops),
+        }));
+        (runs, drops)
+    }
+
+    fn run_fake_claimed_h3(
+        worker: &GpuWorker,
+        job: GpuJob,
+        scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+    ) -> Arc<AtomicUsize> {
+        let id = job.id.clone();
+        let (attempt, current, settlements) = crate::h3_attempt::generation_attempt_for_test(
+            &id,
+            mold_inference::InferenceCancellationToken::default(),
+        );
+        with_claimed_h3_generation_cleanup(job, |job| {
+            process_claimed_h3_generation_attempt(worker, job, scheduler_tx, attempt, current)
+        });
+        settlements
+    }
+
+    #[tokio::test]
+    async fn h3_claim_failure_consumes_the_owner_local_attempt_and_completes() {
+        let id = "claimed-h3-owner-local-claim-failure";
+        let (mut job, result_rx, _progress_rx, _queue_rx, queue, registry) =
+            claimed_h3_job_fixture(id).await;
+        let (_runs, drops) = install_fake_h3_attempt(&mut job, FakeH3Outcome::Success);
+        let fence = job
+            .lease
+            .clone()
+            .expect("fake attempt installs owner fence");
+
+        let outcome = complete_h3_claim_failure(
+            LeaseGrant {
+                fence,
+                work: OwnerWork::Generation(Box::new(job)),
+                retry: None,
+            },
+            "synthetic H3 claim failure".to_string(),
+        );
+
+        assert!(matches!(
+            outcome,
+            OwnerProcessOutcome::Completed {
+                successful: false,
+                chain_result: None,
+            }
+        ));
+        let error = match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("claim-failed H3 attempt unexpectedly completed"),
+        };
+        assert_eq!(error, "synthetic H3 claim failure");
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(queue.pending(), 1);
+        assert!(registry.snapshot().entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn claimed_h3_fake_success_commits_and_publishes_once_without_touching_cache() {
+        let id = "claimed-h3-fake-success";
+        let (mut job, result_rx, mut progress_rx, _queue_rx, queue, registry) =
+            claimed_h3_job_fixture(id).await;
+        let output = tempfile::tempdir().unwrap();
+        job.output_dir = Some(output.path().to_path_buf());
+        let (runs, drops) = install_fake_h3_attempt(&mut job, FakeH3Outcome::Success);
+        let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
+        let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let owner_worker = Arc::clone(&worker);
+        let owner_scheduler = scheduler_tx.clone();
+        let settlements =
+            std::thread::spawn(move || run_fake_claimed_h3(&owner_worker, job, &owner_scheduler))
+                .join()
+                .expect("fake H3 owner thread must not panic");
+        let result = result_rx.await.unwrap().expect("fake H3 success result");
+
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(settlements.load(Ordering::SeqCst), 1);
+        assert_eq!(queue.pending(), 1);
+        assert!(registry.snapshot().entries.is_empty());
+        assert_eq!(result.response.gpu, Some(0));
+        assert!(result
+            .response
+            .video
+            .as_ref()
+            .is_some_and(|video| { video.format == OutputFormat::Mp4 && video.has_audio }));
+        assert!(worker
+            .model_cache
+            .lock()
+            .unwrap()
+            .contains("cache-sentinel"));
+        assert!(worker.active_generation.read().unwrap().is_none());
+        assert_eq!(mold_inference::device::thread_vram_grant_bytes(), None);
+        assert!(matches!(
+            scheduler_rx.try_recv(),
+            Ok(crate::scheduler::WorkerEvent::AllocationCommitted { work_id, .. }) if work_id == id
+        ));
+        assert!(scheduler_rx.try_recv().is_err());
+        let mut saw_progress = false;
+        let mut saw_complete = false;
+        while let Ok(message) = progress_rx.try_recv() {
+            match message {
+                SseMessage::Progress(SseProgressEvent::StageStart { name })
+                    if name == "Private H3 fake runtime" =>
+                {
+                    saw_progress = true;
+                }
+                SseMessage::Complete(_) => saw_complete = true,
+                _ => {}
+            }
+        }
+        assert!(saw_progress && saw_complete);
+        let published = std::fs::read_dir(output.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "mp4"))
+            .count();
+        assert_eq!(published, 1);
+    }
+
+    #[tokio::test]
+    async fn claimed_h3_rejects_prepared_and_terminal_identity_mismatch_without_publication() {
+        for (id, terminal_mismatch) in [
+            ("claimed-h3-prepared-mismatch", false),
+            ("claimed-h3-terminal-mismatch", true),
+        ] {
+            let (mut job, result_rx, _progress_rx, _queue_rx, queue, registry) =
+                claimed_h3_job_fixture(id).await;
+            let output = tempfile::tempdir().unwrap();
+            job.output_dir = Some(output.path().to_path_buf());
+            let outcome = if terminal_mismatch {
+                FakeH3Outcome::TerminalIdentityMismatch
+            } else {
+                FakeH3Outcome::Success
+            };
+            let (runs, drops) = install_fake_h3_attempt(&mut job, outcome);
+            if !terminal_mismatch {
+                job.h3_prepared_attempt
+                    .as_mut()
+                    .expect("installed fake")
+                    .facts();
+                let fake = job.h3_prepared_attempt.take().expect("installed fake");
+                let mut facts = fake.facts();
+                facts.execution_identity_sha256 = std::iter::repeat_n('e', 64).collect();
+                job.h3_prepared_attempt = Some(Box::new(FakeH3PreparedAttempt {
+                    facts,
+                    outcome: Some(FakeH3Outcome::Success),
+                    runs: Arc::clone(&runs),
+                    drops: Arc::clone(&drops),
+                }));
+                drop(fake);
+            }
+            let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
+            let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            let settlements = run_fake_claimed_h3(&worker, job, &scheduler_tx);
+            let error = match result_rx.await.unwrap() {
+                Err(error) => error,
+                Ok(_) => panic!("identity-mismatched H3 attempt unexpectedly completed"),
+            };
+
+            assert!(error.contains("identity") || error.contains("owner scope"));
+            assert_eq!(runs.load(Ordering::SeqCst), usize::from(terminal_mismatch));
+            assert_eq!(settlements.load(Ordering::SeqCst), 1);
+            assert_eq!(queue.pending(), 1);
+            assert!(registry.snapshot().entries.is_empty());
+            assert!(worker
+                .model_cache
+                .lock()
+                .unwrap()
+                .contains("cache-sentinel"));
+            assert_eq!(
+                scheduler_rx.try_recv().is_ok(),
+                terminal_mismatch,
+                "only a runtime that passed prepared-fact validation may allocate"
+            );
+            assert_eq!(
+                std::fs::read_dir(output.path()).unwrap().count(),
+                0,
+                "identity failures must not publish partial gallery output"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn claimed_h3_rejects_cancel_error_missing_commit_and_empty_output_cleanly() {
+        for (id, outcome, expected) in [
+            (
+                "claimed-h3-runtime-cancelled",
+                FakeH3Outcome::Cancelled,
+                "cancelled",
+            ),
+            (
+                "claimed-h3-runtime-error",
+                FakeH3Outcome::Error,
+                "synthetic private H3 failure",
+            ),
+            (
+                "claimed-h3-no-allocation-commit",
+                FakeH3Outcome::NoAllocationCommit,
+                "without one allocation commit",
+            ),
+            (
+                "claimed-h3-empty-output",
+                FakeH3Outcome::EmptyOutput,
+                "frozen publication contract",
+            ),
+        ] {
+            let (mut job, result_rx, _progress_rx, _queue_rx, queue, registry) =
+                claimed_h3_job_fixture(id).await;
+            let output = tempfile::tempdir().unwrap();
+            job.output_dir = Some(output.path().to_path_buf());
+            let (runs, drops) = install_fake_h3_attempt(&mut job, outcome);
+            let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
+            let (scheduler_tx, _scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            let settlements = run_fake_claimed_h3(&worker, job, &scheduler_tx);
+            let error = match result_rx.await.unwrap() {
+                Err(error) => error,
+                Ok(_) => panic!("invalid fake H3 attempt unexpectedly completed"),
+            };
+
+            assert!(error.contains(expected), "unexpected error: {error}");
+            assert_eq!(runs.load(Ordering::SeqCst), 1);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(settlements.load(Ordering::SeqCst), 1);
+            assert_eq!(queue.pending(), 1);
+            assert!(registry.snapshot().entries.is_empty());
+            assert!(worker
+                .model_cache
+                .lock()
+                .unwrap()
+                .contains("cache-sentinel"));
+            assert!(worker.active_generation.read().unwrap().is_none());
+            assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn claimed_h3_requires_the_allocation_commit_to_reach_the_scheduler() {
+        let id = "claimed-h3-closed-scheduler";
+        let (mut job, result_rx, _progress_rx, _queue_rx, queue, registry) =
+            claimed_h3_job_fixture(id).await;
+        let output = tempfile::tempdir().unwrap();
+        job.output_dir = Some(output.path().to_path_buf());
+        let (runs, drops) = install_fake_h3_attempt(&mut job, FakeH3Outcome::Success);
+        let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
+        let (scheduler_tx, scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(scheduler_rx);
+
+        let settlements = run_fake_claimed_h3(&worker, job, &scheduler_tx);
+        let error = match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("H3 attempt completed without a scheduler allocation commit"),
+        };
+
+        assert!(error.contains("could not reach the scheduler"));
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(settlements.load(Ordering::SeqCst), 1);
+        assert_eq!(queue.pending(), 1);
+        assert!(registry.snapshot().entries.is_empty());
+        assert!(worker
+            .model_cache
+            .lock()
+            .unwrap()
+            .contains("cache-sentinel"));
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn claimed_h3_latches_a_swallowed_allocation_callback_failure() {
+        let id = "claimed-h3-swallowed-allocation-failure";
+        let (mut job, result_rx, _progress_rx, _queue_rx, queue, registry) =
+            claimed_h3_job_fixture(id).await;
+        let output = tempfile::tempdir().unwrap();
+        job.output_dir = Some(output.path().to_path_buf());
+        let (runs, drops) =
+            install_fake_h3_attempt(&mut job, FakeH3Outcome::SwallowAllocationCommitFailure);
+        let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
+        let (scheduler_tx, scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(scheduler_rx);
+
+        let settlements = run_fake_claimed_h3(&worker, job, &scheduler_tx);
+        let error = match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("H3 attempt published after swallowing a callback failure"),
+        };
+
+        assert!(error.contains("could not reach the scheduler"));
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(settlements.load(Ordering::SeqCst), 1);
+        assert_eq!(queue.pending(), 1);
+        assert!(registry.snapshot().entries.is_empty());
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn claimed_h3_publication_gate_rejects_every_independent_media_axis() {
+        for (index, fault) in [
+            FakeH3PublicationFault::Model,
+            FakeH3PublicationFault::Seed,
+            FakeH3PublicationFault::Width,
+            FakeH3PublicationFault::Fps,
+            FakeH3PublicationFault::Duration,
+            FakeH3PublicationFault::AudioRate,
+            FakeH3PublicationFault::Synchronization,
+            FakeH3PublicationFault::Provenance,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("claimed-h3-publication-fault-{index}");
+            let (mut job, result_rx, _progress_rx, _queue_rx, queue, registry) =
+                claimed_h3_job_fixture(&id).await;
+            let output = tempfile::tempdir().unwrap();
+            job.output_dir = Some(output.path().to_path_buf());
+            let (runs, drops) =
+                install_fake_h3_attempt(&mut job, FakeH3Outcome::PublicationFault(fault));
+            let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
+            let (scheduler_tx, _scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            let settlements = run_fake_claimed_h3(&worker, job, &scheduler_tx);
+            let error = match result_rx.await.unwrap() {
+                Err(error) => error,
+                Ok(_) => panic!("invalid H3 publication unexpectedly completed"),
+            };
+
+            assert!(error.contains("frozen publication contract"));
+            assert_eq!(runs.load(Ordering::SeqCst), 1);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(settlements.load(Ordering::SeqCst), 1);
+            assert_eq!(queue.pending(), 1);
+            assert!(registry.snapshot().entries.is_empty());
+            assert!(worker
+                .model_cache
+                .lock()
+                .unwrap()
+                .contains("cache-sentinel"));
+            assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn claimed_h3_fatal_and_panic_quarantine_without_partial_publication() {
+        for (id, outcome) in [
+            ("claimed-h3-fatal", FakeH3Outcome::FatalCuda),
+            ("claimed-h3-panic", FakeH3Outcome::Panic),
+        ] {
+            let (mut job, result_rx, _progress_rx, _queue_rx, queue, registry) =
+                claimed_h3_job_fixture(id).await;
+            let output = tempfile::tempdir().unwrap();
+            job.output_dir = Some(output.path().to_path_buf());
+            let (runs, drops) = install_fake_h3_attempt(&mut job, outcome);
+            let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
+            let (scheduler_tx, _scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            let settlements = run_fake_claimed_h3(&worker, job, &scheduler_tx);
+            let error = match result_rx.await.unwrap() {
+                Err(error) => error,
+                Ok(_) => panic!("quarantined fake H3 attempt unexpectedly completed"),
+            };
+
+            assert!(error.contains("quarantined"));
+            assert_eq!(runs.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                0,
+                "suspect CUDA-owned attempt must be retained for process teardown"
+            );
+            assert_eq!(settlements.load(Ordering::SeqCst), 1);
+            assert_eq!(queue.pending(), 1);
+            assert!(registry.snapshot().entries.is_empty());
+            assert!(worker.poisoned.load(Ordering::SeqCst));
+            assert!(worker.fatal_cuda_error.load(Ordering::SeqCst));
+            assert!(worker.model_cache.lock().unwrap().is_empty());
+            assert!(worker.active_generation.read().unwrap().is_none());
+            assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+        }
     }
 
     #[tokio::test]
@@ -4840,9 +6045,11 @@ mod tests {
             id,
             mold_inference::InferenceCancellationToken::default(),
         );
+        let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
+        let (scheduler_tx, _scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
 
         assert!(!with_claimed_h3_generation_cleanup(job, |job| {
-            process_claimed_h3_generation_attempt(job, attempt, current)
+            process_claimed_h3_generation_attempt(&worker, job, &scheduler_tx, attempt, current)
         }));
 
         let error = match result_rx.await.unwrap() {
@@ -4873,9 +6080,11 @@ mod tests {
         cancellation.cancel();
         let (attempt, current, settlements) =
             crate::h3_attempt::generation_attempt_for_test(id, cancellation);
+        let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
+        let (scheduler_tx, _scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
 
         assert!(!with_claimed_h3_generation_cleanup(job, |job| {
-            process_claimed_h3_generation_attempt(job, attempt, current)
+            process_claimed_h3_generation_attempt(&worker, job, &scheduler_tx, attempt, current)
         }));
 
         let error = match result_rx.await.unwrap() {
@@ -5774,6 +6983,7 @@ mod tests {
             events: crate::events::EventBroadcaster::new(),
             execution_plan: None,
             prepared_execution_inputs: None,
+            h3_prepared_attempt: None,
             lease: None,
             batch_child: None,
         }
@@ -6067,6 +7277,7 @@ mod tests {
                 events: crate::events::EventBroadcaster::new(),
                 execution_plan: None,
                 prepared_execution_inputs: None,
+                h3_prepared_attempt: None,
                 lease: Some(crate::scheduler::LeaseFence {
                     work_id: "stale".to_string(),
                     device_id: crate::scheduler::worker_device_id(&worker),
@@ -6927,6 +8138,7 @@ mod tests {
                 events: crate::events::EventBroadcaster::new(),
                 execution_plan: None,
                 prepared_execution_inputs: None,
+                h3_prepared_attempt: None,
                 lease: None,
                 batch_child: None,
             };
@@ -7057,6 +8269,7 @@ mod tests {
                     events: crate::events::EventBroadcaster::new(),
                     execution_plan: None,
                     prepared_execution_inputs: None,
+                    h3_prepared_attempt: None,
                     lease: None,
                     batch_child: None,
                 })),
@@ -7691,6 +8904,7 @@ mod tests {
                     events: crate::events::EventBroadcaster::new(),
                     execution_plan: Some(plan),
                     prepared_execution_inputs: None,
+                    h3_prepared_attempt: None,
                     lease: None,
                     batch_child: None,
                 })),
@@ -8226,6 +9440,8 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
+                    #[cfg(feature = "h3-private-uat")]
+                    h3_private_ingress_grant: None,
                 },
                 1,
             ))
@@ -8253,6 +9469,7 @@ mod tests {
                 events: crate::events::EventBroadcaster::new(),
                 execution_plan: None,
                 prepared_execution_inputs: None,
+                h3_prepared_attempt: None,
                 lease: Some(fence("generate", 3)),
                 batch_child: None,
             })
@@ -8401,6 +9618,8 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
+                    #[cfg(feature = "h3-private-uat")]
+                    h3_private_ingress_grant: None,
                 },
                 1,
             )
@@ -8432,6 +9651,7 @@ mod tests {
                 events: crate::events::EventBroadcaster::new(),
                 execution_plan: None,
                 prepared_execution_inputs: None,
+                h3_prepared_attempt: None,
                 lease: None,
                 batch_child: None,
             },
@@ -8491,6 +9711,8 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
+                    #[cfg(feature = "h3-private-uat")]
+                    h3_private_ingress_grant: None,
                 },
                 1,
             )
@@ -8522,6 +9744,7 @@ mod tests {
                     events: crate::events::EventBroadcaster::new(),
                     execution_plan: None,
                     prepared_execution_inputs: None,
+                    h3_prepared_attempt: None,
                     lease: None,
                     batch_child: None,
                 },
@@ -8559,6 +9782,8 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
+                    #[cfg(feature = "h3-private-uat")]
+                    h3_private_ingress_grant: None,
                 },
                 1,
             )
@@ -8588,6 +9813,7 @@ mod tests {
                     events: crate::events::EventBroadcaster::new(),
                     execution_plan: None,
                     prepared_execution_inputs: None,
+                    h3_prepared_attempt: None,
                     lease: None,
                     batch_child: None,
                 },
@@ -8996,6 +10222,8 @@ mod tests {
                     result_tx: dummy_tx,
                     output_dir: None,
                     batch_child: None,
+                    #[cfg(feature = "h3-private-uat")]
+                    h3_private_ingress_grant: None,
                 },
                 1,
             ))
@@ -9280,6 +10508,45 @@ mod tests {
             planned_recheck_peak_bytes(20_000_000_000, 12_000_000_000),
             20_000_000_000
         );
+    }
+
+    #[test]
+    fn private_h3_allocation_recheck_rejects_fresh_pressure_below_exact_peak() {
+        let error = validate_private_h3_physical_capacity(
+            "minimax-h3-private",
+            12_000_000_000,
+            11_999_999_999,
+            2_000_000_000,
+            64_000_000_000,
+        )
+        .expect_err("fresh device pressure below the frozen peak must reject");
+        assert!(error.error.contains("frozen execution plan peak"));
+
+        let error = validate_private_h3_physical_capacity(
+            "minimax-h3-private",
+            12_000_000_000,
+            24_000_000_000,
+            2_000_000_000,
+            1_999_999_999,
+        )
+        .expect_err("fresh host pressure below the frozen increment must reject");
+        assert!(error.error.contains("frozen private host-memory increment"));
+    }
+
+    #[test]
+    fn private_h3_fatal_memory_sample_quarantines_the_owner() {
+        let (worker, _worker_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+        let error = private_h3_memory_sample_error(
+            &worker,
+            mold_inference::device::DeviceMemoryError::FatalCuda {
+                operation: "private H3 post-drop sample",
+                message: "synthetic asynchronous fault".to_string(),
+            },
+        );
+
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+        assert!(worker.fatal_cuda_error.load(Ordering::SeqCst));
     }
 
     /// A regular (non-OOM) error must not trigger the OOM path.

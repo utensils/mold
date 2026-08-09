@@ -580,6 +580,9 @@ fn shim_build_response_and_cleanup(
         pipeline: output_metadata
             .as_ref()
             .and_then(|metadata| metadata.pipeline),
+        pipeline_provenance_sha256: output_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pipeline_provenance_sha256.clone()),
         thumbnail,
         gif_preview,
         has_audio: actual_format == OutputFormat::Mp4 && probe.has_audio,

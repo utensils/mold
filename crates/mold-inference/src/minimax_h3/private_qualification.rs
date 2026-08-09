@@ -245,6 +245,21 @@ pub fn qualify_private_artifacts(
     authorization_record: &Path,
     mut progress: impl FnMut(H3ArtifactHashProgress),
 ) -> Result<H3PrivateArtifactQualificationReport> {
+    qualify_private_artifacts_with_control(models_root, model, authorization_record, |event| {
+        progress(event);
+        Ok(())
+    })
+}
+
+/// Cancellable counterpart used by the singular private server attempt.
+/// Returning an error from `progress` stops before the next bounded artifact
+/// read, so preparation cannot outlive its scheduler cancellation scope.
+pub(crate) fn qualify_private_artifacts_with_control(
+    models_root: &Path,
+    model: &str,
+    authorization_record: &Path,
+    mut progress: impl FnMut(H3ArtifactHashProgress) -> Result<()>,
+) -> Result<H3PrivateArtifactQualificationReport> {
     let private_scope = validate_private_scope(models_root, authorization_record)?;
     let (manifest, task, published_transformer) = qualification_manifest(model)?;
     let root = private_scope.models_root.clone();
@@ -751,7 +766,7 @@ fn hash_exact_file(
     expected_sha: &str,
     verified_before: u64,
     total_bytes: u64,
-    progress: &mut impl FnMut(H3ArtifactHashProgress),
+    progress: &mut impl FnMut(H3ArtifactHashProgress) -> Result<()>,
 ) -> Result<(String, FileIdentity)> {
     let relative_path = portable_path(&artifact.relative_path)?;
     let before_path_metadata = fs::symlink_metadata(&artifact.canonical_path)
@@ -787,7 +802,7 @@ fn hash_exact_file(
         artifact_bytes_total: before.len,
         total_bytes_verified: verified_before,
         total_bytes,
-    });
+    })?;
     loop {
         let read = file
             .read(&mut buffer)
@@ -808,7 +823,7 @@ fn hash_exact_file(
             artifact_bytes_total: before.len,
             total_bytes_verified,
             total_bytes,
-        });
+        })?;
     }
     if artifact_bytes_verified != before.len {
         bail!("private H3 artifact {relative_path} changed length during hashing")

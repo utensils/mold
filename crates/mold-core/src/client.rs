@@ -305,6 +305,7 @@ impl MoldClient {
             frames: meta.frames,
             fps: meta.fps,
             pipeline: meta.pipeline,
+            pipeline_provenance_sha256: meta.pipeline_provenance_sha256,
             thumbnail: Vec::new(),
             gif_preview: Vec::new(),
             has_audio: meta.has_audio,
@@ -571,6 +572,9 @@ impl MoldClient {
                                 frames,
                                 fps,
                                 pipeline: complete.metadata.as_ref().and_then(|m| m.pipeline),
+                                pipeline_provenance_sha256: complete.metadata.as_ref().and_then(
+                                    |metadata| metadata.pipeline_provenance_sha256.clone(),
+                                ),
                                 thumbnail,
                                 gif_preview,
                                 has_audio: complete.video_has_audio,
@@ -719,6 +723,10 @@ impl MoldClient {
                             frames: complete.frames,
                             fps: complete.fps,
                             pipeline: complete.metadata.as_ref().and_then(|m| m.pipeline),
+                            pipeline_provenance_sha256: complete
+                                .metadata
+                                .as_ref()
+                                .and_then(|metadata| metadata.pipeline_provenance_sha256.clone()),
                             thumbnail,
                             gif_preview,
                             has_audio: complete.has_audio,
@@ -1377,6 +1385,7 @@ struct VideoMeta {
     width: Option<u32>,
     height: Option<u32>,
     pipeline: Option<crate::Ltx2PipelineMode>,
+    pipeline_provenance_sha256: Option<String>,
     has_audio: bool,
     duration_ms: Option<u64>,
     audio_sample_rate: Option<u32>,
@@ -1407,6 +1416,10 @@ fn parse_video_headers(headers: &reqwest::header::HeaderMap) -> Option<VideoMeta
         .get("x-mold-video-pipeline")
         .and_then(|v| v.to_str().ok())
         .and_then(|value| serde_json::from_value(serde_json::Value::String(value.into())).ok());
+    let pipeline_provenance_sha256 = headers
+        .get("x-mold-video-pipeline-provenance-sha256")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let has_audio = headers
         .get("x-mold-video-has-audio")
         .and_then(|v| v.to_str().ok())
@@ -1431,6 +1444,7 @@ fn parse_video_headers(headers: &reqwest::header::HeaderMap) -> Option<VideoMeta
         width,
         height,
         pipeline,
+        pipeline_provenance_sha256,
         has_audio,
         duration_ms,
         audio_sample_rate,

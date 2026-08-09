@@ -27,6 +27,19 @@ cuda = ["mold-inference/cuda", "nvml"]
 metal = ["mold-inference/metal"]
 expand = ["mold-inference/expand"]
 mp4 = ["mold-inference/mp4"]
+# Structural seam for opaque, one-shot H3 owner attempts. This compiles the
+# scheduler/server contract without making the private runtime runnable.
+h3-private-bridge = []
+# Developer-only runnable edge for the authenticated MiniMax H3 UAT runtime.
+# Keep CUDA, the reviewed attention kernel, and MP4 in this exact edge so an
+# incomplete private server binary cannot be built accidentally.
+h3-private-uat = [
+    "h3-private-bridge",
+    "mold-inference/h3-private-uat",
+    "mold-inference/h3-attention-rc",
+    "mp4",
+    "cuda",
+]
 webp = ["mold-inference/webp"]
 metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 mdns = ["dep:mdns-sd"]

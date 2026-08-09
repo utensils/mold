@@ -1528,6 +1528,7 @@ impl WanEngine {
                 // `pipeline` is LTX-2's provenance slot; Wan has no pipeline
                 // variants to record.
                 pipeline: None,
+                pipeline_provenance_sha256: None,
                 thumbnail,
                 gif_preview,
                 has_audio: false,

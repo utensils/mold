@@ -643,7 +643,7 @@ enum PreparationState {
 enum PreparationEvent {
     Ready {
         work_id: String,
-        prepared: PreparedGeneration,
+        prepared: Box<PreparedGeneration>,
     },
     Failed {
         work_id: String,
@@ -654,6 +654,7 @@ enum PreparationEvent {
 #[derive(Clone, Debug, Default)]
 struct PreparedGeneration {
     expanded_prompt: Option<String>,
+    resolved_seed: Option<u64>,
     execution_inputs: Option<crate::execution_plan::PreparedExecutionInputs>,
 }
 
@@ -663,9 +664,20 @@ struct PreparedGeneration {
 /// Keep all pre-stage output reduction here so that execution never exposes a
 /// preview whose later stages have not yet frozen and executed the same plans.
 fn compose_prepared_generation(pending: &mut PendingGeneration, prepared: PreparedGeneration) {
+    if let Some(seed) = prepared.resolved_seed {
+        pending.job.request.seed = Some(seed);
+    }
     if let Some(expanded_prompt) = prepared.expanded_prompt {
         pending.job.request.original_prompt = Some(pending.job.request.prompt.clone());
         pending.job.request.prompt = expanded_prompt;
+    }
+    #[cfg(feature = "h3-private-uat")]
+    if let Some(grant) = prepared
+        .execution_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.h3_private_ingress_grant.clone())
+    {
+        pending.job.h3_private_ingress_grant = Some(grant);
     }
     pending.prepared_inputs = prepared.execution_inputs;
 }
@@ -679,6 +691,7 @@ trait DependencyPreparer: Send + Sync {
         work_id: String,
         request: mold_core::GenerateRequest,
         progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+        context: crate::variant_dependencies::DependencyPreparationContext,
     ) -> PreparationFuture;
 }
 
@@ -691,6 +704,7 @@ impl DependencyPreparer for PostUpscalePreparer {
         work_id: String,
         request: mold_core::GenerateRequest,
         progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+        context: crate::variant_dependencies::DependencyPreparationContext,
     ) -> PreparationFuture {
         Box::pin(async move {
             crate::queue::ensure_post_upscale_model_downloaded(&state, &request, progress.as_ref())
@@ -700,11 +714,21 @@ impl DependencyPreparer for PostUpscalePreparer {
                 &work_id,
                 &request,
                 progress.as_ref(),
+                context,
             )
             .await?;
+            #[cfg(feature = "h3-private-uat")]
+            let resolved_seed = execution_inputs
+                .h3_private_admission_by_device
+                .values()
+                .next()
+                .map(mold_inference::H3PrivateFl2VaAdmissionEvidence::seed);
+            #[cfg(not(feature = "h3-private-uat"))]
+            let resolved_seed = None;
             if request.expand != Some(true) {
                 return Ok(PreparedGeneration {
                     expanded_prompt: None,
+                    resolved_seed,
                     execution_inputs: Some(execution_inputs),
                 });
             }
@@ -715,6 +739,7 @@ impl DependencyPreparer for PostUpscalePreparer {
                 // resolved before queue admission by the route.
                 return Ok(PreparedGeneration {
                     expanded_prompt: None,
+                    resolved_seed,
                     execution_inputs: Some(execution_inputs),
                 });
             }
@@ -787,6 +812,7 @@ impl DependencyPreparer for PostUpscalePreparer {
             }?;
             Ok(PreparedGeneration {
                 expanded_prompt: result.expanded.first().cloned(),
+                resolved_seed,
                 execution_inputs: Some(execution_inputs),
             })
         })
@@ -1549,13 +1575,22 @@ impl Coordinator {
             let state = self.state.clone();
             let request = pending.job.request.clone();
             let progress = pending.job.progress_tx.clone();
+            #[cfg(feature = "h3-private-uat")]
+            let context = crate::variant_dependencies::DependencyPreparationContext {
+                h3_private_ingress_grant: pending.job.h3_private_ingress_grant.clone(),
+            };
+            #[cfg(not(feature = "h3-private-uat"))]
+            let context = crate::variant_dependencies::DependencyPreparationContext::default();
             let preparer = self.preparer.clone();
             let tx = self.preparation_tx.clone();
             self.preparation_tasks.spawn(async move {
-                let event = match preparer.prepare(state, id.clone(), request, progress).await {
+                let event = match preparer
+                    .prepare(state, id.clone(), request, progress, context)
+                    .await
+                {
                     Ok(prepared) => PreparationEvent::Ready {
                         work_id: id,
-                        prepared,
+                        prepared: Box::new(prepared),
                     },
                     Err(error) => PreparationEvent::Failed { work_id: id, error },
                 };
@@ -1573,7 +1608,7 @@ impl Coordinator {
                 if pending.preparation != PreparationState::Preparing {
                     return;
                 }
-                compose_prepared_generation(pending, prepared);
+                compose_prepared_generation(pending, *prepared);
                 pending.preparation = PreparationState::Ready;
                 pending.preparation_refresh_observation = None;
                 if pending
@@ -5162,6 +5197,8 @@ fn gpu_job_from_generation(
         events: state.events.clone(),
         execution_plan,
         prepared_execution_inputs,
+        #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+        h3_prepared_attempt: None,
         lease: Some(lease),
         batch_child: job.batch_child,
     }
@@ -5174,6 +5211,10 @@ fn generation_and_prepared_from_gpu_job(
     Option<crate::execution_plan::PreparedExecutionInputs>,
 ) {
     let prepared = job.prepared_execution_inputs;
+    #[cfg(feature = "h3-private-uat")]
+    let h3_private_ingress_grant = prepared
+        .as_ref()
+        .and_then(|inputs| inputs.h3_private_ingress_grant.clone());
     (
         GenerationJob {
             id: job.id,
@@ -5184,6 +5225,8 @@ fn generation_and_prepared_from_gpu_job(
             result_tx: job.result_tx,
             output_dir: job.output_dir,
             batch_child: job.batch_child,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_ingress_grant,
         },
         prepared,
     )
@@ -6070,6 +6113,7 @@ mod tests {
             _work_id: String,
             _request: mold_core::GenerateRequest,
             _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+            _context: crate::variant_dependencies::DependencyPreparationContext,
         ) -> PreparationFuture {
             Box::pin(async { Ok(PreparedGeneration::default()) })
         }
@@ -6243,6 +6287,8 @@ mod tests {
                 result_tx,
                 output_dir: None,
                 batch_child: None,
+                #[cfg(feature = "h3-private-uat")]
+                h3_private_ingress_grant: None,
             },
             result_rx,
         )
@@ -6413,10 +6459,11 @@ mod tests {
         coordinator.handle_preparation_event(
             PreparationEvent::Ready {
                 work_id: "expanded".to_string(),
-                prepared: PreparedGeneration {
+                prepared: Box::new(PreparedGeneration {
                     expanded_prompt: Some("expanded prompt".to_string()),
+                    resolved_seed: None,
                     execution_inputs: None,
-                },
+                }),
             },
             &mut immediate,
         );
@@ -11175,6 +11222,7 @@ mod tests {
             _work_id: String,
             request: mold_core::GenerateRequest,
             _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+            _context: crate::variant_dependencies::DependencyPreparationContext,
         ) -> PreparationFuture {
             let release = self.release_blocked.clone();
             Box::pin(async move {

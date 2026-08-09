@@ -44,6 +44,22 @@ mod tests {
         serde_json::from_slice(&body).unwrap()
     }
 
+    #[cfg(feature = "h3-private-uat")]
+    fn private_h3_fl2va_body(batch_size: u32) -> serde_json::Value {
+        serde_json::json!({
+            "prompt": "private FL2VA route fence",
+            "model": mold_core::minimax_h3::FL2VA_COMFY,
+            "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+            "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+            "steps": mold_core::minimax_h3::DEFAULT_STEPS,
+            "guidance": 0.0,
+            "batch_size": batch_size,
+            "frames": mold_core::minimax_h3::MIN_FRAMES,
+            "fps": mold_core::minimax_h3::FIXED_FPS,
+            "output_format": "mp4"
+        })
+    }
+
     /// Extract and parse the JSON payload for the first named event in an SSE body.
     fn sse_json_event(body: &str, event_name: &str) -> serde_json::Value {
         let mut lines = body.lines();
@@ -931,6 +947,7 @@ mod tests {
             extend_video_path: None,
             extend_overlap_frames: None,
             pipeline: None,
+            pipeline_provenance_sha256: None,
             ic_lora_control: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -5997,6 +6014,77 @@ mod tests {
             .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
     }
 
+    #[cfg(feature = "h3-private-uat")]
+    #[tokio::test]
+    async fn private_h3_generation_requires_explicit_auth_before_queueing() {
+        let (state, mut queue_rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(private_h3_fl2va_body(1).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json_body(response).await["code"], "UNAUTHORIZED");
+        assert_eq!(state.job_registry.len(), 0);
+        assert!(queue_rx.try_recv().is_err());
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    #[tokio::test]
+    async fn private_h3_wrong_partition_is_rejected_before_queueing() {
+        let (state, mut queue_rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let mut request = Request::post("/api/generate")
+            .header("content-type", "application/json")
+            .body(Body::from(private_h3_fl2va_body(2).to_string()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(crate::auth::ApiKeyAuthenticated {
+                identity: "private-route-test".to_string(),
+            });
+        let response = app_with_state(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(response).await["code"],
+            crate::h3_private_bridge::H3_PRIVATE_PARTITION_REJECTED,
+        );
+        assert_eq!(state.job_registry.len(), 0);
+        assert!(queue_rx.try_recv().is_err());
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    #[tokio::test]
+    async fn private_h3_placement_preview_requires_explicit_auth() {
+        let state = AppState::for_tests();
+        let response = app_with_state(state)
+            .oneshot(
+                Request::post("/api/generate/placement-preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "request": private_h3_fl2va_body(1),
+                            "copies": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json_body(response).await["code"], "UNAUTHORIZED");
+    }
+
     #[tokio::test]
     async fn reference_upload_session_requires_explicit_auth_then_451s_before_staging() {
         let state = AppState::for_tests();
@@ -8288,6 +8376,7 @@ mod tests {
             extend_video_path: None,
             extend_overlap_frames: None,
             pipeline: None,
+            pipeline_provenance_sha256: None,
             ic_lora_control: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -9200,6 +9289,7 @@ mod tests {
             extend_video_path: None,
             extend_overlap_frames: None,
             pipeline: None,
+            pipeline_provenance_sha256: None,
             ic_lora_control: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -10484,6 +10574,7 @@ mod tests {
                 frames: 97,
                 fps: 24,
                 pipeline: Some(mold_core::Ltx2PipelineMode::TwoStageHq),
+                pipeline_provenance_sha256: None,
                 thumbnail: Vec::new(),
                 gif_preview: Vec::new(),
                 has_audio: true,

@@ -535,6 +535,10 @@ pub(crate) fn prepare_request(
     progress: &ProgressReporter,
     observer: &mut dyn H3PipelineObserver,
 ) -> Result<H3PreparedFl2VaRequest> {
+    // Keep endpoint decode/resize and prepared noise on the host side of the
+    // allocation fence. Every Candle tensor constructed by this path uses
+    // `Device::Cpu`; execution transfers happen only after CUDA allocation is
+    // committed by the private runner.
     let mut control = PipelineControl { progress, observer };
     control.checkpoint(H3PipelineEvent {
         phase: H3PipelinePhase::Validate,

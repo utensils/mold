@@ -230,6 +230,7 @@ mod tests {
                 frames: 25,
                 fps: 24,
                 pipeline: None,
+                pipeline_provenance_sha256: None,
                 thumbnail: vec![],
                 gif_preview: preview,
                 has_audio: false,
