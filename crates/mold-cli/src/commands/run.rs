@@ -367,6 +367,40 @@ fn manifest_source_image_contract(model: &str) -> Option<mold_core::SourceImageC
     mold_core::manifest::find_manifest(model).and_then(|manifest| manifest.defaults.source_image)
 }
 
+/// Resolve the checkpoint's source-image contract for the pre-dispatch check,
+/// like Discord's resolver but ordered for the CLI's one-shot lifetime: the
+/// on-disk manifest answers first (it is the same classification the server's
+/// admission gate consults for its own tiers, so consulting the server again
+/// would buy nothing), and only a model the manifest cannot classify — an
+/// installed `cv:`/`hf:` checkpoint — asks the server it is about to POST to
+/// for its advertised `/api/models[].source_image` (#806). The extra GET is
+/// therefore paid exactly when it can change the answer. Every failure —
+/// unreachable server, older server without the field, unknown model — keeps
+/// `None`, which enforces nothing; the engine stays the late authority.
+///
+/// Forced-local runs (`--local`) stay manifest-only by design: they must not
+/// gain a network dependency, so opaque local installs keep the engine's own
+/// error there. That gap is deliberate.
+async fn resolve_source_image_contract(
+    model: &str,
+    host: Option<&str>,
+    local: bool,
+) -> Option<mold_core::SourceImageCapability> {
+    if let Some(capability) = manifest_source_image_contract(model) {
+        return Some(capability);
+    }
+    if local {
+        return None;
+    }
+    let client = crate::control::client_for_host(host);
+    let models = client.list_models_extended().await.ok()?;
+    let resolved = mold_core::manifest::resolve_model_name(model);
+    models
+        .iter()
+        .find(|entry| entry.info.name == model || entry.info.name == resolved)
+        .and_then(|entry| entry.source_image)
+}
+
 fn parse_pipeline(value: Option<Ltx2PipelineArg>) -> Option<Ltx2PipelineMode> {
     value.map(|value| match value {
         Ltx2PipelineArg::OneStage => Ltx2PipelineMode::OneStage,
@@ -981,11 +1015,13 @@ pub async fn run(
     // costs nothing here and minutes on the server. Every flag that can carry
     // a source frame counts, so a boundary-image run is never mistaken for
     // text-to-video — withholding the check is recoverable at admission,
-    // rejecting a satisfied contract is not.
+    // rejecting a satisfied contract is not. Manifest tiers answer from disk;
+    // installed cv:/hf: checkpoints consult the target server's advertised
+    // contract on remote-capable runs (#806).
     if let Some(message) = source_image_contract_error(
         Some(family.as_str()),
         &model,
-        manifest_source_image_contract(&model),
+        resolve_source_image_contract(&model, host.as_deref(), local).await,
         !image.is_empty() || !keyframe.is_empty() || first_frame.is_some() || last_frame.is_some(),
     ) {
         anyhow::bail!(message);

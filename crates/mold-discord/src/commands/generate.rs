@@ -261,17 +261,43 @@ pub struct BuildParams<'a> {
     pub retake_range: Option<TimeRange>,
 }
 
-/// Resolve Discord's human-readable duration sugar onto the selected model's
-/// concrete frame grid. Explicit `frames` remains the advanced escape hatch;
-/// it is deliberately not normalized here so the server can reject mistakes
-/// rather than silently changing a precise request.
+/// Concrete video timing plus an optional user-facing disclosure. `notice`
+/// is `Some` exactly when the requested value was substituted (a raw frame
+/// count snapped onto the model's advertised grid) — a substitution is always
+/// reported to the user, never silent (#806).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedTiming {
+    frames: Option<u32>,
+    fps: Option<u32>,
+    notice: Option<String>,
+}
+
+impl ResolvedTiming {
+    fn new(frames: Option<u32>, fps: Option<u32>) -> Self {
+        Self {
+            frames,
+            fps,
+            notice: None,
+        }
+    }
+}
+
+/// Resolve Discord's human-readable duration sugar — and a raw `frames`
+/// count — onto the selected model's concrete frame grid. Both inputs go
+/// through the same snap-and-cap machinery driven by the advertised
+/// `frame_step`/`frame_offset`/`max_frames` (family fallbacks for older
+/// servers), so an off-grid `frames: 46` on wan's `4n+1` grid becomes 45 with
+/// a disclosed substitution instead of a late server rejection. MiniMax H3
+/// keeps its raw frame count: its `17n+5` grid is enforced by its own
+/// authoring contract and the server's admission, which reject rather than
+/// substitute.
 fn resolve_video_timing(
     family: Option<&str>,
     defaults: Option<&mold_core::ModelDefaults>,
     frames: Option<u32>,
     fps: Option<u32>,
     duration_seconds: Option<f64>,
-) -> Result<(Option<u32>, Option<u32>), String> {
+) -> Result<ResolvedTiming, String> {
     if frames.is_some() && duration_seconds.is_some() {
         return Err("Use either duration or frames, not both.".to_string());
     }
@@ -280,7 +306,7 @@ fn resolve_video_timing(
         if duration_seconds.is_some() {
             return Err("Duration is only available for a recognized video model.".to_string());
         }
-        return Ok((frames, fps));
+        return Ok(ResolvedTiming::new(frames, fps));
     };
 
     let is_h3 = mold_core::minimax_h3::is_family(family);
@@ -301,32 +327,10 @@ fn resolve_video_timing(
         return Err("Video FPS must be at least 1.".to_string());
     }
 
-    let Some(seconds) = duration_seconds else {
-        let resolved_frames = frames
-            .or_else(|| defaults.and_then(|value| value.default_frames))
-            .unwrap_or(25);
-        return Ok((Some(resolved_frames), Some(resolved_fps)));
-    };
-    if !seconds.is_finite() || seconds <= 0.0 {
-        return Err("Duration must be a positive number of seconds.".to_string());
-    }
-    if is_h3 && seconds < f64::from(mold_core::minimax_h3::MIN_DURATION_SECONDS) {
-        return Err(format!(
-            "MiniMax H3 duration must be at least {} seconds.",
-            mold_core::minimax_h3::MIN_DURATION_SECONDS
-        ));
-    }
-
+    // The advertised grid and ceiling both request paths resolve against.
     let max_runtime_seconds = defaults
         .and_then(|value| value.max_runtime_seconds)
         .or_else(|| mold_core::validation::max_runtime_seconds_for_family(family));
-    if max_runtime_seconds.is_some_and(|maximum| seconds > f64::from(maximum)) {
-        return Err(format!(
-            "Duration for this model cannot exceed {} seconds.",
-            max_runtime_seconds.unwrap_or_default()
-        ));
-    }
-
     let step = defaults
         .and_then(|value| value.frame_step)
         .or_else(|| mold_core::validation::frame_step_for_family(family))
@@ -337,25 +341,7 @@ fn resolve_video_timing(
         .or_else(|| mold_core::validation::frame_offset_for_family(family))
         .unwrap_or(1)
         .max(1);
-    let requested_frames = seconds * f64::from(resolved_fps);
-    if requested_frames > f64::from(u32::MAX) {
-        return Err("Duration is too large.".to_string());
-    }
-    let frames_on_grid = if requested_frames <= f64::from(offset) {
-        offset
-    } else {
-        (((requested_frames - f64::from(offset)) / f64::from(step)).round() as u32)
-            .saturating_mul(step)
-            .saturating_add(offset)
-    };
     let min_frames = mold_core::validation::min_frames_for_family(family).unwrap_or(offset);
-    if frames_on_grid < min_frames {
-        return Err(format!(
-            "Duration for this model must be at least {:.1} seconds.",
-            f64::from(min_frames) / f64::from(resolved_fps)
-        ));
-    }
-
     let max_frames = if let Some(runtime_seconds) = max_runtime_seconds {
         let raw = runtime_seconds
             .saturating_mul(resolved_fps)
@@ -379,6 +365,73 @@ fn resolve_video_timing(
     } else {
         max_frames - ((max_frames - offset) % step)
     };
+    let snap_to_grid = |requested: f64| -> u32 {
+        if requested <= f64::from(offset) {
+            offset
+        } else {
+            (((requested - f64::from(offset)) / f64::from(step)).round() as u32)
+                .saturating_mul(step)
+                .saturating_add(offset)
+        }
+    };
+
+    let Some(seconds) = duration_seconds else {
+        let resolved_frames = frames
+            .or_else(|| defaults.and_then(|value| value.default_frames))
+            .unwrap_or(25);
+        if is_h3 || frames.is_none() {
+            // Model defaults are already on-grid; H3's stricter contract
+            // rejects rather than substitutes.
+            return Ok(ResolvedTiming::new(
+                Some(resolved_frames),
+                Some(resolved_fps),
+            ));
+        }
+        let snapped = snap_to_grid(f64::from(resolved_frames)).max(min_frames);
+        if snapped > max_frames_on_grid {
+            return Err(format!(
+                "Frames for this model cannot exceed {max_frames_on_grid} at {resolved_fps} FPS."
+            ));
+        }
+        let notice = (snapped != resolved_frames).then(|| {
+            format!(
+                "Adjusted frames from {resolved_frames} to {snapped} — this model renders on a \
+                 {step}n+{offset} frame grid."
+            )
+        });
+        return Ok(ResolvedTiming {
+            frames: Some(snapped),
+            fps: Some(resolved_fps),
+            notice,
+        });
+    };
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Err("Duration must be a positive number of seconds.".to_string());
+    }
+    if is_h3 && seconds < f64::from(mold_core::minimax_h3::MIN_DURATION_SECONDS) {
+        return Err(format!(
+            "MiniMax H3 duration must be at least {} seconds.",
+            mold_core::minimax_h3::MIN_DURATION_SECONDS
+        ));
+    }
+    if max_runtime_seconds.is_some_and(|maximum| seconds > f64::from(maximum)) {
+        return Err(format!(
+            "Duration for this model cannot exceed {} seconds.",
+            max_runtime_seconds.unwrap_or_default()
+        ));
+    }
+
+    let requested_frames = seconds * f64::from(resolved_fps);
+    if requested_frames > f64::from(u32::MAX) {
+        return Err("Duration is too large.".to_string());
+    }
+    let frames_on_grid = snap_to_grid(requested_frames);
+    if frames_on_grid < min_frames {
+        return Err(format!(
+            "Duration for this model must be at least {:.1} seconds.",
+            f64::from(min_frames) / f64::from(resolved_fps)
+        ));
+    }
     if frames_on_grid > max_frames_on_grid {
         return Err(format!(
             "Duration is too long for this model at {resolved_fps} FPS (maximum {:.1} seconds).",
@@ -386,7 +439,29 @@ fn resolve_video_timing(
         ));
     }
 
-    Ok((Some(frames_on_grid), Some(resolved_fps)))
+    Ok(ResolvedTiming::new(
+        Some(frames_on_grid),
+        Some(resolved_fps),
+    ))
+}
+
+/// Pre-dispatch floor for wan TI2V first/last-frame conditioning, mirroring
+/// the server's admission rule and the CLI's `--last-image` check: TI2V pins
+/// both endpoints in latent space (4x temporal stride), so below nine pixel
+/// frames nothing remains to denoise. Applies only to the two-keyframe
+/// endpoint layout on `wan22-ti2v-5b`; opaque `cv:`/`hf:` installs keep the
+/// engine's own check, exactly like admission.
+fn ti2v_endpoint_floor_error(model: &str, keyframe_count: usize, frames: u32) -> Option<String> {
+    (keyframe_count == 2
+        && mold_core::manifest::resolve_model_name(model).starts_with("wan22-ti2v-5b")
+        && frames < mold_core::validation::WAN_TI2V_FLF_MIN_FRAMES)
+        .then(|| {
+            format!(
+                "wan22-ti2v-5b first/last-frame conditioning needs at least {} frames — shorter \
+                 clips leave no latent frames to denoise between the pinned endpoints.",
+                mold_core::validation::WAN_TI2V_FLF_MIN_FRAMES
+            )
+        })
 }
 
 /// Map the `/generate` `negative_prompt` option onto the wire tri-state.
@@ -809,9 +884,8 @@ pub async fn generate(
     >,
     #[description = "Video container (MP4 default, GIF for easier sharing) — video models only"]
     video_format: Option<VideoFormat>,
-    #[description = "Number of video frames (video models only; LTX prefers 8n+1)"] frames: Option<
-        u32,
-    >,
+    #[description = "Number of video frames (video models only; snapped to the model's frame grid)"]
+    frames: Option<u32>,
     #[description = "Video duration in seconds (simple alternative to frames; video models only)"]
     duration: Option<f64>,
     #[description = "Video FPS (video models only; uses the model default)"] fps: Option<u32>,
@@ -833,12 +907,11 @@ pub async fn generate(
     #[description = "MP4 source for LTX-2 retake"] source_video: Option<serenity::Attachment>,
     #[description = "Retake start time in seconds"] retake_start: Option<f64>,
     #[description = "Retake end time in seconds"] retake_end: Option<f64>,
-    #[description = "First image for LTX-2 keyframe interpolation"] keyframe_1: Option<
+    #[description = "First keyframe image (LTX-2 interpolation; wan first/last-frame)"] keyframe_1: Option<
         serenity::Attachment,
     >,
-    #[description = "Second image for LTX-2 keyframe interpolation"] keyframe_2: Option<
-        serenity::Attachment,
-    >,
+    #[description = "Second keyframe image (LTX-2 interpolation; wan last frame)"]
+    keyframe_2: Option<serenity::Attachment>,
     #[description = "Optional third image for LTX-2 keyframe interpolation"] keyframe_3: Option<
         serenity::Attachment,
     >,
@@ -1018,15 +1091,34 @@ pub async fn generate(
         return Ok(());
     }
 
-    let (resolved_frames, resolved_fps) =
-        match resolve_video_timing(family, model_defaults, frames, fps, duration) {
-            Ok(timing) => timing,
-            Err(message) => {
-                ctx.data().quotas.refund(user_id);
-                handler::send_error(ctx, &message).await?;
-                return Ok(());
-            }
-        };
+    let timing = match resolve_video_timing(family, model_defaults, frames, fps, duration) {
+        Ok(timing) => timing,
+        Err(message) => {
+            ctx.data().quotas.refund(user_id);
+            handler::send_error(ctx, &message).await?;
+            return Ok(());
+        }
+    };
+    let (resolved_frames, resolved_fps) = (timing.frames, timing.fps);
+    if let Some(notice) = timing.notice {
+        // Disclose the substitution before generation starts; a failed
+        // followup must not abort the render the user asked for.
+        let _ = ctx
+            .send(poise::CreateReply::default().content(notice))
+            .await;
+    }
+    // The TI2V endpoint floor mirrors server admission (#806): reject before
+    // the keyframe downloads and the queue slot, like the CLI's --last-image
+    // path does.
+    if let Some(message) = ti2v_endpoint_floor_error(
+        &model_name,
+        keyframe_attachments.len(),
+        resolved_frames.unwrap_or(25),
+    ) {
+        ctx.data().quotas.refund(user_id);
+        handler::send_error(ctx, &message).await?;
+        return Ok(());
+    }
 
     let prepared_references = if reference_attachments.is_empty() {
         None
@@ -1482,16 +1574,104 @@ mod tests {
 
         assert_eq!(
             resolve_video_timing(Some("ltx2"), Some(&defs), None, None, Some(10.0)).unwrap(),
-            (Some(241), Some(24))
+            ResolvedTiming::new(Some(241), Some(24))
         );
         assert_eq!(
             resolve_video_timing(Some("ltx2"), Some(&defs), None, None, Some(20.0)).unwrap(),
-            (Some(481), Some(24))
+            ResolvedTiming::new(Some(481), Some(24))
         );
         assert_eq!(
             resolve_video_timing(Some("ltx2"), Some(&defs), None, Some(30), Some(10.0)).unwrap(),
-            (Some(297), Some(30))
+            ResolvedTiming::new(Some(297), Some(30))
         );
+    }
+
+    /// #806: a raw `frames` value routes through the same snap-and-cap
+    /// machinery as duration, on the model's advertised grid — wan's `4n+1`
+    /// here — and a substitution is disclosed via `notice`, never silent.
+    #[test]
+    fn explicit_frames_snap_to_the_advertised_grid_with_disclosure() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/wan/surface-parity-v1.json"
+        )))
+        .expect("fixture parses");
+        let step = fixture["frame_grid"]["step"].as_u64().unwrap() as u32;
+        let offset = fixture["frame_grid"]["offset"].as_u64().unwrap() as u32;
+        assert_eq!((step, offset), (4, 1), "fixture pins wan's 4n+1 grid");
+
+        let defs = mold_core::ModelDefaults {
+            default_frames: Some(81),
+            default_fps: Some(16),
+            frame_step: Some(step),
+            frame_offset: Some(offset),
+            max_frames: Some(257),
+            ..defaults()
+        };
+
+        // 45 = 4*11+1 is already on-grid: unchanged, no notice.
+        let on_grid = resolve_video_timing(Some("wan"), Some(&defs), Some(45), None, None).unwrap();
+        assert_eq!(on_grid, ResolvedTiming::new(Some(45), Some(16)));
+
+        // 46 is off-grid: snapped to 45 with a disclosed substitution.
+        let snapped = resolve_video_timing(Some("wan"), Some(&defs), Some(46), None, None).unwrap();
+        assert_eq!(snapped.frames, Some(45));
+        assert_eq!(snapped.fps, Some(16));
+        let notice = snapped.notice.expect("substitution must be disclosed");
+        assert!(notice.contains("46") && notice.contains("45"), "{notice}");
+        assert!(notice.contains("4n+1"), "{notice}");
+
+        // Above the model ceiling the request errors, mirroring duration.
+        let too_long =
+            resolve_video_timing(Some("wan"), Some(&defs), Some(100_000), None, None).unwrap_err();
+        assert!(too_long.contains("cannot exceed"), "{too_long}");
+
+        // A valid ltx2 frame count is unchanged with no notice.
+        let ltx_defs = mold_core::ModelDefaults {
+            default_frames: Some(97),
+            default_fps: Some(24),
+            max_runtime_seconds: Some(20),
+            max_frames_absolute: Some(604),
+            frame_step: Some(8),
+            ..defaults()
+        };
+        assert_eq!(
+            resolve_video_timing(Some("ltx2"), Some(&ltx_defs), Some(97), None, None).unwrap(),
+            ResolvedTiming::new(Some(97), Some(24))
+        );
+
+        // Non-video families keep the raw pass-through.
+        assert_eq!(
+            resolve_video_timing(Some("flux"), None, Some(46), None, None).unwrap(),
+            ResolvedTiming::new(Some(46), None)
+        );
+    }
+
+    /// #806: Discord enforces the wan TI2V first/last-frame floor before
+    /// dispatch, mirroring server admission and the CLI's `--last-image`
+    /// check, pinned to the shared fixture.
+    #[test]
+    fn ti2v_endpoint_floor_matches_the_shared_surface_parity_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/wan/surface-parity-v1.json"
+        )))
+        .expect("fixture parses");
+        let floor = fixture["first_last_frame"]["ti2v_min_frames"]
+            .as_u64()
+            .unwrap() as u32;
+        let model = fixture["first_last_frame"]["ti2v_model_prefix"]
+            .as_str()
+            .unwrap();
+
+        let message = ti2v_endpoint_floor_error(model, 2, floor - 1)
+            .expect("below the floor must be refused");
+        assert!(message.contains(&floor.to_string()), "{message}");
+        assert!(ti2v_endpoint_floor_error(model, 2, floor).is_none());
+        // Only the two-keyframe endpoint layout on TI2V gets the floor.
+        assert!(ti2v_endpoint_floor_error(model, 3, floor - 1).is_none());
+        assert!(ti2v_endpoint_floor_error("wan22-i2v-a14b:q8", 2, floor - 1).is_none());
+        assert!(ti2v_endpoint_floor_error("ltx-2-19b-distilled:fp8", 2, floor - 1).is_none());
     }
 
     #[test]
@@ -1515,7 +1695,7 @@ mod tests {
                 Some(5.0),
             )
             .unwrap(),
-            (Some(124), Some(24))
+            ResolvedTiming::new(Some(124), Some(24))
         );
         assert_eq!(
             resolve_video_timing(
@@ -1526,7 +1706,7 @@ mod tests {
                 Some(15.0),
             )
             .unwrap(),
-            (Some(362), Some(24))
+            ResolvedTiming::new(Some(362), Some(24))
         );
         assert_eq!(
             resolve_video_timing(
@@ -2173,10 +2353,9 @@ mod tests {
     fn wan_duration_resolves_onto_its_own_four_frame_grid() {
         // No model defaults: the resolver falls back to the shared Rust
         // helpers, which is the path a bot with a stale model cache takes.
-        let (frames, fps) =
-            resolve_video_timing(Some("wan"), None, None, Some(16), Some(3.0)).unwrap();
-        let frames = frames.expect("wan is a video family");
-        assert_eq!(fps, Some(16));
+        let timing = resolve_video_timing(Some("wan"), None, None, Some(16), Some(3.0)).unwrap();
+        let frames = timing.frames.expect("wan is a video family");
+        assert_eq!(timing.fps, Some(16));
         // 3s x 16fps = 48 -> the nearest 4k+1 value. An 8k+1 grid would have
         // produced 49 here, which the server rejects for wan.
         assert_eq!(frames, 49);

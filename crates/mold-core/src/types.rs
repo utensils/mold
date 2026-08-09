@@ -1407,12 +1407,27 @@ impl GenerateRequest {
         }
         self.output_format = Some(match family {
             Some("wan") if self.frames == Some(1) => OutputFormat::Png,
-            Some("ltx2") | Some("ltx-video") | Some("wan") | Some("minimax-h3")
-            | Some("minimax_h3") | Some("minimaxh3") => OutputFormat::Mp4,
+            Some(family) if family_output_defaults_to_mp4(family) => OutputFormat::Mp4,
             _ => OutputFormat::Png,
         });
         self
     }
+}
+
+/// Whether an unset output format on this family defaults to MP4.
+///
+/// This is the single family-policy authority behind
+/// [`GenerateRequest::normalise_output_format`] and the CLI's client-side
+/// container default (`mold run` resolves the container before dispatch so
+/// local saves and `--output` extensions agree with what the server would
+/// pick). The CLI additionally degrades wan/ltx-video to APNG in builds
+/// without the `mp4` feature — that build-time concern stays on the CLI side;
+/// the family policy itself lives here so the two cannot drift (#806).
+pub fn family_output_defaults_to_mp4(family: &str) -> bool {
+    matches!(
+        family,
+        "ltx2" | "ltx-video" | "wan" | "minimax-h3" | "minimax_h3" | "minimaxh3"
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

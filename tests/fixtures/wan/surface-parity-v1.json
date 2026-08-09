@@ -1,0 +1,42 @@
+{
+  "schema": "mold.wan.surface-parity.v1",
+  "comment": "Shared Wan cross-surface capability expectations (#806). Rust tests in mold-core, mold-ai (CLI), mold-ai-discord, and mold-ai-tui, plus the TS test studio/lib/wanSurfaceParity.test.ts, all read this file so a drift in any surface's Wan presentation or request semantics fails CI. Additive: new capability domains (e.g. #783 sequence rows) join as new top-level keys without touching existing ones.",
+  "family": "wan",
+  "family_label": "Wan Video",
+  "frame_grid": {
+    "step": 4,
+    "offset": 1,
+    "comment": "Valid frame counts are 4k+1. Surfaces that accept a raw frame count snap onto this grid and disclose the substitution; they never submit an off-grid value."
+  },
+  "container_default": {
+    "unset_multi_frame": "mp4",
+    "wan_single_frame": "png",
+    "cli_minimal_build_fallback": "apng",
+    "mp4_default_families": [
+      "ltx2",
+      "ltx-video",
+      "wan",
+      "minimax-h3",
+      "minimax_h3",
+      "minimaxh3"
+    ],
+    "comment": "Server policy (GenerateRequest::normalise_output_format): an unset output format on these families defaults to MP4; a single-frame wan render is a still (#798) and stays PNG. The CLI mirrors this in mp4-enabled release builds and truthfully degrades to APNG for families whose MP4 encoder is behind the `mp4` feature in minimal builds."
+  },
+  "first_last_frame": {
+    "ti2v_model_prefix": "wan22-ti2v-5b",
+    "ti2v_min_frames": 9,
+    "comment": "TI2V pins both endpoints in latent space (4x temporal stride); below nine pixel frames nothing remains to denoise. CLI, Discord, studio, and server admission all enforce this floor before dispatch."
+  },
+  "recipe": {
+    "max_distill_strength": 4,
+    "distill_tier_models": [
+      "wan22-t2v-a14b:q4",
+      "wan22-t2v-a14b:q5",
+      "wan22-i2v-a14b:q4",
+      "wan22-i2v-a14b:q5"
+    ],
+    "non_distill_models": ["wan22-t2v-a14b:q8", "wan21-t2v-1.3b:bf16"],
+    "solvers": ["default", "uni-pc", "euler", "dpm-pp"],
+    "comment": "Distill strengths are (0, 4], offered only on the Lightning tiers; the solver row cycles wan's flow solvers (wire: the existing scheduler slot), never the SD UNet schedulers."
+  }
+}
