@@ -536,6 +536,9 @@ pub(crate) struct WanLoraBackend {
     /// Prefix the checkpoint puts on its keys (`model.diffusion_model.` for the
     /// shipped Comfy-Org repacks, empty for bare exports).
     prefix: String,
+    /// Whether the checkpoint stores diffusers key names (#803), in which
+    /// case lookups translate while adapter registry names stay canonical.
+    diffusers_names: bool,
     registry: WanLoraRegistry,
 }
 
@@ -545,12 +548,14 @@ impl WanLoraBackend {
     pub unsafe fn new(
         paths: &[std::path::PathBuf],
         prefix: String,
+        diffusers_names: bool,
         registry: WanLoraRegistry,
     ) -> candle_core::Result<Self> {
         let st = unsafe { MmapedSafetensors::multi(paths) }?;
         Ok(Self {
             st,
             prefix,
+            diffusers_names,
             registry,
         })
     }
@@ -574,7 +579,7 @@ impl candle_nn::var_builder::SimpleBackend for WanLoraBackend {
         dtype: DType,
         device: &Device,
     ) -> candle_core::Result<Tensor> {
-        let raw = format!("{}{name}", self.prefix);
+        let raw = self.checkpoint_key(name);
         let tensor = self.st.load(&raw, device)?;
         let tensor = if tensor.dtype() == dtype {
             tensor
@@ -585,7 +590,24 @@ impl candle_nn::var_builder::SimpleBackend for WanLoraBackend {
     }
 
     fn contains_tensor(&self, name: &str) -> bool {
-        self.st.get(&format!("{}{name}", self.prefix)).is_ok()
+        self.st.get(&self.checkpoint_key(name)).is_ok()
+    }
+}
+
+impl WanLoraBackend {
+    /// The key this checkpoint actually stores `name` under.
+    ///
+    /// Adapter registry names stay canonical (original layout) — only the
+    /// checkpoint lookup is translated — so a diffusers-layout checkpoint
+    /// takes the same adapters as a native one instead of failing
+    /// `ensure_lora_targets_present` on names it does carry (#803).
+    fn checkpoint_key(&self, name: &str) -> String {
+        if self.diffusers_names {
+            let renamed = crate::wan::model::transformer::original_to_diffusers(name);
+            let name = renamed.as_deref().unwrap_or(name);
+            return format!("{}{name}", self.prefix);
+        }
+        format!("{}{name}", self.prefix)
     }
 }
 

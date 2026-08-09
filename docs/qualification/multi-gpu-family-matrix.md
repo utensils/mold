@@ -72,7 +72,7 @@ SD1.5, SDXL, and SD3.
 | `qwen-image-edit` | runtime qualification | `scripts/qwen-edit-parity-smoke.sh`, explicit source-edit CUDA smoke |
 | `ltx-video` | runtime qualification | `scripts/regression-matrix.sh`, video and independent-chain cases |
 | `ltx2` | runtime qualification | `scripts/regression-matrix.sh`, video/source/audio/durable-chain cases |
-| `wan` | runtime qualification | `scripts/regression-matrix.sh`, text-to-video cases (no hardware campaign recorded yet) |
+| `wan` | runtime qualification | `scripts/regression-matrix.sh`, text-to-video, image-to-video, first/last-frame, and single-frame-still cases across every installed tier (no hardware campaign recorded yet) |
 | `wuerstchen` | runtime qualification | `scripts/regression-matrix.sh`, installed-family base/source cases |
 
 These are executable owners, not a claim that every case passed on the current

@@ -842,6 +842,28 @@ fn specialized_pipeline(
     Ok(has_audio.then_some(Ltx2PipelineMode::A2Vid))
 }
 
+/// The `pipeline` a request should carry, given the family it resolved to.
+///
+/// `specialized_pipeline` runs before the family is known and speaks LTX-2:
+/// two keyframe attachments derive `Ltx2PipelineMode::Keyframe`. Wan takes
+/// the same two attachments as its first/last-frame pair but carries them in
+/// `keyframes` with NO pipeline — core validation accepts a pipeline only for
+/// LTX-2, so forwarding the derived mode made every wan endpoint request 422
+/// after passing Discord's own checks (#806). An explicitly chosen pipeline
+/// is left untouched: the server names that rejection itself.
+fn pipeline_for_request(
+    family: Option<&str>,
+    specialized: Option<Ltx2PipelineMode>,
+    explicit: Option<PipelineChoice>,
+) -> Option<Ltx2PipelineMode> {
+    let derived = if family == Some("wan") {
+        None
+    } else {
+        specialized
+    };
+    derived.or_else(|| explicit.map(PipelineChoice::to_mode))
+}
+
 fn build_keyframes(images: Vec<Vec<u8>>, frames: u32) -> Vec<KeyframeCondition> {
     let last_frame = frames.saturating_sub(1);
     let denominator = u32::try_from(images.len().saturating_sub(1))
@@ -1243,7 +1265,7 @@ pub async fn generate(
         strength,
         video_format,
         audio,
-        pipeline: specialized.or_else(|| pipeline.map(PipelineChoice::to_mode)),
+        pipeline: pipeline_for_request(family, specialized, pipeline),
         audio_file: audio_bytes,
         source_video: video_bytes,
         keyframes,
@@ -2007,6 +2029,25 @@ mod tests {
             specialized_pipeline(false, false, false, None, None, 2).unwrap(),
             Some(Ltx2PipelineMode::Keyframe)
         );
+        // #806: wan's first/last-frame pair rides `keyframes` alone. The
+        // LTX-2 keyframe mode derived before the family was known must not
+        // reach the request, or core validation rejects every wan endpoint
+        // render (a pipeline is LTX-2-only there).
+        assert_eq!(
+            pipeline_for_request(Some("wan"), Some(Ltx2PipelineMode::Keyframe), None),
+            None
+        );
+        assert_eq!(
+            pipeline_for_request(Some("ltx2"), Some(Ltx2PipelineMode::Keyframe), None),
+            Some(Ltx2PipelineMode::Keyframe)
+        );
+        // An explicit choice is forwarded unchanged on any family; the
+        // server owns that rejection.
+        assert_eq!(
+            pipeline_for_request(Some("wan"), None, Some(PipelineChoice::TwoStage)),
+            Some(Ltx2PipelineMode::TwoStage)
+        );
+
         assert!(specialized_pipeline(false, true, true, Some(0.0), Some(1.0), 0).is_err());
         assert!(specialized_pipeline(false, false, true, Some(0.0), None, 0).is_err());
         assert!(specialized_pipeline(false, false, false, None, None, 1).is_err());
