@@ -24,16 +24,22 @@ directory, ControlNet, LoRA, upscaler, or nested component below any root
 remains gated, and every proposed `MOLD_HOME` must independently pass the
 storage qualification gate.
 
-As of 2026-08-07, `/Volumes/ExternalStorage` is operationally excluded. Mount
-metadata remained readable and reported a mounted APFS volume with about 966
-GiB available, but time-bounded directory enumeration did not complete; an
-earlier bounded create/fsync/read/checksum/delete probe and later filesystem
-commands also did not complete. Nominal mount, capacity, and SMART metadata do
-not override that failure. Do not enumerate, write, remount, or repair it as
-part of H3 work. No H3 bytes were read from or written to the volume. A separate
-owner must authorize storage recovery, and a fresh clean probe must pass before
-the volume can be considered for any Mold UAT. Storage recovery would not
-change the H3 authorization gate.
+The earlier operational exclusion of `/Volumes/ExternalStorage` was superseded
+on 2026-08-08 after the maintainer explicitly selected it for private H3 UAT and
+a fresh qualification campaign completed successfully. The isolated root is
+`/Volumes/ExternalStorage/mold/uat-h3`; every directory is owner-only mode 0700,
+and model and evidence files are mode 0600. It currently retains about 760 GiB
+free.
+
+That root completed revision-pinned downloads and repeated verification for 50
+official payloads totaling 144,028,152,581 bytes at `bfc8ed0` and 17 practical
+Comfy payloads totaling 42,482,090,318 bytes at `eb8a161`. Size and SHA-256
+checks matched every expected payload, no partial files remained, and repeat
+dry runs reported zero missing files. The canonical private `MOLD_HOME` is
+`/Volumes/ExternalStorage/mold/uat-h3/mold-home`; authorization evidence and its
+validated external record live below the sibling owner-only `compliance`
+directory. This storage qualification permits only the private activity defined
+below and does not change any public H3 authorization or release gate.
 
 ## Authorized private qualification scope
 
@@ -86,6 +92,7 @@ not the private correspondence itself.
 | Last review            | 2026-08-08                                                                                                                                                                                               |
 | License revision       | `bfc8ed0353f5a9733be73e6b2c98ec0948195b86`; LICENSE SHA-256 `59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44`                                                                         |
 | Authorization evidence | Maintainer attestation that MiniMax authorized H3 integration with Mold; corroborating image SHA-256 `8cd4d6e52cff34d7d39721ebab13b8c1187aa87aafc1c4ae2a16609186f22f1d`; direct grant retained privately |
+| Qualification root     | Owner-only `/Volumes/ExternalStorage/mold/uat-h3`; validated external authorization record under its `compliance` directory; no evidence or model payload committed                                            |
 | Permitted artifacts    | Revision-pinned official and Comfy H3 artifacts downloaded directly to the private qualification root; private benign outputs and conformance evidence                                                    |
 | Permitted users        | Project maintainer operating authorized private host only                                                                                                                                               |
 | Prohibited scope       | Third-party access; public/hosted product activation; distribution or redistribution; public weights, headers, outputs, fixtures, manifests, URLs, or release capabilities                               |
