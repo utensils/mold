@@ -521,6 +521,31 @@ require_text docs/qualification/minimax-h3.md \
   '--authorization-record' \
   "the private artifact qualifier runbook omits its external authorization record"
 
+# Ref2VA may share the one-shot owner protocol, but it must retain a distinct
+# runtime qualification, ordered-reference authority, and publication fence.
+# Until a reviewed campaign lands, production ingress remains closed.
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'pub const fn reviewed_h3_private_runtime_available_for_task(task: Task) -> bool {' \
+  "private H3 runtime availability is not scoped to an exact task"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'Task::Ref2va => false,' \
+  "Ref2VA can inherit authority without its own reviewed runtime qualification"
+require_text crates/mold-server/src/h3_private_bridge.rs \
+  'b"ordered-heterogeneous-references"' \
+  "the private ingress partition does not bind ordered Ref2VA conditioning"
+require_text crates/mold-server/src/h3_private_bridge.rs \
+  'pub(crate) reference_fingerprint_sha256: Option<String>' \
+  "the one-shot owner contract omits target-duration reference order identity"
+require_text crates/mold-server/src/h3_private_bridge.rs \
+  'pub(crate) resolved_reference_fingerprint_sha256: Option<String>' \
+  "the one-shot owner contract omits resolved reference artifact identity"
+require_text crates/mold-server/src/gpu_worker.rs \
+  'durable_reference_fingerprint != contract.reference_fingerprint_sha256' \
+  "terminal publication does not cross-check durable Ref2VA order metadata"
+require_text crates/mold-server/src/h3_attempt.rs \
+  'mold_core::minimax_h3::Task::Ref2va => {' \
+  "the one-shot attempt fence does not validate the Ref2VA task partition"
+
 scratch_dir="$(mktemp -d)"
 trap 'rm -rf "$scratch_dir"' EXIT
 ordinary_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=omitted'

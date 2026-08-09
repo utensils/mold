@@ -1335,7 +1335,7 @@ fn resolve_private_h3_execution_plans(
         )
     })?;
     grant
-        .validate_for_request(request)
+        .validate_bound_request(request)
         .map_err(ExecutionPlanError::PreparedInputsStale)?;
     if prepared
         .h3_private_admission_by_device
@@ -1725,7 +1725,7 @@ fn validate_private_h3_before_cuda(
         )
     })?;
     grant
-        .validate_for_request(request)
+        .validate_bound_request(request)
         .map_err(ExecutionPlanError::PlanInvalidated)?;
     let evidence = prepared
         .h3_private_admission_by_device
