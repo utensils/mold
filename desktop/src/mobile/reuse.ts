@@ -14,6 +14,7 @@ import {
 import { applyMetadataToForm, type GenerateForm } from "../lib/generateForm";
 import { emptyGuidanceOverrides } from "@studio/lib/guidanceOverrides";
 import { emptyWanRecipe } from "@studio/lib/wanRecipe";
+import { canonicalMinimaxH3ModelName } from "@studio/lib/minimaxH3Authoring";
 
 /** The clip rail a sequence print reloads, plus what it could not give back. */
 export interface MobileSequenceReuse {
@@ -29,6 +30,9 @@ export interface MobileGalleryReuseResult {
   substitutedModel: boolean;
   /** Non-null only for a print stitched from a sequence (`metadata.chain`). */
   sequence: MobileSequenceReuse | null;
+  /** Present when durable metadata claims a sequence for a model partition
+   * that cannot safely be reinterpreted as a sequence-capable checkpoint. */
+  sequenceUnsupportedReason?: string;
 }
 
 /**
@@ -48,20 +52,55 @@ export function applyMobileGalleryMetadata(
 ): MobileGalleryReuseResult {
   const plan = planSequenceReuse(metadata);
   const oneShotPrompt = form.prompt;
-  const originalModelInstalled = models.some((model) => model.name === metadata.model);
+  const canonicalRecordedModel = canonicalMinimaxH3ModelName(metadata.model);
+  const installedRecordedModel = models.find(
+    (model) =>
+      model.name === metadata.model ||
+      (canonicalRecordedModel !== null &&
+        canonicalMinimaxH3ModelName(model.name) === canonicalRecordedModel),
+  );
+  const originalModelInstalled = installedRecordedModel !== undefined;
+  // Every released H3 identity binds both task and weight layout. If its exact
+  // checkpoint is not installed, preserve that unavailable selection so the
+  // existing missing-model recovery can repair it; substituting any other
+  // installed model could change the task or quantized/official layout.
+  const preserveMissingH3 = !originalModelInstalled && canonicalRecordedModel !== null;
+
+  // H3 is one-shot-only. A malformed or future durable snapshot must not turn
+  // an H3 chain into an unrelated installed sequence model merely because the
+  // original exact checkpoint is absent. Leave the form untouched and give
+  // the caller a concrete recovery error instead.
+  if (plan && canonicalRecordedModel !== null) {
+    return {
+      modelName: canonicalRecordedModel,
+      substitutedModel: false,
+      sequence: null,
+      sequenceUnsupportedReason:
+        "This print records a MiniMax H3 checkpoint, which cannot render a clip sequence.",
+    };
+  }
   // A sequence must fall back to a SEQUENCE-capable model; the first installed
   // model could be an image model the clip rail can never render.
   const candidates = plan ? modelsForOutput(models, "sequence") : models;
   const fallbackModel =
     candidates.find((model) => model.name === form.model) ?? candidates[0] ?? models[0];
-  const mobileMetadata =
-    originalModelInstalled || !fallbackModel
-      ? metadata
-      : { ...metadata, model: fallbackModel.name };
+  const mobileMetadata = installedRecordedModel
+    ? { ...metadata, model: installedRecordedModel.name }
+    : preserveMissingH3
+      ? { ...metadata, model: canonicalRecordedModel ?? metadata.model }
+      : !fallbackModel
+        ? metadata
+        : { ...metadata, model: fallbackModel.name };
 
   applyMetadataToForm(form, mobileMetadata, models);
 
-  if (!originalModelInstalled && fallbackModel) {
+  if (preserveMissingH3) {
+    form.model = mobileMetadata.model;
+    form.family = "minimax-h3";
+  }
+
+  const substitutedModel = !originalModelInstalled && !preserveMissingH3 && !!fallbackModel;
+  if (substitutedModel) {
     // Adapters and auxiliary models are host/model artifacts, not portable
     // print settings. Replaying them against a fallback can fail outright or,
     // worse, produce a result with unrelated weights.
@@ -107,7 +146,7 @@ export function applyMobileGalleryMetadata(
 
   return {
     modelName: form.model,
-    substitutedModel: !originalModelInstalled && !!fallbackModel,
+    substitutedModel,
     sequence,
   };
 }

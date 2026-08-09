@@ -371,8 +371,13 @@ impl ReferenceUploadStore {
         &self,
         identity: &str,
         instance_id: &str,
-        payload: ReferenceUploadSessionRequest,
+        mut payload: ReferenceUploadSessionRequest,
     ) -> Result<ReferenceUploadSessionResponse, ApiError> {
+        // Session storage and every scope digest must bind the same explicit
+        // partition identity that generation preparation will queue later.
+        // Keep this defensive normalization inside the store as well as the
+        // HTTP ingress so internal callers cannot mint alias-scoped sessions.
+        minimax_h3::canonicalize_request_model(&mut payload.request);
         self.purge_expired().await;
         let references = payload.request.references.as_deref().ok_or_else(|| {
             ApiError::structured(
@@ -1809,9 +1814,10 @@ fn authenticated_identity(
 pub(crate) async fn create_reference_upload_session(
     State(state): State<AppState>,
     authenticated: Option<Extension<ApiKeyAuthenticated>>,
-    Json(payload): Json<ReferenceUploadSessionRequest>,
+    Json(mut payload): Json<ReferenceUploadSessionRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let identity = authenticated_identity(authenticated)?;
+    minimax_h3::canonicalize_request_model(&mut payload.request);
     if payload.request.batch_size > 1 {
         return Err(ApiError::with_code(
             "MiniMax H3 references do not support durable server batches yet",
@@ -2142,6 +2148,45 @@ mod tests {
             audio_sample_rate: Some(44_100),
             audio_channels: Some(2),
         }
+    }
+
+    #[tokio::test]
+    async fn upload_session_scope_and_storage_use_canonical_h3_partition() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReferenceUploadStore::at(dir.path().join("cache"));
+        let descriptor = png_reference(
+            GenerationReferenceAuthority::Descriptor,
+            Some("11".repeat(32)),
+        );
+        let mut alias_request = request(descriptor);
+        alias_request.model = "MiniMax_H3_Ref2VA".into();
+        let mut canonical_request = alias_request.clone();
+        assert!(minimax_h3::canonicalize_request_model(
+            &mut canonical_request
+        ));
+
+        let session = store
+            .create_session(
+                "auth-a",
+                "instance-a",
+                ReferenceUploadSessionRequest {
+                    request: alias_request,
+                    upload_references: vec![1],
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            session.request_scope_sha256,
+            request_scope_sha256(&canonical_request).unwrap()
+        );
+        let session_digest = store.session_digest(&session.session_handle);
+        let inner = store.inner.lock().await;
+        assert_eq!(
+            inner.sessions[&session_digest].request.model,
+            minimax_h3::REF2VA_COMFY
+        );
     }
 
     #[tokio::test]

@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { GenerationReference } from "./generationReferences";
 import {
   MINIMAX_H3_FIXED_FPS,
+  MINIMAX_H3_REF2VA_COMFY,
   MINIMAX_H3_RESYNTHESIS_GUIDANCE,
+  appendMinimaxH3GalleryImageReference,
+  canonicalMinimaxH3ModelName,
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Family,
   isMinimaxH3Identity,
@@ -16,6 +19,7 @@ import {
   minimaxH3TaskForModel,
   moveMinimaxH3Reference,
   serializeMinimaxH3Authoring,
+  setMinimaxH3GalleryImageFirstFrame,
 } from "./minimaxH3Authoring";
 
 const image = (name: string): GenerationReference => ({
@@ -67,6 +71,118 @@ describe("MiniMax H3 Studio authority", () => {
     expect(minimaxH3TaskForModel("hf:opaque")).toBeNull();
     expect(isMinimaxH3Identity(null, "minimax_h3_ref2va")).toBe(true);
     expect(isMinimaxH3Identity(null, "hf:opaque")).toBe(false);
+    expect(isMinimaxH3Identity(null, "minimax-h3-ref2va:future")).toBe(true);
+    expect(canonicalMinimaxH3ModelName(" MiniMax_H3_Ref2VA ")).toBe(
+      MINIMAX_H3_REF2VA_COMFY,
+    );
+    expect(canonicalMinimaxH3ModelName("minimax-h3-ref2va:future")).toBeNull();
+  });
+
+  it.each([
+    ["MiniMax_H3", "minimax-h3-fl2va:comfy-pruned-int8"],
+    ["MiniMax_H3_Ref2VA", "minimax-h3-ref2va:comfy-pruned-int8"],
+    ["MiniMax_H3_FL2VA:OFFICIAL_BF16", "minimax-h3-fl2va:official-bf16"],
+    [
+      "minimax-h3-ref2va:comfy-pruned-int8",
+      "minimax-h3-ref2va:comfy-pruned-int8",
+    ],
+  ])("canonicalizes %s inside the frozen H3 request", (model, expected) => {
+    const request = serializeMinimaxH3Authoring(
+      { model, frames: 124 },
+      null,
+      model,
+      emptyMinimaxH3AuthoringState(),
+    );
+    expect(request.model).toBe(expected);
+  });
+
+  it("keeps an unknown H3 partition unchanged while failing its task projection closed", () => {
+    const model = "minimax-h3-ref2va:future-layout";
+    const request = serializeMinimaxH3Authoring(
+      {
+        model,
+        frames: 124,
+        source_image: "STALE",
+        references: [image("stale.png")],
+      },
+      "minimax-h3",
+      model,
+      emptyMinimaxH3AuthoringState(),
+    );
+    expect(request.model).toBe(model);
+    expect(request).not.toHaveProperty("source_image");
+    expect(request).not.toHaveProperty("references");
+    expect(minimaxH3AuthoringError(null, model, null)).toContain(
+      "explicit FL2VA or Ref2VA",
+    );
+  });
+
+  it("appends a gallery image as the final ordered inline Ref2VA reference", () => {
+    const state = emptyMinimaxH3AuthoringState();
+    const original = { reference: video("motion.mp4") };
+    state.references = [original];
+
+    const result = appendMinimaxH3GalleryImageReference(state, {
+      filename: " subject.png ",
+      mimeType: "image/png; charset=binary",
+      width: 1280,
+      height: 720,
+      data: "SUBJECT",
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.reference).toBe(2);
+    expect(result.state.references[0]).toBe(original);
+    expect(result.state.references[1]?.reference).toEqual({
+      kind: "image",
+      media: { authority: "inline", data: "SUBJECT" },
+      provenance: { name: "subject.png" },
+      mime_type: "image/png",
+      width: 1280,
+      height: 720,
+    });
+  });
+
+  it("enforces gallery reference limits and maps FL2VA source to its first frame", () => {
+    const images = Array.from({ length: 9 }, (_, index) => ({
+      reference: image(`${index}.png`),
+    }));
+    const rejected = appendMinimaxH3GalleryImageReference(
+      { ...emptyMinimaxH3AuthoringState(), references: images },
+      {
+        filename: "overflow.png",
+        mimeType: "image/png",
+        width: 10,
+        height: 10,
+        data: "OVERFLOW",
+      },
+    );
+    expect(rejected).toEqual({
+      ok: false,
+      error: "Use at most 9 image references.",
+    });
+
+    const boundary = setMinimaxH3GalleryImageFirstFrame(null, {
+      filename: "opening.jpg",
+      mimeType: "image/jpeg",
+      width: 640,
+      height: 480,
+      data: "OPENING",
+    });
+    expect(boundary).toMatchObject({
+      ok: true,
+      reference: null,
+      state: {
+        firstFrame: {
+          filename: "opening.jpg",
+          mimeType: "image/jpeg",
+          width: 640,
+          height: 480,
+          data: "OPENING",
+        },
+      },
+    });
   });
 
   it("restores opening-frame gallery provenance as explicitly missing media", () => {

@@ -147,6 +147,103 @@ describe("applyMobileGalleryMetadata", () => {
     expect(buildRequest(form).upscale_model).toBeUndefined();
   });
 
+  it("preserves a recorded Ref2VA partition instead of substituting another model", () => {
+    const replacement = {
+      ...model,
+      name: "flux:replacement",
+      family: "flux",
+      default_width: 1024,
+      default_height: 1024,
+    } as ModelEntry;
+    const form = newGenerateForm();
+
+    const result = applyMobileGalleryMetadata(
+      form,
+      {
+        ...metadata,
+        model: "MiniMax_H3_Ref2VA",
+        output_format: "mp4",
+        references: [
+          {
+            kind: "image",
+            index: 1,
+            name: "subject.png",
+            sha256: "a".repeat(64),
+            mime_type: "image/png",
+            width: 1024,
+            height: 768,
+          },
+        ],
+      },
+      [replacement],
+    );
+
+    expect(result).toMatchObject({
+      modelName: "minimax-h3-ref2va:comfy-pruned-int8",
+      substitutedModel: false,
+    });
+    expect(form).toMatchObject({
+      model: "minimax-h3-ref2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      outputFormat: "mp4",
+    });
+    expect(form.h3Authoring?.references[0]?.reference).toMatchObject({
+      kind: "image",
+      media: { authority: "descriptor" },
+      provenance: { name: "subject.png" },
+    });
+  });
+
+  it("matches a legacy Ref2VA alias to its installed canonical checkpoint", () => {
+    const ref2va = {
+      ...model,
+      name: "minimax-h3-ref2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      default_width: 1344,
+      default_height: 768,
+      default_steps: 50,
+      default_guidance: 0,
+    } as ModelEntry;
+    const form = newGenerateForm();
+
+    const result = applyMobileGalleryMetadata(
+      form,
+      { ...metadata, model: "minimax_h3_ref2va", output_format: "mp4" },
+      [ref2va],
+    );
+
+    expect(result.substitutedModel).toBe(false);
+    expect(form.model).toBe(ref2va.name);
+    expect(form.family).toBe("minimax-h3");
+  });
+
+  it("preserves a missing official FL2VA checkpoint for exact-model recovery", () => {
+    const replacement = {
+      ...model,
+      name: "minimax-h3-fl2va:comfy-pruned-int8",
+      family: "minimax-h3",
+    } as ModelEntry;
+    const form = newGenerateForm();
+
+    const result = applyMobileGalleryMetadata(
+      form,
+      {
+        ...metadata,
+        model: "minimax-h3-fl2va:official-bf16",
+        output_format: "mp4",
+      },
+      [replacement],
+    );
+
+    expect(result).toMatchObject({
+      modelName: "minimax-h3-fl2va:official-bf16",
+      substitutedModel: false,
+      sequence: null,
+    });
+    expect(form.model).toBe("minimax-h3-fl2va:official-bf16");
+    expect(form.family).toBe("minimax-h3");
+  });
+
   it("restores a wan print's solver and recipe", () => {
     const wan = {
       ...model,
@@ -287,6 +384,29 @@ describe("applyMobileGalleryMetadata — sequence prints", () => {
     expect(result.substitutedModel).toBe(true);
     expect(result.modelName).toBe(other.name);
     expect(result.sequence?.clips).toHaveLength(2);
+  });
+
+  it("fails an H3 sequence explicitly without substituting another partition", () => {
+    const other = {
+      ...sequenceModel,
+      name: "ltx-video-0.9.8-2b-distilled:q8",
+    } as ModelEntry;
+    const form = newGenerateForm();
+    const initialModel = form.model;
+    const result = applyMobileGalleryMetadata(
+      form,
+      chainPrint([25, 25], { model: "minimax-h3-fl2va:official-bf16" }),
+      [other],
+    );
+
+    expect(result).toMatchObject({
+      modelName: "minimax-h3-fl2va:official-bf16",
+      substitutedModel: false,
+      sequence: null,
+    });
+    expect(result.sequenceUnsupportedReason).toContain("cannot render a clip sequence");
+    expect(form.model).toBe(initialModel);
+    expect(form.model).not.toBe(other.name);
   });
 
   it("reports what the print could not give back", () => {

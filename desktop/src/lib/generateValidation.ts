@@ -26,7 +26,10 @@ export type InlineGenerationMediaField =
   | "sourceVideo"
   | "extendVideo"
   | "keyframes"
-  | "audioFile";
+  | "audioFile"
+  | "h3FirstFrame"
+  | "h3LastFrame"
+  | "h3References";
 
 export function decodedBase64Bytes(value: string | null | undefined): number {
   if (!value) return 0;
@@ -53,6 +56,18 @@ export function inlineGenerationMediaBytes(
       (sum, keyframe) => sum + decodedBase64Bytes(keyframe.image.base64),
       0,
     );
+  }
+  if (exclude !== "h3FirstFrame") {
+    total += decodedBase64Bytes(form.h3Authoring?.firstFrame?.data);
+  }
+  if (exclude !== "h3LastFrame") {
+    total += decodedBase64Bytes(form.h3Authoring?.lastFrame?.data);
+  }
+  if (exclude !== "h3References") {
+    total += (form.h3Authoring?.references ?? []).reduce((sum, draft) => {
+      const media = draft.reference.media;
+      return sum + (media.authority === "inline" ? decodedBase64Bytes(media.data) : 0);
+    }, 0);
   }
   return total;
 }
