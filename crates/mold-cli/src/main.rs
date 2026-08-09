@@ -1038,7 +1038,9 @@ Examples:
         #[arg(short = 'n', long, help_heading = "Image")]
         negative_prompt: Option<String>,
 
-        /// Suppress config-file default negative prompt (use empty unconditional)
+        /// Disable every default negative prompt — config-file defaults and
+        /// the model's tuned default (wan) — by sending an explicit empty
+        /// unconditional
         #[arg(long, help_heading = "Image")]
         no_negative: bool,
 

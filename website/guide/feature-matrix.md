@@ -144,7 +144,9 @@ complete workflows.
 - Negative prompts are meaningful for CFG-based families and ignored by FLUX,
   Z-Image, and Flux.2 Klein. Wan checkpoints were tuned against a specific
   negative prompt, which mold applies automatically when a request leaves it
-  unset.
+  unset; `/api/models` advertises it per model (`default_negative_prompt`),
+  every surface prefills it, and clearing the field (or `--no-negative`)
+  sends an explicit empty negative instead.
 - `qwen-image-edit` is a distinct edit family, not a standard img2img mode.
 - The CLI and API support multiple ordered input images for `qwen-image-edit`;
   the TUI keeps the edit flow to a single source image in v1.

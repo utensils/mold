@@ -58,6 +58,94 @@ describe("model-specific audio capability", () => {
   });
 });
 
+describe("advertised default negative prompt (#787)", () => {
+  const WAN_DEFAULT = "色调艳丽，过曝，静态，细节模糊不清";
+
+  function wanModel(): ModelEntry {
+    return {
+      ...ltx2Model(),
+      name: "wan22-t2v-a14b:q5",
+      family: "wan",
+      default_negative_prompt: WAN_DEFAULT,
+      guidance_capabilities: {
+        adjustable: true,
+        supports_negative_prompt: true,
+      },
+    };
+  }
+
+  it("prefills the advertised default when a wan model is selected", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, wanModel());
+    expect(form.negativePrompt).toBe(WAN_DEFAULT);
+    expect(form.negativePromptDefault).toBe(WAN_DEFAULT);
+  });
+
+  it("keeps an untouched default absent on the wire", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, wanModel());
+    form.prompt = "a cat";
+    expect(buildRequest(form).negative_prompt).toBeUndefined();
+  });
+
+  it("ships the explicit empty opt-out when the user clears the field", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, wanModel());
+    form.prompt = "a cat";
+    form.negativePrompt = "";
+    expect(buildRequest(form).negative_prompt).toBe("");
+  });
+
+  it("ships typed text verbatim", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, wanModel());
+    form.prompt = "a cat";
+    form.negativePrompt = "hands";
+    expect(buildRequest(form).negative_prompt).toBe("hands");
+  });
+
+  it("withdraws an untouched default when leaving the family, but keeps typed text", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, wanModel());
+    applyModelDefaults(form, ltx2Model());
+    expect(form.negativePrompt).toBe("");
+    expect(form.negativePromptDefault).toBe("");
+
+    applyModelDefaults(form, wanModel());
+    form.negativePrompt = "hands";
+    applyModelDefaults(form, ltx2Model());
+    expect(form.negativePrompt).toBe("hands");
+  });
+
+  it("keeps today's omit-empty behavior for models without a default", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, ltx2Model());
+    form.prompt = "a cat";
+    expect(buildRequest(form).negative_prompt).toBeUndefined();
+  });
+
+  it('restores absent metadata negatives as the model\'s default, and "" as empty', () => {
+    const metadata = {
+      prompt: "a cat",
+      model: "wan22-t2v-a14b:q5",
+      seed: 7,
+      steps: 30,
+      guidance: 6,
+      width: 832,
+      height: 480,
+      version: "1",
+    } as OutputMetadata;
+    const form = newGenerateForm();
+    applyMetadataToForm(form, metadata, [wanModel()]);
+    expect(form.negativePrompt).toBe(WAN_DEFAULT);
+
+    const optedOut = newGenerateForm();
+    applyMetadataToForm(optedOut, { ...metadata, negative_prompt: "" }, [wanModel()]);
+    expect(optedOut.negativePrompt).toBe("");
+    expect(buildRequest(optedOut).negative_prompt).toBe("");
+  });
+});
+
 describe("seedMode", () => {
   it("derives random from an empty field and fixed from any number", () => {
     expect(seedMode("")).toBe("random");

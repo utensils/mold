@@ -389,6 +389,21 @@ fn resolve_video_timing(
     Ok((Some(frames_on_grid), Some(resolved_fps)))
 }
 
+/// Map the `/generate` `negative_prompt` option onto the wire tri-state.
+///
+/// Discord's slash command sits at the 25-option hard cap, so the explicit
+/// empty-uncond opt-out (#787) cannot be its own boolean — the documented
+/// sentinel `none` (case-insensitive, `-` also accepted) on the existing
+/// option ships the `""` that disables wan's tuned default. Absence stays
+/// absent so the server materializes the model's default as usual.
+pub fn resolve_negative_prompt_option(explicit: Option<&str>) -> Option<String> {
+    let text = explicit?.trim();
+    if text.eq_ignore_ascii_case("none") || text == "-" {
+        return Some(String::new());
+    }
+    Some(text.to_string())
+}
+
 /// Build a `GenerateRequest` from slash command parameters, honoring model
 /// defaults and routing video families to an appropriate container.
 pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
@@ -472,7 +487,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
         negative_prompt: if is_h3 {
             None
         } else {
-            params.negative_prompt.map(|s| s.to_string())
+            resolve_negative_prompt_option(params.negative_prompt)
         },
         model: params.model.to_string(),
         width: params.width.unwrap_or(if is_h3 {
@@ -810,7 +825,7 @@ pub async fn generate(
     >,
     #[description = "Enable synchronized audio (LTX-2 + MP4 only)"] audio: Option<bool>,
     #[description = "LTX-2 pipeline mode (advanced)"] pipeline: Option<PipelineChoice>,
-    #[description = "Negative prompt — what to avoid (CFG models: SD1.5, SDXL, SD3)"]
+    #[description = "Negative prompt — what to avoid (CFG models); 'none' disables wan's tuned default"]
     negative_prompt: Option<String>,
     #[description = "Audio attachment for LTX-2 audio-to-video"] audio_file: Option<
         serenity::Attachment,
@@ -1384,6 +1399,35 @@ mod tests {
             ..base_params("a cat", "sd15:fp16")
         });
         assert_eq!(req.negative_prompt.as_deref(), Some("blurry, low quality"));
+    }
+
+    /// #787: with the slash command at Discord's 25-option cap, the `none`
+    /// sentinel on `negative_prompt` is the explicit empty-uncond opt-out
+    /// wan honors; absence stays absent so the server materializes the tuned
+    /// default, and ordinary text still travels verbatim.
+    #[test]
+    fn negative_prompt_none_sentinel_is_the_explicit_empty_opt_out() {
+        for sentinel in ["none", "NONE", " None ", "-"] {
+            let req = build_generate_request(BuildParams {
+                family: Some("wan"),
+                negative_prompt: Some(sentinel),
+                ..base_params("a cat", "wan22-t2v-a14b:q5")
+            });
+            assert_eq!(
+                req.negative_prompt.as_deref(),
+                Some(""),
+                "sentinel {sentinel:?} must ship the explicit empty uncond"
+            );
+        }
+        let absent = build_generate_request(BuildParams {
+            family: Some("wan"),
+            ..base_params("a cat", "wan22-t2v-a14b:q5")
+        });
+        assert_eq!(absent.negative_prompt, None);
+        assert_eq!(
+            resolve_negative_prompt_option(Some("blurry")).as_deref(),
+            Some("blurry")
+        );
     }
 
     // --- Video routing tests ---

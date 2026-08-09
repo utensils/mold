@@ -27,6 +27,12 @@ import {
   supportsScheduler,
 } from "../lib/generateCapabilities";
 import { composeStyle } from "../lib/stylePresets";
+import {
+  advertisedNegativeDefault,
+  negativePromptOnDefaultChange,
+  negativePromptWireValue,
+  restoredNegativePrompt,
+} from "@studio/lib/negativePrompt";
 import { defaultVideoFps } from "@studio/lib/sequence";
 import {
   cameraMotionLoraPath,
@@ -124,6 +130,7 @@ function defaultForm(): GenerateFormState {
     originalPrompt: null,
     stylePreset: null,
     negativePrompt: "",
+    negativePromptDefault: "",
     model: "",
     modelFamily: "",
     width: 1024,
@@ -248,6 +255,16 @@ function modelDefaultsPatch(
     loras: [],
     icLoraControl: null,
   };
+  // #787: a Negative field still showing the previous model's advertised
+  // default follows the new model (that is also how the default first
+  // appears); typed text and an explicit clear are user authority.
+  const nextNegativeDefault = advertisedNegativeDefault(model);
+  next.negativePrompt = negativePromptOnDefaultChange(
+    current.negativePrompt,
+    current.negativePromptDefault ?? "",
+    nextNegativeDefault,
+  );
+  next.negativePromptDefault = nextNegativeDefault;
   const capabilities = generationCapabilitiesForFamily(
     model.family,
     model.name,
@@ -404,7 +421,12 @@ export function applyMetadataToForm(
   const model = options.models?.find((m) => m.name === metadata.model);
   const next = model
     ? modelDefaultsPatch(current, model)
-    : { ...cloneFormState(current), model: metadata.model, modelFamily: "" };
+    : {
+        ...cloneFormState(current),
+        model: metadata.model,
+        modelFamily: "",
+        negativePromptDefault: "",
+      };
   const loras =
     metadata.loras?.map<LoraSelection>((l) => ({
       path: l.path,
@@ -432,7 +454,13 @@ export function applyMetadataToForm(
     // Saved metadata already carries the fully-composed prompt (style extras
     // included at generation time); re-applying a preset would double-append.
     stylePreset: null,
-    negativePrompt: metadata.negative_prompt ?? "",
+    // Absence predates truthful recording: on a defaulted model it means the
+    // default conditioned the render, so restore shows it rather than
+    // silently flipping the reuse into an explicit empty-uncond opt-out.
+    negativePrompt: restoredNegativePrompt(
+      metadata.negative_prompt,
+      next.negativePromptDefault ?? "",
+    ),
     width: metadata.generation_width || metadata.width || next.width,
     height: metadata.generation_height || metadata.height || next.height,
     steps: metadata.steps || next.steps,
@@ -940,8 +968,15 @@ export function useGenerateForm(): UseGenerateForm {
         s.originalPrompt.trim() !== styled.prompt
           ? { original_prompt: s.originalPrompt.trim() }
           : {}),
+        // Tri-state (#787): text equal to the advertised default stays
+        // absent (older servers behave identically), a cleared defaulted
+        // field ships the explicit "" opt-out, typed/styled text travels
+        // verbatim. `null` and omission both read as absent server-side.
         negative_prompt: capabilities.supportsNegativePrompt
-          ? styled.negative || null
+          ? (negativePromptWireValue(
+              styled.negative ?? "",
+              s.negativePromptDefault ?? "",
+            ) ?? null)
           : null,
         model: s.model,
         width: s.width,

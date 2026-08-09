@@ -1060,10 +1060,30 @@ pub(crate) fn normalize_generate_params_for_family(params: &mut GenerateParams, 
     params.upscale_model = None;
 }
 
+/// Build the Negative editor textarea with the standard cursor and
+/// placeholder styling, from prefill text (possibly empty).
+fn negative_prompt_textarea(text: &str) -> TextArea<'static> {
+    let mut textarea = if text.is_empty() {
+        TextArea::default()
+    } else {
+        TextArea::new(text.lines().map(String::from).collect())
+    };
+    textarea.set_cursor_line_style(ratatui::style::Style::default());
+    textarea.set_placeholder_text("Negative prompt (what to avoid)...");
+    textarea
+}
+
 /// State for the Generate view.
 pub struct GenerateState {
     pub prompt: TextArea<'static>,
     pub negative_prompt: TextArea<'static>,
+    /// The selected model's advertised default negative prompt
+    /// (`/api/models[].default_negative_prompt`, wan today; empty when
+    /// none). Prefilled into the editor while it is untouched; at submit,
+    /// editor text equal to this stays absent on the wire and a cleared
+    /// editor ships the explicit `""` opt-out
+    /// (`create_form::negative_prompt_wire_value`).
+    pub negative_default: String,
     pub params: GenerateParams,
     pub focus: GenerateFocus,
     pub param_index: usize,
@@ -1957,6 +1977,7 @@ impl App {
             generate: GenerateState {
                 prompt,
                 negative_prompt,
+                negative_default: String::new(),
                 params,
                 focus: GenerateFocus::Prompt,
                 param_index: 0,
@@ -2252,6 +2273,30 @@ impl App {
             effective_guidance,
             self.source_image_contract(&model),
         );
+        // #787: keep the Negative editor and its advertised default in step
+        // with the selected model. The server's per-model advertisement wins;
+        // the family constant covers local mode and older servers (it *is*
+        // the engine's absence fallback). Only an editor still showing the
+        // previous default follows the change — typed text and an explicit
+        // clear are user authority.
+        let next_default = self
+            .models
+            .catalog
+            .iter()
+            .find(|entry| entry.name == model)
+            .and_then(|entry| entry.defaults.default_negative_prompt.clone())
+            .or_else(|| {
+                mold_core::manifest::default_negative_prompt_for_family(&family).map(str::to_string)
+            })
+            .unwrap_or_default();
+        if let Some(replacement) = crate::ui::create_form::negative_prompt_on_default_change(
+            &self.generate.negative_prompt.lines().join("\n"),
+            &self.generate.negative_default,
+            &next_default,
+        ) {
+            self.generate.negative_prompt = negative_prompt_textarea(&replacement);
+        }
+        self.generate.negative_default = next_default;
         normalize_generate_params_for_family(&mut self.generate.params, &family);
         if !self.generate.capabilities.supports_audio {
             self.generate.params.enable_audio = None;
@@ -4920,16 +4965,20 @@ impl App {
         };
         let meta = &entry.metadata;
 
-        // Populate prompt fields
+        // Populate prompt fields. The model switches first so the Negative
+        // restore below can resolve the restored model's advertised default:
+        // metadata without a `negative_prompt` predates truthful recording,
+        // and for wan that means the tuned default conditioned the render —
+        // restoring an empty editor would flip the reuse into an explicit
+        // empty-uncond opt-out (#787).
         self.generate.prompt = tui_textarea::TextArea::from(meta.prompt.lines());
-        if let Some(ref neg) = meta.negative_prompt {
-            self.generate.negative_prompt = tui_textarea::TextArea::from(neg.lines());
-        } else {
-            self.generate.negative_prompt = tui_textarea::TextArea::default();
-        }
-
-        // Set model and parameters
         self.update_model(&meta.model);
+        let restored_negative = meta
+            .negative_prompt
+            .as_deref()
+            .unwrap_or(&self.generate.negative_default)
+            .to_string();
+        self.generate.negative_prompt = negative_prompt_textarea(&restored_negative);
         self.generate.params.seed = Some(meta.seed);
         self.generate.params.seed_mode = SeedMode::Fixed;
         self.generate.params.steps = meta.steps;
@@ -6466,19 +6515,15 @@ impl App {
         self.generate.image_state = None;
         self.generate.animation = None;
 
-        let neg = self
-            .generate
-            .negative_prompt
-            .lines()
-            .join("\n")
-            .trim()
-            .to_string();
-        let negative_prompt =
-            if neg.is_empty() || !self.generate.capabilities.supports_negative_prompt {
-                None
-            } else {
-                Some(neg)
-            };
+        // #787 tri-state: editor text equal to the advertised default stays
+        // absent on the wire (the server/engine re-applies it; older servers
+        // behave identically), a cleared editor ships the explicit `""`
+        // opt-out when a default is advertised, and typed text replaces it.
+        let negative_prompt = crate::ui::create_form::negative_prompt_wire_value(
+            &self.generate.negative_prompt.lines().join("\n"),
+            &self.generate.negative_default,
+            self.generate.capabilities.supports_negative_prompt,
+        );
 
         // Resolve seed based on seed mode
         let resolved_seed = self
@@ -9109,6 +9154,7 @@ mod tests {
             generate: GenerateState {
                 prompt: TextArea::default(),
                 negative_prompt: TextArea::default(),
+                negative_default: String::new(),
                 params,
                 focus: GenerateFocus::Navigation,
                 param_index: 0,
@@ -9955,6 +10001,38 @@ mod tests {
             Some(&CreateRow::NegativeEditor),
             "selection must land on the inline editor row"
         );
+    }
+
+    /// #787: selecting a wan model prefills the tuned default into the
+    /// Negative editor and records it as the advertised default; leaving the
+    /// family clears an untouched editor, while typed text survives the
+    /// switch. The wire tri-state itself is pinned by
+    /// `create_form::negative_prompt_wire_value`'s unit tests.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn wan_model_prefills_the_advertised_default_negative() {
+        let wan_default = mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT;
+        let mut app = make_settings_test_app();
+        assert_eq!(app.generate.negative_default, "");
+
+        app.update_model("wan21-t2v-1.3b:bf16");
+        assert_eq!(app.generate.negative_default, wan_default);
+        assert_eq!(
+            app.generate.negative_prompt.lines().join("\n"),
+            wan_default,
+            "an untouched editor shows the tuned default"
+        );
+
+        // Leaving the family withdraws the untouched default.
+        app.update_model("flux2-klein:q8");
+        assert_eq!(app.generate.negative_default, "");
+        assert_eq!(app.generate.negative_prompt.lines().join("\n"), "");
+
+        // Typed text is user authority across model switches.
+        app.generate.negative_prompt = tui_textarea::TextArea::from(["hands"]);
+        app.update_model("wan21-t2v-1.3b:bf16");
+        assert_eq!(app.generate.negative_default, wan_default);
+        assert_eq!(app.generate.negative_prompt.lines().join("\n"), "hands");
     }
 
     #[tokio::test]
@@ -12131,6 +12209,7 @@ mod tests {
         let mut gen = GenerateState {
             prompt: TextArea::default(),
             negative_prompt: TextArea::default(),
+            negative_default: String::new(),
             params: GenerateParams::from_config(&Config::load_or_default()),
             focus: GenerateFocus::Prompt,
             param_index: 0,
@@ -12193,6 +12272,7 @@ mod tests {
         let mut gen = GenerateState {
             prompt: TextArea::default(),
             negative_prompt: TextArea::default(),
+            negative_default: String::new(),
             params: GenerateParams::from_config(&Config::load_or_default()),
             focus: GenerateFocus::Prompt,
             param_index: 0,
@@ -12236,6 +12316,7 @@ mod tests {
         let mut gen = GenerateState {
             prompt: TextArea::default(),
             negative_prompt: TextArea::default(),
+            negative_default: String::new(),
             params,
             focus: GenerateFocus::Prompt,
             param_index: 0,

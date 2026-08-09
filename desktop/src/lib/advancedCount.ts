@@ -8,6 +8,7 @@
 import { generationCapabilitiesForFamily } from "./capabilities";
 import type { GenerateForm } from "./generateForm";
 import { guidanceOverridesAreEmpty } from "@studio/lib/guidanceOverrides";
+import { negativePromptWireValue } from "@studio/lib/negativePrompt";
 import { wanRecipeCount } from "@studio/lib/wanRecipe";
 
 export function advancedActiveCount(form: GenerateForm): number {
@@ -18,7 +19,13 @@ export function advancedActiveCount(form: GenerateForm): number {
     form.guidanceCapabilities,
   );
   let count = 0;
-  if (caps.supportsNegativePrompt && form.negativePrompt.trim()) count += 1;
+  // Differs-from-default (#787): an untouched wan default is not "active",
+  // while an explicit clear (the empty-uncond opt-out) is.
+  if (
+    caps.supportsNegativePrompt &&
+    negativePromptWireValue(form.negativePrompt, form.negativePromptDefault) !== undefined
+  )
+    count += 1;
   if (caps.supportsScheduler && form.scheduler !== "default") count += 1;
   if (caps.supportsCfgPlus && form.cfgPlus) count += 1;
   if (caps.wanRecipe.supported) count += wanRecipeCount(form.wanRecipe);

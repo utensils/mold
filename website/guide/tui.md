@@ -143,15 +143,15 @@ carries a count of advanced values that differ from their defaults. The
 open state and expanded section persist across sessions
 (`tui.advanced_open` / `tui.advanced_section`).
 
-| Section                | Rows                                                                                          |
-| ---------------------- | --------------------------------------------------------------------------------------------- |
-| Scheduler & sampling   | Scheduler (CFG models), Expand prompt, Offload                                                |
-| Negative prompt        | inline editor (CFG models; **Alt+N** jumps here)                                              |
-| Source image           | Source, Strength, Mask, ControlNet (per model)                                                |
-| LoRA                   | LoRA path + scale                                                                             |
-| Upscale after generate | post-generate upscaler (Enter picks, `(off)` clears)                                          |
-| Output format          | png / jpeg / gif / apng / webp / mp4                                                          |
-| Video                  | Frames, FPS; LTX-2 Pipeline, Audio default/on/off, Spatial native/1.5×/2×, Temporal native/2× |
+| Section                | Rows                                                                                                                                                                                 |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Scheduler & sampling   | Scheduler (CFG models), Expand prompt, Offload                                                                                                                                       |
+| Negative prompt        | inline editor (CFG models; **Alt+N** jumps here). Wan models prefill their tuned default — leave it for the default, edit to replace it, clear it to send an explicit empty negative |
+| Source image           | Source, Strength, Mask, ControlNet (per model)                                                                                                                                       |
+| LoRA                   | LoRA path + scale                                                                                                                                                                    |
+| Upscale after generate | post-generate upscaler (Enter picks, `(off)` clears)                                                                                                                                 |
+| Output format          | png / jpeg / gif / apng / webp / mp4                                                                                                                                                 |
+| Video                  | Frames, FPS; LTX-2 Pipeline, Audio default/on/off, Spatial native/1.5×/2×, Temporal native/2×                                                                                        |
 
 The LTX-2 Pipeline row cycles through **Auto**, **one-stage**, **two-stage**,
 **two-stage-hq**, and **distilled**. Auto omits the request field so the server

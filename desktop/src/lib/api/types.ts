@@ -198,6 +198,11 @@ export interface ModelEntry {
     supports_negative_prompt: boolean;
     fixed_scale?: number | null;
   } | null;
+  /** Tuned default negative prompt the engine applies when a request omits
+   * `negative_prompt` entirely (additive; wan today). Absent on older
+   * servers and on families without one. An explicit `""` in a request
+   * remains the opt-out — see `@studio/lib/negativePrompt`. */
+  default_negative_prompt?: string | null;
   /** Server-advertised per-clip frame default (LTX-2 ships 97, LTX-Video
    * 25); absent on older servers. Sizes new sequence clips. */
   default_frames?: number | null;

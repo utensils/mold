@@ -2309,6 +2309,15 @@ pub struct ModelDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 2048)]
     pub max_axis_pixels: Option<u32>,
+    /// Tuned default negative prompt the engine conditions on when a request
+    /// omits `negative_prompt` entirely (additive; wan today, whose
+    /// checkpoints were trained against a specific long Chinese negative).
+    /// This is the absence fallback, never a floor: an explicit empty string
+    /// in the request stays a real empty uncond. Clients prefill their
+    /// Negative control with it, keep an untouched field absent on the wire,
+    /// and submit `""` when the user clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_negative_prompt: Option<String>,
     /// Runnable, family-appropriate buckets used by every Studio surface.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recommended_dimensions: Vec<RecommendedDimensions>,
@@ -2541,6 +2550,39 @@ mod model_defaults_frame_tests {
         assert_eq!(back.max_runtime_seconds, Some(20));
         assert_eq!(back.frame_offset, Some(1));
         assert_eq!(back.frame_step, Some(8));
+    }
+
+    /// `default_negative_prompt` is additive: absent on the old wire shape,
+    /// omitted from serialized output when None (image families and older
+    /// servers), and round-tripping the tuned wan value verbatim.
+    #[test]
+    fn model_defaults_default_negative_prompt_is_additive() {
+        let legacy = r#"{
+            "default_steps": 30,
+            "default_guidance": 6.0,
+            "default_width": 832,
+            "default_height": 480,
+            "description": "wan"
+        }"#;
+        let parsed: ModelDefaults = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.default_negative_prompt, None);
+        let out = serde_json::to_value(&parsed).unwrap();
+        assert!(out.get("default_negative_prompt").is_none());
+
+        let wan = ModelDefaults {
+            default_negative_prompt: Some(crate::manifest::WAN_DEFAULT_NEGATIVE_PROMPT.to_string()),
+            ..parsed
+        };
+        let out = serde_json::to_value(&wan).unwrap();
+        assert_eq!(
+            out["default_negative_prompt"],
+            crate::manifest::WAN_DEFAULT_NEGATIVE_PROMPT
+        );
+        let back: ModelDefaults = serde_json::from_value(out).unwrap();
+        assert_eq!(
+            back.default_negative_prompt.as_deref(),
+            Some(crate::manifest::WAN_DEFAULT_NEGATIVE_PROMPT)
+        );
     }
 }
 

@@ -697,6 +697,13 @@ fn installed_catalog_models(
                 ),
                 frame_step: mold_core::validation::frame_step_for_family(&sidecar.family),
                 frame_offset: mold_core::validation::frame_offset_for_family(&sidecar.family),
+                // The engine substitutes its family default on absence for
+                // installed cv:/hf: checkpoints exactly as for manifest
+                // models, so the advertisement is per-family here too.
+                default_negative_prompt: mold_core::manifest::default_negative_prompt_for_family(
+                    &sidecar.family,
+                )
+                .map(str::to_string),
                 // Per model, through the same helper the manifest catalog
                 // uses. An installed `cv:` / `hf:` checkpoint has no spatial
                 // upsampler, so it advertises the single-pass ceiling and
@@ -2949,6 +2956,60 @@ mod tests {
         );
         let combined = installed_catalog_models(&state, &config, dir.path(), None, false);
         assert_eq!(combined[0].supports_audio, Some(true));
+    }
+
+    /// #787: an installed wan checkpoint (cv:/hf:, no manifest) advertises
+    /// the engine's tuned absence-fallback negative exactly like manifest
+    /// rows, because `wan/pipeline.rs` substitutes it per family, not per
+    /// manifest. Non-wan sidecars keep the field absent.
+    #[test]
+    fn installed_wan_catalog_models_advertise_the_default_negative_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_dir = dir.path().join("cv-999001");
+        let primary = install_dir.join("model.safetensors");
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        let sidecar = mold_catalog::sidecar::CatalogSidecar {
+            schema: 1,
+            id: "cv:999001".into(),
+            source: "civitai".into(),
+            source_id: "999001".into(),
+            name: "Wan community finetune".into(),
+            author: None,
+            family: "wan".into(),
+            family_role: "finetune".into(),
+            sub_family: None,
+            kind: "checkpoint".into(),
+            modality: "video".into(),
+            nsfw: None,
+            description: None,
+            tags: vec![],
+            license: None,
+            page_url: None,
+            thumbnail_url: None,
+            size_bytes: None,
+            supported: true,
+            trained_words: vec![],
+            primary_filename_rel: "model.safetensors".into(),
+            written_at: 0,
+        };
+        mold_catalog::sidecar::write_sidecar(
+            &install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &sidecar,
+        )
+        .unwrap();
+        write_safetensors_with_keys(&primary, &["patch_embedding.weight"]);
+
+        let config = Config {
+            models_dir: dir.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let state = AppState::for_tests();
+        let inventory = installed_catalog_models(&state, &config, dir.path(), None, false);
+        assert_eq!(
+            inventory[0].defaults.default_negative_prompt.as_deref(),
+            Some(mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT)
+        );
     }
 
     /// Build a `ModelPaths` whose `transformer` and `vae` files exist on disk

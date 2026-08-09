@@ -1187,6 +1187,7 @@ mod tests {
             generate: crate::app::GenerateState {
                 prompt: tui_textarea::TextArea::default(),
                 negative_prompt: tui_textarea::TextArea::default(),
+                negative_default: String::new(),
                 params: crate::app::GenerateParams::from_config(&mold_core::Config::default()),
                 focus: crate::app::GenerateFocus::Navigation,
                 param_index: 0,

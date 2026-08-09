@@ -406,6 +406,47 @@ pub fn advanced_active_count(params: &GenerateParams, negative_empty: bool) -> u
     count
 }
 
+/// Wire value for the Negative editor given the model's advertised default
+/// negative (`/api/models[].default_negative_prompt`, wan today; empty when
+/// the model has none). Mirrors `studio/lib/negativePrompt.ts` exactly so
+/// every surface serializes the same tri-state:
+///
+/// - text equal to the advertised default → `None` (absent keeps the default
+///   server-side and preserves today's behavior against older servers);
+/// - cleared while a default is advertised → `Some("")`, the explicit empty
+///   uncond the engine honors as an opt-out;
+/// - anything else non-empty → `Some(text)`; empty with no default → `None`.
+pub fn negative_prompt_wire_value(
+    text: &str,
+    advertised_default: &str,
+    supports_negative: bool,
+) -> Option<String> {
+    if !supports_negative {
+        return None;
+    }
+    let text = text.trim();
+    let default = advertised_default.trim();
+    if default.is_empty() {
+        return (!text.is_empty()).then(|| text.to_string());
+    }
+    (text != default).then(|| text.to_string())
+}
+
+/// Prefill decision when the advertised default changes (model switch or a
+/// fresher catalog). `Some(next)` replaces the editor only while it still
+/// shows the previous default (both empty included — that is how the default
+/// first appears); a user-typed value, or an explicit clear while a default
+/// was advertised, is authority and returns `None`. Mirrors
+/// `studio/lib/negativePrompt.ts::negativePromptOnDefaultChange`.
+pub fn negative_prompt_on_default_change(
+    current: &str,
+    previous_default: &str,
+    next_default: &str,
+) -> Option<String> {
+    (current.trim() == previous_default.trim() && current.trim() != next_default.trim())
+        .then(|| next_default.trim().to_string())
+}
+
 /// The dim hint on the Advanced header row: a vocabulary strip while
 /// collapsed, a section count while open.
 pub fn advanced_header_hint(caps: &ModelCapabilities, adv: &AdvancedState) -> String {
@@ -475,6 +516,84 @@ mod tests {
             open: true,
             expanded,
         }
+    }
+
+    // ── negative-prompt default contract (#787) ─────────────────
+    //
+    // These four tests are the TUI half of the cross-surface parity
+    // contract; `studio/lib/negativePrompt.test.ts` pins the identical
+    // cases for web, desktop, and iPhone.
+
+    const WAN_DEFAULT: &str = mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT;
+
+    #[test]
+    fn negative_wire_value_untouched_default_stays_absent() {
+        assert_eq!(
+            negative_prompt_wire_value(WAN_DEFAULT, WAN_DEFAULT, true),
+            None
+        );
+        // No advertised default: empty stays absent (today's behavior).
+        assert_eq!(negative_prompt_wire_value("", "", true), None);
+        // Unsupported family never serializes one.
+        assert_eq!(negative_prompt_wire_value("blurry", "", false), None);
+        assert_eq!(
+            negative_prompt_wire_value(WAN_DEFAULT, WAN_DEFAULT, false),
+            None
+        );
+    }
+
+    #[test]
+    fn negative_wire_value_cleared_is_the_explicit_empty_opt_out() {
+        assert_eq!(
+            negative_prompt_wire_value("", WAN_DEFAULT, true).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            negative_prompt_wire_value("   ", WAN_DEFAULT, true).as_deref(),
+            Some(""),
+            "whitespace-only is a clear, matching the engine's trim"
+        );
+    }
+
+    #[test]
+    fn negative_wire_value_typed_text_replaces_the_default() {
+        assert_eq!(
+            negative_prompt_wire_value("blurry", WAN_DEFAULT, true).as_deref(),
+            Some("blurry")
+        );
+        assert_eq!(
+            negative_prompt_wire_value("blurry", "", true).as_deref(),
+            Some("blurry")
+        );
+    }
+
+    #[test]
+    fn negative_default_change_replaces_only_an_untouched_editor() {
+        // The default first appears: empty editor, no previous default.
+        assert_eq!(
+            negative_prompt_on_default_change("", "", WAN_DEFAULT).as_deref(),
+            Some(WAN_DEFAULT)
+        );
+        // Still showing the old default → follow the new model.
+        assert_eq!(
+            negative_prompt_on_default_change(WAN_DEFAULT, WAN_DEFAULT, "").as_deref(),
+            Some("")
+        );
+        // User-typed text is authority.
+        assert_eq!(
+            negative_prompt_on_default_change("blurry", WAN_DEFAULT, ""),
+            None
+        );
+        // An explicit clear (opt-out) survives a wan→wan model switch.
+        assert_eq!(
+            negative_prompt_on_default_change("", WAN_DEFAULT, WAN_DEFAULT),
+            None
+        );
+        // No change → no textarea rebuild.
+        assert_eq!(
+            negative_prompt_on_default_change(WAN_DEFAULT, WAN_DEFAULT, WAN_DEFAULT),
+            None
+        );
     }
 
     // ── visible_rows ────────────────────────────────────────────

@@ -1147,6 +1147,12 @@ stop hardcoding a frame count that ignores the selected checkpoint:
 | `max_frames_absolute`           | fps-independent frame guard paired with `max_runtime_seconds` (LTX-2: 604).                                                                                           |
 | `frame_step`                    | Valid frame counts are `k · frame_step + 1`; 8 for the LTX families.                                                                                                  |
 
+Models with a tuned default negative prompt (wan today) additionally
+advertise `default_negative_prompt`: the negative the engine applies when a
+request omits `negative_prompt` entirely. An explicit `""` in a request stays
+a real empty uncond — clients prefill the advertised value, keep an untouched
+field absent, and send `""` to opt out.
+
 ::: tip LTX-2's ceiling is a duration, not a frame count
 The LTX-2 checkpoints ship `pos_embed_max_pos = 20`, and the temporal RoPE axis
 is normalized in **seconds** (the pixel-frame coordinate is divided by fps

@@ -7,11 +7,16 @@
  * Capability gating is the caller's job: pass a flag only for a field the
  * current family actually exposes.
  */
+import { negativePromptWireValue } from "@studio/lib/negativePrompt";
 import type { Scheduler } from "../../types";
 
 export interface AdvancedCountParams {
-  /** Negative-prompt text (counts when non-empty after trim). */
+  /** Negative-prompt text (counts when it differs from the advertised
+   * default — an untouched wan default is not user-active, an explicit
+   * clear is; see `@studio/lib/negativePrompt`). */
   negativePrompt: string;
+  /** The model's advertised default negative ("" when none). */
+  negativePromptDefault?: string;
   /** A source image is attached. */
   hasSource: boolean;
   /** Number of active LoRA adapters (each counts). */
@@ -39,7 +44,12 @@ export interface AdvancedCountParams {
 /** Count of active advanced fields for the "N on" / "N active" badge. */
 export function advancedActiveCount(p: AdvancedCountParams): number {
   return (
-    (p.negativePrompt.trim() ? 1 : 0) +
+    (negativePromptWireValue(
+      p.negativePrompt,
+      p.negativePromptDefault ?? "",
+    ) !== undefined
+      ? 1
+      : 0) +
     (p.hasSource ? 1 : 0) +
     Math.max(0, p.loraCount) +
     (p.upscaleOn ? 1 : 0) +

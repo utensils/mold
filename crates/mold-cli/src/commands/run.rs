@@ -1326,16 +1326,15 @@ pub async fn run(
         (prompt, None, None, None)
     };
 
-    // Resolve effective negative prompt: CLI flag > per-model config > global config > None.
-    // --no-negative suppresses all defaults (forces empty unconditional).
-    let effective_negative_prompt = if is_h3 || no_negative {
-        None
-    } else if negative_prompt.is_some() {
-        negative_prompt
-    } else {
-        let model_cfg = config.resolved_model_config(&model);
-        model_cfg.effective_negative_prompt(&config)
-    };
+    let effective_negative_prompt = resolve_effective_negative_prompt(
+        is_h3,
+        no_negative,
+        negative_prompt,
+        config
+            .resolved_model_config(&model)
+            .effective_negative_prompt(&config),
+        &family,
+    );
 
     // Resolve LoRA: explicit CLI values override config defaults.
     let model_cfg = config.resolved_model_config(&model);
@@ -1449,6 +1448,33 @@ pub async fn run(
 
 fn validate_run_expansion(expanded: &[String], batch: u32) -> Result<()> {
     mold_core::expand::validate_expanded_prompts(expanded, batch.max(1) as usize)
+}
+
+/// Effective negative prompt: CLI flag > per-model config (manifest-filled) >
+/// global config > the family's engine fallback (wan) > None.
+///
+/// `--no-negative` must produce `Some("")` — the explicit empty uncond the
+/// engines honor — not `None`: for wan, absence is re-substituted with the
+/// tuned default by the engine (and by the server for remote runs), so `None`
+/// silently un-did the opt-out (#787). The trailing family fallback makes the
+/// request carry the negative that actually conditions the render, so
+/// locally saved metadata and remote provenance agree.
+fn resolve_effective_negative_prompt(
+    is_h3: bool,
+    no_negative: bool,
+    explicit: Option<String>,
+    config_default: Option<String>,
+    family: &str,
+) -> Option<String> {
+    if is_h3 {
+        return None;
+    }
+    if no_negative {
+        return Some(String::new());
+    }
+    explicit.or(config_default).or_else(|| {
+        mold_core::manifest::default_negative_prompt_for_family(family).map(str::to_string)
+    })
 }
 
 #[cfg(test)]
@@ -1740,6 +1766,54 @@ mod tests {
         // Not a manifest tier: the contract stays unknown and the engine
         // remains the authority.
         assert_eq!(manifest_source_image_contract("cv:12345"), None);
+    }
+
+    /// #787 CLI contract: `--no-negative` is the explicit empty uncond
+    /// (`Some("")`), never `None` — absence would let wan's engine fallback
+    /// re-apply the tuned default it was meant to disable. Absent-everything
+    /// wan requests materialize the family default so local saves record the
+    /// real conditioning; explicit and config values keep their precedence.
+    #[test]
+    fn no_negative_is_an_explicit_empty_uncond_and_wan_falls_back_to_family() {
+        assert_eq!(
+            resolve_effective_negative_prompt(false, true, None, None, "wan").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            resolve_effective_negative_prompt(
+                false,
+                true,
+                Some("blurry".into()),
+                Some("config".into()),
+                "wan"
+            )
+            .as_deref(),
+            Some(""),
+            "--no-negative wins over explicit and config values"
+        );
+        assert_eq!(
+            resolve_effective_negative_prompt(false, false, None, None, "wan").as_deref(),
+            Some(mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT)
+        );
+        assert_eq!(
+            resolve_effective_negative_prompt(false, false, Some("blurry".into()), None, "wan")
+                .as_deref(),
+            Some("blurry")
+        );
+        assert_eq!(
+            resolve_effective_negative_prompt(false, false, None, Some("config".into()), "wan")
+                .as_deref(),
+            Some("config")
+        );
+        assert_eq!(
+            resolve_effective_negative_prompt(false, false, None, None, "flux"),
+            None
+        );
+        assert_eq!(
+            resolve_effective_negative_prompt(true, false, Some("blurry".into()), None, "minimax"),
+            None,
+            "H3 never carries a negative prompt"
+        );
     }
 
     #[test]

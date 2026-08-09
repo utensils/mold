@@ -40,8 +40,10 @@ keeps one 14B expert resident at a time, so VRAM is the larger expert, not
 the sum. Its frame defaults (53 on the `:q5` fast tier, 33 on `:q8`) are the
 measured 24 GB envelope rather than the trained 81-frame clip length — larger
 cards pass `--frames 81` explicitly. Wan checkpoints were tuned against a
-specific negative prompt that mold applies automatically when `--negative` is
-not given. See [Wan Video](/models/wan) for variants, defaults, and limits.
+specific negative prompt that mold applies automatically when a request
+carries no negative at all; every surface shows it, editing replaces it, and
+clearing it (`--no-negative` on the CLI) sends a real empty negative. See
+[Wan Video](/models/wan) for variants, defaults, and limits.
 
 ## Resolution and spatial tiling
 

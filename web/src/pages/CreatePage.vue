@@ -17,6 +17,10 @@ import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
 import EstimateBadge from "../components/create/EstimateBadge.vue";
 import { advancedActiveCount } from "../components/create/advancedCount";
+import {
+  advertisedNegativeDefault,
+  restoredNegativePrompt,
+} from "@studio/lib/negativePrompt";
 import { projectResolution } from "../components/create/resolutionProjection";
 import SequenceComposer from "../components/SequenceComposer.vue";
 import ExpandModal from "../components/ExpandModal.vue";
@@ -1880,6 +1884,9 @@ const advCount = computed(() =>
         negativePrompt: capabilities.value.supportsNegativePrompt
           ? form.state.value.negativePrompt
           : "",
+        negativePromptDefault: capabilities.value.supportsNegativePrompt
+          ? (form.state.value.negativePromptDefault ?? "")
+          : "",
         hasSource: form.state.value.imageAttachments.length > 0,
         loraCount: form.state.value.loras.length,
         upscaleOn: form.state.value.upscaleModel.trim() !== "",
@@ -3167,15 +3174,24 @@ function openJob(job: Job) {
   form.state.value.sourceFitPolicy = { mode: "pad-repaint" };
   form.state.value.cameraControl = null;
   form.state.value.model = request.model;
-  form.state.value.modelFamily =
-    models.value.find((model) => model.name === request.model)?.family ?? "";
+  const requestModel = models.value.find(
+    (model) => model.name === request.model,
+  );
+  form.state.value.modelFamily = requestModel?.family ?? "";
+  form.state.value.negativePromptDefault =
+    advertisedNegativeDefault(requestModel);
   form.state.value.width = request.width;
   form.state.value.height = request.height;
   form.state.value.steps = request.steps;
   form.state.value.guidance = request.guidance ?? form.state.value.guidance;
   form.state.value.seed = request.seed == null ? null : Number(request.seed);
   form.state.value.seedMode = request.seed == null ? "random" : "static";
-  form.state.value.negativePrompt = request.negative_prompt ?? "";
+  // Absence in a queued request means the server materialized the model's
+  // default (#787); a recorded "" was the explicit empty-uncond opt-out.
+  form.state.value.negativePrompt = restoredNegativePrompt(
+    request.negative_prompt,
+    form.state.value.negativePromptDefault ?? "",
+  );
   form.state.value.scheduler = request.scheduler ?? null;
   form.state.value.cfgPlus = request.cfg_plus ?? false;
   form.state.value.batchSize = request.batch_size ?? 1;

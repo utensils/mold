@@ -44,6 +44,12 @@ import {
   wanRecipeToWire,
   type WanRecipeState,
 } from "@studio/lib/wanRecipe";
+import {
+  advertisedNegativeDefault,
+  negativePromptOnDefaultChange,
+  negativePromptWireValue,
+  restoredNegativePrompt,
+} from "@studio/lib/negativePrompt";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
 import { isWanFamily } from "@studio/lib/generationCapabilities";
@@ -108,6 +114,12 @@ export interface GenerateForm {
   /** Empty string = random seed. */
   seed: string;
   negativePrompt: string;
+  /** The selected model's advertised default negative
+   * (`default_negative_prompt`, wan today; "" when none). Prefill and wire
+   * semantics derive from `@studio/lib/negativePrompt`: text equal to this
+   * stays absent on the wire, a cleared field ships the explicit `""`
+   * opt-out. */
+  negativePromptDefault: string;
   scheduler: Scheduler;
   cfgPlus: boolean;
   batchSize: number;
@@ -197,6 +209,7 @@ export function newGenerateForm(): GenerateForm {
     sourceImageCapability: null,
     seed: "",
     negativePrompt: "",
+    negativePromptDefault: "",
     scheduler: "default",
     cfgPlus: false,
     batchSize: 1,
@@ -316,6 +329,16 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
   form.model = m.name;
   form.family = m.family;
   form.sourceImageCapability = m.source_image ?? null;
+  // #787: a Negative field still showing the previous model's advertised
+  // default follows the new model (that is also how the default first
+  // appears); typed text and an explicit clear are user authority.
+  const nextNegativeDefault = advertisedNegativeDefault(m);
+  form.negativePrompt = negativePromptOnDefaultChange(
+    form.negativePrompt,
+    form.negativePromptDefault,
+    nextNegativeDefault,
+  );
+  form.negativePromptDefault = nextNegativeDefault;
   const caps = generationCapabilitiesForFamily(m.family, m.name, null, null, m.source_image);
   if (!outputFormatsForFamily(m.family).includes(form.outputFormat)) {
     form.outputFormat = defaultOutputFormat(m.family);
@@ -484,8 +507,12 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   if (form.originalPrompt && form.originalPrompt !== req.prompt) {
     req.original_prompt = form.originalPrompt;
   }
-  if (caps.supportsNegativePrompt && form.negativePrompt.trim()) {
-    req.negative_prompt = form.negativePrompt.trim();
+  if (caps.supportsNegativePrompt) {
+    // Tri-state (#787): text equal to the advertised default stays absent
+    // (older servers behave identically), a cleared defaulted field ships
+    // the explicit "" opt-out, typed text travels verbatim.
+    const negative = negativePromptWireValue(form.negativePrompt, form.negativePromptDefault);
+    if (negative !== undefined) req.negative_prompt = negative;
   }
   if (caps.supportsScheduler && form.scheduler !== "default") req.scheduler = form.scheduler;
   if (caps.supportsCfgPlus && form.cfgPlus) req.cfg_plus = true;
@@ -654,11 +681,18 @@ export function applyMetadataToForm(
   } else {
     form.model = metadata.model;
     form.family = "";
+    form.negativePromptDefault = "";
   }
 
   form.prompt = metadata.prompt ?? "";
   form.originalPrompt = metadata.original_prompt ?? null;
-  form.negativePrompt = metadata.negative_prompt ?? "";
+  // Absence predates truthful recording: on a defaulted model it means the
+  // default conditioned the render, so restore shows it rather than
+  // silently flipping the reuse into an explicit empty-uncond opt-out.
+  form.negativePrompt = restoredNegativePrompt(
+    metadata.negative_prompt,
+    form.negativePromptDefault,
+  );
   // Prefer the pre-upscale generation canvas over the saved raster size.
   form.width = metadata.generation_width || metadata.width || form.width;
   form.height = metadata.generation_height || metadata.height || form.height;
@@ -774,7 +808,7 @@ export function applyRequestToForm(
   if (model) applyModelDefaults(form, model);
   form.prompt = request.prompt;
   form.originalPrompt = request.original_prompt ?? null;
-  form.negativePrompt = request.negative_prompt ?? "";
+  form.negativePrompt = restoredNegativePrompt(request.negative_prompt, form.negativePromptDefault);
   form.model = request.model;
   form.width = request.width;
   form.height = request.height;

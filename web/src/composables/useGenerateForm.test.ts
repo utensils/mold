@@ -289,6 +289,92 @@ describe("useGenerateForm", () => {
     expect(form.toRequest().negative_prompt).toBeNull();
   });
 
+  describe("advertised default negative prompt (#787)", () => {
+    const WAN_DEFAULT = "色调艳丽，过曝，静态，细节模糊不清";
+
+    function wanModel(): ModelInfoExtended {
+      return makeModel({
+        name: "wan22-t2v-a14b:q5",
+        family: "wan",
+        default_negative_prompt: WAN_DEFAULT,
+        guidance_capabilities: {
+          adjustable: true,
+          supports_negative_prompt: true,
+        },
+      });
+    }
+
+    it("prefills the advertised default when a wan model is applied", () => {
+      const form = useGenerateForm();
+      form.applyModelDefaults(wanModel());
+      expect(form.state.value.negativePrompt).toBe(WAN_DEFAULT);
+      expect(form.state.value.negativePromptDefault).toBe(WAN_DEFAULT);
+    });
+
+    it("keeps an untouched default absent on the wire", () => {
+      const form = useGenerateForm();
+      form.applyModelDefaults(wanModel());
+      form.state.value.prompt = "a cat";
+      expect(form.toRequest().negative_prompt).toBeNull();
+    });
+
+    it("ships the explicit empty opt-out when the user clears the field", () => {
+      const form = useGenerateForm();
+      form.applyModelDefaults(wanModel());
+      form.state.value.prompt = "a cat";
+      form.state.value.negativePrompt = "";
+      expect(form.toRequest().negative_prompt).toBe("");
+    });
+
+    it("ships typed text verbatim", () => {
+      const form = useGenerateForm();
+      form.applyModelDefaults(wanModel());
+      form.state.value.prompt = "a cat";
+      form.state.value.negativePrompt = "hands";
+      expect(form.toRequest().negative_prompt).toBe("hands");
+    });
+
+    it("withdraws an untouched default on leaving the family but keeps typed text", () => {
+      const form = useGenerateForm();
+      form.applyModelDefaults(wanModel());
+      form.applyModelDefaults(makeModel());
+      expect(form.state.value.negativePrompt).toBe("");
+      expect(form.state.value.negativePromptDefault).toBe("");
+
+      form.applyModelDefaults(wanModel());
+      form.state.value.negativePrompt = "hands";
+      form.applyModelDefaults(makeModel());
+      expect(form.state.value.negativePrompt).toBe("hands");
+    });
+
+    it('restores absent metadata negatives as the model\'s default, and "" as empty', () => {
+      const metadata = {
+        prompt: "a cat",
+        model: "wan22-t2v-a14b:q5",
+        seed: 7,
+        steps: 30,
+        guidance: 6,
+        width: 832,
+        height: 480,
+        version: "1",
+      } as OutputMetadata;
+      const base = JSON.parse(
+        JSON.stringify(useGenerateForm().state.value),
+      ) as GenerateFormState;
+      const restored = applyMetadataToForm(base, metadata, {
+        models: [wanModel()],
+      });
+      expect(restored.negativePrompt).toBe(WAN_DEFAULT);
+
+      const optedOut = applyMetadataToForm(
+        base,
+        { ...metadata, negative_prompt: "" },
+        { models: [wanModel()] },
+      );
+      expect(optedOut.negativePrompt).toBe("");
+    });
+  });
+
   it("toRequest sends the bare prompt when no style preset is active", () => {
     const form = useGenerateForm();
     form.state.value.model = "flux2-klein:q4";
