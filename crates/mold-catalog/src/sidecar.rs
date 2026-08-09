@@ -70,6 +70,25 @@ pub struct CatalogSidecar {
     /// path via `sidecar_dir.join(primary_filename_rel)` so the layout
     /// stays portable across `MOLD_HOME` moves.
     pub primary_filename_rel: String,
+    /// Expected size of the primary file alone. `size_bytes` above is the
+    /// whole entry (for a two-expert pair that is the sum of both
+    /// experts), so pair sidecars record the primary's own size here for
+    /// the truncation check. Absent on single-file sidecars, where
+    /// `size_bytes` IS the primary size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_size_bytes: Option<u64>,
+    /// The low-noise expert of a two-expert checkpoint pair (Wan 2.2
+    /// A14B), relative to the sidecar's directory like
+    /// `primary_filename_rel` (which is then the high-noise expert).
+    /// When declared, the install is complete only when BOTH files are
+    /// present — a half-pair is never reported as installed. Absent on
+    /// every single-transformer install and on pre-pairing sidecars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_noise_filename_rel: Option<String>,
+    /// Expected size of the low-noise expert file, for the same
+    /// truncation check `size_bytes` provides the primary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_noise_size_bytes: Option<u64>,
     pub written_at: i64,
 }
 
@@ -93,6 +112,9 @@ pub fn require_sidecar_activation(
         mold_core::require_model_activation(page_url, family)?;
     }
     mold_core::require_model_activation(&sidecar.primary_filename_rel, family)?;
+    if let Some(low_rel) = sidecar.low_noise_filename_rel.as_deref() {
+        mold_core::require_model_activation(low_rel, family)?;
+    }
     Ok(())
 }
 
@@ -113,6 +135,13 @@ pub fn require_sidecar_artifact_activation(
     if let Some(primary) = primary_path(sidecar_dir, sidecar) {
         mold_core::require_model_artifact_activation(
             &primary,
+            Some(models_dir),
+            Some(sidecar.family.as_str()),
+        )?;
+    }
+    if let Some(low) = low_noise_path(sidecar_dir, sidecar) {
+        mold_core::require_model_artifact_activation(
+            &low,
             Some(models_dir),
             Some(sidecar.family.as_str()),
         )?;
@@ -146,7 +175,34 @@ fn default_true() -> bool {
 /// `primary_filename_rel` and let the caller decide whether that's
 /// fatal — the picker simply won't show the row.
 pub fn sidecar_from_entry(entry: &CatalogEntry, primary_filename_rel: String) -> CatalogSidecar {
+    // A two-expert (Wan 2.2 A14B) recipe records its low-noise half so the
+    // installed sidecar can resolve the pair without a live lookup, and so
+    // completeness checks can refuse a half-pair. Derived here rather than
+    // passed in so every sidecar writer (CLI pull, server download route,
+    // server intent install) stays in agreement by construction.
+    let (author, name) = match entry.source_id.split_once('/') {
+        Some((author, name)) => (author, name),
+        None => ("", entry.source_id.as_str()),
+    };
+    let low_noise = entry
+        .download_recipe
+        .files
+        .iter()
+        .find(|file| file.role == Some(crate::entry::RecipeFileRole::LowNoiseTransformer));
+    let primary_size_bytes = low_noise.is_some().then(|| {
+        entry
+            .download_recipe
+            .files
+            .iter()
+            .find(|file| file.role.is_none())
+            .and_then(|file| file.size_bytes)
+    });
     CatalogSidecar {
+        primary_size_bytes: primary_size_bytes.flatten(),
+        low_noise_filename_rel: low_noise.map(|file| {
+            crate::entry::render_recipe_dest(&file.dest, entry.family.as_str(), author, name)
+        }),
+        low_noise_size_bytes: low_noise.and_then(|file| file.size_bytes),
         schema: SIDECAR_SCHEMA,
         id: entry.id.0.clone(),
         source: serde_kebab(&entry.source),
@@ -291,35 +347,73 @@ pub fn primary_path(sidecar_dir: &Path, sidecar: &CatalogSidecar) -> Option<Path
     Some(sidecar_dir.join(relative))
 }
 
-/// Returns the absolute path to a sidecar's primary file, when that file is
-/// complete enough to trust. `None` indicates the sidecar is stale or the
-/// primary was only partially downloaded — the caller should treat the row as
-/// not installed.
-pub fn primary_path_if_present(sidecar_dir: &Path, sidecar: &CatalogSidecar) -> Option<PathBuf> {
-    if let Some(models_dir) = sidecar_dir.parent() {
-        if mold_core::download::pulling_marker_path_in(models_dir, &sidecar.id).exists() {
-            return None;
-        }
+/// Resolve the low-noise expert path a pair sidecar declares, with the
+/// same containment rules as [`primary_path`]. `None` for single-file
+/// sidecars and for declarations that would escape the install directory.
+pub fn low_noise_path(sidecar_dir: &Path, sidecar: &CatalogSidecar) -> Option<PathBuf> {
+    let relative = Path::new(sidecar.low_noise_filename_rel.as_deref()?);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
     }
-    let abs = primary_path(sidecar_dir, sidecar)?;
+    Some(sidecar_dir.join(relative))
+}
+
+/// One contained-and-complete file check: exists, resolves inside the
+/// install directory, and is verified by sha marker or declared size.
+fn contained_complete_file(
+    sidecar_dir: &Path,
+    abs: PathBuf,
+    expected_size: Option<u64>,
+) -> Option<PathBuf> {
     if !abs.is_file() {
         return None;
     }
     let canonical_dir = std::fs::canonicalize(sidecar_dir).ok()?;
-    let canonical_primary = std::fs::canonicalize(&abs).ok()?;
-    if !canonical_primary.starts_with(&canonical_dir) {
+    let canonical = std::fs::canonicalize(&abs).ok()?;
+    if !canonical.starts_with(&canonical_dir) {
         return None;
     }
     if mold_core::download::has_sha256_marker(&abs) {
         return Some(abs);
     }
-    if let Some(expected) = sidecar.size_bytes {
+    if let Some(expected) = expected_size {
         let actual = abs.metadata().ok()?.len();
         if actual != expected {
             return None;
         }
     }
     Some(abs)
+}
+
+/// Returns the absolute path to a sidecar's primary file, when the install
+/// is complete enough to trust. `None` indicates the sidecar is stale or a
+/// download is unfinished — the caller should treat the row as not
+/// installed.
+///
+/// For a two-expert pair sidecar (Wan 2.2 A14B) "complete" means BOTH
+/// declared experts: a present high-noise file with a missing low-noise
+/// counterpart is a half-pair that must never be reported installed —
+/// re-running the download resumes just the missing half.
+pub fn primary_path_if_present(sidecar_dir: &Path, sidecar: &CatalogSidecar) -> Option<PathBuf> {
+    if let Some(models_dir) = sidecar_dir.parent() {
+        if mold_core::download::pulling_marker_path_in(models_dir, &sidecar.id).exists() {
+            return None;
+        }
+    }
+    if sidecar.low_noise_filename_rel.is_some() {
+        let low = low_noise_path(sidecar_dir, sidecar)?;
+        contained_complete_file(sidecar_dir, low, sidecar.low_noise_size_bytes)?;
+    }
+    let abs = primary_path(sidecar_dir, sidecar)?;
+    // `size_bytes` is the whole entry; a pair sidecar records the
+    // primary's own size separately.
+    let expected = sidecar.primary_size_bytes.or(sidecar.size_bytes);
+    contained_complete_file(sidecar_dir, abs, expected)
 }
 
 #[cfg(test)]

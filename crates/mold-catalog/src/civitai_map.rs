@@ -59,6 +59,17 @@ pub fn map_base_model(
         "Wan Video 1.3B t2v" => (Wan, Finetune, Some("wan21-t2v-1.3b".into())),
         "Wan Video 14B t2v" => (Wan, Finetune, Some("wan21-t2v-14b".into())),
         "Wan Video 2.2 TI2V-5B" => (Wan, Finetune, Some("wan22-ti2v-5b".into())),
+        // A14B is a *pair*: two complete transformers the sampler alternates
+        // between at a fixed timestep. Civitai publishes the high- and
+        // low-noise experts as separate model versions, so `wan_a14b`
+        // pairs the sibling versions into one two-file recipe (primary =
+        // high-noise, `low-noise-transformer` role = low-noise) and the
+        // normalizer marks any version whose counterpart cannot be
+        // identified with confidence as unsupported — never a silent
+        // single-expert install. `synthesize_intent` fails closed on the
+        // same invariant for defense in depth.
+        "Wan Video 2.2 T2V-A14B" => (Wan, Finetune, Some("wan22-t2v-a14b".into())),
+        "Wan Video 2.2 I2V-A14B" => (Wan, Finetune, Some("wan22-i2v-a14b".into())),
 
         // Qwen
         "Qwen" | "Qwen 2" => (QwenImage, Finetune, None),
@@ -92,20 +103,6 @@ pub const CIVITAI_DROPS: &[&str] = &[
     // multi-gigabyte download that cannot generate.
     "Wan Video 14B i2v 480p",
     "Wan Video 14B i2v 720p",
-    // A14B is a *pair*: two complete transformers the sampler alternates
-    // between at a fixed timestep. Civitai publishes the high- and low-noise
-    // experts as separate model versions, `from_civitai_version` selects one
-    // file, and catalog resolution populates only `ModelConfig.transformer` —
-    // nothing sets `low_noise_transformer`. An installed A14B row would
-    // therefore denoise the whole schedule with whichever expert was pulled.
-    // The I2V half at least fails loudly (`reject_unwired_channel_concat_
-    // checkpoint` refuses a 36-channel checkpoint with no partner), but the
-    // T2V half is shape-indistinguishable from a single-expert 2.1 14B and
-    // would render silently wrong after ~11 GB. These stay dropped until the
-    // catalog can pair both versions; the manifest tiers `wan22-t2v-a14b:q5`
-    // / `:q8` ship the pair and are the supported route today.
-    "Wan Video 2.2 T2V-A14B",
-    "Wan Video 2.2 I2V-A14B",
     // Wan 2.5 and 2.7 are later architectures with no mold engine at all.
     "Wan Video 2.5 T2V",
     "Wan Video 2.5 I2V",

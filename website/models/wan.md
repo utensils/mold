@@ -228,13 +228,27 @@ mold pull cv:<version-id>     # a catalog row
 `mold pull` takes manifest names and catalog ids (`cv:…`, `hf:…`). A catalog id
 has to name a row the catalog actually supports, which is not the same as any
 Hugging Face repository — `hf:Wan-AI/Wan2.2-T2V-A14B`, for instance, is the
-upstream A14B pair and is not installable for the reason below. When in doubt,
-install from **Models → Discover**, which only lists rows this build can run.
+upstream aggregate repository, not a single runnable checkpoint; the A14B
+manifest tiers above are its supported route. When in doubt, install from
+**Models → Discover**, which only lists rows this build can run.
 
 Every Wan checkpoint in the wild ships the transformer alone, so a catalog
 install also pulls the shared UMT5-XXL encoder and the matching VAE. Those are
 the same files the manifest models use, under `shared/wan/`, so a second Wan
 install reuses them.
+
+**A14B fine-tunes install as a pair.** Civitai publishes the two A14B experts
+as separate model versions of one model (`… HighNoise` / `… LowNoise`,
+`HIGH Q8` / `LOW Q8`, and similar). mold pairs the high-noise version with its
+low-noise sibling into one install: the catalog shows one row per pair, either
+expert's `cv:` id resolves to the same two-file download, and the installed
+model denoises with both experts exactly like the manifest tiers (switching at
+timestep 875 for T2V, 900 for I2V). A version whose counterpart cannot be
+identified with confidence — merged "all-in-one" republications, a
+high-noise-only upload, ambiguous naming — stays visible but is refused with
+the reason rather than installed as a single expert, which would render
+silently wrong. If one half of an installed pair goes missing, the row reports
+not-installed and re-running the install resumes just the missing half.
 
 What the catalog deliberately does not offer:
 
@@ -242,13 +256,11 @@ What the catalog deliberately does not offer:
   branch mold's transformer does not implement, so the download would install
   and then fail to generate.
 - **Wan 2.5 and 2.7** are later architectures with no mold engine.
-- **A14B** is a two-expert pair, and a catalog row installs one file. Civitai
-  publishes the high- and low-noise experts as separate versions, so an
-  installed row would denoise the whole schedule with whichever expert was
-  pulled. Use the manifest tiers above, which ship both experts.
+- **GGUF Civitai rows** — the Civitai path is safetensors-only; the GGUF A14B
+  tiers ship through the manifest names above.
 
-Wan 2.1 text-to-video at either size and TI2V-5B install from the catalog
-normally.
+Wan 2.1 text-to-video at either size, TI2V-5B, and paired A14B fine-tunes
+install from the catalog normally.
 
 ## Roadmap
 

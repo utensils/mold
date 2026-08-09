@@ -57,6 +57,14 @@ pub struct CatalogModelIntent {
     /// tokenizer from that companion.
     #[serde(default)]
     pub text_encoder_recipe_paths: Vec<PathBuf>,
+    /// The low-noise expert of a two-expert checkpoint pair (Wan 2.2
+    /// A14B). The primary recipe path is the high-noise expert; this file
+    /// fills `ModelConfig.low_noise_transformer` at resolution time.
+    /// Mandatory for A14B intents — [`synthesize_intent`] fails closed
+    /// rather than emit a half-pair. `serde(default)` keeps pre-pairing
+    /// serialized intents deserializing.
+    #[serde(default)]
+    pub low_noise_recipe_path: Option<PathBuf>,
     /// Companions this model needs, with required/optional flag.
     pub companions: Vec<CompanionIntent>,
     pub bundling: Bundling,
@@ -98,6 +106,19 @@ pub enum SynthesisError {
     /// (`[models]` in `config.toml`), not by `cv:*`/`hf:*` synthesis.
     #[error("catalog entry {id} bundling={bundling:?} is not supported (single-file only)")]
     UnsupportedBundling { id: String, bundling: Bundling },
+
+    /// A Wan 2.2 A14B checkpoint whose recipe carries only one of the two
+    /// experts. The normalizer marks such entries unsupported; this is
+    /// the fail-closed backstop so no install path (server intent cache,
+    /// CLI bridge) can ever produce a single-expert A14B config — the
+    /// T2V half would render silently wrong rather than error.
+    #[error(
+        "catalog entry {id} is a Wan 2.2 A14B expert without its {missing} \
+         counterpart. A14B denoises with a pair of experts, so a single \
+         expert cannot generate correctly; pick a version published as a \
+         matching High/Low pair."
+    )]
+    MissingExpertCounterpart { id: String, missing: &'static str },
 }
 
 /// Synthesize a `CatalogModelIntent` from a `CatalogEntry`.
@@ -156,6 +177,33 @@ pub fn synthesize_intent(
             });
         }
     }
+    let low_noise_recipe_path = entry
+        .download_recipe
+        .files
+        .iter()
+        .find(|file| file.role == Some(RecipeFileRole::LowNoiseTransformer))
+        .map(|file| recipe_file_path(models_dir, &sanitized, entry, file, author, name));
+    if let Some(path) = &low_noise_recipe_path {
+        if path.to_str().is_none() {
+            return Err(SynthesisError::NonUtf8Path {
+                path: path.display().to_string(),
+            });
+        }
+    }
+    // Fail-closed backstop: an A14B checkpoint intent must carry both
+    // experts. The normalizer already marks unpaired entries unsupported;
+    // refusing here as well means no caller — server intent cache, CLI
+    // bridge — can turn a half-pair into a runnable-looking config.
+    if entry.kind == crate::entry::Kind::Checkpoint
+        && entry.family == Family::Wan
+        && crate::wan_a14b::is_a14b_sub_family(entry.sub_family.as_deref())
+        && low_noise_recipe_path.is_none()
+    {
+        return Err(SynthesisError::MissingExpertCounterpart {
+            id: entry.id.0.clone(),
+            missing: crate::wan_a14b::missing_counterpart_label(&primary.dest),
+        });
+    }
 
     if !matches!(entry.bundling, Bundling::SingleFile) {
         return Err(SynthesisError::UnsupportedBundling {
@@ -187,6 +235,7 @@ pub fn synthesize_intent(
         primary_recipe_path: primary_path,
         vae_recipe_path,
         text_encoder_recipe_paths,
+        low_noise_recipe_path,
         companions,
         bundling: entry.bundling,
     })

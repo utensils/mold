@@ -2193,6 +2193,9 @@ mod tests {
             supported: true,
             trained_words: Vec::new(),
             primary_filename_rel: primary_rel.to_string(),
+            primary_size_bytes: None,
+            low_noise_filename_rel: None,
+            low_noise_size_bytes: None,
             written_at: 0,
         };
         mold_catalog::sidecar::write_sidecar(

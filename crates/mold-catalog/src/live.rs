@@ -1392,6 +1392,33 @@ pub async fn fetch_civitai_version(
     }
     let detail: CivitaiVersionDetail = serde_json::from_str(&body)?;
 
+    // A14B experts are published as sibling versions of one model, and the
+    // version-detail response alone cannot see the siblings. Fetch the
+    // parent model so `wan_a14b` pairing runs over the full version list;
+    // either expert's id then resolves to the same runnable pair. A
+    // missing `modelId` or a version absent from its own parent falls
+    // through to the single-version item, which normalizes as an
+    // un-installable unpaired entry — fail closed, never single-expert.
+    if crate::wan_a14b::a14b_sub_family(&detail.version.base_model).is_some() {
+        if let Some(model_id) = detail.model_id {
+            let item = fetch_civitai_model_item(civitai_base, model_id, civitai_token).await?;
+            if let Some(entry) = item
+                .model_versions
+                .iter()
+                .find(|version| version.id == detail.version.id)
+                .and_then(|version| {
+                    crate::normalizer::from_civitai_version_with_policy(
+                        &item,
+                        version,
+                        crate::normalizer::A14bEmitPolicy::EmitRequested,
+                    )
+                })
+            {
+                return Ok(entry);
+            }
+        }
+    }
+
     let item = CivitaiItem {
         // `from_civitai` composes the model page URL from this id and
         // skips it when 0 — the sentinel for "upstream omitted modelId".
@@ -1412,6 +1439,36 @@ pub async fn fetch_civitai_version(
             "model-version {version_id} did not normalize (unsupported kind, missing safetensors, or unknown baseModel)"
         ),
     })
+}
+
+/// Fetch one Civitai model (with its full version list) as a
+/// [`CivitaiItem`]. Used by the A14B pairing path, which needs the
+/// sibling versions the version-detail response does not carry.
+async fn fetch_civitai_model_item(
+    civitai_base: &str,
+    model_id: u64,
+    civitai_token: Option<&str>,
+) -> Result<CivitaiItem, LiveSearchError> {
+    let url = format!("{civitai_base}/api/v1/models/{model_id}");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()?;
+    tracing::debug!(target: "catalog.live", url = %url, "civitai model fetch");
+    let mut req = client.get(&url);
+    if let Some(t) = civitai_token {
+        req = req.bearer_auth(t);
+    }
+    let resp = req.send().await?;
+    let status = resp.status();
+    let body = resp.text().await?;
+    if !status.is_success() {
+        return Err(LiveSearchError::Upstream {
+            host: "civitai.com",
+            status: status.as_u16(),
+            body: body.chars().take(400).collect(),
+        });
+    }
+    Ok(serde_json::from_str(&body)?)
 }
 
 /// Fetch a single catalog entry by its `cv:` / `hf:` id, dispatching to
@@ -2323,6 +2380,147 @@ mod tests {
             serde_json::from_str(VERSION_DETAIL_BODY).expect("without modelId");
         assert_eq!(detail.model_id, None);
         assert_eq!(detail.version.id, 8001);
+    }
+
+    fn fixture(name: &str) -> String {
+        std::fs::read_to_string(format!(
+            "{}/tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("fixture readable")
+    }
+
+    /// A14B version-detail fetches must consult the parent model so the
+    /// sibling expert can be paired: either expert's `cv:` id resolves to
+    /// one two-file recipe with the high-noise expert as primary. Bodies
+    /// are captured from the real Civitai API (model 1817671, the
+    /// official Wan 2.2 repack).
+    #[tokio::test]
+    async fn a14b_version_fetch_pairs_via_the_parent_model() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/model-versions/2057171"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(fixture("civitai_wan22_version_2057171_high.json")),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/model-versions/2057100"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(fixture("civitai_wan22_version_2057100_low.json")),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models/1817671"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(fixture("civitai_wan22_model_1817671.json")),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        for requested in ["2057171", "2057100"] {
+            let entry = fetch_civitai_version(&server.uri(), requested, None)
+                .await
+                .expect("A14B version resolves to the pair");
+            assert_eq!(entry.id.as_str(), format!("cv:{requested}"));
+            assert_eq!(entry.sub_family.as_deref(), Some("wan22-t2v-a14b"));
+            assert!(entry.supported, "a confidently-paired entry is installable");
+            let files = &entry.download_recipe.files;
+            assert_eq!(files.len(), 2, "one recipe carries both experts");
+            assert!(files[0].role.is_none(), "primary = high-noise expert");
+            assert!(files[0]
+                .dest
+                .contains("civitai/2057171/wanVideo22_t2vHighNoise14B.safetensors"));
+            assert_eq!(
+                files[1].role,
+                Some(crate::entry::RecipeFileRole::LowNoiseTransformer)
+            );
+            assert!(files[1]
+                .dest
+                .contains("civitai/2057100/wanVideo22_t2vLowNoise14B.safetensors"));
+            assert!(
+                !crate::wan_a14b::entry_is_unpaired_a14b(&entry),
+                "paired entry must not read as unpaired"
+            );
+            // Whole-install size = both experts, so the UI names the real
+            // download cost.
+            let per_file: u64 = files.iter().filter_map(|f| f.size_bytes).sum();
+            let total = entry.size_bytes.expect("size present");
+            assert!(
+                total.abs_diff(per_file) <= 2,
+                "entry size {total} must be the sum of both experts (~{per_file})"
+            );
+        }
+    }
+
+    /// When the parent model publishes no counterpart, the version still
+    /// resolves — as a deliberately un-installable entry — and never as a
+    /// single-expert install.
+    #[tokio::test]
+    async fn a14b_version_without_counterpart_resolves_unsupported() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/model-versions/2057171"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(fixture("civitai_wan22_version_2057171_high.json")),
+            )
+            .mount(&server)
+            .await;
+        // Parent model with the low-noise siblings removed.
+        let mut model: serde_json::Value =
+            serde_json::from_str(&fixture("civitai_wan22_model_1817671.json")).unwrap();
+        let versions = model["modelVersions"].as_array_mut().unwrap();
+        versions.retain(|v| {
+            let id = v["id"].as_u64().unwrap();
+            ![2057100u64, 2057683].contains(&id)
+        });
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models/1817671"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&model))
+            .mount(&server)
+            .await;
+
+        let entry = fetch_civitai_version(&server.uri(), "2057171", None)
+            .await
+            .expect("the entry still resolves for display");
+        assert!(!entry.supported, "a half-pair is never installable");
+        assert_eq!(entry.download_recipe.files.len(), 1);
+        assert!(crate::wan_a14b::entry_is_unpaired_a14b(&entry));
+    }
+
+    /// A parent-model fetch failure is a hard error, not a silent
+    /// downgrade to an unpaired entry.
+    #[tokio::test]
+    async fn a14b_parent_model_error_propagates() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/model-versions/2057171"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(fixture("civitai_wan22_version_2057171_high.json")),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models/1817671"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("upstream sad"))
+            .mount(&server)
+            .await;
+
+        let err = fetch_civitai_version(&server.uri(), "2057171", None)
+            .await
+            .expect_err("parent fetch failure must propagate");
+        match err {
+            LiveSearchError::Upstream { status, .. } => assert_eq!(status, 500),
+            other => panic!("expected Upstream 500, got {other:?}"),
+        }
     }
 
     #[tokio::test]

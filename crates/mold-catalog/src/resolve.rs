@@ -137,6 +137,19 @@ pub fn resolve_intent_to_model_config(
     };
     apply_catalog_runtime_defaults(&mut cfg, intent);
     cfg.transformer = Some(primary_str.clone());
+    // Two-expert pair (Wan 2.2 A14B): the primary is the high-noise
+    // expert and this fills the low-noise slot the sampler swaps to at
+    // the expert boundary. `WanExperts` validates at bind time that both
+    // files declare the same architecture — the final gate behind the
+    // catalog's name-marker pairing.
+    if let Some(low_noise) = &intent.low_noise_recipe_path {
+        cfg.low_noise_transformer = Some(
+            low_noise
+                .to_str()
+                .expect("synthesize_intent guarantees UTF-8 paths")
+                .to_string(),
+        );
+    }
 
     // FLUX and LTX-2 both have mixed bundling — peek the safetensors header
     // to decide whether the primary carries a VAE or a companion must fill it.
@@ -375,6 +388,16 @@ pub fn installed_intent_from_sidecar(
     }
     let primary_recipe_path = crate::sidecar::primary_path_if_present(&sidecar_dir, &sidecar)?;
     let family = Family::from_str(&sidecar.family).ok()?;
+    // Fail closed on a half-pair: an A14B sidecar written before pairing
+    // existed (or hand-edited) has no low-noise declaration, and treating
+    // it as installed would run a single expert over the whole schedule.
+    let low_noise_recipe_path = crate::sidecar::low_noise_path(&sidecar_dir, &sidecar);
+    if family == Family::Wan
+        && crate::wan_a14b::is_a14b_sub_family(sidecar.sub_family.as_deref())
+        && low_noise_recipe_path.is_none()
+    {
+        return None;
+    }
     let companions = crate::companions::companions_for(
         family,
         sidecar.sub_family.as_deref(),
@@ -394,6 +417,7 @@ pub fn installed_intent_from_sidecar(
         primary_recipe_path,
         vae_recipe_path: None,
         text_encoder_recipe_paths: Vec::new(),
+        low_noise_recipe_path,
         companions,
         bundling: Bundling::SingleFile,
     })
@@ -448,6 +472,17 @@ fn catalog_primary_is_complete(
     config: &Config,
 ) -> bool {
     if !intent.primary_recipe_path.is_file() {
+        return false;
+    }
+    // A two-expert pair is complete only when BOTH experts are on disk;
+    // the low-noise file is not read until the schedule crosses the
+    // expert boundary, so a missing one would otherwise surface
+    // mid-generation instead of as a repairable pull.
+    if intent
+        .low_noise_recipe_path
+        .as_deref()
+        .is_some_and(|low| !low.is_file())
+    {
         return false;
     }
     if model_name.starts_with("cv:") {
@@ -1210,6 +1245,209 @@ mod tests {
         );
     }
 
+    // ── Wan 2.2 A14B expert pairs ──────────────────────────────────────────
+
+    /// Stub the Wan companions (wan-umt5 + wan21-vae) as installed
+    /// manifest entries with on-disk files.
+    fn stub_wan_companions(config: &mut Config, models_dir: &Path) {
+        let umt5 = models_dir.join("wan-umt5/umt5_xxl_fp16.safetensors");
+        let umt5_tok = models_dir.join("wan-umt5/tokenizer.json");
+        let vae = models_dir.join("wan21-vae/wan_2.1_vae.safetensors");
+        for p in [&umt5, &umt5_tok, &vae] {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::File::create(p).unwrap();
+        }
+        config.models.insert(
+            "wan-umt5".into(),
+            ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(umt5.to_string_lossy().into_owned()),
+                vae: Some(umt5.to_string_lossy().into_owned()),
+                text_encoder_files: Some(vec![umt5.to_string_lossy().into_owned()]),
+                text_tokenizer: Some(umt5_tok.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            "wan21-vae".into(),
+            ModelConfig {
+                family: Some("companion".into()),
+                transformer: Some(vae.to_string_lossy().into_owned()),
+                vae: Some(vae.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// A paired Civitai A14B entry: high-noise primary plus the sibling
+    /// version's low-noise expert with the `low-noise-transformer` role,
+    /// matching the shape `wan_a14b::pair_experts` emits from the real
+    /// fixture bodies.
+    fn wan_a14b_pair_entry() -> CatalogEntry {
+        let mut e = base_entry();
+        e.id = CatalogId::from("cv:2057171");
+        e.source_id = "2057171".into();
+        e.name = "Wan Video 2.2 - t2v_high_noise_14B".into();
+        e.family = Family::Wan;
+        e.sub_family = Some("wan22-t2v-a14b".into());
+        e.companions = vec!["wan-umt5".into(), "wan21-vae".into()];
+        e.download_recipe.files = vec![
+            RecipeFile {
+                url: "https://civitai.com/api/download/models/2057171".into(),
+                dest: "{family}/civitai/2057171/wanVideo22_t2vHighNoise14B.safetensors".into(),
+                sha256: None,
+                size_bytes: Some(4),
+                role: None,
+            },
+            RecipeFile {
+                url: "https://civitai.com/api/download/models/2057100".into(),
+                dest: "{family}/civitai/2057100/wanVideo22_t2vLowNoise14B.safetensors".into(),
+                sha256: None,
+                size_bytes: Some(4),
+                role: Some(RecipeFileRole::LowNoiseTransformer),
+            },
+        ];
+        e
+    }
+
+    /// The pair resolves into one runnable config: transformer = high
+    /// expert, `low_noise_transformer` = low expert, and `ModelPaths`
+    /// carries both — which is what makes component status list the
+    /// low-noise row and the VRAM estimator size the larger expert (max
+    /// over the pair, not the sum).
+    #[test]
+    fn a14b_pair_resolves_low_noise_transformer() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_models_dir_env();
+        let dir = tempfile::tempdir().unwrap();
+        let _home = pin_mold_home(dir.path());
+        let models_dir = dir.path();
+        let mut config = config_in(models_dir);
+        stub_wan_companions(&mut config, models_dir);
+
+        let entry = wan_a14b_pair_entry();
+        let intent = synthesize_intent(&entry, models_dir).unwrap();
+        for path in [
+            &intent.primary_recipe_path,
+            intent
+                .low_noise_recipe_path
+                .as_ref()
+                .expect("paired intent records the low expert"),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"fake").unwrap();
+        }
+
+        let cfg = resolve_intent_to_model_config("cv:2057171", &intent, &config, FAIL).unwrap();
+        assert_eq!(cfg.family.as_deref(), Some("wan"));
+        assert_eq!(
+            cfg.transformer.as_deref(),
+            intent.primary_recipe_path.to_str()
+        );
+        assert_eq!(
+            cfg.low_noise_transformer.as_deref(),
+            intent.low_noise_recipe_path.as_ref().unwrap().to_str()
+        );
+        // Quality-tier defaults: no distill, 20 steps, guidance 3.5.
+        assert_eq!(cfg.low_noise_distilled_lora, None);
+        assert_eq!(cfg.distilled_lora, None);
+        assert_eq!(
+            (cfg.default_steps, cfg.default_guidance),
+            (Some(20), Some(3.5))
+        );
+
+        let paths = ModelPaths::resolve_from_model_config_exact(&cfg)
+            .expect("resolved pair config maps to runtime paths");
+        assert_eq!(
+            paths.low_noise_transformer.as_deref(),
+            intent.low_noise_recipe_path.as_deref(),
+            "ModelPaths must carry the pair so component status and the \
+             max-over-experts VRAM estimate see both files"
+        );
+    }
+
+    /// A half-downloaded pair is repairable, not runnable: the missing
+    /// low-noise file fails the strict (server) resolve with the
+    /// pull-to-repair error, and completing it resolves.
+    #[test]
+    fn a14b_pair_with_missing_low_half_is_repairable_not_runnable() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_models_dir_env();
+        let dir = tempfile::tempdir().unwrap();
+        let _home = pin_mold_home(dir.path());
+        let models_dir = dir.path();
+        let mut config = config_in(models_dir);
+        stub_wan_companions(&mut config, models_dir);
+
+        let entry = wan_a14b_pair_entry();
+        let intent = synthesize_intent(&entry, models_dir).unwrap();
+        std::fs::create_dir_all(intent.primary_recipe_path.parent().unwrap()).unwrap();
+        std::fs::write(&intent.primary_recipe_path, b"fake").unwrap();
+
+        let err = resolve_intent_to_model_config("cv:2057171", &intent, &config, FAIL).unwrap_err();
+        assert!(
+            matches!(err, ResolveError::PrimaryFileMissing { .. }),
+            "a half-pair must resolve to the repairable pull error, got {err:?}"
+        );
+
+        let low = intent.low_noise_recipe_path.as_ref().unwrap();
+        std::fs::create_dir_all(low.parent().unwrap()).unwrap();
+        std::fs::write(low, b"fake").unwrap();
+        let cfg = resolve_intent_to_model_config("cv:2057171", &intent, &config, FAIL).unwrap();
+        assert!(cfg.low_noise_transformer.is_some());
+    }
+
+    /// An installed A14B sidecar resolves without a live lookup — and one
+    /// that never declared its low-noise half (pre-pairing or hand-edited)
+    /// yields no intent at all instead of a single-expert config.
+    #[test]
+    fn installed_a14b_sidecar_requires_the_declared_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_dir = dir.path();
+        let entry = wan_a14b_pair_entry();
+        let install_dir = models_dir.join("cv-2057171");
+        let high_rel = "wan/civitai/2057171/wanVideo22_t2vHighNoise14B.safetensors";
+        let low_rel = "wan/civitai/2057100/wanVideo22_t2vLowNoise14B.safetensors";
+        for rel in [high_rel, low_rel] {
+            let path = install_dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"fake").unwrap();
+        }
+        let mut sidecar = crate::sidecar::sidecar_from_entry(&entry, high_rel.to_string());
+        sidecar.size_bytes = Some(8);
+        sidecar.primary_size_bytes = Some(4);
+        sidecar.low_noise_size_bytes = Some(4);
+        crate::sidecar::write_sidecar(
+            &install_dir.join(crate::sidecar::SIDECAR_FILENAME),
+            &sidecar,
+        )
+        .unwrap();
+
+        let intent = installed_intent_from_sidecar(models_dir, "cv:2057171")
+            .expect("paired sidecar synthesizes an intent");
+        assert_eq!(
+            intent.low_noise_recipe_path.as_deref(),
+            Some(install_dir.join(low_rel).as_path())
+        );
+        assert!(intent.companions.iter().any(|c| c.name == "wan-umt5"));
+        assert!(intent.companions.iter().any(|c| c.name == "wan21-vae"));
+
+        // Same sidecar without the pair declaration: fail closed.
+        sidecar.low_noise_filename_rel = None;
+        sidecar.low_noise_size_bytes = None;
+        sidecar.primary_size_bytes = None;
+        sidecar.size_bytes = Some(4);
+        crate::sidecar::write_sidecar(
+            &install_dir.join(crate::sidecar::SIDECAR_FILENAME),
+            &sidecar,
+        )
+        .unwrap();
+        assert!(
+            installed_intent_from_sidecar(models_dir, "cv:2057171").is_none(),
+            "an undeclared pair must never become a single-expert install"
+        );
+    }
+
     #[test]
     fn missing_required_companion_errors_under_fail_policy() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1352,6 +1590,9 @@ mod tests {
             supported,
             trained_words: Vec::new(),
             primary_filename_rel: primary_rel.to_string(),
+            primary_size_bytes: None,
+            low_noise_filename_rel: None,
+            low_noise_size_bytes: None,
             written_at: 0,
         };
         crate::sidecar::write_sidecar(

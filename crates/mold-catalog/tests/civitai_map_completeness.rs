@@ -37,6 +37,10 @@ fn wan_base_models_reach_the_right_vae_and_timing() {
     for (base_model, want_vae, want_frames, want_fps) in [
         ("Wan Video 1.3B t2v", "wan21-vae", 81, 16),
         ("Wan Video 14B t2v", "wan21-vae", 81, 16),
+        // Both A14B pairs use the 2.1 VAE and 2.1 timing despite the 2.2
+        // in their name.
+        ("Wan Video 2.2 T2V-A14B", "wan21-vae", 81, 16),
+        ("Wan Video 2.2 I2V-A14B", "wan21-vae", 81, 16),
         // The one that differs, and the reason this test exists.
         ("Wan Video 2.2 TI2V-5B", "wan22-vae", 121, 24),
     ] {
@@ -87,36 +91,53 @@ fn wan_base_models_reach_the_right_vae_and_timing() {
     }
 }
 
-/// A14B is a two-expert pair, and the catalog cannot install a pair.
+/// A14B is a two-expert pair, and the catalog installs the pair.
 ///
 /// Civitai publishes the high- and low-noise experts as separate model
-/// versions; `from_civitai_version` picks one file and catalog resolution sets
-/// only `ModelConfig.transformer`, never `low_noise_transformer`. An installed
-/// row would denoise the entire schedule with whichever expert was pulled.
-/// The I2V half fails loudly — a 36-channel checkpoint with no partner is
-/// refused — but the T2V half is shape-indistinguishable from a single-expert
-/// 2.1 14B, so it would render silently wrong after ~11 GB of download.
-///
-/// The manifest tiers ship the pair and remain the supported route. Remove
-/// this only together with catalog expert pairing.
+/// versions; `mold_catalog::wan_a14b` pairs the sibling versions into one
+/// two-file recipe, so both base models map. Their sub-families take the
+/// 2.1 VAE and 2.1 timing (the 2.2 in their name notwithstanding), the
+/// quality-tier 20-step / 3.5-guidance recipe, and their sub-family slugs
+/// name expert pairs so intent synthesis fails closed on a half-pair.
 #[test]
-fn a14b_rows_stay_unsupported_until_the_catalog_can_pair_experts() {
-    for base_model in ["Wan Video 2.2 T2V-A14B", "Wan Video 2.2 I2V-A14B"] {
+fn a14b_rows_map_as_expert_pairs() {
+    for (base_model, want_sub) in [
+        ("Wan Video 2.2 T2V-A14B", "wan22-t2v-a14b"),
+        ("Wan Video 2.2 I2V-A14B", "wan22-i2v-a14b"),
+    ] {
+        let (family, _role, sub) = map_base_model(base_model)
+            .unwrap_or_else(|| panic!("{base_model} must map now that pairing exists"));
+        assert_eq!(family, Family::Wan, "{base_model}");
+        assert_eq!(sub.as_deref(), Some(want_sub), "{base_model}");
         assert!(
-            map_base_model(base_model).is_none(),
-            "{base_model} needs both experts; a single-version install renders wrong"
+            mold_catalog::wan_a14b::is_a14b_sub_family(sub.as_deref()),
+            "{base_model} sub_family must be recognized as an expert pair"
         );
-        assert!(CIVITAI_DROPS.contains(&base_model), "{base_model}");
+        assert!(!CIVITAI_DROPS.contains(&base_model), "{base_model}");
+
+        // Distill-adapter policy for paired finetunes: minimum viable is
+        // no distill plus the quality tier's step/guidance defaults.
+        let defaults =
+            mold_catalog::defaults::runtime_defaults_for_family(family.as_str(), sub.as_deref());
+        assert_eq!(
+            (defaults.steps, defaults.guidance),
+            (20, 3.5),
+            "{base_model}"
+        );
     }
 
-    // The single-checkpoint Wan models are unaffected — this is a pairing
-    // limitation, not a family-wide one.
+    // The single-checkpoint Wan models are unaffected — pairing is scoped
+    // to the A14B base models.
     for base_model in [
         "Wan Video 1.3B t2v",
         "Wan Video 14B t2v",
         "Wan Video 2.2 TI2V-5B",
     ] {
-        assert!(map_base_model(base_model).is_some(), "{base_model}");
+        let (_, _, sub) = map_base_model(base_model).unwrap();
+        assert!(
+            !mold_catalog::wan_a14b::is_a14b_sub_family(sub.as_deref()),
+            "{base_model} is not an expert pair"
+        );
     }
 }
 

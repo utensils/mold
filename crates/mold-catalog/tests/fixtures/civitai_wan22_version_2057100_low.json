@@ -1,0 +1,85 @@
+{
+ "id": 2057100,
+ "modelId": 1817671,
+ "name": "t2v_low_noise_14B",
+ "nsfwLevel": 1,
+ "createdAt": "2025-07-28T15:23:17.855Z",
+ "updatedAt": "2025-10-29T01:24:02.075Z",
+ "status": "Published",
+ "publishedAt": "2025-07-28T15:42:32.840Z",
+ "trainedWords": [],
+ "trainingStatus": null,
+ "trainingDetails": null,
+ "baseModel": "Wan Video 2.2 T2V-A14B",
+ "baseModelType": "Standard",
+ "description": "<p>wan2.2_t2v_low_noise_14B_fp8_scaled</p>",
+ "uploadType": "Created",
+ "usageControl": "Download",
+ "licensingFee": null,
+ "paidAccess": null,
+ "air": "urn:air:wanvideo-22-t2v-a14b:checkpoint:civitai:1817671@2057100",
+ "stats": {
+  "downloadCount": 1933,
+  "thumbsUpCount": 59
+ },
+ "model": {
+  "name": "Wan Video 2.2",
+  "type": "Checkpoint",
+  "nsfw": false,
+  "poi": false
+ },
+ "files": [
+  {
+   "id": 1953915,
+   "sizeKB": 13958909.796875,
+   "name": "wanVideo22_t2vLowNoise14B.safetensors",
+   "type": "Model",
+   "pickleScanResult": "Success",
+   "pickleScanMessage": "No Pickle imports",
+   "virusScanResult": "Success",
+   "virusScanMessage": null,
+   "scannedAt": "2025-07-28T15:53:05.451",
+   "metadata": {
+    "format": "SafeTensor",
+    "size": "pruned",
+    "fp": "fp8"
+   },
+   "hashes": {
+    "AutoV1": "053A1060",
+    "AutoV2": "E71B96D7C8",
+    "SHA256": "E71B96D7C82E638694C5E7FB98FAC4BFB0E4DDC5FBBB4B1DF40DA8F0F1278A97",
+    "CRC32": "2E14F608",
+    "BLAKE3": "C91B6776BD509549C533CD3A99B47EBF5F8728F5616A3DA26B605C3317793F9C",
+    "AutoV3": "698EB11168F4"
+   },
+   "primary": true,
+   "downloadUrl": "https://civitai.com/api/download/models/2057100"
+  }
+ ],
+ "images": [
+  {
+   "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/0cf9f668-561b-4c50-b86d-fb47b635f019/original=true/91000464.mp4",
+   "nsfwLevel": 1,
+   "width": 1280,
+   "height": 720,
+   "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+   "type": "video",
+   "metadata": {
+    "hash": "U00000fQfQfQfQfQfQfQfQfQfQfQfQfQfQfQ",
+    "size": 9193286,
+    "audio": false,
+    "width": 1280,
+    "height": 720,
+    "duration": 80.042
+   },
+   "minor": false,
+   "poi": false,
+   "availability": "Public",
+   "hasMeta": false,
+   "hasPositivePrompt": false,
+   "onSite": false,
+   "remixOfId": null
+  }
+ ],
+ "downloadUrl": "https://civitai.com/api/download/models/2057100"
+}

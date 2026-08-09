@@ -104,6 +104,10 @@ pub struct RecipeFile {
 pub enum RecipeFileRole {
     Vae,
     TextEncoder,
+    /// The low-noise expert of a two-expert checkpoint pair (Wan 2.2
+    /// A14B). The role-less primary file is the high-noise expert; this
+    /// file fills `ModelConfig.low_noise_transformer` at resolution time.
+    LowNoiseTransformer,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

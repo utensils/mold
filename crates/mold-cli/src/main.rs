@@ -2541,6 +2541,9 @@ pub async fn resolve_catalog_id(id: &str) -> anyhow::Result<CatalogIdResolution>
     mold_core::require_model_activation(entry.id.as_str(), Some(entry.family.as_str()))?;
     mold_core::require_model_activation(&entry.name, Some(entry.family.as_str()))?;
     if !entry.supported {
+        if mold_catalog::wan_a14b::entry_is_unpaired_a14b(&entry) {
+            anyhow::bail!("{}", mold_catalog::wan_a14b::unpaired_reason(&entry.name));
+        }
         anyhow::bail!("catalog entry is not supported by this build of mold");
     }
     Ok(CatalogIdResolution::Recipe(Box::new(entry)))

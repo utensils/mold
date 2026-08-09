@@ -282,6 +282,9 @@ async fn h3_persisted_sidecar_repair_is_rejected_before_presence_short_circuit()
             supported: true,
             trained_words: Vec::new(),
             primary_filename_rel: "ordinary.safetensors".into(),
+            primary_size_bytes: None,
+            low_noise_filename_rel: None,
+            low_noise_size_bytes: None,
             written_at: 0,
         },
     )
@@ -346,6 +349,7 @@ async fn h3_upstream_change_invalidates_cached_ordinary_repair_intent_before_wri
             primary_recipe_path: tmp.path().join("cv-8200/ordinary.safetensors"),
             vae_recipe_path: None,
             text_encoder_recipe_paths: Vec::new(),
+            low_noise_recipe_path: None,
             companions: Vec::new(),
             bundling: mold_catalog::entry::Bundling::SingleFile,
         },
@@ -392,6 +396,166 @@ async fn h3_upstream_change_invalidates_cached_ordinary_repair_intent_before_wri
         Some("flux")
     );
     server.verify().await;
+}
+
+/// Fixture bodies captured from the real Civitai API (model 1817671, the
+/// official Wan 2.2 repack) — shared with mold-catalog's pairing tests.
+const WAN22_VERSION_2057171_HIGH: &str =
+    include_str!("../../mold-catalog/tests/fixtures/civitai_wan22_version_2057171_high.json");
+const WAN22_MODEL_1817671: &str =
+    include_str!("../../mold-catalog/tests/fixtures/civitai_wan22_model_1817671.json");
+
+fn wan_a14b_pair_sidecar(size_on_disk: u64) -> CatalogSidecar {
+    CatalogSidecar {
+        schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+        id: "cv:2057171".into(),
+        source: "civitai".into(),
+        source_id: "2057171".into(),
+        name: "Wan Video 2.2 - t2v_high_noise_14B".into(),
+        author: None,
+        family: "wan".into(),
+        family_role: "finetune".into(),
+        sub_family: Some("wan22-t2v-a14b".into()),
+        kind: "checkpoint".into(),
+        modality: "video".into(),
+        nsfw: None,
+        description: None,
+        tags: Vec::new(),
+        license: None,
+        page_url: None,
+        thumbnail_url: None,
+        size_bytes: Some(size_on_disk * 2),
+        supported: true,
+        trained_words: Vec::new(),
+        primary_filename_rel: "wan/civitai/2057171/wanVideo22_t2vHighNoise14B.safetensors".into(),
+        primary_size_bytes: Some(size_on_disk),
+        low_noise_filename_rel: Some(
+            "wan/civitai/2057100/wanVideo22_t2vLowNoise14B.safetensors".into(),
+        ),
+        low_noise_size_bytes: Some(size_on_disk),
+        written_at: 0,
+    }
+}
+
+/// The download route resolves a half-downloaded A14B pair (high-noise on
+/// disk, low-noise missing) to the paired entry and enqueues the full
+/// two-expert recipe — placed files are skipped at fetch time, so the
+/// download resumes just the missing half — and the written sidecar keeps
+/// the pair declaration.
+#[tokio::test]
+async fn a14b_pair_download_enqueues_both_experts() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/model-versions/2057171"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(WAN22_VERSION_2057171_HIGH))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/models/1817671"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(WAN22_MODEL_1817671))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = AppState::for_tests().with_civitai_base(server.uri());
+    state.config.write().await.models_dir = tmp.path().display().to_string();
+
+    let sidecar_path = mold_catalog::sidecar::civitai_sidecar_path(tmp.path(), "cv:2057171");
+    let install_dir = sidecar_path.parent().unwrap();
+    let high = install_dir.join("wan/civitai/2057171/wanVideo22_t2vHighNoise14B.safetensors");
+    std::fs::create_dir_all(high.parent().unwrap()).unwrap();
+    std::fs::write(&high, b"high").unwrap();
+    write_sidecar(&sidecar_path, &wan_a14b_pair_sidecar(4)).unwrap();
+
+    let response = create_router(state.clone())
+        .oneshot(
+            Request::post("/api/catalog/cv:2057171/download")
+                .header("x-mold-civitai-token", "cv_test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let job_id = body["primary_job_id"].as_str().expect("primary job id");
+
+    let listing = state.downloads.listing().await;
+    let job = listing
+        .queued
+        .iter()
+        .chain(listing.active_jobs.iter())
+        .find(|job| job.id == job_id)
+        .expect("download job queued");
+    assert_eq!(
+        job.files_total, 2,
+        "the recipe must carry BOTH experts so the missing half resumes"
+    );
+
+    // The rewritten sidecar keeps the pair declaration.
+    let sidecar = mold_catalog::sidecar::read_sidecar(&sidecar_path).unwrap();
+    assert_eq!(
+        sidecar.low_noise_filename_rel.as_deref(),
+        Some("wan/civitai/2057100/wanVideo22_t2vLowNoise14B.safetensors")
+    );
+    server.verify().await;
+}
+
+/// When the counterpart expert can no longer be identified upstream (the
+/// low-noise sibling vanished), repair must refuse with the pairing
+/// reason and enqueue nothing — never a single-expert download.
+#[tokio::test]
+async fn a14b_pair_repair_fails_closed_when_counterpart_vanished_upstream() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/model-versions/2057171"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(WAN22_VERSION_2057171_HIGH))
+        .mount(&server)
+        .await;
+    let mut model: serde_json::Value = serde_json::from_str(WAN22_MODEL_1817671).unwrap();
+    model["modelVersions"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|version| {
+            let id = version["id"].as_u64().unwrap();
+            ![2057100u64, 2057683].contains(&id)
+        });
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/models/1817671"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&model))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = AppState::for_tests().with_civitai_base(server.uri());
+    state.config.write().await.models_dir = tmp.path().display().to_string();
+
+    let sidecar_path = mold_catalog::sidecar::civitai_sidecar_path(tmp.path(), "cv:2057171");
+    let install_dir = sidecar_path.parent().unwrap();
+    let high = install_dir.join("wan/civitai/2057171/wanVideo22_t2vHighNoise14B.safetensors");
+    std::fs::create_dir_all(high.parent().unwrap()).unwrap();
+    std::fs::write(&high, b"high").unwrap();
+    write_sidecar(&sidecar_path, &wan_a14b_pair_sidecar(4)).unwrap();
+
+    let error = super::enqueue_catalog_primary_repair(&state, "cv:2057171")
+        .await
+        .expect_err("an unpairable refetch must refuse repair");
+    assert!(
+        error.error.contains("counterpart expert"),
+        "error must name the pairing failure, got: {}",
+        error.error
+    );
+    let listing = state.downloads.listing().await;
+    assert!(listing.active_jobs.is_empty());
+    assert!(
+        listing.queued.is_empty(),
+        "nothing may be enqueued for an unpairable A14B entry"
+    );
 }
 
 fn hf_checkpoint(source_id: &str) -> mold_catalog::entry::CatalogEntry {
@@ -1009,6 +1173,9 @@ async fn list_models_carries_display_name_for_catalog_rows() {
         supported: true,
         trained_words: vec![],
         primary_filename_rel: "juggernaut.safetensors".into(),
+        primary_size_bytes: None,
+        low_noise_filename_rel: None,
+        low_noise_size_bytes: None,
         written_at: 0,
     };
     write_sidecar(&ckpt_dir.join(SIDECAR_FILENAME), &sidecar).unwrap();
@@ -1072,6 +1239,9 @@ async fn installed_endpoint_returns_only_kind_filtered_sidecars() {
         supported: true,
         trained_words: vec!["trigger-A".into()],
         primary_filename_rel: "lora.safetensors".into(),
+        primary_size_bytes: None,
+        low_noise_filename_rel: None,
+        low_noise_size_bytes: None,
         written_at: 0,
     };
     let ckpt_sc = CatalogSidecar {
@@ -1209,6 +1379,9 @@ fn write_lora_sidecar(root: &std::path::Path, idx: usize, family: &str, written_
         supported: true,
         trained_words: vec![format!("trigger-{idx}")],
         primary_filename_rel: filename.clone(),
+        primary_size_bytes: None,
+        low_noise_filename_rel: None,
+        low_noise_size_bytes: None,
         written_at,
     };
     write_sidecar(&dir.join(SIDECAR_FILENAME), &sidecar).unwrap();
@@ -1246,6 +1419,9 @@ async fn installed_endpoint_marks_uninstalled_when_primary_missing() {
         supported: true,
         trained_words: vec![],
         primary_filename_rel: "missing.safetensors".into(),
+        primary_size_bytes: None,
+        low_noise_filename_rel: None,
+        low_noise_size_bytes: None,
         written_at: 0,
     };
     write_sidecar(&dir.join(SIDECAR_FILENAME), &sc).unwrap();
@@ -1350,6 +1526,9 @@ fn sidecar_to_wire_shape_is_pinned() {
         supported: true,
         trained_words: vec!["trigger".into()],
         primary_filename_rel: "lora.safetensors".into(),
+        primary_size_bytes: None,
+        low_noise_filename_rel: None,
+        low_noise_size_bytes: None,
         written_at: 1_700_000_000,
     };
     let got = serde_json::to_value(crate::catalog_api::sidecar_to_wire(

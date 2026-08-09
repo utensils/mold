@@ -18,3 +18,4 @@ pub mod normalizer;
 pub mod resolve;
 pub mod sidecar;
 pub mod synthesis;
+pub mod wan_a14b;
