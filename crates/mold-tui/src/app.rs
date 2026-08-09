@@ -10521,10 +10521,20 @@ mod tests {
             ("4", View::Machines),
             ("5", View::Settings),
         ];
+        // The rendered row is the whole evidence for this test, and a bare
+        // "got Create" tells you nothing about *why* a column moved. Anything
+        // that changes the strip's width budget — the host chip, the version
+        // string, a renamed tab — shifts these columns, so print the row.
+        let rendered_row: String = (0..tab_bar.width)
+            .map(|x| buf[(tab_bar.x + x, tab_row)].symbol())
+            .collect();
+
         for (digit, expected) in digit_to_view {
             let col = (0..tab_bar.width)
                 .find(|&x| buf[(tab_bar.x + x, tab_row)].symbol() == *digit)
-                .unwrap_or_else(|| panic!("digit {digit} not found in rendered tab bar"));
+                .unwrap_or_else(|| {
+                    panic!("digit {digit} not found in rendered tab bar: {rendered_row:?}")
+                });
             let click_col = tab_bar.x + col;
 
             let mut click_app = make_settings_test_app();
@@ -10538,8 +10548,9 @@ mod tests {
             });
             assert_eq!(
                 click_app.active_view, *expected,
-                "clicking on digit '{digit}' at col {click_col} should land on {expected:?}, got {:?}",
-                click_app.active_view
+                "clicking on digit '{digit}' at col {click_col} should land on {expected:?}, got {:?}\nrendered row: {rendered_row:?}\nversion: {:?}",
+                click_app.active_view,
+                mold_core::build_info::version_string(),
             );
         }
     }
