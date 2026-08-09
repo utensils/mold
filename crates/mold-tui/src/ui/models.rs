@@ -94,7 +94,7 @@ fn render_details_panel(frame: &mut Frame, app: &App, area: Rect) {
         model.defaults.default_steps, model.defaults.default_guidance,
     );
     let size = format!("{:.1}G", model.size_gb);
-    let family = model.family.to_uppercase();
+    let family = family_label(&model.family);
 
     let lines = vec![
         Line::from(Span::styled(
@@ -216,7 +216,7 @@ fn render_model_table(
             let dim = format!("{}\u{00b2}", m.defaults.default_width,);
             Row::new(vec![
                 Cell::from(format!("{marker}{}", m.human_name())),
-                Cell::from(m.family.to_uppercase()),
+                Cell::from(family_label(&m.family)),
                 Cell::from(format!("{:.1}G", m.size_gb)),
                 Cell::from(m.defaults.default_steps.to_string()),
                 Cell::from(format!("{:.1}", m.defaults.default_guidance)),
@@ -230,7 +230,7 @@ fn render_model_table(
         rows,
         [
             Constraint::Min(22),
-            Constraint::Length(8),
+            Constraint::Length(FAMILY_COL_WIDTH),
             Constraint::Length(6),
             Constraint::Length(5),
             Constraint::Length(5),
@@ -256,3 +256,44 @@ fn render_model_table(
 /// A mismatched bump to either constant fails the build instead of silently
 /// clipping the Default/HF rows at runtime.
 const _: () = assert!(INSPECTOR_HEIGHT >= DETAILS_LINE_COUNT + 2);
+
+/// Width of the FAMILY table column. Sized so the video family labels
+/// ("Wan Video", "MiniMax H3") render whole; longer labels keep the table's
+/// existing truncation behavior.
+const FAMILY_COL_WIDTH: u16 = 10;
+
+/// Display label for a family identifier in the Models tables and Details
+/// panel. Delegates to the shared `mold_core::format::family_display_label`
+/// table (the same authority the CLI renders from, #806) and keeps the TUI's
+/// historical uppercase fallback for identifiers the table does not know.
+fn family_label(family: &str) -> String {
+    mold_core::format::family_display_label(family)
+        .map(str::to_string)
+        .unwrap_or_else(|| family.to_uppercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #806 acceptance criterion 1: the TUI presents wan as **Wan Video**,
+    /// pinned to the shared cross-surface fixture, and the FAMILY column is
+    /// wide enough to render that label without truncation.
+    #[test]
+    fn wan_family_label_matches_the_shared_surface_parity_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/wan/surface-parity-v1.json"
+        )))
+        .expect("fixture parses");
+        let family = fixture["family"].as_str().expect("family");
+        let expected = fixture["family_label"].as_str().expect("family_label");
+        assert_eq!(family_label(family), expected);
+        assert!(
+            usize::from(FAMILY_COL_WIDTH) >= expected.len(),
+            "FAMILY column must fit {expected:?}"
+        );
+        // Unknown identifiers keep the historical uppercase rendering.
+        assert_eq!(family_label("companion"), "COMPANION");
+    }
+}

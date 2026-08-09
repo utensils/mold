@@ -37,9 +37,58 @@ pub fn human_bytes_compact(bytes: u64) -> String {
     }
 }
 
+/// Human-readable display name for a model family identifier, shared by the
+/// CLI (`mold list`, run banners) and the TUI (Models tables/details) so the
+/// two terminal surfaces can never disagree about how a family is presented
+/// (#806). `None` means the identifier is unknown here — callers keep their
+/// own fallback (the CLI shows the raw identifier, the TUI uppercases it).
+///
+/// The browser surfaces carry their own table in `studio/lib/familyLabels.ts`;
+/// the wan row is pinned across both languages by
+/// `tests/fixtures/wan/surface-parity-v1.json`.
+pub fn family_display_label(family: &str) -> Option<&'static str> {
+    Some(match family {
+        "flux" => "FLUX.1",
+        "flux2" => "FLUX.2",
+        "sd15" => "SD 1.5",
+        "sd3" | "sd3.5" => "SD 3.5",
+        "sdxl" => "SDXL",
+        "z-image" => "Z-Image",
+        "qwen-image" | "qwen_image" => "Qwen-Image",
+        "qwen-image-edit" => "Qwen-Image-Edit",
+        "wuerstchen" | "wuerstchen-v2" => "Wuerstchen",
+        "ltx-video" | "ltx_video" => "LTX Video",
+        "ltx2" => "LTX-2",
+        "wan" => "Wan Video",
+        "minimax-h3" | "minimax_h3" | "minimaxh3" => "MiniMax H3",
+        "controlnet" => "ControlNet",
+        "qwen3-expand" => "Expand",
+        "upscaler" => "Upscaler",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wan_family_label_matches_the_shared_surface_parity_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/wan/surface-parity-v1.json"
+        )))
+        .expect("fixture parses");
+        let family = fixture["family"].as_str().expect("family");
+        let label = fixture["family_label"].as_str().expect("family_label");
+        assert_eq!(family_display_label(family), Some(label));
+    }
+
+    #[test]
+    fn unknown_families_have_no_label_so_callers_keep_their_fallback() {
+        assert_eq!(family_display_label("companion"), None);
+        assert_eq!(family_display_label(""), None);
+    }
 
     #[test]
     fn human_bytes_compact_picks_the_right_unit_at_each_threshold() {

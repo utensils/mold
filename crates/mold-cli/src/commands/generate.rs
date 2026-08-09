@@ -450,23 +450,14 @@ pub async fn run(
     let audio_only_pipeline = ltx2
         .pipeline
         .is_some_and(mold_core::Ltx2PipelineMode::is_audio_only);
-    let output_format = if is_h3 {
-        OutputFormat::Mp4
-    } else if audio_only_pipeline && format == OutputFormat::Png {
-        OutputFormat::Wav
-    } else if format == OutputFormat::Png && effective_frames.is_some() {
-        if is_ltx2 {
-            OutputFormat::Mp4
-        } else if family.as_deref() == Some("wan") && effective_frames == Some(1) {
-            // A single-frame Wan render is a still (#798): keep the raster
-            // default instead of wrapping one frame in a video container.
-            OutputFormat::Png
-        } else {
-            OutputFormat::Apng
-        }
-    } else {
-        format
-    };
+    let output_format = default_output_format(
+        family.as_deref(),
+        format,
+        effective_frames,
+        audio_only_pipeline,
+        is_h3,
+        cfg!(feature = "mp4"),
+    );
 
     // ── Chain routing ─────────────────────────────────────────────────────
     // When --frames exceeds the per-clip cap, auto-build a ChainRequest and
@@ -1417,6 +1408,47 @@ fn require_remote_auto_pull_activation(request: &GenerateRequest, config: &Confi
     let family = resolve_family(&request.model, config);
     mold_core::require_model_activation(&request.model, family.as_deref())
         .map_err(anyhow::Error::new)
+}
+
+/// Resolve the container an unset `--format` defaults to.
+///
+/// Mirrors the server's family policy (`GenerateRequest::normalise_output_format`
+/// via `mold_core::family_output_defaults_to_mp4`): every MP4-default video
+/// family — wan and ltx-video included, not just LTX-2 — defaults a
+/// multi-frame render to MP4 when this build can encode it (#806). `mp4_built`
+/// is `cfg!(feature = "mp4")` at the call site: LTX-2 and MiniMax H3 carry
+/// their own baseline MP4 media pipelines, but wan and ltx-video encode MP4
+/// through the feature-gated `video_enc::encode_mp4`, so a minimal build
+/// keeps the truthful APNG fallback instead of erroring after the render.
+/// A single-frame wan render stays a PNG still (#798), and `--format` always
+/// wins — `format` here is PNG only when the user didn't pick one.
+fn default_output_format(
+    family: Option<&str>,
+    format: OutputFormat,
+    effective_frames: Option<u32>,
+    audio_only_pipeline: bool,
+    is_h3: bool,
+    mp4_built: bool,
+) -> OutputFormat {
+    if is_h3 {
+        return OutputFormat::Mp4;
+    }
+    if audio_only_pipeline && format == OutputFormat::Png {
+        return OutputFormat::Wav;
+    }
+    if format != OutputFormat::Png || effective_frames.is_none() {
+        return format;
+    }
+    match family {
+        Some("ltx2") => OutputFormat::Mp4,
+        // A single-frame Wan render is a still (#798): keep the raster
+        // default instead of wrapping one frame in a video container.
+        Some("wan") if effective_frames == Some(1) => OutputFormat::Png,
+        Some(family) if mp4_built && mold_core::family_output_defaults_to_mp4(family) => {
+            OutputFormat::Mp4
+        }
+        _ => OutputFormat::Apng,
+    }
 }
 
 /// Remote generation: try SSE streaming first, fall back to blocking API.
@@ -2886,6 +2918,144 @@ fn default_filename(model: &str, timestamp: u64, ext: &str, batch: u32, index: u
 mod tests {
     use super::*;
     use mold_core::ModelConfig;
+
+    fn wan_surface_parity_fixture() -> serde_json::Value {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/wan/surface-parity-v1.json"
+        )))
+        .expect("fixture parses")
+    }
+
+    /// The issue's acceptance criterion 2 (#806): in an mp4-enabled build a
+    /// multi-frame wan render defaults to MP4 exactly like the server's
+    /// `normalise_output_format` would pick, and a minimal build without the
+    /// `mp4` feature keeps the truthful APNG fallback instead of promising a
+    /// container it cannot encode.
+    #[test]
+    fn wan_multi_frame_defaults_to_mp4_when_the_build_can_encode_it() {
+        let fixture = wan_surface_parity_fixture();
+        let expected = fixture["container_default"]["unset_multi_frame"]
+            .as_str()
+            .unwrap();
+        assert_eq!(expected, "mp4");
+        assert_eq!(
+            default_output_format(Some("wan"), OutputFormat::Png, Some(81), false, false, true),
+            OutputFormat::Mp4
+        );
+        // ltx-video shares the same family policy and the same feature gate.
+        assert_eq!(
+            default_output_format(
+                Some("ltx-video"),
+                OutputFormat::Png,
+                Some(97),
+                false,
+                false,
+                true
+            ),
+            OutputFormat::Mp4
+        );
+    }
+
+    #[test]
+    fn wan_multi_frame_falls_back_to_apng_in_minimal_builds() {
+        let fixture = wan_surface_parity_fixture();
+        let fallback = fixture["container_default"]["cli_minimal_build_fallback"]
+            .as_str()
+            .unwrap();
+        assert_eq!(fallback, "apng");
+        assert_eq!(
+            default_output_format(
+                Some("wan"),
+                OutputFormat::Png,
+                Some(81),
+                false,
+                false,
+                false
+            ),
+            OutputFormat::Apng
+        );
+        assert_eq!(
+            default_output_format(
+                Some("ltx-video"),
+                OutputFormat::Png,
+                Some(97),
+                false,
+                false,
+                false
+            ),
+            OutputFormat::Apng
+        );
+        // LTX-2's MP4 media pipeline is baseline, not `mp4`-gated: its
+        // default must not degrade in a minimal build.
+        assert_eq!(
+            default_output_format(
+                Some("ltx2"),
+                OutputFormat::Png,
+                Some(97),
+                false,
+                false,
+                false
+            ),
+            OutputFormat::Mp4
+        );
+    }
+
+    /// #798 regression guard: a single-frame wan render is a still and stays
+    /// PNG regardless of the build's MP4 capability.
+    #[test]
+    fn wan_single_frame_stays_png() {
+        for mp4_built in [false, true] {
+            assert_eq!(
+                default_output_format(
+                    Some("wan"),
+                    OutputFormat::Png,
+                    Some(1),
+                    false,
+                    false,
+                    mp4_built
+                ),
+                OutputFormat::Png
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_format_and_image_families_keep_their_container() {
+        // An explicit user choice always wins, even for a wan video.
+        assert_eq!(
+            default_output_format(Some("wan"), OutputFormat::Gif, Some(81), false, false, true),
+            OutputFormat::Gif
+        );
+        // Image families without frames keep the raster default.
+        assert_eq!(
+            default_output_format(Some("flux"), OutputFormat::Png, None, false, false, true),
+            OutputFormat::Png
+        );
+        // Audio-only pipelines emit WAV, and H3 is always MP4.
+        assert_eq!(
+            default_output_format(
+                Some("ltx2"),
+                OutputFormat::Png,
+                Some(126),
+                true,
+                false,
+                true
+            ),
+            OutputFormat::Wav
+        );
+        assert_eq!(
+            default_output_format(
+                Some("minimax-h3"),
+                OutputFormat::Png,
+                Some(90),
+                false,
+                true,
+                true
+            ),
+            OutputFormat::Mp4
+        );
+    }
 
     fn h3_request(model: &str) -> GenerateRequest {
         serde_json::from_value(serde_json::json!({

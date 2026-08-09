@@ -7,25 +7,11 @@ use std::time::{Duration, Instant};
 use crate::output::{is_piped, status};
 use crate::theme;
 
+/// Display label for a family identifier. The table itself lives in
+/// `mold_core::format::family_display_label` so the CLI and TUI cannot drift
+/// (#806); unknown identifiers fall back to the raw string here.
 pub(crate) fn family_label(family: &str) -> &str {
-    match family {
-        "flux" => "FLUX.1",
-        "flux2" => "FLUX.2",
-        "sd15" => "SD 1.5",
-        "sd3" | "sd3.5" => "SD 3.5",
-        "sdxl" => "SDXL",
-        "z-image" => "Z-Image",
-        "qwen-image" | "qwen_image" => "Qwen-Image",
-        "qwen-image-edit" => "Qwen-Image-Edit",
-        "wuerstchen" | "wuerstchen-v2" => "Wuerstchen",
-        "ltx-video" | "ltx_video" => "LTX Video",
-        "ltx2" => "LTX-2",
-        "minimax-h3" | "minimax_h3" | "minimaxh3" => "MiniMax H3",
-        "controlnet" => "ControlNet",
-        "qwen3-expand" => "Expand",
-        "upscaler" => "Upscaler",
-        other => other,
-    }
+    mold_core::format::family_display_label(family).unwrap_or(family)
 }
 
 pub(crate) fn format_family_padded(family: &str, width: usize) -> String {
@@ -41,6 +27,7 @@ pub(crate) fn format_family_padded(family: &str, width: usize) -> String {
         "wuerstchen" | "wuerstchen-v2" => padded.bright_yellow().to_string(),
         "ltx-video" | "ltx_video" => padded.red().to_string(),
         "ltx2" => padded.truecolor(255, 140, 80).to_string(),
+        "wan" => padded.truecolor(120, 200, 120).to_string(),
         "minimax-h3" | "minimax_h3" | "minimaxh3" => padded.truecolor(80, 190, 255).to_string(),
         "controlnet" => padded.bright_red().to_string(),
         "qwen3-expand" => padded.bright_cyan().to_string(),
@@ -50,30 +37,7 @@ pub(crate) fn format_family_padded(family: &str, width: usize) -> String {
 }
 
 pub(crate) fn format_family(family: &str) -> String {
-    if matches!(
-        family,
-        "flux"
-            | "flux2"
-            | "sd15"
-            | "sd3"
-            | "sd3.5"
-            | "sdxl"
-            | "z-image"
-            | "qwen-image"
-            | "qwen_image"
-            | "qwen-image-edit"
-            | "wuerstchen"
-            | "wuerstchen-v2"
-            | "ltx-video"
-            | "ltx_video"
-            | "ltx2"
-            | "minimax-h3"
-            | "minimax_h3"
-            | "minimaxh3"
-            | "controlnet"
-            | "qwen3-expand"
-            | "upscaler"
-    ) {
+    if mold_core::format::family_display_label(family).is_some() {
         format_family_padded(family, family_label(family).len())
             .trim_end()
             .to_string()
@@ -727,5 +691,25 @@ mod tests {
         let label = download_label(&long_name, 0, 20);
         assert!(label.contains(".safetensors"));
         assert!(label.contains("[1/20]"));
+    }
+
+    /// #806 acceptance criterion 1: the CLI presents the wan family as
+    /// **Wan Video**, pinned to the shared cross-surface fixture instead of
+    /// falling through to the raw uppercase identifier.
+    #[test]
+    fn wan_family_label_matches_the_shared_surface_parity_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/wan/surface-parity-v1.json"
+        )))
+        .expect("fixture parses");
+        let family = fixture["family"].as_str().expect("family");
+        let expected = fixture["family_label"].as_str().expect("family_label");
+        assert_eq!(family_label(family), expected);
+        // The known-family path renders the label (possibly colored), never
+        // the uppercase fallback.
+        assert!(format_family(family).contains(expected));
+        // Unknown identifiers keep the existing uppercase fallback.
+        assert_eq!(format_family("companion"), "COMPANION");
     }
 }

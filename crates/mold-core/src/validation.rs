@@ -172,6 +172,16 @@ pub fn snap_frames_to_8k1(frames: u32) -> u32 {
 /// `Wan2.1/generate.py`).
 pub const WAN_TEMPORAL_SCALE: u32 = 4;
 
+/// Smallest clip `wan22-ti2v-5b` first/last-frame conditioning accepts. TI2V
+/// pins both endpoints in latent space, where the 2.2 VAE's 4x temporal
+/// stride turns a 5-frame pixel clip into two latent frames — both anchored,
+/// nothing left to denoise. Nine pixel frames (three latent frames) is the
+/// smallest `4k + 1` clip with an interior. Admission, the CLI, Discord, and
+/// the studio surfaces (`studio/lib/sourceImageCapability.ts`) all enforce
+/// this same floor before dispatch; the shared fixture
+/// `tests/fixtures/wan/surface-parity-v1.json` pins them together (#806).
+pub const WAN_TI2V_FLF_MIN_FRAMES: u32 = 9;
+
 /// The frame count and rate a lip-dub render must use, plus anything the
 /// caller asked for that the reference video overrode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1894,7 +1904,9 @@ fn validate_generate_request_after_activation(
         if family == Some("wan")
             && keyframes.len() == 2
             && crate::manifest::resolve_model_name(&req.model).starts_with("wan22-ti2v-5b")
-            && req.frames.is_some_and(|frames| frames < 9)
+            && req
+                .frames
+                .is_some_and(|frames| frames < WAN_TI2V_FLF_MIN_FRAMES)
         {
             return Err(
                 "wan22-ti2v-5b first/last-frame conditioning needs at least 9 frames — \
@@ -3566,6 +3578,85 @@ mod tests {
     }
 
     // ── normalise_output_format tests ────────────────────────────────────────
+
+    /// The shared Wan surface-parity fixture (#806) pins the family policy the
+    /// server default and the CLI's client-side default both derive from, plus
+    /// the frame grid and the TI2V first/last-frame floor every surface
+    /// enforces before dispatch. Editing one side without the other fails here.
+    #[test]
+    fn wan_surface_parity_fixture_pins_the_core_contracts() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/wan/surface-parity-v1.json"
+        )))
+        .expect("fixture parses");
+
+        // Container policy: exactly the fixture's family set defaults to MP4.
+        let mp4_families: Vec<&str> = fixture["container_default"]["mp4_default_families"]
+            .as_array()
+            .expect("mp4_default_families")
+            .iter()
+            .map(|value| value.as_str().expect("family string"))
+            .collect();
+        for family in &mp4_families {
+            assert!(
+                crate::family_output_defaults_to_mp4(family),
+                "{family} must default to mp4"
+            );
+        }
+        for family in ["flux", "sdxl", "qwen-image", "z-image", ""] {
+            assert!(
+                !crate::family_output_defaults_to_mp4(family),
+                "{family:?} must not default to mp4"
+            );
+        }
+
+        // Server normalisation: unset wan multi-frame → mp4; frames == 1 → png.
+        let mut req = valid_req();
+        req.model = "wan22-t2v-a14b:q8".to_string();
+        req.frames = Some(81);
+        req.output_format = None;
+        req.normalise_output_format(Some(fixture["family"].as_str().unwrap()));
+        assert_eq!(
+            format!("{:?}", req.resolved_output_format()).to_lowercase(),
+            fixture["container_default"]["unset_multi_frame"]
+                .as_str()
+                .unwrap()
+        );
+        let mut still = valid_req();
+        still.model = "wan22-t2v-a14b:q8".to_string();
+        still.frames = Some(1);
+        still.output_format = None;
+        still.normalise_output_format(Some("wan"));
+        assert_eq!(
+            format!("{:?}", still.resolved_output_format()).to_lowercase(),
+            fixture["container_default"]["wan_single_frame"]
+                .as_str()
+                .unwrap()
+        );
+
+        // Frame grid.
+        assert_eq!(
+            u64::from(WAN_TEMPORAL_SCALE),
+            fixture["frame_grid"]["step"].as_u64().unwrap()
+        );
+        assert_eq!(
+            u64::from(frame_offset_for_family("wan").expect("wan has a grid")),
+            fixture["frame_grid"]["offset"].as_u64().unwrap()
+        );
+
+        // TI2V first/last-frame floor.
+        assert_eq!(
+            u64::from(WAN_TI2V_FLF_MIN_FRAMES),
+            fixture["first_last_frame"]["ti2v_min_frames"]
+                .as_u64()
+                .unwrap()
+        );
+        assert!(fixture["first_last_frame"]["ti2v_model_prefix"]
+            .as_str()
+            .unwrap()
+            .starts_with("wan22-ti2v-5b"));
+    }
 
     #[test]
     fn normalise_output_format_unset_for_ltx2_picks_mp4() {
