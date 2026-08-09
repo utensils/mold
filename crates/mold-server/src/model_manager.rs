@@ -223,6 +223,10 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
         snapshot.is_loaded,
     ));
     annotate_audio_capabilities(&mut catalog, &config);
+    // CPU-fallback / maintenance runtimes (no workers) advertise the same
+    // conditioning contracts: classification reads safetensors headers, not
+    // a GPU.
+    annotate_source_image_capabilities(&mut catalog, &config);
     catalog
 }
 

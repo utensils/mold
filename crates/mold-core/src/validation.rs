@@ -1159,24 +1159,33 @@ fn validate_keyframes(
                     keyframes.len()
                 ));
             }
+            // Without an explicit clip length the closing anchor cannot be
+            // checked here, and the engine would resolve its own default and
+            // reject a mismatched endpoint only after the model loads —
+            // defeating admission-time validation.
+            let Some(frames) = frames else {
+                return Err(
+                    "Wan first/last-frame keyframes require an explicit frames count — the \
+                     closing keyframe must anchor the clip's final frame"
+                        .to_string(),
+                );
+            };
             // A single-frame clip has coincident endpoints; the generic
             // duplicate-frame check below would also refuse it, but with a
             // message that doesn't say why. Name the real problem instead.
-            if frames.is_some_and(|frames| frames < 2) {
+            if frames < 2 {
                 return Err(
                     "Wan first/last-frame keyframes need a multi-frame clip — frames=1 \
                      renders a single still, which has no distinct last frame"
                         .to_string(),
                 );
             }
-            let last = frames.map(|frames| frames.saturating_sub(1));
-            if keyframes[0].frame != 0 || last.is_some_and(|last| keyframes[1].frame != last) {
+            let last = frames.saturating_sub(1);
+            if keyframes[0].frame != 0 || keyframes[1].frame != last {
                 return Err(format!(
-                    "Wan first/last-frame keyframes must anchor frames 0 and {} (the clip's \
-                     endpoints), got frames {} and {}",
-                    last.map_or_else(|| "frames-1".to_string(), |last| last.to_string()),
-                    keyframes[0].frame,
-                    keyframes[1].frame
+                    "Wan first/last-frame keyframes must anchor frames 0 and {last} (the \
+                     clip's endpoints), got frames {} and {}",
+                    keyframes[0].frame, keyframes[1].frame
                 ));
             }
         }
@@ -4759,6 +4768,13 @@ mod tests {
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("not both"), "got: {err}");
         req.source_image = None;
+
+        // Without an explicit frames count the closing anchor is uncheckable
+        // here, and the engine would reject a mismatch only after loading.
+        req.frames = None;
+        req.keyframes = Some(vec![keyframe(0), keyframe(32)]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("explicit frames count"), "got: {err}");
 
         // frames=1 renders a still — its endpoints coincide, so the pair is
         // refused by name rather than as a generic duplicate frame.
