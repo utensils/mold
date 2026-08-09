@@ -91,6 +91,8 @@ COPY crates/mold-tui/Cargo.toml crates/mold-tui/Cargo.toml
 # Cargo resolves explicit build-script paths before compiling the stub crates.
 # Keep these in the manifest-first layer so dependency caching remains valid.
 COPY crates/mold-core/build.rs crates/mold-core/build.rs
+COPY crates/mold-inference/build.rs crates/mold-inference/build.rs
+COPY crates/mold-inference/build_support/ crates/mold-inference/build_support/
 COPY crates/mold-server/build.rs crates/mold-server/build.rs
 
 # Create stub source files so cargo can resolve and build dependencies

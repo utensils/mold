@@ -113,6 +113,10 @@ while IFS= read -r workspace_member; do
     require_text "Dockerfile" \
       "COPY ${workspace_member}/build.rs ${workspace_member}/build.rs"
   fi
+  if [[ -d "$repo_root/${workspace_member}/build_support" ]]; then
+    require_text "Dockerfile" \
+      "COPY ${workspace_member}/build_support/ ${workspace_member}/build_support/"
+  fi
   if [[ -f "$repo_root/${workspace_member}/src/lib.rs" ]]; then
     source_name="lib.rs"
   else
