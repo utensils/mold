@@ -53,6 +53,13 @@ require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
 require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
   '_activation: admitted_overlap_seal::Token,' \
   "private H3 FL2VA overlap authority no longer contains its uninhabited token"
+require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
+  'b"mold.minimax-h3.private-fl2va-overlap.v2\0"' \
+  "private H3 FL2VA overlap identity does not use its version-two serializer domain"
+if grep -Fq 'private-fl2va-overlap.v1' \
+  crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs; then
+  fail "private H3 FL2VA overlap identity still accepts its changed version-one domain"
+fi
 require_text crates/mold-inference/src/minimax_h3/private_runtime.rs \
   'pub(crate) struct H3PrivateBoundComfyStream' \
   "private H3 checkpoint load lacks a non-cloneable pre-allocation binding"
@@ -94,23 +101,77 @@ for method in \
     "fn ${method}(&self)" \
     "private H3 artifact lease omits ${method}"
 done
-composer=$(sed -n \
-  '/fn compose_private_comfy_fl2va_runtime/,/^}/p' \
+owner_bind=$(sed -n \
+  '/pub(crate) fn bind_private_comfy_fl2va_phase_owner/,/^}/p' \
   crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs)
-bind_line=$(grep -nF 'let bound_stream = bind_private_comfy_stream(' <<<"$composer" | cut -d: -f1)
-attempt_line=$(grep -nF 'let attempt = H3PrivateAttemptAuthority::new' <<<"$composer" | cut -d: -f1)
-qwen_line=$(grep -nF 'let qwen = H3PrivateQwenAdapter::load_authorized' <<<"$composer" | cut -d: -f1)
-if [[ -z "$bind_line" || -z "$attempt_line" || -z "$qwen_line" ]] \
-  || (( bind_line >= attempt_line || bind_line >= qwen_line )); then
-  fail "private H3 attention/checkpoint binding no longer precedes attempt and Qwen allocation"
+prepared_line=$(grep -nF 'prepared.revalidate()?;' <<<"$owner_bind" | cut -d: -f1)
+qwen_capture_line=$(grep -nF 'H3PrivateQwenArtifactAuthority::capture(&qwen_support, &opened_qwen)?;' \
+  <<<"$owner_bind" | cut -d: -f1)
+overlap_line=$(grep -nF 'validate_prepared_overlap_binding(' <<<"$owner_bind" | cut -d: -f1)
+bind_line=$(grep -nF 'let bound_transformer = bind_private_comfy_stream(' <<<"$owner_bind" | cut -d: -f1)
+attempt_line=$(grep -nF 'let attempt = H3PrivateAttemptAuthority::new' <<<"$owner_bind" | cut -d: -f1)
+if [[ -z "$prepared_line" || -z "$qwen_capture_line" || -z "$overlap_line" \
+  || -z "$bind_line" || -z "$attempt_line" ]] \
+  || (( prepared_line >= qwen_capture_line || qwen_capture_line >= overlap_line \
+    || overlap_line >= bind_line || bind_line >= attempt_line )); then
+  fail "private H3 prepared, Qwen, overlap, checkpoint, and singular-attempt binding order changed"
 fi
-if [[ $(grep -Fc 'capture_private_execution_route(execution_lease' <<<"$composer") -ne 1 ]] \
-  || grep -Fq 'execution_lease.device()' <<<"$composer"; then
-  fail "private H3 composer must consume and capture the execution lease route exactly once"
+if grep -Fq 'load_authorized_from_opened' <<<"$owner_bind"; then
+  fail "private H3 owner binding eagerly allocates Qwen before the VAE phase"
 fi
-if [[ $(grep -Fc 'bound_execution.device()' <<<"$composer") -ne 1 ]] \
-  || [[ $(grep -Fc 'H3PrivateAttemptAuthority::new(bound_execution, artifact_lease)' <<<"$composer") -ne 1 ]]; then
-  fail "private H3 bound execution token is not shared with attention binding and consumed by the attempt"
+if [[ $(grep -Fc 'capture_private_execution_route(execution_lease' <<<"$owner_bind") -ne 1 ]] \
+  || grep -Fq 'execution_lease.device()' <<<"$owner_bind"; then
+  fail "private H3 owner binding must consume and capture the execution lease route exactly once"
+fi
+if [[ $(grep -Fc 'bound_execution.device()' <<<"$owner_bind") -ne 1 ]] \
+  || [[ $(grep -Fc 'H3PrivateAttemptAuthority::new(bound_execution, artifact_lease)' <<<"$owner_bind") -ne 1 ]]; then
+  fail "private H3 bound execution token is not shared with checkpoint binding and consumed by the attempt"
+fi
+runtime_source=crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs
+vae_load_line=$(grep -nF 'let loaded = load_h3_comfy_vae_runtime_from_authority(' "$runtime_source" | cut -d: -f1)
+qwen_load_line=$(grep -nF 'let mut qwen = H3PrivateQwenAdapter::load_authorized_from_opened(' "$runtime_source" | cut -d: -f1)
+transformer_load_line=$(grep -nF 'let stream = load_and_pair_private_comfy_stream(' "$runtime_source" | cut -d: -f1)
+transformer_drop_line=$(grep -nF 'drop(self.denoiser.take());' "$runtime_source" | cut -d: -f1)
+vae_drop_line=$(grep -nF 'drop(vae);' "$runtime_source" | head -n 1 | cut -d: -f1)
+terminal_line=$(grep -nF 'let terminal = backend.into_empty()?;' "$runtime_source" | cut -d: -f1)
+mux_line=$(grep -nF 'let output = super::pipeline::finalize_av(' "$runtime_source" | cut -d: -f1)
+if [[ -z "$vae_load_line" || -z "$qwen_load_line" || -z "$transformer_load_line" \
+  || -z "$transformer_drop_line" || -z "$vae_drop_line" || -z "$terminal_line" \
+  || -z "$mux_line" ]] \
+  || (( vae_load_line >= qwen_load_line || qwen_load_line >= transformer_load_line \
+    || transformer_load_line >= transformer_drop_line || transformer_drop_line >= vae_drop_line \
+    || vae_drop_line >= terminal_line || terminal_line >= mux_line )); then
+  fail "private H3 phase runtime no longer loads and drops components before terminal-only mux"
+fi
+require_text "$runtime_source" \
+  'pub(crate) struct H3PrivatePhaseIdentityEcho {' \
+  "private H3 runtime output omits its server bridge identity echo"
+require_text "$runtime_source" \
+  'let identity_echo = terminal.identity_echo()?;' \
+  "private H3 runtime does not derive its identity echo from the terminal proof"
+require_text "$runtime_source" \
+  'if stream.authority != self.stream_authority {' \
+  "private H3 loaded transformer discards its retained bound authority"
+for identity in \
+  support_identity_sha256 \
+  weight_identity_sha256 \
+  weight_header_identity_sha256 \
+  weight_policy_identity_sha256; do
+  require_text "$runtime_source" \
+    "facts.${identity} != qwen.${identity}" \
+    "private H3 continuing artifact validation omits retained Qwen ${identity}"
+done
+terminal_attempt=$(sed -n '/struct H3PrivateTerminalAttempt/,/^}/p' "$runtime_source")
+if ! grep -Fq 'qwen_artifact_authority: H3PrivateQwenArtifactAuthority,' \
+  <<<"$terminal_attempt"; then
+  fail "private H3 terminal mux proof does not retain exact Qwen artifact authority"
+fi
+require_text "$runtime_source" \
+  'device_id: live.device_id,' \
+  "private H3 bridge echo copies planned rather than validated live route identity"
+if grep -Fq 'unsafe impl<T> H3PrivateQwenArtifactLease for &T' \
+  crates/mold-inference/src/minimax_h3/private_qwen.rs; then
+  fail "private H3 Qwen artifact authority escapes through a borrowed blanket implementation"
 fi
 capture=$(sed -n \
   '/fn capture_private_execution_route/,/^}/p' \

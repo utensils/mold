@@ -454,6 +454,14 @@ pub(crate) struct H3PrivateBoundComfyStream {
     authority: H3PrivateComfyStreamAuthority,
 }
 
+impl H3PrivateBoundComfyStream {
+    /// Read-only snapshot of the exact opened checkpoint and attention facts
+    /// bound before any resident transformer allocation.
+    pub(crate) fn authority(&self) -> &H3PrivateComfyStreamAuthority {
+        &self.authority
+    }
+}
+
 fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
