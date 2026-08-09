@@ -94,6 +94,7 @@ COPY crates/mold-core/build.rs crates/mold-core/build.rs
 COPY crates/mold-inference/build.rs crates/mold-inference/build.rs
 COPY crates/mold-inference/build_support/ crates/mold-inference/build_support/
 COPY crates/mold-server/build.rs crates/mold-server/build.rs
+COPY crates/mold-server/build_support/ crates/mold-server/build_support/
 
 # Create stub source files so cargo can resolve and build dependencies
 RUN mkdir -p crates/mold-core/src \

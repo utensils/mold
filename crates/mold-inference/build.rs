@@ -28,6 +28,13 @@ fn main() {
     for input in &inputs {
         println!("cargo:rerun-if-changed={}", input.display());
     }
+    // A toolkit replaced in place changes no tracked source, so watch the
+    // native compilers themselves or the cached identity would outlive them.
+    let (_, native_toolchain) = h3_runtime_code_identity::collect_native_toolchain_identity()
+        .expect("failed to bind the private H3 native toolchain identity");
+    for binary in &native_toolchain {
+        println!("cargo:rerun-if-changed={}", binary.display());
+    }
     for key in h3_runtime_code_identity::build_environment_rerun_keys() {
         println!("cargo:rerun-if-env-changed={key}");
     }

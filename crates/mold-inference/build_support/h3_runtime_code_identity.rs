@@ -59,6 +59,18 @@ const BUILD_ENVIRONMENT_KEYS: &[&str] = &[
     "TARGET",
 ];
 
+// `CUDA_HOME` and friends are captured above, but only as strings. A toolkit
+// upgraded in place under the same prefix leaves every captured string and
+// `rustc -vV` identical while producing a different compiled executable, so the
+// campaign identity must bind what the native compilers report about
+// themselves, not merely where they live.
+const CUDA_ROOT_KEYS: &[&str] = &[
+    "CUDA_HOME",
+    "CUDA_PATH",
+    "CUDA_ROOT",
+    "CUDA_TOOLKIT_ROOT_DIR",
+];
+
 pub const CANONICAL_H3_SERVER_FEATURES: &[&str] = &[
     "CARGO_FEATURE_CUDA",
     "CARGO_FEATURE_H3_PRIVATE_BRIDGE",
@@ -112,11 +124,113 @@ pub fn collect_build_environment() -> Result<Vec<(String, String)>, String> {
         "MOLD_H3_CANONICAL_SERVER_FEATURES".into(),
         CANONICAL_H3_SERVER_FEATURES.join(","),
     ));
+    environment.extend(collect_native_toolchain_identity()?.0);
     environment.sort();
     if environment.windows(2).any(|pair| pair[0].0 == pair[1].0) {
         return Err("runtime build environment contains duplicate keys".into());
     }
     Ok(environment)
+}
+
+/// Identity of the native compilers that turn this source into the measured
+/// executable, plus the binaries whose in-place replacement must invalidate the
+/// build script.
+///
+/// CUDA is part of the canonical campaign feature set, so an unresolvable or
+/// unrunnable `nvcc` fails the build rather than silently producing an identity
+/// that cannot distinguish two toolkits.
+pub fn collect_native_toolchain_identity() -> Result<NativeToolchainIdentity, String> {
+    let cuda = std::env::var_os("CARGO_FEATURE_CUDA").is_some();
+    native_toolchain_identity_for(cuda, resolve_cuda_compiler(), host_compiler_command())
+}
+
+/// Environment entries to hash, paired with the binaries to watch.
+pub type NativeToolchainIdentity = (Vec<(String, String)>, Vec<PathBuf>);
+
+pub fn native_toolchain_identity_for(
+    cuda: bool,
+    nvcc: Option<PathBuf>,
+    host_compiler: PathBuf,
+) -> Result<NativeToolchainIdentity, String> {
+    let mut entries = Vec::new();
+    let mut watched = Vec::new();
+    if !cuda {
+        entries.push(("MOLD_H3_NATIVE_CUDA_TOOLCHAIN".into(), "absent".into()));
+        return Ok((entries, watched));
+    }
+    let nvcc = nvcc.ok_or_else(|| {
+        "private H3 CUDA campaign builds must resolve nvcc to bind the toolkit identity".to_string()
+    })?;
+    entries.push((
+        "MOLD_H3_NVCC_VERSION".into(),
+        command_identity(&nvcc, "--version")?,
+    ));
+    watched.push(nvcc);
+    // nvcc delegates to a host compiler, so its upgrade changes the executable
+    // just as a toolkit upgrade does.
+    entries.push((
+        "MOLD_H3_HOST_COMPILER_VERSION".into(),
+        command_identity(&host_compiler, "--version")?,
+    ));
+    if host_compiler.is_absolute() {
+        watched.push(host_compiler);
+    }
+    Ok((entries, watched))
+}
+
+fn command_identity(program: &Path, argument: &str) -> Result<String, String> {
+    let output = Command::new(program)
+        .arg(argument)
+        .output()
+        .map_err(|error| {
+            format!(
+                "failed to execute {} {argument}: {error}",
+                program.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} {argument} failed with status {}",
+            program.display(),
+            output.status
+        ));
+    }
+    let mut reported = String::from_utf8(output.stdout)
+        .map_err(|_| format!("{} {argument} output is not UTF-8", program.display()))?;
+    if reported.trim().is_empty() {
+        reported = String::from_utf8(output.stderr)
+            .map_err(|_| format!("{} {argument} output is not UTF-8", program.display()))?;
+    }
+    let reported = reported.trim_end().to_string();
+    if reported.is_empty() {
+        return Err(format!(
+            "{} {argument} reported no version",
+            program.display()
+        ));
+    }
+    Ok(reported)
+}
+
+fn resolve_cuda_compiler() -> Option<PathBuf> {
+    for key in CUDA_ROOT_KEYS {
+        let Some(root) = std::env::var_os(key) else {
+            continue;
+        };
+        let candidate = PathBuf::from(root).join("bin").join("nvcc");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    // Fall back to PATH resolution; the bare name still yields a version
+    // string, it simply cannot be watched for in-place replacement.
+    Some(PathBuf::from("nvcc"))
+}
+
+fn host_compiler_command() -> PathBuf {
+    std::env::var_os("CC")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("cc"))
 }
 
 pub fn validate_canonical_h3_server_features() -> Result<(), String> {

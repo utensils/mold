@@ -19,8 +19,8 @@
 //! The binary always embeds something; runtime code never has to reason about
 //! an empty embed.
 
-#[path = "../mold-inference/build_support/h3_runtime_code_identity.rs"]
-mod h3_runtime_code_identity;
+#[path = "build_support/h3_server_features.rs"]
+mod h3_server_features;
 
 use std::env;
 use std::fs;
@@ -33,10 +33,10 @@ const PLACEHOLDER_INDEX_HTML: &str = r#"<!doctype html>
 "#;
 
 fn main() {
-    for key in h3_runtime_code_identity::canonical_h3_server_feature_rerun_keys() {
+    for key in h3_server_features::canonical_h3_server_feature_rerun_keys() {
         println!("cargo:rerun-if-env-changed={key}");
     }
-    h3_runtime_code_identity::validate_canonical_h3_server_features()
+    h3_server_features::validate_canonical_h3_server_features()
         .expect("invalid private H3 server campaign feature set");
     println!("cargo:rerun-if-env-changed=MOLD_WEB_DIST");
 

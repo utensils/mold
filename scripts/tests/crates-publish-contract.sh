@@ -32,6 +32,28 @@ for manifest in "$repo_root"/crates/*/Cargo.toml; do
   done < <(sed -n 's/.*package = "\(mold-ai-[^"]*\)".*/\1/p' "$manifest")
 done
 
+# A published `.crate` contains only files under its own crate directory, so a
+# build script that loads source from a sibling crate compiles in the workspace
+# and then fails `cargo publish`'s verification build. The publish job is the
+# last step of a tagged release, so that failure would land after the tag.
+# Nothing else in CI packages a crate, so assert the property directly.
+while IFS= read -r package; do
+  crate_dir=$(
+    for manifest in "$repo_root"/crates/*/Cargo.toml; do
+      if [[ $(sed -n 's/^name = "\(mold-ai[^" ]*\)"/\1/p' "$manifest" | head -1) == "$package" ]]; then
+        dirname "$manifest"
+        break
+      fi
+    done
+  )
+  [[ -n "$crate_dir" ]] || fail "no crate directory for published package $package"
+  [[ -f "$crate_dir/build.rs" ]] || continue
+  if grep -Enq '#\[path *= *"\.\./|include!\( *"\.\./|include_str!\( *"\.\./|include_bytes!\( *"\.\./' \
+    "$crate_dir/build.rs"; then
+    fail "$package build script loads source from outside its crate directory, which cargo publish cannot package"
+  fi
+done < "$tmp/publish-order"
+
 # The workflow must use the single guarded publisher rather than drifting into
 # a second hand-maintained package list.
 grep -q 'run: scripts/release/publish-crates.sh' "$workflow" \

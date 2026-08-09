@@ -69,6 +69,56 @@ fn canonical_private_server_features_reject_an_extra_axis() {
     assert!(error.contains("canonical campaign build"), "{error}");
 }
 
+#[test]
+fn runtime_identity_binds_the_native_cuda_toolchain() {
+    // An in-place toolkit upgrade leaves CUDA_HOME, rustc -vV, and every source
+    // input untouched while changing the compiled executable, so the reported
+    // compiler versions must reach the identity and the binaries must be
+    // watched for replacement.
+    let (entries, watched) = h3_runtime_code_identity::native_toolchain_identity_for(
+        true,
+        Some(Path::new(env!("CARGO")).to_path_buf()),
+        Path::new(env!("CARGO")).to_path_buf(),
+    )
+    .expect("synthetic toolchain identity");
+    let keys = entries
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<Vec<_>>();
+    assert!(keys.contains(&"MOLD_H3_NVCC_VERSION"), "{keys:?}");
+    assert!(keys.contains(&"MOLD_H3_HOST_COMPILER_VERSION"), "{keys:?}");
+    assert_eq!(watched.len(), 2, "{watched:?}");
+
+    let inputs = [("crates/mold-server/src/lib.rs".to_string(), b"x".to_vec())];
+    let older = [(
+        "MOLD_H3_NVCC_VERSION".to_string(),
+        "release 12.8".to_string(),
+    )];
+    let newer = [(
+        "MOLD_H3_NVCC_VERSION".to_string(),
+        "release 12.9".to_string(),
+    )];
+    assert_ne!(
+        h3_runtime_code_identity::identity_for_entries_and_environment(&inputs, &older).unwrap(),
+        h3_runtime_code_identity::identity_for_entries_and_environment(&inputs, &newer).unwrap(),
+    );
+}
+
+#[test]
+fn cuda_campaign_builds_reject_an_unresolvable_toolkit() {
+    let error = h3_runtime_code_identity::native_toolchain_identity_for(true, None, "cc".into())
+        .unwrap_err();
+    assert!(error.contains("nvcc"), "{error}");
+
+    let error = h3_runtime_code_identity::native_toolchain_identity_for(
+        true,
+        Some("/nonexistent/bin/nvcc".into()),
+        "cc".into(),
+    )
+    .unwrap_err();
+    assert!(error.contains("nvcc"), "{error}");
+}
+
 fn synthetic_workspace(root: &Path) {
     for relative in ["Cargo.toml", "Cargo.lock", ".cargo/config.toml"] {
         let path = root.join(relative);

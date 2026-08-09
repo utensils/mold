@@ -130,6 +130,36 @@ require_text crates/mold-server/build.rs \
 require_text crates/mold-inference/build_support/h3_runtime_code_identity.rs \
   '"MOLD_H3_CANONICAL_SERVER_FEATURES"' \
   "the private H3 runtime identity omits the canonical server feature set"
+require_text crates/mold-inference/build_support/h3_runtime_code_identity.rs \
+  '"MOLD_H3_NVCC_VERSION"' \
+  "the private H3 runtime identity cannot distinguish an in-place CUDA toolkit upgrade"
+require_text crates/mold-inference/build.rs \
+  'collect_native_toolchain_identity()' \
+  "the private H3 identity does not invalidate when a native compiler is replaced"
+# mold-ai-server is published to crates.io, and a published `.crate` carries
+# only its own crate directory, so its build script cannot read the inference
+# copy of this list. The two are separate files on purpose; they must not drift,
+# because one enforces the campaign feature set and the other hashes it into the
+# runtime-code identity.
+canonical_features_of() {
+  sed -n '/CANONICAL_H3_SERVER_FEATURES: &\[&str\] = &\[/,/^\];/p' "$1" \
+    | sed -n 's/^ *"\(CARGO_FEATURE_[A-Z0-9_]*\)",$/\1/p'
+}
+inference_canonical_features=$(
+  canonical_features_of crates/mold-inference/build_support/h3_runtime_code_identity.rs
+)
+server_canonical_features=$(
+  canonical_features_of crates/mold-server/build_support/h3_server_features.rs
+)
+if [[ -z "$inference_canonical_features" || -z "$server_canonical_features" ]]; then
+  fail "the canonical private H3 server feature set could not be read from both build-support files"
+fi
+if [[ "$inference_canonical_features" != "$server_canonical_features" ]]; then
+  fail "the canonical private H3 server feature set drifted between mold-inference and mold-server"
+fi
+require_text crates/mold-server/build_support/h3_server_features.rs \
+  'CARGO_FEATURE_H3_PRIVATE_UAT' \
+  "the measured private server build support omits its own campaign gate"
 require_text scripts/verify-h3-release-exclusion.sh \
   'private_runtime_record_marker=' \
   "published-binary verification does not reject the private runtime-record producer"

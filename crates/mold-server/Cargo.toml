@@ -48,9 +48,6 @@ nvml = ["dep:nvml-wrapper"]
 # Exposes test helpers (TestApp, etc.) for integration tests.
 test-support = []
 
-[build-dependencies]
-sha2 = "0.10"
-
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.21.0" }
 mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.21.0" }

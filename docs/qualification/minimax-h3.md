@@ -334,7 +334,20 @@ encoded Rust flags, and relevant compiler, linker, and CUDA configuration. The
 build script declares every captured environment key as a rebuild input. The
 private server build separately rejects any feature set beyond the canonical
 CUDA, private bridge/runtime, MP4, and NVML campaign edge, and that canonical
-server feature set is itself part of the composite identity.
+server feature set is itself part of the composite identity. That validation
+lives in `crates/mold-server/build_support/` rather than being shared from
+`mold-inference`, because `mold-ai-server` is published to crates.io and a
+published `.crate` cannot carry a sibling crate's files; the release contract
+fails if the two copies of the canonical feature set drift.
+
+Configuration paths are not compiler identities. `CUDA_HOME` and the host
+compiler variables record *where* the toolchain is, so a toolkit upgraded in
+place under the same prefix would otherwise leave the identity unchanged while
+producing a different executable. The identity therefore also binds what `nvcc`
+and the host C compiler report about themselves, and the build script watches
+both binaries so replacing either invalidates a cached identity. A CUDA
+campaign build whose `nvcc` cannot be resolved or run fails rather than
+producing an identity that cannot tell two toolkits apart.
 
 ```bash
 umask 077
