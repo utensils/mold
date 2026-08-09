@@ -1,0 +1,71 @@
+name: MiniMax H3 private conformance
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_source_sha:
+        description: Exact reviewed main commit to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minimax-h3-private-conformance
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Verify explicit source authority
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require exact current main
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != 'refs/heads/main' ]]; then
+            echo '::error::Private H3 conformance may only target main.'
+            exit 1
+          fi
+          if [[ ! "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::expected_source_sha must be one lowercase commit SHA.'
+            exit 1
+          fi
+          if [[ "$GITHUB_SHA" != "$EXPECTED_SOURCE_SHA" ]]; then
+            echo '::error::The dispatched revision differs from expected_source_sha.'
+            exit 1
+          fi
+
+  conformance:
+    name: Validate authorized external GPU evidence
+    needs: preflight
+    environment: minimax-h3-private-uat
+    runs-on:
+      group: minimax-h3-private-conformance
+      labels: [self-hosted, linux, x64, cuda, minimax-h3-private-uat]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          clean: true
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Require protected runner tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v python3 >/dev/null
+          command -v nvidia-smi >/dev/null
+      - name: Compare authorization-bound external captures
+        env:
+          MOLD_H3_FIXTURE_ROOT: ${{ secrets.MOLD_H3_FIXTURE_ROOT }}
+          MOLD_H3_AUTHORIZATION_RECORD: ${{ secrets.MOLD_H3_AUTHORIZATION_RECORD }}
+          MOLD_H3_ORACLE_BUNDLE: ${{ secrets.MOLD_H3_ORACLE_BUNDLE }}
+          MOLD_H3_MOLD_BUNDLE: ${{ secrets.MOLD_H3_MOLD_BUNDLE }}
+          MOLD_H3_SOURCE_SHA: ${{ github.sha }}
+        run: >-
+          PYTHONDONTWRITEBYTECODE=1
+          python3 scripts/run-minimax-h3-gpu-conformance.py

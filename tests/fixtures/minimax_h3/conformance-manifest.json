@@ -12,7 +12,25 @@
       "stochastic-sampling",
       "approximate-attention",
       "tf32"
-    ]
+    ],
+    "excluded_acceleration_aliases": {
+      "torch-compile": ["torch-compile", "torch-inductor", "inductor"],
+      "fp8": ["fp8", "float8", "e4m3", "e4m3fn", "e5m2"],
+      "cache-dit": ["cache-dit"],
+      "sageattention": ["sageattention", "sage-attn"],
+      "stochastic-sampling": [
+        "stochastic-sampling",
+        "stochastic",
+        "ancestral"
+      ],
+      "approximate-attention": [
+        "approximate-attention",
+        "approximate",
+        "approx-attn",
+        "approx"
+      ],
+      "tf32": ["tf32", "tensorfloat32"]
+    }
   },
   "sources": [
     {
@@ -113,6 +131,84 @@
       "source_id": "minimax-official-model",
       "relative_path": "audio_vae/config.json",
       "sha256": "9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6"
+    },
+    {
+      "id": "official-tokenizer-json",
+      "source_id": "minimax-official-model",
+      "relative_path": "tokenizer/tokenizer.json",
+      "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+    },
+    {
+      "id": "official-tokenizer-config",
+      "source_id": "minimax-official-model",
+      "relative_path": "tokenizer/tokenizer_config.json",
+      "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68"
+    },
+    {
+      "id": "official-tokenizer-merges",
+      "source_id": "minimax-official-model",
+      "relative_path": "tokenizer/merges.txt",
+      "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+    },
+    {
+      "id": "official-tokenizer-vocab",
+      "source_id": "minimax-official-model",
+      "relative_path": "tokenizer/vocab.json",
+      "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+    },
+    {
+      "id": "official-processor-config",
+      "source_id": "minimax-official-model",
+      "relative_path": "processor/preprocessor_config.json",
+      "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+    },
+    {
+      "id": "official-processor-video-config",
+      "source_id": "minimax-official-model",
+      "relative_path": "processor/video_preprocessor_config.json",
+      "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+    },
+    {
+      "id": "official-processor-chat-template",
+      "source_id": "minimax-official-model",
+      "relative_path": "processor/chat_template.json",
+      "sha256": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce"
+    },
+    {
+      "id": "official-processor-tokenizer-json",
+      "source_id": "minimax-official-model",
+      "relative_path": "processor/tokenizer.json",
+      "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+    },
+    {
+      "id": "official-processor-tokenizer-config",
+      "source_id": "minimax-official-model",
+      "relative_path": "processor/tokenizer_config.json",
+      "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68"
+    },
+    {
+      "id": "official-processor-merges",
+      "source_id": "minimax-official-model",
+      "relative_path": "processor/merges.txt",
+      "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+    },
+    {
+      "id": "official-processor-vocab",
+      "source_id": "minimax-official-model",
+      "relative_path": "processor/vocab.json",
+      "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+    },
+    {
+      "id": "official-video-scheduler-config",
+      "source_id": "minimax-official-model",
+      "relative_path": "scheduler/scheduler_config.json",
+      "sha256": "8fa6c3aa70dc9e691e1a6df899fd1b6f75f70481a27cee6e18a303817075c304"
+    },
+    {
+      "id": "official-audio-scheduler-config",
+      "source_id": "minimax-official-model",
+      "relative_path": "audio_scheduler/scheduler_config.json",
+      "sha256": "804780f7133477067bd6bbfbc02dc8b3cf9feeb400f97c08f5b1d5f6cbab3840"
     }
   ],
   "capture_policy": {
@@ -128,6 +224,22 @@
     {
       "id": "tokenizer-processor",
       "authority_tier": "exact-full-bf16",
+      "input_contract": { "kind": "identity-sha256-v1" },
+      "required_component_indexes": [
+        "official-model-index",
+        "official-modular-index",
+        "official-tokenizer-json",
+        "official-tokenizer-config",
+        "official-tokenizer-merges",
+        "official-tokenizer-vocab",
+        "official-processor-config",
+        "official-processor-video-config",
+        "official-processor-chat-template",
+        "official-processor-tokenizer-json",
+        "official-processor-tokenizer-config",
+        "official-processor-merges",
+        "official-processor-vocab"
+      ],
       "required_provenance": [
         "source-revision",
         "tokenizer-hash",
@@ -135,6 +247,30 @@
         "device",
         "capture-command"
       ],
+      "pinned_provenance": [
+        {
+          "key": "tokenizer-hash",
+          "component_indexes": [
+            "official-tokenizer-json",
+            "official-tokenizer-config",
+            "official-tokenizer-merges",
+            "official-tokenizer-vocab"
+          ]
+        },
+        {
+          "key": "processor-hash",
+          "component_indexes": [
+            "official-processor-config",
+            "official-processor-video-config",
+            "official-processor-chat-template",
+            "official-processor-tokenizer-json",
+            "official-processor-tokenizer-config",
+            "official-processor-merges",
+            "official-processor-vocab"
+          ]
+        }
+      ],
+      "role_invariant_provenance": ["tokenizer-hash", "processor-hash"],
       "required_measurements": [
         "token-ids",
         "special-token-presentation",
@@ -145,6 +281,8 @@
     {
       "id": "qwen-layer-50",
       "authority_tier": "exact-full-bf16",
+      "input_contract": { "kind": "identity-sha256-v1" },
+      "required_component_indexes": ["official-text-encoder-index"],
       "required_provenance": [
         "source-revision",
         "component-index-hash",
@@ -152,11 +290,15 @@
         "dtype",
         "capture-command"
       ],
+      "pinned_provenance": [],
+      "role_invariant_provenance": ["component-index-hash", "dtype"],
       "required_measurements": ["shape", "dtype", "statistics", "sampled-values", "tolerance"]
     },
     {
       "id": "visual-vae",
       "authority_tier": "exact-full-bf16",
+      "input_contract": { "kind": "identity-sha256-v1" },
+      "required_component_indexes": ["official-video-vae-index"],
       "required_provenance": [
         "source-revision",
         "component-index-hash",
@@ -164,6 +306,8 @@
         "dtype",
         "capture-command"
       ],
+      "pinned_provenance": [],
+      "role_invariant_provenance": ["component-index-hash", "dtype"],
       "required_measurements": [
         "pixel-normalization",
         "posterior-seed-42",
@@ -175,6 +319,8 @@
     {
       "id": "audio-vae",
       "authority_tier": "exact-full-bf16",
+      "input_contract": { "kind": "identity-sha256-v1" },
+      "required_component_indexes": ["official-audio-vae-config"],
       "required_provenance": [
         "source-revision",
         "component-index-hash",
@@ -182,6 +328,8 @@
         "dtype",
         "capture-command"
       ],
+      "pinned_provenance": [],
+      "role_invariant_provenance": ["component-index-hash", "dtype"],
       "required_measurements": [
         "stereo-packing",
         "latent-rate",
@@ -193,26 +341,40 @@
     {
       "id": "token-refiner",
       "authority_tier": "exact-full-bf16",
+      "input_contract": { "kind": "identity-sha256-v1" },
+      "required_component_indexes": [
+        "official-fl2va-transformer-index",
+        "official-ref2va-transformer-index"
+      ],
       "required_provenance": [
         "source-revision",
-        "component-index-hash",
+        "component-index-hashes",
         "device",
         "dtype",
         "capture-command"
       ],
+      "pinned_provenance": [],
+      "role_invariant_provenance": ["component-index-hashes", "dtype"],
       "required_measurements": ["shape", "statistics", "sampled-values", "tolerance"]
     },
     {
       "id": "transformer-block",
       "authority_tier": "exact-full-bf16",
+      "input_contract": { "kind": "identity-sha256-v1" },
+      "required_component_indexes": [
+        "official-fl2va-transformer-index",
+        "official-ref2va-transformer-index"
+      ],
       "required_provenance": [
         "source-revision",
-        "component-index-hash",
+        "component-index-hashes",
         "device",
         "dtype",
         "attention-backend",
         "capture-command"
       ],
+      "pinned_provenance": [],
+      "role_invariant_provenance": ["component-index-hashes", "dtype"],
       "required_measurements": [
         "qk-rms",
         "partial-mm-rope",
@@ -225,6 +387,8 @@
     {
       "id": "packed-layout",
       "authority_tier": "exact-full-bf16",
+      "input_contract": { "kind": "identity-sha256-v1" },
+      "required_component_indexes": ["official-modular-index"],
       "required_provenance": [
         "source-revision",
         "workflow",
@@ -232,6 +396,8 @@
         "device",
         "capture-command"
       ],
+      "pinned_provenance": [],
+      "role_invariant_provenance": ["workflow", "reference-order"],
       "required_measurements": [
         "row-order",
         "modality-tags",
@@ -242,6 +408,12 @@
     {
       "id": "dual-sampler",
       "authority_tier": "synthetic",
+      "input_contract": { "kind": "identity-sha256-v1" },
+      "required_component_indexes": [
+        "official-modular-index",
+        "official-video-scheduler-config",
+        "official-audio-scheduler-config"
+      ],
       "required_provenance": [
         "source-revision",
         "float-policy",
@@ -249,11 +421,15 @@
         "audio-shift",
         "capture-command"
       ],
+      "pinned_provenance": [],
+      "role_invariant_provenance": ["float-policy", "video-shift", "audio-shift"],
       "required_measurements": ["sigma-arrays", "timesteps", "coupled-update", "evaluation-count"]
     },
     {
       "id": "noise-allocation",
       "authority_tier": "exact-full-bf16",
+      "input_contract": { "kind": "identity-sha256-v1" },
+      "required_component_indexes": ["official-modular-index"],
       "required_provenance": [
         "source-revision",
         "seed",
@@ -261,11 +437,53 @@
         "allocation-version",
         "capture-command"
       ],
+      "pinned_provenance": [],
+      "role_invariant_provenance": ["seed", "generator-device", "allocation-version"],
       "required_measurements": ["draw-order", "tensor-shapes", "sampled-values", "hash"]
     },
     {
       "id": "end-to-end-t2va",
       "authority_tier": "exact-full-bf16",
+      "input_contract": {
+        "kind": "canonical-e2e-json-sha256-v1",
+        "task": "t2va",
+        "algorithm": "minimax-h3-flow-euler-v1",
+        "guidance": "0",
+        "video_shift": "12",
+        "audio_shift": "3",
+        "dimension_multiple": 32,
+        "frame_step": 17,
+        "frame_offset": 5,
+        "min_frames": 124,
+        "max_frames": 362,
+        "max_pixels": 1069056,
+        "min_aspect_ratio": "0.25",
+        "max_aspect_ratio": "4",
+        "fps": 24,
+        "video_scheduler_component": "official-video-scheduler-config",
+        "audio_scheduler_component": "official-audio-scheduler-config"
+      },
+      "required_component_indexes": [
+        "official-model-index",
+        "official-modular-index",
+        "official-tokenizer-json",
+        "official-tokenizer-config",
+        "official-tokenizer-merges",
+        "official-tokenizer-vocab",
+        "official-processor-config",
+        "official-processor-video-config",
+        "official-processor-chat-template",
+        "official-processor-tokenizer-json",
+        "official-processor-tokenizer-config",
+        "official-processor-merges",
+        "official-processor-vocab",
+        "official-text-encoder-index",
+        "official-video-vae-index",
+        "official-audio-vae-config",
+        "official-fl2va-transformer-index",
+        "official-video-scheduler-config",
+        "official-audio-scheduler-config"
+      ],
       "required_provenance": [
         "source-revision",
         "component-index-hashes",
@@ -273,11 +491,53 @@
         "dtype",
         "capture-command"
       ],
+      "pinned_provenance": [],
+      "role_invariant_provenance": ["component-index-hashes", "dtype"],
       "required_measurements": ["latent-statistics", "av-timing", "video-metrics", "audio-metrics"]
     },
     {
       "id": "end-to-end-fl2va",
       "authority_tier": "exact-full-bf16",
+      "input_contract": {
+        "kind": "canonical-e2e-json-sha256-v1",
+        "task": "fl2va",
+        "algorithm": "minimax-h3-flow-euler-v1",
+        "guidance": "0",
+        "video_shift": "12",
+        "audio_shift": "3",
+        "dimension_multiple": 32,
+        "frame_step": 17,
+        "frame_offset": 5,
+        "min_frames": 124,
+        "max_frames": 362,
+        "max_pixels": 1069056,
+        "min_aspect_ratio": "0.25",
+        "max_aspect_ratio": "4",
+        "fps": 24,
+        "video_scheduler_component": "official-video-scheduler-config",
+        "audio_scheduler_component": "official-audio-scheduler-config"
+      },
+      "required_component_indexes": [
+        "official-model-index",
+        "official-modular-index",
+        "official-tokenizer-json",
+        "official-tokenizer-config",
+        "official-tokenizer-merges",
+        "official-tokenizer-vocab",
+        "official-processor-config",
+        "official-processor-video-config",
+        "official-processor-chat-template",
+        "official-processor-tokenizer-json",
+        "official-processor-tokenizer-config",
+        "official-processor-merges",
+        "official-processor-vocab",
+        "official-text-encoder-index",
+        "official-video-vae-index",
+        "official-audio-vae-config",
+        "official-fl2va-transformer-index",
+        "official-video-scheduler-config",
+        "official-audio-scheduler-config"
+      ],
       "required_provenance": [
         "source-revision",
         "component-index-hashes",
@@ -285,6 +545,8 @@
         "device",
         "capture-command"
       ],
+      "pinned_provenance": [],
+      "role_invariant_provenance": ["component-index-hashes", "endpoint-signature"],
       "required_measurements": [
         "condition-latents",
         "latent-statistics",
@@ -296,6 +558,46 @@
     {
       "id": "end-to-end-ref2va",
       "authority_tier": "exact-full-bf16",
+      "input_contract": {
+        "kind": "canonical-e2e-json-sha256-v1",
+        "task": "ref2va",
+        "algorithm": "minimax-h3-flow-euler-v1",
+        "guidance": "0",
+        "video_shift": "12",
+        "audio_shift": "3",
+        "dimension_multiple": 32,
+        "frame_step": 17,
+        "frame_offset": 5,
+        "min_frames": 124,
+        "max_frames": 362,
+        "max_pixels": 1069056,
+        "min_aspect_ratio": "0.25",
+        "max_aspect_ratio": "4",
+        "fps": 24,
+        "video_scheduler_component": "official-video-scheduler-config",
+        "audio_scheduler_component": "official-audio-scheduler-config"
+      },
+      "required_component_indexes": [
+        "official-model-index",
+        "official-modular-index",
+        "official-tokenizer-json",
+        "official-tokenizer-config",
+        "official-tokenizer-merges",
+        "official-tokenizer-vocab",
+        "official-processor-config",
+        "official-processor-video-config",
+        "official-processor-chat-template",
+        "official-processor-tokenizer-json",
+        "official-processor-tokenizer-config",
+        "official-processor-merges",
+        "official-processor-vocab",
+        "official-text-encoder-index",
+        "official-video-vae-index",
+        "official-audio-vae-config",
+        "official-ref2va-transformer-index",
+        "official-video-scheduler-config",
+        "official-audio-scheduler-config"
+      ],
       "required_provenance": [
         "source-revision",
         "component-index-hashes",
@@ -303,6 +605,8 @@
         "device",
         "capture-command"
       ],
+      "pinned_provenance": [],
+      "role_invariant_provenance": ["component-index-hashes", "reference-order"],
       "required_measurements": [
         "packed-order",
         "latent-statistics",

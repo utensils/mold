@@ -56,6 +56,33 @@ def test_manifest_drift(tool, temporary: pathlib.Path) -> None:
     finally:
         tool.MANIFEST_PATH = original_path
 
+    manifest = json.loads(original_path.read_text(encoding="utf-8"))
+    tokenizer_layer = next(
+        layer
+        for layer in manifest["fixture_layers"]
+        if layer["id"] == "tokenizer-processor"
+    )
+    tokenizer_layer["pinned_provenance"][0]["component_indexes"] = ["official-license"]
+    changed = temporary / "remapped-provenance-manifest.json"
+    write_json(changed, manifest)
+    tool.MANIFEST_PATH = changed
+    try:
+        expect_failure(tool.validate_manifest, "invalid provenance authority")
+    finally:
+        tool.MANIFEST_PATH = original_path
+
+    manifest = json.loads(original_path.read_text(encoding="utf-8"))
+    manifest["numerical_authority"]["excluded_acceleration_aliases"]["fp8"].remove(
+        "float8"
+    )
+    changed = temporary / "narrowed-acceleration-aliases-manifest.json"
+    write_json(changed, manifest)
+    tool.MANIFEST_PATH = changed
+    try:
+        expect_failure(tool.validate_manifest, "exclusion aliases drifted")
+    finally:
+        tool.MANIFEST_PATH = original_path
+
 
 def test_synthetic_drift(tool, temporary: pathlib.Path) -> None:
     original_path = tool.SYNTHETIC_PATH
@@ -148,6 +175,15 @@ def test_comparison_diagnostics(tool) -> None:
     expect_failure(
         lambda: tool.compare_layer_outputs(oracle, tolerance_mold),
         "sample=[0] tolerance exceeded",
+    )
+
+    overflow_oracle = copy.deepcopy(oracle)
+    overflow_mold = copy.deepcopy(mold)
+    output_with_key(overflow_oracle, "audio_next")["samples"][0]["value"] = 10**400
+    output_with_key(overflow_mold, "audio_next")["samples"][0]["value"] = 10**400
+    expect_failure(
+        lambda: tool.compare_layer_outputs(overflow_oracle, overflow_mold),
+        "outside the finite comparison domain",
     )
 
     nan_mold = copy.deepcopy(mold)

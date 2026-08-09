@@ -68,7 +68,10 @@ jobs:
               - 'docs/qualification/local-multi-gpu-report.schema.json'
               - 'scripts/minimax-h3-conformance.py'
               - 'scripts/tests/minimax-h3-conformance-contract.py'
+              - 'scripts/run-minimax-h3-gpu-conformance.py'
+              - 'scripts/tests/minimax-h3-gpu-conformance-contract.py'
               - 'scripts/tests/minimax-h3-private-uat-release-contract.sh'
+              - '.github/workflows/minimax-h3-private-conformance.yml'
               - 'tests/fixtures/minimax_h3/**'
               - 'docs/qualification/minimax-h3-*.json'
               - 'docs/qualification/minimax-h3-conformance.md'
@@ -163,6 +166,7 @@ jobs:
               - 'scripts/tests/desktop-candle-nix-source-hash.sh'
               - 'scripts/tests/release-sync-pr.sh'
               - 'scripts/tests/crates-publish-contract.sh'
+              - '.github/actionlint.yaml'
               - '.github/workflows/**'
             # Workflow-only PRs get static actionlint/routing-contract proof.
             # After merge, exercise every dynamic path against the real runner
@@ -413,6 +417,9 @@ jobs:
       - name: Test MiniMax H3 conformance contract
         if: env.RUN_RUST_SUITE == 'true'
         run: python3 scripts/tests/minimax-h3-conformance-contract.py
+      - name: Test MiniMax H3 private GPU conformance contract
+        if: env.RUN_RUST_SUITE == 'true'
+        run: python3 scripts/tests/minimax-h3-gpu-conformance-contract.py
       - name: Clippy the private MiniMax H3 artifact qualifier
         if: env.RUN_RUST_SUITE == 'true'
         run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_artifact_qualification -- -D warnings
