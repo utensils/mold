@@ -1,27 +1,24 @@
-//! Private MiniMax H3 artifact qualification on the authorized private host.
+//! Private MiniMax H3 artifact qualification under a reviewed campaign record.
 //!
 //! The binary is unreachable without `dev-bins,h3-private-uat`, refuses every
-//! host/root outside the authorization record, never constructs an engine, and
-//! embeds a marker that release verification rejects.
+//! root outside the authorization record's owner-only campaign, never
+//! constructs an engine, and embeds a marker that release verification rejects.
 
 use std::collections::BTreeMap;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use mold_inference::private_qualification::{
-    qualify_private_artifacts, H3ArtifactHashProgress, H3_PRIVATE_AUTHORIZATION_SCOPE,
-    H3_PRIVATE_MODELS_ROOT,
-};
+use mold_inference::private_qualification::{qualify_private_artifacts, H3ArtifactHashProgress};
 
 fn usage() -> &'static str {
     "usage: h3_artifact_qualification --models-root \
-     /storage/jamesbrink/mold-uat/minimax-h3/models --model \
+     <absolute-campaign-root>/mold-home/models --model \
      <minimax-h3-fl2va:comfy-pruned-int8|minimax-h3-ref2va:comfy-pruned-int8> \
-     --authorization-scope private-h3-uat"
+     --authorization-record <absolute-campaign-root>/compliance/<record>.json"
 }
 
-fn parse_args() -> Result<(PathBuf, String, String)> {
+fn parse_args() -> Result<(PathBuf, String, PathBuf)> {
     let mut values = BTreeMap::new();
     let mut args = env::args().skip(1);
     while let Some(argument) = args.next() {
@@ -47,25 +44,23 @@ fn parse_args() -> Result<(PathBuf, String, String)> {
         .map(PathBuf::from)
         .with_context(usage)?;
     let model = values.remove("--model").with_context(usage)?;
-    let authorization_scope = values.remove("--authorization-scope").with_context(usage)?;
+    let authorization_record = values
+        .remove("--authorization-record")
+        .map(PathBuf::from)
+        .with_context(usage)?;
     if !values.is_empty() {
         bail!("unknown qualification argument; {}", usage())
     }
-    Ok((models_root, model, authorization_scope))
+    Ok((models_root, model, authorization_record))
 }
 
 fn main() -> Result<()> {
-    let (models_root, model, authorization_scope) = parse_args()?;
-    if models_root != Path::new(H3_PRIVATE_MODELS_ROOT)
-        || authorization_scope != H3_PRIVATE_AUTHORIZATION_SCOPE
-    {
-        bail!("the requested host scope differs from the reviewed private authorization")
-    }
+    let (models_root, model, authorization_record) = parse_args()?;
     let mut reported = BTreeMap::<String, u64>::new();
     let report = qualify_private_artifacts(
         &models_root,
         &model,
-        &authorization_scope,
+        &authorization_record,
         |progress: H3ArtifactHashProgress| {
             let previous = reported
                 .get(&progress.relative_path)

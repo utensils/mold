@@ -3246,6 +3246,7 @@ dependencies = [
  "fs2",
  "gif 0.13.3",
  "image",
+ "libc",
  "mold-ai-candle",
  "mold-ai-catalog",
  "mold-ai-core",

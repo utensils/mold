@@ -6,7 +6,7 @@
 //! ordinary product policy. Its claim marker is forbidden in published Mold
 //! binaries by `scripts/verify-h3-release-exclusion.sh`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, Metadata};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -31,12 +31,19 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 pub const H3_PRIVATE_UAT_CLAIM_MARKER: &str = "mold.minimax-h3.private-uat-artifact-reader.v1";
 pub const H3_PRIVATE_AUTHORIZATION_SCOPE: &str = "private-h3-uat";
-pub const H3_PRIVATE_HOST_AUTHORITY_SHA256: &str =
-    "87e4571bc7b47363d74a65592c50a1eccb5afdc5bd3036d119f8c84c934b37da";
-pub const H3_PRIVATE_MODELS_ROOT: &str = "/storage/jamesbrink/mold-uat/minimax-h3/models";
 
 const MAX_PRIVATE_HEADER_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_AUTHORIZATION_RECORD_BYTES: u64 = 64 * 1024;
 const HASH_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+const AUTHORIZATION_SCHEMA: &str = "mold.minimax-h3.authorization.v1";
+const REVIEWED_AUTHORIZATION_EVIDENCE_SHA256: &str =
+    "8cd4d6e52cff34d7d39721ebab13b8c1187aa87aafc1c4ae2a16609186f22f1d";
+const QUALIFICATION_SCHEMA: &str = "mold.minimax-h3.private-artifact-qualification.v2";
+const REQUIRED_AUTHORIZATION_SCOPES: [&str; 3] = [
+    "checkpoint-execution",
+    "fixture-capture",
+    "generated-output-retention",
+];
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct H3ArtifactHashProgress {
@@ -69,7 +76,10 @@ pub struct H3PrivateArtifactQualificationReport {
     pub claim_marker: &'static str,
     pub decision: &'static str,
     pub authorization_scope: &'static str,
-    pub host_authority_sha256: &'static str,
+    pub authorization_schema: &'static str,
+    pub authorization_record_sha256: String,
+    pub authorization_source_document_sha256: String,
+    pub authorization_review_reference: String,
     pub canonical_model: String,
     pub task: &'static str,
     pub layout: &'static str,
@@ -99,6 +109,42 @@ struct ResolvedArtifact<'a> {
     file: &'a ModelFile,
     relative_path: PathBuf,
     canonical_path: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct H3PrivateAuthorizationRecord {
+    schema_version: String,
+    family: String,
+    decision: String,
+    license_revision: String,
+    license_sha256: String,
+    approved_scopes: Vec<String>,
+    source_document_path: PathBuf,
+    source_document_sha256: String,
+    review_reference: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProtectedPathKind {
+    Directory,
+    File,
+}
+
+#[derive(Clone, Debug)]
+struct ProtectedPath {
+    path: PathBuf,
+    kind: ProtectedPathKind,
+    identity: FileIdentity,
+}
+
+#[derive(Debug)]
+struct ValidatedPrivateScope {
+    models_root: PathBuf,
+    authorization_record_sha256: String,
+    authorization_source_document_sha256: String,
+    authorization_review_reference: String,
+    protected_paths: Vec<ProtectedPath>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -146,6 +192,10 @@ struct FileIdentity {
     #[cfg(unix)]
     inode: u64,
     #[cfg(unix)]
+    mode: u32,
+    #[cfg(unix)]
+    owner: u32,
+    #[cfg(unix)]
     modified_seconds: i64,
     #[cfg(unix)]
     modified_nanoseconds: i64,
@@ -166,6 +216,10 @@ impl FileIdentity {
             #[cfg(unix)]
             inode: metadata.ino(),
             #[cfg(unix)]
+            mode: metadata.mode(),
+            #[cfg(unix)]
+            owner: metadata.uid(),
+            #[cfg(unix)]
             modified_seconds: metadata.mtime(),
             #[cfg(unix)]
             modified_nanoseconds: metadata.mtime_nsec(),
@@ -181,20 +235,19 @@ impl FileIdentity {
 
 /// Authenticate and structurally inspect the exact Comfy deployment set.
 ///
-/// The host, models root, authorization scope, hidden manifest, file sizes,
-/// full SHA-256 digests, and bounded headers are all mandatory. This function
-/// never builds an inference engine and cannot change `runtime_available`.
+/// The owner-only campaign layout, external authorization record, hidden
+/// manifest, file sizes, full SHA-256 digests, and bounded headers are all
+/// mandatory. This function never builds an inference engine and cannot change
+/// `runtime_available`.
 pub fn qualify_private_artifacts(
     models_root: &Path,
     model: &str,
-    authorization_scope: &str,
+    authorization_record: &Path,
     mut progress: impl FnMut(H3ArtifactHashProgress),
 ) -> Result<H3PrivateArtifactQualificationReport> {
-    validate_private_scope(models_root, authorization_scope)?;
+    let private_scope = validate_private_scope(models_root, authorization_record)?;
     let (manifest, task, published_transformer) = qualification_manifest(model)?;
-    let root = models_root
-        .canonicalize()
-        .context("failed to canonicalize the private H3 models root")?;
+    let root = private_scope.models_root.clone();
     let artifacts = manifest
         .files
         .iter()
@@ -247,14 +300,24 @@ pub fn qualify_private_artifacts(
     revalidate_artifact_set(&artifacts, &authenticated_identities)?;
     validate_support_assets(&artifacts, &authenticated_identities, task)?;
     revalidate_artifact_set(&artifacts, &authenticated_identities)?;
+    revalidate_private_scope(&private_scope)?;
 
-    let qualification_identity_sha256 = qualification_identity(model, task, &qualified);
+    let qualification_identity_sha256 = qualification_identity(
+        model,
+        task,
+        &private_scope.authorization_record_sha256,
+        &private_scope.authorization_source_document_sha256,
+        &qualified,
+    );
     Ok(H3PrivateArtifactQualificationReport {
-        schema: "mold.minimax-h3.private-artifact-qualification.v1",
+        schema: QUALIFICATION_SCHEMA,
         claim_marker: H3_PRIVATE_UAT_CLAIM_MARKER,
         decision: "qualified-private-artifacts",
         authorization_scope: H3_PRIVATE_AUTHORIZATION_SCOPE,
-        host_authority_sha256: H3_PRIVATE_HOST_AUTHORITY_SHA256,
+        authorization_schema: AUTHORIZATION_SCHEMA,
+        authorization_record_sha256: private_scope.authorization_record_sha256,
+        authorization_source_document_sha256: private_scope.authorization_source_document_sha256,
+        authorization_review_reference: private_scope.authorization_review_reference,
         canonical_model: model.to_string(),
         task: task_id(task),
         layout: "comfy-pruned-int8-convrot-plus-nvfp4-awq",
@@ -277,49 +340,338 @@ pub fn qualify_private_artifacts(
     })
 }
 
-fn validate_private_scope(models_root: &Path, authorization_scope: &str) -> Result<()> {
-    if authorization_scope != H3_PRIVATE_AUTHORIZATION_SCOPE {
-        bail!(
-            "MiniMax H3 artifact qualification requires authorization scope {H3_PRIVATE_AUTHORIZATION_SCOPE:?}"
-        )
-    }
-    let hostname = fs::read_to_string("/etc/hostname")
-        .context("private H3 qualification requires a readable /etc/hostname")?;
-    let hostname_authority = format!("{:x}", Sha256::digest(hostname.trim().as_bytes()));
-    if hostname_authority != H3_PRIVATE_HOST_AUTHORITY_SHA256 {
-        bail!("private MiniMax H3 qualification is outside the authorized host scope")
-    }
-    let canonical = models_root
-        .canonicalize()
-        .context("failed to canonicalize the requested private H3 models root")?;
-    if canonical != Path::new(H3_PRIVATE_MODELS_ROOT) {
-        bail!(
-            "private MiniMax H3 qualification is authorized only for the reviewed models root {H3_PRIVATE_MODELS_ROOT}"
-        )
-    }
-    require_private_directory(&canonical)?;
-    let campaign_root = canonical
-        .parent()
-        .ok_or_else(|| anyhow!("private H3 models root has no campaign parent"))?;
-    require_private_directory(campaign_root)
+fn validate_private_scope(
+    models_root: &Path,
+    authorization_record: &Path,
+) -> Result<ValidatedPrivateScope> {
+    validate_private_scope_against_evidence(
+        models_root,
+        authorization_record,
+        REVIEWED_AUTHORIZATION_EVIDENCE_SHA256,
+    )
 }
 
-fn require_private_directory(path: &Path) -> Result<()> {
+fn validate_private_scope_against_evidence(
+    models_root: &Path,
+    authorization_record: &Path,
+    reviewed_evidence_sha256: &str,
+) -> Result<ValidatedPrivateScope> {
+    let models_root = canonical_absolute_path(models_root, "private H3 models root")?;
+    if models_root.file_name().and_then(|name| name.to_str()) != Some("models") {
+        bail!("private H3 models root must be the campaign mold-home/models directory")
+    }
+    let mold_home = models_root
+        .parent()
+        .ok_or_else(|| anyhow!("private H3 models root has no Mold home parent"))?;
+    if mold_home.file_name().and_then(|name| name.to_str()) != Some("mold-home") {
+        bail!("private H3 models root must be nested directly under campaign mold-home")
+    }
+    let campaign_root = mold_home
+        .parent()
+        .ok_or_else(|| anyhow!("private H3 Mold home has no campaign parent"))?;
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| anyhow!("cannot resolve the Mold repository root"))?
+        .canonicalize()
+        .context("failed to canonicalize the Mold repository root")?;
+    if campaign_root.starts_with(&repository_root) {
+        bail!("private H3 qualification campaign must live outside the Mold repository")
+    }
+    let compliance_root = campaign_root.join("compliance");
+    let authorization_record =
+        canonical_absolute_path(authorization_record, "private H3 authorization record")?;
+    if authorization_record.parent() != Some(compliance_root.as_path()) {
+        bail!("private H3 authorization record must be a direct child of campaign compliance")
+    }
+
+    let mut protected_paths = Vec::new();
+    let campaign = require_private_directory(campaign_root, None)?;
+    let owner = campaign.owner();
+    require_effective_process_owner(owner)?;
+    protected_paths.push(campaign);
+    protected_paths.push(require_private_directory(mold_home, Some(owner))?);
+    protected_paths.push(require_private_directory(&models_root, Some(owner))?);
+    protected_paths.push(require_private_directory(&compliance_root, Some(owner))?);
+    let record_path = require_private_file(&authorization_record, owner)?;
+    let record_bytes = read_protected_file(
+        &record_path,
+        MAX_AUTHORIZATION_RECORD_BYTES,
+        "private H3 authorization record",
+    )?;
+    let authorization_record_sha256 = format!("{:x}", Sha256::digest(&record_bytes));
+    let record: H3PrivateAuthorizationRecord = serde_json::from_slice(&record_bytes)
+        .context("private H3 authorization record is not valid exact-schema JSON")?;
+    validate_authorization_fields(&record, reviewed_evidence_sha256)?;
+
+    let source_document = canonical_absolute_path(
+        &record.source_document_path,
+        "private H3 authorization source document",
+    )?;
+    if source_document == authorization_record
+        || source_document.parent() != Some(compliance_root.as_path())
+    {
+        bail!(
+            "private H3 authorization source document must be a distinct direct child of campaign compliance"
+        )
+    }
+    let source_path = require_private_file(&source_document, owner)?;
+    let source_document_sha256 =
+        hash_protected_file(&source_path, "private H3 authorization source document")?;
+    if source_document_sha256 != record.source_document_sha256 {
+        bail!("private H3 authorization source document hash does not match its record")
+    }
+
+    protected_paths.push(record_path);
+    protected_paths.push(source_path);
+    Ok(ValidatedPrivateScope {
+        models_root,
+        authorization_record_sha256,
+        authorization_source_document_sha256: source_document_sha256,
+        authorization_review_reference: record.review_reference,
+        protected_paths,
+    })
+}
+
+fn validate_authorization_fields(
+    record: &H3PrivateAuthorizationRecord,
+    reviewed_evidence_sha256: &str,
+) -> Result<()> {
+    if !valid_lower_sha256(reviewed_evidence_sha256) {
+        bail!("private H3 reviewed authorization evidence identity is invalid")
+    }
+    if record.schema_version != AUTHORIZATION_SCHEMA {
+        bail!("private H3 authorization record schema is unsupported")
+    }
+    if record.family != contract::FAMILY || record.decision != "approved" {
+        bail!("private H3 authorization record does not approve MiniMax H3")
+    }
+    if record.license_revision != contract::OFFICIAL_REVISION {
+        bail!("private H3 authorization record covers a different license revision")
+    }
+    if record.license_sha256 != contract::LICENSE_SHA256 {
+        bail!("private H3 authorization record covers different license bytes")
+    }
+    let actual_scopes = record
+        .approved_scopes
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected_scopes = REQUIRED_AUTHORIZATION_SCOPES
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if actual_scopes.len() != record.approved_scopes.len()
+        || !expected_scopes.is_subset(&actual_scopes)
+        || actual_scopes.iter().any(|scope| {
+            scope.is_empty()
+                || scope.len() > 128
+                || scope.trim() != *scope
+                || scope.chars().any(char::is_control)
+        })
+    {
+        bail!("private H3 authorization record does not cover every reviewed activity")
+    }
+    if !valid_lower_sha256(&record.source_document_sha256) {
+        bail!("private H3 authorization source document SHA-256 is not canonical")
+    }
+    if record.source_document_sha256 != reviewed_evidence_sha256 {
+        bail!("private H3 authorization record does not bind the reviewed evidence")
+    }
+    let review_reference = record.review_reference.as_str();
+    if review_reference.is_empty()
+        || review_reference.len() > 256
+        || review_reference.trim() != review_reference
+        || review_reference.chars().any(char::is_control)
+    {
+        bail!("private H3 authorization record lacks a canonical external review reference")
+    }
+    Ok(())
+}
+
+fn canonical_absolute_path(path: &Path, label: &str) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        bail!("{label} must be an absolute path")
+    }
+    if path
+        .components()
+        .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        bail!("{label} must not contain relative or parent components")
+    }
+    let requested_metadata =
+        fs::symlink_metadata(path).with_context(|| format!("failed to inspect {label}"))?;
+    if requested_metadata.file_type().is_symlink() {
+        bail!("{label} must not be a symlink")
+    }
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {label}"))?;
+    if canonical != path {
+        bail!("{label} must not contain aliases or symlink components")
+    }
+    Ok(canonical)
+}
+
+#[cfg(unix)]
+fn require_effective_process_owner(owner: u32) -> Result<()> {
+    if owner != effective_process_owner() {
+        bail!("private H3 qualification campaign must be owned by the invoking process user")
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn effective_process_owner() -> u32 {
+    // SAFETY: `geteuid` has no preconditions, does not dereference pointers,
+    // and only returns the effective uid maintained by the operating system.
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(not(unix))]
+fn require_effective_process_owner(_owner: u32) -> Result<()> {
+    bail!("private H3 qualification currently requires Unix ownership semantics")
+}
+
+fn require_private_directory(path: &Path, expected_owner: Option<u32>) -> Result<ProtectedPath> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect private directory {}", path.display()))?;
     if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
         bail!("private H3 qualification path must be a real directory")
     }
     #[cfg(unix)]
-    if metadata.permissions().mode() & 0o077 != 0 {
+    if metadata.permissions().mode() & 0o7777 != 0o700 {
         bail!(
-            "private H3 qualification directory {} grants group/other access",
+            "private H3 qualification directory {} must have mode 0700",
             path.display()
         )
     }
+    #[cfg(unix)]
+    if expected_owner.is_some_and(|owner| metadata.uid() != owner) {
+        bail!("private H3 qualification directories must have one owner")
+    }
     #[cfg(not(unix))]
     bail!("private H3 qualification currently requires Unix permission semantics");
+    Ok(ProtectedPath {
+        path: path.to_path_buf(),
+        kind: ProtectedPathKind::Directory,
+        identity: FileIdentity::from_metadata(&metadata),
+    })
+}
+
+fn require_private_file(path: &Path, expected_owner: u32) -> Result<ProtectedPath> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect private file {}", path.display()))?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        bail!("private H3 qualification evidence must be a regular non-symlink file")
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o7777 != 0o600 {
+        bail!(
+            "private H3 qualification evidence {} must have mode 0600",
+            path.display()
+        )
+    }
+    #[cfg(unix)]
+    if metadata.uid() != expected_owner {
+        bail!("private H3 qualification evidence must share the campaign owner")
+    }
+    #[cfg(not(unix))]
+    bail!("private H3 qualification currently requires Unix permission semantics");
+    Ok(ProtectedPath {
+        path: path.to_path_buf(),
+        kind: ProtectedPathKind::File,
+        identity: FileIdentity::from_metadata(&metadata),
+    })
+}
+
+impl ProtectedPath {
+    #[cfg(unix)]
+    fn owner(&self) -> u32 {
+        self.identity.owner
+    }
+
+    #[cfg(not(unix))]
+    fn owner(&self) -> u32 {
+        0
+    }
+}
+
+fn read_protected_file(path: &ProtectedPath, maximum: u64, label: &str) -> Result<Vec<u8>> {
+    let mut file = File::open(&path.path).with_context(|| format!("failed to open {label}"))?;
+    if FileIdentity::from_metadata(&file.metadata()?) != path.identity {
+        bail!("{label} changed while it was opened")
+    }
+    if path.identity.len > maximum {
+        bail!("{label} exceeds the bounded reader size")
+    }
+    let capacity = usize::try_from(path.identity.len).context("private file is too large")?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read {label}"))?;
+    if bytes.len() != capacity || FileIdentity::from_metadata(&file.metadata()?) != path.identity {
+        bail!("{label} changed during its read")
+    }
+    revalidate_protected_path(path)?;
+    Ok(bytes)
+}
+
+fn hash_protected_file(path: &ProtectedPath, label: &str) -> Result<String> {
+    let mut file = File::open(&path.path).with_context(|| format!("failed to open {label}"))?;
+    if FileIdentity::from_metadata(&file.metadata()?) != path.identity {
+        bail!("{label} changed while it was opened")
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
+    let mut read_bytes = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("failed to hash {label}"))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+        read_bytes = read_bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| anyhow!("{label} byte count overflow"))?;
+    }
+    if read_bytes != path.identity.len
+        || FileIdentity::from_metadata(&file.metadata()?) != path.identity
+    {
+        bail!("{label} changed during hashing")
+    }
+    revalidate_protected_path(path)?;
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn revalidate_private_scope(scope: &ValidatedPrivateScope) -> Result<()> {
+    for path in &scope.protected_paths {
+        revalidate_protected_path(path)?;
+    }
     Ok(())
+}
+
+fn revalidate_protected_path(path: &ProtectedPath) -> Result<()> {
+    let metadata = fs::symlink_metadata(&path.path)
+        .with_context(|| format!("failed to revalidate private path {}", path.path.display()))?;
+    let kind_matches = match path.kind {
+        ProtectedPathKind::Directory => metadata.file_type().is_dir(),
+        ProtectedPathKind::File => metadata.file_type().is_file(),
+    };
+    if !kind_matches
+        || metadata.file_type().is_symlink()
+        || FileIdentity::from_metadata(&metadata) != path.identity
+    {
+        bail!("private H3 authorization or campaign scope changed during qualification")
+    }
+    Ok(())
+}
+
+fn valid_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn qualification_manifest(
@@ -764,13 +1116,21 @@ fn require_string_field(value: &serde_json::Value, field: &str, expected: &str) 
     Ok(())
 }
 
-fn qualification_identity(model: &str, task: Task, artifacts: &[H3QualifiedArtifact]) -> String {
+fn qualification_identity(
+    model: &str,
+    task: Task,
+    authorization_record_sha256: &str,
+    authorization_source_document_sha256: &str,
+    artifacts: &[H3QualifiedArtifact],
+) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"mold.minimax-h3.private-artifact-qualification.v1\0");
+    digest.update(b"mold.minimax-h3.private-artifact-qualification.v2\0");
     digest.update(model.as_bytes());
     digest.update(task_id(task).as_bytes());
     digest.update(contract::OFFICIAL_REVISION.as_bytes());
     digest.update(contract::COMFY_REVISION.as_bytes());
+    digest.update(authorization_record_sha256.as_bytes());
+    digest.update(authorization_source_document_sha256.as_bytes());
     for artifact in artifacts {
         digest.update(artifact.relative_path.as_bytes());
         digest.update(artifact.component.as_bytes());
@@ -851,13 +1211,256 @@ mod tests {
             "mold.minimax-h3.private-uat-artifact-reader.v1"
         );
         assert_eq!(H3_PRIVATE_AUTHORIZATION_SCOPE, "private-h3-uat");
-        assert_eq!(H3_PRIVATE_HOST_AUTHORITY_SHA256.len(), 64);
-        assert!(H3_PRIVATE_HOST_AUTHORITY_SHA256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
-        assert!(H3_PRIVATE_MODELS_ROOT.starts_with("/storage/"));
         assert!(!contract::capabilities(Task::Fl2va).runtime_available);
         assert!(!contract::capabilities(Task::Ref2va).runtime_available);
+    }
+
+    #[cfg(unix)]
+    struct PrivateCampaignFixture {
+        _temporary: tempfile::TempDir,
+        campaign_root: PathBuf,
+        models_root: PathBuf,
+        compliance_root: PathBuf,
+        source_document: PathBuf,
+        authorization_record: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl PrivateCampaignFixture {
+        fn new() -> Self {
+            let temporary = tempfile::tempdir().unwrap();
+            let campaign_root = temporary.path().canonicalize().unwrap().join("campaign");
+            let mold_home = campaign_root.join("mold-home");
+            let models_root = mold_home.join("models");
+            let compliance_root = campaign_root.join("compliance");
+            for directory in [&campaign_root, &mold_home, &models_root, &compliance_root] {
+                fs::create_dir_all(directory).unwrap();
+                set_mode(directory, 0o700);
+            }
+            let source_document = compliance_root.join("authorization-evidence.bin");
+            fs::write(&source_document, b"reviewed private authorization evidence").unwrap();
+            set_mode(&source_document, 0o600);
+            let authorization_record = compliance_root.join("authorization.v1.json");
+            let fixture = Self {
+                _temporary: temporary,
+                campaign_root,
+                models_root,
+                compliance_root,
+                source_document,
+                authorization_record,
+            };
+            fixture.write_record(fixture.valid_record());
+            fixture
+        }
+
+        fn valid_record(&self) -> serde_json::Value {
+            serde_json::json!({
+                "schema_version": "mold.minimax-h3.authorization.v1",
+                "family": contract::FAMILY,
+                "decision": "approved",
+                "license_revision": contract::OFFICIAL_REVISION,
+                "license_sha256": contract::LICENSE_SHA256,
+                "approved_scopes": [
+                    "checkpoint-execution",
+                    "fixture-capture",
+                    "generated-output-retention"
+                ],
+                "source_document_path": self.source_document,
+                "source_document_sha256": sha256_path(&self.source_document),
+                "review_reference": "external-test-review"
+            })
+        }
+
+        fn write_record(&self, value: serde_json::Value) {
+            fs::write(
+                &self.authorization_record,
+                serde_json::to_vec_pretty(&value).unwrap(),
+            )
+            .unwrap();
+            set_mode(&self.authorization_record, 0o600);
+        }
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn sha256_path(path: &Path) -> String {
+        format!("{:x}", Sha256::digest(fs::read(path).unwrap()))
+    }
+
+    #[cfg(unix)]
+    fn validate_fixture_scope(
+        fixture: &PrivateCampaignFixture,
+        models_root: &Path,
+        authorization_record: &Path,
+    ) -> Result<ValidatedPrivateScope> {
+        validate_private_scope_against_evidence(
+            models_root,
+            authorization_record,
+            &sha256_path(&fixture.source_document),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_scope_rejects_unreviewed_evidence() {
+        let fixture = PrivateCampaignFixture::new();
+        let error = validate_private_scope(&fixture.models_root, &fixture.authorization_record)
+            .unwrap_err();
+        assert!(error.to_string().contains("reviewed evidence"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authorization_record_and_owner_only_campaign_layout_are_required() {
+        let fixture = PrivateCampaignFixture::new();
+        validate_fixture_scope(
+            &fixture,
+            &fixture.models_root,
+            &fixture.authorization_record,
+        )
+        .unwrap();
+        require_effective_process_owner(effective_process_owner()).unwrap();
+        assert!(
+            require_effective_process_owner(effective_process_owner().wrapping_add(1)).is_err()
+        );
+
+        let other = PrivateCampaignFixture::new();
+        assert!(validate_fixture_scope(
+            &fixture,
+            &fixture.models_root,
+            &other.authorization_record
+        )
+        .is_err());
+
+        set_mode(&fixture.authorization_record, 0o644);
+        assert!(validate_fixture_scope(
+            &fixture,
+            &fixture.models_root,
+            &fixture.authorization_record,
+        )
+        .is_err());
+        set_mode(&fixture.authorization_record, 0o600);
+        set_mode(&fixture.source_document, 0o644);
+        assert!(validate_fixture_scope(
+            &fixture,
+            &fixture.models_root,
+            &fixture.authorization_record,
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authorization_record_fields_and_source_digest_fail_closed() {
+        let fixture = PrivateCampaignFixture::new();
+        let valid = fixture.valid_record();
+
+        let mut broader_scope = valid.clone();
+        broader_scope["approved_scopes"] = serde_json::json!([
+            "checkpoint-execution",
+            "fixture-capture",
+            "generated-output-retention",
+            "later-reviewed-private-activity"
+        ]);
+        fixture.write_record(broader_scope);
+        validate_fixture_scope(
+            &fixture,
+            &fixture.models_root,
+            &fixture.authorization_record,
+        )
+        .unwrap();
+
+        let mut wrong_license = valid.clone();
+        wrong_license["license_sha256"] = serde_json::Value::String("0".repeat(64));
+        fixture.write_record(wrong_license);
+        assert!(validate_fixture_scope(
+            &fixture,
+            &fixture.models_root,
+            &fixture.authorization_record,
+        )
+        .is_err());
+
+        let mut missing_scope = valid.clone();
+        missing_scope["approved_scopes"] = serde_json::json!(["fixture-capture"]);
+        fixture.write_record(missing_scope);
+        assert!(validate_fixture_scope(
+            &fixture,
+            &fixture.models_root,
+            &fixture.authorization_record,
+        )
+        .is_err());
+
+        let mut duplicate_scope = valid.clone();
+        duplicate_scope["approved_scopes"] = serde_json::json!([
+            "checkpoint-execution",
+            "fixture-capture",
+            "fixture-capture",
+            "generated-output-retention"
+        ]);
+        fixture.write_record(duplicate_scope);
+        assert!(validate_fixture_scope(
+            &fixture,
+            &fixture.models_root,
+            &fixture.authorization_record,
+        )
+        .is_err());
+
+        let mut wrong_source = valid;
+        wrong_source["source_document_sha256"] = serde_json::Value::String("0".repeat(64));
+        fixture.write_record(wrong_source);
+        assert!(validate_fixture_scope(
+            &fixture,
+            &fixture.models_root,
+            &fixture.authorization_record,
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authorization_source_and_models_root_reject_symlink_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = PrivateCampaignFixture::new();
+        let campaign_alias = fixture
+            .campaign_root
+            .parent()
+            .unwrap()
+            .join("campaign-alias");
+        symlink(&fixture.campaign_root, &campaign_alias).unwrap();
+        let aliased_models_root = campaign_alias.join("mold-home/models");
+        assert!(validate_fixture_scope(
+            &fixture,
+            &aliased_models_root,
+            &fixture.authorization_record,
+        )
+        .is_err());
+
+        let source_target = fixture.compliance_root.join("source-target.bin");
+        fs::rename(&fixture.source_document, &source_target).unwrap();
+        symlink(&source_target, &fixture.source_document).unwrap();
+        assert!(validate_fixture_scope(
+            &fixture,
+            &fixture.models_root,
+            &fixture.authorization_record,
+        )
+        .is_err());
+
+        fs::remove_file(&fixture.source_document).unwrap();
+        fs::rename(&source_target, &fixture.source_document).unwrap();
+        let models_target = fixture.campaign_root.join("models-target");
+        fs::rename(&fixture.models_root, &models_target).unwrap();
+        symlink(&models_target, &fixture.models_root).unwrap();
+        assert!(validate_fixture_scope(
+            &fixture,
+            &fixture.models_root,
+            &fixture.authorization_record,
+        )
+        .is_err());
     }
 
     #[test]
