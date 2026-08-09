@@ -83,6 +83,21 @@ def output_with_key(document: dict[str, object], key: str) -> dict[str, object]:
     return next(output for output in outputs if output["key"] == key)
 
 
+def test_synthetic_comparison_uses_fixture_math(tool) -> None:
+    fixture = json.loads(tool.SYNTHETIC_PATH.read_text(encoding="utf-8"))
+    oracle, _ = checked_comparison_pair(tool)
+    coupled_update = fixture["coupled_update"]
+    for key in ("video_next", "audio_next"):
+        output = output_with_key(oracle, key)
+        samples = output["samples"]
+        assert isinstance(samples, list)
+        actual = [sample["value"] for sample in samples]
+        assert actual == coupled_update[key], (
+            f"synthetic {key} evidence is not the fixture's coupled Euler output: "
+            f"{actual!r} != {coupled_update[key]!r}"
+        )
+
+
 def test_comparison_diagnostics(tool) -> None:
     oracle, mold = checked_comparison_pair(tool)
     notes = tool.compare_layer_outputs(oracle, mold)
@@ -125,7 +140,7 @@ def test_comparison_diagnostics(tool) -> None:
     output_with_key(hash_mold, "video_next")["content_sha256"] = "f" * 64
     expect_failure(
         lambda: tool.compare_layer_outputs(oracle, hash_mold),
-        "hash mismatch: oracle=cfff2f665b33397e84a33853fc786e9597ebead599161a3e00d7d2a6761fbf9e",
+        "hash mismatch: oracle=d775157b364dba9b441d9f37d774ca51e48bfdd8b360fe9fcc40632cc53e848a",
     )
 
     tolerance_mold = copy.deepcopy(mold)
@@ -370,6 +385,7 @@ def main() -> int:
         temporary = pathlib.Path(value).resolve()
         test_manifest_drift(tool, temporary)
         test_synthetic_drift(tool, temporary)
+        test_synthetic_comparison_uses_fixture_math(tool)
         test_comparison_diagnostics(tool)
         test_comparison_authorization_boundary(tool, temporary)
         test_authorization_and_external_root(tool, temporary)
