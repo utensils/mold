@@ -1060,6 +1060,32 @@ pub(crate) fn normalize_generate_params_for_family(params: &mut GenerateParams, 
     params.upscale_model = None;
 }
 
+/// What the Negative editor shows on cold start (#787 round 2). `App::new`
+/// never runs `sync_generate_capabilities`, so the selected model's default
+/// must be resolved here or a remembered wan model boots with an empty
+/// editor and no expressible opt-out until the model is re-selected.
+///
+/// - saved text → restored verbatim (typed authority; text equal to the
+///   default reads as untouched on the wire, exactly as it was saved);
+/// - empty with the session's persisted `negative_cleared` marker → stays
+///   empty, so an explicit `""` opt-out survives restart distinguishably;
+/// - empty otherwise → the untouched state shows the advertised default
+///   (this is also the upgrade path for pre-#787 sessions, which carry no
+///   marker).
+fn restored_negative_editor_text(
+    saved: &str,
+    negative_cleared: Option<bool>,
+    advertised_default: &str,
+) -> String {
+    if !saved.trim().is_empty() {
+        saved.to_string()
+    } else if negative_cleared == Some(true) {
+        String::new()
+    } else {
+        advertised_default.trim().to_string()
+    }
+}
+
 /// Build the Negative editor textarea with the standard cursor and
 /// placeholder styling, from prefill text (possibly empty).
 fn negative_prompt_textarea(text: &str) -> TextArea<'static> {
@@ -1939,14 +1965,24 @@ impl App {
             prompt.set_cursor_line_style(ratatui::style::Style::default());
         }
 
-        let mut negative_prompt = TextArea::default();
-        negative_prompt.set_cursor_line_style(ratatui::style::Style::default());
-        negative_prompt.set_placeholder_text("Negative prompt (what to avoid)...");
-        if !session.last_negative.is_empty() {
-            negative_prompt =
-                TextArea::new(session.last_negative.lines().map(String::from).collect());
-            negative_prompt.set_cursor_line_style(ratatui::style::Style::default());
-        }
+        // #787 round 2: resolve the selected model's advertised default at
+        // startup — `sync_generate_capabilities` only runs on later changes,
+        // so without this a remembered wan model cold-starts with an empty
+        // default, no prefill, and no expressible opt-out. The catalog row
+        // wins (local catalogs already plant the family constant); the
+        // family constant backs a bare config-only model.
+        let negative_default = crate::ui::create_form::effective_negative_default(
+            catalog
+                .iter()
+                .find(|entry| entry.name == params.model)
+                .and_then(|entry| entry.defaults.default_negative_prompt.as_deref()),
+            &family,
+        );
+        let negative_prompt = negative_prompt_textarea(&restored_negative_editor_text(
+            &session.last_negative,
+            session.negative_cleared,
+            &negative_default,
+        ));
 
         // Load prompt history
         let history = crate::history::PromptHistory::load();
@@ -1977,7 +2013,7 @@ impl App {
             generate: GenerateState {
                 prompt,
                 negative_prompt,
-                negative_default: String::new(),
+                negative_default,
                 params,
                 focus: GenerateFocus::Prompt,
                 param_index: 0,
@@ -2279,16 +2315,14 @@ impl App {
         // the engine's absence fallback). Only an editor still showing the
         // previous default follows the change — typed text and an explicit
         // clear are user authority.
-        let next_default = self
-            .models
-            .catalog
-            .iter()
-            .find(|entry| entry.name == model)
-            .and_then(|entry| entry.defaults.default_negative_prompt.clone())
-            .or_else(|| {
-                mold_core::manifest::default_negative_prompt_for_family(&family).map(str::to_string)
-            })
-            .unwrap_or_default();
+        let next_default = crate::ui::create_form::effective_negative_default(
+            self.models
+                .catalog
+                .iter()
+                .find(|entry| entry.name == model)
+                .and_then(|entry| entry.defaults.default_negative_prompt.as_deref()),
+            &family,
+        );
         if let Some(replacement) = crate::ui::create_form::negative_prompt_on_default_change(
             &self.generate.negative_prompt.lines().join("\n"),
             &self.generate.negative_default,
@@ -2625,7 +2659,13 @@ impl App {
             .to_string();
         let session =
             crate::session::TuiSession::from_params(&prompt_text, &neg_text, &self.generate.params)
-                .with_theme(self.settings.theme_preset);
+                .with_theme(self.settings.theme_preset)
+                // An empty editor while a default is advertised is the
+                // explicit "" opt-out; the marker is what keeps it
+                // distinguishable from "untouched" across restarts (#787).
+                .with_negative_cleared(
+                    neg_text.is_empty() && !self.generate.negative_default.trim().is_empty(),
+                );
         session.save();
     }
 
@@ -5486,6 +5526,12 @@ impl App {
         self.generate.params.control_model = None;
         self.generate.params.control_scale = 1.0;
         self.sync_generate_capabilities();
+        // #787 round 2: Reset Defaults is an explicit "give me the model's
+        // defaults", not a model switch — the sync above deliberately
+        // preserves a cleared or typed editor, but here both go back to the
+        // advertised default (empty when the model has none), mirroring web
+        // Reset settings and desktop ⌘N.
+        self.generate.negative_prompt = negative_prompt_textarea(&self.generate.negative_default);
     }
 
     // ── Settings view helpers ─────────────────────────────────────────
@@ -10033,6 +10079,86 @@ mod tests {
         app.update_model("wan21-t2v-1.3b:bf16");
         assert_eq!(app.generate.negative_default, wan_default);
         assert_eq!(app.generate.negative_prompt.lines().join("\n"), "hands");
+    }
+
+    /// #787 round 2: `App::new` never runs `sync_generate_capabilities`, so
+    /// cold start wires `restored_negative_editor_text` (with
+    /// `create_form::effective_negative_default`) to resolve the editor.
+    /// The pure contract is pinned here because `App::new` itself spawns
+    /// real IO.
+    #[test]
+    fn cold_start_negative_editor_resolution() {
+        let wan_default = mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT;
+        // Saved text restores verbatim, marker or not.
+        assert_eq!(
+            restored_negative_editor_text("hands", None, wan_default),
+            "hands"
+        );
+        assert_eq!(
+            restored_negative_editor_text("hands", Some(true), wan_default),
+            "hands"
+        );
+        // Untouched (no marker — including pre-marker sessions) prefills the
+        // advertised default instead of booting with an empty editor.
+        assert_eq!(
+            restored_negative_editor_text("", None, wan_default),
+            wan_default
+        );
+        assert_eq!(
+            restored_negative_editor_text("", Some(false), wan_default),
+            wan_default
+        );
+        // A persisted explicit clear survives restart as the "" opt-out.
+        assert_eq!(
+            restored_negative_editor_text("", Some(true), wan_default),
+            ""
+        );
+        assert_eq!(
+            crate::ui::create_form::negative_prompt_wire_value(
+                &restored_negative_editor_text("", Some(true), wan_default),
+                wan_default,
+                true,
+            )
+            .as_deref(),
+            Some("")
+        );
+        // No default → nothing to prefill.
+        assert_eq!(restored_negative_editor_text("", None, ""), "");
+    }
+
+    /// #787 round 2: Reset Defaults goes through the model-switch
+    /// preservation semantics in `sync_generate_capabilities`, which
+    /// deliberately keep a cleared or typed editor — the reset itself must
+    /// then explicitly return the editor to the model's default, mirroring
+    /// web Reset settings and desktop ⌘N.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn reset_defaults_restores_the_negative_editor_to_the_model_default() {
+        let wan_default = mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT;
+        let mut app = make_settings_test_app();
+        app.update_model("wan21-t2v-1.3b:bf16");
+        assert_eq!(app.generate.negative_prompt.lines().join("\n"), wan_default);
+
+        // A cleared editor is user authority on a model switch — but Reset
+        // Defaults is an explicit return to the model's own defaults.
+        app.generate.negative_prompt = tui_textarea::TextArea::default();
+        app.reset_params_to_model_defaults();
+        assert_eq!(
+            app.generate.negative_prompt.lines().join("\n"),
+            wan_default,
+            "reset must re-prefill the advertised default over a cleared editor"
+        );
+
+        // Typed text resets the same way.
+        app.generate.negative_prompt = tui_textarea::TextArea::from(["hands"]);
+        app.reset_params_to_model_defaults();
+        assert_eq!(app.generate.negative_prompt.lines().join("\n"), wan_default);
+
+        // A model without a default resets the editor to empty.
+        app.update_model("flux2-klein:q8");
+        app.generate.negative_prompt = tui_textarea::TextArea::from(["hands"]);
+        app.reset_params_to_model_defaults();
+        assert_eq!(app.generate.negative_prompt.lines().join("\n"), "");
     }
 
     #[tokio::test]

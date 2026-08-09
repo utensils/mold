@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT,
   advertisedNegativeDefault,
+  effectiveNegativeDefault,
   negativePromptOnDefaultChange,
   negativePromptWireValue,
   restoredNegativePrompt,
@@ -28,6 +30,41 @@ describe("advertisedNegativeDefault", () => {
     expect(advertisedNegativeDefault({})).toBe("");
     expect(advertisedNegativeDefault(null)).toBe("");
     expect(advertisedNegativeDefault(undefined)).toBe("");
+  });
+});
+
+describe("effectiveNegativeDefault", () => {
+  it("prefers the advertised row value, trimmed", () => {
+    expect(
+      effectiveNegativeDefault({ default_negative_prompt: " custom " }, "wan"),
+    ).toBe("custom");
+  });
+
+  it("falls back to the wan family constant when the additive field is absent", () => {
+    // Older servers omit `default_negative_prompt`; the known family default
+    // must survive so an explicit "" opt-out keeps serializing as "".
+    expect(effectiveNegativeDefault({}, "wan")).toBe(
+      WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT,
+    );
+    expect(effectiveNegativeDefault(null, "wan")).toBe(
+      WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT,
+    );
+    expect(
+      effectiveNegativeDefault({ default_negative_prompt: null }, "wan"),
+    ).toBe(WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT);
+  });
+
+  it("stays empty for families without an engine fallback", () => {
+    expect(effectiveNegativeDefault({}, "sdxl")).toBe("");
+    expect(effectiveNegativeDefault(null, "")).toBe("");
+    expect(effectiveNegativeDefault(undefined, undefined)).toBe("");
+  });
+
+  it("keeps an explicit clear an explicit clear against an older server", () => {
+    // The regression this guards (#787 round 2): absent advertisement must
+    // not decay the opt-out's wire value from "" to undefined.
+    const decayedDefault = effectiveNegativeDefault({}, "wan");
+    expect(negativePromptWireValue("", decayedDefault)).toBe("");
   });
 });
 

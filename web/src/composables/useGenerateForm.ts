@@ -28,7 +28,7 @@ import {
 } from "../lib/generateCapabilities";
 import { composeStyle } from "../lib/stylePresets";
 import {
-  advertisedNegativeDefault,
+  effectiveNegativeDefault,
   negativePromptOnDefaultChange,
   negativePromptWireValue,
   restoredNegativePrompt,
@@ -257,8 +257,10 @@ function modelDefaultsPatch(
   };
   // #787: a Negative field still showing the previous model's advertised
   // default follows the new model (that is also how the default first
-  // appears); typed text and an explicit clear are user authority.
-  const nextNegativeDefault = advertisedNegativeDefault(model);
+  // appears); typed text and an explicit clear are user authority. The
+  // family constant backs an older server that omits the additive field so
+  // a known default (and the "" opt-out against it) never decays to absence.
+  const nextNegativeDefault = effectiveNegativeDefault(model, model.family);
   next.negativePrompt = negativePromptOnDefaultChange(
     current.negativePrompt,
     current.negativePromptDefault ?? "",
@@ -795,6 +797,19 @@ export interface UseGenerateForm {
    * keeping the prompt, style, model and batch size (`settingsResetPatch`). */
   resetSettings: (model: ModelInfoExtended | null) => void;
   applyModelDefaults: (model: ModelInfoExtended) => void;
+  /**
+   * Reconcile the restored form's negative-default state against the resolved
+   * catalog row for the *currently selected* model once the inventory lands
+   * (#787 round 2). A persisted v3 snapshot that predates
+   * `negativePromptDefault` restores with an empty default, and the
+   * installed-model watcher early-returns because the saved model is still
+   * valid — without this, upgraded users never see the prefill and cannot
+   * express the "" opt-out until they switch models. Runs the same
+   * `negativePromptOnDefaultChange` + default update as the model-switch
+   * path, so it is idempotent and never clobbers typed text or an explicit
+   * clear recorded against a known default.
+   */
+  reconcileNegativeDefault: (model: ModelInfoExtended) => void;
   /** Replace the entire LoRA stack. Pass `[]` to clear. */
   setLoras: (loras: LoraSelection[]) => void;
   /** Append a LoRA to the stack, capped by `MAX_LORA_STACK`. No-op if
@@ -883,6 +898,21 @@ export function useGenerateForm(): UseGenerateForm {
       // change — even FLUX→FLUX swaps because the LoRA might not target
       // the new variant's tensor layout.
       state.value = modelDefaultsPatch(state.value, m);
+    },
+    reconcileNegativeDefault: (m) => {
+      const s = state.value;
+      // Only the selected model's row is authority for the visible field.
+      if (m.name !== s.model) return;
+      const nextDefault = effectiveNegativeDefault(m, m.family);
+      const nextPrompt = negativePromptOnDefaultChange(
+        s.negativePrompt,
+        s.negativePromptDefault ?? "",
+        nextDefault,
+      );
+      if (nextPrompt !== s.negativePrompt) s.negativePrompt = nextPrompt;
+      if ((s.negativePromptDefault ?? "") !== nextDefault) {
+        s.negativePromptDefault = nextDefault;
+      }
     },
     toRequest: (model = null) => {
       const s = state.value;

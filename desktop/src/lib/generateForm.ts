@@ -45,7 +45,7 @@ import {
   type WanRecipeState,
 } from "@studio/lib/wanRecipe";
 import {
-  advertisedNegativeDefault,
+  effectiveNegativeDefault,
   negativePromptOnDefaultChange,
   negativePromptWireValue,
   restoredNegativePrompt,
@@ -331,8 +331,10 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
   form.sourceImageCapability = m.source_image ?? null;
   // #787: a Negative field still showing the previous model's advertised
   // default follows the new model (that is also how the default first
-  // appears); typed text and an explicit clear are user authority.
-  const nextNegativeDefault = advertisedNegativeDefault(m);
+  // appears); typed text and an explicit clear are user authority. The
+  // family constant backs an older server that omits the additive field so
+  // a known default (and the "" opt-out against it) never decays to absence.
+  const nextNegativeDefault = effectiveNegativeDefault(m, m.family);
   form.negativePrompt = negativePromptOnDefaultChange(
     form.negativePrompt,
     form.negativePromptDefault,
@@ -422,6 +424,35 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     }));
     form.cameraControl = null;
   }
+}
+
+/**
+ * Normalize a form snapshot saved before `negativePromptDefault` existed —
+ * legacy templates and drafts (#787 round 2) — before it is `Object.assign`ed
+ * into a live form. Such snapshots carry no tri-state authority: their empty
+ * `negativePrompt` means "untouched", never the explicit `""` opt-out.
+ * Assigning one raw keeps the live form's previous-model default next to the
+ * template's `""` and manufactures an opt-out the user never made. The
+ * snapshot's own model/family resolve the default (live inventory row first,
+ * family constant fallback); a snapshot that already carries the key is
+ * post-#787 authority and passes through untouched.
+ */
+export function normalizeLegacyNegativeSnapshot(
+  snapshot: GenerateForm,
+  models: ModelEntry[] = [],
+): GenerateForm {
+  if (typeof (snapshot as Partial<GenerateForm>).negativePromptDefault === "string") {
+    return snapshot;
+  }
+  const model = findInstalledModel(models, snapshot.model);
+  const nextDefault = effectiveNegativeDefault(model, snapshot.family);
+  snapshot.negativePromptDefault = nextDefault;
+  if ((snapshot.negativePrompt ?? "").trim() === "") {
+    // Legacy omission is the untouched state: show the default so the wire
+    // stays absent, exactly what the pre-#787 template produced.
+    snapshot.negativePrompt = nextDefault;
+  }
+  return snapshot;
 }
 
 /**

@@ -432,6 +432,26 @@ pub fn negative_prompt_wire_value(
     (text != default).then(|| text.to_string())
 }
 
+/// The model's *effective* default negative: the advertised additive field
+/// when present, else the family constant for a family whose engine
+/// substitutes one anyway (wan, via
+/// `mold_core::manifest::default_negative_prompt_for_family`). A known
+/// default must survive additive-field absence — resolving the same wan
+/// model against an older server that omits `default_negative_prompt` would
+/// otherwise collapse the tracked default to `""`, at which point an
+/// explicit `""` opt-out serializes as absence and silently re-enables the
+/// engine fallback. Mirrors
+/// `studio/lib/negativePrompt.ts::effectiveNegativeDefault`; the parity test
+/// below pins the two constants byte-for-byte.
+pub fn effective_negative_default(advertised: Option<&str>, family: &str) -> String {
+    match advertised.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => text.to_string(),
+        None => mold_core::manifest::default_negative_prompt_for_family(family)
+            .unwrap_or_default()
+            .to_string(),
+    }
+}
+
 /// Prefill decision when the advertised default changes (model switch or a
 /// fresher catalog). `Some(next)` replaces the editor only while it still
 /// shows the previous default (both empty included — that is how the default
@@ -593,6 +613,51 @@ mod tests {
         assert_eq!(
             negative_prompt_on_default_change(WAN_DEFAULT, WAN_DEFAULT, WAN_DEFAULT),
             None
+        );
+    }
+
+    #[test]
+    fn effective_default_prefers_the_advertisement_then_the_family_constant() {
+        // Advertised row value wins, trimmed.
+        assert_eq!(
+            effective_negative_default(Some(" custom "), "wan"),
+            "custom"
+        );
+        // An older server omits the additive field: the known family default
+        // survives so the "" opt-out keeps serializing as Some("").
+        assert_eq!(effective_negative_default(None, "wan"), WAN_DEFAULT);
+        assert_eq!(effective_negative_default(Some("  "), "wan"), WAN_DEFAULT);
+        assert_eq!(
+            negative_prompt_wire_value("", &effective_negative_default(None, "wan"), true)
+                .as_deref(),
+            Some("")
+        );
+        // Families without an engine fallback stay empty.
+        assert_eq!(effective_negative_default(None, "sdxl"), "");
+        assert_eq!(effective_negative_default(None, ""), "");
+    }
+
+    /// The Studio surfaces cannot read `mold_core`, so
+    /// `studio/lib/negativePrompt.ts` carries its own copy of wan's tuned
+    /// default for the older-server fallback. A drifted copy would make web
+    /// and TUI disagree about what "untouched" means on the wire.
+    #[test]
+    fn effective_default_ts_mirror_pins_the_wan_constant() {
+        let workspace = env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/mold-tui")
+            .or_else(|| env!("CARGO_MANIFEST_DIR").strip_suffix("crates/mold-tui"))
+            .unwrap_or(env!("CARGO_MANIFEST_DIR"));
+        let path = format!("{workspace}/studio/lib/negativePrompt.ts");
+        let source =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        assert!(
+            source.contains(&format!("\"{WAN_DEFAULT}\"")),
+            "studio/lib/negativePrompt.ts must pin WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT \
+             to mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT"
+        );
+        assert!(
+            source.contains("export const WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT"),
+            "studio/lib/negativePrompt.ts must export WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT"
         );
     }
 

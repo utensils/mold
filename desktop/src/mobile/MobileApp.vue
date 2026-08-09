@@ -126,6 +126,7 @@ import {
   buildRequest,
   cloneGenerateForm,
   newGenerateForm,
+  normalizeLegacyNegativeSnapshot,
   reconcileModelCapabilities,
   resetFormToModelDefaults,
   type GenerateForm,
@@ -2158,7 +2159,9 @@ async function loadTemplate(template: GenerationTemplate): Promise<void> {
   const epoch = ++templateLoadEpoch;
   const hydrated = await hydrateGenerationTemplate(template);
   if (epoch !== templateLoadEpoch) return;
-  Object.assign(form, hydrated.form);
+  // A pre-#787 template lacking `negativePromptDefault` is normalized first
+  // so its empty negative reads as "untouched", not the explicit "" opt-out.
+  Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, generationModels.value));
   const sameHost = !!template.scopeId && template.scopeId === selectedHostId.value;
   if (!sameHost) clearHostScopedGenerationSelections();
   const selectedEntry = generationModels.value.find((model) => model.name === form.model);

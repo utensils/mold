@@ -18,10 +18,42 @@
  * The engine trims, so comparisons are on trimmed text throughout.
  */
 
+import { isWanFamily } from "./generationCapabilities";
+
 /** The `/api/models` row fields the negative default depends on. */
 export type NegativeDefaultModel = {
   default_negative_prompt?: string | null;
 };
+
+/**
+ * Wan's tuned default negative — the engine's absence fallback
+ * (`mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT`; upstream
+ * `Wan2.2/wan/configs/shared_config.py`). This is the browser-side authority
+ * for the family constant; the TUI parity test in
+ * `crates/mold-tui/src/ui/create_form.rs` pins it byte-for-byte against the
+ * Rust constant so the two can never drift.
+ */
+export const WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT =
+  "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走";
+
+/**
+ * The model's *effective* default negative: the advertised additive field
+ * when present, else the family constant for a family whose engine
+ * substitutes one anyway (wan). A known default must survive additive-field
+ * absence — reconciling the same wan model against an older server that
+ * omits `default_negative_prompt` would otherwise collapse the stored
+ * default to `""`, at which point an explicit `""` opt-out serializes as
+ * absence and silently re-enables the engine fallback. Mirrors
+ * `create_form::effective_negative_default` on the TUI.
+ */
+export function effectiveNegativeDefault(
+  model: NegativeDefaultModel | null | undefined,
+  family: string | null | undefined,
+): string {
+  const advertised = advertisedNegativeDefault(model);
+  if (advertised !== "") return advertised;
+  return isWanFamily(family ?? "") ? WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT : "";
+}
 
 /** The model's advertised default negative, normalized ("" when none). */
 export function advertisedNegativeDefault(

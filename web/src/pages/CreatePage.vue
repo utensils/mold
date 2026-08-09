@@ -18,7 +18,7 @@ import ActivityStrip from "../components/create/ActivityStrip.vue";
 import EstimateBadge from "../components/create/EstimateBadge.vue";
 import { advancedActiveCount } from "../components/create/advancedCount";
 import {
-  advertisedNegativeDefault,
+  effectiveNegativeDefault,
   restoredNegativePrompt,
 } from "@studio/lib/negativePrompt";
 import { projectResolution } from "../components/create/resolutionProjection";
@@ -1327,8 +1327,17 @@ watch(
     const first = installedModels.value[0];
     if (!first) return;
     const current = form.state.value.model;
-    if (current && installedModels.value.some((m) => m.name === current))
+    const currentRow = current
+      ? installedModels.value.find((m) => m.name === current)
+      : undefined;
+    if (currentRow) {
+      // The saved model is still valid, so no defaults reapply — but a
+      // pre-#787 snapshot restored without `negativePromptDefault` still
+      // needs the advertised default reconciled in (idempotent; typed text
+      // and an explicit clear survive).
+      form.reconcileNegativeDefault(currentRow);
       return;
+    }
     form.applyModelDefaults(first);
   },
   { immediate: true },
@@ -3178,8 +3187,10 @@ function openJob(job: Job) {
     (model) => model.name === request.model,
   );
   form.state.value.modelFamily = requestModel?.family ?? "";
-  form.state.value.negativePromptDefault =
-    advertisedNegativeDefault(requestModel);
+  form.state.value.negativePromptDefault = effectiveNegativeDefault(
+    requestModel,
+    requestModel?.family ?? "",
+  );
   form.state.value.width = request.width;
   form.state.value.height = request.height;
   form.state.value.steps = request.steps;

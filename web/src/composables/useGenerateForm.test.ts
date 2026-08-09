@@ -14,6 +14,7 @@ import type {
   ModelInfoExtended,
   OutputMetadata,
 } from "../types";
+import { WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT } from "@studio/lib/negativePrompt";
 
 const STORAGE_KEY = "mold.generate.form";
 
@@ -345,6 +346,82 @@ describe("useGenerateForm", () => {
       form.state.value.negativePrompt = "hands";
       form.applyModelDefaults(makeModel());
       expect(form.state.value.negativePrompt).toBe("hands");
+    });
+
+    it("reconciles a pre-#787 v3 snapshot once the wan row arrives", () => {
+      // The stored form predates `negativePromptDefault`; the saved model is
+      // still installed, so the CreatePage watcher never reapplies defaults.
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          version: 3,
+          prompt: "a cat",
+          model: "wan22-t2v-a14b:q5",
+          modelFamily: "wan",
+          negativePrompt: "",
+        }),
+      );
+      const form = useGenerateForm();
+      expect(form.state.value.negativePromptDefault).toBe("");
+
+      form.reconcileNegativeDefault(wanModel());
+
+      expect(form.state.value.negativePrompt).toBe(WAN_DEFAULT);
+      expect(form.state.value.negativePromptDefault).toBe(WAN_DEFAULT);
+    });
+
+    it("reconcile preserves typed text and an explicit clear against a known default", () => {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          version: 3,
+          model: "wan22-t2v-a14b:q5",
+          modelFamily: "wan",
+          negativePrompt: "",
+          negativePromptDefault: WAN_DEFAULT,
+        }),
+      );
+      const form = useGenerateForm();
+      form.reconcileNegativeDefault(wanModel());
+      expect(form.state.value.negativePrompt).toBe("");
+      expect(form.toRequest().negative_prompt).toBe("");
+
+      form.state.value.negativePrompt = "hands";
+      form.reconcileNegativeDefault(wanModel());
+      expect(form.state.value.negativePrompt).toBe("hands");
+    });
+
+    it("reconcile ignores a row for a model that is no longer selected", () => {
+      const form = useGenerateForm();
+      form.applyModelDefaults(makeModel());
+      form.reconcileNegativeDefault(wanModel());
+      expect(form.state.value.negativePrompt).toBe("");
+      expect(form.state.value.negativePromptDefault).toBe("");
+    });
+
+    it('keeps the family default (and the "" opt-out) against an older server', () => {
+      // An older server omits the additive field; the known wan default must
+      // not decay to absence, or a cleared field stops serializing "".
+      const form = useGenerateForm();
+      form.applyModelDefaults(
+        makeModel({
+          name: "wan22-t2v-a14b:q5",
+          family: "wan",
+          guidance_capabilities: {
+            adjustable: true,
+            supports_negative_prompt: true,
+          },
+        }),
+      );
+      expect(form.state.value.negativePromptDefault).toBe(
+        WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT,
+      );
+      expect(form.state.value.negativePrompt).toBe(
+        WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT,
+      );
+      form.state.value.prompt = "a cat";
+      form.state.value.negativePrompt = "";
+      expect(form.toRequest().negative_prompt).toBe("");
     });
 
     it('restores absent metadata negatives as the model\'s default, and "" as empty', () => {
