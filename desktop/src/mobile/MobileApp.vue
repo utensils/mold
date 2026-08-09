@@ -51,7 +51,13 @@ import {
   type OutputMode,
 } from "@studio/lib/sequence";
 import { promptPlaceholder, promptRequired } from "@studio/lib/promptRequirement";
-import { isMinimaxH3Identity, minimaxH3AuthoringError } from "@studio/lib/minimaxH3Authoring";
+import {
+  appendMinimaxH3GalleryImageReference,
+  isMinimaxH3Identity,
+  minimaxH3AuthoringError,
+  minimaxH3TaskForModel,
+  setMinimaxH3GalleryImageFirstFrame,
+} from "@studio/lib/minimaxH3Authoring";
 import {
   classifyPlacementPreview,
   previewChainPlacement,
@@ -3832,6 +3838,10 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       return;
     }
     const reuse = applyMobileGalleryMetadata(form, print.metadata, generationModels.value);
+    if (reuse.sequenceUnsupportedReason) {
+      reusePrintError.value = reuse.sequenceUnsupportedReason;
+      return;
+    }
     if (reuse.sequence) {
       // A sequence print reloads the clip rail as a NEW draft: no edit
       // session, nothing cached (iPhone has no chain-detail recovery route,
@@ -3890,8 +3900,12 @@ async function useSelectedPrintAsSource(): Promise<void> {
   reusePrintError.value = "";
   try {
     const response = await apiFetchTo(print.target, galleryMediaPath(print.filename, "host"));
+    const h3Task = minimaxH3TaskForModel(form.model);
     const attachmentMode = caps.value.sourceImageMode !== "single";
-    const existingBytes = inlineGenerationMediaBytes(form, attachmentMode ? null : "sourceImage");
+    const existingBytes = inlineGenerationMediaBytes(
+      form,
+      h3Task === "fl2va" ? "h3FirstFrame" : attachmentMode ? null : "sourceImage",
+    );
     const exceedsBudget = (incomingBytes: number) =>
       existingBytes + incomingBytes > MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES;
     // Reject from Content-Length before materialising the response Blob when
@@ -3905,7 +3919,34 @@ async function useSelectedPrintAsSource(): Promise<void> {
     if (blob.size === 0) throw new Error("That gallery image is empty.");
     if (exceedsBudget(blob.size)) throw new Error(MOBILE_MEDIA_BUDGET_ERROR);
     const base64 = await blobToBase64(blob);
-    if (attachmentMode) {
+    if (h3Task) {
+      const dimensions = imageDimensionsFromBase64(base64) ?? {
+        width: print.metadata.width,
+        height: print.metadata.height,
+      };
+      const image = {
+        filename: print.filename,
+        mimeType: galleryImageMimeType(print, blob.type),
+        width: dimensions.width,
+        height: dimensions.height,
+        data: base64,
+      };
+      const result =
+        h3Task === "ref2va"
+          ? appendMinimaxH3GalleryImageReference(form.h3Authoring, image)
+          : setMinimaxH3GalleryImageFirstFrame(form.h3Authoring, image);
+      if (!result.ok) throw new Error(result.error);
+      form.h3Authoring = result.state;
+      setGenerationStatus(
+        h3Task === "ref2va"
+          ? `Added gallery print as reference ${result.reference}`
+          : "Gallery print selected as first frame",
+      );
+    } else if (isMinimaxH3Identity(form.family, form.model)) {
+      throw new Error(
+        "Choose an explicit MiniMax H3 FL2VA or Ref2VA model before adding a source.",
+      );
+    } else if (attachmentMode) {
       form.imageAttachments = [base64, ...form.imageAttachments].slice(
         0,
         isFlux2DevModel(form.model) ? 4 : undefined,
@@ -3928,6 +3969,15 @@ async function useSelectedPrintAsSource(): Promise<void> {
   } finally {
     usingPrintAsSource.value = false;
   }
+}
+
+function galleryImageMimeType(print: GalleryImage, declared: string): string {
+  const mime = declared.split(";", 1)[0]!.trim().toLowerCase();
+  if (mime.startsWith("image/")) return mime;
+  const format = (print.format ?? print.filename.split(".").pop() ?? "")
+    .toLowerCase()
+    .replace("jpg", "jpeg");
+  return format ? `image/${format}` : "application/octet-stream";
 }
 
 function openPrint(print: GalleryPrint): void {

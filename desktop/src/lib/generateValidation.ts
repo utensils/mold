@@ -11,6 +11,7 @@ import { guidanceOverridesError } from "@studio/lib/guidanceOverrides";
 import { isMinimaxH3Family } from "@studio/lib/minimaxH3Authoring";
 import { sourceImageValidationError } from "@studio/lib/sourceImageCapability";
 import { wanRecipeError } from "@studio/lib/wanRecipe";
+import { minimaxH3TaskForModel } from "@studio/lib/minimaxH3Authoring";
 
 export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
 // JSON base64 expands bytes by roughly 4/3 and the server body limit is 64
@@ -29,7 +30,10 @@ export type InlineGenerationMediaField =
   | "sourceVideo"
   | "extendVideo"
   | "keyframes"
-  | "audioFile";
+  | "audioFile"
+  | "h3FirstFrame"
+  | "h3LastFrame"
+  | "h3References";
 
 export function decodedBase64Bytes(value: string | null | undefined): number {
   if (!value) return 0;
@@ -63,6 +67,19 @@ export function inlineGenerationMediaBytes(
       (sum, keyframe) => sum + decodedBase64Bytes(keyframe.image.base64),
       0,
     );
+  }
+  const h3Task = minimaxH3TaskForModel(form.model);
+  if (h3Task === "fl2va" && exclude !== "h3FirstFrame") {
+    total += decodedBase64Bytes(form.h3Authoring?.firstFrame?.data);
+  }
+  if (h3Task === "fl2va" && exclude !== "h3LastFrame") {
+    total += decodedBase64Bytes(form.h3Authoring?.lastFrame?.data);
+  }
+  if (h3Task === "ref2va" && exclude !== "h3References") {
+    total += (form.h3Authoring?.references ?? []).reduce((sum, draft) => {
+      const media = draft.reference.media;
+      return sum + (media.authority === "inline" ? decodedBase64Bytes(media.data) : 0);
+    }, 0);
   }
   return total;
 }

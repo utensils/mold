@@ -773,6 +773,12 @@ async fn prepare_generation(
     ),
     ApiError,
 > {
+    // Collapse every released H3 alias to one exact task/layout identity
+    // before activation, upload scope, admission, placement, queue, metadata,
+    // and retry state can observe the request. This is deliberately a no-op
+    // for every non-H3 configured alias and catalog ID.
+    mold_core::minimax_h3::canonicalize_request_model(request);
+
     // `hdr_exr_dir` names an output directory on the machine doing inference.
     // An HTTP client must never choose that server-local path: unlike media
     // inputs there is no useful remote artifact to return and no safe root to
@@ -1594,6 +1600,7 @@ async fn generate(
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
+    mold_core::minimax_h3::canonicalize_request_model(&mut req);
     validate_live_server_batch_admission(&req)?;
     // Capture before prepare_generation: prompt expansion mutates req.prompt,
     // and history should hold what the user typed.
@@ -2657,6 +2664,7 @@ async fn generate_stream(
     headers: HeaderMap,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
+    mold_core::minimax_h3::canonicalize_request_model(&mut req);
     let completion_payload = requested_sse_completion_payload(&headers)?;
     validate_live_server_batch_admission(&req)?;
     // Capture before prepare_generation: prompt expansion mutates req.prompt,
@@ -2870,8 +2878,9 @@ async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtende
 
 async fn generate_estimate(
     State(state): State<AppState>,
-    Json(req): Json<GenerateRequest>,
+    Json(mut req): Json<GenerateRequest>,
 ) -> Result<Json<mold_core::GenerationMemoryEstimate>, ApiError> {
+    mold_core::minimax_h3::canonicalize_request_model(&mut req);
     Ok(Json(
         model_manager::estimate_generation_memory(&state, &req).await?,
     ))
@@ -2898,6 +2907,7 @@ pub(crate) async fn placement_preview_for_request(
     mut request: GenerateRequest,
     copies: u32,
 ) -> mold_core::GenerationPlacementPreview {
+    mold_core::minimax_h3::canonicalize_request_model(&mut request);
     let plan = state.scheduled_work.latest_plan();
     let unavailable = |outcome: &str, reason: String| mold_core::GenerationPlacementPreview {
         version: 1,

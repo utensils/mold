@@ -30,6 +30,11 @@ export const MINIMAX_H3_PROMPT_PLACEHOLDER =
 
 export type MinimaxH3Task = "fl2va" | "ref2va";
 
+export const MINIMAX_H3_FL2VA_OFFICIAL = "minimax-h3-fl2va:official-bf16";
+export const MINIMAX_H3_REF2VA_OFFICIAL = "minimax-h3-ref2va:official-bf16";
+export const MINIMAX_H3_FL2VA_COMFY = "minimax-h3-fl2va:comfy-pruned-int8";
+export const MINIMAX_H3_REF2VA_COMFY = "minimax-h3-ref2va:comfy-pruned-int8";
+
 /** Browser-owned first/last-frame authority. The raw bytes live in IndexedDB
  * when a draft/template is persisted; only the small descriptor is allowed in
  * localStorage. */
@@ -82,6 +87,34 @@ function normalize(value: string): string {
   return value.trim().toLowerCase().replaceAll("_", "-");
 }
 
+/** Browser-side mirror of the server's released H3 alias resolver. Opaque
+ * catalog IDs and unknown future variants stay unresolved instead of being
+ * guessed into a task/layout partition. */
+export function canonicalMinimaxH3ModelName(
+  model: string | null | undefined,
+): string | null {
+  const value = normalize(model ?? "");
+  if (
+    value === "minimax-h3" ||
+    value === "minimaxh3" ||
+    value === "minimax-h3-fl2va"
+  ) {
+    return MINIMAX_H3_FL2VA_COMFY;
+  }
+  if (value === "minimax-h3-ref2va") {
+    return MINIMAX_H3_REF2VA_COMFY;
+  }
+  if (
+    value === MINIMAX_H3_FL2VA_OFFICIAL ||
+    value === MINIMAX_H3_REF2VA_OFFICIAL ||
+    value === MINIMAX_H3_FL2VA_COMFY ||
+    value === MINIMAX_H3_REF2VA_COMFY
+  ) {
+    return value;
+  }
+  return null;
+}
+
 export function isMinimaxH3Family(family: string | null | undefined): boolean {
   const value = normalize(family ?? "").replaceAll("-", "");
   return value === "minimaxh3";
@@ -92,33 +125,147 @@ export function isMinimaxH3Family(family: string | null | undefined): boolean {
 export function minimaxH3TaskForModel(
   model: string | null | undefined,
 ): MinimaxH3Task | null {
-  const value = normalize(model ?? "");
-  if (value === "minimax-h3-ref2va" || value.startsWith("minimax-h3-ref2va:")) {
+  const value = canonicalMinimaxH3ModelName(model);
+  if (value?.startsWith("minimax-h3-ref2va:")) {
     return "ref2va";
   }
-  if (
-    value === "minimax-h3" ||
-    value === "minimaxh3" ||
-    value === "minimax-h3-fl2va" ||
-    value.startsWith("minimax-h3-fl2va:")
-  ) {
+  if (value?.startsWith("minimax-h3-fl2va:")) {
     return "fl2va";
   }
   return null;
 }
 
-/** Family metadata can be absent in durable gallery/request snapshots. Exact
- * released model identities still carry enough authority to recover the H3
- * contract without guessing opaque catalog IDs. */
+/** Family metadata can be absent in durable gallery/request snapshots. An
+ * H3-shaped model name still identifies the family boundary, while task and
+ * layout resolution remain restricted to the exact released identities. */
 export function isMinimaxH3Identity(
   family: string | null | undefined,
   model: string | null | undefined,
 ): boolean {
-  return isMinimaxH3Family(family) || minimaxH3TaskForModel(model) !== null;
+  if (isMinimaxH3Family(family)) return true;
+  const value = normalize(model ?? "");
+  return (
+    value === "minimax-h3" ||
+    value === "minimaxh3" ||
+    value === "minimax-h3-fl2va" ||
+    value === "minimax-h3-ref2va" ||
+    value.startsWith("minimax-h3-fl2va:") ||
+    value.startsWith("minimax-h3-ref2va:")
+  );
 }
 
 export function emptyMinimaxH3AuthoringState(): MinimaxH3AuthoringState {
   return { firstFrame: null, lastFrame: null, references: [] };
+}
+
+export interface MinimaxH3GalleryImageSource {
+  filename: string;
+  mimeType: string;
+  width: number;
+  height: number;
+  /** Raw base64 without a data-URI prefix. */
+  data: string;
+  sha256?: string | null;
+}
+
+export type MinimaxH3GalleryImageResult =
+  | {
+      ok: true;
+      state: MinimaxH3AuthoringState;
+      /** One-based ordered reference position; null for an FL2VA boundary. */
+      reference: number | null;
+    }
+  | { ok: false; error: string };
+
+function validateGalleryImageSource(
+  image: MinimaxH3GalleryImageSource,
+): string | null {
+  if (!image.filename.trim()) return "The gallery image needs a filename.";
+  const mimeType = image.mimeType.split(";", 1)[0]!.trim().toLowerCase();
+  if (!mimeType.startsWith("image/")) {
+    return "Only gallery images can be used as MiniMax H3 visual references.";
+  }
+  if (
+    !Number.isInteger(image.width) ||
+    image.width <= 0 ||
+    !Number.isInteger(image.height) ||
+    image.height <= 0
+  ) {
+    return "The gallery image dimensions could not be read.";
+  }
+  if (!image.data.trim()) return "The gallery image is empty.";
+  return null;
+}
+
+/** Append one gallery print to the authoritative Ref2VA order as inline media.
+ * The returned state is shallowly immutable: existing potentially-large media
+ * strings are retained without a JSON-clone, while the ordered array and new
+ * row are fresh objects for Vue reactivity. */
+export function appendMinimaxH3GalleryImageReference(
+  state: MinimaxH3AuthoringState | null | undefined,
+  image: MinimaxH3GalleryImageSource,
+): MinimaxH3GalleryImageResult {
+  const invalid = validateGalleryImageSource(image);
+  if (invalid) return { ok: false, error: invalid };
+  const current = state ?? emptyMinimaxH3AuthoringState();
+  const budget = minimaxH3ReferenceBudget(current.references);
+  if (budget.total >= MINIMAX_H3_MAX_REFERENCES) {
+    return {
+      ok: false,
+      error: `Use at most ${MINIMAX_H3_MAX_REFERENCES} references total.`,
+    };
+  }
+  if (budget.images >= MINIMAX_H3_MAX_REFERENCE_IMAGES) {
+    return {
+      ok: false,
+      error: `Use at most ${MINIMAX_H3_MAX_REFERENCE_IMAGES} image references.`,
+    };
+  }
+  const mimeType = image.mimeType.split(";", 1)[0]!.trim().toLowerCase();
+  const reference: GenerationReference = {
+    kind: "image",
+    media: { authority: "inline", data: image.data },
+    provenance: {
+      name: image.filename.trim(),
+      ...(image.sha256 ? { sha256: image.sha256.toLowerCase() } : {}),
+    },
+    mime_type: mimeType,
+    width: image.width,
+    height: image.height,
+  };
+  const references = [...current.references, { reference }];
+  return {
+    ok: true,
+    state: { ...current, references },
+    reference: references.length,
+  };
+}
+
+/** Use one gallery print as the FL2VA opening boundary. Kept beside the
+ * ordered-reference helper so every Library surface validates identical image
+ * facts before writing dedicated H3 authoring state. */
+export function setMinimaxH3GalleryImageFirstFrame(
+  state: MinimaxH3AuthoringState | null | undefined,
+  image: MinimaxH3GalleryImageSource,
+): MinimaxH3GalleryImageResult {
+  const invalid = validateGalleryImageSource(image);
+  if (invalid) return { ok: false, error: invalid };
+  const current = state ?? emptyMinimaxH3AuthoringState();
+  return {
+    ok: true,
+    state: {
+      ...current,
+      firstFrame: {
+        filename: image.filename.trim(),
+        mimeType: image.mimeType.split(";", 1)[0]!.trim().toLowerCase(),
+        width: image.width,
+        height: image.height,
+        data: image.data,
+        ...(image.sha256 ? { sha256: image.sha256.toLowerCase() } : {}),
+      },
+    },
+    reference: null,
+  };
 }
 
 export function cloneMinimaxH3AuthoringState(
@@ -388,6 +535,7 @@ export function minimaxH3AuthoringError(
 
 type H3Request = {
   frames?: number | null;
+  model?: string;
 };
 
 const FOREIGN_H3_FIELDS = [
@@ -452,6 +600,8 @@ export function serializeMinimaxH3Authoring<T extends H3Request>(
     strength: 1,
     output_format: "mp4",
   };
+  const canonicalModel = canonicalMinimaxH3ModelName(model);
+  if (canonicalModel) next.model = canonicalModel;
   for (const field of FOREIGN_H3_FIELDS) delete next[field];
   delete next.edit_images;
 
