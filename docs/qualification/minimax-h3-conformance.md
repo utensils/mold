@@ -119,8 +119,8 @@ The external authorization record has this exact shape:
     "fixture-capture",
     "generated-output-retention"
   ],
-  "source_document_path": "/external/compliance/minimax-h3-authorization.pdf",
-  "source_document_sha256": "<sha256>",
+  "source_document_path": "/external/compliance/reviewed-authorization-evidence.bin",
+  "source_document_sha256": "8cd4d6e52cff34d7d39721ebab13b8c1187aa87aafc1c4ae2a16609186f22f1d",
   "review_reference": "<external review identifier>"
 }
 ```
@@ -169,9 +169,15 @@ trigger. Dispatch it from `main` with the exact reviewed commit as
 the protected runner independently checks its checkout before reading external
 evidence.
 
-The protected `minimax-h3-private-uat` GitHub Environment supplies four
-environment-scoped secrets. Each value is an absolute path visible only to the
-protected runner:
+The administrator prerequisite is to create and protect the
+`minimax-h3-private-uat` GitHub Environment, configure its four path secrets,
+and provision an ephemeral, isolated runner carrying the workflow's exact
+self-hosted labels. Do not register a persistent public-repository runner for
+this campaign. This runbook does not assert that either is currently
+configured. Without the matching runner the job remains queued; if the
+environment, approval, or secrets are absent, validation fails closed before
+it reads evidence. Each secret value is an absolute path visible only to the
+validator step:
 
 - `MOLD_H3_FIXTURE_ROOT`: the external root containing all retained evidence.
 - `MOLD_H3_AUTHORIZATION_RECORD`: the external authorization JSON described
@@ -183,17 +189,30 @@ protected runner:
 
 Both bundles use `mold.minimax-h3.fixture-bundle.v1`; their referenced files use
 `mold.minimax-h3.layer-output.v1`. Bundle and layer environments must declare a
-`cuda:` device, and non-synthetic documents must bind the authorization source
-hash. The runner rejects mismatched case/layer sets, component indexes,
-producer roles, framework revisions, or numerical comparisons. This path
-requires `exact-full-bf16`; synthetic and quantized-structural authority remain
-available only to their separate, explicitly labeled qualification paths.
+`cuda:` device and the canonical `bfloat16` dtype. Every layer output accepted
+by this exact path is also `bfloat16`. Non-synthetic documents must bind the
+already reviewed authorization evidence SHA-256 shown above. The runner derives
+the authority-tier map from the validated manifest and requires paired oracle
+and Mold evidence for all eleven `exact-full-bf16` layers; it excludes the
+manifest's synthetic sampler instead of relabeling it. Synthetic and
+quantized-structural authority remain available only to their separate,
+explicitly labeled qualification paths.
+
+The layer document's oracle comparison policies are authoritative. Absolute
+and relative tolerances are independently capped at `1/64`, and each bundle's
+duplicated tensor summary must exactly mirror the document's first output. The
+oracle bundle tolerance must exactly mirror that output's policy, and the Mold
+bundle must repeat the same policy summary. A mismatch is rejected rather than
+silently trusting bundle metadata.
 
 The workflow neither executes the adapter `command` strings nor captures new
 evidence. Those fields remain provenance from separately reviewed capture
 steps. It also does not upload artifacts or copy external evidence into the
 checkout; detailed evidence stays on the protected runner, and failures expose
-only redacted contract context in CI logs. Adding this validation
+only redacted contract context in CI logs. Evidence bytes are hashed, parsed,
+validated, and retained from one read; numerical comparison uses those same
+in-memory documents, so a later path replacement cannot change the compared
+values. Adding this validation
 infrastructure does not by itself claim that a real checkpoint was captured or
 that licensed GPU UAT passed.
 

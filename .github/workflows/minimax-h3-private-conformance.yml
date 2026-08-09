@@ -45,30 +45,25 @@ jobs:
     environment: minimax-h3-private-uat
     runs-on: [self-hosted, linux, x64, cuda, minimax-h3-private-uat]
     timeout-minutes: 120
-    env:
-      MOLD_H3_FIXTURE_ROOT: ${{ secrets.MOLD_H3_FIXTURE_ROOT }}
-      MOLD_H3_AUTHORIZATION_RECORD: ${{ secrets.MOLD_H3_AUTHORIZATION_RECORD }}
-      MOLD_H3_ORACLE_BUNDLE: ${{ secrets.MOLD_H3_ORACLE_BUNDLE }}
-      MOLD_H3_MOLD_BUNDLE: ${{ secrets.MOLD_H3_MOLD_BUNDLE }}
-      MOLD_H3_SOURCE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           clean: true
           persist-credentials: false
           ref: ${{ github.sha }}
-      - name: Require protected runner inputs
+      - name: Require protected runner tools
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$MOLD_H3_FIXTURE_ROOT"
-          test -n "$MOLD_H3_AUTHORIZATION_RECORD"
-          test -n "$MOLD_H3_ORACLE_BUNDLE"
-          test -n "$MOLD_H3_MOLD_BUNDLE"
-          test -n "$MOLD_H3_SOURCE_SHA"
           command -v python3 >/dev/null
           command -v nvidia-smi >/dev/null
       - name: Compare authorization-bound external captures
+        env:
+          MOLD_H3_FIXTURE_ROOT: ${{ secrets.MOLD_H3_FIXTURE_ROOT }}
+          MOLD_H3_AUTHORIZATION_RECORD: ${{ secrets.MOLD_H3_AUTHORIZATION_RECORD }}
+          MOLD_H3_ORACLE_BUNDLE: ${{ secrets.MOLD_H3_ORACLE_BUNDLE }}
+          MOLD_H3_MOLD_BUNDLE: ${{ secrets.MOLD_H3_MOLD_BUNDLE }}
+          MOLD_H3_SOURCE_SHA: ${{ github.sha }}
         run: >-
           PYTHONDONTWRITEBYTECODE=1
           python3 scripts/run-minimax-h3-gpu-conformance.py

@@ -8,7 +8,9 @@ product remains fail-closed and no evidence is copied into the checkout or CI.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import os
 import pathlib
 import re
@@ -29,6 +31,12 @@ REQUIRED_ENVIRONMENT = (
 )
 COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 EXACT_AUTHORITY_TIER = "exact-full-bf16"
+CANONICAL_BF16_DTYPE = "bfloat16"
+MAX_EXACT_ABSOLUTE_TOLERANCE = 1.0 / 64.0
+MAX_EXACT_RELATIVE_TOLERANCE = 1.0 / 64.0
+REVIEWED_AUTHORIZATION_EVIDENCE_SHA256 = (
+    "8cd4d6e52cff34d7d39721ebab13b8c1187aa87aafc1c4ae2a16609186f22f1d"
+)
 
 
 class GpuConformanceFailure(Exception):
@@ -142,6 +150,47 @@ def call_redacted(tool: Any, context: str, action: Callable[[], Any]) -> Any:
         fail(f"{context} failed; inspect evidence only on the protected runner")
 
 
+def read_json_once(path: pathlib.Path, label: str) -> tuple[bytes, Any]:
+    try:
+        encoded = path.read_bytes()
+        value = json.loads(encoded)
+    except (OSError, ValueError):
+        fail(f"{label} is unavailable or invalid")
+    return encoded, value
+
+
+def manifest_layer_tiers(manifest: dict[str, Any]) -> dict[str, str]:
+    tiers = {
+        layer["id"]: layer["authority_tier"] for layer in manifest["fixture_layers"]
+    }
+    if len(tiers) != len(manifest["fixture_layers"]):
+        fail("checked manifest contains duplicate layer identities")
+    return tiers
+
+
+def load_bundle_once(
+    tool: Any,
+    path: pathlib.Path,
+    authorization_sha: str,
+    label: str,
+) -> dict[str, Any]:
+    _, bundle = read_json_once(path, label)
+    call_redacted(
+        tool,
+        f"{label} schema validation",
+        lambda: tool.validate_schema(bundle, tool.BUNDLE_SCHEMA_PATH),
+    )
+    if bundle["schema_version"] != tool.BUNDLE_SCHEMA_VERSION:
+        fail(f"{label} schema version is unsupported")
+    if bundle["manifest_sha256"] != tool.sha256_file(tool.MANIFEST_PATH):
+        fail(f"{label} targets a different conformance manifest")
+    if bundle["authorization_document_sha256"] != authorization_sha:
+        fail(f"{label} is not bound to the reviewed authorization evidence")
+    if not bundle["fixtures"]:
+        fail(f"{label} contains no evidence")
+    return bundle
+
+
 def validate_capture_environment(
     tool: Any,
     bundle: dict[str, Any],
@@ -151,6 +200,8 @@ def validate_capture_environment(
     capture = bundle["capture_environment"]
     if not is_cuda_environment(capture["device"]):
         fail(f"{role} bundle does not declare a CUDA capture environment")
+    if capture["dtype"] != CANONICAL_BF16_DTYPE:
+        fail(f"{role} bundle capture environment dtype must be {CANONICAL_BF16_DTYPE}")
     if role == "oracle":
         expected_framework = "diffusers"
         expected_revision = tool.EXPECTED_REVISIONS["diffusers"]
@@ -163,6 +214,54 @@ def validate_capture_environment(
         fail(f"{role.capitalize()} bundle framework revision is not exact")
 
 
+def expected_tensor_summary(output: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "shape": output["shape"],
+        "dtype": output["dtype"],
+        "min": output["statistics"]["min"],
+        "max": output["statistics"]["max"],
+        "mean": output["statistics"]["mean"],
+        "std": output["statistics"]["std"],
+        "sampled_values": [sample["value"] for sample in output["samples"]],
+    }
+
+
+def expected_tolerance_summary(policy: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "absolute": policy["absolute"],
+        "relative": policy["relative"],
+        "metric": policy["metric"],
+    }
+
+
+def validate_exact_outputs(
+    document: dict[str, Any],
+    fixture: dict[str, Any],
+    role: str,
+) -> None:
+    outputs = {output["key"]: output for output in document["outputs"]}
+    for output in outputs.values():
+        if output["dtype"] != CANONICAL_BF16_DTYPE:
+            fail(f"{role} layer output dtype must be {CANONICAL_BF16_DTYPE}")
+
+    first_output = document["outputs"][0]
+    if fixture["tensor"] != expected_tensor_summary(first_output):
+        fail(f"{role} bundle tensor summary does not match layer evidence")
+
+    if role != "oracle":
+        return
+    policies = {policy["key"]: policy for policy in document["comparison"]}
+    for policy in policies.values():
+        if (
+            policy["absolute"] > MAX_EXACT_ABSOLUTE_TOLERANCE
+            or policy["relative"] > MAX_EXACT_RELATIVE_TOLERANCE
+        ):
+            fail(f"{role} comparison policy is not bounded for exact BF16 evidence")
+    first_policy = policies[first_output["key"]]
+    if fixture["tolerance"] != expected_tolerance_summary(first_policy):
+        fail(f"{role} bundle tolerance summary does not match oracle policy")
+
+
 def load_layer_documents(
     tool: Any,
     fixture_root: pathlib.Path,
@@ -170,13 +269,18 @@ def load_layer_documents(
     bundle: dict[str, Any],
     role: str,
     source_sha: str,
-) -> dict[tuple[str, str], pathlib.Path]:
-    documents: dict[tuple[str, str], pathlib.Path] = {}
+    layer_tiers: dict[str, str],
+) -> dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]]:
+    documents: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
     for position, fixture in enumerate(bundle["fixtures"], start=1):
-        if fixture["authority_tier"] == "synthetic":
-            fail(f"{role} bundle synthetic evidence is forbidden in the GPU campaign")
-        if fixture["authority_tier"] != EXACT_AUTHORITY_TIER:
-            fail(f"{role} bundle evidence must be {EXACT_AUTHORITY_TIER}")
+        manifest_tier = layer_tiers.get(fixture["layer"])
+        if manifest_tier != EXACT_AUTHORITY_TIER:
+            fail(
+                f"{role} bundle layer {fixture['layer']} has manifest authority tier "
+                f"{manifest_tier!r}, not {EXACT_AUTHORITY_TIER}"
+            )
+        if fixture["authority_tier"] != manifest_tier:
+            fail(f"{role} bundle authority tier drifts from the manifest")
         try:
             evidence_path = (fixture_root / fixture["relative_path"]).resolve(
                 strict=True
@@ -187,11 +291,16 @@ def load_layer_documents(
             evidence_path.relative_to(fixture_root)
         except ValueError:
             fail(f"{role} evidence escapes MOLD_H3_FIXTURE_ROOT")
+        encoded, raw_document = read_json_once(
+            evidence_path, f"{role} evidence {position}"
+        )
+        if hashlib.sha256(encoded).hexdigest() != fixture["sha256"]:
+            fail(f"{role} evidence {position} hash does not match its bundle")
         document = call_redacted(
             tool,
             f"{role} layer evidence validation",
             lambda: tool.validate_layer_output(
-                tool.load_json(evidence_path), f"{role} evidence {position}"
+                raw_document, f"{role} evidence {position}"
             ),
         )
         producer = document["producer"]
@@ -205,14 +314,20 @@ def load_layer_documents(
                 fail("oracle evidence is not from the pinned Diffusers authority")
         elif producer["source_id"] != "mold" or producer["revision"] != source_sha:
             fail("Mold evidence is not from the exact requested source SHA")
-        if document["authority_tier"] == "synthetic":
-            fail(f"{role} layer synthetic evidence is forbidden in the GPU campaign")
-        if document["authority_tier"] != EXACT_AUTHORITY_TIER:
-            fail(f"{role} layer evidence must be {EXACT_AUTHORITY_TIER}")
+        document_manifest_tier = layer_tiers.get(document["layer"])
+        if document_manifest_tier != EXACT_AUTHORITY_TIER:
+            fail(
+                f"{role} layer {document['layer']} has manifest authority tier "
+                f"{document_manifest_tier!r}, not {EXACT_AUTHORITY_TIER}"
+            )
+        if document["authority_tier"] != document_manifest_tier:
+            fail(f"{role} layer authority tier drifts from the manifest")
         if document["authorization_document_sha256"] != authorization_sha:
             fail(f"{role} layer is not bound to the authorization evidence")
         if not is_cuda_environment(document["environment"]["device"]):
             fail(f"{role} layer does not declare a CUDA execution environment")
+        if document["environment"]["dtype"] != CANONICAL_BF16_DTYPE:
+            fail(f"{role} layer environment dtype must be {CANONICAL_BF16_DTYPE}")
         if fixture["layer"] != document["layer"]:
             fail(f"{role} bundle layer does not match its evidence")
         if fixture["authority_tier"] != document["authority_tier"]:
@@ -222,11 +337,30 @@ def load_layer_documents(
             != document["input"]["component_index_sha256"]
         ):
             fail(f"{role} bundle component index does not match its evidence")
+        validate_exact_outputs(document, fixture, role)
         key = (document["case_id"], document["layer"])
         if key in documents:
             fail(f"{role} bundle contains duplicate case/layer evidence")
-        documents[key] = evidence_path
+        documents[key] = (document, fixture)
     return documents
+
+
+def require_complete_exact_coverage(
+    documents: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]],
+    layer_tiers: dict[str, str],
+    role: str,
+) -> None:
+    required = {
+        layer
+        for layer, authority_tier in layer_tiers.items()
+        if authority_tier == EXACT_AUTHORITY_TIER
+    }
+    observed = {layer for _, layer in documents}
+    if observed != required:
+        fail(
+            f"{role} bundle lacks complete exact layer coverage "
+            f"(required={len(required)}, observed={len(observed)})"
+        )
 
 
 def run_campaign(
@@ -256,6 +390,9 @@ def run_campaign(
         "authorization validation",
         lambda: tool.validate_authorization(authorization_path),
     )
+    authorization_sha = authorization["source_document_sha256"]
+    if authorization_sha != REVIEWED_AUTHORIZATION_EVIDENCE_SHA256:
+        fail("authorization record does not bind the reviewed authorization evidence")
     oracle_bundle_path = resolve_bundle_path(
         fixture_root, "oracle bundle", values["MOLD_H3_ORACLE_BUNDLE"]
     )
@@ -267,30 +404,22 @@ def run_campaign(
 
     gpu_probe()
 
-    for label, path in (
-        ("oracle bundle", oracle_bundle_path),
-        ("Mold bundle", mold_bundle_path),
-    ):
-        call_redacted(
-            tool,
-            f"{label} validation",
-            lambda path=path: tool.validate_bundle(
-                manifest,
-                str(fixture_root),
-                str(path),
-                str(authorization_path),
-            ),
-        )
-    oracle_bundle = call_redacted(
-        tool, "oracle bundle reload", lambda: tool.load_json(oracle_bundle_path)
+    oracle_bundle = load_bundle_once(
+        tool,
+        oracle_bundle_path,
+        authorization_sha,
+        "oracle bundle",
     )
-    mold_bundle = call_redacted(
-        tool, "Mold bundle reload", lambda: tool.load_json(mold_bundle_path)
+    mold_bundle = load_bundle_once(
+        tool,
+        mold_bundle_path,
+        authorization_sha,
+        "Mold bundle",
     )
     source_sha = values["MOLD_H3_SOURCE_SHA"]
     validate_capture_environment(tool, oracle_bundle, "oracle", source_sha)
     validate_capture_environment(tool, mold_bundle, "mold", source_sha)
-    authorization_sha = authorization["source_document_sha256"]
+    layer_tiers = manifest_layer_tiers(manifest)
     oracle_documents = load_layer_documents(
         tool,
         fixture_root,
@@ -298,6 +427,7 @@ def run_campaign(
         oracle_bundle,
         "oracle",
         source_sha,
+        layer_tiers,
     )
     mold_documents = load_layer_documents(
         tool,
@@ -306,7 +436,10 @@ def run_campaign(
         mold_bundle,
         "mold",
         source_sha,
+        layer_tiers,
     )
+    require_complete_exact_coverage(oracle_documents, layer_tiers, "oracle")
+    require_complete_exact_coverage(mold_documents, layer_tiers, "mold")
     if not oracle_documents or set(oracle_documents) != set(mold_documents):
         fail(
             "oracle and Mold comparison sets differ "
@@ -315,14 +448,15 @@ def run_campaign(
 
     notes = 0
     for position, key in enumerate(sorted(oracle_documents), start=1):
+        oracle_document, oracle_fixture = oracle_documents[key]
+        mold_document, mold_fixture = mold_documents[key]
+        if mold_fixture["tolerance"] != oracle_fixture["tolerance"]:
+            fail("Mold bundle tolerance summary differs from oracle policy")
         comparison_notes = call_redacted(
             tool,
             f"authorized comparison {position}",
-            lambda key=key: tool.compare_output_files(
-                str(oracle_documents[key]),
-                str(mold_documents[key]),
-                str(fixture_root),
-                str(authorization_path),
+            lambda oracle_document=oracle_document, mold_document=mold_document: (
+                tool.compare_layer_outputs(oracle_document, mold_document)
             ),
         )
         notes += len(comparison_notes)
