@@ -1159,6 +1159,16 @@ fn validate_keyframes(
                     keyframes.len()
                 ));
             }
+            // A single-frame clip has coincident endpoints; the generic
+            // duplicate-frame check below would also refuse it, but with a
+            // message that doesn't say why. Name the real problem instead.
+            if frames.is_some_and(|frames| frames < 2) {
+                return Err(
+                    "Wan first/last-frame keyframes need a multi-frame clip — frames=1 \
+                     renders a single still, which has no distinct last frame"
+                        .to_string(),
+                );
+            }
             let last = frames.map(|frames| frames.saturating_sub(1));
             if keyframes[0].frame != 0 || last.is_some_and(|last| keyframes[1].frame != last) {
                 return Err(format!(
@@ -4732,6 +4742,15 @@ mod tests {
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("not both"), "got: {err}");
         req.source_image = None;
+
+        // frames=1 renders a still — its endpoints coincide, so the pair is
+        // refused by name rather than as a generic duplicate frame.
+        req.frames = Some(1);
+        req.keyframes = Some(vec![keyframe(0), keyframe(0)]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("multi-frame clip"), "got: {err}");
+        req.frames = Some(33);
+        req.keyframes = Some(vec![keyframe(0), keyframe(32)]);
 
         // The expansion task treats the pair as boundary anchors, exactly as
         // LTX-2 keyframes classify.

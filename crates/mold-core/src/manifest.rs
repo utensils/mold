@@ -4195,6 +4195,10 @@ pub fn paths_from_downloads(
 }
 
 fn ltx_video_manifests() -> Vec<ModelManifest> {
+    // Plain LTX-Video has no image-to-video path — its engine never reads
+    // `source_image` (chain stages render independently and stitch). Only
+    // LTX-2 conditions on a still, so these advertise Unsupported and
+    // admission rejects an attached image instead of silently ignoring it.
     let dev_defaults = ManifestDefaults {
         steps: 40,
         guidance: 3.0,
@@ -4205,7 +4209,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
         negative_prompt: None,
         frames: Some(25),
         fps: Some(30),
-        source_image: Some(crate::types::SourceImageCapability::Optional),
+        source_image: Some(crate::types::SourceImageCapability::Unsupported),
     };
     let distilled_defaults = ManifestDefaults {
         steps: 8,
@@ -4217,7 +4221,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
         negative_prompt: None,
         frames: Some(25),
         fps: Some(30),
-        source_image: Some(crate::types::SourceImageCapability::Optional),
+        source_image: Some(crate::types::SourceImageCapability::Unsupported),
     };
     let multiscale_distilled_defaults = ManifestDefaults {
         steps: 7,
@@ -4229,7 +4233,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
         negative_prompt: None,
         frames: Some(25),
         fps: Some(30),
-        source_image: Some(crate::types::SourceImageCapability::Optional),
+        source_image: Some(crate::types::SourceImageCapability::Unsupported),
     };
     let multiscale_dev_defaults = ManifestDefaults {
         steps: 30,
@@ -4241,7 +4245,7 @@ fn ltx_video_manifests() -> Vec<ModelManifest> {
         negative_prompt: None,
         frames: Some(25),
         fps: Some(30),
-        source_image: Some(crate::types::SourceImageCapability::Optional),
+        source_image: Some(crate::types::SourceImageCapability::Unsupported),
     };
     let shared_t5_files = vec![
         // T5-XXL FP16 text encoder (shared with FLUX)

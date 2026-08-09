@@ -874,12 +874,13 @@ export function useGenerateForm(): UseGenerateForm {
       const attachmentMode = capabilities.sourceImageMode !== "single";
       const attachments = s.imageAttachments ?? [];
       // Wan's first/last-frame render (#779) rides the existing `keyframes`
-      // contract: both stills travel there while `source_image` stays put,
-      // because that is what admission reads to prove an I2V-required
-      // checkpoint has its opening frame. The closing index is derived from
-      // the frame count THIS request carries, so changing the clip length
-      // after attaching the end frame can never ship a stale index. A lone
-      // source image is an ordinary image-to-video request and sends none.
+      // contract: both stills travel there and `source_image` stays home —
+      // the engine refuses a request carrying both, and admission counts
+      // keyframes as source presence for an I2V-required checkpoint. The
+      // closing index is derived from the frame count THIS request carries,
+      // so changing the clip length after attaching the end frame can never
+      // ship a stale index. A lone source image is an ordinary
+      // image-to-video request and sends none.
       const firstLastFrames =
         capabilities.supportsEndFrame && !attachmentMode
           ? firstLastFrameKeyframes(
@@ -960,12 +961,24 @@ export function useGenerateForm(): UseGenerateForm {
               edit_images: attachments.map((image) => image.base64),
             }
           : {
-              source_image: attachments[0]?.base64 ?? null,
-              source_image_name: attachments[0]?.base64
-                ? attachments[0].filename
-                : undefined,
-              strength: attachments[0]?.base64 ? s.strength : undefined,
-              mask_image: s.maskImage?.base64 ?? undefined,
+              // A first/last-frame render ships BOTH stills as `keyframes`
+              // and no `source_image` — the engine refuses a request
+              // carrying both, and admission counts keyframes as source
+              // presence for an I2V-required checkpoint.
+              source_image: firstLastFrames
+                ? null
+                : (attachments[0]?.base64 ?? null),
+              source_image_name:
+                !firstLastFrames && attachments[0]?.base64
+                  ? attachments[0].filename
+                  : undefined,
+              strength:
+                !firstLastFrames && attachments[0]?.base64
+                  ? s.strength
+                  : undefined,
+              mask_image: firstLastFrames
+                ? undefined
+                : (s.maskImage?.base64 ?? undefined),
               control_image: capabilities.supportsControlNet
                 ? (s.controlImage?.base64 ?? undefined)
                 : undefined,

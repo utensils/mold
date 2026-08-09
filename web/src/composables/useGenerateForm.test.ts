@@ -1698,16 +1698,19 @@ describe("useGenerateForm — source image & first/last frames", () => {
     }
   });
 
-  it("serializes both ends as exactly two keyframes while keeping source_image", () => {
+  it("serializes both ends as exactly two keyframes and keeps source_image home", () => {
     const form = useGenerateForm();
     form.applyModelDefaults(wanEndFrameModel());
     attachEnds(form);
     form.state.value.frames = 81;
 
     const wire = form.toRequest();
-    // Admission reads `source_image` to prove an I2V checkpoint has its
-    // opening frame, so the pair travels twice on purpose.
-    expect(wire.source_image).toBe("FIRST");
+    // The engine refuses a request carrying both `source_image` and
+    // `keyframes` ("not both"); admission counts keyframes as source
+    // presence, so the pair travels only once.
+    expect(wire.source_image).toBeNull();
+    expect(wire.source_image_name).toBeUndefined();
+    expect(wire.strength).toBeUndefined();
     expect(wire.keyframes).toEqual([
       { frame: 0, image: "FIRST", name: "open.png" },
       { frame: 80, image: "LAST", name: "close.png" },

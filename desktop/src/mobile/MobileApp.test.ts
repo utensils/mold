@@ -4194,12 +4194,14 @@ describe("MobileApp wan source conditioning", () => {
     expect(openStreams).toHaveLength(1);
     expect(openStreams[0]?.path).toBe("/api/generate/stream");
     expect(openStreams[0]?.options.body).toMatchObject({
-      source_image: btoa("opening"),
       keyframes: [
         { frame: 0, image: btoa("opening"), name: "opening.png" },
         { frame: 80, image: btoa("closing"), name: "closing.png" },
       ],
     });
+    // The engine refuses `source_image` + `keyframes` together ("not both");
+    // the pair travels only as keyframes.
+    expect(openStreams[0]?.options.body.source_image).toBeFalsy();
   });
 
   it("sends no keyframes for a lone source image", async () => {

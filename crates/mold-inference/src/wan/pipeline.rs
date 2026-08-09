@@ -475,6 +475,16 @@ fn resolve_endpoint_images(
                     keyframes.len()
                 );
             }
+            // Coincident endpoints (frames <= 1) must be refused here, not
+            // just at server admission: the forced-local path reaches this
+            // resolver directly, and the I2V canvas math below computes
+            // `frames - 2` interior frames, which would underflow.
+            if num_frames < 2 {
+                bail!(
+                    "Wan first/last-frame keyframes need a multi-frame clip — frames={num_frames} \
+                     has no distinct last frame"
+                );
+            }
             let last_index = num_frames.saturating_sub(1);
             if keyframes[0].frame != 0 || keyframes[1].frame != last_index {
                 bail!(
@@ -1935,6 +1945,16 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("not both"), "{error}");
+
+        // frames=1 makes the endpoints coincide (both anchor frame 0, which
+        // IS frames-1) — refused before the I2V canvas math can compute the
+        // underflowing `frames - 2` interior gap.
+        let mut coincident = request();
+        coincident.keyframes = Some(vec![keyframe(0, 1), keyframe(0, 2)]);
+        let error = resolve_endpoint_images(&coincident, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("multi-frame clip"), "{error}");
 
         // An empty keyframes vec is treated as absent, matching serde's
         // omitted-field shape.

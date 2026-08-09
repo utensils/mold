@@ -46,6 +46,7 @@ import {
 } from "@studio/lib/wanRecipe";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
+import { isWanFamily } from "@studio/lib/generationCapabilities";
 import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
 import {
   MINIMAX_H3_MIN_FRAMES,
@@ -505,17 +506,15 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   }
 
   if (caps.supportsImg2img && caps.sourceImageMode === "single" && form.sourceImage) {
-    req.source_image = form.sourceImage;
-    if (form.sourceImageName) req.source_image_name = form.sourceImageName;
-    req.strength = form.strength;
-    if (caps.supportsMask && form.maskImage) req.mask_image = form.maskImage;
-    // Wan's first/last-frame render rides the keyframes contract: both ends
-    // travel as `keyframes`, and `source_image` stays put because that is
-    // what admission reads to prove an I2V-required checkpoint has its
-    // opening frame. The closing index is computed here, from the frame count
-    // this request is actually carrying, so changing clip length after
-    // attaching the end frame can never ship a stale index. A lone source
-    // image is an ordinary image-to-video request and sends no keyframes.
+    // Wan's first/last-frame render rides the keyframes contract: BOTH ends
+    // travel as `keyframes` and `source_image` stays home — the engine
+    // refuses a request carrying both ("first frame from either
+    // source_image or keyframes[0], not both"), and admission counts
+    // keyframes as source presence for an I2V-required checkpoint. The
+    // closing index is computed here, from the frame count this request is
+    // actually carrying, so changing clip length after attaching the end
+    // frame can never ship a stale index. A lone source image is an
+    // ordinary image-to-video request and sends no keyframes.
     const firstLast =
       caps.supportsEndFrame && form.endFrame
         ? firstLastFrameKeyframes(
@@ -524,7 +523,14 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
             form.frames,
           )
         : null;
-    if (firstLast) req.keyframes = firstLast;
+    if (firstLast) {
+      req.keyframes = firstLast;
+    } else {
+      req.source_image = form.sourceImage;
+      if (form.sourceImageName) req.source_image_name = form.sourceImageName;
+      req.strength = form.strength;
+      if (caps.supportsMask && form.maskImage) req.mask_image = form.maskImage;
+    }
   }
 
   // ControlNet is independent conditioning, not an img2img derivative. An
@@ -811,6 +817,23 @@ export function applyRequestToForm(
       base64: keyframe.image,
     },
   }));
+  // A wan first/last-frame request carries both stills as keyframes and no
+  // `source_image` (the engine refuses both together), so restoring it means
+  // mapping the pair back into the wells the serializer read them from. Wan
+  // has no mid-clip keyframe UI, so the raw list must not linger where only
+  // the LTX-2 advanced panel would show it.
+  if (
+    isWanFamily(form.family) &&
+    !request.source_image &&
+    form.keyframes.length === 2 &&
+    form.keyframes[0]!.frame === 0
+  ) {
+    const [first, last] = form.keyframes;
+    form.sourceImage = first!.image.base64;
+    form.sourceImageName = first!.image.filename;
+    form.endFrame = { filename: last!.image.filename, base64: last!.image.base64 };
+    form.keyframes = [];
+  }
   form.pipeline = request.pipeline ?? null;
   form.icLoraControl = request.ic_lora_control ?? null;
   form.retakeRange = request.retake_range ?? null;

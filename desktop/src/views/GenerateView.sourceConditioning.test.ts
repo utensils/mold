@@ -169,6 +169,8 @@ describe("GenerateView source-conditioning gating (#772, #779)", () => {
       { frame: 0, image: "SRC", name: "open.png" },
       { frame: 80, image: "ENDB64", name: "close.png" },
     ]);
+    // The engine refuses `source_image` + `keyframes` together ("not both").
+    expect(request.source_image).toBeUndefined();
   });
 
   it("says the end frame cannot be restored when reusing a first/last-frame print", async () => {
