@@ -64,8 +64,10 @@ pub(crate) struct H3RuntimeLoadRequest<'a> {
     pub(crate) block_offload: bool,
 }
 
-/// Injected component loader. No implementation is installed by the shipping
-/// factory; callers inside tests use in-memory components only.
+/// Injected attempt-runtime factory. The factory object may retain immutable
+/// construction inputs, but every call must return a newly owned session. No
+/// implementation is installed by the shipping factory; callers inside tests
+/// use in-memory components only.
 pub(crate) trait H3RuntimeLoader: Send + Sync {
     fn load(
         &mut self,
@@ -74,13 +76,16 @@ pub(crate) trait H3RuntimeLoader: Send + Sync {
     ) -> Result<Box<dyn H3RuntimeSession>>;
 }
 
-/// One already-loaded, single-route H3 runtime.
+/// One already-loaded, single-route H3 runtime attempt.
+///
+/// Generation consumes the boxed session so neither success nor any error path
+/// can return it to the retained loader or an engine/cache slot.
 pub(crate) trait H3RuntimeSession: Send + Sync {
     fn device_id(&self) -> &str;
     fn execution_fingerprint(&self) -> &str;
     fn component_set_identity_sha256(&self) -> &str;
     fn generate(
-        &mut self,
+        self: Box<Self>,
         request: &GenerateRequest,
         bindings: &[GenerationReferenceBinding],
         progress: &ProgressReporter,
@@ -109,7 +114,10 @@ pub(crate) struct H3EngineOutput {
 
 /// Concrete task-bound `InferenceEngine` adapter. It owns the exact
 /// server-frozen route, but can be constructed only with an injected loader;
-/// production factory dispatch deliberately has no such loader today.
+/// production factory dispatch deliberately has no such loader today. The
+/// loader factory is retained, but a constructed runtime session never is.
+/// This closes retention inside this adapter; the server's generic engine-cache
+/// bypass remains a separate routing change.
 pub(crate) struct H3Fl2VaEngine {
     task: Task,
     model_name: String,
@@ -118,7 +126,6 @@ pub(crate) struct H3Fl2VaEngine {
     load_strategy: LoadStrategy,
     block_offload: bool,
     loader: Box<dyn H3RuntimeLoader>,
-    runtime: Option<Box<dyn H3RuntimeSession>>,
     progress: ProgressReporter,
 }
 
@@ -192,7 +199,6 @@ impl H3Fl2VaEngine {
             load_strategy,
             block_offload,
             loader,
-            runtime: None,
             progress: ProgressReporter::default(),
         })
     }
@@ -215,7 +221,7 @@ impl H3Fl2VaEngine {
         )
     }
 
-    fn validate_loaded_runtime(&self, runtime: &dyn H3RuntimeSession) -> Result<()> {
+    fn validate_runtime_echo(&self, runtime: &dyn H3RuntimeSession) -> Result<()> {
         if runtime.device_id() != self.authority.device_id()
             || runtime.execution_fingerprint() != self.authority.execution_fingerprint()
             || runtime.component_set_identity_sha256()
@@ -224,6 +230,33 @@ impl H3Fl2VaEngine {
             bail!("MiniMax H3 injected runtime differs from the frozen factory authority");
         }
         Ok(())
+    }
+
+    fn construct_attempt_runtime(&mut self) -> Result<Box<dyn H3RuntimeSession>> {
+        self.progress.checkpoint()?;
+        self.progress
+            .stage_start("Constructing MiniMax H3 attempt-scoped frozen runtime");
+        let started = Instant::now();
+        let runtime = self.loader.load(
+            H3RuntimeLoadRequest {
+                model_name: &self.model_name,
+                paths: &self.paths,
+                authority: &self.authority,
+                load_strategy: self.load_strategy,
+                gpu_ordinal: self.authority.device_ordinal(),
+                block_offload: self.block_offload,
+            },
+            &self.progress,
+        )?;
+        // This is the runtime-owned pre-consumption echo. It is checked before
+        // any pipeline work and repeated in the consumed runtime's output.
+        self.validate_runtime_echo(runtime.as_ref())?;
+        self.progress.checkpoint()?;
+        self.progress.stage_done(
+            "Constructing MiniMax H3 attempt-scoped frozen runtime",
+            started.elapsed(),
+        );
+        Ok(runtime)
     }
 
     fn validate_output(
@@ -277,18 +310,13 @@ impl H3Fl2VaEngine {
                 Some(ref2va_reference_fingerprint(request)?)
             }
         };
-        if !self.is_loaded() {
-            self.load_for_request(request)?;
-        }
-        self.progress.checkpoint()?;
+        let runtime = self.construct_attempt_runtime()?;
         let started = Instant::now();
         let mut observer = H3EngineProgressObserver::new(&self.progress);
-        let output = self
-            .runtime
-            .as_mut()
-            .context("MiniMax H3 runtime disappeared after load")?
-            .generate(request, bindings, &self.progress, &mut observer)?;
+        let output = runtime.generate(request, bindings, &self.progress, &mut observer)?;
         self.progress.checkpoint()?;
+        // The output echo was emitted after the consuming runtime invocation;
+        // compare it independently with both the request and frozen authority.
         self.validate_output(
             request,
             expected_mode,
@@ -400,39 +428,16 @@ impl InferenceEngine for H3Fl2VaEngine {
     }
 
     fn is_loaded(&self) -> bool {
-        self.runtime.is_some()
+        false
     }
 
     fn load(&mut self) -> Result<()> {
-        if self.runtime.is_some() {
-            return Ok(());
-        }
-        self.progress.checkpoint()?;
-        self.progress
-            .stage_start("Loading MiniMax H3 frozen runtime");
-        let started = Instant::now();
-        let runtime = self.loader.load(
-            H3RuntimeLoadRequest {
-                model_name: &self.model_name,
-                paths: &self.paths,
-                authority: &self.authority,
-                load_strategy: self.load_strategy,
-                gpu_ordinal: self.authority.device_ordinal(),
-                block_offload: self.block_offload,
-            },
-            &self.progress,
-        )?;
-        self.validate_loaded_runtime(runtime.as_ref())?;
-        self.progress.checkpoint()?;
-        self.runtime = Some(runtime);
-        self.progress
-            .stage_done("Loading MiniMax H3 frozen runtime", started.elapsed());
-        Ok(())
+        bail!(
+            "MiniMax H3 runtime construction is attempt-scoped and unavailable through generic load"
+        )
     }
 
-    fn unload(&mut self) {
-        self.runtime = None;
-    }
+    fn unload(&mut self) {}
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
         self.progress.set_callback(callback);
@@ -640,7 +645,7 @@ where
     }
 
     fn generate(
-        &mut self,
+        self: Box<Self>,
         request: &GenerateRequest,
         bindings: &[GenerationReferenceBinding],
         progress: &ProgressReporter,
@@ -656,10 +661,11 @@ where
         }
         #[cfg(feature = "mp4")]
         {
+            let mut runtime = self;
             let prepared = pipeline::prepare_request(request, progress, observer)?;
             let mode = prepared.geometry.mode;
             let staged =
-                pipeline::execute_staged(&prepared, &mut self.backend, progress, observer)?;
+                pipeline::execute_staged(&prepared, &mut runtime.backend, progress, observer)?;
             let output = pipeline::finalize_av(staged, progress, observer)?;
             let duration_ms = u64::from(1_000_u16)
                 .checked_mul(output.mux_report.video_duration_ticks)
@@ -682,7 +688,7 @@ where
                 audio_channels: u32::from(output.mux_report.channels),
                 device_id: output.provenance.device_id,
                 execution_fingerprint: output.provenance.execution_fingerprint,
-                component_set_identity_sha256: self.component_set_identity_sha256.clone(),
+                component_set_identity_sha256: runtime.component_set_identity_sha256.clone(),
                 reference_fingerprint: output.provenance.reference_fingerprint,
             })
         }
@@ -739,7 +745,7 @@ where
     }
 
     fn generate(
-        &mut self,
+        self: Box<Self>,
         request: &GenerateRequest,
         bindings: &[GenerationReferenceBinding],
         progress: &ProgressReporter,
@@ -752,11 +758,12 @@ where
         }
         #[cfg(feature = "mp4")]
         {
+            let mut runtime = self;
             let prepared = ref2va_pipeline::prepare_resolved_request(request, progress, observer)?;
             let staged = ref2va_pipeline::execute_staged(
                 &prepared,
                 bindings,
-                &mut self.backend,
+                &mut runtime.backend,
                 progress,
                 observer,
             )?;
@@ -764,7 +771,7 @@ where
             h3_engine_output_from_pipeline(
                 output,
                 Mode::ReferenceToAudioVideo,
-                &self.component_set_identity_sha256,
+                &runtime.component_set_identity_sha256,
             )
         }
     }
@@ -1447,7 +1454,7 @@ mod tests {
         }
 
         fn generate(
-            &mut self,
+            self: Box<Self>,
             request: &GenerateRequest,
             bindings: &[GenerationReferenceBinding],
             progress: &ProgressReporter,
@@ -1520,6 +1527,152 @@ mod tests {
         wrong_device: bool,
     }
 
+    #[derive(Clone, Copy)]
+    enum AttemptOutcome {
+        Success,
+        Error,
+        WrongOutputIdentity,
+    }
+
+    #[derive(Clone, Default)]
+    struct AttemptProbe {
+        loads: Arc<AtomicUsize>,
+        runs: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+        run_session_ids: Arc<Mutex<Vec<usize>>>,
+    }
+
+    struct AttemptRuntime {
+        session_id: usize,
+        probe: AttemptProbe,
+        device: String,
+        execution: String,
+        components: String,
+        outcome: AttemptOutcome,
+        cancel_during_generate: Option<InferenceCancellationToken>,
+    }
+
+    impl Drop for AttemptRuntime {
+        fn drop(&mut self) {
+            self.probe.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl H3RuntimeSession for AttemptRuntime {
+        fn device_id(&self) -> &str {
+            &self.device
+        }
+
+        fn execution_fingerprint(&self) -> &str {
+            &self.execution
+        }
+
+        fn component_set_identity_sha256(&self) -> &str {
+            &self.components
+        }
+
+        fn generate(
+            self: Box<Self>,
+            request: &GenerateRequest,
+            bindings: &[GenerationReferenceBinding],
+            progress: &ProgressReporter,
+            _observer: &mut dyn H3PipelineObserver,
+        ) -> Result<H3EngineOutput> {
+            assert!(bindings.is_empty());
+            self.probe.runs.fetch_add(1, Ordering::SeqCst);
+            self.probe
+                .run_session_ids
+                .lock()
+                .unwrap()
+                .push(self.session_id);
+            if let Some(cancellation) = &self.cancel_during_generate {
+                cancellation.cancel();
+                progress.checkpoint()?;
+            }
+            if matches!(self.outcome, AttemptOutcome::Error) {
+                bail!("synthetic H3 attempt failed");
+            }
+            Ok(H3EngineOutput {
+                mp4: vec![0, 0, 0, 1],
+                thumbnail_png: vec![137, 80, 78, 71],
+                mode: Mode::TextToAudioVideo,
+                seed: request.seed.unwrap(),
+                width: request.width,
+                height: request.height,
+                frames: request.frames.unwrap(),
+                fps: request.fps.unwrap(),
+                duration_ms: 5_166,
+                audio_sample_rate: contract::AUDIO_SAMPLE_RATE_HZ,
+                audio_channels: contract::AUDIO_CHANNELS,
+                device_id: self.device.clone(),
+                execution_fingerprint: if matches!(
+                    self.outcome,
+                    AttemptOutcome::WrongOutputIdentity
+                ) {
+                    sha('f')
+                } else {
+                    self.execution.clone()
+                },
+                component_set_identity_sha256: self.components.clone(),
+                reference_fingerprint: None,
+            })
+        }
+    }
+
+    struct AttemptLoader {
+        probe: AttemptProbe,
+        outcome: AttemptOutcome,
+        wrong_loaded_identity: bool,
+        cancel_during_generate: Option<InferenceCancellationToken>,
+    }
+
+    impl H3RuntimeLoader for AttemptLoader {
+        fn load(
+            &mut self,
+            request: H3RuntimeLoadRequest<'_>,
+            progress: &ProgressReporter,
+        ) -> Result<Box<dyn H3RuntimeSession>> {
+            progress.checkpoint()?;
+            let session_id = self.probe.loads.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(Box::new(AttemptRuntime {
+                session_id,
+                probe: self.probe.clone(),
+                device: if self.wrong_loaded_identity {
+                    "gpu-1".into()
+                } else {
+                    request.authority.device_id().into()
+                },
+                execution: request.authority.execution_fingerprint().into(),
+                components: request.authority.component_set_identity_sha256().into(),
+                outcome: self.outcome,
+                cancel_during_generate: self.cancel_during_generate.clone(),
+            }))
+        }
+    }
+
+    fn attempt_engine(
+        probe: AttemptProbe,
+        outcome: AttemptOutcome,
+        wrong_loaded_identity: bool,
+        cancel_during_generate: Option<InferenceCancellationToken>,
+    ) -> H3Fl2VaEngine {
+        H3Fl2VaEngine::new_injected(
+            contract::FL2VA_COMFY.into(),
+            paths(),
+            authority(),
+            LoadStrategy::Eager,
+            0,
+            true,
+            Box::new(AttemptLoader {
+                probe,
+                outcome,
+                wrong_loaded_identity,
+                cancel_during_generate,
+            }),
+        )
+        .unwrap()
+    }
+
     struct SyntheticRefRuntime {
         device: String,
         execution: String,
@@ -1542,7 +1695,7 @@ mod tests {
         }
 
         fn generate(
-            &mut self,
+            self: Box<Self>,
             request: &GenerateRequest,
             bindings: &[GenerationReferenceBinding],
             progress: &ProgressReporter,
@@ -1798,7 +1951,7 @@ mod tests {
             );
             assert_eq!(video.audio_channels, Some(contract::AUDIO_CHANNELS));
         }
-        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
         assert_eq!(
             engine.batch_execution_capability(),
             BatchExecutionCapability::SINGLETON_COOPERATIVE
@@ -1819,6 +1972,106 @@ mod tests {
     }
 
     #[test]
+    fn runtime_sessions_are_fresh_and_dropped_after_each_success() {
+        let probe = AttemptProbe::default();
+        let mut engine = attempt_engine(probe.clone(), AttemptOutcome::Success, false, None);
+
+        engine.generate(&request()).unwrap();
+        engine.generate(&request()).unwrap();
+
+        assert_eq!(probe.loads.load(Ordering::SeqCst), 2);
+        assert_eq!(probe.runs.load(Ordering::SeqCst), 2);
+        assert_eq!(probe.drops.load(Ordering::SeqCst), 2);
+        assert_eq!(*probe.run_session_ids.lock().unwrap(), vec![1, 2]);
+        assert!(!engine.is_loaded());
+    }
+
+    #[test]
+    fn runtime_sessions_drop_and_are_not_reused_after_generation_error() {
+        let probe = AttemptProbe::default();
+        let mut engine = attempt_engine(probe.clone(), AttemptOutcome::Error, false, None);
+
+        for _ in 0..2 {
+            let error = engine.generate(&request()).unwrap_err();
+            assert!(error.to_string().contains("synthetic H3 attempt failed"));
+        }
+
+        assert_eq!(probe.loads.load(Ordering::SeqCst), 2);
+        assert_eq!(probe.runs.load(Ordering::SeqCst), 2);
+        assert_eq!(probe.drops.load(Ordering::SeqCst), 2);
+        assert_eq!(*probe.run_session_ids.lock().unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn runtime_session_drops_when_same_attempt_observes_cancellation() {
+        let probe = AttemptProbe::default();
+        let cancellation = InferenceCancellationToken::default();
+        let mut engine = attempt_engine(
+            probe.clone(),
+            AttemptOutcome::Success,
+            false,
+            Some(cancellation.clone()),
+        );
+        engine.set_cancellation_token(cancellation);
+
+        let error = engine.generate(&request()).unwrap_err();
+
+        assert!(is_inference_cancelled(&error));
+        assert_eq!(probe.loads.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.runs.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+        assert_eq!(*probe.run_session_ids.lock().unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn runtime_identity_mismatches_drop_each_fresh_session() {
+        let pre_probe = AttemptProbe::default();
+        let mut wrong_loaded =
+            attempt_engine(pre_probe.clone(), AttemptOutcome::Success, true, None);
+        for _ in 0..2 {
+            let error = wrong_loaded.generate(&request()).unwrap_err();
+            assert!(error.to_string().contains("frozen factory authority"));
+        }
+        assert_eq!(pre_probe.loads.load(Ordering::SeqCst), 2);
+        assert_eq!(pre_probe.runs.load(Ordering::SeqCst), 0);
+        assert_eq!(pre_probe.drops.load(Ordering::SeqCst), 2);
+
+        let post_probe = AttemptProbe::default();
+        let mut wrong_output = attempt_engine(
+            post_probe.clone(),
+            AttemptOutcome::WrongOutputIdentity,
+            false,
+            None,
+        );
+        for _ in 0..2 {
+            let error = wrong_output.generate(&request()).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("frozen request or factory authority"));
+        }
+        assert_eq!(post_probe.loads.load(Ordering::SeqCst), 2);
+        assert_eq!(post_probe.runs.load(Ordering::SeqCst), 2);
+        assert_eq!(post_probe.drops.load(Ordering::SeqCst), 2);
+        assert_eq!(*post_probe.run_session_ids.lock().unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn generic_load_contract_cannot_construct_or_retain_an_h3_session() {
+        let probe = AttemptProbe::default();
+        let mut engine = attempt_engine(probe.clone(), AttemptOutcome::Success, false, None);
+
+        let error = engine.load().unwrap_err();
+
+        assert!(error.to_string().contains("attempt-scoped"));
+        assert_eq!(probe.loads.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.runs.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.drops.load(Ordering::SeqCst), 0);
+        assert!(!engine.is_loaded());
+        engine.unload();
+        assert!(!engine.is_loaded());
+    }
+
+    #[test]
     fn cancellation_and_runtime_reroute_fail_without_publication_or_cache_state() {
         let loads = Arc::new(AtomicUsize::new(0));
         let mut cancelled = engine(Arc::clone(&loads), false);
@@ -1832,7 +2085,7 @@ mod tests {
         assert!(!cancelled.is_loaded());
 
         let mut rerouted = engine(Arc::clone(&loads), true);
-        let error = rerouted.load().unwrap_err();
+        let error = rerouted.generate(&request()).unwrap_err();
         assert!(error.to_string().contains("frozen factory authority"));
         assert_eq!(loads.load(Ordering::SeqCst), 1);
         assert!(!rerouted.is_loaded());
@@ -2218,7 +2471,7 @@ mod tests {
             authority.component_set_identity_sha256().to_string(),
         )
         .unwrap();
-        let mut runtime = H3Ref2VaPipelineRuntime::new(composed, &authority).unwrap();
+        let runtime = H3Ref2VaPipelineRuntime::new(composed, &authority).unwrap();
         assert_eq!(runtime.device_id(), authority.device_id());
         assert_eq!(
             runtime.execution_fingerprint(),
@@ -2231,7 +2484,7 @@ mod tests {
 
         let request = image_ref2va_request();
         let bindings = ref2va_bindings(&request);
-        let output = runtime
+        let output = Box::new(runtime)
             .generate(
                 &request,
                 &bindings,
