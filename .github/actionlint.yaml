@@ -1,0 +1,6 @@
+self-hosted-runner:
+  labels:
+    - cuda
+    - minimax-h3-private-uat
+
+config-variables: null

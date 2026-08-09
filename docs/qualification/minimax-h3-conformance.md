@@ -94,12 +94,12 @@ until checkpoint access is authorized.
 
 ## External real-checkpoint fixtures
 
-Real checkpoint execution and fixture capture remain unavailable until the
-license gate is cleared. After that decision, evidence must be stored under an
-absolute fixture root outside the Mold checkout. The authorization record must
-also live outside the repository and content-address the reviewed source
-document. The validator is an accidental-bypass guard: it does not authenticate
-the issuer or replace legal review.
+Real checkpoint execution and fixture capture are restricted to an explicitly
+approved scope. Evidence must be stored under an absolute fixture root outside
+the Mold checkout. The authorization record must also live outside the
+repository and content-address the reviewed source document. The validator is
+an accidental-bypass guard: it does not authenticate the issuer or replace
+legal review.
 
 Everything in this section is a deferred runbook. No authorization record,
 real-checkpoint fixture bundle, generated H3 output, or passing licensed UAT is
@@ -158,6 +158,44 @@ its primitive layer, authority tier, component-index hash, environment,
 shape/dtype/statistics/sampled values, evidence hash, and numerical tolerance.
 Quantized Comfy results use structural, temporal, and audio quality metrics;
 they are never mislabeled as bit-identical full-precision evidence.
+
+### Opt-in protected GPU validation
+
+The manual `MiniMax H3 private conformance` workflow validates an approved,
+already-captured real-checkpoint campaign on an access-controlled self-hosted
+CUDA runner. It has no push, pull-request, schedule, or chained-workflow
+trigger. Dispatch it from `main` with the exact reviewed commit as
+`expected_source_sha`; its preflight rejects every other ref or source SHA, and
+the protected runner independently checks its checkout before reading external
+evidence.
+
+The protected `minimax-h3-private-uat` GitHub Environment supplies four
+environment-scoped secrets. Each value is an absolute path visible only to the
+protected runner:
+
+- `MOLD_H3_FIXTURE_ROOT`: the external root containing all retained evidence.
+- `MOLD_H3_AUTHORIZATION_RECORD`: the external authorization JSON described
+  above.
+- `MOLD_H3_ORACLE_BUNDLE`: a Diffusers bundle captured at the manifest's exact
+  pinned revision.
+- `MOLD_H3_MOLD_BUNDLE`: a distinct Mold bundle captured at the dispatched
+  source SHA.
+
+Both bundles use `mold.minimax-h3.fixture-bundle.v1`; their referenced files use
+`mold.minimax-h3.layer-output.v1`. Bundle and layer environments must declare a
+`cuda:` device, and non-synthetic documents must bind the authorization source
+hash. The runner rejects mismatched case/layer sets, component indexes,
+producer roles, framework revisions, or numerical comparisons. This path
+requires `exact-full-bf16`; synthetic and quantized-structural authority remain
+available only to their separate, explicitly labeled qualification paths.
+
+The workflow neither executes the adapter `command` strings nor captures new
+evidence. Those fields remain provenance from separately reviewed capture
+steps. It also does not upload artifacts or copy external evidence into the
+checkout; detailed evidence stays on the protected runner, and failures expose
+only redacted contract context in CI logs. Adding this validation
+infrastructure does not by itself claim that a real checkpoint was captured or
+that licensed GPU UAT passed.
 
 ## Day-zero frame decision
 
