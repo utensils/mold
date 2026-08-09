@@ -32,8 +32,92 @@ REQUIRED_ENVIRONMENT = (
 COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 EXACT_AUTHORITY_TIER = "exact-full-bf16"
 CANONICAL_BF16_DTYPE = "bfloat16"
+CANONICAL_INTEGER_DTYPE = "int64"
+CANONICAL_METRIC_DTYPE = "float64"
 MAX_EXACT_ABSOLUTE_TOLERANCE = 1.0 / 64.0
 MAX_EXACT_RELATIVE_TOLERANCE = 1.0 / 64.0
+MEASUREMENT_DTYPES = {
+    "tokenizer-processor": {
+        "token-ids": CANONICAL_INTEGER_DTYPE,
+        "special-token-presentation": CANONICAL_INTEGER_DTYPE,
+        "processor-shapes": CANONICAL_INTEGER_DTYPE,
+        "sampled-values": CANONICAL_BF16_DTYPE,
+    },
+    "qwen-layer-50": {
+        "shape": CANONICAL_INTEGER_DTYPE,
+        "dtype": CANONICAL_INTEGER_DTYPE,
+        "statistics": CANONICAL_METRIC_DTYPE,
+        "sampled-values": CANONICAL_BF16_DTYPE,
+        "tolerance": CANONICAL_METRIC_DTYPE,
+    },
+    "visual-vae": {
+        "pixel-normalization": CANONICAL_BF16_DTYPE,
+        "posterior-seed-42": CANONICAL_BF16_DTYPE,
+        "latent-statistics": CANONICAL_METRIC_DTYPE,
+        "sampled-values": CANONICAL_BF16_DTYPE,
+        "tile-seams": CANONICAL_METRIC_DTYPE,
+    },
+    "audio-vae": {
+        "stereo-packing": CANONICAL_INTEGER_DTYPE,
+        "latent-rate": CANONICAL_METRIC_DTYPE,
+        "waveform-statistics": CANONICAL_METRIC_DTYPE,
+        "phase-polarity": CANONICAL_INTEGER_DTYPE,
+        "sampled-values": CANONICAL_BF16_DTYPE,
+    },
+    "token-refiner": {
+        "shape": CANONICAL_INTEGER_DTYPE,
+        "statistics": CANONICAL_METRIC_DTYPE,
+        "sampled-values": CANONICAL_BF16_DTYPE,
+        "tolerance": CANONICAL_METRIC_DTYPE,
+    },
+    "transformer-block": {
+        "qk-rms": CANONICAL_METRIC_DTYPE,
+        "partial-mm-rope": CANONICAL_BF16_DTYPE,
+        "adaln": CANONICAL_BF16_DTYPE,
+        "video-head": CANONICAL_BF16_DTYPE,
+        "audio-head": CANONICAL_BF16_DTYPE,
+        "tolerance": CANONICAL_METRIC_DTYPE,
+    },
+    "packed-layout": {
+        "row-order": CANONICAL_INTEGER_DTYPE,
+        "modality-tags": CANONICAL_INTEGER_DTYPE,
+        "rotary-coordinates": CANONICAL_INTEGER_DTYPE,
+        "timestep-indices": CANONICAL_INTEGER_DTYPE,
+    },
+    "noise-allocation": {
+        "draw-order": CANONICAL_INTEGER_DTYPE,
+        "tensor-shapes": CANONICAL_INTEGER_DTYPE,
+        "sampled-values": CANONICAL_BF16_DTYPE,
+        "hash": CANONICAL_INTEGER_DTYPE,
+    },
+    "end-to-end-t2va": {
+        "latent-statistics": CANONICAL_METRIC_DTYPE,
+        "av-timing": CANONICAL_METRIC_DTYPE,
+        "video-metrics": CANONICAL_METRIC_DTYPE,
+        "audio-metrics": CANONICAL_METRIC_DTYPE,
+    },
+    "end-to-end-fl2va": {
+        "condition-latents": CANONICAL_BF16_DTYPE,
+        "latent-statistics": CANONICAL_METRIC_DTYPE,
+        "av-timing": CANONICAL_METRIC_DTYPE,
+        "video-metrics": CANONICAL_METRIC_DTYPE,
+        "audio-metrics": CANONICAL_METRIC_DTYPE,
+    },
+    "end-to-end-ref2va": {
+        "packed-order": CANONICAL_INTEGER_DTYPE,
+        "latent-statistics": CANONICAL_METRIC_DTYPE,
+        "av-timing": CANONICAL_METRIC_DTYPE,
+        "video-metrics": CANONICAL_METRIC_DTYPE,
+        "audio-metrics": CANONICAL_METRIC_DTYPE,
+    },
+}
+PROVENANCE_HASH_KEYS = {
+    "tokenizer-hash",
+    "processor-hash",
+    "component-index-hash",
+    "component-index-hashes",
+}
+CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 REVIEWED_AUTHORIZATION_EVIDENCE_SHA256 = (
     "8cd4d6e52cff34d7d39721ebab13b8c1187aa87aafc1c4ae2a16609186f22f1d"
 )
@@ -168,6 +252,32 @@ def manifest_layer_tiers(manifest: dict[str, Any]) -> dict[str, str]:
     return tiers
 
 
+def exact_layer_contracts(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    contracts: dict[str, dict[str, Any]] = {}
+    for layer in manifest["fixture_layers"]:
+        if layer["authority_tier"] != EXACT_AUTHORITY_TIER:
+            continue
+        identifier = layer["id"]
+        if identifier in contracts:
+            fail("checked manifest contains duplicate exact layer identities")
+        contracts[identifier] = layer
+
+    if set(contracts) != set(MEASUREMENT_DTYPES):
+        fail("protected measurement policy does not cover the exact manifest layers")
+    for identifier, contract in contracts.items():
+        required = contract["required_measurements"]
+        if len(required) != len(set(required)):
+            fail(f"checked manifest layer {identifier} repeats required measurements")
+        if set(required) != set(MEASUREMENT_DTYPES[identifier]):
+            fail(
+                f"protected measurement policy drifts from manifest layer {identifier}"
+            )
+        provenance = contract["required_provenance"]
+        if len(provenance) != len(set(provenance)):
+            fail(f"checked manifest layer {identifier} repeats required provenance")
+    return contracts
+
+
 def load_bundle_once(
     tool: Any,
     path: pathlib.Path,
@@ -234,15 +344,158 @@ def expected_tolerance_summary(policy: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def keyed_evidence_records(
+    records: Any,
+    label: str,
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(records, list) or not records:
+        fail(f"{label} must be a non-empty record list")
+    keyed: dict[str, dict[str, Any]] = {}
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get("key"), str):
+            fail(f"{label} contains an invalid record")
+        key = record["key"]
+        if key in keyed:
+            fail(f"{label} contains duplicate key {key!r}")
+        keyed[key] = record
+    return keyed
+
+
+def structured_provenance_value(document: dict[str, Any], key: str) -> str | None:
+    if key == "source-revision":
+        return document["producer"]["revision"]
+    if key in {"component-index-hash", "component-index-hashes"}:
+        return document["input"]["component_index_sha256"]
+    if key in {"device", "generator-device"}:
+        return document["environment"]["device"]
+    if key == "dtype":
+        return document["environment"]["dtype"]
+    if key == "attention-backend":
+        return document["environment"]["attention_backend"]
+    if key == "capture-command":
+        return document["adapter"]["command"]
+    return None
+
+
+def is_json_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def validate_manifest_layer_evidence(
+    document: dict[str, Any],
+    manifest_layer: dict[str, Any],
+    role: str,
+) -> None:
+    layer = manifest_layer["id"]
+    if document.get("layer") != layer:
+        fail(f"{role} evidence does not match manifest layer {layer}")
+
+    provenance = keyed_evidence_records(
+        document.get("provenance"), f"{role} layer {layer} provenance"
+    )
+    required_provenance = set(manifest_layer["required_provenance"])
+    if set(provenance) != required_provenance:
+        fail(f"{role} layer {layer} provenance keys differ from the manifest")
+    for key, record in provenance.items():
+        value = record.get("value")
+        if (
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+            or len(value) > 4096
+            or CONTROL_CHARACTER_PATTERN.search(value) is not None
+        ):
+            fail(f"{role} layer {layer} provenance {key!r} is not canonical")
+        if key == "source-revision" and COMMIT_SHA_PATTERN.fullmatch(value) is None:
+            fail(f"{role} layer {layer} provenance {key!r} is not canonical")
+        if key in PROVENANCE_HASH_KEYS and re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            fail(f"{role} layer {layer} provenance {key!r} is not canonical")
+        if key == "seed" and re.fullmatch(r"0|[1-9][0-9]*", value) is None:
+            fail(f"{role} layer {layer} provenance {key!r} is not canonical")
+        structured = structured_provenance_value(document, key)
+        if structured is not None and value != structured:
+            fail(
+                f"{role} layer {layer} provenance {key!r} "
+                "does not match structured evidence"
+            )
+
+    outputs = keyed_evidence_records(
+        document.get("outputs"), f"{role} layer {layer} outputs"
+    )
+    measurement_order = manifest_layer["required_measurements"]
+    required_measurements = set(measurement_order)
+    if set(outputs) != required_measurements:
+        fail(f"{role} layer {layer} measurement keys differ from the manifest")
+    if [output["key"] for output in document["outputs"]] != measurement_order:
+        fail(f"{role} layer {layer} measurement order differs from the manifest")
+
+    expected_dtypes = MEASUREMENT_DTYPES.get(layer)
+    if expected_dtypes is None or set(expected_dtypes) != required_measurements:
+        fail(f"protected measurement policy is missing manifest layer {layer}")
+
+    policies: dict[str, dict[str, Any]] = {}
+    if role == "oracle":
+        policies = keyed_evidence_records(
+            document.get("comparison"), f"{role} layer {layer} comparison policies"
+        )
+        if set(policies) != required_measurements:
+            fail(f"{role} layer {layer} policy keys differ from the manifest")
+    elif document.get("comparison") is not None:
+        fail("Mold evidence must not declare oracle comparison policies")
+
+    for key, output in outputs.items():
+        expected_dtype = expected_dtypes[key]
+        if output.get("dtype") != expected_dtype:
+            fail(f"{role} layer {layer} output {key!r} dtype must be {expected_dtype}")
+        if expected_dtype == CANONICAL_INTEGER_DTYPE:
+            statistics = output.get("statistics", {})
+            samples = output.get("samples", [])
+            if (
+                not is_json_integer(statistics.get("min"))
+                or not is_json_integer(statistics.get("max"))
+                or any(not is_json_integer(sample.get("value")) for sample in samples)
+            ):
+                fail(
+                    f"{role} layer {layer} output {key!r} integer evidence "
+                    "must use integer min/max and samples"
+                )
+        if role != "oracle":
+            continue
+        policy = policies[key]
+        if policy.get("metric") != "elementwise-atol-plus-rtol":
+            fail(f"oracle layer {layer} output {key!r} policy metric is invalid")
+        if expected_dtype == CANONICAL_INTEGER_DTYPE:
+            if (
+                policy.get("absolute") != 0
+                or policy.get("relative") != 0
+                or policy.get("hash_policy") != "exact"
+            ):
+                fail(
+                    f"oracle layer {layer} output {key!r} integer policy "
+                    "must use zero tolerances and exact hashes"
+                )
+        elif (
+            not isinstance(policy.get("absolute"), (int, float))
+            or not isinstance(policy.get("relative"), (int, float))
+            or policy["absolute"] > MAX_EXACT_ABSOLUTE_TOLERANCE
+            or policy["relative"] > MAX_EXACT_RELATIVE_TOLERANCE
+            or policy["absolute"] < 0
+            or policy["relative"] < 0
+            or policy.get("hash_policy") != "record-only"
+        ):
+            fail(
+                f"oracle layer {layer} output {key!r} floating policy "
+                "is not the bounded protected policy"
+            )
+
+
 def validate_exact_outputs(
     document: dict[str, Any],
     fixture: dict[str, Any],
+    manifest_layer: dict[str, Any],
     role: str,
 ) -> None:
-    outputs = {output["key"]: output for output in document["outputs"]}
-    for output in outputs.values():
-        if output["dtype"] != CANONICAL_BF16_DTYPE:
-            fail(f"{role} layer output dtype must be {CANONICAL_BF16_DTYPE}")
+    validate_manifest_layer_evidence(document, manifest_layer, role)
 
     first_output = document["outputs"][0]
     if fixture["tensor"] != expected_tensor_summary(first_output):
@@ -251,12 +504,6 @@ def validate_exact_outputs(
     if role != "oracle":
         return
     policies = {policy["key"]: policy for policy in document["comparison"]}
-    for policy in policies.values():
-        if (
-            policy["absolute"] > MAX_EXACT_ABSOLUTE_TOLERANCE
-            or policy["relative"] > MAX_EXACT_RELATIVE_TOLERANCE
-        ):
-            fail(f"{role} comparison policy is not bounded for exact BF16 evidence")
     first_policy = policies[first_output["key"]]
     if fixture["tolerance"] != expected_tolerance_summary(first_policy):
         fail(f"{role} bundle tolerance summary does not match oracle policy")
@@ -270,6 +517,7 @@ def load_layer_documents(
     role: str,
     source_sha: str,
     layer_tiers: dict[str, str],
+    layer_contracts: dict[str, dict[str, Any]],
 ) -> dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]]:
     documents: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
     for position, fixture in enumerate(bundle["fixtures"], start=1):
@@ -337,7 +585,10 @@ def load_layer_documents(
             != document["input"]["component_index_sha256"]
         ):
             fail(f"{role} bundle component index does not match its evidence")
-        validate_exact_outputs(document, fixture, role)
+        manifest_layer = layer_contracts.get(document["layer"])
+        if manifest_layer is None:
+            fail(f"{role} layer lacks a protected manifest contract")
+        validate_exact_outputs(document, fixture, manifest_layer, role)
         key = (document["case_id"], document["layer"])
         if key in documents:
             fail(f"{role} bundle contains duplicate case/layer evidence")
@@ -363,6 +614,27 @@ def require_complete_exact_coverage(
         )
 
 
+def validate_oracle_mold_policy_parity(
+    oracle_document: dict[str, Any],
+    oracle_fixture: dict[str, Any],
+    mold_document: dict[str, Any],
+    mold_fixture: dict[str, Any],
+) -> None:
+    oracle_outputs = keyed_evidence_records(
+        oracle_document["outputs"], "oracle paired outputs"
+    )
+    mold_outputs = keyed_evidence_records(
+        mold_document["outputs"], "Mold paired outputs"
+    )
+    if set(oracle_outputs) != set(mold_outputs):
+        fail("oracle and Mold measurement sets differ")
+    for key in oracle_outputs:
+        if oracle_outputs[key]["dtype"] != mold_outputs[key]["dtype"]:
+            fail(f"oracle and Mold output {key!r} dtypes differ")
+    if mold_fixture["tolerance"] != oracle_fixture["tolerance"]:
+        fail("Mold bundle tolerance summary differs from oracle policy")
+
+
 def run_campaign(
     environment: Mapping[str, str],
     gpu_probe: Callable[[], None] = probe_cuda,
@@ -375,6 +647,8 @@ def run_campaign(
     manifest = call_redacted(
         tool, "checked conformance contract", tool.validate_manifest
     )
+    layer_tiers = manifest_layer_tiers(manifest)
+    layer_contracts = exact_layer_contracts(manifest)
     fixture_root = call_redacted(
         tool,
         "external fixture root validation",
@@ -419,7 +693,6 @@ def run_campaign(
     source_sha = values["MOLD_H3_SOURCE_SHA"]
     validate_capture_environment(tool, oracle_bundle, "oracle", source_sha)
     validate_capture_environment(tool, mold_bundle, "mold", source_sha)
-    layer_tiers = manifest_layer_tiers(manifest)
     oracle_documents = load_layer_documents(
         tool,
         fixture_root,
@@ -428,6 +701,7 @@ def run_campaign(
         "oracle",
         source_sha,
         layer_tiers,
+        layer_contracts,
     )
     mold_documents = load_layer_documents(
         tool,
@@ -437,6 +711,7 @@ def run_campaign(
         "mold",
         source_sha,
         layer_tiers,
+        layer_contracts,
     )
     require_complete_exact_coverage(oracle_documents, layer_tiers, "oracle")
     require_complete_exact_coverage(mold_documents, layer_tiers, "mold")
@@ -450,8 +725,12 @@ def run_campaign(
     for position, key in enumerate(sorted(oracle_documents), start=1):
         oracle_document, oracle_fixture = oracle_documents[key]
         mold_document, mold_fixture = mold_documents[key]
-        if mold_fixture["tolerance"] != oracle_fixture["tolerance"]:
-            fail("Mold bundle tolerance summary differs from oracle policy")
+        validate_oracle_mold_policy_parity(
+            oracle_document,
+            oracle_fixture,
+            mold_document,
+            mold_fixture,
+        )
         comparison_notes = call_redacted(
             tool,
             f"authorized comparison {position}",

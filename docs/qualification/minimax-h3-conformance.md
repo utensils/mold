@@ -169,15 +169,29 @@ trigger. Dispatch it from `main` with the exact reviewed commit as
 the protected runner independently checks its checkout before reading external
 evidence.
 
-The administrator prerequisite is to create and protect the
-`minimax-h3-private-uat` GitHub Environment, configure its four path secrets,
-and provision an ephemeral, isolated runner carrying the workflow's exact
-self-hosted labels. Do not register a persistent public-repository runner for
-this campaign. This runbook does not assert that either is currently
-configured. Without the matching runner the job remains queued; if the
-environment, approval, or secrets are absent, validation fails closed before
-it reads evidence. Each secret value is an absolute path visible only to the
-validator step:
+The following are **unchecked administrator prerequisites**. Verify them in
+GitHub before every dispatch; neither the workflow nor this repository can
+attest repository settings:
+
+- Create the `minimax-h3-private-uat` Environment, add required reviewers and
+  the intended branch/ref protection, and configure its four path secrets.
+  Referencing a missing Environment can create one without the intended
+  protection, so the name in this workflow is not evidence that approval is
+  enforced.
+- Create the dedicated `minimax-h3-private-conformance` runner group, restrict
+  it to selected workflows, and allow exactly
+  `utensils/mold/.github/workflows/minimax-h3-private-conformance.yml@refs/heads/main`.
+  Provision only an ephemeral, isolated runner in that group. Do not register
+  a persistent public-repository runner for this campaign.
+- Give the runner the `self-hosted`, `linux`, `x64`, `cuda`, and
+  `minimax-h3-private-uat` labels. Labels select compatible capacity; they are
+  routing metadata, not an access-control boundary. Runner-group workflow/ref
+  restriction and Environment reviewers provide the administrative boundary.
+
+A missing matching runner can leave the job queued, and missing secrets are
+rejected by the validator, but neither behavior proves that the Environment or
+runner-group restrictions exist. Each secret value is an absolute path visible
+only to the validator step:
 
 - `MOLD_H3_FIXTURE_ROOT`: the external root containing all retained evidence.
 - `MOLD_H3_AUTHORIZATION_RECORD`: the external authorization JSON described
@@ -188,22 +202,43 @@ validator step:
   source SHA.
 
 Both bundles use `mold.minimax-h3.fixture-bundle.v1`; their referenced files use
-`mold.minimax-h3.layer-output.v1`. Bundle and layer environments must declare a
-`cuda:` device and the canonical `bfloat16` dtype. Every layer output accepted
-by this exact path is also `bfloat16`. Non-synthetic documents must bind the
-already reviewed authorization evidence SHA-256 shown above. The runner derives
-the authority-tier map from the validated manifest and requires paired oracle
-and Mold evidence for all eleven `exact-full-bf16` layers; it excludes the
-manifest's synthetic sampler instead of relabeling it. Synthetic and
-quantized-structural authority remain available only to their separate,
-explicitly labeled qualification paths.
+`mold.minimax-h3.layer-output.v1`. Bundle and layer capture environments must
+declare a `cuda:` device and the canonical `bfloat16` execution dtype.
+Non-synthetic documents must bind the already reviewed authorization evidence
+SHA-256 shown above. The protected runner requires a `provenance` record whose
+keys exactly equal each manifest layer's `required_provenance`; canonical
+source, component, device, dtype, attention-backend, and capture-command values
+must also agree with the document's structured producer, input, environment,
+and adapter fields. It likewise requires output and oracle-policy keys to
+exactly equal `required_measurements`. The field remains optional in the base
+schema only so the older checked synthetic contract stays compatible; it is
+mandatory for this protected path.
 
-The layer document's oracle comparison policies are authoritative. Absolute
-and relative tolerances are independently capped at `1/64`, and each bundle's
-duplicated tensor summary must exactly mirror the document's first output. The
-oracle bundle tolerance must exactly mirror that output's policy, and the Mold
-bundle must repeat the same policy summary. A mismatch is rejected rather than
-silently trusting bundle metadata.
+The runner uses an explicit dtype and comparison policy for every required
+measurement. Captured floating activations are `bfloat16`. Computed metric and
+statistical summaries are serialized as `float64` so reductions and derived
+quality values retain stable host-side precision; this does not claim that the
+captured model tensors ran in float64. Discrete tokenizer, shape, layout,
+ordering, allocation, polarity, and hash records are `int64`, use zero absolute
+and relative tolerance, and require an exact content hash. Floating activation
+and metric records use the manifest-specific dtype, `record-only` hashes, and
+absolute and relative tolerances independently capped at `1/64`. Oracle and
+Mold outputs must agree on measurement keys and dtype; the protected policy is
+derived by the runner rather than accepted from a relabeled fixture.
+
+The runner derives the authority-tier map from the validated manifest and
+requires paired oracle and Mold evidence for all eleven `exact-full-bf16`
+layers; it excludes the manifest's synthetic sampler instead of relabeling it.
+Synthetic and quantized-structural authority remain available only to their
+separate, explicitly labeled qualification paths.
+
+Each bundle's duplicated tensor summary must exactly mirror the document's
+first output. The oracle bundle tolerance must exactly mirror that output's
+validated policy, and the Mold bundle must repeat the same policy summary. A
+mismatch is rejected rather than silently trusting bundle metadata. Mold layer
+documents cannot declare a second comparison policy; the runner applies the
+validated oracle policy to both producers, preventing a Mold-side tolerance or
+hash-policy override.
 
 The workflow neither executes the adapter `command` strings nor captures new
 evidence. Those fields remain provenance from separately reviewed capture

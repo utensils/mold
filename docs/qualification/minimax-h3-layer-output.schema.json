@@ -33,6 +33,11 @@
     "producer": { "$ref": "#/$defs/producer" },
     "adapter": { "$ref": "#/$defs/adapter" },
     "environment": { "$ref": "#/$defs/environment" },
+    "provenance": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/provenance" }
+    },
     "outputs": {
       "type": "array",
       "minItems": 1,
@@ -104,6 +109,18 @@
         "dtype": { "type": "string", "minLength": 1 },
         "attention_backend": { "type": "string", "minLength": 1 },
         "forbidden_accelerations_disabled": { "const": true }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value"],
+      "properties": {
+        "key": { "$ref": "#/$defs/key" },
+        "value": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "statistics": {

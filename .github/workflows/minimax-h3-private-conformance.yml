@@ -43,7 +43,9 @@ jobs:
     name: Validate authorized external GPU evidence
     needs: preflight
     environment: minimax-h3-private-uat
-    runs-on: [self-hosted, linux, x64, cuda, minimax-h3-private-uat]
+    runs-on:
+      group: minimax-h3-private-conformance
+      labels: [self-hosted, linux, x64, cuda, minimax-h3-private-uat]
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
