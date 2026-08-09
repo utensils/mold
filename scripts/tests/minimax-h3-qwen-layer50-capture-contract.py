@@ -6,10 +6,12 @@ from __future__ import annotations
 import base64
 import copy
 import importlib.util
+import io
 import json
 import pathlib
 import stat
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -314,6 +316,72 @@ class ProducerContractTests(unittest.TestCase):
     def test_release_verifier_rejects_capture_marker(self) -> None:
         verifier = RELEASE_VERIFIER_PATH.read_text(encoding="utf-8")
         self.assertIn(PRODUCER.CAPTURE_MARKER, verifier)
+
+    def test_repository_snapshot_survives_a_tracked_symlink(self) -> None:
+        # `git archive` of the Mold repository carries the tracked
+        # `AGENTS.md -> CLAUDE.md` link, so rejecting every non-regular member
+        # made the `--role mold` staging path unreachable.
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as archive:
+            payload = b"guidance\n"
+            target = tarfile.TarInfo("CLAUDE.md")
+            target.size = len(payload)
+            archive.addfile(target, io.BytesIO(payload))
+            link = tarfile.TarInfo("AGENTS.md")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "CLAUDE.md"
+            archive.addfile(link)
+        with tempfile.TemporaryDirectory() as directory:
+            destination = pathlib.Path(directory) / "snapshot"
+            PRODUCER.extract_archive(buffer.getvalue(), destination)
+            materialized = destination / "AGENTS.md"
+            self.assertFalse(materialized.is_symlink())
+            self.assertEqual(materialized.read_bytes(), b"guidance\n")
+
+    def test_repository_snapshot_rejects_an_escaping_link(self) -> None:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as archive:
+            link = tarfile.TarInfo("AGENTS.md")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "../../etc/passwd"
+            archive.addfile(link)
+        with tempfile.TemporaryDirectory() as directory:
+            destination = pathlib.Path(directory) / "snapshot"
+            with self.assertRaises(PRODUCER.CaptureFailure):
+                PRODUCER.extract_archive(buffer.getvalue(), destination)
+
+    def test_repository_snapshot_still_rejects_a_device_member(self) -> None:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as archive:
+            node = tarfile.TarInfo("dev/null")
+            node.type = tarfile.CHRTYPE
+            archive.addfile(node)
+        with tempfile.TemporaryDirectory() as directory:
+            destination = pathlib.Path(directory) / "snapshot"
+            with self.assertRaises(PRODUCER.CaptureFailure):
+                PRODUCER.extract_archive(buffer.getvalue(), destination)
+
+    def test_shard_payload_length_excludes_the_safetensors_header(self) -> None:
+        # A Hugging Face shard index reports the summed tensor payload, while a
+        # shard file also carries its 8-byte length prefix and JSON header, so
+        # comparing whole-file sizes to the index total can never balance.
+        header = b'{"__metadata__":{"format":"pt"}}'
+        payload = b"\x00" * 512
+        encoded = len(header).to_bytes(8, "little") + header + payload
+        with tempfile.TemporaryDirectory() as directory:
+            shard = pathlib.Path(directory) / "model-00001-of-00002.safetensors"
+            shard.write_bytes(encoded)
+            self.assertEqual(
+                PRODUCER.safetensors_payload_length(shard, len(encoded)),
+                len(payload),
+            )
+
+    def test_shard_payload_length_rejects_a_truncated_header(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shard = pathlib.Path(directory) / "model-00001-of-00002.safetensors"
+            shard.write_bytes((1 << 20).to_bytes(8, "little") + b"{}")
+            with self.assertRaises(PRODUCER.CaptureFailure):
+                PRODUCER.safetensors_payload_length(shard, shard.stat().st_size)
 
     def test_producer_never_routes_oracle_through_quantized_loader(self) -> None:
         source = PRODUCER_PATH.read_text(encoding="utf-8")

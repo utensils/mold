@@ -268,11 +268,20 @@ def extract_archive(encoded: bytes, destination: pathlib.Path) -> None:
         members = archive.getmembers()
         if not members:
             fail("private Qwen capture source snapshot is empty")
+        # Mold tracks `AGENTS.md -> CLAUDE.md`, so a whole-repository archive
+        # always carries a symbolic link. Materialize it as a regular copy of an
+        # in-snapshot target instead of rejecting it, which would make the
+        # `--role mold` staging path unreachable. The staged tree therefore
+        # holds regular files only, and `snapshot_files` keeps rejecting links.
+        links: list[tuple[pathlib.PurePosixPath, str]] = []
         for member in members:
             relative = safe_relative_path(member.name)
             target = destination.joinpath(*relative.parts)
             if member.isdir():
                 private_directory(target)
+                continue
+            if member.issym():
+                links.append((relative, member.linkname))
                 continue
             if not member.isfile():
                 fail("private Qwen capture source snapshot contains a non-regular file")
@@ -283,6 +292,53 @@ def extract_archive(encoded: bytes, destination: pathlib.Path) -> None:
             if len(contents) != member.size:
                 fail("private Qwen capture source snapshot changed while it was read")
             write_private_file(target, contents)
+        for relative, linkname in links:
+            materialize_snapshot_link(destination, relative, linkname)
+
+
+def materialize_snapshot_link(
+    destination: pathlib.Path,
+    relative: pathlib.PurePosixPath,
+    linkname: str,
+) -> None:
+    if not linkname or pathlib.PurePosixPath(linkname).is_absolute():
+        fail("private Qwen capture source snapshot contains an unsafe link")
+    resolved = pathlib.PurePosixPath(
+        os.path.normpath(str(relative.parent / linkname))
+    )
+    if resolved.is_absolute() or not resolved.parts or ".." in resolved.parts:
+        fail("private Qwen capture source snapshot link escapes the snapshot")
+    source = destination.joinpath(*resolved.parts)
+    if source.is_symlink() or not source.is_file():
+        fail("private Qwen capture source snapshot link has no in-snapshot target")
+    try:
+        contents = source.read_bytes()
+    except OSError as error:
+        fail(f"cannot read private Qwen capture snapshot link target: {error}")
+    write_private_file(destination.joinpath(*relative.parts), contents)
+
+
+def safetensors_payload_length(path: pathlib.Path, file_size: int) -> int:
+    """Tensor payload bytes of one safetensors shard.
+
+    A Hugging Face shard index reports the summed tensor payload, while the
+    shard on disk also carries an eight-byte little-endian header length and the
+    JSON header itself. Comparing whole-file sizes to the index total therefore
+    never balances; derive the payload from the shard's own header instead.
+    """
+    if file_size < 8:
+        fail("official text encoder shard is too short to be safetensors")
+    try:
+        with open(path, "rb") as shard:
+            prefix = shard.read(8)
+    except OSError as error:
+        fail(f"cannot read official text encoder shard header: {error}")
+    if len(prefix) != 8:
+        fail("official text encoder shard header is truncated")
+    header_length = int.from_bytes(prefix, "little")
+    if header_length == 0 or header_length > file_size - 8:
+        fail("official text encoder shard header length is out of range")
+    return file_size - 8 - header_length
 
 
 def git_archive(
@@ -626,7 +682,7 @@ def verify_text_encoder_snapshot(
     shard_names = sorted(set(weight_map.values()))
     if len(shard_names) != 14 or total_size != TEXT_ENCODER_PAYLOAD_BYTES:
         fail("official text encoder index payload geometry drifted")
-    observed_size = 0
+    observed_payload = 0
     identities = [index_after, index_metadata_identity]
     for name in shard_names:
         if pathlib.Path(name).name != name or not name.endswith(".safetensors"):
@@ -642,7 +698,7 @@ def verify_text_encoder_snapshot(
         if not resolved.is_file() or not BASE.is_relative_to(resolved, model_root):
             fail("official text encoder shard escapes its snapshot")
         before = ExternalFileIdentity.capture(resolved)
-        observed_size += before.size
+        observed_payload += safetensors_payload_length(resolved, before.size)
         lines, metadata_identity = model_metadata_lines(model_root, relative)
         if len(lines) < 2 or lines[0] != MODEL_REVISION or not lower_hex(lines[1], 64):
             fail(
@@ -658,8 +714,8 @@ def verify_text_encoder_snapshot(
         else:
             identities.append(before)
         identities.append(metadata_identity)
-    if observed_size != TEXT_ENCODER_PAYLOAD_BYTES:
-        fail("official text encoder shard sizes differ from the reviewed index")
+    if observed_payload != TEXT_ENCODER_PAYLOAD_BYTES:
+        fail("official text encoder shard payloads differ from the reviewed index")
     config_relative = "text_encoder/config.json"
     config_path = (model_root / config_relative).resolve(strict=True)
     config_before = ExternalFileIdentity.capture(config_path)
