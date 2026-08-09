@@ -567,6 +567,7 @@ pub(crate) fn prepare_for_owner(
     fence: &crate::scheduler::LeaseFence,
     job: &mut crate::gpu_pool::GpuJob,
     cancellation: mold_inference::InferenceCancellationToken,
+    available_host_headroom_bytes: u64,
 ) -> Result<(), String> {
     if job.h3_prepared_attempt.is_some() {
         return Err("MiniMax H3 owner received a prepared attempt before final dispatch".into());
@@ -638,12 +639,13 @@ pub(crate) fn prepare_for_owner(
             "MiniMax H3 owner plan differs from immutable private admission evidence".into(),
         );
     }
-    let (available_device_bytes, available_host_bytes) =
+    let (available_device_bytes, available_host_headroom_bytes) =
         crate::gpu_worker::prepare_private_h3_allocation_boundary(
             worker,
             &job.model,
             plan.predicted_vram_peak_bytes,
             plan.predicted_host_increment_bytes,
+            available_host_headroom_bytes,
         )
         .map_err(|error| error.error)?;
     admission_evidence
@@ -653,7 +655,7 @@ pub(crate) fn prepare_for_owner(
             worker.gpu.ordinal,
             compute_capability,
             available_device_bytes,
-            available_host_bytes,
+            available_host_headroom_bytes,
         )
         .map_err(|error| {
             format!("MiniMax H3 live owner evidence no longer validates: {error:#}")

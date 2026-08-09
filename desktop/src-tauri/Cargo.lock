@@ -1291,8 +1291,7 @@ dependencies = [
 [[package]]
 name = "cudarc"
 version = "0.19.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42310153e06cf4cd532901f7096beb27504d681736a29ee90728ae4e2d93b2a8"
+source = "git+https://github.com/utensils/cudarc?rev=9b3b1bc276bc27c3e99343ee82db7f99705b9ed5#9b3b1bc276bc27c3e99343ee82db7f99705b9ed5"
 dependencies = [
  "float8",
  "half",
@@ -3913,6 +3912,7 @@ dependencies = [
  "dirs 6.0.0",
  "hf-hub",
  "indicatif 0.17.11",
+ "libc",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -3920,6 +3920,7 @@ dependencies = [
  "strsim",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml 0.8.2",
  "tracing",
  "ureq",
@@ -3954,10 +3955,13 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "cudarc 0.19.8",
  "exr",
  "fdk-aac",
+ "fs2",
  "gif 0.13.3",
  "image",
+ "libc",
  "mold-ai-candle",
  "mold-ai-catalog",
  "mold-ai-core",
@@ -3993,6 +3997,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "clap",
+ "cudarc 0.19.8",
  "dirs 5.0.1",
  "fs2",
  "futures",

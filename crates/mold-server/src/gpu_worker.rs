@@ -37,6 +37,10 @@ thread_local! {
         }) };
 }
 
+#[cfg(feature = "h3-private-uat")]
+const H3_CUDA_ATTEMPT_RETAINED_MARKER: &str =
+    "CUDA execution attempt retained resources; server restart required";
+
 fn reset_lease_load_ms() {
     LEASE_LOAD_MS.set(0);
     LEASE_PHASE_TIMINGS
@@ -1183,13 +1187,22 @@ fn process_owner_work(
     #[cfg(feature = "h3-private-uat")]
     let h3_prepare_error = match (&mut grant.work, h3_cancellation.as_ref()) {
         (OwnerWork::Generation(job), Some(cancellation)) => {
-            crate::h3_private_bridge::prepare_for_owner(
-                worker,
-                &grant.fence,
-                job,
-                cancellation.clone(),
-            )
-            .err()
+            request_private_h3_host_headroom(scheduler_tx, &grant.fence)
+                .map_err(|error| error.error)
+                .and_then(|available_host_headroom_bytes| {
+                    with_private_h3_cuda_preparation_attempt(worker, || {
+                        crate::h3_private_bridge::prepare_for_owner(
+                            worker,
+                            &grant.fence,
+                            job,
+                            cancellation.clone(),
+                            available_host_headroom_bytes,
+                        )
+                        .map_err(crate::routes::ApiError::internal)
+                    })
+                    .map_err(|error| error.error)
+                })
+                .err()
         }
         _ => None,
     };
@@ -1335,6 +1348,70 @@ fn complete_h3_claim_failure(grant: LeaseGrant, error: String) -> OwnerProcessOu
     OwnerProcessOutcome::Completed {
         successful,
         chain_result: None,
+    }
+}
+
+#[cfg(feature = "h3-private-uat")]
+fn request_private_h3_host_headroom(
+    scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+    fence: &crate::scheduler::LeaseFence,
+) -> Result<u64, crate::routes::ApiError> {
+    let (reply, response) = std::sync::mpsc::sync_channel(1);
+    scheduler_tx
+        .send(crate::scheduler::WorkerEvent::HostMemoryRecheck {
+            fence: fence.clone(),
+            reply,
+        })
+        .map_err(|_| {
+            crate::routes::ApiError::internal(
+                "private H3 host-memory recheck could not reach Scheduler V2",
+            )
+        })?;
+    response
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|error| {
+            crate::routes::ApiError::internal(format!(
+                "private H3 host-memory recheck did not complete: {error}"
+            ))
+        })?
+        .map_err(crate::routes::ApiError::internal)
+}
+
+#[cfg(feature = "h3-private-uat")]
+fn with_private_h3_cuda_preparation_attempt<T>(
+    worker: &GpuWorker,
+    operation: impl FnOnce() -> Result<T, crate::routes::ApiError>,
+) -> Result<T, crate::routes::ApiError> {
+    use cudarc::driver::CudaExecutionAttempt;
+
+    let mut attempt = CudaExecutionAttempt::begin_unbound().map_err(|error| {
+        quarantine_poisoned_worker(worker);
+        contain_worker_cache(worker);
+        crate::routes::ApiError::internal(format!(
+            "failed to install the private H3 CUDA preparation boundary: {error}; server restart required"
+        ))
+    })?;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+    match result {
+        Err(payload) => {
+            attempt.mark_panicked();
+            let _status = attempt.finish();
+            quarantine_poisoned_worker(worker);
+            contain_worker_cache(worker);
+            std::panic::resume_unwind(payload)
+        }
+        Ok(result) => {
+            let status = attempt.finish();
+            if status.resources_retained() {
+                quarantine_poisoned_worker(worker);
+                contain_worker_cache(worker);
+                tracing::error!("{H3_CUDA_ATTEMPT_RETAINED_MARKER}");
+                return Err(crate::routes::ApiError::internal(
+                    H3_CUDA_ATTEMPT_RETAINED_MARKER,
+                ));
+            }
+            result
+        }
     }
 }
 
@@ -2174,6 +2251,17 @@ fn has_fatal_cuda_error(message: &str) -> bool {
         "CUDA_ERROR_INVALID_ADDRESS_SPACE",
         "CUDA_ERROR_INVALID_PC",
         "CUDA_ERROR_LAUNCH_TIMEOUT",
+        "CUDA_ERROR_EXTERNAL_DEVICE",
+        "CUDA_ERROR_MPS_CLIENT_TERMINATED",
+        "CUDA_ERROR_CONTAINED",
+        "CUDA_ERROR_TENSOR_MEMORY_LEAK",
+        "CUBLAS_STATUS_MAPPING_ERROR",
+        "CUBLAS_STATUS_EXECUTION_FAILED",
+        "CUBLAS_STATUS_INTERNAL_ERROR",
+        "CURAND_STATUS_LAUNCH_FAILURE",
+        "CURAND_STATUS_PREEXISTING_FAILURE",
+        "CURAND_STATUS_INTERNAL_ERROR",
+        "CUDA execution attempt retained resources",
     ]
     .iter()
     .any(|needle| message.contains(needle))
@@ -2860,12 +2948,21 @@ fn run_claimed_h3_generation(
         }
     };
     #[cfg(feature = "h3-private-uat")]
-    if let Err(error) = prepare_private_h3_allocation_boundary(
-        worker,
-        &model_name,
-        prepared_facts.predicted_device_peak_bytes,
-        prepared_facts.predicted_host_increment_bytes,
-    ) {
+    let available_host_headroom_bytes = match request_private_h3_host_headroom(scheduler_tx, &lease)
+    {
+        Ok(headroom) => headroom,
+        Err(error) => return reject_claimed_h3_generation_message(job, error.error),
+    };
+    #[cfg(feature = "h3-private-uat")]
+    if let Err(error) = with_private_h3_cuda_preparation_attempt(worker, || {
+        prepare_private_h3_allocation_boundary(
+            worker,
+            &model_name,
+            prepared_facts.predicted_device_peak_bytes,
+            prepared_facts.predicted_host_increment_bytes,
+            available_host_headroom_bytes,
+        )
+    }) {
         return reject_claimed_h3_generation_message(job, error.error);
     }
 
@@ -4219,6 +4316,7 @@ pub(crate) fn prepare_private_h3_allocation_boundary(
     model_name: &str,
     predicted_device_peak_bytes: u64,
     predicted_host_increment_bytes: u64,
+    available_host_headroom_bytes: u64,
 ) -> Result<(u64, u64), crate::routes::ApiError> {
     let unloaded = worker
         .model_cache
@@ -4231,18 +4329,14 @@ pub(crate) fn prepare_private_h3_allocation_boundary(
     }
     let available_device_bytes = device::post_drop_free_vram_bytes(worker.gpu.ordinal)
         .map_err(|error| private_h3_memory_sample_error(worker, error))?;
-    let ram = crate::resources::ram_snapshot();
-    let available_host_bytes = ram
-        .available
-        .unwrap_or_else(|| ram.total.saturating_sub(ram.used));
     validate_private_h3_physical_capacity(
         model_name,
         predicted_device_peak_bytes,
         available_device_bytes,
         predicted_host_increment_bytes,
-        available_host_bytes,
+        available_host_headroom_bytes,
     )?;
-    Ok((available_device_bytes, available_host_bytes))
+    Ok((available_device_bytes, available_host_headroom_bytes))
 }
 
 #[cfg(any(test, feature = "h3-private-uat"))]
@@ -4265,7 +4359,7 @@ fn validate_private_h3_physical_capacity(
     predicted_device_peak_bytes: u64,
     available_device_bytes: u64,
     predicted_host_increment_bytes: u64,
-    available_host_bytes: u64,
+    available_host_headroom_bytes: u64,
 ) -> Result<(), crate::routes::ApiError> {
     crate::memory_preflight::check_planned_memory_budget(
         model_name,
@@ -4273,11 +4367,11 @@ fn validate_private_h3_physical_capacity(
         available_device_bytes,
         crate::memory_preflight::rejection_suggestion(None),
     )?;
-    if predicted_host_increment_bytes > available_host_bytes {
+    if predicted_host_increment_bytes > available_host_headroom_bytes {
         return Err(crate::routes::ApiError::insufficient_memory(format!(
-            "model '{model_name}' frozen private host-memory increment ~{:.1} GB no longer fits the current ~{:.1} GB physical host-memory budget; memory pressure changed after scheduler admission",
+            "model '{model_name}' frozen private host-memory increment ~{:.1} GB no longer fits the current ~{:.1} GB host-memory headroom after the canonical safety floor; memory pressure changed after scheduler admission",
             predicted_host_increment_bytes as f64 / 1_000_000_000.0,
-            available_host_bytes as f64 / 1_000_000_000.0,
+            available_host_headroom_bytes as f64 / 1_000_000_000.0,
         )));
     }
     Ok(())
@@ -5306,6 +5400,12 @@ mod tests {
             .map(|offset| owner_start + offset)
             .expect("owner work handler boundary");
         let owner = &source[owner_start..owner_end];
+        let headroom = owner
+            .find("request_private_h3_host_headroom(")
+            .expect("ledger-aware private host-memory recheck");
+        let containment = owner
+            .find("with_private_h3_cuda_preparation_attempt(worker, ||")
+            .expect("private preparation containment boundary");
         let prepare = owner
             .find("h3_private_bridge::prepare_for_owner(")
             .expect("private final-dispatch preparation");
@@ -5313,6 +5413,7 @@ mod tests {
             .find("h3_attempt::claim_generation_attempt(")
             .expect("private owner attempt claim");
         let dispatch = owner.find("process_job(").expect("generation dispatch");
+        assert!(headroom < containment && containment < prepare);
         assert!(prepare < claim && claim < dispatch);
 
         let process_start = source.find("fn process_job(").expect("generation handler");
@@ -9528,6 +9629,17 @@ mod tests {
             "DriverError(CUDA_ERROR_INVALID_ADDRESS_SPACE, invalid address space)",
             "DriverError(CUDA_ERROR_INVALID_PC, invalid program counter)",
             "DriverError(CUDA_ERROR_LAUNCH_TIMEOUT, launch timed out)",
+            "DriverError(CUDA_ERROR_EXTERNAL_DEVICE)",
+            "DriverError(CUDA_ERROR_MPS_CLIENT_TERMINATED)",
+            "DriverError(CUDA_ERROR_CONTAINED)",
+            "DriverError(CUDA_ERROR_TENSOR_MEMORY_LEAK)",
+            "CublasError(CUBLAS_STATUS_MAPPING_ERROR)",
+            "CublasError(CUBLAS_STATUS_EXECUTION_FAILED)",
+            "CublasLtError(CUBLAS_STATUS_INTERNAL_ERROR)",
+            "CurandError(CURAND_STATUS_LAUNCH_FAILURE)",
+            "CurandError(CURAND_STATUS_PREEXISTING_FAILURE)",
+            "CurandError(CURAND_STATUS_INTERNAL_ERROR)",
+            "CUDA execution attempt retained resources; server restart required",
         ] {
             let err = anyhow::anyhow!(message);
             assert!(is_fatal_cuda_error(&err), "not classified: {message}");
@@ -10531,6 +10643,17 @@ mod tests {
         )
         .expect_err("fresh host pressure below the frozen increment must reject");
         assert!(error.error.contains("frozen private host-memory increment"));
+
+        let predicted_host_increment_bytes = 2 << 30;
+        let error = validate_private_h3_physical_capacity(
+            "minimax-h3-private",
+            12_000_000_000,
+            24_000_000_000,
+            predicted_host_increment_bytes,
+            predicted_host_increment_bytes - 1,
+        )
+        .expect_err("ledger-aware headroom below the frozen host increment must reject");
+        assert!(error.error.contains("canonical safety floor"));
     }
 
     #[test]

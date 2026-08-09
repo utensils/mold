@@ -7,6 +7,9 @@
 //! record matching the schema below. Until then the allowlist is empty and the
 //! reader fails before any record can become runtime authority.
 
+#[cfg(all(feature = "mp4", feature = "cuda"))]
+const H3_CUDA_ATTEMPT_RETAINED_MARKER: &str =
+    "CUDA execution attempt retained resources; server restart required";
 #[cfg(feature = "mp4")]
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -400,7 +403,9 @@ pub struct H3PrivateFl2VaAdmissionInput<'a> {
     pub device_ordinal: usize,
     pub compute_capability: (u16, u16),
     pub available_device_bytes: u64,
-    pub available_host_bytes: u64,
+    /// Host RAM available after the server's canonical 15%-or-8-GiB safety
+    /// floor, never the raw operating-system available-memory sample.
+    pub available_host_headroom_bytes: u64,
 }
 
 /// Payload-free projection of the thirteen independently reviewed runtime
@@ -512,7 +517,7 @@ pub struct H3PrivateFl2VaAdmissionEvidence {
     device_ordinal: usize,
     compute_capability: (u16, u16),
     admitted_available_device_bytes: u64,
-    admitted_available_host_bytes: u64,
+    admitted_host_headroom_bytes: u64,
     base_factory_authority: FrozenH3FactoryAuthority,
     execution_fingerprint: String,
     component_set_identity_sha256: String,
@@ -561,8 +566,8 @@ impl H3PrivateFl2VaAdmissionEvidence {
         self.admitted_available_device_bytes
     }
 
-    pub const fn admitted_available_host_bytes(&self) -> u64 {
-        self.admitted_available_host_bytes
+    pub const fn admitted_host_headroom_bytes(&self) -> u64 {
+        self.admitted_host_headroom_bytes
     }
 
     pub fn base_factory_authority(&self) -> &FrozenH3FactoryAuthority {
@@ -652,7 +657,7 @@ impl H3PrivateFl2VaAdmissionEvidence {
         device_ordinal: usize,
         compute_capability: (u16, u16),
         available_device_bytes: u64,
-        available_host_bytes: u64,
+        available_host_headroom_bytes: u64,
     ) -> Result<()> {
         let resolved = self.resolve_request(request)?;
         self.base_factory_authority.validate_engine_seam(
@@ -697,9 +702,9 @@ impl H3PrivateFl2VaAdmissionEvidence {
             || self.attention.qualification_sha256
                 != self.base_factory_authority.attention_qualification_sha256()
             || available_device_bytes < self.predicted_device_peak_bytes
-            || available_host_bytes < self.predicted_host_increment_bytes
+            || available_host_headroom_bytes < self.predicted_host_increment_bytes
             || self.admitted_available_device_bytes < self.predicted_device_peak_bytes
-            || self.admitted_available_host_bytes < self.predicted_host_increment_bytes
+            || self.admitted_host_headroom_bytes < self.predicted_host_increment_bytes
             || !valid_sha256(&self.prepared_request_identity_sha256)
             || !valid_sha256(&self.prepared_attempt_identity_sha256)
             || !valid_sha256(&self.target_budget_identity_sha256)
@@ -752,12 +757,12 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         device_ordinal,
         compute_capability,
         available_device_bytes,
-        available_host_bytes,
+        available_host_headroom_bytes,
     } = input;
     if device_id.trim().is_empty()
         || compute_capability.0 == 0
         || available_device_bytes == 0
-        || available_host_bytes == 0
+        || available_host_headroom_bytes == 0
     {
         bail!("private H3 admission requires one concrete nonempty CUDA capacity sample")
     }
@@ -970,7 +975,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         .target_budget
         .predicted_host_increment_bytes;
     if predicted_device_peak_bytes > available_device_bytes
-        || predicted_host_increment_bytes > available_host_bytes
+        || predicted_host_increment_bytes > available_host_headroom_bytes
     {
         bail!(
             "private H3 canonical target needs {predicted_device_peak_bytes} device and \
@@ -1007,7 +1012,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         device_ordinal,
         compute_capability,
         admitted_available_device_bytes: available_device_bytes,
-        admitted_available_host_bytes: available_host_bytes,
+        admitted_host_headroom_bytes: available_host_headroom_bytes,
         component_set_identity_sha256: base_factory_authority
             .component_set_identity_sha256()
             .into(),
@@ -1033,7 +1038,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         device_ordinal,
         compute_capability,
         available_device_bytes,
-        available_host_bytes,
+        available_host_headroom_bytes,
     )?;
     Ok(evidence)
 }
@@ -1339,7 +1344,7 @@ fn private_h3_pruned_adaln_identity(transformer: &H3ComfyOpenedInt8Checkpoint) -
 
 fn private_h3_admission_evidence_identity(evidence: &H3PrivateFl2VaAdmissionEvidence) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"mold.minimax-h3.private-admission-evidence.v1\0");
+    digest.update(b"mold.minimax-h3.private-admission-evidence.v2\0");
     for value in [
         evidence.submitted_request_identity_sha256.as_str(),
         evidence.resolved_request_identity_sha256.as_str(),
@@ -1369,7 +1374,7 @@ fn private_h3_admission_evidence_identity(evidence: &H3PrivateFl2VaAdmissionEvid
         u64::from(evidence.compute_capability.0),
         u64::from(evidence.compute_capability.1),
         evidence.admitted_available_device_bytes,
-        evidence.admitted_available_host_bytes,
+        evidence.admitted_host_headroom_bytes,
         evidence.predicted_device_peak_bytes,
         evidence.predicted_host_increment_bytes,
         evidence.seed,
@@ -1748,7 +1753,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         owner_fence.device_ordinal,
         owner_fence.compute_capability,
         admission_evidence.admitted_available_device_bytes(),
-        admission_evidence.admitted_available_host_bytes(),
+        admission_evidence.admitted_host_headroom_bytes(),
     )?;
     let resolved_request = admission_evidence.resolve_request(request)?;
     let resolved_request_identity_sha256 = private_h3_request_identity(&resolved_request)?;
@@ -2590,6 +2595,34 @@ fn commit_private_h3_allocation_then<T>(
     construct()
 }
 
+#[cfg(all(feature = "mp4", feature = "cuda"))]
+fn with_private_h3_cuda_execution_attempt<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    use cudarc::driver::CudaExecutionAttempt;
+
+    let mut attempt = CudaExecutionAttempt::begin_unbound()
+        .context("failed to install the private H3 CUDA execution boundary")?;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+    match result {
+        Err(payload) => {
+            attempt.mark_panicked();
+            let _status = attempt.finish();
+            std::panic::resume_unwind(payload)
+        }
+        Ok(result) => {
+            let status = attempt.finish();
+            if status.resources_retained() {
+                bail!(H3_CUDA_ATTEMPT_RETAINED_MARKER)
+            }
+            result
+        }
+    }
+}
+
+#[cfg(all(feature = "mp4", not(feature = "cuda")))]
+fn with_private_h3_cuda_execution_attempt<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    operation()
+}
+
 #[cfg(feature = "mp4")]
 struct H3PrivateConcretePreparedRunner {
     authority: FrozenH3FactoryAuthority,
@@ -2637,55 +2670,64 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
             owner,
             consumption_binding,
         } = *self;
-        consumption_binding.revalidate(&owner, &activation.scheduler_ledger)?;
-        let cuda_device = commit_private_h3_allocation_then(&mut allocation_commit, || {
-            Device::new_cuda(owner.device_ordinal)
-                .context("failed to construct the reviewed private H3 CUDA route")
-        })?;
-        let conditioner_device = match authority.conditioner_placement() {
-            H3FactoryConditionerPlacement::AssignedCudaThenDrop => cuda_device.clone(),
-            H3FactoryConditionerPlacement::HostCpuThenDrop => Device::Cpu,
-        };
-        let conditioner_device_id = match authority.conditioner_placement() {
-            H3FactoryConditionerPlacement::AssignedCudaThenDrop => owner.device_id.clone(),
-            H3FactoryConditionerPlacement::HostCpuThenDrop => "cpu".into(),
-        };
-        let conditioner_lease = H3PrivateServerConditionerLease::new(
-            &authority,
-            conditioner_device_id,
-            conditioner_device,
-            &owner.work_identity_sha256,
-            &owner.cancellation_scope_identity_sha256,
-            "runtime-conditioner",
-        );
-        let execution_lease = H3PrivateServerExecutionLease::new(
-            &authority,
-            cuda_device,
-            &owner.work_identity_sha256,
-            &owner.cancellation_scope_identity_sha256,
-            "runtime-execution",
-        );
-        let phase_owner = bind_private_comfy_fl2va_phase_owner(
-            authority,
-            activation,
-            prepared,
-            storage,
-            qwen_support,
-            opened_transformer,
-            opened_qwen,
-            opened_vae,
-            attention,
-            conditioner_lease,
-            execution_lease,
-            artifact_lease,
-            memory_overlap,
-            allocation_commit,
-        )?;
-        let mut observer = NoopH3PipelineObserver;
-        let output = run_private_comfy_fl2va_attempt(phase_owner, progress, &mut observer)?;
-        cancellation.checkpoint()?;
-        progress.checkpoint()?;
-        private_run_output(output, owner, &consumption_binding, started)
+        with_private_h3_cuda_execution_attempt(|| {
+            consumption_binding.revalidate(&owner, &activation.scheduler_ledger)?;
+            let cuda_device = commit_private_h3_allocation_then(&mut allocation_commit, || {
+                Device::new_cuda(owner.device_ordinal)
+                    .context("failed to construct the reviewed private H3 CUDA route")
+            })?;
+            // Keep one completion fence alive outside the concrete owner graph.
+            // It runs only after a successful pipeline result and before any
+            // CUDA-bearing local leaves the execution-attempt boundary.
+            let completion_device = cuda_device.clone();
+            let conditioner_device = match authority.conditioner_placement() {
+                H3FactoryConditionerPlacement::AssignedCudaThenDrop => cuda_device.clone(),
+                H3FactoryConditionerPlacement::HostCpuThenDrop => Device::Cpu,
+            };
+            let conditioner_device_id = match authority.conditioner_placement() {
+                H3FactoryConditionerPlacement::AssignedCudaThenDrop => owner.device_id.clone(),
+                H3FactoryConditionerPlacement::HostCpuThenDrop => "cpu".into(),
+            };
+            let conditioner_lease = H3PrivateServerConditionerLease::new(
+                &authority,
+                conditioner_device_id,
+                conditioner_device,
+                &owner.work_identity_sha256,
+                &owner.cancellation_scope_identity_sha256,
+                "runtime-conditioner",
+            );
+            let execution_lease = H3PrivateServerExecutionLease::new(
+                &authority,
+                cuda_device,
+                &owner.work_identity_sha256,
+                &owner.cancellation_scope_identity_sha256,
+                "runtime-execution",
+            );
+            let phase_owner = bind_private_comfy_fl2va_phase_owner(
+                authority,
+                activation,
+                prepared,
+                storage,
+                qwen_support,
+                opened_transformer,
+                opened_qwen,
+                opened_vae,
+                attention,
+                conditioner_lease,
+                execution_lease,
+                artifact_lease,
+                memory_overlap,
+                allocation_commit,
+            )?;
+            let mut observer = NoopH3PipelineObserver;
+            let output = run_private_comfy_fl2va_attempt(phase_owner, progress, &mut observer)?;
+            completion_device
+                .synchronize()
+                .context("private H3 completion synchronization failed")?;
+            cancellation.checkpoint()?;
+            progress.checkpoint()?;
+            private_run_output(output, owner, &consumption_binding, started)
+        })
     }
 }
 
@@ -3848,7 +3890,7 @@ mod tests {
             device_ordinal: 0,
             compute_capability: (8, 9),
             admitted_available_device_bytes: 10,
-            admitted_available_host_bytes: 10,
+            admitted_host_headroom_bytes: 10,
             base_factory_authority: factory.clone(),
             execution_fingerprint: factory.execution_fingerprint().into(),
             component_set_identity_sha256: factory.component_set_identity_sha256().into(),
@@ -3982,7 +4024,7 @@ mod tests {
                 device_ordinal: 0,
                 compute_capability: (8, 9),
                 available_device_bytes: 1,
-                available_host_bytes: 1,
+                available_host_headroom_bytes: 1,
             },
             &ProgressReporter::default(),
         )
@@ -4309,11 +4351,48 @@ mod tests {
         assert!(components.contains("vae.artifact_validation_identity_sha256()"));
         assert!(!components.contains("vae.identity_sha256()"));
 
-        let runner_start = source.find("impl H3PrivateFl2VaPreparedRunner").unwrap();
+        let runner_start = source
+            .find("impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner")
+            .unwrap();
         let runner = &source[runner_start..];
+        let boundary = runner
+            .find("with_private_h3_cuda_execution_attempt(||")
+            .unwrap();
         let commit = runner.find("commit_private_h3_allocation_then").unwrap();
         let device = runner.find("Device::new_cuda").unwrap();
-        assert!(commit < device);
+        let execute = runner.find("run_private_comfy_fl2va_attempt").unwrap();
+        let completion_sync = runner[execute..]
+            .find(".synchronize()")
+            .map(|offset| execute + offset)
+            .unwrap();
+        assert!(boundary < commit && commit < device && device < execute);
+        assert!(execute < completion_sync);
+
+        #[cfg(feature = "cuda")]
+        {
+            let attempt_start = source
+                .find("fn with_private_h3_cuda_execution_attempt<T>(operation")
+                .unwrap();
+            let attempt_end = source[attempt_start..]
+                .find("#[cfg(all(feature = \"mp4\", not(feature = \"cuda\")))]")
+                .map(|offset| attempt_start + offset)
+                .unwrap();
+            let attempt = &source[attempt_start..attempt_end];
+            let begin = attempt
+                .find("CudaExecutionAttempt::begin_unbound()")
+                .unwrap();
+            let catch = attempt
+                .find("catch_unwind(std::panic::AssertUnwindSafe(operation))")
+                .unwrap();
+            let mark = attempt.find("attempt.mark_panicked();").unwrap();
+            let panic_finish = attempt[mark..]
+                .find("attempt.finish()")
+                .map(|offset| mark + offset)
+                .unwrap();
+            assert!(begin < catch && catch < mark && mark < panic_finish);
+            assert_eq!(attempt.matches("attempt.finish()").count(), 2);
+            assert!(attempt.contains("status.resources_retained()"));
+        }
     }
 
     #[cfg(feature = "mp4")]

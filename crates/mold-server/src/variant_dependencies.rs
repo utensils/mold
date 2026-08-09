@@ -1261,10 +1261,8 @@ async fn prepare_h3_private_inputs_for_devices(
     if devices.is_empty() {
         return Err("request placement has no eligible schedulable device".into());
     }
-    let ram = crate::resources::ram_snapshot();
-    let available_host_bytes = ram
-        .available
-        .unwrap_or_else(|| ram.total.saturating_sub(ram.used));
+    let available_host_headroom_bytes =
+        crate::h3_admission::current_h3_host_memory().headroom_bytes();
     let uat_paths =
         crate::h3_private_bridge::H3PrivateUatPathSet::resolve(config.resolved_models_dir());
     let mut resolved_request = request.clone();
@@ -1307,7 +1305,7 @@ async fn prepare_h3_private_inputs_for_devices(
                     device_ordinal,
                     compute_capability,
                     available_device_bytes,
-                    available_host_bytes,
+                    available_host_headroom_bytes,
                 },
                 &reporter,
             )
@@ -1332,7 +1330,7 @@ async fn prepare_h3_private_inputs_for_devices(
                 device.ordinal,
                 compute_capability,
                 device.available_vram_bytes,
-                available_host_bytes,
+                available_host_headroom_bytes,
             )
             .map_err(|error| {
                 format!("MiniMax H3 admission evidence did not revalidate: {error:#}")

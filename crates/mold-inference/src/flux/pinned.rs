@@ -20,6 +20,8 @@
 //!
 //! Both levers are no-ops on Metal/CPU.
 
+#[cfg(feature = "cuda")]
+use anyhow::Context;
 use anyhow::Result;
 use candle_core::Tensor;
 
@@ -186,12 +188,17 @@ impl Drop for PinnedRegion {
     fn drop(&mut self) {
         #[cfg(feature = "cuda")]
         unsafe {
-            use candle_core::cuda_backend::cudarc::driver::sys;
-            let res = sys::cuMemHostUnregister(self.ptr);
-            if res != sys::CUresult::CUDA_SUCCESS {
+            use candle_core::cuda_backend::cudarc::driver::{
+                preflight_current_execution_attempt_latch, sys,
+            };
+            if let Err(error) = preflight_current_execution_attempt_latch() {
                 tracing::debug!(
-                    "cuMemHostUnregister returned {:?} for {} bytes (continuing)",
-                    res,
+                    "skipping cuMemHostUnregister for {} bytes after CUDA attempt retention: {error}",
+                    self.n_bytes
+                );
+            } else if let Err(error) = sys::cuMemHostUnregister(self.ptr).result() {
+                tracing::debug!(
+                    "cuMemHostUnregister returned {error} for {} bytes (continuing)",
                     self.n_bytes
                 );
             }
@@ -233,22 +240,26 @@ pub fn try_pin_to_host(
 
     #[cfg(feature = "cuda")]
     {
-        use candle_core::cuda_backend::cudarc::driver::sys;
+        use candle_core::cuda_backend::cudarc::driver::{
+            preflight_current_execution_attempt_latch, sys,
+        };
         // CU_MEMHOSTREGISTER_PORTABLE = 1 (visible to all contexts in the
         // process). We don't request DEVICEMAP since we still hand the
         // tensor to candle's `to_device`, which does its own allocation +
         // memcpy — pinning just makes that copy fast.
         const CU_MEMHOSTREGISTER_PORTABLE: u32 = 1;
-        let res = unsafe {
+        preflight_current_execution_attempt_latch()
+            .context("CUDA execution attempt rejected host-memory registration")?;
+        let result = unsafe {
             sys::cuMemHostRegister_v2(ptr as *mut c_void, n_bytes, CU_MEMHOSTREGISTER_PORTABLE)
-        };
-        if res != sys::CUresult::CUDA_SUCCESS {
+        }
+        .result();
+        if let Err(error) = result {
             // Already pinned, or platform refuses (WSL2 sometimes does). Roll
             // back the tracker reservation and treat as a no-op.
             tracker.release(n_bytes as u64);
             tracing::debug!(
-                "cuMemHostRegister_v2 returned {:?} for {} bytes — falling back to pageable",
-                res,
+                "cuMemHostRegister_v2 returned {error} for {} bytes — falling back to pageable",
                 n_bytes
             );
             return Ok(None);

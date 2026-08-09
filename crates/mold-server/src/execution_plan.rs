@@ -1348,10 +1348,8 @@ fn resolve_private_h3_execution_plans(
         ));
     }
     let eligible = eligible_devices_for_private_h3(config, request, devices)?;
-    let ram = crate::resources::ram_snapshot();
-    let available_host_bytes = ram
-        .available
-        .unwrap_or_else(|| ram.total.saturating_sub(ram.used));
+    let available_host_headroom_bytes =
+        crate::h3_admission::current_h3_host_memory().headroom_bytes();
     let mut plans = Vec::new();
     let mut rejections = Vec::new();
     for device in eligible {
@@ -1369,7 +1367,7 @@ fn resolve_private_h3_execution_plans(
                 ))
             })?,
             device.available_vram_bytes,
-            available_host_bytes,
+            available_host_headroom_bytes,
         ) {
             rejections.push(DeviceInfeasibility {
                 device_id: device.id,

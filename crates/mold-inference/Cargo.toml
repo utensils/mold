@@ -16,7 +16,13 @@ name = "mold_inference"
 
 [features]
 default = []
-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "mold-candle/cuda"]
+cuda = [
+    "candle-core/cuda",
+    "candle-nn/cuda",
+    "candle-transformers/cuda",
+    "mold-candle/cuda",
+    "dep:cudarc",
+]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "mold-candle/metal"]
 # FlashAttention v2 dispatch path. Implies `cuda` (flash-attn is CUDA-only).
 # Off by default — pulls in the candle-flash-attn build, which requires the
@@ -85,6 +91,7 @@ anyhow = "1"
 candle-core = "0.11"
 candle-nn = "0.11"
 candle-transformers = "0.11"
+cudarc = { version = "0.19.8", default-features = false, features = ["driver"], optional = true }
 # Optional flash-attention v2. Pulled in only by the `flash-attn` feature.
 #
 # This now resolves through the same workspace-root `candle-core` patch as

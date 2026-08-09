@@ -2397,6 +2397,17 @@ fn is_fatal_private_cuda_error(error: &anyhow::Error) -> bool {
         "CUDA_ERROR_INVALID_ADDRESS_SPACE",
         "CUDA_ERROR_INVALID_PC",
         "CUDA_ERROR_LAUNCH_TIMEOUT",
+        "CUDA_ERROR_EXTERNAL_DEVICE",
+        "CUDA_ERROR_MPS_CLIENT_TERMINATED",
+        "CUDA_ERROR_CONTAINED",
+        "CUDA_ERROR_TENSOR_MEMORY_LEAK",
+        "CUBLAS_STATUS_MAPPING_ERROR",
+        "CUBLAS_STATUS_EXECUTION_FAILED",
+        "CUBLAS_STATUS_INTERNAL_ERROR",
+        "CURAND_STATUS_LAUNCH_FAILURE",
+        "CURAND_STATUS_PREEXISTING_FAILURE",
+        "CURAND_STATUS_INTERNAL_ERROR",
+        "CUDA execution attempt retained resources",
     ]
     .iter()
     .any(|needle| message.contains(needle))

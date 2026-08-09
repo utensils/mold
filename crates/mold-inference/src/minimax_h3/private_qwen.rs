@@ -2800,6 +2800,14 @@ mod tests {
         weight: String,
         header: String,
         policy: String,
+        active: Arc<AtomicBool>,
+    }
+
+    #[cfg(feature = "cuda")]
+    impl Drop for RealArtifactLease {
+        fn drop(&mut self) {
+            self.active.store(false, Ordering::SeqCst);
+        }
     }
 
     #[cfg(feature = "cuda")]
@@ -2808,7 +2816,7 @@ mod tests {
             &self.components
         }
         fn is_active(&self) -> bool {
-            true
+            self.active.load(Ordering::SeqCst)
         }
     }
 
@@ -2959,6 +2967,7 @@ mod tests {
             device_id: "cuda:0".into(),
             device: device.clone(),
         };
+        let artifact_active = Arc::new(AtomicBool::new(true));
         let artifact_lease = RealArtifactLease {
             factory,
             components: component_set,
@@ -2968,6 +2977,7 @@ mod tests {
             weight: H3_QWEN_NVFP4_AWQ_SHA256.into(),
             header: header_identity,
             policy: H3_QWEN_NVFP4_AWQ_POLICY_SHA256.into(),
+            active: Arc::clone(&artifact_active),
         };
         let mut checkpoint = NoopCheckpoint;
         let mut adapter = H3PrivateQwenAdapter::load_authorized(
@@ -2975,7 +2985,7 @@ mod tests {
             support,
             conditioner_lease,
             &execution_lease,
-            &artifact_lease,
+            artifact_lease,
             &authority,
             &mut checkpoint,
         )
@@ -2987,9 +2997,9 @@ mod tests {
         assert!(rows > 0);
         assert!(!active.load(Ordering::SeqCst));
         assert!(execution_lease.is_active());
-        assert!(H3BackendArtifactLease::is_active(&artifact_lease));
+        assert!(artifact_active.load(Ordering::SeqCst));
         drop(adapter);
         assert!(execution_lease.is_active());
-        assert!(H3BackendArtifactLease::is_active(&artifact_lease));
+        assert!(!artifact_active.load(Ordering::SeqCst));
     }
 }
