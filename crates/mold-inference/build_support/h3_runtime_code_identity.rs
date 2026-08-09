@@ -77,6 +77,18 @@ const CUDA_PATH_KEY: &str = "CUDA_PATH";
 const NVCC_OVERRIDE_KEY: &str = "NVCC";
 const NVCC_HOST_COMPILER_KEY: &str = "NVCC_CCBIN";
 
+/// `cudaforge-0.1.6/src/toolkit.rs:8-15`, its fifth and last resolution step.
+/// Omitting it would fail a campaign build whose kernels cudaforge compiles
+/// happily — for instance a `/usr/local/cuda` install not on `PATH`.
+const CUDA_SEARCH_PATHS: &[&str] = &[
+    "/usr/local/cuda",
+    "/opt/cuda",
+    "/usr/lib/cuda",
+    "/usr",
+    "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA",
+    "C:/CUDA",
+];
+
 pub const CANONICAL_H3_SERVER_FEATURES: &[&str] = &[
     "CARGO_FEATURE_CUDA",
     "CARGO_FEATURE_H3_PRIVATE_BRIDGE",
@@ -275,6 +287,17 @@ pub fn resolve_cuda_compiler_from(
             return Some(candidate);
         }
     }
+    let program = if cfg!(target_os = "windows") {
+        "nvcc.exe"
+    } else {
+        "nvcc"
+    };
+    for base in CUDA_SEARCH_PATHS {
+        let candidate = Path::new(base).join("bin").join(program);
+        if exists(&candidate) {
+            return Some(candidate);
+        }
+    }
     None
 }
 
@@ -283,17 +306,34 @@ fn host_compiler_command() -> PathBuf {
     // which host compiler compiles the device code's host halves.
     for key in [NVCC_HOST_COMPILER_KEY, "CC"] {
         if let Some(value) = std::env::var_os(key).filter(|value| !value.is_empty()) {
-            let candidate = PathBuf::from(value);
-            if candidate.is_absolute() {
-                return candidate;
-            }
-            if let Some(found) = candidate.to_str().and_then(search_path_for) {
-                return found;
-            }
-            return candidate;
+            return resolve_host_compiler(PathBuf::from(value));
         }
     }
     search_path_for("cc").unwrap_or_else(|| PathBuf::from("cc"))
+}
+
+/// `nvcc --compiler-bindir` takes a **directory** as well as an executable, and
+/// the directory form is the documented one. Running the directory itself would
+/// abort a campaign build that nvcc compiles without complaint.
+pub fn resolve_host_compiler(value: PathBuf) -> PathBuf {
+    if value.is_dir() {
+        for program in ["cc", "gcc", "clang"] {
+            let candidate = value.join(program);
+            if is_executable_file(&candidate) {
+                return candidate;
+            }
+        }
+        // No known host compiler inside it; keep the directory so the failure
+        // names what was configured rather than a guess.
+        return value;
+    }
+    if value.is_absolute() {
+        return value;
+    }
+    value
+        .to_str()
+        .and_then(search_path_for)
+        .unwrap_or_else(|| value.clone())
 }
 
 /// Absolute path of the first `PATH` entry holding `program`.
@@ -304,7 +344,27 @@ fn search_path_for(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|directory| directory.join(program))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable_file(candidate))
+}
+
+/// `which` semantics: a non-executable file of the right name is not the
+/// program cargo would have run.
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 pub fn validate_canonical_h3_server_features() -> Result<(), String> {

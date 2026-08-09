@@ -164,10 +164,50 @@ fn cuda_compiler_resolution_mirrors_cudaforge() {
         resolve(None, None, None, Some("/win".into()), &present),
         Some(Path::new("/win/bin/nvcc.exe").to_path_buf()),
     );
+    // cudaforge's fifth step sweeps standard prefixes, so a /usr/local/cuda
+    // install that is not on PATH still compiles the kernels and must still be
+    // identified rather than failing the campaign build.
+    assert_eq!(
+        resolve(None, None, None, None, &|path: &Path| path
+            == Path::new("/usr/local/cuda/bin/nvcc")),
+        Some(Path::new("/usr/local/cuda/bin/nvcc").to_path_buf()),
+    );
     assert_eq!(
         resolve(None, None, Some("/home".into()), None, &missing),
         None,
         "an unresolvable toolkit fails closed rather than guessing",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_valued_ccbin_resolves_to_its_compiler() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // `nvcc --compiler-bindir` documents a *directory*, so running the value
+    // itself would abort a campaign build that nvcc compiles happily.
+    let bindir = tempfile::tempdir().unwrap();
+    let compiler = bindir.path().join("gcc");
+    fs::write(&compiler, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(&compiler, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        h3_runtime_code_identity::resolve_host_compiler(bindir.path().to_path_buf()),
+        compiler,
+    );
+
+    // A plain executable path is passed through untouched.
+    assert_eq!(
+        h3_runtime_code_identity::resolve_host_compiler(compiler.clone()),
+        compiler,
+    );
+
+    // A non-executable file of the right name is not what cargo would run.
+    let inert = tempfile::tempdir().unwrap();
+    fs::write(inert.path().join("cc"), "not a program\n").unwrap();
+    assert_eq!(
+        h3_runtime_code_identity::resolve_host_compiler(inert.path().to_path_buf()),
+        inert.path(),
+        "a directory without a runnable compiler keeps the configured value",
     );
 }
 
