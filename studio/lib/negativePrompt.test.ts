@@ -5,6 +5,7 @@ import {
   effectiveNegativeDefault,
   negativePromptOnDefaultChange,
   negativePromptWireValue,
+  restoredNegativeExplicitClear,
   restoredNegativePrompt,
 } from "./negativePrompt";
 
@@ -65,6 +66,60 @@ describe("effectiveNegativeDefault", () => {
     // not decay the opt-out's wire value from "" to undefined.
     const decayedDefault = effectiveNegativeDefault({}, "wan");
     expect(negativePromptWireValue("", decayedDefault)).toBe("");
+  });
+});
+
+describe("explicit-clear restore authority (#787 round 3)", () => {
+  it('marks a recorded "" as an explicit clear; absence and text are not', () => {
+    expect(restoredNegativeExplicitClear("")).toBe(true);
+    expect(restoredNegativeExplicitClear("   ")).toBe(true);
+    expect(restoredNegativeExplicitClear(null)).toBe(false);
+    expect(restoredNegativeExplicitClear(undefined)).toBe(false);
+    expect(restoredNegativeExplicitClear("blurry")).toBe(false);
+  });
+
+  it("a marked clear survives the default arriving after restore", () => {
+    // Reuse settings before the model rows load: default "" at restore time,
+    // then the wan row resolves. Unmarked "" is indistinguishable from
+    // untouched and takes the prefill; the marker keeps the print's opt-out.
+    expect(
+      negativePromptOnDefaultChange(
+        "",
+        "",
+        WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT,
+        true,
+      ),
+    ).toBe("");
+    expect(
+      negativePromptOnDefaultChange("", "", WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT),
+    ).toBe(WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT);
+  });
+
+  it("the marker is scoped to the empty control", () => {
+    // Typed-over text keeps the normal default-change rules even when the
+    // restore was an explicit clear that the user then replaced.
+    expect(negativePromptOnDefaultChange("hands", "", "next", true)).toBe(
+      "hands",
+    );
+    expect(negativePromptOnDefaultChange("prev", "prev", "next", true)).toBe(
+      "next",
+    );
+  });
+
+  it('a marked clear serializes "" even while the default is unknown', () => {
+    // Without the marker an empty control with an empty default is untouched
+    // and stays absent — which re-enables the engine fallback the print
+    // explicitly disabled.
+    expect(negativePromptWireValue("", "", true)).toBe("");
+    expect(negativePromptWireValue("", "")).toBeUndefined();
+    expect(negativePromptWireValue("typed", "", true)).toBe("typed");
+    expect(
+      negativePromptWireValue(
+        WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT,
+        WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT,
+        true,
+      ),
+    ).toBeUndefined();
   });
 });
 

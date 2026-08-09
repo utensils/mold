@@ -3,6 +3,7 @@ import { nextTick } from "vue";
 import { IDBFactory } from "fake-indexeddb";
 import {
   applyMetadataToForm,
+  normalizeLegacyNegativeFormState,
   cloneTemplateForm,
   promptWithStyle,
   sanitizePersistedForm,
@@ -449,6 +450,95 @@ describe("useGenerateForm", () => {
         { models: [wanModel()] },
       );
       expect(optedOut.negativePrompt).toBe("");
+    });
+
+    it("an explicit clear restored before rows load survives the wan row arriving", () => {
+      // Reuse settings with the inventory not yet resolved: the model row is
+      // unknown, the default restores as "", and the saved `""` opt-out is
+      // visually identical to "untouched". The marker keeps the print's
+      // authority so the later reconcile does not prefill over it — and the
+      // wire still ships the explicit "" (#787 round 3).
+      const metadata = {
+        prompt: "a cat",
+        model: "wan22-t2v-a14b:q5",
+        negative_prompt: "",
+        seed: 7,
+        steps: 30,
+        guidance: 6,
+        width: 832,
+        height: 480,
+        version: "1",
+      } as OutputMetadata;
+      const base = JSON.parse(
+        JSON.stringify(useGenerateForm().state.value),
+      ) as GenerateFormState;
+
+      const restored = applyMetadataToForm(base, metadata, { models: [] });
+      expect(restored.negativePrompt).toBe("");
+      expect(restored.negativeExplicitClear).toBe(true);
+
+      const form = useGenerateForm();
+      form.state.value = restored;
+      form.reconcileNegativeDefault(wanModel());
+      expect(form.state.value.negativePrompt).toBe("");
+      expect(form.state.value.negativePromptDefault).toBe(WAN_DEFAULT);
+      expect(form.toRequest().negative_prompt).toBe("");
+    });
+
+    it("absence restored before rows load still takes the prefill on reconcile", () => {
+      const metadata = {
+        prompt: "a cat",
+        model: "wan22-t2v-a14b:q5",
+        seed: 7,
+        steps: 30,
+        guidance: 6,
+        width: 832,
+        height: 480,
+        version: "1",
+      } as OutputMetadata;
+      const base = JSON.parse(
+        JSON.stringify(useGenerateForm().state.value),
+      ) as GenerateFormState;
+
+      const restored = applyMetadataToForm(base, metadata, { models: [] });
+      expect(restored.negativeExplicitClear).toBe(false);
+
+      const form = useGenerateForm();
+      form.state.value = restored;
+      form.reconcileNegativeDefault(wanModel());
+      expect(form.state.value.negativePrompt).toBe(WAN_DEFAULT);
+    });
+
+    it("selecting a model resolves and resets the deferred clear marker", () => {
+      const form = useGenerateForm();
+      form.state.value.negativeExplicitClear = true;
+      form.applyModelDefaults(wanModel());
+      expect(form.state.value.negativeExplicitClear).toBe(false);
+    });
+
+    it("normalizeLegacyNegativeFormState resolves a pre-#787 template snapshot", () => {
+      const legacy = JSON.parse(
+        JSON.stringify(useGenerateForm().state.value),
+      ) as GenerateFormState;
+      legacy.model = "wan22-t2v-a14b:q5";
+      legacy.modelFamily = "wan";
+      legacy.negativePrompt = "";
+      delete legacy.negativePromptDefault;
+      delete legacy.negativeExplicitClear;
+
+      const normalized = normalizeLegacyNegativeFormState(legacy, [wanModel()]);
+      expect(normalized.negativePrompt).toBe(WAN_DEFAULT);
+      expect(normalized.negativePromptDefault).toBe(WAN_DEFAULT);
+      expect(normalized.negativeExplicitClear).toBe(false);
+
+      // Post-#787 snapshots are authority and pass through untouched.
+      const cleared = JSON.parse(
+        JSON.stringify(normalized),
+      ) as GenerateFormState;
+      cleared.negativePrompt = "";
+      expect(
+        normalizeLegacyNegativeFormState(cleared, [wanModel()]).negativePrompt,
+      ).toBe("");
     });
   });
 

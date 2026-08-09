@@ -1110,6 +1110,13 @@ pub struct GenerateState {
     /// editor ships the explicit `""` opt-out
     /// (`create_form::negative_prompt_wire_value`).
     pub negative_default: String,
+    /// Restore-time explicit-clear authority (#787 round 3): true while an
+    /// empty editor is a restored explicit `""` opt-out (session marker on
+    /// cold start, `""` metadata on gallery reuse) rather than "untouched".
+    /// Keeps the clear from being mistaken for the untouched state by
+    /// default-change reconciliation and wire serialization; reset by an
+    /// explicit model switch and by Reset Defaults.
+    pub negative_explicit_clear: bool,
     pub params: GenerateParams,
     pub focus: GenerateFocus,
     pub param_index: usize,
@@ -1983,6 +1990,11 @@ impl App {
             session.negative_cleared,
             &negative_default,
         ));
+        // #787 round 3: the session's persisted marker stays live authority,
+        // so a restored explicit clear survives later default reconciliation
+        // (a fresher catalog row landing) and still serializes as `""`.
+        let negative_explicit_clear =
+            session.negative_cleared == Some(true) && session.last_negative.trim().is_empty();
 
         // Load prompt history
         let history = crate::history::PromptHistory::load();
@@ -2014,6 +2026,7 @@ impl App {
                 prompt,
                 negative_prompt,
                 negative_default,
+                negative_explicit_clear,
                 params,
                 focus: GenerateFocus::Prompt,
                 param_index: 0,
@@ -2327,6 +2340,9 @@ impl App {
             &self.generate.negative_prompt.lines().join("\n"),
             &self.generate.negative_default,
             &next_default,
+            // A restored explicit clear (#787 round 3) is user authority even
+            // while the tracked default was still empty at restore time.
+            self.generate.negative_explicit_clear,
         ) {
             self.generate.negative_prompt = negative_prompt_textarea(&replacement);
         }
@@ -2663,8 +2679,12 @@ impl App {
                 // An empty editor while a default is advertised is the
                 // explicit "" opt-out; the marker is what keeps it
                 // distinguishable from "untouched" across restarts (#787).
+                // A deferred restore-time clear (#787 round 3) persists the
+                // same way even while no default is known yet.
                 .with_negative_cleared(
-                    neg_text.is_empty() && !self.generate.negative_default.trim().is_empty(),
+                    neg_text.is_empty()
+                        && (self.generate.negative_explicit_clear
+                            || !self.generate.negative_default.trim().is_empty()),
                 );
         session.save();
     }
@@ -2696,6 +2716,10 @@ impl App {
             self.save_prefs_for_model(&outgoing_model);
         }
 
+        // Switching models is fresh authority: a deferred restore-time clear
+        // marker (#787 round 3) belonged to the previous selection. Gallery
+        // reuse re-arms it after this call when the print recorded `""`.
+        self.generate.negative_explicit_clear = false;
         self.generate.params.model = model_name.clone();
 
         // Use server catalog defaults when connected to a remote server,
@@ -5019,6 +5043,14 @@ impl App {
             .unwrap_or(&self.generate.negative_default)
             .to_string();
         self.generate.negative_prompt = negative_prompt_textarea(&restored_negative);
+        // #787 round 3: a recorded `""` is the explicit opt-out. Keep that
+        // authority live so a later default reconciliation (fresher catalog
+        // row) does not mistake the empty editor for "untouched", and the
+        // wire keeps shipping `""`.
+        self.generate.negative_explicit_clear = meta
+            .negative_prompt
+            .as_deref()
+            .is_some_and(|saved| saved.trim().is_empty());
         self.generate.params.seed = Some(meta.seed);
         self.generate.params.seed_mode = SeedMode::Fixed;
         self.generate.params.steps = meta.steps;
@@ -5530,8 +5562,10 @@ impl App {
         // defaults", not a model switch — the sync above deliberately
         // preserves a cleared or typed editor, but here both go back to the
         // advertised default (empty when the model has none), mirroring web
-        // Reset settings and desktop ⌘N.
+        // Reset settings and desktop ⌘N. That also resolves any deferred
+        // restore-time clear marker (#787 round 3).
         self.generate.negative_prompt = negative_prompt_textarea(&self.generate.negative_default);
+        self.generate.negative_explicit_clear = false;
     }
 
     // ── Settings view helpers ─────────────────────────────────────────
@@ -6569,6 +6603,7 @@ impl App {
             &self.generate.negative_prompt.lines().join("\n"),
             &self.generate.negative_default,
             self.generate.capabilities.supports_negative_prompt,
+            self.generate.negative_explicit_clear,
         );
 
         // Resolve seed based on seed mode
@@ -9201,6 +9236,7 @@ mod tests {
                 prompt: TextArea::default(),
                 negative_prompt: TextArea::default(),
                 negative_default: String::new(),
+                negative_explicit_clear: false,
                 params,
                 focus: GenerateFocus::Navigation,
                 param_index: 0,
@@ -10081,6 +10117,56 @@ mod tests {
         assert_eq!(app.generate.negative_prompt.lines().join("\n"), "hands");
     }
 
+    /// #787 round 3: gallery reuse of a print recorded with the explicit
+    /// `""` opt-out arms the live marker, so a later capability sync (a
+    /// fresher catalog row for the same model) keeps the clear instead of
+    /// mistaking the empty editor for "untouched" — and an explicit model
+    /// switch resolves the marker back to ordinary prefill rules.
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn gallery_reuse_explicit_clear_survives_default_reconciliation() {
+        let mut app = make_settings_test_app();
+        let mut entry = make_test_entry();
+        entry.metadata.model = "wan21-t2v-1.3b:bf16".to_string();
+        entry.metadata.negative_prompt = Some(String::new());
+        app.gallery.entries = vec![entry];
+        app.gallery.selected = 0;
+
+        app.load_gallery_into_generate();
+        assert!(app.generate.negative_explicit_clear);
+        assert_eq!(app.generate.negative_prompt.lines().join("\n"), "");
+
+        // The reconciliation that runs when capabilities refresh must not
+        // prefill over the restored opt-out.
+        app.sync_generate_capabilities();
+        assert_eq!(app.generate.negative_prompt.lines().join("\n"), "");
+        assert_eq!(
+            crate::ui::create_form::negative_prompt_wire_value(
+                &app.generate.negative_prompt.lines().join("\n"),
+                &app.generate.negative_default,
+                true,
+                app.generate.negative_explicit_clear,
+            )
+            .as_deref(),
+            Some(""),
+            "the reused opt-out must keep serializing as the explicit \"\""
+        );
+
+        // Reuse of a print with an absent negative is NOT an explicit clear.
+        let mut untouched = make_test_entry();
+        untouched.metadata.model = "wan21-t2v-1.3b:bf16".to_string();
+        untouched.metadata.negative_prompt = None;
+        app.gallery.entries = vec![untouched];
+        app.gallery.selected = 0;
+        app.load_gallery_into_generate();
+        assert!(!app.generate.negative_explicit_clear);
+        assert_eq!(
+            app.generate.negative_prompt.lines().join("\n"),
+            mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT,
+            "absence predates truthful recording: the default conditioned the render"
+        );
+    }
+
     /// #787 round 2: `App::new` never runs `sync_generate_capabilities`, so
     /// cold start wires `restored_negative_editor_text` (with
     /// `create_form::effective_negative_default`) to resolve the editor.
@@ -10117,6 +10203,7 @@ mod tests {
             crate::ui::create_form::negative_prompt_wire_value(
                 &restored_negative_editor_text("", Some(true), wan_default),
                 wan_default,
+                true,
                 true,
             )
             .as_deref(),
@@ -12336,6 +12423,7 @@ mod tests {
             prompt: TextArea::default(),
             negative_prompt: TextArea::default(),
             negative_default: String::new(),
+            negative_explicit_clear: false,
             params: GenerateParams::from_config(&Config::load_or_default()),
             focus: GenerateFocus::Prompt,
             param_index: 0,
@@ -12399,6 +12487,7 @@ mod tests {
             prompt: TextArea::default(),
             negative_prompt: TextArea::default(),
             negative_default: String::new(),
+            negative_explicit_clear: false,
             params: GenerateParams::from_config(&Config::load_or_default()),
             focus: GenerateFocus::Prompt,
             param_index: 0,
@@ -12443,6 +12532,7 @@ mod tests {
             prompt: TextArea::default(),
             negative_prompt: TextArea::default(),
             negative_default: String::new(),
+            negative_explicit_clear: false,
             params,
             focus: GenerateFocus::Prompt,
             param_index: 0,

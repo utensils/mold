@@ -7,6 +7,7 @@ import {
   cloneGenerateForm,
   newGenerateForm,
   normalizeLegacyNegativeSnapshot,
+  reconcileModelCapabilities,
   resetFormToModelDefaults,
   seedMode,
   type GenerateForm,
@@ -161,6 +162,70 @@ describe("advertised default negative prompt (#787)", () => {
     expect(form.negativePromptDefault).toBe(WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT);
     form.prompt = "a cat";
     expect(buildRequest(form).negative_prompt).toBe("");
+  });
+});
+
+describe("deferred explicit-clear restore authority (#787 round 3)", () => {
+  const WAN_DEFAULT = "色调艳丽，过曝，静态，细节模糊不清";
+
+  function wanModel(): ModelEntry {
+    return {
+      ...ltx2Model(),
+      name: "wan22-t2v-a14b:q5",
+      family: "wan",
+      default_negative_prompt: WAN_DEFAULT,
+      guidance_capabilities: {
+        adjustable: true,
+        supports_negative_prompt: true,
+      },
+    };
+  }
+
+  const metadata = {
+    prompt: "a cat",
+    model: "wan22-t2v-a14b:q5",
+    seed: 7,
+    steps: 30,
+    guidance: 6,
+    width: 832,
+    height: 480,
+    version: "1",
+  } as OutputMetadata;
+
+  it("a reused explicit clear restored before rows load survives the row arriving", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(form, { ...metadata, negative_prompt: "" }, []);
+    expect(form.negativePrompt).toBe("");
+    expect(form.negativeExplicitClear).toBe(true);
+    // The wire ships the opt-out even while the default is unknown — absence
+    // would silently re-enable the engine fallback the print disabled.
+    expect(buildRequest(form).negative_prompt).toBe("");
+
+    // The wan row lands (host reconnect / inventory refresh): the clear is
+    // kept instead of being mistaken for "untouched" and prefilled.
+    reconcileModelCapabilities(form, wanModel());
+    expect(form.negativePrompt).toBe("");
+    expect(form.negativePromptDefault).toBe(WAN_DEFAULT);
+    expect(buildRequest(form).negative_prompt).toBe("");
+  });
+
+  it("absence restored before rows load still takes the prefill when the row arrives", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(form, metadata, []);
+    expect(form.negativeExplicitClear).toBe(false);
+    reconcileModelCapabilities(form, wanModel());
+    expect(form.negativePrompt).toBe(WAN_DEFAULT);
+  });
+
+  it("explicitly selecting a model resets the deferred marker and prefills", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(form, { ...metadata, negative_prompt: "" }, []);
+    expect(form.negativeExplicitClear).toBe(true);
+    // A user model pick is fresh authority — unlike the row-refresh path it
+    // resolves the deferred clear and shows the new model's default.
+    applyModelDefaults(form, wanModel());
+    expect(form.negativePrompt).toBe(WAN_DEFAULT);
+    expect(form.negativeExplicitClear).toBe(false);
   });
 });
 

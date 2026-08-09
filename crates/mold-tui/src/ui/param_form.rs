@@ -112,6 +112,7 @@ pub fn render(
         &state.negative_prompt.lines().join("\n"),
         &state.negative_default,
         state.capabilities.supports_negative_prompt,
+        state.negative_explicit_clear,
     )
     .is_none();
     let neg_empty = state

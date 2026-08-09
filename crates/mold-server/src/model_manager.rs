@@ -2991,6 +2991,9 @@ mod tests {
             supported: true,
             trained_words: vec![],
             primary_filename_rel: "model.safetensors".into(),
+            primary_size_bytes: None,
+            low_noise_filename_rel: None,
+            low_noise_size_bytes: None,
             written_at: 0,
         };
         mold_catalog::sidecar::write_sidecar(

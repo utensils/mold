@@ -415,17 +415,24 @@ pub fn advanced_active_count(params: &GenerateParams, negative_empty: bool) -> u
 ///   server-side and preserves today's behavior against older servers);
 /// - cleared while a default is advertised → `Some("")`, the explicit empty
 ///   uncond the engine honors as an opt-out;
-/// - anything else non-empty → `Some(text)`; empty with no default → `None`.
+/// - anything else non-empty → `Some(text)`; empty with no default → `None`,
+///   unless `explicit_clear` marks the empty editor as a restored explicit
+///   opt-out (#787 round 3) — then the `""` still ships even while no
+///   default is known, so absence cannot re-enable the engine fallback.
 pub fn negative_prompt_wire_value(
     text: &str,
     advertised_default: &str,
     supports_negative: bool,
+    explicit_clear: bool,
 ) -> Option<String> {
     if !supports_negative {
         return None;
     }
     let text = text.trim();
     let default = advertised_default.trim();
+    if explicit_clear && text.is_empty() {
+        return Some(String::new());
+    }
     if default.is_empty() {
         return (!text.is_empty()).then(|| text.to_string());
     }
@@ -456,13 +463,20 @@ pub fn effective_negative_default(advertised: Option<&str>, family: &str) -> Str
 /// fresher catalog). `Some(next)` replaces the editor only while it still
 /// shows the previous default (both empty included — that is how the default
 /// first appears); a user-typed value, or an explicit clear while a default
-/// was advertised, is authority and returns `None`. Mirrors
-/// `studio/lib/negativePrompt.ts::negativePromptOnDefaultChange`.
+/// was advertised, is authority and returns `None`. `explicit_clear` extends
+/// that authority to an empty editor restored as an explicit `""` opt-out
+/// before any default was known (#787 round 3) — without it the deferred
+/// clear is indistinguishable from "untouched" and would take the prefill.
+/// Mirrors `studio/lib/negativePrompt.ts::negativePromptOnDefaultChange`.
 pub fn negative_prompt_on_default_change(
     current: &str,
     previous_default: &str,
     next_default: &str,
+    explicit_clear: bool,
 ) -> Option<String> {
+    if explicit_clear && current.trim().is_empty() {
+        return None;
+    }
     (current.trim() == previous_default.trim() && current.trim() != next_default.trim())
         .then(|| next_default.trim().to_string())
 }
@@ -549,15 +563,15 @@ mod tests {
     #[test]
     fn negative_wire_value_untouched_default_stays_absent() {
         assert_eq!(
-            negative_prompt_wire_value(WAN_DEFAULT, WAN_DEFAULT, true),
+            negative_prompt_wire_value(WAN_DEFAULT, WAN_DEFAULT, true, false),
             None
         );
         // No advertised default: empty stays absent (today's behavior).
-        assert_eq!(negative_prompt_wire_value("", "", true), None);
+        assert_eq!(negative_prompt_wire_value("", "", true, false), None);
         // Unsupported family never serializes one.
-        assert_eq!(negative_prompt_wire_value("blurry", "", false), None);
+        assert_eq!(negative_prompt_wire_value("blurry", "", false, false), None);
         assert_eq!(
-            negative_prompt_wire_value(WAN_DEFAULT, WAN_DEFAULT, false),
+            negative_prompt_wire_value(WAN_DEFAULT, WAN_DEFAULT, false, false),
             None
         );
     }
@@ -565,11 +579,11 @@ mod tests {
     #[test]
     fn negative_wire_value_cleared_is_the_explicit_empty_opt_out() {
         assert_eq!(
-            negative_prompt_wire_value("", WAN_DEFAULT, true).as_deref(),
+            negative_prompt_wire_value("", WAN_DEFAULT, true, false).as_deref(),
             Some("")
         );
         assert_eq!(
-            negative_prompt_wire_value("   ", WAN_DEFAULT, true).as_deref(),
+            negative_prompt_wire_value("   ", WAN_DEFAULT, true, false).as_deref(),
             Some(""),
             "whitespace-only is a clear, matching the engine's trim"
         );
@@ -578,11 +592,11 @@ mod tests {
     #[test]
     fn negative_wire_value_typed_text_replaces_the_default() {
         assert_eq!(
-            negative_prompt_wire_value("blurry", WAN_DEFAULT, true).as_deref(),
+            negative_prompt_wire_value("blurry", WAN_DEFAULT, true, false).as_deref(),
             Some("blurry")
         );
         assert_eq!(
-            negative_prompt_wire_value("blurry", "", true).as_deref(),
+            negative_prompt_wire_value("blurry", "", true, false).as_deref(),
             Some("blurry")
         );
     }
@@ -591,29 +605,65 @@ mod tests {
     fn negative_default_change_replaces_only_an_untouched_editor() {
         // The default first appears: empty editor, no previous default.
         assert_eq!(
-            negative_prompt_on_default_change("", "", WAN_DEFAULT).as_deref(),
+            negative_prompt_on_default_change("", "", WAN_DEFAULT, false).as_deref(),
             Some(WAN_DEFAULT)
         );
         // Still showing the old default → follow the new model.
         assert_eq!(
-            negative_prompt_on_default_change(WAN_DEFAULT, WAN_DEFAULT, "").as_deref(),
+            negative_prompt_on_default_change(WAN_DEFAULT, WAN_DEFAULT, "", false).as_deref(),
             Some("")
         );
         // User-typed text is authority.
         assert_eq!(
-            negative_prompt_on_default_change("blurry", WAN_DEFAULT, ""),
+            negative_prompt_on_default_change("blurry", WAN_DEFAULT, "", false),
             None
         );
         // An explicit clear (opt-out) survives a wan→wan model switch.
         assert_eq!(
-            negative_prompt_on_default_change("", WAN_DEFAULT, WAN_DEFAULT),
+            negative_prompt_on_default_change("", WAN_DEFAULT, WAN_DEFAULT, false),
             None
         );
         // No change → no textarea rebuild.
         assert_eq!(
-            negative_prompt_on_default_change(WAN_DEFAULT, WAN_DEFAULT, WAN_DEFAULT),
+            negative_prompt_on_default_change(WAN_DEFAULT, WAN_DEFAULT, WAN_DEFAULT, false),
             None
         );
+    }
+
+    /// #787 round 3: an explicit `""` restored before any default was known
+    /// (gallery reuse of an opted-out print, session cold start) is user
+    /// authority even though it is visually identical to "untouched". The
+    /// marker keeps the clear across the default arriving and keeps the wire
+    /// shipping `""`; the identical cases are pinned for the browsers in
+    /// `studio/lib/negativePrompt.test.ts`.
+    #[test]
+    fn deferred_explicit_clear_marker_preserves_the_restored_opt_out() {
+        // The default resolves after restore: the marked clear stays.
+        assert_eq!(
+            negative_prompt_on_default_change("", "", WAN_DEFAULT, true),
+            None
+        );
+        // The wire ships the opt-out even while the default is unknown.
+        assert_eq!(
+            negative_prompt_wire_value("", "", true, true).as_deref(),
+            Some("")
+        );
+        // The marker is scoped to the empty editor: typed text and an editor
+        // still showing the previous default keep the ordinary rules.
+        assert_eq!(
+            negative_prompt_on_default_change("blurry", "", WAN_DEFAULT, true),
+            None
+        );
+        assert_eq!(
+            negative_prompt_wire_value("blurry", "", true, true).as_deref(),
+            Some("blurry")
+        );
+        assert_eq!(
+            negative_prompt_on_default_change(WAN_DEFAULT, WAN_DEFAULT, "next", true).as_deref(),
+            Some("next")
+        );
+        // Unsupported family still serializes nothing.
+        assert_eq!(negative_prompt_wire_value("", "", false, true), None);
     }
 
     #[test]
@@ -628,7 +678,7 @@ mod tests {
         assert_eq!(effective_negative_default(None, "wan"), WAN_DEFAULT);
         assert_eq!(effective_negative_default(Some("  "), "wan"), WAN_DEFAULT);
         assert_eq!(
-            negative_prompt_wire_value("", &effective_negative_default(None, "wan"), true)
+            negative_prompt_wire_value("", &effective_negative_default(None, "wan"), true, false)
                 .as_deref(),
             Some("")
         );

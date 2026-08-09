@@ -75,7 +75,9 @@ export function negativePromptOnDefaultChange(
   current: string,
   previousDefault: string,
   nextDefault: string,
+  explicitClear = false,
 ): string {
+  if (explicitClear && current.trim() === "") return current;
   return current.trim() === previousDefault.trim()
     ? nextDefault.trim()
     : current;
@@ -90,9 +92,11 @@ export function negativePromptOnDefaultChange(
 export function negativePromptWireValue(
   text: string,
   advertisedDefault: string,
+  explicitClear = false,
 ): string | undefined {
   const trimmed = text.trim();
   const normalizedDefault = advertisedDefault.trim();
+  if (explicitClear && trimmed === "") return "";
   if (normalizedDefault === "") {
     return trimmed === "" ? undefined : trimmed;
   }
@@ -111,4 +115,22 @@ export function restoredNegativePrompt(
   advertisedDefault: string,
 ): string {
   return saved ?? advertisedDefault.trim();
+}
+
+/**
+ * Whether restored metadata carried the explicit `""` opt-out (#787 round 3).
+ * A restore can land before the model rows do, when the advertised default is
+ * still unknown — at that moment an explicit clear and "untouched" both show
+ * an empty control and are indistinguishable afterwards. This marker carries
+ * the restore-time authority forward: `negativePromptOnDefaultChange` keeps a
+ * marked empty control cleared when the default finally resolves, and
+ * `negativePromptWireValue` serializes it as `""` instead of letting absence
+ * silently re-enable the conditioning the print explicitly disabled. The
+ * marker resets whenever the user selects a model (`applyModelDefaults` /
+ * `reconcileModelCapabilities` on a model switch), and typed text bypasses it.
+ */
+export function restoredNegativeExplicitClear(
+  saved: string | null | undefined,
+): boolean {
+  return saved != null && saved.trim() === "";
 }

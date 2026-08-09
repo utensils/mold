@@ -31,6 +31,7 @@ import {
   effectiveNegativeDefault,
   negativePromptOnDefaultChange,
   negativePromptWireValue,
+  restoredNegativeExplicitClear,
   restoredNegativePrompt,
 } from "@studio/lib/negativePrompt";
 import { defaultVideoFps } from "@studio/lib/sequence";
@@ -131,6 +132,7 @@ function defaultForm(): GenerateFormState {
     stylePreset: null,
     negativePrompt: "",
     negativePromptDefault: "",
+    negativeExplicitClear: false,
     model: "",
     modelFamily: "",
     width: 1024,
@@ -267,6 +269,9 @@ function modelDefaultsPatch(
     nextNegativeDefault,
   );
   next.negativePromptDefault = nextNegativeDefault;
+  // Selecting a model is fresh authority: any deferred restore-time clear
+  // marker (#787 round 3) has been resolved by the rules above.
+  next.negativeExplicitClear = false;
   const capabilities = generationCapabilitiesForFamily(
     model.family,
     model.name,
@@ -406,6 +411,41 @@ export function settingsResetPatch(
   return model ? modelDefaultsPatch(base, model) : base;
 }
 
+/**
+ * Normalize a form snapshot saved before `negativePromptDefault` existed —
+ * legacy generation templates (#787 round 3) — before it replaces the live
+ * form wholesale. Such snapshots carry no tri-state authority: their empty
+ * `negativePrompt` means "untouched", never the explicit `""` opt-out, and a
+ * template loaded AFTER the installed-models watcher settled would otherwise
+ * sit with an empty default forever (the watcher's deps never change again).
+ * The snapshot's own model resolves the default (live inventory row first,
+ * then the family constant via the snapshot's stored family); a snapshot that
+ * already carries the key is post-#787 authority and passes through
+ * untouched. Mirrors desktop's `normalizeLegacyNegativeSnapshot`.
+ */
+export function normalizeLegacyNegativeFormState(
+  state: GenerateFormState,
+  models: ModelInfoExtended[] = [],
+): GenerateFormState {
+  if (typeof state.negativePromptDefault === "string") {
+    state.negativeExplicitClear ??= false;
+    return state;
+  }
+  const row = models.find((m) => m.name === state.model) ?? null;
+  const nextDefault = effectiveNegativeDefault(
+    row,
+    row?.family ?? selectedFamily(state),
+  );
+  state.negativePromptDefault = nextDefault;
+  state.negativeExplicitClear = false;
+  if (state.negativePrompt.trim() === "") {
+    // Legacy omission is the untouched state: show the default so the wire
+    // stays absent, exactly what the pre-#787 template produced.
+    state.negativePrompt = nextDefault;
+  }
+  return state;
+}
+
 export interface ApplyMetadataOptions {
   models?: ModelInfoExtended[];
   format?: OutputFormat | null;
@@ -462,6 +502,13 @@ export function applyMetadataToForm(
     negativePrompt: restoredNegativePrompt(
       metadata.negative_prompt,
       next.negativePromptDefault ?? "",
+    ),
+    // A recorded `""` is the explicit opt-out. When this restore ran before
+    // the model rows resolved, the empty control is otherwise identical to
+    // "untouched" — the marker carries the print's authority until the
+    // default is known (#787 round 3).
+    negativeExplicitClear: restoredNegativeExplicitClear(
+      metadata.negative_prompt,
     ),
     width: metadata.generation_width || metadata.width || next.width,
     height: metadata.generation_height || metadata.height || next.height,
@@ -908,6 +955,10 @@ export function useGenerateForm(): UseGenerateForm {
         s.negativePrompt,
         s.negativePromptDefault ?? "",
         nextDefault,
+        // A reuse restored before this row landed may carry the explicit
+        // `""` opt-out — indistinguishable from untouched without the
+        // marker, which keeps the clear instead of prefilling (#787 r3).
+        s.negativeExplicitClear ?? false,
       );
       if (nextPrompt !== s.negativePrompt) s.negativePrompt = nextPrompt;
       if ((s.negativePromptDefault ?? "") !== nextDefault) {
@@ -1006,6 +1057,7 @@ export function useGenerateForm(): UseGenerateForm {
           ? (negativePromptWireValue(
               styled.negative ?? "",
               s.negativePromptDefault ?? "",
+              s.negativeExplicitClear ?? false,
             ) ?? null)
           : null,
         model: s.model,

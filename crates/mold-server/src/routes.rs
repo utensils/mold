@@ -1172,7 +1172,7 @@ async fn plan_builtin_ltx2_control(
 /// resolution, before validation and metadata capture — makes provenance
 /// truthful without changing what renders. `Some("")` is the explicit
 /// opt-out and must never be replaced.
-fn materialize_default_negative_prompt(
+pub(crate) fn materialize_default_negative_prompt(
     request: &mut mold_core::GenerateRequest,
     family: Option<&str>,
 ) {
@@ -2974,6 +2974,15 @@ pub(crate) async fn placement_preview_for_request(
         response.authoritative = true;
         return response;
     }
+    // Admission materializes the family's tuned default negative (wan) before
+    // the scheduler prices the job, and `request_sensitive_activation_memory`
+    // doubles its CFG activation factor for `guidance > 1` only when a
+    // negative is present. An authoritative preview priced without the same
+    // materialization would promise a 1x plan admission re-prices at 2x —
+    // exactly the divergence the placement-preview authority contract forbids.
+    // Same seam, same semantics: absence fills in, the explicit `""` opt-out
+    // and typed values pass through untouched.
+    materialize_default_negative_prompt(&mut request, resolved_family.as_deref());
     if let Some(task) = mold_core::minimax_h3::task_for_model(&request.model) {
         match (task, request.references.as_deref()) {
             (mold_core::minimax_h3::Task::Ref2va, Some(references)) => {

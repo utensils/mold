@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import type { GenerateFormState } from "../types";
 import type { ModelInfoExtended } from "../types";
 import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
+import { normalizeLegacyNegativeFormState } from "../composables/useGenerateForm";
 import { requestText } from "../lib/toasts";
 import {
   deleteGenerationTemplateWithMedia,
@@ -93,7 +94,13 @@ async function loadTemplate(template: GenerationTemplate) {
   try {
     const hydrated = await hydrateGenerationTemplate(template);
     if (epoch !== loadEpoch) return;
-    emit("update:modelValue", hydrated.form);
+    // A pre-#787 template has no negative tri-state; resolve its default at
+    // hydration because the installed-models watcher will not run again for
+    // a template loaded after the inventory settled (#787 round 3).
+    emit(
+      "update:modelValue",
+      normalizeLegacyNegativeFormState(hydrated.form, props.models ?? []),
+    );
     if (hydrated.sourceMissing) {
       error.value =
         "The template loaded, but some saved images are no longer available.";

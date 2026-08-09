@@ -390,13 +390,24 @@ pub async fn run_chain_generation(
 }
 
 /// Run a single local generation and send the result via `tx`.
+///
+/// This is the one funnel for both the forced `InferenceMode::Local` case
+/// and the Auto-mode fallback, so it is where local runs mirror server
+/// admission's negative materialization (#787 round 3): an absent
+/// `negative_prompt` on a family with a tuned engine fallback (wan) is
+/// resolved into the request *and* the provenance snapshot before the engine
+/// runs, so locally saved metadata records the uncond that actually
+/// conditioned the render instead of omitting it.
 async fn run_local_generation_single(
     params: GenerateParams,
     prompt: String,
-    negative_prompt: Option<String>,
-    metadata_snapshot: GenerationMetadataSnapshot,
+    mut negative_prompt: Option<String>,
+    mut metadata_snapshot: GenerationMetadataSnapshot,
     tx: &mpsc::UnboundedSender<BackgroundEvent>,
 ) {
+    let config = mold_core::Config::load_or_default();
+    let family = crate::model_info::family_for_model(&params.model, &config);
+    materialize_local_negative_authority(&mut negative_prompt, &mut metadata_snapshot, &family);
     run_local_generation(
         params,
         prompt,
@@ -405,6 +416,26 @@ async fn run_local_generation_single(
         tx.clone(),
     )
     .await;
+}
+
+/// Resolve the engine's absence-fallback negative into a local request and
+/// its metadata snapshot — the TUI-local mirror of the server's
+/// `materialize_default_negative_prompt` (#787). The wan engine substitutes
+/// its tuned default whenever `negative_prompt` is absent, so recording the
+/// request as-received would save provenance claiming no negative while the
+/// long tuned uncond conditioned the render. An explicit value — the `""`
+/// opt-out above all — is authority and passes through untouched.
+fn materialize_local_negative_authority(
+    negative_prompt: &mut Option<String>,
+    metadata_snapshot: &mut GenerationMetadataSnapshot,
+    family: &str,
+) {
+    if negative_prompt.is_none() {
+        if let Some(default) = mold_core::manifest::default_negative_prompt_for_family(family) {
+            *negative_prompt = Some(default.to_string());
+        }
+    }
+    metadata_snapshot.negative_prompt = negative_prompt.clone();
 }
 
 /// Pull a model with progress reporting to the TUI.
@@ -1026,6 +1057,44 @@ pub fn remove_model(model_name: String, tx: mpsc::UnboundedSender<BackgroundEven
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #787 round 3: a Local-target (or Auto-fallback) run with an untouched
+    /// wan editor used to snapshot `None` even though the engine substitutes
+    /// the tuned default — locally saved provenance omitted the negative that
+    /// conditioned the render. The local funnel now mirrors server
+    /// admission's `materialize_default_negative_prompt`: absence resolves
+    /// into both the request and the metadata snapshot, while the explicit
+    /// `""` opt-out and typed text pass through untouched.
+    #[test]
+    fn local_runs_materialize_the_wan_default_negative_into_request_and_snapshot() {
+        let config = mold_core::Config::default();
+        let params = GenerateParams::from_config(&config);
+        let mut snapshot = GenerationMetadataSnapshot::new(params, "p".into(), None);
+
+        let mut absent = None;
+        materialize_local_negative_authority(&mut absent, &mut snapshot, "wan");
+        assert_eq!(
+            absent.as_deref(),
+            Some(mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT)
+        );
+        assert_eq!(snapshot.negative_prompt, absent);
+
+        let mut cleared = Some(String::new());
+        materialize_local_negative_authority(&mut cleared, &mut snapshot, "wan");
+        assert_eq!(cleared.as_deref(), Some(""));
+        assert_eq!(snapshot.negative_prompt.as_deref(), Some(""));
+
+        let mut typed = Some("blurry".to_string());
+        materialize_local_negative_authority(&mut typed, &mut snapshot, "wan");
+        assert_eq!(typed.as_deref(), Some("blurry"));
+        assert_eq!(snapshot.negative_prompt.as_deref(), Some("blurry"));
+
+        // Families without an engine fallback keep truthful absence.
+        let mut other = None;
+        materialize_local_negative_authority(&mut other, &mut snapshot, "flux");
+        assert_eq!(other, None);
+        assert_eq!(snapshot.negative_prompt, None);
+    }
 
     #[test]
     fn build_ref_counts_tracks_shared_files() {

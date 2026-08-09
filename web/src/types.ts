@@ -884,6 +884,12 @@ export interface GenerateFormState {
    * persisted pre-#787 form snapshots keep loading; semantics live in
    * `@studio/lib/negativePrompt`. */
   negativePromptDefault?: string;
+  /** Restore-time explicit-clear authority (#787 round 3): true when a reuse
+   * carried the explicit `""` opt-out while the advertised default was still
+   * unknown. Keeps the clear from decaying to "untouched" once the model row
+   * resolves; semantics live in `@studio/lib/negativePrompt`. Optional so
+   * persisted pre-round-3 snapshots keep loading. */
+  negativeExplicitClear?: boolean;
   model: string;
   /** Family for the selected model. Stored so request serialization can
    * choose family-specific wire fields without needing the model catalog. */

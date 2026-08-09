@@ -6252,6 +6252,128 @@ mod tests {
         assert_eq!(vae.repair_model.as_deref(), Some("sd15:fp16"));
     }
 
+    /// #787 round 3: admission materializes wan's tuned default negative,
+    /// which flips `request_sensitive_activation_memory`'s CFG factor to 2x
+    /// for `guidance > 1` — an authoritative preview priced without the same
+    /// materialization would promise a 1x plan admission cannot honor. This
+    /// captures the exact request the scheduler is asked to price and pins it
+    /// to the admission seam's output; the explicit `""` opt-out must pass
+    /// through both paths untouched.
+    #[tokio::test]
+    async fn placement_preview_prices_the_same_wan_negative_as_admission() {
+        let models = tempfile::tempdir().unwrap();
+        let weights = models.path().join("studio-wan.safetensors");
+        std::fs::write(&weights, b"stub").unwrap();
+        let vae = models.path().join("studio-wan-vae.safetensors");
+        std::fs::write(&vae, b"stub").unwrap();
+        let (mut state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![gpu_worker_stub(0)].into(),
+        });
+        install_worker_registry(&mut state);
+        let (owner_tx, _owner_rx) = tokio::sync::mpsc::channel(1);
+        let (preview_tx, mut preview_rx) = tokio::sync::mpsc::channel(4);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+            owner_tx,
+            crate::dispatch_mode::DispatchMode::V2,
+            true,
+            false,
+        )
+        .with_placement_preview(preview_tx);
+        state.config.write().await.models.insert(
+            "studio-wan".to_string(),
+            mold_core::ModelConfig {
+                family: Some("wan".to_string()),
+                transformer: Some(weights.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                ..Default::default()
+            },
+        );
+
+        let base = serde_json::json!({
+            "prompt": "a cat",
+            "model": "studio-wan",
+            "width": 256,
+            "height": 256,
+            "steps": 4,
+            "guidance": 5.0,
+            "batch_size": 1
+        });
+        for (sent_negative, expected) in [
+            (
+                None::<&str>,
+                Some(mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT),
+            ),
+            (Some(""), Some("")),
+            (Some("blurry"), Some("blurry")),
+        ] {
+            let mut request: GenerateRequest = serde_json::from_value(base.clone()).unwrap();
+            request.negative_prompt = sent_negative.map(str::to_string);
+
+            // Admission's own seam, for the parity half of the assertion.
+            let mut admitted = request.clone();
+            crate::routes::materialize_default_negative_prompt(&mut admitted, Some("wan"));
+
+            let preview_call = {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    crate::routes::placement_preview_for_request(&state, request, 1).await
+                })
+            };
+            let query = match tokio::time::timeout(Duration::from_secs(5), preview_rx.recv()).await
+            {
+                Ok(query) => query,
+                Err(_) => {
+                    let response = preview_call.await.unwrap();
+                    panic!(
+                        "preview never reached the scheduler pricing channel: \
+                         outcome={} reason={:?}",
+                        response.outcome, response.reason
+                    );
+                }
+            };
+            let priced = match query.expect("scheduler preview channel must remain open") {
+                crate::scheduler::PlacementPreviewQuery::Generation {
+                    request, reply_tx, ..
+                } => {
+                    let _ = reply_tx.send(mold_core::GenerationPlacementPreview {
+                        version: 1,
+                        authoritative: true,
+                        state_version: 0,
+                        plan_version: 0,
+                        outcome: "planned".to_string(),
+                        reason: None,
+                        candidate: None,
+                        stage_candidates: Vec::new(),
+                        pending_downloads: Vec::new(),
+                        missing_components: Vec::new(),
+                    });
+                    request
+                }
+                _ => panic!("expected a generation pricing query"),
+            };
+            let response = preview_call.await.unwrap();
+            assert_eq!(response.outcome, "planned", "{sent_negative:?}");
+
+            assert_eq!(
+                priced.negative_prompt.as_deref(),
+                expected,
+                "preview must price the negative admission will materialize ({sent_negative:?})"
+            );
+            assert_eq!(
+                priced.negative_prompt, admitted.negative_prompt,
+                "preview and admission diverged for {sent_negative:?}"
+            );
+            // The CFG factor `request_sensitive_activation_memory` derives
+            // from `guidance > 1 && negative_prompt.is_some()` must match.
+            assert_eq!(
+                priced.guidance > 1.0 && priced.negative_prompt.is_some(),
+                admitted.guidance > 1.0 && admitted.negative_prompt.is_some(),
+                "CFG pricing factor diverged for {sent_negative:?}"
+            );
+        }
+    }
+
     // ── /api/docs ────────────────────────────────────────────────────────────
 
     #[tokio::test]
