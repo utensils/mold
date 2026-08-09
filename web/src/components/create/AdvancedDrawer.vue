@@ -493,7 +493,9 @@ function resetAdvanced() {
     return;
   }
   patch({
-    negativePrompt: "",
+    // Reset restores the model's advertised default negative (wan), not the
+    // explicit empty opt-out — matching the iPhone reset.
+    negativePrompt: props.modelValue.negativePromptDefault,
     scheduler: null,
     cfgPlus: false,
     imageAttachments: [],

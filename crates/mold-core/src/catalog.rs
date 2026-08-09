@@ -115,6 +115,15 @@ pub fn build_model_catalog(
                 ),
                 frame_step: crate::validation::frame_step_for_family(&manifest.family),
                 frame_offset: crate::validation::frame_offset_for_family(&manifest.family),
+                // Strictly the engine-applied absence fallback (wan). NOT
+                // `manifest.defaults.negative_prompt`: wuerstchen's manifest
+                // carries a CLI-layer default the server never substitutes,
+                // and advertising it would promise behavior an HTTP request
+                // does not get.
+                default_negative_prompt: crate::manifest::default_negative_prompt_for_family(
+                    &manifest.family,
+                )
+                .map(str::to_string),
                 max_pixels: resolution.max_pixels,
                 max_axis_pixels: resolution.max_axis_pixels,
                 recommended_dimensions: resolution.recommended_dimensions,
@@ -222,6 +231,10 @@ pub fn build_model_catalog(
                 max_frames_absolute: crate::validation::max_frames_absolute_for_family(&family),
                 frame_step: crate::validation::frame_step_for_family(&family),
                 frame_offset: crate::validation::frame_offset_for_family(&family),
+                default_negative_prompt: crate::manifest::default_negative_prompt_for_family(
+                    &family,
+                )
+                .map(str::to_string),
                 max_pixels: resolution.max_pixels,
                 max_axis_pixels: resolution.max_axis_pixels,
                 recommended_dimensions: resolution.recommended_dimensions,
@@ -576,6 +589,28 @@ mod tests {
             .find(|model| model.name == "qwen-image:bf16")
             .expect("manifest model should exist");
         assert_eq!(entry.info.hf_repo, "Qwen/Qwen-Image");
+    }
+
+    /// Wan rows advertise the engine's tuned absence-fallback negative so
+    /// clients can show, edit, and explicitly disable it; families whose
+    /// engines apply no default keep the field absent on the wire.
+    #[test]
+    fn catalog_advertises_wan_default_negative_prompt_only() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let models = build_model_catalog(&Config::default(), None, false);
+        let wan = models
+            .iter()
+            .find(|model| model.family == "wan")
+            .expect("wan manifests exist");
+        assert_eq!(
+            wan.defaults.default_negative_prompt.as_deref(),
+            Some(crate::manifest::WAN_DEFAULT_NEGATIVE_PROMPT)
+        );
+        let flux = models
+            .iter()
+            .find(|model| model.family == "flux")
+            .expect("flux manifests exist");
+        assert_eq!(flux.defaults.default_negative_prompt, None);
     }
 
     #[test]

@@ -22,7 +22,9 @@ export const useGenerateFormStore = defineStore("generateForm", {
     clearComposer() {
       this.form.prompt = "";
       this.form.originalPrompt = null;
-      this.form.negativePrompt = "";
+      // A cleared composer starts from the model's advertised default
+      // negative (wan), never the explicit empty opt-out.
+      this.form.negativePrompt = this.form.negativePromptDefault;
       this.form.seed = "";
       this.form.sourceImage = null;
       this.form.sourceImageName = null;

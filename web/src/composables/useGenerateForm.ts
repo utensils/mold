@@ -27,6 +27,13 @@ import {
   supportsScheduler,
 } from "../lib/generateCapabilities";
 import { composeStyle } from "../lib/stylePresets";
+import {
+  effectiveNegativeDefault,
+  negativePromptOnDefaultChange,
+  negativePromptWireValue,
+  restoredNegativeExplicitClear,
+  restoredNegativePrompt,
+} from "@studio/lib/negativePrompt";
 import { defaultVideoFps } from "@studio/lib/sequence";
 import {
   cameraMotionLoraPath,
@@ -124,6 +131,8 @@ function defaultForm(): GenerateFormState {
     originalPrompt: null,
     stylePreset: null,
     negativePrompt: "",
+    negativePromptDefault: "",
+    negativeExplicitClear: false,
     model: "",
     modelFamily: "",
     width: 1024,
@@ -248,6 +257,21 @@ function modelDefaultsPatch(
     loras: [],
     icLoraControl: null,
   };
+  // #787: a Negative field still showing the previous model's advertised
+  // default follows the new model (that is also how the default first
+  // appears); typed text and an explicit clear are user authority. The
+  // family constant backs an older server that omits the additive field so
+  // a known default (and the "" opt-out against it) never decays to absence.
+  const nextNegativeDefault = effectiveNegativeDefault(model, model.family);
+  next.negativePrompt = negativePromptOnDefaultChange(
+    current.negativePrompt,
+    current.negativePromptDefault ?? "",
+    nextNegativeDefault,
+  );
+  next.negativePromptDefault = nextNegativeDefault;
+  // Selecting a model is fresh authority: any deferred restore-time clear
+  // marker (#787 round 3) has been resolved by the rules above.
+  next.negativeExplicitClear = false;
   const capabilities = generationCapabilitiesForFamily(
     model.family,
     model.name,
@@ -387,6 +411,41 @@ export function settingsResetPatch(
   return model ? modelDefaultsPatch(base, model) : base;
 }
 
+/**
+ * Normalize a form snapshot saved before `negativePromptDefault` existed —
+ * legacy generation templates (#787 round 3) — before it replaces the live
+ * form wholesale. Such snapshots carry no tri-state authority: their empty
+ * `negativePrompt` means "untouched", never the explicit `""` opt-out, and a
+ * template loaded AFTER the installed-models watcher settled would otherwise
+ * sit with an empty default forever (the watcher's deps never change again).
+ * The snapshot's own model resolves the default (live inventory row first,
+ * then the family constant via the snapshot's stored family); a snapshot that
+ * already carries the key is post-#787 authority and passes through
+ * untouched. Mirrors desktop's `normalizeLegacyNegativeSnapshot`.
+ */
+export function normalizeLegacyNegativeFormState(
+  state: GenerateFormState,
+  models: ModelInfoExtended[] = [],
+): GenerateFormState {
+  if (typeof state.negativePromptDefault === "string") {
+    state.negativeExplicitClear ??= false;
+    return state;
+  }
+  const row = models.find((m) => m.name === state.model) ?? null;
+  const nextDefault = effectiveNegativeDefault(
+    row,
+    row?.family ?? selectedFamily(state),
+  );
+  state.negativePromptDefault = nextDefault;
+  state.negativeExplicitClear = false;
+  if (state.negativePrompt.trim() === "") {
+    // Legacy omission is the untouched state: show the default so the wire
+    // stays absent, exactly what the pre-#787 template produced.
+    state.negativePrompt = nextDefault;
+  }
+  return state;
+}
+
 export interface ApplyMetadataOptions {
   models?: ModelInfoExtended[];
   format?: OutputFormat | null;
@@ -404,7 +463,12 @@ export function applyMetadataToForm(
   const model = options.models?.find((m) => m.name === metadata.model);
   const next = model
     ? modelDefaultsPatch(current, model)
-    : { ...cloneFormState(current), model: metadata.model, modelFamily: "" };
+    : {
+        ...cloneFormState(current),
+        model: metadata.model,
+        modelFamily: "",
+        negativePromptDefault: "",
+      };
   const loras =
     metadata.loras?.map<LoraSelection>((l) => ({
       path: l.path,
@@ -432,7 +496,20 @@ export function applyMetadataToForm(
     // Saved metadata already carries the fully-composed prompt (style extras
     // included at generation time); re-applying a preset would double-append.
     stylePreset: null,
-    negativePrompt: metadata.negative_prompt ?? "",
+    // Absence predates truthful recording: on a defaulted model it means the
+    // default conditioned the render, so restore shows it rather than
+    // silently flipping the reuse into an explicit empty-uncond opt-out.
+    negativePrompt: restoredNegativePrompt(
+      metadata.negative_prompt,
+      next.negativePromptDefault ?? "",
+    ),
+    // A recorded `""` is the explicit opt-out. When this restore ran before
+    // the model rows resolved, the empty control is otherwise identical to
+    // "untouched" — the marker carries the print's authority until the
+    // default is known (#787 round 3).
+    negativeExplicitClear: restoredNegativeExplicitClear(
+      metadata.negative_prompt,
+    ),
     width: metadata.generation_width || metadata.width || next.width,
     height: metadata.generation_height || metadata.height || next.height,
     steps: metadata.steps || next.steps,
@@ -767,6 +844,19 @@ export interface UseGenerateForm {
    * keeping the prompt, style, model and batch size (`settingsResetPatch`). */
   resetSettings: (model: ModelInfoExtended | null) => void;
   applyModelDefaults: (model: ModelInfoExtended) => void;
+  /**
+   * Reconcile the restored form's negative-default state against the resolved
+   * catalog row for the *currently selected* model once the inventory lands
+   * (#787 round 2). A persisted v3 snapshot that predates
+   * `negativePromptDefault` restores with an empty default, and the
+   * installed-model watcher early-returns because the saved model is still
+   * valid — without this, upgraded users never see the prefill and cannot
+   * express the "" opt-out until they switch models. Runs the same
+   * `negativePromptOnDefaultChange` + default update as the model-switch
+   * path, so it is idempotent and never clobbers typed text or an explicit
+   * clear recorded against a known default.
+   */
+  reconcileNegativeDefault: (model: ModelInfoExtended) => void;
   /** Replace the entire LoRA stack. Pass `[]` to clear. */
   setLoras: (loras: LoraSelection[]) => void;
   /** Append a LoRA to the stack, capped by `MAX_LORA_STACK`. No-op if
@@ -856,6 +946,25 @@ export function useGenerateForm(): UseGenerateForm {
       // the new variant's tensor layout.
       state.value = modelDefaultsPatch(state.value, m);
     },
+    reconcileNegativeDefault: (m) => {
+      const s = state.value;
+      // Only the selected model's row is authority for the visible field.
+      if (m.name !== s.model) return;
+      const nextDefault = effectiveNegativeDefault(m, m.family);
+      const nextPrompt = negativePromptOnDefaultChange(
+        s.negativePrompt,
+        s.negativePromptDefault ?? "",
+        nextDefault,
+        // A reuse restored before this row landed may carry the explicit
+        // `""` opt-out — indistinguishable from untouched without the
+        // marker, which keeps the clear instead of prefilling (#787 r3).
+        s.negativeExplicitClear ?? false,
+      );
+      if (nextPrompt !== s.negativePrompt) s.negativePrompt = nextPrompt;
+      if ((s.negativePromptDefault ?? "") !== nextDefault) {
+        s.negativePromptDefault = nextDefault;
+      }
+    },
     toRequest: (model = null) => {
       const s = state.value;
       // The wire format strips per-row metadata (trigger phrases) — only
@@ -940,8 +1049,16 @@ export function useGenerateForm(): UseGenerateForm {
         s.originalPrompt.trim() !== styled.prompt
           ? { original_prompt: s.originalPrompt.trim() }
           : {}),
+        // Tri-state (#787): text equal to the advertised default stays
+        // absent (older servers behave identically), a cleared defaulted
+        // field ships the explicit "" opt-out, typed/styled text travels
+        // verbatim. `null` and omission both read as absent server-side.
         negative_prompt: capabilities.supportsNegativePrompt
-          ? styled.negative || null
+          ? (negativePromptWireValue(
+              styled.negative ?? "",
+              s.negativePromptDefault ?? "",
+              s.negativeExplicitClear ?? false,
+            ) ?? null)
           : null,
         model: s.model,
         width: s.width,

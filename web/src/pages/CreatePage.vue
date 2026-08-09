@@ -17,6 +17,10 @@ import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
 import EstimateBadge from "../components/create/EstimateBadge.vue";
 import { advancedActiveCount } from "../components/create/advancedCount";
+import {
+  effectiveNegativeDefault,
+  restoredNegativePrompt,
+} from "@studio/lib/negativePrompt";
 import { projectResolution } from "../components/create/resolutionProjection";
 import SequenceComposer from "../components/SequenceComposer.vue";
 import ExpandModal from "../components/ExpandModal.vue";
@@ -1323,8 +1327,17 @@ watch(
     const first = installedModels.value[0];
     if (!first) return;
     const current = form.state.value.model;
-    if (current && installedModels.value.some((m) => m.name === current))
+    const currentRow = current
+      ? installedModels.value.find((m) => m.name === current)
+      : undefined;
+    if (currentRow) {
+      // The saved model is still valid, so no defaults reapply — but a
+      // pre-#787 snapshot restored without `negativePromptDefault` still
+      // needs the advertised default reconciled in (idempotent; typed text
+      // and an explicit clear survive).
+      form.reconcileNegativeDefault(currentRow);
       return;
+    }
     form.applyModelDefaults(first);
   },
   { immediate: true },
@@ -1879,6 +1892,9 @@ const advCount = computed(() =>
     : advancedActiveCount({
         negativePrompt: capabilities.value.supportsNegativePrompt
           ? form.state.value.negativePrompt
+          : "",
+        negativePromptDefault: capabilities.value.supportsNegativePrompt
+          ? (form.state.value.negativePromptDefault ?? "")
           : "",
         hasSource: form.state.value.imageAttachments.length > 0,
         loraCount: form.state.value.loras.length,
@@ -3167,15 +3183,26 @@ function openJob(job: Job) {
   form.state.value.sourceFitPolicy = { mode: "pad-repaint" };
   form.state.value.cameraControl = null;
   form.state.value.model = request.model;
-  form.state.value.modelFamily =
-    models.value.find((model) => model.name === request.model)?.family ?? "";
+  const requestModel = models.value.find(
+    (model) => model.name === request.model,
+  );
+  form.state.value.modelFamily = requestModel?.family ?? "";
+  form.state.value.negativePromptDefault = effectiveNegativeDefault(
+    requestModel,
+    requestModel?.family ?? "",
+  );
   form.state.value.width = request.width;
   form.state.value.height = request.height;
   form.state.value.steps = request.steps;
   form.state.value.guidance = request.guidance ?? form.state.value.guidance;
   form.state.value.seed = request.seed == null ? null : Number(request.seed);
   form.state.value.seedMode = request.seed == null ? "random" : "static";
-  form.state.value.negativePrompt = request.negative_prompt ?? "";
+  // Absence in a queued request means the server materialized the model's
+  // default (#787); a recorded "" was the explicit empty-uncond opt-out.
+  form.state.value.negativePrompt = restoredNegativePrompt(
+    request.negative_prompt,
+    form.state.value.negativePromptDefault ?? "",
+  );
   form.state.value.scheduler = request.scheduler ?? null;
   form.state.value.cfgPlus = request.cfg_plus ?? false;
   form.state.value.batchSize = request.batch_size ?? 1;

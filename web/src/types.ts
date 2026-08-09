@@ -384,6 +384,11 @@ export interface ModelInfoExtended extends ModelDefaults {
     supports_negative_prompt: boolean;
     fixed_scale?: number | null;
   } | null;
+  /** Tuned default negative prompt the engine applies when a request omits
+   * `negative_prompt` entirely (`/api/models`, additive; wan today). Absent
+   * on older servers and on families without one. An explicit `""` in a
+   * request remains the opt-out — see `@studio/lib/negativePrompt`. */
+  default_negative_prompt?: string | null;
   /** Model's own default frame count (`/api/models`, additive) — LTX-2
    * ships 97, LTX-Video 25; absent on older servers and image models. */
   default_frames?: number | null;
@@ -874,6 +879,17 @@ export interface GenerateFormState {
    * textarea content (`prompt`) is never rewritten by the style row. */
   stylePreset: string | null;
   negativePrompt: string;
+  /** The selected model's advertised default negative
+   * (`default_negative_prompt`, wan today; "" when none). Optional so
+   * persisted pre-#787 form snapshots keep loading; semantics live in
+   * `@studio/lib/negativePrompt`. */
+  negativePromptDefault?: string;
+  /** Restore-time explicit-clear authority (#787 round 3): true when a reuse
+   * carried the explicit `""` opt-out while the advertised default was still
+   * unknown. Keeps the clear from decaying to "untouched" once the model row
+   * resolves; semantics live in `@studio/lib/negativePrompt`. Optional so
+   * persisted pre-round-3 snapshots keep loading. */
+  negativeExplicitClear?: boolean;
   model: string;
   /** Family for the selected model. Stored so request serialization can
    * choose family-specific wire fields without needing the model catalog. */

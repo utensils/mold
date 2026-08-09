@@ -92,7 +92,12 @@ import {
   unsupportedAutoChainFields,
   type ChainRoutingDecision,
 } from "../lib/chainRouting";
-import { applyPrefillToForm, buildRequest, cloneGenerateForm } from "../lib/generateForm";
+import {
+  applyPrefillToForm,
+  buildRequest,
+  cloneGenerateForm,
+  normalizeLegacyNegativeSnapshot,
+} from "../lib/generateForm";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import { videoFramesError } from "@studio/lib/videoDuration";
 import {
@@ -1563,8 +1568,10 @@ async function loadTemplate(template: GenerationTemplate) {
   const hydrated = await hydrateGenerationTemplate(template);
   if (epoch !== templateLoadEpoch) return;
   // buildRequest's pruneRequestForFamily still guards anything the (possibly
-  // different) family can't use after the source snapshot is restored.
-  Object.assign(form, hydrated.form);
+  // different) family can't use after the source snapshot is restored. A
+  // pre-#787 template lacking `negativePromptDefault` is normalized first so
+  // its empty negative reads as "untouched", not the explicit "" opt-out.
+  Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, installedModels.value));
   if (form.model && !findInstalledModel(installedModels.value, form.model)) {
     toasts.push(`Model "${form.model}" isn't installed — settings applied anyway.`);
   }

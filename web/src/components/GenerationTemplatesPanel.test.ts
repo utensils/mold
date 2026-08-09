@@ -9,6 +9,7 @@ import {
   settleConfirm,
   useNotifications,
 } from "../lib/toasts";
+import { WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT } from "@studio/lib/negativePrompt";
 
 function makeForm(
   overrides: Partial<GenerateFormState> = {},
@@ -96,6 +97,64 @@ describe("GenerationTemplatesPanel", () => {
       .emitted("update:modelValue")
       ?.at(-1)?.[0] as GenerateFormState;
     expect(emitted.prompt).toBe("from template");
+  });
+
+  it("normalizes a pre-#787 wan template loaded after models settle", async () => {
+    // A legacy template stores no `negativePromptDefault` and its "" means
+    // "untouched". Loading it replaces form.state wholesale AFTER the
+    // installed-models watcher already ran, so hydration itself must resolve
+    // the default — otherwise the user sees an empty field with no
+    // expressible opt-out and no prefill (#787 round 3).
+    const legacy = makeForm({
+      model: "wan22-t2v-a14b:q5",
+      modelFamily: "wan",
+      negativePrompt: "",
+    });
+    delete (legacy as Partial<GenerateFormState>).negativePromptDefault;
+    delete (legacy as Partial<GenerateFormState>).negativeExplicitClear;
+    saveGenerationTemplate("Wan shot", legacy);
+    const w = mount(GenerationTemplatesPanel, {
+      props: { modelValue: makeForm({ prompt: "current" }) },
+    });
+
+    await w.find("[data-test='template-load']").trigger("click");
+    await flushPromises();
+
+    const emitted = w
+      .emitted("update:modelValue")
+      ?.at(-1)?.[0] as GenerateFormState;
+    expect(emitted.negativePrompt).toBe(WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT);
+    expect(emitted.negativePromptDefault).toBe(
+      WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT,
+    );
+    expect(emitted.negativeExplicitClear).toBe(false);
+  });
+
+  it("keeps a post-#787 template's recorded tri-state untouched on load", async () => {
+    saveGenerationTemplate(
+      "Cleared wan",
+      makeForm({
+        model: "wan22-t2v-a14b:q5",
+        modelFamily: "wan",
+        negativePrompt: "",
+        negativePromptDefault: WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT,
+      }),
+    );
+    const w = mount(GenerationTemplatesPanel, {
+      props: { modelValue: makeForm({ prompt: "current" }) },
+    });
+
+    await w.find("[data-test='template-load']").trigger("click");
+    await flushPromises();
+
+    const emitted = w
+      .emitted("update:modelValue")
+      ?.at(-1)?.[0] as GenerateFormState;
+    // The recorded explicit clear stays a clear against its stored default.
+    expect(emitted.negativePrompt).toBe("");
+    expect(emitted.negativePromptDefault).toBe(
+      WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT,
+    );
   });
 
   it("does not let a slower earlier template load overwrite the latest choice", async () => {

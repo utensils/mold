@@ -6,10 +6,14 @@ import {
   buildRequest,
   cloneGenerateForm,
   newGenerateForm,
+  normalizeLegacyNegativeSnapshot,
+  reconcileModelCapabilities,
   resetFormToModelDefaults,
   seedMode,
+  type GenerateForm,
 } from "./generateForm";
 import { MAX_LORA_STACK } from "./capabilities";
+import { WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT } from "@studio/lib/negativePrompt";
 import type { ModelEntry, OutputMetadata } from "./api/types";
 
 function ltx2Model(): ModelEntry {
@@ -55,6 +59,255 @@ describe("model-specific audio capability", () => {
     expect(form.frames).toBe(124);
     expect(form.fps).toBe(24);
     expect(form.outputFormat).toBe("mp4");
+  });
+});
+
+describe("advertised default negative prompt (#787)", () => {
+  const WAN_DEFAULT = "色调艳丽，过曝，静态，细节模糊不清";
+
+  function wanModel(): ModelEntry {
+    return {
+      ...ltx2Model(),
+      name: "wan22-t2v-a14b:q5",
+      family: "wan",
+      default_negative_prompt: WAN_DEFAULT,
+      guidance_capabilities: {
+        adjustable: true,
+        supports_negative_prompt: true,
+      },
+    };
+  }
+
+  it("prefills the advertised default when a wan model is selected", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, wanModel());
+    expect(form.negativePrompt).toBe(WAN_DEFAULT);
+    expect(form.negativePromptDefault).toBe(WAN_DEFAULT);
+  });
+
+  it("keeps an untouched default absent on the wire", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, wanModel());
+    form.prompt = "a cat";
+    expect(buildRequest(form).negative_prompt).toBeUndefined();
+  });
+
+  it("ships the explicit empty opt-out when the user clears the field", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, wanModel());
+    form.prompt = "a cat";
+    form.negativePrompt = "";
+    expect(buildRequest(form).negative_prompt).toBe("");
+  });
+
+  it("ships typed text verbatim", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, wanModel());
+    form.prompt = "a cat";
+    form.negativePrompt = "hands";
+    expect(buildRequest(form).negative_prompt).toBe("hands");
+  });
+
+  it("withdraws an untouched default when leaving the family, but keeps typed text", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, wanModel());
+    applyModelDefaults(form, ltx2Model());
+    expect(form.negativePrompt).toBe("");
+    expect(form.negativePromptDefault).toBe("");
+
+    applyModelDefaults(form, wanModel());
+    form.negativePrompt = "hands";
+    applyModelDefaults(form, ltx2Model());
+    expect(form.negativePrompt).toBe("hands");
+  });
+
+  it("keeps today's omit-empty behavior for models without a default", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, ltx2Model());
+    form.prompt = "a cat";
+    expect(buildRequest(form).negative_prompt).toBeUndefined();
+  });
+
+  it('restores absent metadata negatives as the model\'s default, and "" as empty', () => {
+    const metadata = {
+      prompt: "a cat",
+      model: "wan22-t2v-a14b:q5",
+      seed: 7,
+      steps: 30,
+      guidance: 6,
+      width: 832,
+      height: 480,
+      version: "1",
+    } as OutputMetadata;
+    const form = newGenerateForm();
+    applyMetadataToForm(form, metadata, [wanModel()]);
+    expect(form.negativePrompt).toBe(WAN_DEFAULT);
+
+    const optedOut = newGenerateForm();
+    applyMetadataToForm(optedOut, { ...metadata, negative_prompt: "" }, [wanModel()]);
+    expect(optedOut.negativePrompt).toBe("");
+    expect(buildRequest(optedOut).negative_prompt).toBe("");
+  });
+
+  it("keeps the wan family default when an older server omits the field", () => {
+    // Reconciling the same model against a host that predates the additive
+    // advertisement must not decay the known default — the "" opt-out below
+    // would otherwise serialize as absence and re-enable the engine fallback.
+    const form = newGenerateForm();
+    applyModelDefaults(form, wanModel());
+    form.negativePrompt = "";
+    const olderRow = { ...wanModel() };
+    delete olderRow.default_negative_prompt;
+    applyModelDefaults(form, olderRow);
+    expect(form.negativePromptDefault).toBe(WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT);
+    form.prompt = "a cat";
+    expect(buildRequest(form).negative_prompt).toBe("");
+  });
+});
+
+describe("deferred explicit-clear restore authority (#787 round 3)", () => {
+  const WAN_DEFAULT = "色调艳丽，过曝，静态，细节模糊不清";
+
+  function wanModel(): ModelEntry {
+    return {
+      ...ltx2Model(),
+      name: "wan22-t2v-a14b:q5",
+      family: "wan",
+      default_negative_prompt: WAN_DEFAULT,
+      guidance_capabilities: {
+        adjustable: true,
+        supports_negative_prompt: true,
+      },
+    };
+  }
+
+  const metadata = {
+    prompt: "a cat",
+    model: "wan22-t2v-a14b:q5",
+    seed: 7,
+    steps: 30,
+    guidance: 6,
+    width: 832,
+    height: 480,
+    version: "1",
+  } as OutputMetadata;
+
+  it("a reused explicit clear restored before rows load survives the row arriving", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(form, { ...metadata, negative_prompt: "" }, []);
+    expect(form.negativePrompt).toBe("");
+    expect(form.negativeExplicitClear).toBe(true);
+    // The wire ships the opt-out even while the default is unknown — absence
+    // would silently re-enable the engine fallback the print disabled.
+    expect(buildRequest(form).negative_prompt).toBe("");
+
+    // The wan row lands (host reconnect / inventory refresh): the clear is
+    // kept instead of being mistaken for "untouched" and prefilled.
+    reconcileModelCapabilities(form, wanModel());
+    expect(form.negativePrompt).toBe("");
+    expect(form.negativePromptDefault).toBe(WAN_DEFAULT);
+    expect(buildRequest(form).negative_prompt).toBe("");
+  });
+
+  it("absence restored before rows load still takes the prefill when the row arrives", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(form, metadata, []);
+    expect(form.negativeExplicitClear).toBe(false);
+    reconcileModelCapabilities(form, wanModel());
+    expect(form.negativePrompt).toBe(WAN_DEFAULT);
+  });
+
+  it("explicitly selecting a model resets the deferred marker and prefills", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(form, { ...metadata, negative_prompt: "" }, []);
+    expect(form.negativeExplicitClear).toBe(true);
+    // A user model pick is fresh authority — unlike the row-refresh path it
+    // resolves the deferred clear and shows the new model's default.
+    applyModelDefaults(form, wanModel());
+    expect(form.negativePrompt).toBe(WAN_DEFAULT);
+    expect(form.negativeExplicitClear).toBe(false);
+  });
+});
+
+describe("normalizeLegacyNegativeSnapshot (#787 round 2)", () => {
+  const WAN_DEFAULT = "色调艳丽，过曝，静态，细节模糊不清";
+
+  function wanRow(): ModelEntry {
+    return {
+      ...ltx2Model(),
+      name: "wan22-t2v-a14b:q5",
+      family: "wan",
+      default_negative_prompt: WAN_DEFAULT,
+      guidance_capabilities: {
+        adjustable: true,
+        supports_negative_prompt: true,
+      },
+    };
+  }
+
+  /** A template form saved before #787: the key is absent, not empty. */
+  function legacySnapshot(overrides: Partial<GenerateForm> = {}): GenerateForm {
+    const { negativePromptDefault: _dropped, ...rest } = {
+      ...newGenerateForm(),
+      model: "wan22-t2v-a14b:q5",
+      family: "wan",
+      negativePrompt: "",
+      ...overrides,
+    };
+    void _dropped;
+    return rest as GenerateForm;
+  }
+
+  it("treats a legacy empty negative as untouched, never the explicit opt-out", () => {
+    const normalized = normalizeLegacyNegativeSnapshot(legacySnapshot(), [wanRow()]);
+    expect(normalized.negativePrompt).toBe(WAN_DEFAULT);
+    expect(normalized.negativePromptDefault).toBe(WAN_DEFAULT);
+
+    // The regression this guards: Object.assign of the raw legacy shape kept
+    // the live form's previous default beside the template's "", which
+    // buildRequest serialized as the explicit "" opt-out.
+    const live = newGenerateForm();
+    applyModelDefaults(live, wanRow());
+    Object.assign(live, normalized);
+    live.prompt = "a cat";
+    expect(buildRequest(live).negative_prompt).toBeUndefined();
+  });
+
+  it("resolves the family constant when the model is not in the inventory", () => {
+    const normalized = normalizeLegacyNegativeSnapshot(legacySnapshot(), []);
+    expect(normalized.negativePromptDefault).toBe(WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT);
+    expect(normalized.negativePrompt).toBe(WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT);
+  });
+
+  it("keeps legacy typed text as user authority", () => {
+    const normalized = normalizeLegacyNegativeSnapshot(
+      legacySnapshot({ negativePrompt: "hands" }),
+      [wanRow()],
+    );
+    expect(normalized.negativePrompt).toBe("hands");
+    expect(normalized.negativePromptDefault).toBe(WAN_DEFAULT);
+  });
+
+  it("leaves a non-defaulted legacy snapshot untouched", () => {
+    const normalized = normalizeLegacyNegativeSnapshot(
+      legacySnapshot({ model: "sdxl:base", family: "sdxl" }),
+      [],
+    );
+    expect(normalized.negativePrompt).toBe("");
+    expect(normalized.negativePromptDefault).toBe("");
+  });
+
+  it("passes a post-#787 snapshot through untouched — its opt-out is authority", () => {
+    const snapshot = {
+      ...newGenerateForm(),
+      model: "wan22-t2v-a14b:q5",
+      family: "wan",
+      negativePrompt: "",
+      negativePromptDefault: WAN_DEFAULT,
+    };
+    const normalized = normalizeLegacyNegativeSnapshot(snapshot, [wanRow()]);
+    expect(normalized.negativePrompt).toBe("");
+    expect(normalized.negativePromptDefault).toBe(WAN_DEFAULT);
   });
 });
 

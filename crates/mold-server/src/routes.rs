@@ -869,6 +869,13 @@ async fn prepare_generation(
     // field. This must happen before validation so the validator sees a concrete
     // format and can gate on it correctly.
     request.normalise_output_format(resolved_family.as_deref());
+    // Materialize the family's tuned default negative (wan) into the request
+    // when the caller omitted the field, so the queue/worker metadata — and
+    // therefore saved gallery provenance and "Reuse settings" — record the
+    // uncond that actually conditions the render. Same engine semantics
+    // either way; an explicit value (the empty-string opt-out included) is
+    // authoritative and passes through untouched.
+    materialize_default_negative_prompt(request, resolved_family.as_deref());
 
     let planned_control = plan_builtin_ltx2_control(state, request).await?;
     let planned_camera_controls = plan_builtin_ltx2_camera_controls(state, request).await?;
@@ -1154,6 +1161,28 @@ async fn plan_builtin_ltx2_control(
         .resolved_models_dir()
         .join(mold_core::manifest::storage_path(manifest, file));
     Ok(Some((adapter, path)))
+}
+
+/// Resolve the engine's absence-fallback negative prompt into the request.
+///
+/// The wan engine substitutes its tuned default when `negative_prompt` is
+/// absent (`wan/pipeline.rs::resolve_negative_prompt`); recording the request
+/// as-received left saved metadata claiming no negative while ~60 Chinese
+/// tokens conditioned the render (#787). Resolving here — after family
+/// resolution, before validation and metadata capture — makes provenance
+/// truthful without changing what renders. `Some("")` is the explicit
+/// opt-out and must never be replaced.
+pub(crate) fn materialize_default_negative_prompt(
+    request: &mut mold_core::GenerateRequest,
+    family: Option<&str>,
+) {
+    if request.negative_prompt.is_none() {
+        if let Some(default) =
+            family.and_then(mold_core::manifest::default_negative_prompt_for_family)
+        {
+            request.negative_prompt = Some(default.to_string());
+        }
+    }
 }
 
 /// Replace a lip-dub request's `frames` / `fps` with the reference clip's own.
@@ -2945,6 +2974,15 @@ pub(crate) async fn placement_preview_for_request(
         response.authoritative = true;
         return response;
     }
+    // Admission materializes the family's tuned default negative (wan) before
+    // the scheduler prices the job, and `request_sensitive_activation_memory`
+    // doubles its CFG activation factor for `guidance > 1` only when a
+    // negative is present. An authoritative preview priced without the same
+    // materialization would promise a 1x plan admission re-prices at 2x —
+    // exactly the divergence the placement-preview authority contract forbids.
+    // Same seam, same semantics: absence fills in, the explicit `""` opt-out
+    // and typed values pass through untouched.
+    materialize_default_negative_prompt(&mut request, resolved_family.as_deref());
     if let Some(task) = mold_core::minimax_h3::task_for_model(&request.model) {
         match (task, request.references.as_deref()) {
             (mold_core::minimax_h3::Task::Ref2va, Some(references)) => {
@@ -7313,6 +7351,76 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    /// #787: an absent negative on a wan request materializes the tuned
+    /// default so queue/worker metadata record the real uncond; an explicit
+    /// value — the empty-string opt-out above all — passes through untouched,
+    /// and families without an engine fallback stay absent.
+    #[test]
+    fn materialize_default_negative_prompt_fills_wan_absence_only() {
+        let request = || -> mold_core::GenerateRequest {
+            serde_json::from_value(serde_json::json!({
+                "prompt": "a cat",
+                "model": "wan22-t2v-a14b:q5",
+                "width": 832,
+                "height": 480,
+                "steps": 20,
+                "guidance": 3.5,
+                "batch_size": 1,
+                "strength": 0.75
+            }))
+            .unwrap()
+        };
+
+        let mut absent = request();
+        materialize_default_negative_prompt(&mut absent, Some("wan"));
+        assert_eq!(
+            absent.negative_prompt.as_deref(),
+            Some(mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT)
+        );
+
+        let mut opted_out = request();
+        opted_out.negative_prompt = Some(String::new());
+        materialize_default_negative_prompt(&mut opted_out, Some("wan"));
+        assert_eq!(opted_out.negative_prompt.as_deref(), Some(""));
+
+        let mut explicit = request();
+        explicit.negative_prompt = Some("blurry".into());
+        materialize_default_negative_prompt(&mut explicit, Some("wan"));
+        assert_eq!(explicit.negative_prompt.as_deref(), Some("blurry"));
+
+        let mut other_family = request();
+        materialize_default_negative_prompt(&mut other_family, Some("flux"));
+        assert_eq!(other_family.negative_prompt, None);
+
+        let mut unknown_family = request();
+        materialize_default_negative_prompt(&mut unknown_family, None);
+        assert_eq!(unknown_family.negative_prompt, None);
+    }
+
+    /// The materialized request is what `OutputMetadata::from_generate_request`
+    /// captures everywhere (queue, workers, batch runtime), so this pins the
+    /// truthful-provenance half of #787's acceptance criteria.
+    #[test]
+    fn materialized_wan_negative_reaches_output_metadata() {
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat",
+            "model": "wan22-t2v-a14b:q5",
+            "width": 832,
+            "height": 480,
+            "steps": 20,
+            "guidance": 3.5,
+            "batch_size": 1,
+            "strength": 0.75
+        }))
+        .unwrap();
+        materialize_default_negative_prompt(&mut request, Some("wan"));
+        let metadata = mold_core::OutputMetadata::from_generate_request(&request, 7, None, "test");
+        assert_eq!(
+            metadata.negative_prompt.as_deref(),
+            Some(mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT)
+        );
     }
 
     #[tokio::test]

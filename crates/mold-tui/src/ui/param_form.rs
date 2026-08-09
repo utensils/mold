@@ -102,12 +102,25 @@ pub fn render(
     let scroll = clamp_scroll(&offsets, sel, inner.height as usize, state.param_scroll);
     state.param_scroll = scroll;
 
+    // Badge "active" means differs-from-default (#787): a wan editor still
+    // showing the model's advertised default negative is not user-active,
+    // while an explicit clear (the empty-uncond opt-out) is. Matches the
+    // desktop inspector's `advancedActiveCount` semantics. The section
+    // summary keeps text emptiness ("on" = a negative conditions the
+    // render, tuned default included) — see the `neg_empty` binding below.
+    let neg_inactive = create_form::negative_prompt_wire_value(
+        &state.negative_prompt.lines().join("\n"),
+        &state.negative_default,
+        state.capabilities.supports_negative_prompt,
+        state.negative_explicit_clear,
+    )
+    .is_none();
     let neg_empty = state
         .negative_prompt
         .lines()
         .iter()
         .all(|l| l.trim().is_empty());
-    let active = create_form::advanced_active_count(&state.params, neg_empty);
+    let active = create_form::advanced_active_count(&state.params, neg_inactive);
 
     let mut neg_rect = None;
     for (i, row) in rows.iter().enumerate() {

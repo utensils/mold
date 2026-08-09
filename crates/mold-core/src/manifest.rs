@@ -4921,6 +4921,21 @@ fn qwen3_expand_manifests() -> Vec<ModelManifest> {
 /// defaults; the engine falls back to it when a request arrives without one.
 pub const WAN_DEFAULT_NEGATIVE_PROMPT: &str = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走";
 
+/// The tuned default negative prompt a family's *engine* substitutes when a
+/// request carries no `negative_prompt` at all. This is the single source for
+/// every surface that advertises, materializes, or prefills that default —
+/// `/api/models[].default_negative_prompt`, the server's request
+/// materialization, the CLI's local fallback, and TUI prefill all resolve
+/// through here so they cannot drift from the engine
+/// (`wan/pipeline.rs::resolve_negative_prompt`). An explicit value — the
+/// empty string included — is always authoritative and never replaced.
+pub fn default_negative_prompt_for_family(family: &str) -> Option<&'static str> {
+    match family {
+        "wan" => Some(WAN_DEFAULT_NEGATIVE_PROMPT),
+        _ => None,
+    }
+}
+
 /// The A14B quality tier's advertised guidance scale. Upstream runs the tier
 /// with *per-expert* scales — T2V `(3.0, 4.0)` low/high, I2V `(3.5, 3.5)`
 /// (`Wan2.2/wan/configs/wan_{t2v,i2v}_A14B.py:37`) — which a single wire
@@ -6103,6 +6118,43 @@ fn upscaler_manifests() -> Vec<ModelManifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The engine's absence fallback (`wan/pipeline.rs::resolve_negative_prompt`)
+    /// and the advertised default must be one value: every wan manifest
+    /// plants exactly the family constant. Only wan gets an engine-side
+    /// substitution — wuerstchen's manifest negative is a CLI-layer default
+    /// (`resolved_model_config`) the server never applies, so the helper must
+    /// keep returning None for it rather than promising HTTP behavior that
+    /// does not exist.
+    #[test]
+    fn family_default_negative_prompt_matches_the_wan_manifests() {
+        assert_eq!(
+            default_negative_prompt_for_family("wan"),
+            Some(WAN_DEFAULT_NEGATIVE_PROMPT)
+        );
+        for family in [
+            "flux",
+            "ltx2",
+            "ltx-video",
+            "sdxl",
+            "sd15",
+            "qwen-image",
+            "wuerstchen",
+        ] {
+            assert_eq!(default_negative_prompt_for_family(family), None);
+        }
+        let mut wan_manifests = 0;
+        for manifest in known_manifests().iter().filter(|m| m.family == "wan") {
+            wan_manifests += 1;
+            assert_eq!(
+                manifest.defaults.negative_prompt.as_deref(),
+                Some(WAN_DEFAULT_NEGATIVE_PROMPT),
+                "wan manifest {} disagrees with the engine fallback",
+                manifest.name
+            );
+        }
+        assert!(wan_manifests > 0, "wan manifests exist");
+    }
 
     #[test]
     fn camera_control_presets_have_hidden_auxiliary_download_manifests() {

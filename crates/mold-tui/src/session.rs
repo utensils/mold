@@ -19,6 +19,13 @@ pub struct TuiSession {
     pub last_prompt: String,
     #[serde(default)]
     pub last_negative: String,
+    /// Whether an empty [`Self::last_negative`] was an explicit clear of an
+    /// advertised default negative (#787) — the `""` empty-uncond opt-out —
+    /// rather than an untouched field. `None` on legacy sessions that
+    /// predate the marker, which restore as untouched (the default
+    /// prefills).
+    #[serde(default)]
+    pub negative_cleared: Option<bool>,
     #[serde(default)]
     pub last_model: String,
     // Generation parameters
@@ -120,6 +127,7 @@ impl TuiSession {
         Self {
             last_prompt: prompt.to_string(),
             last_negative: negative.to_string(),
+            negative_cleared: None,
             last_model: params.model.clone(),
             width: Some(params.width),
             height: Some(params.height),
@@ -143,6 +151,13 @@ impl TuiSession {
     /// to `from_params` without adding a positional argument.
     pub fn with_theme(mut self, preset: super::ui::theme::ThemePreset) -> Self {
         self.theme = Some(preset.slug().to_string());
+        self
+    }
+
+    /// Record whether an empty negative was an explicit clear of an
+    /// advertised default (#787). Chainable like [`Self::with_theme`].
+    pub fn with_negative_cleared(mut self, cleared: bool) -> Self {
+        self.negative_cleared = Some(cleared);
         self
     }
 
@@ -258,11 +273,13 @@ fn load_from_db(db: &MetadataDb) -> TuiSession {
         .get_str(keys::TUI_LAST_NEGATIVE)
         .unwrap_or(None)
         .unwrap_or_default();
+    let negative_cleared = s.get_bool(keys::TUI_NEGATIVE_CLEARED).unwrap_or(None);
     let theme = s.get_str(keys::TUI_THEME).unwrap_or(None);
 
     let mut session = TuiSession {
         last_prompt,
         last_negative,
+        negative_cleared,
         last_model: last_model.clone(),
         theme,
         ..Default::default()
@@ -309,6 +326,13 @@ fn save_to_db(db: &MetadataDb, session: &TuiSession) {
     }
     if let Err(e) = s.set_str(keys::TUI_LAST_NEGATIVE, &session.last_negative) {
         tracing::warn!(error = %e, "tui session: set last_negative failed");
+    }
+    if let Some(cleared) = session.negative_cleared {
+        // Written on every save that carries the marker, so a later prefill
+        // or typed text always retires a stale `true`.
+        if let Err(e) = s.set_bool(keys::TUI_NEGATIVE_CLEARED, cleared) {
+            tracing::warn!(error = %e, "tui session: set negative_cleared failed");
+        }
     }
     if !session.last_model.is_empty() {
         let _ = s.set_str(keys::TUI_LAST_MODEL, &session.last_model);
@@ -461,6 +485,7 @@ mod tests {
             let seed = TuiSession {
                 last_prompt: "a cat".into(),
                 last_negative: "blurry".into(),
+                negative_cleared: Some(false),
                 last_model: "flux-dev:q4".into(),
                 width: Some(1024),
                 height: Some(1024),
@@ -512,6 +537,39 @@ mod tests {
                 );
                 loaded.save();
             }
+        });
+    }
+
+    #[test]
+    #[serial(mold_env)]
+    fn negative_cleared_marker_round_trips_and_legacy_sessions_stay_none() {
+        with_isolated_env(|_home| {
+            // Legacy rows carry no marker; the loader must not invent one, so
+            // an empty saved negative restores as "untouched" (prefill).
+            let legacy = TuiSession {
+                last_model: "wan21-t2v-1.3b:bf16".into(),
+                ..Default::default()
+            };
+            legacy.save();
+            assert_eq!(TuiSession::load().negative_cleared, None);
+
+            // An explicit clear survives restart distinguishably…
+            let cleared = TuiSession {
+                last_model: "wan21-t2v-1.3b:bf16".into(),
+                ..Default::default()
+            }
+            .with_negative_cleared(true);
+            cleared.save();
+            assert_eq!(TuiSession::load().negative_cleared, Some(true));
+
+            // …and a later save without the clear retires the stale marker.
+            let restored = TuiSession {
+                last_model: "wan21-t2v-1.3b:bf16".into(),
+                ..Default::default()
+            }
+            .with_negative_cleared(false);
+            restored.save();
+            assert_eq!(TuiSession::load().negative_cleared, Some(false));
         });
     }
 
@@ -683,6 +741,7 @@ mod tests {
         let session = TuiSession {
             last_prompt: "a cat".to_string(),
             last_negative: "ugly".to_string(),
+            negative_cleared: None,
             last_model: "sd15:fp16".to_string(),
             width: Some(512),
             height: Some(768),

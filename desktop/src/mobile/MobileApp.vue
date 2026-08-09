@@ -112,6 +112,7 @@ import {
   syncCameraMotionLora,
 } from "@studio/lib/cameraMotion";
 import { emptyGuidanceOverrides, guidanceOverridesAreEmpty } from "@studio/lib/guidanceOverrides";
+import { negativePromptWireValue } from "@studio/lib/negativePrompt";
 import { emptyWanRecipe, wanRecipeCount } from "@studio/lib/wanRecipe";
 import {
   buildAutoChainRequest,
@@ -125,6 +126,7 @@ import {
   buildRequest,
   cloneGenerateForm,
   newGenerateForm,
+  normalizeLegacyNegativeSnapshot,
   reconcileModelCapabilities,
   resetFormToModelDefaults,
   type GenerateForm,
@@ -421,6 +423,8 @@ const advancedSheetOpen = ref(false);
  * "Advanced" trigger badge and the sheet header badge. */
 const advancedActiveCount = computed(() => {
   let count = 0;
+  // Differs-from-default (#787): an untouched wan default is not "active",
+  // while an explicit clear (the empty-uncond opt-out) is.
   if (
     generationCapabilitiesForFamily(
       form.family,
@@ -428,7 +432,7 @@ const advancedActiveCount = computed(() => {
       form.pipeline,
       form.guidanceCapabilities,
     ).supportsNegativePrompt &&
-    form.negativePrompt.trim()
+    negativePromptWireValue(form.negativePrompt, form.negativePromptDefault) !== undefined
   )
     count += 1;
   if (form.sourceImage || form.endFrame || form.controlImage || form.imageAttachments.length)
@@ -469,7 +473,9 @@ function resetCreateSettings(): void {
  * dimensions, steps, guidance, seed, and batch are left untouched. */
 function resetAdvancedSettings(): void {
   const defaults = newGenerateForm();
-  form.negativePrompt = defaults.negativePrompt;
+  // Reset restores the model's advertised default negative (wan), not an
+  // explicit empty opt-out.
+  form.negativePrompt = form.negativePromptDefault;
   form.scheduler = defaults.scheduler;
   form.cfgPlus = defaults.cfgPlus;
   form.upscaleModel = defaults.upscaleModel;
@@ -2153,7 +2159,9 @@ async function loadTemplate(template: GenerationTemplate): Promise<void> {
   const epoch = ++templateLoadEpoch;
   const hydrated = await hydrateGenerationTemplate(template);
   if (epoch !== templateLoadEpoch) return;
-  Object.assign(form, hydrated.form);
+  // A pre-#787 template lacking `negativePromptDefault` is normalized first
+  // so its empty negative reads as "untouched", not the explicit "" opt-out.
+  Object.assign(form, normalizeLegacyNegativeSnapshot(hydrated.form, generationModels.value));
   const sameHost = !!template.scopeId && template.scopeId === selectedHostId.value;
   if (!sameHost) clearHostScopedGenerationSelections();
   const selectedEntry = generationModels.value.find((model) => model.name === form.model);

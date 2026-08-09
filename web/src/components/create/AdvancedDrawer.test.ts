@@ -597,6 +597,20 @@ describe("AdvancedDrawer video suite", () => {
     expect(next.keyframes[0]?.frame).toBe(48);
   });
 
+  it("Reset restores the advertised default negative, not the opt-out", async () => {
+    // Shipping "" from Reset would silently disable wan's tuned default —
+    // the explicit opt-out belongs to the user, not to a reset action.
+    const wrapper = factory("wan", {
+      negativePrompt: "hand-typed",
+      negativePromptDefault: "TUNED_DEFAULT",
+    });
+    await wrapper.get("[data-test='advanced-reset']").trigger("click");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.negativePrompt).toBe("TUNED_DEFAULT");
+  });
+
   it("Reset also clears the video suite", async () => {
     const wrapper = factory("ltx2", {
       pipeline: "two-stage",

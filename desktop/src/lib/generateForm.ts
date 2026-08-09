@@ -44,6 +44,13 @@ import {
   wanRecipeToWire,
   type WanRecipeState,
 } from "@studio/lib/wanRecipe";
+import {
+  effectiveNegativeDefault,
+  negativePromptOnDefaultChange,
+  negativePromptWireValue,
+  restoredNegativeExplicitClear,
+  restoredNegativePrompt,
+} from "@studio/lib/negativePrompt";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
 import { isWanFamily } from "@studio/lib/generationCapabilities";
@@ -108,6 +115,18 @@ export interface GenerateForm {
   /** Empty string = random seed. */
   seed: string;
   negativePrompt: string;
+  /** The selected model's advertised default negative
+   * (`default_negative_prompt`, wan today; "" when none). Prefill and wire
+   * semantics derive from `@studio/lib/negativePrompt`: text equal to this
+   * stays absent on the wire, a cleared field ships the explicit `""`
+   * opt-out. */
+  negativePromptDefault: string;
+  /** Restore-time explicit-clear authority (#787 round 3): true when a reuse
+   * carried the explicit `""` opt-out while the advertised default was still
+   * unknown (rows not loaded). Keeps the clear from decaying to "untouched"
+   * once the row resolves, and keeps the wire shipping `""` meanwhile.
+   * Resets on model selection and on any resolved default change. */
+  negativeExplicitClear: boolean;
   scheduler: Scheduler;
   cfgPlus: boolean;
   batchSize: number;
@@ -197,6 +216,8 @@ export function newGenerateForm(): GenerateForm {
     sourceImageCapability: null,
     seed: "",
     negativePrompt: "",
+    negativePromptDefault: "",
+    negativeExplicitClear: false,
     scheduler: "default",
     cfgPlus: false,
     batchSize: 1,
@@ -291,6 +312,11 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
   form.fps = defaultVideoFps(m, form.fps);
   form.loras = [];
   form.icLoraControl = null;
+  // Selecting a model is fresh authority: a deferred restore-time clear
+  // marker (#787 round 3) belongs to the restored model, not this pick, so
+  // the advertised default prefills like any other model switch. The
+  // row-refresh path (`reconcileModelCapabilities` alone) keeps the marker.
+  form.negativeExplicitClear = false;
   reconcileModelCapabilities(form, m);
   if (form.cameraControl) {
     form.loras = syncCameraMotionLora(
@@ -316,6 +342,27 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
   form.model = m.name;
   form.family = m.family;
   form.sourceImageCapability = m.source_image ?? null;
+  // #787: a Negative field still showing the previous model's advertised
+  // default follows the new model (that is also how the default first
+  // appears); typed text and an explicit clear are user authority. The
+  // family constant backs an older server that omits the additive field so
+  // a known default (and the "" opt-out against it) never decays to absence.
+  const nextNegativeDefault = effectiveNegativeDefault(m, m.family);
+  form.negativePrompt = negativePromptOnDefaultChange(
+    form.negativePrompt,
+    form.negativePromptDefault,
+    nextNegativeDefault,
+    // A reuse restored before this row landed may carry the explicit ""
+    // opt-out — indistinguishable from untouched without the marker, which
+    // keeps the clear instead of prefilling (#787 round 3).
+    form.negativeExplicitClear,
+  );
+  form.negativePromptDefault = nextNegativeDefault;
+  if (nextNegativeDefault !== "") {
+    // The default is known now; the ordinary tri-state rules carry the
+    // clear from here, so the deferred marker has served its purpose.
+    form.negativeExplicitClear = false;
+  }
   const caps = generationCapabilitiesForFamily(m.family, m.name, null, null, m.source_image);
   if (!outputFormatsForFamily(m.family).includes(form.outputFormat)) {
     form.outputFormat = defaultOutputFormat(m.family);
@@ -402,6 +449,39 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
 }
 
 /**
+ * Normalize a form snapshot saved before `negativePromptDefault` existed —
+ * legacy templates and drafts (#787 round 2) — before it is `Object.assign`ed
+ * into a live form. Such snapshots carry no tri-state authority: their empty
+ * `negativePrompt` means "untouched", never the explicit `""` opt-out.
+ * Assigning one raw keeps the live form's previous-model default next to the
+ * template's `""` and manufactures an opt-out the user never made. The
+ * snapshot's own model/family resolve the default (live inventory row first,
+ * family constant fallback); a snapshot that already carries the key is
+ * post-#787 authority and passes through untouched.
+ */
+export function normalizeLegacyNegativeSnapshot(
+  snapshot: GenerateForm,
+  models: ModelEntry[] = [],
+): GenerateForm {
+  if (typeof (snapshot as Partial<GenerateForm>).negativePromptDefault === "string") {
+    // Post-round-2, pre-round-3 snapshots lack the marker; leaving it
+    // undefined would let Object.assign keep the live form's stale value.
+    snapshot.negativeExplicitClear ??= false;
+    return snapshot;
+  }
+  const model = findInstalledModel(models, snapshot.model);
+  const nextDefault = effectiveNegativeDefault(model, snapshot.family);
+  snapshot.negativePromptDefault = nextDefault;
+  snapshot.negativeExplicitClear = false;
+  if ((snapshot.negativePrompt ?? "").trim() === "") {
+    // Legacy omission is the untouched state: show the default so the wire
+    // stays absent, exactly what the pre-#787 template produced.
+    snapshot.negativePrompt = nextDefault;
+  }
+  return snapshot;
+}
+
+/**
  * Restore every generation knob to the selected model's defaults. The prompt
  * (with its expand provenance), the model/family, and the batch size survive:
  * the prompt is the user's authored work, and prepared batch siblings must
@@ -484,8 +564,16 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   if (form.originalPrompt && form.originalPrompt !== req.prompt) {
     req.original_prompt = form.originalPrompt;
   }
-  if (caps.supportsNegativePrompt && form.negativePrompt.trim()) {
-    req.negative_prompt = form.negativePrompt.trim();
+  if (caps.supportsNegativePrompt) {
+    // Tri-state (#787): text equal to the advertised default stays absent
+    // (older servers behave identically), a cleared defaulted field ships
+    // the explicit "" opt-out, typed text travels verbatim.
+    const negative = negativePromptWireValue(
+      form.negativePrompt,
+      form.negativePromptDefault,
+      form.negativeExplicitClear,
+    );
+    if (negative !== undefined) req.negative_prompt = negative;
   }
   if (caps.supportsScheduler && form.scheduler !== "default") req.scheduler = form.scheduler;
   if (caps.supportsCfgPlus && form.cfgPlus) req.cfg_plus = true;
@@ -654,11 +742,23 @@ export function applyMetadataToForm(
   } else {
     form.model = metadata.model;
     form.family = "";
+    form.negativePromptDefault = "";
   }
 
   form.prompt = metadata.prompt ?? "";
   form.originalPrompt = metadata.original_prompt ?? null;
-  form.negativePrompt = metadata.negative_prompt ?? "";
+  // Absence predates truthful recording: on a defaulted model it means the
+  // default conditioned the render, so restore shows it rather than
+  // silently flipping the reuse into an explicit empty-uncond opt-out.
+  form.negativePrompt = restoredNegativePrompt(
+    metadata.negative_prompt,
+    form.negativePromptDefault,
+  );
+  // A recorded "" is the explicit opt-out; when this restore ran before the
+  // model rows resolved the empty control is otherwise identical to
+  // "untouched" — the marker carries the print's authority until the default
+  // is known (#787 round 3).
+  form.negativeExplicitClear = restoredNegativeExplicitClear(metadata.negative_prompt);
   // Prefer the pre-upscale generation canvas over the saved raster size.
   form.width = metadata.generation_width || metadata.width || form.width;
   form.height = metadata.generation_height || metadata.height || form.height;
@@ -774,7 +874,8 @@ export function applyRequestToForm(
   if (model) applyModelDefaults(form, model);
   form.prompt = request.prompt;
   form.originalPrompt = request.original_prompt ?? null;
-  form.negativePrompt = request.negative_prompt ?? "";
+  form.negativePrompt = restoredNegativePrompt(request.negative_prompt, form.negativePromptDefault);
+  form.negativeExplicitClear = restoredNegativeExplicitClear(request.negative_prompt);
   form.model = request.model;
   form.width = request.width;
   form.height = request.height;

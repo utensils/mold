@@ -24,6 +24,11 @@ pub const TUI_THEME: &str = "tui.theme";
 pub const TUI_LAST_MODEL: &str = "tui.last_model";
 pub const TUI_LAST_PROMPT: &str = "tui.last_prompt";
 pub const TUI_LAST_NEGATIVE: &str = "tui.last_negative";
+/// Whether an empty `tui.last_negative` was an explicit clear of the model's
+/// advertised default negative (#787) — the `""` empty-uncond opt-out —
+/// rather than an untouched field. Absent on sessions saved before the
+/// marker existed; those restore as untouched.
+pub const TUI_NEGATIVE_CLEARED: &str = "tui.negative_cleared";
 pub const TUI_NEGATIVE_COLLAPSED: &str = "tui.negative_collapsed";
 pub const TUI_VIEW_MODE: &str = "tui.view_mode";
 pub const TUI_GALLERY_COLUMNS: &str = "tui.gallery_columns";

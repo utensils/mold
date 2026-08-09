@@ -60,6 +60,12 @@ describe("generateForm store", () => {
     expect(store.form.maskImage).toBeNull();
     expect(store.form.imageAttachments).toEqual([]);
     // Model + shape params survive a ⌘N.
+    // A model with an advertised default negative gets it back, not "".
+    store.form.negativePromptDefault = "TUNED_DEFAULT";
+    store.form.negativePrompt = "hand-typed";
+    store.clearComposer();
+    expect(store.form.negativePrompt).toBe("TUNED_DEFAULT");
+
     expect(store.form.model).toBe("flux-dev:q8");
     expect(store.form.family).toBe("flux");
     expect(store.form.width).toBe(768);
