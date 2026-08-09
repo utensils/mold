@@ -102,6 +102,7 @@ pub(crate) enum H3AttemptError {
     DuplicateSettledFence,
     DuplicateNonce,
     Cancelled,
+    RuntimeUnavailable,
 }
 
 impl fmt::Display for H3AttemptError {
@@ -114,6 +115,9 @@ impl fmt::Display for H3AttemptError {
             Self::DuplicateSettledFence => "MiniMax H3 attempt lease fence was already settled",
             Self::DuplicateNonce => "MiniMax H3 attempt nonce was already settled",
             Self::Cancelled => "MiniMax H3 attempt was cancelled before execution",
+            Self::RuntimeUnavailable => {
+                "MiniMax H3 claimed-attempt runtime bridge is not available"
+            }
         })
     }
 }
@@ -329,6 +333,56 @@ impl H3GenerationAttempt {
     ) -> Result<T, H3AttemptError> {
         self.root.run_once(&current, consume)
     }
+}
+
+#[cfg(test)]
+pub(crate) fn generation_attempt_for_test(
+    work_id: &str,
+    cancellation: mold_inference::InferenceCancellationToken,
+) -> (
+    H3GenerationAttempt,
+    H3AttemptCurrent,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let identity = |byte: char| std::iter::repeat_n(byte, 64).collect::<String>();
+    let claim = H3AttemptClaim {
+        work_id: work_id.to_string(),
+        device_id: "cuda:0".to_string(),
+        device_ordinal: 0,
+        owner_epoch: 7,
+        worker_generation: 11,
+        state_version: 13,
+        plan_version: 17,
+        memory_sample_generation: 19,
+        memory_ledger_sequence: 23,
+        execution_identity_sha256: identity('a'),
+        prepared_attempt_identity_sha256: identity('b'),
+        target_budget_identity_sha256: identity('c'),
+    };
+    let current = H3AttemptCurrent {
+        work_id: claim.work_id.clone(),
+        device_id: claim.device_id.clone(),
+        device_ordinal: claim.device_ordinal,
+        owner_epoch: claim.owner_epoch,
+        worker_generation: claim.worker_generation,
+        state_version: claim.state_version,
+        plan_version: claim.plan_version,
+        memory_sample_generation: claim.memory_sample_generation,
+        memory_ledger_sequence: claim.memory_ledger_sequence,
+        execution_identity_sha256: claim.execution_identity_sha256.clone(),
+        prepared_attempt_identity_sha256: claim.prepared_attempt_identity_sha256.clone(),
+        target_budget_identity_sha256: claim.target_budget_identity_sha256.clone(),
+    };
+    let settlements = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let root = H3AttemptRoot::claim_inner(
+        claim,
+        &current,
+        cancellation,
+        uuid::Uuid::new_v4().to_string(),
+        H3AttemptSettlementProbe::new(std::sync::Arc::clone(&settlements)),
+    )
+    .expect("synthetic H3 owner attempt must be internally valid");
+    (H3GenerationAttempt { root }, current, settlements)
 }
 
 /// Claim a future H3 attempt from exact owner-local facts.
@@ -678,6 +732,29 @@ mod tests {
 
         assert_eq!(result.unwrap(), Err("synthetic failure"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(settlements.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn panicking_consumer_unwinds_through_exactly_one_settlement() {
+        let claim = fixture("h3-attempt-panic");
+        let (probe, settlements) = probe();
+        let root = H3AttemptRoot::claim_for_test(
+            claim.clone(),
+            &current(&claim),
+            mold_inference::InferenceCancellationToken::default(),
+            "00000000-0000-4000-8000-00000000000b",
+            probe,
+        )
+        .unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            root.run_once(&current(&claim), |_| -> () {
+                panic!("synthetic H3 attempt panic")
+            })
+        }));
+
+        assert!(result.is_err());
         assert_eq!(settlements.load(Ordering::SeqCst), 1);
     }
 
