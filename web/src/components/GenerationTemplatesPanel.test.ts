@@ -24,6 +24,8 @@ function makeForm(
     height: 1024,
     steps: 28,
     guidance: 3.5,
+    sourceImageCapability: null,
+    endFrame: null,
     seedMode: "static",
     seed: 123,
     batchSize: 1,

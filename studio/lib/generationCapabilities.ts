@@ -2,6 +2,11 @@ import {
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
 } from "./minimaxH3Authoring";
+import {
+  resolveSourceImageCapability,
+  supportsFirstLastFrames,
+  type SourceImageCapability,
+} from "./sourceImageCapability";
 
 export { isMinimaxH3Family } from "./minimaxH3Authoring";
 
@@ -46,6 +51,17 @@ export interface BaseGenerationCapabilities {
   supportsLora: boolean;
   supportsControlNet: boolean;
   sourceImageMode: SourceImageMode;
+  /**
+   * The effective per-model source-image contract (#772): the model's own
+   * advertised mode when it has one, this family's heuristic otherwise.
+   */
+  sourceImageCapability: SourceImageCapability;
+  /** Whether the source-image well renders at all. */
+  supportsSourceImage: boolean;
+  /** Whether Generate stays gated until a source image is attached. */
+  requiresSourceImage: boolean;
+  /** Whether the optional wan End frame well renders (#779). */
+  supportsEndFrame: boolean;
   supportsMask: boolean;
   forcesBatchSizeOne: boolean;
 }
@@ -196,11 +212,18 @@ export const LORA_CAPABLE_FAMILIES = [
   "z-image",
 ] as const;
 
+/**
+ * `advertisedSourceImage` is the selected model row's additive
+ * `source_image` field (#772). Pass it wherever the row is in scope; omitting
+ * it falls back to the family heuristic below, which is what an older server
+ * — one that enforces nothing at admission — expects.
+ */
 export function baseGenerationCapabilities(
   family: string,
   model = "",
   pipeline?: string | null,
   advertisedGuidance?: AdvertisedGuidanceCapabilities | null,
+  advertisedSourceImage?: string | null,
 ): BaseGenerationCapabilities {
   const normalized = family.trim().toLowerCase();
   const qwenEdit = isQwenImageEditFamily(normalized);
@@ -227,6 +250,20 @@ export function baseGenerationCapabilities(
   const inferredFixedGuidance =
     ltx &&
     (fixedLtxPipeline || (!pipeline && normalizedModel.includes("distilled")));
+  const supportsVideo = h3 || VIDEO_FAMILIES.has(normalized);
+  // The family heuristic behind the advertised contract: every image family
+  // reads a source image, and among the video families only the
+  // image-conditioned ones do. It can say a checkpoint *reads* a source
+  // image, never that it cannot render without one — requiredness comes from
+  // the server alone.
+  const familySourceImage: SourceImageCapability =
+    !supportsVideo || isImageConditionedVideoFamily(normalized) || h3
+      ? "optional"
+      : "unsupported";
+  const sourceImageCapability = resolveSourceImageCapability(
+    advertisedSourceImage,
+    familySourceImage,
+  );
   const advertisedDefault = !pipeline ? advertisedGuidance : null;
   const fixedGuidance = h3
     ? true
@@ -250,7 +287,7 @@ export function baseGenerationCapabilities(
       supportsDistillStrength: wan && WAN_DISTILL_TIER.test(normalizedModel),
     },
     supportsCfgPlus: CFG_PLUS_FAMILIES.has(normalized),
-    supportsVideo: h3 || VIDEO_FAMILIES.has(normalized),
+    supportsVideo,
     supportsAudio: h3 || AUDIO_FAMILIES.has(normalized),
     supportsLora:
       !flux2Dev &&
@@ -265,6 +302,13 @@ export function baseGenerationCapabilities(
           : qwenEdit
             ? "qwen-edit"
             : "single",
+    sourceImageCapability,
+    supportsSourceImage: sourceImageCapability !== "unsupported",
+    requiresSourceImage: sourceImageCapability === "required",
+    supportsEndFrame: supportsFirstLastFrames(
+      normalized,
+      advertisedSourceImage,
+    ),
     supportsMask: !h3 && !qwenEdit && !flux2Dev,
     forcesBatchSizeOne: h3 || qwenEdit,
   };

@@ -8,6 +8,8 @@ import {
   type ModelResolutionContract,
 } from "@studio/lib/resolutions";
 import { guidanceOverridesError } from "@studio/lib/guidanceOverrides";
+import { isMinimaxH3Family } from "@studio/lib/minimaxH3Authoring";
+import { sourceImageValidationError } from "@studio/lib/sourceImageCapability";
 import { wanRecipeError } from "@studio/lib/wanRecipe";
 
 export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
@@ -23,6 +25,7 @@ export type InlineGenerationMediaField =
   | "maskImage"
   | "controlImage"
   | "imageAttachments"
+  | "endFrame"
   | "sourceVideo"
   | "extendVideo"
   | "keyframes"
@@ -44,6 +47,13 @@ export function inlineGenerationMediaBytes(
   if (exclude !== "controlImage") total += decodedBase64Bytes(form.controlImage);
   if (exclude !== "imageAttachments") {
     total += form.imageAttachments.reduce((sum, image) => sum + decodedBase64Bytes(image), 0);
+  }
+  if (exclude !== "endFrame" && form.endFrame) {
+    total += decodedBase64Bytes(form.endFrame.base64);
+    // A first/last-frame render puts the opening still on the wire twice —
+    // as `source_image`, which admission reads, and as keyframe 0 — so the
+    // budget has to see it twice too.
+    if (exclude !== "sourceImage") total += decodedBase64Bytes(form.sourceImage);
   }
   if (exclude !== "sourceVideo") total += decodedBase64Bytes(form.sourceVideo?.base64);
   if (exclude !== "extendVideo") total += decodedBase64Bytes(form.extendVideo?.base64);
@@ -140,6 +150,32 @@ export function cameraControlValidationError(
   }
   if (isCameraMotionPreset(value)) return null;
   return "Custom camera motion must be a .safetensors path on the selected host.";
+}
+
+/**
+ * The per-model source-image contract (#772) plus wan's first/last-frame
+ * pairing (#779). H3 is excluded: its boundary images have their own
+ * authoring validator, which names the missing one precisely.
+ */
+export function sourceConditioningValidationError(form: GenerateForm): string | null {
+  if (isMinimaxH3Family(form.family)) return null;
+  const caps = generationCapabilitiesForFamily(
+    form.family,
+    form.model,
+    form.pipeline,
+    form.guidanceCapabilities,
+    form.sourceImageCapability,
+  );
+  const hasSourceImage =
+    caps.sourceImageMode === "single"
+      ? Boolean(form.sourceImage)
+      : form.imageAttachments.length > 0;
+  return sourceImageValidationError({
+    capability: caps.sourceImageCapability,
+    hasSourceImage,
+    hasEndFrame: caps.supportsEndFrame && Boolean(form.endFrame),
+    frames: caps.supportsVideo ? form.frames : null,
+  });
 }
 
 export function audioOutputValidationError(form: GenerateForm): string | null {

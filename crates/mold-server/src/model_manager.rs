@@ -208,6 +208,7 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
             primary.is_some(),
         ));
         annotate_audio_capabilities(&mut catalog, &config);
+        annotate_source_image_capabilities(&mut catalog, &config);
         return catalog;
     }
 
@@ -235,6 +236,24 @@ fn annotate_audio_capabilities(catalog: &mut [ModelInfoExtended], config: &Confi
         }
         entry.supports_audio = ModelPaths::resolve(&entry.info.name, config)
             .and_then(|paths| mold_inference::audio::output_supported(&entry.info.family, &paths));
+    }
+}
+
+/// Fill `source_image` for downloaded wan checkpoints the manifest layer
+/// could not classify (installed `cv:`/`hf:` models and `--transformer`
+/// overrides), from the checkpoints' own headers — the same shape-driven
+/// classification the engine applies at generate time (#772). Manifest
+/// tiers arrive pre-classified from their own task structure and are left
+/// untouched; a cold, unclassifiable entry stays `None`, which clients must
+/// read as "unknown", never as one of the three contracts.
+fn annotate_source_image_capabilities(catalog: &mut [ModelInfoExtended], config: &Config) {
+    for entry in catalog {
+        if entry.source_image.is_some() || !entry.downloaded || entry.info.family != "wan" {
+            continue;
+        }
+        entry.source_image = ModelPaths::resolve(&entry.info.name, config).and_then(|paths| {
+            mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
+        });
     }
 }
 
@@ -714,6 +733,12 @@ fn installed_catalog_models(
                 &format!("{} {} {}", sidecar.id, sidecar.name, primary_path.display()),
                 None,
             )),
+            // Classified from the installed checkpoint's own headers — the
+            // shape-driven read the engine applies — never from the sidecar's
+            // display name (#772). The wan VAE is a shared companion, so the
+            // annotate pass below fills this once paths resolve; a bare
+            // primary file cannot answer alone.
+            source_image: None,
         });
     }
     out

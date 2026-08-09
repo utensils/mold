@@ -1033,6 +1033,7 @@ mod tests {
             supports_sequence: None,
             extend_default_overlap_frames: None,
             guidance_capabilities: None,
+            source_image: None,
         }];
         let embed = format_model_list(&models);
         assert!(embed.description.contains("**FLUX**"));
@@ -1073,6 +1074,7 @@ mod tests {
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
+                source_image: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -1103,6 +1105,7 @@ mod tests {
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
+                source_image: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -1133,6 +1136,7 @@ mod tests {
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
+                source_image: None,
             },
         ];
         let embed = format_model_list(&models);

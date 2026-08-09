@@ -109,6 +109,76 @@ describe("baseGenerationCapabilities", () => {
     expect(isImageConditionedVideoFamily("")).toBe(false);
   });
 
+  it("resolves the source-image contract per model, family as fallback", () => {
+    // Advertised wins: the three wan checkpoints split three ways and the
+    // family cannot tell them apart.
+    expect(
+      baseGenerationCapabilities(
+        "wan",
+        "wan22-t2v-a14b",
+        null,
+        null,
+        "unsupported",
+      ),
+    ).toMatchObject({
+      sourceImageCapability: "unsupported",
+      supportsSourceImage: false,
+      requiresSourceImage: false,
+      supportsEndFrame: false,
+    });
+    expect(
+      baseGenerationCapabilities(
+        "wan",
+        "wan22-i2v-a14b",
+        null,
+        null,
+        "required",
+      ),
+    ).toMatchObject({
+      sourceImageCapability: "required",
+      supportsSourceImage: true,
+      requiresSourceImage: true,
+      supportsEndFrame: true,
+    });
+    expect(
+      baseGenerationCapabilities(
+        "wan",
+        "wan22-ti2v-5b",
+        null,
+        null,
+        "optional",
+      ),
+    ).toMatchObject({
+      sourceImageCapability: "optional",
+      supportsSourceImage: true,
+      requiresSourceImage: false,
+      supportsEndFrame: true,
+    });
+
+    // An older server advertises nothing, so every wan checkpoint keeps
+    // today's optional well and nothing is ever gated on a guess.
+    expect(baseGenerationCapabilities("wan", "wan22-i2v-a14b")).toMatchObject({
+      sourceImageCapability: "optional",
+      supportsSourceImage: true,
+      requiresSourceImage: false,
+      supportsEndFrame: false,
+    });
+
+    // Image families read a source image; a video family with no
+    // image-to-video path does not.
+    expect(baseGenerationCapabilities("flux").supportsSourceImage).toBe(true);
+    expect(baseGenerationCapabilities("ltx2").supportsSourceImage).toBe(true);
+    expect(baseGenerationCapabilities("ltx-video").supportsSourceImage).toBe(
+      false,
+    );
+
+    // The end frame is wan's alone even where a source image is advertised.
+    expect(
+      baseGenerationCapabilities("ltx2", "", null, null, "optional")
+        .supportsEndFrame,
+    ).toBe(false);
+  });
+
   it("returns independent scheduler option lists", () => {
     const first = baseGenerationCapabilities("sdxl").schedulerOptions;
     first.pop();

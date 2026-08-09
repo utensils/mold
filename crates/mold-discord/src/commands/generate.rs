@@ -190,6 +190,55 @@ pub fn family_for_model<'a>(models: &'a [ModelInfoExtended], name: &str) -> Opti
         .map(|m| m.info.family.as_str())
 }
 
+/// Reject a request the selected checkpoint's source-image contract (#772)
+/// already refuses, before it costs a queue slot, a UMT5 encode, and an
+/// expert load. Returns the server's own admission wording so the message is
+/// identical wherever the rejection lands.
+///
+/// `None` — an older server, or a checkpoint neither the server nor the
+/// built-in manifests could classify — enforces nothing: the engine remains
+/// the authority and its late error is no worse than today's behavior. Only
+/// Wan checkpoints carry a non-optional contract, which is why both messages
+/// name the family.
+///
+/// `has_source` counts first/last-frame keyframes as well as a source image
+/// (#779), matching admission: both carry source frames, so either satisfies
+/// a required contract and either is refused by a T2V-only checkpoint.
+fn source_image_contract_error(
+    capability: Option<mold_core::SourceImageCapability>,
+    has_source: bool,
+) -> Option<&'static str> {
+    match capability {
+        Some(mold_core::SourceImageCapability::Unsupported) if has_source => Some(
+            "this Wan checkpoint is text-to-video only and does not accept a source image \
+             or keyframes — remove them, or pick an I2V-capable checkpoint such as \
+             wan22-ti2v-5b or wan22-i2v-a14b",
+        ),
+        Some(mold_core::SourceImageCapability::Required) if !has_source => Some(
+            "this Wan I2V checkpoint needs a source image; supply one, or pick a \
+             text-to-video checkpoint such as wan22-t2v-a14b",
+        ),
+        _ => None,
+    }
+}
+
+/// Resolve the checkpoint's source-image contract: the server's advertised
+/// classification first, then the built-in manifest, which answers both while
+/// the model cache is cold and against a server too old to advertise the
+/// field at all. A manifest tier's contract is structural, so it is as true
+/// of an old server's engine as of a new server's admission gate.
+fn resolve_source_image_contract(
+    model_entry: Option<&ModelInfoExtended>,
+    model: &str,
+) -> Option<mold_core::SourceImageCapability> {
+    model_entry
+        .and_then(|entry| entry.source_image)
+        .or_else(|| {
+            mold_core::manifest::find_manifest(model)
+                .and_then(|manifest| manifest.defaults.source_image)
+        })
+}
+
 /// Parameters collected from the Discord slash command before they are turned
 /// into a concrete `GenerateRequest`. Keeps `build_generate_request` signature
 /// small and makes test fixtures explicit.
@@ -950,6 +999,17 @@ pub async fn generate(
         .await?;
         return Ok(());
     }
+    // Preflight the source-image contract before the attachment download and
+    // the enqueue, so an impossible pairing never takes a queue slot.
+    if let Some(message) = source_image_contract_error(
+        resolve_source_image_contract(model_entry, &model_name),
+        source_image.is_some() || !keyframe_attachments.is_empty(),
+    ) {
+        ctx.data().quotas.refund(user_id);
+        handler::send_error(ctx, message).await?;
+        return Ok(());
+    }
+
     let (resolved_frames, resolved_fps) =
         match resolve_video_timing(family, model_defaults, frames, fps, duration) {
             Ok(timing) => timing,
@@ -1163,6 +1223,68 @@ mod tests {
             model,
             ..BuildParams::default()
         }
+    }
+
+    /// The pre-enqueue contract check. Identical table in `mold-ai` and
+    /// `mold-ai-tui`; all three must agree with the server's admission gate,
+    /// whose wording they reuse verbatim.
+    #[test]
+    fn source_image_contract_rejects_exactly_what_admission_rejects() {
+        use mold_core::SourceImageCapability::{Optional, Required, Unsupported};
+
+        for (capability, has_source, rejected) in [
+            // Unknown contract — an older server, or a checkpoint it could
+            // not classify — enforces nothing.
+            (None, false, false),
+            (None, true, false),
+            (Some(Optional), false, false),
+            (Some(Optional), true, false),
+            (Some(Unsupported), false, false),
+            (Some(Unsupported), true, true),
+            (Some(Required), false, true),
+            (Some(Required), true, false),
+        ] {
+            assert_eq!(
+                source_image_contract_error(capability, has_source).is_some(),
+                rejected,
+                "{capability:?} with has_source={has_source}"
+            );
+        }
+
+        assert!(source_image_contract_error(Some(Unsupported), true)
+            .is_some_and(|message| message.contains("text-to-video only")));
+        assert!(source_image_contract_error(Some(Required), false)
+            .is_some_and(|message| message.contains("needs a source image")));
+    }
+
+    /// The served row is the first authority; the built-in manifest answers
+    /// for a cold cache and for a server too old to advertise the field.
+    #[test]
+    fn advertised_contract_wins_over_the_manifest_fallback() {
+        let mut advertised = mk_model("wan22-i2v-a14b:q5", "wan", true);
+        advertised.source_image = Some(mold_core::SourceImageCapability::Optional);
+
+        assert_eq!(
+            resolve_source_image_contract(Some(&advertised), "wan22-i2v-a14b:q5"),
+            Some(mold_core::SourceImageCapability::Optional),
+            "a served row is the server's own classification of the checkpoint"
+        );
+        assert_eq!(
+            resolve_source_image_contract(None, "wan22-i2v-a14b:q5"),
+            Some(mold_core::SourceImageCapability::Required),
+            "a cold cache falls back to the manifest tier"
+        );
+        assert_eq!(
+            resolve_source_image_contract(
+                Some(&mk_model("wan22-i2v-a14b:q5", "wan", true)),
+                "wan22-i2v-a14b:q5"
+            ),
+            Some(mold_core::SourceImageCapability::Required),
+            "a row from a server that predates the field is not evidence of absence"
+        );
+        // No manifest tier and nothing advertised: the contract stays unknown
+        // and the engine remains the authority.
+        assert_eq!(resolve_source_image_contract(None, "cv:12345"), None);
     }
 
     #[test]
@@ -1867,6 +1989,7 @@ mod tests {
             supports_sequence: None,
             extend_default_overlap_frames: None,
             guidance_capabilities: None,
+            source_image: None,
         }
     }
 
@@ -2035,6 +2158,7 @@ mod tests {
             supports_sequence: None,
             extend_default_overlap_frames: None,
             guidance_capabilities: None,
+            source_image: None,
         }];
         assert_eq!(
             family_for_model(&models, "ltx-2-19b-distilled:fp8"),
@@ -2070,6 +2194,7 @@ mod tests {
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
+                source_image: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -2093,6 +2218,7 @@ mod tests {
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
+                source_image: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
@@ -2122,6 +2248,7 @@ mod tests {
             supports_sequence: None,
             extend_default_overlap_frames: None,
             guidance_capabilities: None,
+            source_image: None,
         }];
         assert_eq!(resolve_default_model(&models), "flux-dev:q4");
     }
@@ -2156,6 +2283,7 @@ mod tests {
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
+                source_image: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -2179,6 +2307,7 @@ mod tests {
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
+                source_image: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
@@ -2209,6 +2338,7 @@ mod tests {
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
+                source_image: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -2232,6 +2362,7 @@ mod tests {
                 supports_sequence: None,
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
+                source_image: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");

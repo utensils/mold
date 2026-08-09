@@ -2371,6 +2371,30 @@ pub struct ModelInfoExtended {
     /// refine this with an explicitly selected pipeline when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guidance_capabilities: Option<GuidanceCapabilities>,
+    /// Per-model source-image conditioning contract (#772). Wan checkpoints
+    /// split three ways — T2V-only, I2V-required, I2V-optional — which no
+    /// family-level fact can express. `None` on older servers; clients fall
+    /// back to their family heuristics, which is the compatible answer
+    /// against a server that enforces nothing at admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_image: Option<SourceImageCapability>,
+}
+
+/// How a model relates to a conditioning source image (#772).
+///
+/// Derived from checkpoint structure — the engine's own conditioning
+/// classification — never from model names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceImageCapability {
+    /// The checkpoint has no image-conditioning input; a supplied source is
+    /// rejected at admission.
+    Unsupported,
+    /// The checkpoint accepts but does not require a source image.
+    Optional,
+    /// The checkpoint cannot generate without a source image; admission
+    /// rejects a request lacking one.
+    Required,
 }
 
 impl ModelInfoExtended {
@@ -2554,6 +2578,7 @@ mod model_display_name_tests {
             supports_sequence: None,
             extend_default_overlap_frames: None,
             guidance_capabilities: None,
+            source_image: None,
         }
     }
 

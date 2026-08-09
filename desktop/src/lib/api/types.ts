@@ -188,6 +188,11 @@ export interface ModelEntry {
   extend_default_overlap_frames?: number | null;
   /** Explicit durable sequence eligibility; absent on older servers. */
   supports_sequence?: boolean | null;
+  /** Per-model source-image conditioning contract — `"unsupported"`,
+   * `"optional"`, or `"required"`. Absent on older servers and on entries the
+   * server could not classify; read it through
+   * `@studio/lib/sourceImageCapability`, never raw. */
+  source_image?: string | null;
   guidance_capabilities?: {
     adjustable: boolean;
     supports_negative_prompt: boolean;

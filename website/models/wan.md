@@ -69,7 +69,20 @@ mold run wan22-i2v-a14b:q5 "the balloon lifts off" --image balloon.png
 # Single-frame text-to-image — Wan 2.2 as a still-image model
 mold run wan22-t2v-a14b:q5 "a lighthouse at dusk, volumetric fog" \
   --frames 1 --output still.png
+
+# First/last-frame interpolation: anchor both endpoints (A14B I2V or TI2V-5B)
+mold run wan22-i2v-a14b:q5 "the sapling grows into an oak" \
+  --image sapling.png --last-image oak.png
+
+# The fp8-scaled quality tier — the 20-step recipe with ~2.6 GB more VRAM headroom
+mold run wan22-t2v-a14b:fp8 "storm waves crash over the lighthouse"
 ```
+
+The `:fp8` tier is not faster than `:q8` — measured on an RTX 4090 at
+33f/832x480 under identical settings, both run ~28 s/step (the denoise is
+compute-bound, not weight-decode-bound) — but its peak VRAM is 17,646 MiB
+against `:q8`'s 20,278 MiB, and user LoRAs merge into fp8 weights at load
+instead of running as a per-step branch.
 
 At `--frames 1` Wan renders a still: png/jpeg output is admitted (and png is
 the default there), the image embeds the same `mold:parameters` provenance as
@@ -79,6 +92,32 @@ frame count above 1 keeps the video-only output contract.
 
 Wan checkpoints were tuned against a specific negative prompt; mold applies
 it automatically when `--negative` is not given.
+
+## Source-image contracts
+
+Wan checkpoints split three ways, and `/api/models` advertises which through
+the additive per-model `source_image` field so every surface offers exactly
+what the checkpoint accepts:
+
+- **`unsupported`** — `wan21-t2v-1.3b`, `wan22-t2v-a14b:*`: pure
+  text-to-video; a supplied image is rejected at admission.
+- **`optional`** — `wan22-ti2v-5b:*`: text-to-video, or the source pinned as
+  frame 0 through latent inpainting.
+- **`required`** — `wan22-i2v-a14b:*`: the image is half the model input;
+  admission rejects a request without one.
+
+Installed `cv:`/`hf:` wan checkpoints classify from their own tensor shapes —
+the same read the engine performs — never from their names.
+
+## First/last-frame interpolation
+
+`--image` + `--last-image` (wire: a two-entry `keyframes` list anchoring
+pixel frames 0 and F-1) renders motion between two stills — upstream's FLF2V
+task, ComfyUI's `WanFirstLastFrameToVideo`. A14B I2V drives the 36-channel
+mask contract with the endpoint flag in mask channel 3; TI2V-5B pins both
+endpoint latent frames through the same inpaint path diffusers' `last_image`
+uses. Any other keyframe layout is refused at admission — the family has no
+mid-clip keyframe path.
 
 ## Defaults and limits
 

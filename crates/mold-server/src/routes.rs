@@ -886,6 +886,7 @@ async fn prepare_generation(
     if let Err(e) = validate_generate_request(validation_request, resolved_family.as_deref()) {
         return Err(ApiError::validation(e));
     }
+    enforce_source_image_capability(state, request, resolved_family.as_deref()).await?;
 
     let resolved_references = if request.references.is_some() {
         let identity = reference_identity
@@ -1874,6 +1875,58 @@ fn validate_generate_request(
     family_hint: Option<&str>,
 ) -> Result<(), String> {
     mold_core::validate_generate_request_with_family(req, family_hint)
+}
+
+/// Enforce the per-model source-image contract at admission (#772), with the
+/// engine's own wording — both failure modes used to surface only after the
+/// user had paid for the UMT5 encode and the expert load.
+///
+/// The contract resolves manifest-first (cold tiers classify from their own
+/// task structure) and falls back to the downloaded checkpoint's headers.
+/// An unknown contract enforces nothing: the engine remains the authority
+/// and its late error is no worse than today's behavior.
+async fn enforce_source_image_capability(
+    state: &AppState,
+    request: &mold_core::GenerateRequest,
+    resolved_family: Option<&str>,
+) -> Result<(), ApiError> {
+    if resolved_family != Some("wan") {
+        return Ok(());
+    }
+    let capability = match mold_core::manifest::find_manifest(&request.model)
+        .and_then(|manifest| manifest.defaults.source_image)
+    {
+        Some(capability) => Some(capability),
+        None => {
+            let config = state.config.read().await;
+            mold_core::ModelPaths::resolve(&request.model, &config).and_then(|paths| {
+                mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
+            })
+        }
+    };
+    // First/last-frame keyframes carry the source frames too (#779): a
+    // T2V-only checkpoint can no more render them than a lone source image,
+    // and a required-source checkpoint is satisfied by them.
+    let has_source =
+        request.source_image.is_some() || request.keyframes.as_ref().is_some_and(|k| !k.is_empty());
+    match capability {
+        Some(mold_core::SourceImageCapability::Unsupported) if has_source => {
+            Err(ApiError::validation(
+                "this Wan checkpoint is text-to-video only and does not accept a source image \
+                 or keyframes — remove them, or pick an I2V-capable checkpoint such as \
+                 wan22-ti2v-5b or wan22-i2v-a14b"
+                    .to_string(),
+            ))
+        }
+        Some(mold_core::SourceImageCapability::Required) if !has_source => {
+            Err(ApiError::validation(
+                "this Wan I2V checkpoint needs a source image; supply one, or pick a \
+                 text-to-video checkpoint such as wan22-t2v-a14b"
+                    .to_string(),
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 async fn apply_default_metadata_setting(state: &AppState, req: &mut mold_core::GenerateRequest) {

@@ -425,7 +425,6 @@ fn reject_unsupported_conditioning(req: &GenerateRequest) -> Result<()> {
             req.extend_video.is_some() || req.extend_video_path.is_some(),
             "extend_video",
         ),
-        (req.keyframes.is_some(), "keyframes"),
         // Core validation accepts source_image + mask_image as generic
         // inpainting, but Wan's conditioning never reads the mask — the
         // render would succeed while repainting everything, which reads as
@@ -435,12 +434,62 @@ fn reject_unsupported_conditioning(req: &GenerateRequest) -> Result<()> {
     for (present, field) in unsupported {
         if present {
             bail!(
-                "{field} is not yet supported for Wan — the family ships text-to-video and \
-                 single-image conditioning; video-to-video, masks, and keyframes land later"
+                "{field} is not yet supported for Wan — the family ships text-to-video, \
+                 single-image, and first/last-frame conditioning; video-to-video and masks \
+                 land later"
             );
         }
     }
     Ok(())
+}
+
+/// The endpoint images a wan request conditions on, resolved from
+/// `source_image` and/or the two-entry first/last `keyframes` layout (#779).
+///
+/// Every other keyframe layout is refused by name: wan's conditioning
+/// contracts anchor pixel frames 0 and F-1 only — there is no mid-clip
+/// keyframe path in the family.
+#[derive(Debug)]
+struct WanEndpointImages<'a> {
+    first: &'a [u8],
+    last: Option<&'a [u8]>,
+}
+
+fn resolve_endpoint_images(
+    req: &GenerateRequest,
+    num_frames: u32,
+) -> Result<Option<WanEndpointImages<'_>>> {
+    let keyframes = req.keyframes.as_deref().filter(|list| !list.is_empty());
+    match (req.source_image.as_deref(), keyframes) {
+        (None, None) => Ok(None),
+        (Some(first), None) => Ok(Some(WanEndpointImages { first, last: None })),
+        (Some(_), Some(_)) => bail!(
+            "Wan takes the first frame from either source_image or keyframes[0], not both — \
+             for a first/last-frame render, put both endpoints in keyframes"
+        ),
+        (None, Some(keyframes)) => {
+            if keyframes.len() != 2 {
+                bail!(
+                    "Wan supports exactly two keyframes — the first and last pixel frames — got \
+                     {}",
+                    keyframes.len()
+                );
+            }
+            let last_index = num_frames.saturating_sub(1);
+            if keyframes[0].frame != 0 || keyframes[1].frame != last_index {
+                bail!(
+                    "Wan first/last-frame keyframes must anchor frames 0 and {last_index} (the \
+                     clip's endpoints), got frames {} and {}",
+                    keyframes[0].frame,
+                    keyframes[1].frame
+                );
+            }
+            Ok(Some(WanEndpointImages {
+                first: &keyframes[0].image,
+                last: Some(&keyframes[1].image),
+            }))
+        }
+    }
 }
 
 /// How a checkpoint expects its conditioning to arrive, derived from the ratio
@@ -508,6 +557,32 @@ pub(crate) fn conditioning_shape(in_dim: usize, z_dim: usize) -> Result<WanCondi
          VAE — expected {z_dim} (plain) or {} (image concat)",
         2 * z_dim + 4
     )
+}
+
+/// Classify a Wan checkpoint's source-image contract from its own headers —
+/// the exact classification `generate` applies, exported so `/api/models`
+/// advertises what the engine will actually accept (#772).
+///
+/// - `ChannelConcat` (36-channel patch embedding): the image is half the
+///   model input — required.
+/// - `Plain` over the 48-channel 2.2 VAE: TI2V latent inpaint — optional.
+/// - `Plain` over the 16-channel 2.1 VAE: text-to-video only — unsupported.
+///
+/// `None` when either header cannot be read or classified; callers must
+/// treat that as "unknown", never as one of the three contracts.
+pub fn source_image_capability(
+    transformer: &Path,
+    vae: &Path,
+) -> Option<mold_core::SourceImageCapability> {
+    let config = detect_transformer_config(transformer).ok()?;
+    let vae_config = detect_vae_generation(vae).ok()?.config();
+    match conditioning_shape(config.in_dim, vae_config.z_dim).ok()? {
+        WanConditioningShape::ChannelConcat => Some(mold_core::SourceImageCapability::Required),
+        WanConditioningShape::Plain if vae_config.z_dim == 48 => {
+            Some(mold_core::SourceImageCapability::Optional)
+        }
+        WanConditioningShape::Plain => Some(mold_core::SourceImageCapability::Unsupported),
+    }
 }
 
 /// The conditioning a request resolved to, carrying whatever tensors the
@@ -820,7 +895,7 @@ impl WanEngine {
         dtype: DType,
         progress: &crate::progress::ProgressReporter,
     ) -> Result<WanImageConditioning> {
-        let Some(bytes) = req.source_image.as_ref() else {
+        let Some(endpoints) = resolve_endpoint_images(req, pixel_frames as u32)? else {
             if shape == WanConditioningShape::ChannelConcat {
                 bail!(
                     "this Wan checkpoint is image-to-video (it declares {} input channels) and \
@@ -834,23 +909,32 @@ impl WanEngine {
         if shape == WanConditioningShape::Plain && vae_generation != WanVaeGeneration::V2_2 {
             bail!(
                 "this Wan checkpoint is text-to-video only and has no image conditioning path — \
-                 use wan22-ti2v-5b, or an I2V checkpoint, for source images"
+                 use wan22-ti2v-5b, or an I2V checkpoint, for source images and keyframes"
             );
         }
+        let anchors = if endpoints.last.is_some() {
+            WanImageAnchors::FirstAndLastFrame
+        } else {
+            WanImageAnchors::FirstFrame
+        };
 
         progress.stage_start("Encoding source image");
         let encode_start = Instant::now();
         // Fit to the requested frame, matching every other mold engine's source
         // convention. mold deliberately does NOT run upstream's area bucketing,
         // which would silently resize; see `wan::conditioning`.
-        let image = crate::img_utils::decode_source_image(
-            bytes,
-            width,
-            height,
-            crate::img_utils::NormalizeRange::MinusOneToOne,
-            device,
-            dtype,
-        )?;
+        let decode = |bytes: &[u8]| {
+            crate::img_utils::decode_source_image(
+                bytes,
+                width,
+                height,
+                crate::img_utils::NormalizeRange::MinusOneToOne,
+                device,
+                dtype,
+            )
+        };
+        let image = decode(endpoints.first)?;
+        let last_image = endpoints.last.map(decode).transpose()?;
 
         let vae = WanVideoVae::from_safetensors(
             &self.base.paths.vae,
@@ -862,37 +946,53 @@ impl WanEngine {
         let conditioning = match shape {
             WanConditioningShape::Plain => {
                 // TI2V encodes the bare image: one pixel frame in, one latent
-                // frame out, broadcast across the clip by the blend.
+                // frame out, broadcast across the clip by the blend. FLF
+                // additionally pins the final latent frame to the encoded
+                // last image — diffusers' `last_image` shape (#779).
                 let single = image.unsqueeze(2)?;
                 let encoded = vae.encode(&single)?;
-                let condition = encoded.broadcast_as((
-                    1,
-                    encoded.dim(1)?,
-                    geometry.latent_frames,
-                    geometry.latent_height,
-                    geometry.latent_width,
-                ))?;
-                let inpaint = WanTi2vInpaint::new(geometry, device, dtype)?;
-                WanImageConditioning::LatentInpaint {
-                    inpaint,
-                    condition: condition.contiguous()?,
+                let mut condition = encoded
+                    .broadcast_as((
+                        1,
+                        encoded.dim(1)?,
+                        geometry.latent_frames,
+                        geometry.latent_height,
+                        geometry.latent_width,
+                    ))?
+                    .contiguous()?;
+                if let Some(last_image) = &last_image {
+                    let last_encoded = vae.encode(&last_image.unsqueeze(2)?)?;
+                    let head = condition.narrow(2, 0, geometry.latent_frames - 1)?;
+                    condition = Tensor::cat(&[&head, &last_encoded], 2)?.contiguous()?;
                 }
+                let inpaint = WanTi2vInpaint::with_anchors(geometry, anchors, device, dtype)?;
+                WanImageConditioning::LatentInpaint { inpaint, condition }
             }
             WanConditioningShape::ChannelConcat => {
-                // I2V encodes the image followed by a black canvas, so the
-                // conditioning latent spans the whole clip.
-                let canvas = Tensor::zeros(
-                    (1, 3, pixel_frames - 1, height as usize, width as usize),
-                    dtype,
-                    device,
-                )?;
-                let video = Tensor::cat(&[&image.unsqueeze(2)?, &canvas], 2)?;
+                // I2V encodes the endpoints with a black canvas between —
+                // upstream FLF2V's `y = [first, zeros(F-2), last]`
+                // (`first_last_frame2video.py:186-277`); plain I2V is the
+                // degenerate one-anchor case.
+                let gap = pixel_frames - 1 - usize::from(last_image.is_some());
+                let mut segments = vec![image.unsqueeze(2)?];
+                if gap > 0 {
+                    segments.push(Tensor::zeros(
+                        (1, 3, gap, height as usize, width as usize),
+                        dtype,
+                        device,
+                    )?);
+                }
+                if let Some(last_image) = &last_image {
+                    segments.push(last_image.unsqueeze(2)?);
+                }
+                let refs: Vec<&Tensor> = segments.iter().collect();
+                let video = Tensor::cat(&refs, 2)?;
                 let encoded = vae.encode(&video)?;
                 WanImageConditioning::ChannelConcat {
                     conditioning: build_a14b_conditioning(
                         &encoded,
                         pixel_frames,
-                        WanImageAnchors::FirstFrame,
+                        anchors,
                         VAE_TEMPORAL_COMPRESSION,
                     )?,
                 }
@@ -1752,7 +1852,6 @@ mod tests {
             (|req: &mut GenerateRequest| req.source_video = Some(vec![1, 2, 3])) as fn(&mut _),
             |req: &mut GenerateRequest| req.extend_video = Some(vec![1, 2, 3]),
             |req: &mut GenerateRequest| req.source_video_path = Some("clip.mp4".into()),
-            |req: &mut GenerateRequest| req.keyframes = Some(Vec::new()),
         ] {
             let mut req = request();
             mutate(&mut req);
@@ -1764,17 +1863,84 @@ mod tests {
                 "unexpected error: {error}"
             );
             assert!(
-                error.contains("single-image conditioning"),
+                error.contains("first/last-frame conditioning"),
                 "the error must say what the engine does support: {error}"
             );
         }
 
-        // Images are no longer refused at the request boundary.
+        // Images are no longer refused at the request boundary, and neither
+        // are keyframes — the endpoint layout is validated in
+        // `resolve_endpoint_images` (#779).
         let mut req = request();
         req.source_image = Some(vec![1, 2, 3]);
         req.source_image_name = Some("cat.png".into());
         reject_unsupported_conditioning(&req).unwrap();
         reject_unsupported_conditioning(&request()).unwrap();
+    }
+
+    /// #779: the endpoint resolver accepts exactly the layouts wan renders —
+    /// a lone source image, or a two-entry first/last keyframe pair anchored
+    /// at frames 0 and F-1 — and names why anything else is refused.
+    #[test]
+    fn endpoint_images_resolve_source_and_flf_layouts_only() {
+        let frames = 33u32;
+        let keyframe = |frame: u32, byte: u8| mold_core::KeyframeCondition {
+            frame,
+            image: vec![byte],
+            name: None,
+        };
+
+        // No conditioning at all.
+        assert!(resolve_endpoint_images(&request(), frames)
+            .unwrap()
+            .is_none());
+
+        // A lone source image is the existing I2V shape.
+        let mut source_only = request();
+        source_only.source_image = Some(vec![7]);
+        let endpoints = resolve_endpoint_images(&source_only, frames)
+            .unwrap()
+            .expect("source resolves");
+        assert_eq!(endpoints.first, &[7]);
+        assert!(endpoints.last.is_none());
+
+        // The FLF pair anchors the clip's endpoints.
+        let mut flf = request();
+        flf.keyframes = Some(vec![keyframe(0, 1), keyframe(frames - 1, 2)]);
+        let endpoints = resolve_endpoint_images(&flf, frames)
+            .unwrap()
+            .expect("FLF resolves");
+        assert_eq!(endpoints.first, &[1]);
+        assert_eq!(endpoints.last, Some(&[2u8][..]));
+
+        // Wrong count, wrong anchors, and ambiguous mixes are refused by name.
+        let mut one = request();
+        one.keyframes = Some(vec![keyframe(0, 1)]);
+        let error = resolve_endpoint_images(&one, frames)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exactly two keyframes"), "{error}");
+
+        let mut misplaced = request();
+        misplaced.keyframes = Some(vec![keyframe(0, 1), keyframe(7, 2)]);
+        let error = resolve_endpoint_images(&misplaced, frames)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("frames 0 and 32"), "{error}");
+
+        let mut ambiguous = request();
+        ambiguous.source_image = Some(vec![7]);
+        ambiguous.keyframes = Some(vec![keyframe(0, 1), keyframe(frames - 1, 2)]);
+        let error = resolve_endpoint_images(&ambiguous, frames)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not both"), "{error}");
+
+        // An empty keyframes vec is treated as absent, matching serde's
+        // omitted-field shape.
+        let mut empty = request();
+        empty.keyframes = Some(Vec::new());
+        assert!(resolve_endpoint_images(&empty, frames).unwrap().is_none());
     }
 
     /// The conditioning shape is derived from the checkpoint's channel ratio,

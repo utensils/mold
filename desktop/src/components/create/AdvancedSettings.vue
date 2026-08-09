@@ -127,6 +127,10 @@ const caps = computed(() =>
     props.form.model,
     props.form.pipeline,
     props.selectedModel?.guidance_capabilities,
+    // Per-model source-image contract (#772): the picked row when we have it,
+    // otherwise the form's snapshot of it. Without this the Source image
+    // section would render for a text-to-video wan checkpoint that rejects one.
+    props.selectedModel?.source_image ?? props.form.sourceImageCapability,
   ),
 );
 const audioOutputSupported = computed(() => props.selectedModel?.supports_audio !== false);

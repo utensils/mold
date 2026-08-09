@@ -37,6 +37,7 @@ export type GenerationTemplateMediaField =
   | "control"
   | "sourceVideo"
   | "keyframes"
+  | "endFrame"
   | "editImages"
   | "audioFile"
   | "h3FirstFrame"
@@ -64,6 +65,7 @@ const MEDIA_REFERENCE_LABELS: Record<GenerationTemplateMediaField, string> = {
   control: "control photo",
   sourceVideo: "source video",
   keyframes: "keyframes",
+  endFrame: "end frame",
   editImages: "edit pictures",
   audioFile: "conditioning audio",
   h3FirstFrame: "H3 first frame",
@@ -129,6 +131,7 @@ export function collectTemplateMediaReferences(form: GenerateForm): GenerationTe
   if (form.imageAttachments.length > 0) refs.push("editImages");
   if (form.sourceVideo) refs.push("sourceVideo");
   if (form.keyframes.length > 0) refs.push("keyframes");
+  if (form.endFrame) refs.push("endFrame");
   if (form.audioFile) refs.push("audioFile");
   if (form.h3Authoring?.firstFrame) refs.push("h3FirstFrame");
   if (form.h3Authoring?.lastFrame) refs.push("h3LastFrame");
@@ -146,6 +149,9 @@ function stripTemplateForm(form: GenerateForm): GenerateForm {
   clone.imageAttachments = [];
   clone.sourceVideo = null;
   clone.keyframes = [];
+  // The wan end frame has no durable asset of its own, so it is recorded as a
+  // media reference and reported missing on hydrate rather than persisted.
+  clone.endFrame = null;
   clone.audioFile = null;
   clone.h3Authoring = stripMinimaxH3AuthoringMedia(clone.h3Authoring);
   return clone;

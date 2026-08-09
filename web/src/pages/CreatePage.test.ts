@@ -823,6 +823,155 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.text()).toContain("Guidance skip stride:");
   });
 
+  // #772: the advertised contract gates submit, and #779's first/last-frame
+  // pair rides the existing keyframes field.
+  it("holds Generate until an image-to-video checkpoint has its first frame", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "wan22-i2v-a14b:q8";
+    form.state.value.modelFamily = "wan";
+    form.state.value.sourceImageCapability = "required";
+    form.state.value.frames = 81;
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain(
+      "This checkpoint is image-to-video only. Attach a source image to use as the first frame.",
+    );
+
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "open.png", base64: "FIRST" },
+    ];
+    await nextTick();
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    expect(submitMock).toHaveBeenCalled();
+  });
+
+  it("holds Generate when a text-to-video checkpoint carries a source image", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "wan22-t2v-a14b:q5";
+    form.state.value.modelFamily = "wan";
+    form.state.value.sourceImageCapability = "unsupported";
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "stale.png", base64: "STALE" },
+    ];
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("text-to-video only");
+  });
+
+  it("holds Generate for an end frame with no first frame", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "wan22-ti2v-5b:fp16";
+    form.state.value.modelFamily = "wan";
+    form.state.value.sourceImageCapability = "optional";
+    form.state.value.frames = 81;
+    form.state.value.endFrame = {
+      kind: "upload",
+      filename: "close.png",
+      base64: "LAST",
+    };
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("An end frame needs a first frame.");
+  });
+
+  it("submits a first/last-frame pair as two keyframes plus the source image", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "wan22-ti2v-5b:fp16";
+    form.state.value.modelFamily = "wan";
+    form.state.value.sourceImageCapability = "optional";
+    form.state.value.frames = 81;
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "open.png", base64: "FIRST" },
+    ];
+    form.state.value.endFrame = {
+      kind: "upload",
+      filename: "close.png",
+      base64: "LAST",
+    };
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).toHaveBeenCalled();
+    const request = submitMock.mock.calls.at(-1)![0] as {
+      source_image?: string | null;
+      keyframes?: { frame: number; image: string }[];
+    };
+    expect(request.source_image).toBe("FIRST");
+    expect(request.keyframes).toEqual([
+      { frame: 0, image: "FIRST", name: "open.png" },
+      { frame: 80, image: "LAST", name: "close.png" },
+    ]);
+  });
+
+  it("says the end frame could not be restored when reusing a first/last-frame print", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "wan22-ti2v-5b:fp16",
+        family: "wan",
+        size_gb: 10,
+        is_loaded: false,
+        last_used: null,
+        hf_repo: "",
+        downloaded: true,
+        default_steps: 20,
+        default_guidance: 3.5,
+        default_width: 1280,
+        default_height: 704,
+        default_frames: 81,
+        default_fps: 24,
+        description: "Wan 2.2 TI2V 5B",
+        source_image: "optional",
+      },
+    ]);
+    setGenerationHandoff({
+      seedPinned: true,
+      metadata: {
+        version: "1",
+        model: "wan22-ti2v-5b:fp16",
+        prompt: "a heron takes off",
+        seed: 42,
+        steps: 20,
+        guidance: 3.5,
+        width: 1280,
+        height: 704,
+        frames: 81,
+        keyframes: [
+          { frame: 0, name: "open.png", sha256: "a".repeat(64) },
+          { frame: 80, name: "close.png", sha256: "b".repeat(64) },
+        ],
+      } as OutputMetadata,
+    });
+
+    mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    expect(useGenerateForm().state.value.endFrame).toBeNull();
+    expect(
+      useNotifications()
+        .toasts.map((item) => item.text)
+        .join(" "),
+    ).toContain("The end frame (close.png) can't be restored");
+  });
+
   it("submits Qwen edit images without sending stale mask state", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();

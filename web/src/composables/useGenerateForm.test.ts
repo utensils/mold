@@ -1587,6 +1587,231 @@ describe("useGenerateForm — enableAudio (LTX-2 / LTX-2.3)", () => {
   });
 });
 
+/**
+ * Per-model source-image conditioning (#772) and the wan first/last-frame
+ * layout that rides the existing `keyframes` field (#779).
+ */
+describe("useGenerateForm — source image & first/last frames", () => {
+  beforeEach(() => {
+    Object.defineProperty(globalThis, "indexedDB", {
+      value: new IDBFactory(),
+      writable: true,
+      configurable: true,
+    });
+    localStorage.clear();
+    __testing__.resetForTest();
+  });
+
+  const wanEndFrameModel = (
+    overrides: Partial<ModelInfoExtended> = {},
+  ): ModelInfoExtended =>
+    makeModel({
+      name: "wan22-ti2v-5b:fp16",
+      family: "wan",
+      default_frames: 81,
+      default_fps: 24,
+      source_image: "optional",
+      ...overrides,
+    });
+
+  function attachEnds(form: ReturnType<typeof useGenerateForm>) {
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "open.png", base64: "FIRST" },
+    ];
+    form.state.value.endFrame = {
+      kind: "upload",
+      filename: "close.png",
+      base64: "LAST",
+    };
+  }
+
+  it("defaults both new fields to absent so nothing new reaches an older server", () => {
+    const form = useGenerateForm();
+    expect(form.state.value.sourceImageCapability).toBeNull();
+    expect(form.state.value.endFrame).toBeNull();
+  });
+
+  it("snapshots the model's advertised contract on model change", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(wanEndFrameModel({ source_image: "required" }));
+    expect(form.state.value.sourceImageCapability).toBe("required");
+    // A row without the field clears the snapshot rather than inheriting the
+    // previous model's answer.
+    form.applyModelDefaults(
+      makeModel({ name: "flux-dev:q4", family: "flux", source_image: null }),
+    );
+    expect(form.state.value.sourceImageCapability).toBeNull();
+  });
+
+  it("clears the end frame and staged source when the new model cannot take one", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(wanEndFrameModel());
+    attachEnds(form);
+
+    // Still a wan checkpoint, but text-to-video only: neither well applies.
+    form.applyModelDefaults(
+      wanEndFrameModel({
+        name: "wan22-t2v-a14b:q5",
+        source_image: "unsupported",
+      }),
+    );
+    expect(form.state.value.endFrame).toBeNull();
+    expect(form.state.value.imageAttachments).toEqual([]);
+  });
+
+  it("keeps the source but drops the end frame on a family with no first/last layout", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(wanEndFrameModel());
+    attachEnds(form);
+
+    form.applyModelDefaults(makeModel({ name: "flux-dev:q4", family: "flux" }));
+    expect(form.state.value.endFrame).toBeNull();
+    expect(form.state.value.imageAttachments).toHaveLength(1);
+  });
+
+  it("persists the end frame as a descriptor and hydrates its bytes from the draft store", async () => {
+    vi.useFakeTimers();
+    try {
+      const first = useGenerateForm();
+      first.state.value.endFrame = {
+        kind: "upload",
+        filename: "close.png",
+        base64: "END_FRAME_BYTES",
+      };
+      await nextTick();
+      await flushDraftPersistence();
+
+      const raw = localStorage.getItem(STORAGE_KEY);
+      expect(raw).not.toContain("END_FRAME_BYTES");
+      expect(JSON.parse(raw!).endFrame).toMatchObject({
+        filename: "close.png",
+        draftId: expect.any(String),
+      });
+
+      __testing__.clearDraftsForTest();
+      __testing__.resetForTest();
+      const second = useGenerateForm();
+      await flushDraftHydration();
+      expect(second.state.value.endFrame?.base64).toBe("END_FRAME_BYTES");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("serializes both ends as exactly two keyframes while keeping source_image", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(wanEndFrameModel());
+    attachEnds(form);
+    form.state.value.frames = 81;
+
+    const wire = form.toRequest();
+    // Admission reads `source_image` to prove an I2V checkpoint has its
+    // opening frame, so the pair travels twice on purpose.
+    expect(wire.source_image).toBe("FIRST");
+    expect(wire.keyframes).toEqual([
+      { frame: 0, image: "FIRST", name: "open.png" },
+      { frame: 80, image: "LAST", name: "close.png" },
+    ]);
+  });
+
+  it("recomputes the closing index from the frame count held at submit time", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(wanEndFrameModel());
+    attachEnds(form);
+    form.state.value.frames = 81;
+    expect(form.toRequest().keyframes?.[1]?.frame).toBe(80);
+
+    form.state.value.frames = 49;
+    expect(form.toRequest().keyframes?.[1]?.frame).toBe(48);
+  });
+
+  it("sends no keyframes for a lone source image — that request is unchanged", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(wanEndFrameModel());
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "open.png", base64: "FIRST" },
+    ];
+    form.state.value.frames = 81;
+
+    const wire = form.toRequest();
+    expect(wire.source_image).toBe("FIRST");
+    expect(wire.keyframes).toBeUndefined();
+  });
+
+  it("sends no keyframes for an end frame with no first frame", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(wanEndFrameModel());
+    form.state.value.endFrame = {
+      kind: "upload",
+      filename: "close.png",
+      base64: "LAST",
+    };
+    form.state.value.frames = 81;
+    expect(form.toRequest().keyframes).toBeUndefined();
+  });
+
+  it("sends no keyframes when the server advertised nothing for this checkpoint", () => {
+    // A host old enough to omit `source_image` rejects wan keyframes outright,
+    // so the pair must not be optimistically serialized.
+    const form = useGenerateForm();
+    form.applyModelDefaults(
+      wanEndFrameModel({ source_image: null }) as ModelInfoExtended,
+    );
+    attachEnds(form);
+    form.state.value.frames = 81;
+    expect(form.toRequest().keyframes).toBeUndefined();
+  });
+
+  it("leaves the LTX-2 keyframe control alone", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "ltx-2-19b:fp8",
+      modelFamily: "ltx2",
+      sourceImageCapability: "optional",
+      frames: 97,
+      keyframes: [
+        {
+          frame: 48,
+          image: { kind: "upload", filename: "kf.png", base64: "KF" },
+        },
+      ],
+      endFrame: { kind: "upload", filename: "close.png", base64: "LAST" },
+      imageAttachments: [
+        { kind: "upload", filename: "open.png", base64: "FIRST" },
+      ],
+    });
+    expect(form.toRequest().keyframes).toEqual([
+      { frame: 48, image: "KF", name: "kf.png" },
+    ]);
+  });
+
+  it("applyMetadataToForm clears the end frame — saved keyframes carry no bytes", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(wanEndFrameModel());
+    attachEnds(form);
+
+    const restored = applyMetadataToForm(
+      form.state.value,
+      {
+        prompt: "a heron",
+        model: "wan22-ti2v-5b:fp16",
+        seed: 7,
+        steps: 20,
+        guidance: 3.5,
+        width: 1280,
+        height: 704,
+        version: "test",
+        keyframes: [
+          { frame: 0, name: "open.png", sha256: "a".repeat(64) },
+          { frame: 80, name: "close.png", sha256: "b".repeat(64) },
+        ],
+      } as OutputMetadata,
+      { models: [wanEndFrameModel()] },
+    );
+    expect(restored.endFrame).toBeNull();
+  });
+});
+
 describe("generate form serialization helpers", () => {
   function makeForm(
     overrides: Partial<GenerateFormState> = {},
@@ -1602,6 +1827,8 @@ describe("generate form serialization helpers", () => {
       height: 1024,
       steps: 28,
       guidance: 3.5,
+      sourceImageCapability: null,
+      endFrame: null,
       seedMode: "random",
       seed: null,
       batchSize: 1,

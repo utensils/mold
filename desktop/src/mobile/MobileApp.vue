@@ -71,6 +71,7 @@ import { buildChainRequest } from "@studio/lib/sequenceForm";
 import { chainScriptToClips } from "@studio/lib/sequenceForm";
 import { normalizeServerChainScript } from "@studio/lib/chainScriptWire";
 import { sequenceReuseClampNote, sequenceReuseNote } from "@studio/lib/sequenceReuse";
+import { firstLastFrameRestoreNotice } from "@studio/lib/sourceImageCapability";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ChainJobDetail, ChainLimits } from "@studio/lib/api/chainTypes";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
@@ -137,6 +138,7 @@ import {
   MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
   MOBILE_MEDIA_BUDGET_ERROR,
   mobileMediaBudgetValidationError,
+  sourceConditioningValidationError,
   stepsValidationError,
 } from "../lib/generateValidation";
 import { blobToBase64, isStillImageFile } from "../lib/image";
@@ -423,7 +425,8 @@ const advancedActiveCount = computed(() => {
     form.negativePrompt.trim()
   )
     count += 1;
-  if (form.sourceImage || form.controlImage || form.imageAttachments.length) count += 1;
+  if (form.sourceImage || form.endFrame || form.controlImage || form.imageAttachments.length)
+    count += 1;
   if (form.loras.length) count += 1;
   if (form.upscaleModel) count += 1;
   if (form.scheduler !== "default") count += 1;
@@ -704,6 +707,11 @@ const caps = computed(() =>
     form.model,
     form.pipeline,
     selectedGenerationModel.value?.guidance_capabilities,
+    // Per-model source-image contract (#772): the picked row when the host's
+    // listing has it, otherwise the form's snapshot of it. Without this the
+    // source well would render for a text-to-video wan checkpoint that
+    // rejects one, and the End frame well (#779) would never appear.
+    selectedGenerationModel.value?.source_image ?? form.sourceImageCapability,
   ),
 );
 const h3Family = computed(() => isMinimaxH3Identity(form.family, form.model));
@@ -892,7 +900,13 @@ const sourceSectionSummary = computed(() => {
     }
     return count === 0 ? "Target required" : `${count} photo${count === 1 ? "" : "s"}`;
   }
-  if (form.sourceImage) return form.sourceImageName || "Selected";
+  if (form.sourceImage) {
+    const opening = form.sourceImageName || "Selected";
+    // A first/last-frame pair is the whole point of the section for wan, so
+    // the collapsed summary has to say the closing still is there too.
+    return form.endFrame && caps.value.supportsEndFrame ? `${opening} · end frame` : opening;
+  }
+  if (caps.value.requiresSourceImage) return "Required";
   return form.controlImage ? "Control photo selected" : "Optional";
 });
 const outputFormats = computed(() => outputFormatsForFamily(form.family));
@@ -1016,6 +1030,15 @@ watch(
   { immediate: true },
 );
 const sourceControlsValid = computed(() => !caps.value.supportsImg2img || sourceValid.value);
+/**
+ * The per-model source-image contract (#772) and wan's first/last-frame
+ * pairing (#779). The source well lives inside the full-screen Advanced sheet,
+ * so its own inline copy is invisible while that sheet is closed — this is the
+ * same message beside Develop, which is what stops a disabled button from
+ * being a dead end. It also covers the case the well cannot report at all: an
+ * advertised text-to-video checkpoint hides the well entirely.
+ */
+const sourceConditioningError = computed(() => sourceConditioningValidationError(form));
 const stepsError = computed(() => stepsValidationError(form.steps));
 const guidanceError = computed(() => guidanceValidationError(form.guidance));
 const basicParametersValid = computed(() => !stepsError.value && !guidanceError.value);
@@ -3100,7 +3123,13 @@ async function prepareGenerationRequest(
   draft: GenerateForm,
   isCurrent: () => boolean = () => true,
 ) {
-  const draftCaps = generationCapabilitiesForFamily(draft.family, draft.model);
+  const draftCaps = generationCapabilitiesForFamily(
+    draft.family,
+    draft.model,
+    draft.pipeline,
+    draft.guidanceCapabilities,
+    draft.sourceImageCapability,
+  );
   if (draftCaps.supportsImg2img && draftCaps.sourceImageMode === "single" && draft.sourceImage) {
     const result = await applySourceFitPreprocess(
       {
@@ -3219,13 +3248,20 @@ async function generate(): Promise<void> {
     !resolutionValid.value ||
     !basicParametersValid.value ||
     !!mobileMediaBudgetError.value ||
+    !!sourceConditioningError.value ||
     !!h3AuthoringError.value ||
     preparingGeneration.value
   )
     return;
 
   const draft = cloneGenerateForm(form);
-  const draftCaps = generationCapabilitiesForFamily(draft.family, draft.model);
+  const draftCaps = generationCapabilitiesForFamily(
+    draft.family,
+    draft.model,
+    draft.pipeline,
+    draft.guidanceCapabilities,
+    draft.sourceImageCapability,
+  );
   // The composer style preset is baked into the OUTGOING request at submit —
   // the textarea and negative field are never mutated. Reviewed prepared
   // prompts ship verbatim (the style already reached them through the
@@ -3822,7 +3858,17 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     } else if (notes.length === 0) {
       notes.push("Prompt settings restored");
     }
-    setGenerationStatus(notes.join(" · "));
+    // A first/last-frame print restores every knob except its closing still:
+    // saved metadata records each keyframe's name and digest, never the bytes
+    // (`applyMetadataToForm` already cleared `form.endFrame`). Say so, the same
+    // way an unrestorable source video is reported, rather than letting Develop
+    // look ready to reproduce the render.
+    const endFrameNotice = firstLastFrameRestoreNotice(
+      caps.value.supportsEndFrame,
+      print.metadata.keyframes,
+    );
+    if (endFrameNotice) notes.push(endFrameNotice);
+    setGenerationStatus(notes.join(" · "), !!endFrameNotice);
     selectedPrint.value = null;
     // The next Gallery visit performs its normal refresh; do not refetch the
     // grid while navigating directly to the restored prompt.
@@ -4679,6 +4725,14 @@ onBeforeUnmount(() => {
               {{ mobileMediaBudgetError }}
             </p>
             <p
+              v-if="sourceConditioningError"
+              class="mobile-generate-validation"
+              role="alert"
+              data-test="mobile-source-conditioning-gate"
+            >
+              {{ sourceConditioningError }}
+            </p>
+            <p
               v-if="h3AuthoringError"
               class="mobile-generate-validation"
               role="alert"
@@ -4768,7 +4822,13 @@ onBeforeUnmount(() => {
                 v-if="form.model && caps.supportsImg2img && !h3Family"
                 class="mobile-native-disclosure"
                 :open="
-                  !!(form.sourceImage || form.controlImage || form.imageAttachments.length) ||
+                  !!(
+                    form.sourceImage ||
+                    form.endFrame ||
+                    form.controlImage ||
+                    form.imageAttachments.length
+                  ) ||
+                  caps.requiresSourceImage ||
                   caps.sourceImageMode !== 'single'
                 "
                 data-test="mobile-source-disclosure"
@@ -4824,6 +4884,7 @@ onBeforeUnmount(() => {
                 !resolutionValid ||
                 !basicParametersValid ||
                 !!mobileMediaBudgetError ||
+                !!sourceConditioningError ||
                 !!h3AuthoringError ||
                 preparingGeneration
               "

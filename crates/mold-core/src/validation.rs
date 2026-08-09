@@ -1148,14 +1148,39 @@ fn validate_keyframes(
 ) -> Result<(), String> {
     match family {
         Some("ltx2") => {}
+        // Wan accepts exactly the first/last endpoint pair (#779) — the
+        // family has no mid-clip keyframe path, so every other layout is
+        // named at admission rather than after the model loads.
+        Some("wan") => {
+            if keyframes.len() != 2 {
+                return Err(format!(
+                    "Wan supports exactly two keyframes — the first and last pixel frames — \
+                     got {}",
+                    keyframes.len()
+                ));
+            }
+            let last = frames.map(|frames| frames.saturating_sub(1));
+            if keyframes[0].frame != 0 || last.is_some_and(|last| keyframes[1].frame != last) {
+                return Err(format!(
+                    "Wan first/last-frame keyframes must anchor frames 0 and {} (the clip's \
+                     endpoints), got frames {} and {}",
+                    last.map_or_else(|| "frames-1".to_string(), |last| last.to_string()),
+                    keyframes[0].frame,
+                    keyframes[1].frame
+                ));
+            }
+        }
         None => {
             return Err(
-                "unknown model family; keyframes are only supported for LTX-2 / LTX-2.3 models"
+                "unknown model family; keyframes are only supported for LTX-2 / LTX-2.3 and \
+                 Wan models"
                     .to_string(),
             );
         }
         _ => {
-            return Err("keyframes are only supported for LTX-2 / LTX-2.3 models".to_string());
+            return Err(
+                "keyframes are only supported for LTX-2 / LTX-2.3 and Wan models".to_string(),
+            );
         }
     }
     if keyframes.is_empty() {
@@ -1949,6 +1974,17 @@ fn validate_generate_request_after_activation(
             ) => {}
             (OutputFormat::Png | OutputFormat::Jpeg, Some(1)) => {}
             _ => return Err("Wan outputs must use mp4, gif, apng, or webp".to_string()),
+        }
+
+        // First/last-frame conditioning (#779): the first frame comes from
+        // either `source_image` or `keyframes[0]`, never both — an ambiguous
+        // mix is refused at admission with the engine's own wording.
+        if req.source_image.is_some() && req.keyframes.as_ref().is_some_and(|k| !k.is_empty()) {
+            return Err(
+                "Wan takes the first frame from either source_image or keyframes[0], not both \
+                 — for a first/last-frame render, put both endpoints in keyframes"
+                    .to_string(),
+            );
         }
     }
 
@@ -4661,6 +4697,53 @@ mod tests {
         // The UNet schedulers keep working off-family.
         flux.scheduler = Some(Scheduler::Ddim);
         assert!(validate_generate_request(&flux).is_ok());
+    }
+
+    /// #779: wan admits exactly the first/last endpoint keyframe pair, and
+    /// classifies it as boundary-preserving prompt work — parity twin:
+    /// `studio/lib/expandTask.ts`.
+    #[test]
+    fn wan_keyframes_admit_only_the_endpoint_pair() {
+        use crate::{ExpandTask, KeyframeCondition};
+        let keyframe = |frame: u32| KeyframeCondition {
+            frame,
+            // A real PNG header so the image-format check passes.
+            image: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+            name: None,
+        };
+
+        let mut req = valid_req();
+        req.model = "wan22-i2v-a14b:q5".to_string();
+        req.output_format = Some(OutputFormat::Mp4);
+        req.frames = Some(33);
+        req.keyframes = Some(vec![keyframe(0), keyframe(32)]);
+        assert!(validate_generate_request(&req).is_ok());
+
+        // Wrong count, wrong anchors, and the ambiguous source+keyframes mix
+        // are named at admission.
+        req.keyframes = Some(vec![keyframe(0)]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("exactly two keyframes"), "got: {err}");
+        req.keyframes = Some(vec![keyframe(0), keyframe(7)]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("frames 0 and 32"), "got: {err}");
+        req.keyframes = Some(vec![keyframe(0), keyframe(32)]);
+        req.source_image = Some(vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        let err = validate_generate_request(&req).unwrap_err();
+        assert!(err.contains("not both"), "got: {err}");
+        req.source_image = None;
+
+        // The expansion task treats the pair as boundary anchors, exactly as
+        // LTX-2 keyframes classify.
+        assert_eq!(
+            ExpandTask::for_generation("wan", &req),
+            ExpandTask::KeyframeInterpolation
+        );
+
+        // Non-video families keep rejecting keyframes outright.
+        let mut flux = valid_req();
+        flux.keyframes = Some(vec![keyframe(0), keyframe(8)]);
+        assert!(validate_generate_request(&flux).is_err());
     }
 
     /// Buckets are advertised per checkpoint: the 480p-only 1.3B and the

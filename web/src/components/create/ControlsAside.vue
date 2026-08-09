@@ -77,12 +77,17 @@ const emit = defineEmits<{
   "reset-settings": [];
 }>();
 
+// The fifth argument is the selected row's advertised source-image contract
+// (#772). The rail does not render a source well itself, but resolving the
+// same five inputs as the drawer and the submit gate is what stops the three
+// from disagreeing about the selected checkpoint.
 const capabilities = computed(() =>
   generationCapabilitiesForFamily(
     props.family,
     props.model?.name ?? props.modelValue.model,
     props.modelValue.pipeline,
     props.model?.guidance_capabilities,
+    props.model?.source_image ?? props.modelValue.sourceImageCapability,
   ),
 );
 const sequenceMode = computed(() => props.output === "sequence");

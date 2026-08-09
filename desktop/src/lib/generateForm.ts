@@ -45,6 +45,7 @@ import {
   type WanRecipeState,
 } from "@studio/lib/wanRecipe";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
+import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
 import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
 import {
   MINIMAX_H3_MIN_FRAMES,
@@ -98,6 +99,11 @@ export interface GenerateForm {
   steps: number;
   guidance: number;
   guidanceCapabilities: ModelEntry["guidance_capabilities"];
+  /** The selected model's advertised source-image contract (#772), snapshotted
+   * on model change like `guidanceCapabilities`. Read it through
+   * `generationCapabilitiesForFamily`, never raw; `null` means the host
+   * advertised nothing and the family heuristic answers. */
+  sourceImageCapability: ModelEntry["source_image"];
   /** Empty string = random seed. */
   seed: string;
   negativePrompt: string;
@@ -120,6 +126,11 @@ export interface GenerateForm {
    * and never travel on the generation wire. */
   sourceImageWidth: number | null;
   sourceImageHeight: number | null;
+  /** Wan first/last-frame conditioning (#779): the closing still. Optional,
+   * offered only on a wan checkpoint whose advertised contract accepts a
+   * source image, and meaningless without `sourceImage` — the pair ships as
+   * the two-entry `keyframes` layout, never a lone keyframe. */
+  endFrame: PickedImage | null;
   /** Ordered edit/reference strip, base64 each (no data-URI prefix). For Qwen,
    * index 0 is the edit Target and the rest are References. FLUX.2 Dev treats
    * every entry as an ordered Reference. Empty in single-source mode. */
@@ -182,6 +193,7 @@ export function newGenerateForm(): GenerateForm {
     steps: 4,
     guidance: 3.5,
     guidanceCapabilities: null,
+    sourceImageCapability: null,
     seed: "",
     negativePrompt: "",
     scheduler: "default",
@@ -194,6 +206,7 @@ export function newGenerateForm(): GenerateForm {
     sourceImageName: null,
     sourceImageWidth: null,
     sourceImageHeight: null,
+    endFrame: null,
     imageAttachments: [],
     sourceFit: { mode: "pad-repaint" },
     maskImage: null,
@@ -240,6 +253,7 @@ export function cloneGenerateForm(form: GenerateForm): GenerateForm {
       ...lora,
       trainedWords: [...lora.trainedWords],
     })),
+    endFrame: form.endFrame ? { ...form.endFrame } : null,
     sourceVideo: form.sourceVideo ? { ...form.sourceVideo } : null,
     extendVideo: form.extendVideo ? { ...form.extendVideo } : null,
     keyframes: form.keyframes.map((keyframe) => ({
@@ -300,7 +314,8 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
 export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): void {
   form.model = m.name;
   form.family = m.family;
-  const caps = generationCapabilitiesForFamily(m.family, m.name);
+  form.sourceImageCapability = m.source_image ?? null;
+  const caps = generationCapabilitiesForFamily(m.family, m.name, null, null, m.source_image);
   if (!outputFormatsForFamily(m.family).includes(form.outputFormat)) {
     form.outputFormat = defaultOutputFormat(m.family);
   }
@@ -321,6 +336,9 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     };
   }
   if (caps.forcesBatchSizeOne) form.batchSize = 1;
+  // The closing still belongs to wan's first/last-frame contract alone; a
+  // model that cannot read one must not keep it staged where nothing shows it.
+  if (!caps.supportsEndFrame) form.endFrame = null;
   if (!caps.supportsImg2img) {
     form.sourceImage = null;
     form.sourceImageName = null;
@@ -422,6 +440,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     form.model,
     form.pipeline,
     form.guidanceCapabilities,
+    form.sourceImageCapability,
   );
   const parsedSeed = form.seed.trim() === "" ? undefined : Number(form.seed);
   let loras: LoraWeight[] = form.loras.map((l) => ({ path: l.path, scale: l.scale }));
@@ -490,6 +509,22 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     if (form.sourceImageName) req.source_image_name = form.sourceImageName;
     req.strength = form.strength;
     if (caps.supportsMask && form.maskImage) req.mask_image = form.maskImage;
+    // Wan's first/last-frame render rides the keyframes contract: both ends
+    // travel as `keyframes`, and `source_image` stays put because that is
+    // what admission reads to prove an I2V-required checkpoint has its
+    // opening frame. The closing index is computed here, from the frame count
+    // this request is actually carrying, so changing clip length after
+    // attaching the end frame can never ship a stale index. A lone source
+    // image is an ordinary image-to-video request and sends no keyframes.
+    const firstLast =
+      caps.supportsEndFrame && form.endFrame
+        ? firstLastFrameKeyframes(
+            { base64: form.sourceImage, filename: form.sourceImageName },
+            { base64: form.endFrame.base64, filename: form.endFrame.filename },
+            form.frames,
+          )
+        : null;
+    if (firstLast) req.keyframes = firstLast;
   }
 
   // ControlNet is independent conditioning, not an img2img derivative. An
@@ -551,7 +586,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   // transition keeps the user's source media intact if they switch back.
   return stripAudioOnlyIncompatibleFields(
     serializeMinimaxH3Authoring(
-      pruneRequestForFamily(req, form.family, form.model),
+      pruneRequestForFamily(req, form.family, form.model, form.sourceImageCapability),
       form.family,
       form.model,
       form.h3Authoring ?? emptyMinimaxH3AuthoringState(),

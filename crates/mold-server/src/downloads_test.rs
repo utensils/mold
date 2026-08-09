@@ -950,6 +950,7 @@ fn synthetic_manifest(name: &str, family: &str, repo: &str) -> mold_core::manife
             negative_prompt: None,
             frames: None,
             fps: None,
+            source_image: None,
         },
         hidden: true,
     }

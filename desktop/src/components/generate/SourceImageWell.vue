@@ -10,6 +10,7 @@ import {
   reorderAttachment,
 } from "../../lib/editAttachments";
 import { buildControlNetOptions } from "../../lib/controlNetOptions";
+import { sourceConditioningValidationError } from "../../lib/generateValidation";
 import { fetchCatalogInstalled } from "../../lib/api/catalog";
 import type { CatalogEntry } from "../../lib/api/types";
 import { useAppPrefsStore } from "../../stores/appPrefs";
@@ -27,10 +28,26 @@ const appPrefs = useAppPrefsStore();
 const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
 
-const caps = computed(() => generationCapabilitiesForFamily(props.form.family, props.form.model));
+// The selected checkpoint's own advertised source-image contract (#772) rides
+// as the fifth argument: wan's three checkpoints split T2V / I2V-optional /
+// I2V-required and only the server can tell them apart. Never read
+// `source_image` (or a family set) directly here — the helper owns the
+// absent-field fallback that keeps older servers on today's behaviour.
+const caps = computed(() =>
+  generationCapabilitiesForFamily(
+    props.form.family,
+    props.form.model,
+    props.form.pipeline,
+    props.form.guidanceCapabilities,
+    props.form.sourceImageCapability,
+  ),
+);
 const flux2Dev = computed(() => isFlux2DevModel(props.form.model));
+/** Why the attached conditioning would be refused, in the server's own order. */
+const conditioningError = computed(() => sourceConditioningValidationError(props.form));
 
 const pickerOpen = ref(false);
+const endPickerOpen = ref(false);
 const maskOpen = ref(false);
 
 function onSourcePicked(picked: PickedImage[]) {
@@ -41,6 +58,10 @@ function onSourcePicked(picked: PickedImage[]) {
     props.form.sourceImageName = first.filename || null;
     props.form.sourceFit = { mode: "lanczos-resize" };
   }
+}
+function onEndFramePicked(picked: PickedImage[]) {
+  const first = picked[0];
+  if (first) setSlot("end", first.base64, first.filename || null);
 }
 function onMaskApplied(mask: string) {
   props.form.maskImage = mask;
@@ -153,10 +174,11 @@ watch(
   { immediate: true },
 );
 
-type Slot = "source" | "mask" | "control";
+type Slot = "source" | "end" | "mask" | "control";
 const dragOver = ref<Slot | null>(null);
 const inputEls = ref<Record<Slot, HTMLInputElement | null>>({
   source: null,
+  end: null,
   mask: null,
   control: null,
 });
@@ -167,6 +189,10 @@ function setSlot(slot: Slot, b64: string | null, name: string | null = null) {
     // The label lives and dies with the image (Reuse-settings restore).
     props.form.sourceImageName = b64 ? name : null;
     if (b64) props.form.sourceFit = { mode: "lanczos-resize" };
+  } else if (slot === "end") {
+    // The closing still keeps its own name: it ships as the second keyframe,
+    // whose provenance is all saved metadata will ever hold of it.
+    props.form.endFrame = b64 ? { filename: name ?? "", base64: b64 } : null;
   } else if (slot === "mask") props.form.maskImage = b64;
   else props.form.controlImage = b64;
 }
@@ -318,6 +344,13 @@ function setSourceFitMode(e: Event) {
   <div v-else-if="caps.supportsImg2img && caps.sourceImageMode === 'single'">
     <div class="mt-5 mb-2 flex items-center gap-2">
       <span class="edge-code">Source</span>
+      <span
+        v-if="caps.requiresSourceImage"
+        class="edge-code text-safelight"
+        data-test="source-required-badge"
+      >
+        Required
+      </span>
       <div class="border-edge h-px flex-1 border-t" />
     </div>
 
@@ -334,6 +367,7 @@ function setSourceFitMode(e: Event) {
         v-if="!form.sourceImage"
         role="button"
         tabindex="0"
+        :aria-required="caps.requiresSourceImage || undefined"
         class="flex h-24 cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors focus-visible:outline-2 focus-visible:outline-safelight"
         :class="
           dragOver === 'source'
@@ -374,6 +408,83 @@ function setSourceFitMode(e: Event) {
         Choose from gallery…
       </button>
     </div>
+
+    <!-- Why the attached conditioning would be refused. One message at a time,
+         in the same order admission checks them. -->
+    <p
+      v-if="conditioningError"
+      class="mt-2 text-caption text-stop"
+      role="alert"
+      data-test="source-conditioning-error"
+    >
+      {{ conditioningError }}
+    </p>
+
+    <!-- End frame well (wan first/last-frame conditioning). Offered only when
+         the server advertised a source-image contract for this checkpoint —
+         an older server rejects wan keyframes outright. -->
+    <template v-if="caps.supportsEndFrame">
+      <div class="mt-4 mb-2 flex items-center gap-2">
+        <span class="edge-code">End frame</span>
+        <span class="edge-code text-ink-3">Optional</span>
+        <div class="border-edge h-px flex-1 border-t" />
+      </div>
+      <div data-test="end-frame-media-controls" class="flex flex-col items-start">
+        <input
+          :ref="(el) => (inputEls.end = el as HTMLInputElement | null)"
+          type="file"
+          accept="image/*"
+          class="hidden"
+          @change="onPick('end', $event)"
+        />
+        <div
+          v-if="!form.endFrame"
+          role="button"
+          tabindex="0"
+          class="flex h-24 cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors focus-visible:outline-2 focus-visible:outline-safelight"
+          :class="
+            dragOver === 'end'
+              ? 'border-safelight text-safelight'
+              : 'border-control-edge text-ink-3'
+          "
+          @click="pick('end')"
+          @keydown.enter.prevent="pick('end')"
+          @keydown.space.prevent="pick('end')"
+          @dragover.prevent="dragOver = 'end'"
+          @dragleave="dragOver = null"
+          @drop.prevent="onDrop('end', $event)"
+        >
+          Drop the closing image or click to pick
+        </div>
+        <div v-else class="relative inline-block max-w-full">
+          <img
+            :src="base64ToDataUrl(form.endFrame.base64)"
+            alt="end frame"
+            class="max-h-40 max-w-full rounded-media border border-[color-mix(in_srgb,var(--rebate)_25%,transparent)] p-px"
+          />
+          <button
+            type="button"
+            class="border-edge absolute top-1 right-1 h-5 w-5 rounded-control border bg-bath text-ink-2 hover:text-stop"
+            title="Clear end frame"
+            aria-label="Clear end frame"
+            @click="clearSlot('end')"
+          >
+            ✕
+          </button>
+        </div>
+        <button
+          type="button"
+          class="mt-2 text-caption text-ink-3 underline-offset-2 hover:text-ink hover:underline"
+          data-test="end-frame-choose-gallery"
+          @click="endPickerOpen = true"
+        >
+          Choose from gallery…
+        </button>
+      </div>
+      <p class="mt-1 text-caption text-ink-3">
+        Renders a first/last-frame clip: the source opens it, this closes it.
+      </p>
+    </template>
 
     <!-- Strength -->
     <template v-if="form.sourceImage">
@@ -584,6 +695,14 @@ function setSourceFitMode(e: Event) {
       :multiple="false"
       @pick="onSourcePicked"
       @close="pickerOpen = false"
+    />
+    <ImagePickerModal
+      v-if="caps.supportsEndFrame"
+      :open="endPickerOpen"
+      :multiple="false"
+      title="Pick an end frame"
+      @pick="onEndFramePicked"
+      @close="endPickerOpen = false"
     />
     <MaskEditorModal
       :open="maskOpen"

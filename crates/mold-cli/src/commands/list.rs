@@ -401,6 +401,7 @@ mod tests {
             supports_sequence: None,
             extend_default_overlap_frames: None,
             guidance_capabilities: None,
+            source_image: None,
         }
     }
 

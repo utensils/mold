@@ -177,6 +177,10 @@ import {
   minimaxH3TaskForModel,
 } from "@studio/lib/minimaxH3Authoring";
 import {
+  firstLastFrameRestoreNotice,
+  sourceImageValidationError,
+} from "@studio/lib/sourceImageCapability";
+import {
   modelDisplayName,
   modelDisplayNameForId,
 } from "@studio/lib/modelDisplay";
@@ -224,6 +228,9 @@ const showRemix = ref(false);
 const remixRoute = ref<HostRoute | null>(null);
 const remixTask = ref<ExpandTask>("text-to-image");
 const showPicker = ref(false);
+/** Wan's closing still gets its own picker (#779) so attaching one can never
+ * overwrite the opening frame the source well holds. */
+const showEndFramePicker = ref(false);
 const showMask = ref(false);
 const showAdvanced = ref(false);
 const showTemplates = ref(false);
@@ -1179,11 +1186,16 @@ const currentFamily = computed(
     (isMinimaxH3Identity(null, form.state.value.model) ? "minimax-h3" : ""),
 );
 
+// The fifth argument is the selected row's advertised source-image contract
+// (#772). The persisted snapshot backs it up so a form restored before the
+// catalog resolves still resolves the same capability the submit gate will.
 const capabilities = computed(() =>
   generationCapabilitiesForFamily(
     currentFamily.value,
     form.state.value.model,
     form.state.value.pipeline,
+    null,
+    currentModel.value?.source_image ?? form.state.value.sourceImageCapability,
   ),
 );
 
@@ -1739,6 +1751,38 @@ function applySequenceHandoff() {
 }
 watch(pendingSequenceHandoff(), applySequenceHandoff, { immediate: true });
 
+/**
+ * A first/last-frame print restores every knob except its closing still:
+ * saved metadata records each keyframe's name and digest, never the bytes
+ * (`applyMetadataToForm` already cleared `endFrame`). Say so, the same way an
+ * unrestorable source video does, rather than letting Generate look ready to
+ * reproduce the render.
+ *
+ * Whether the print IS a first/last-frame render is positive knowledge: it
+ * needs the origin model's advertised contract. A Library handover lands
+ * during setup, before the inventory resolves, so the notice waits for it
+ * rather than guessing from the keyframe count alone — LTX-2 keyframes are a
+ * different control, and they restore nothing either way.
+ */
+const pendingEndFrameNotice = ref<OutputMetadata | null>(null);
+function noticeFirstLastFrameRestore(metadata: OutputMetadata) {
+  if (!modelsLoaded.value) {
+    pendingEndFrameNotice.value = metadata;
+    return;
+  }
+  const notice = firstLastFrameRestoreNotice(
+    capabilities.value.supportsEndFrame,
+    metadata.keyframes,
+  );
+  if (notice) toast("error", notice);
+}
+watch(modelsLoaded, (loaded) => {
+  const pending = pendingEndFrameNotice.value;
+  if (!loaded || !pending) return;
+  pendingEndFrameNotice.value = null;
+  noticeFirstLastFrameRestore(pending);
+});
+
 function applyGenerationHandoff() {
   const handoff = takeGenerationHandoff();
   if (!handoff) return;
@@ -1752,6 +1796,7 @@ function applyGenerationHandoff() {
   form.state.value = applyMetadataToForm(form.state.value, metadata, {
     models: models.value,
   });
+  noticeFirstLastFrameRestore(metadata);
 }
 watch(pendingGenerationHandoff(), applyGenerationHandoff, { immediate: true });
 
@@ -1776,6 +1821,7 @@ function onNewPrint() {
   form.state.value.prompt = "";
   form.state.value.stylePreset = null;
   form.state.value.imageAttachments = [];
+  form.state.value.endFrame = null;
   form.state.value.maskImage = null;
   form.state.value.controlImage = null;
   variations.value = [];
@@ -2238,6 +2284,30 @@ function validateSubmit(): boolean {
     form.state.value.imageAttachments.length === 0
   ) {
     composerError.value = "Mask image needs a source image.";
+    return false;
+  }
+  // The per-model source-image contract (#772) plus wan's first/last-frame
+  // pairing (#779), in the same order admission checks them. H3 is excluded:
+  // its boundary images have their own authoring validator above, which names
+  // the missing one precisely.
+  const conditioningError = isMinimaxH3Identity(
+    currentFamily.value,
+    form.state.value.model,
+  )
+    ? null
+    : sourceImageValidationError({
+        capability: capabilities.value.sourceImageCapability,
+        hasSourceImage: form.state.value.imageAttachments.length > 0,
+        hasEndFrame:
+          capabilities.value.supportsEndFrame &&
+          form.state.value.endFrame != null,
+        frames: capabilities.value.supportsVideo
+          ? form.state.value.frames
+          : null,
+      });
+  if (conditioningError) {
+    composerError.value = conditioningError;
+    showAdvanced.value = true;
     return false;
   }
   if (form.state.value.icLoraControl) {
@@ -3030,6 +3100,17 @@ async function resolveMaskSourceConflict(): Promise<boolean> {
   return true;
 }
 
+function onPickEndFrame(picked: SourceImageState[]) {
+  const first = picked[0];
+  if (first) form.state.value.endFrame = first;
+  showEndFramePicker.value = false;
+  composerError.value = null;
+}
+
+function onClearEndFrame() {
+  form.state.value.endFrame = null;
+}
+
 function onApplyMask(mask: SourceImageState) {
   form.state.value.maskImage = mask;
   showMask.value = false;
@@ -3054,6 +3135,7 @@ function recreateFromGallery(item: GalleryImage) {
     format: item.format,
     models: models.value,
   });
+  noticeFirstLastFrameRestore(item.metadata);
 }
 
 function openJob(job: Job) {
@@ -3794,6 +3876,8 @@ onBeforeUnmount(() => {
           "
           @open-picker="showPicker = true"
           @clear-source="onClearSource"
+          @open-end-frame-picker="showEndFramePicker = true"
+          @clear-end-frame="onClearEndFrame"
           @open-mask="showMask = true"
           @append-prompt="form.appendPromptPhrase"
         />
@@ -3822,6 +3906,8 @@ onBeforeUnmount(() => {
         @close="showAdvanced = false"
         @open-picker="showPicker = true"
         @clear-source="onClearSource"
+        @open-end-frame-picker="showEndFramePicker = true"
+        @clear-end-frame="onClearEndFrame"
         @open-mask="showMask = true"
         @append-prompt="form.appendPromptPhrase"
       />
@@ -3874,6 +3960,13 @@ onBeforeUnmount(() => {
       "
       @pick="onPickSource"
       @close="showPicker = false"
+    />
+    <ImagePickerModal
+      :open="showEndFramePicker"
+      title="End frame"
+      :multiple="false"
+      @pick="onPickEndFrame"
+      @close="showEndFramePicker = false"
     />
     <MaskEditorModal
       :open="showMask"

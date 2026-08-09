@@ -69,6 +69,97 @@ describe("MobileSourceControls", () => {
     expect(wrapper.find("[data-test='mobile-source-controls']").exists()).toBe(false);
   });
 
+  it("keeps today's wan source well and offers no end frame when the host advertises nothing", () => {
+    const form = formFor("wan");
+    expect(form.sourceImageCapability).toBeNull();
+    const wrapper = mount(MobileSourceControls, { props: { form } });
+
+    expect(wrapper.find("[data-test='mobile-source-controls']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='mobile-source-add']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='mobile-source-required']").exists()).toBe(false);
+    // An older server rejects wan keyframes outright, so an absent contract
+    // must never surface the End frame well.
+    expect(wrapper.find("[data-test='mobile-end-frame-controls']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-source-conditioning-error']").exists()).toBe(false);
+  });
+
+  it("hides the whole source well for an advertised text-to-video checkpoint", () => {
+    const form = formFor("wan");
+    form.sourceImageCapability = "unsupported";
+    const wrapper = mount(MobileSourceControls, { props: { form } });
+
+    expect(wrapper.find("[data-test='mobile-source-controls']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-end-frame-controls']").exists()).toBe(false);
+  });
+
+  it("marks the well required and gates until an image-to-video source is attached", async () => {
+    const form = formFor("wan");
+    form.sourceImageCapability = "required";
+    const wrapper = mount(MobileSourceControls, {
+      props: { form },
+      global: { stubs: { MobileImagePickerSheet: true } },
+    });
+
+    expect(wrapper.get("[data-test='mobile-source-required']").text()).toContain("Required");
+    expect(wrapper.get("[data-test='mobile-source-add']").attributes("aria-required")).toBe("true");
+    expect(wrapper.get("[data-test='mobile-source-conditioning-error']").text()).toContain(
+      "image-to-video only",
+    );
+    expect(wrapper.emitted("validity-change")?.at(-1)).toEqual([false]);
+
+    form.sourceImage = "T1BFTklORw==";
+    form.sourceImageName = "opening.png";
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-source-conditioning-error']").exists()).toBe(false);
+    expect(wrapper.emitted("validity-change")?.at(-1)).toEqual([true]);
+  });
+
+  it("offers an optional end frame on wan and refuses an end-frame-only draft", async () => {
+    const form = formFor("wan");
+    form.sourceImageCapability = "optional";
+    const target = { baseUrl: "http://halcyon:7680", apiKey: "remote-key" };
+    const wrapper = mount(MobileSourceControls, { props: { form, target } });
+
+    expect(wrapper.find("[data-test='mobile-source-required']").exists()).toBe(false);
+    const endWell = wrapper.get("[data-test='mobile-end-frame-controls']");
+    expect(endWell.text()).toContain("Optional");
+
+    await wrapper.get("[data-test='mobile-end-frame-add']").trigger("click");
+    const endPicker = wrapper
+      .findAllComponents(MobileImagePickerSheet)
+      .find((sheet) => sheet.props("title") === "End frame");
+    expect(endPicker).toBeDefined();
+    expect(endPicker!.props()).toMatchObject({
+      open: true,
+      target,
+      maxBytes: MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
+    });
+
+    endPicker!.vm.$emit("pick", { filename: "closing.png", base64: "Q0xPU0lORw==" });
+    await flushPromises();
+    expect(form.endFrame).toEqual({ filename: "closing.png", base64: "Q0xPU0lORw==" });
+    expect(endPicker!.props("open")).toBe(false);
+    expect(wrapper.get("[data-test='mobile-end-frame-preview']").attributes("src")).toContain(
+      "base64,Q0xPU0lORw==",
+    );
+
+    // A closing still with nothing to open the clip is refused, not silently
+    // dropped or shipped as a lone keyframe.
+    expect(wrapper.get("[data-test='mobile-source-conditioning-error']").text()).toContain(
+      "needs a first frame",
+    );
+    expect(wrapper.emitted("validity-change")?.at(-1)).toEqual([false]);
+
+    form.sourceImage = "T1BFTklORw==";
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-source-conditioning-error']").exists()).toBe(false);
+    expect(wrapper.emitted("validity-change")?.at(-1)).toEqual([true]);
+
+    await wrapper.get("[data-test='mobile-end-frame-remove']").trigger("click");
+    expect(form.endFrame).toBeNull();
+  });
+
   it("exposes preview, strength, fit, replace, and remove for a source image", async () => {
     const form = formFor("sdxl");
     form.sourceImage = "cGhvdG8=";
