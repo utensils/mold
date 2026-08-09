@@ -315,3 +315,16 @@ install from the catalog normally.
 
 Remaining Wan work is tracked in the
 [Wan Video milestone](https://github.com/utensils/mold/milestone/4).
+
+The Wan ecosystem is much wider than text-to-video and image-to-video —
+VACE, Fun-Control, camera, Phantom, track, audio-driven (S2V, HuMo,
+InfiniteTalk, WanDancer), and character animation (Animate, SCAIL) all exist
+upstream. Every one of them carries an explicit decision in the
+**[ComfyUI parity ledger](https://github.com/utensils/mold/blob/main/docs/architecture/wan-comfyui-parity-ledger.md)**:
+supported, earning an engine, deferred with the blocker named, or dropped
+with the reason. If a Wan variant you use is not in this page's model table,
+that ledger says why and what would change it.
+
+One naming trap worth stating here: ComfyUI's **Fun Inpaint** is the
+first/last-frame contract under a different brand name. In mold it is
+`--image` plus `--last-image` (the `keyframes` pair), not a separate model.
