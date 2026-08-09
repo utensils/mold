@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use candle_core::{DType, Device};
 use mold_candle::minimax_h3::{
@@ -21,7 +21,7 @@ use mold_candle::minimax_h3::{
     AudioTensorLayout, AudioVae, AudioVaeLoadObserver, DecodeComputePolicy, MiniMaxH3VisualVae,
     VisualAttentionBackend, VisualVaeEvent, VisualVaeObserver,
 };
-use mold_core::manifest::{find_manifest, ModelComponent, ModelManifest};
+use mold_core::manifest::{find_manifest, storage_path, ModelComponent, ModelManifest};
 use mold_core::minimax_h3::{self as contract, ArtifactRole as ContractArtifactRole, Layout, Task};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -46,7 +46,7 @@ pub(crate) enum H3ComfyVaeArtifactRole {
 }
 
 impl H3ComfyVaeArtifactRole {
-    const ALL: [Self; 4] = [
+    pub(crate) const ALL: [Self; 4] = [
         Self::VisualConfig,
         Self::VisualWeights,
         Self::AudioConfig,
@@ -66,6 +66,23 @@ impl H3ComfyVaeArtifactRole {
 
     const fn is_config(self) -> bool {
         matches!(self, Self::VisualConfig | Self::AudioConfig)
+    }
+
+    pub(crate) const fn source_path(self) -> &'static str {
+        match self {
+            Self::VisualConfig => VISUAL_CONFIG_SOURCE_PATH,
+            Self::VisualWeights => COMFY_VISUAL_WEIGHT_SOURCE_PATH,
+            Self::AudioConfig => AUDIO_CONFIG_SOURCE_PATH,
+            Self::AudioWeights => COMFY_AUDIO_WEIGHT_SOURCE_PATH,
+        }
+    }
+
+    pub(crate) const fn manifest_component(self) -> ModelComponent {
+        match self {
+            Self::VisualConfig | Self::AudioConfig => ModelComponent::ModelConfig,
+            Self::VisualWeights => ModelComponent::Vae,
+            Self::AudioWeights => ModelComponent::AudioVae,
+        }
     }
 }
 
@@ -222,6 +239,62 @@ pub(crate) struct FrozenH3ComfyVaeLoadPlan {
 }
 
 impl FrozenH3ComfyVaeLoadPlan {
+    /// Resolve the exact private VAE component paths from Mold's hidden,
+    /// source-pinned manifest and canonical storage authority. No caller-
+    /// mutable `ModelPaths` value participates in this plan.
+    pub(crate) fn from_hidden_storage(
+        model: &str,
+        models_root: &Path,
+        staging_root: &Path,
+    ) -> LoadResult<Self> {
+        let models_root = validate_private_storage_directory(models_root, "models root")?;
+        let staging_root = validate_private_storage_directory(staging_root, "staging root")?;
+        let manifest = find_manifest(model).ok_or_else(|| {
+            H3ComfyVaeLoadError::InvalidPlan(format!("missing manifest {model:?}"))
+        })?;
+        if !manifest.hidden {
+            return Err(H3ComfyVaeLoadError::InvalidPlan(
+                "private H3 VAE storage resolution requires a hidden manifest".into(),
+            ));
+        }
+        let path_for = |role: H3ComfyVaeArtifactRole| -> LoadResult<PathBuf> {
+            let expected_path = role.source_path();
+            let matches = manifest
+                .files
+                .iter()
+                .filter(|file| {
+                    file.hf_filename == expected_path && file.component == role.manifest_component()
+                })
+                .collect::<Vec<_>>();
+            let [file] = matches.as_slice() else {
+                return Err(H3ComfyVaeLoadError::InvalidPlan(format!(
+                    "hidden manifest {model:?} requires exactly one {expected_path}"
+                )));
+            };
+            let relative = storage_path(manifest, file);
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|component| !matches!(component, Component::Normal(_)))
+            {
+                return Err(H3ComfyVaeLoadError::InvalidPlan(
+                    "hidden manifest produced a non-canonical VAE storage path".into(),
+                ));
+            }
+            Ok(models_root.join(relative))
+        };
+        Self::new(
+            model,
+            H3ComfyVaeArtifactPaths {
+                visual_config: path_for(H3ComfyVaeArtifactRole::VisualConfig)?,
+                visual_weights: path_for(H3ComfyVaeArtifactRole::VisualWeights)?,
+                audio_config: path_for(H3ComfyVaeArtifactRole::AudioConfig)?,
+                audio_weights: path_for(H3ComfyVaeArtifactRole::AudioWeights)?,
+            },
+            staging_root,
+        )
+    }
+
     pub(crate) fn new(
         model: &str,
         paths: H3ComfyVaeArtifactPaths,
@@ -436,6 +509,16 @@ pub(crate) struct H3ComfyVaeRuntimeMemory {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct H3ComfyVaeOpenedArtifactFact {
+    pub(crate) role: H3ComfyVaeArtifactRole,
+    pub(crate) source_repository: String,
+    pub(crate) source_revision: String,
+    pub(crate) source_path: String,
+    pub(crate) content_sha256: String,
+    pub(crate) file_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ComponentLoadFacts {
     artifact_file_bytes: u64,
     header_bytes: u64,
@@ -472,6 +555,77 @@ impl ComponentLoadFacts {
             effective_device_weight_bytes: self.effective_device_weight_bytes,
             construction_staging_disk_bytes: self.artifact_file_bytes,
         }
+    }
+}
+
+/// Fully authenticated VAE source and exact pre-allocation memory authority.
+///
+/// The token intentionally does not implement `Clone`. It owns all four
+/// opened source descriptors and both private authenticated staging files,
+/// and the construction function consumes it exactly once.
+pub(crate) struct H3AuthenticatedComfyVaeAuthority {
+    plan: FrozenH3ComfyVaeLoadPlan,
+    opened: Vec<OpenedArtifact>,
+    staged: StagedWeights,
+    visual_config: Vec<u8>,
+    audio_config: Vec<u8>,
+    visual_facts: ComponentLoadFacts,
+    audio_facts: ComponentLoadFacts,
+    memory: H3ComfyVaeRuntimeMemory,
+    artifact_facts: Vec<H3ComfyVaeOpenedArtifactFact>,
+    identity_sha256: String,
+}
+
+impl H3AuthenticatedComfyVaeAuthority {
+    pub(crate) const fn task(&self) -> Task {
+        self.plan.task
+    }
+
+    pub(crate) fn canonical_model(&self) -> &str {
+        &self.plan.canonical_model
+    }
+
+    pub(crate) fn source_path(&self, role: H3ComfyVaeArtifactRole) -> LoadResult<&Path> {
+        self.opened
+            .iter()
+            .find(|artifact| artifact.expected.role == role)
+            .map(|artifact| artifact.canonical_path.as_path())
+            .ok_or_else(|| H3ComfyVaeLoadError::InvalidPlan(format!("missing opened {role:?}")))
+    }
+
+    pub(crate) fn plan_identity_sha256(&self) -> &str {
+        self.plan.identity_sha256()
+    }
+
+    pub(crate) fn artifact_plan_identity_sha256(&self) -> &str {
+        self.plan.artifact_plan_identity_sha256()
+    }
+
+    pub(crate) fn identity_sha256(&self) -> &str {
+        &self.identity_sha256
+    }
+
+    pub(crate) fn memory(&self) -> &H3ComfyVaeRuntimeMemory {
+        &self.memory
+    }
+
+    pub(crate) fn artifact_facts(&self) -> &[H3ComfyVaeOpenedArtifactFact] {
+        &self.artifact_facts
+    }
+
+    pub(crate) fn validate(&self) -> LoadResult<()> {
+        self.plan.validate()?;
+        for artifact in &self.opened {
+            artifact.validate_source("while authenticated VAE authority is retained")?;
+        }
+        self.staged
+            .validate("while authenticated VAE authority is retained")?;
+        if self.identity_sha256 != authenticated_vae_authority_identity(self) {
+            return Err(H3ComfyVaeLoadError::InvalidPlan(
+                "authenticated VAE authority identity changed".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -578,7 +732,443 @@ pub(crate) fn load_h3_comfy_vae_runtime(
     device: &Device,
     observer: &mut dyn H3ComfyVaeLoadObserver,
 ) -> LoadResult<H3ComfyVaeRuntimeBundle> {
-    load_with_factory(plan, device, observer, &mut ProductionVaeFactory)
+    let authority = open_h3_comfy_vae_authority(plan, observer)?;
+    load_h3_comfy_vae_runtime_from_authority(authority, device, observer)
+}
+
+/// Open, completely authenticate, privately stage, and inspect the exact VAE
+/// artifacts before any visual/audio model tensor allocation occurs.
+pub(crate) fn open_h3_comfy_vae_authority(
+    plan: &FrozenH3ComfyVaeLoadPlan,
+    observer: &mut dyn H3ComfyVaeLoadObserver,
+) -> LoadResult<H3AuthenticatedComfyVaeAuthority> {
+    plan.validate()?;
+    let mut opened = Vec::with_capacity(H3ComfyVaeArtifactRole::ALL.len());
+    for role in H3ComfyVaeArtifactRole::ALL {
+        opened.push(OpenedArtifact::open(
+            plan.artifact(role)?.clone(),
+            plan.paths.get(role),
+            observer,
+        )?);
+    }
+    let visual_config = opened_for_mut(&mut opened, H3ComfyVaeArtifactRole::VisualConfig)?
+        .read_authenticated_config(observer)?;
+    let audio_config = opened_for_mut(&mut opened, H3ComfyVaeArtifactRole::AudioConfig)?
+        .read_authenticated_config(observer)?;
+    let required_staging_bytes = required_staging_bytes(plan)?;
+    ensure_staging_capacity(plan, required_staging_bytes)?;
+    let staged = StagedWeights::create(plan, &mut opened, observer)?;
+    for artifact in &opened {
+        artifact.validate_source("before VAE pre-allocation inspection")?;
+    }
+    let visual_facts = inspect_visual_component(
+        staged.path(H3ComfyVaeArtifactRole::VisualWeights)?,
+        &visual_config,
+        observer,
+    )?;
+    visual_facts.validate(plan.artifact(H3ComfyVaeArtifactRole::VisualWeights)?)?;
+    let audio_facts = inspect_audio_component(
+        staged.path(H3ComfyVaeArtifactRole::AudioWeights)?,
+        &audio_config,
+        observer,
+    )?;
+    audio_facts.validate(plan.artifact(H3ComfyVaeArtifactRole::AudioWeights)?)?;
+    for artifact in &opened {
+        artifact.validate_source("after VAE pre-allocation inspection")?;
+    }
+    let memory = vae_runtime_memory(
+        &visual_facts,
+        &audio_facts,
+        visual_config.len(),
+        audio_config.len(),
+        required_staging_bytes,
+    )?;
+    let artifact_facts = opened
+        .iter()
+        .map(|artifact| H3ComfyVaeOpenedArtifactFact {
+            role: artifact.expected.role,
+            source_repository: artifact.expected.source_repository.clone(),
+            source_revision: artifact.expected.source_revision.clone(),
+            source_path: artifact.expected.source_path.clone(),
+            content_sha256: artifact.expected.content_sha256.clone(),
+            file_bytes: artifact.expected.file_bytes,
+        })
+        .collect();
+    let mut authority = H3AuthenticatedComfyVaeAuthority {
+        plan: plan.clone(),
+        opened,
+        staged,
+        visual_config,
+        audio_config,
+        visual_facts,
+        audio_facts,
+        memory,
+        artifact_facts,
+        identity_sha256: String::new(),
+    };
+    authority.identity_sha256 = authenticated_vae_authority_identity(&authority);
+    authority.validate()?;
+    Ok(authority)
+}
+
+/// Consume one authenticated, non-Clone VAE authority and construct both
+/// runtime models on the selected device.
+pub(crate) fn load_h3_comfy_vae_runtime_from_authority(
+    authority: H3AuthenticatedComfyVaeAuthority,
+    device: &Device,
+    observer: &mut dyn H3ComfyVaeLoadObserver,
+) -> LoadResult<H3ComfyVaeRuntimeBundle> {
+    authority.validate()?;
+    if authority.plan.requires_cuda() && !device.is_cuda() {
+        return Err(H3ComfyVaeLoadError::InvalidPlan(
+            "production Comfy VAE construction requires the frozen CUDA route".into(),
+        ));
+    }
+    let H3AuthenticatedComfyVaeAuthority {
+        plan,
+        opened,
+        staged,
+        visual_config,
+        audio_config,
+        visual_facts,
+        audio_facts,
+        memory,
+        artifact_facts: _,
+        identity_sha256: _,
+    } = authority;
+    let mut factory = ProductionVaeFactory;
+    staged.validate("before visual VAE construction")?;
+    let (visual_vae, loaded_visual_facts) = factory
+        .load_visual(
+            staged.path(H3ComfyVaeArtifactRole::VisualWeights)?,
+            &visual_config,
+            device,
+            observer,
+        )
+        .map_err(factory_error)?;
+    staged.validate("after visual VAE construction")?;
+    staged.validate("before audio VAE construction")?;
+    let (audio_vae, loaded_audio_facts) = factory
+        .load_audio(
+            staged.path(H3ComfyVaeArtifactRole::AudioWeights)?,
+            &audio_config,
+            device,
+            observer,
+        )
+        .map_err(factory_error)?;
+    staged.validate("after audio VAE construction")?;
+    if loaded_visual_facts != visual_facts || loaded_audio_facts != audio_facts {
+        return Err(H3ComfyVaeLoadError::InvalidPlan(
+            "constructed VAE facts differ from authenticated pre-allocation evidence".into(),
+        ));
+    }
+    for artifact in &opened {
+        artifact.validate_source("after VAE construction")?;
+    }
+    drop(staged);
+    let authority_identity_sha256 = artifact_lease_identity(plan.identity_sha256(), &opened);
+    let artifact_lease = H3ComfyVaeArtifactLease {
+        plan_identity_sha256: plan.identity_sha256().into(),
+        authority_identity_sha256,
+        artifacts: opened,
+    };
+    artifact_lease.validate()?;
+    Ok(H3ComfyVaeRuntimeBundle {
+        visual_vae,
+        audio_vae,
+        memory,
+        task: plan.task,
+        canonical_model: plan.canonical_model,
+        artifact_plan_identity_sha256: plan.artifact_plan_identity_sha256,
+        plan_identity_sha256: plan.identity_sha256,
+        #[cfg(feature = "h3-private-uat")]
+        device: device.clone(),
+        artifact_lease,
+    })
+}
+
+fn required_staging_bytes(plan: &FrozenH3ComfyVaeLoadPlan) -> LoadResult<u64> {
+    H3ComfyVaeArtifactRole::WEIGHTS
+        .into_iter()
+        .try_fold(0_u64, |total, role| {
+            total
+                .checked_add(plan.artifact(role)?.file_bytes)
+                .ok_or_else(|| {
+                    H3ComfyVaeLoadError::InvalidPlan("VAE staging byte count overflow".into())
+                })
+        })
+}
+
+fn ensure_staging_capacity(plan: &FrozenH3ComfyVaeLoadPlan, required_bytes: u64) -> LoadResult<()> {
+    let available_bytes = fs2::available_space(&plan.staging_root).map_err(|error| {
+        H3ComfyVaeLoadError::InvalidPlan(format!(
+            "cannot inspect staging capacity at {}: {error}",
+            plan.staging_root.display()
+        ))
+    })?;
+    if available_bytes < required_bytes {
+        return Err(H3ComfyVaeLoadError::InsufficientStaging {
+            path: plan.staging_root.clone(),
+            required_bytes,
+            available_bytes,
+        });
+    }
+    Ok(())
+}
+
+fn inspect_visual_component(
+    weight_path: &Path,
+    config_bytes: &[u8],
+    observer: &mut dyn H3ComfyVaeLoadObserver,
+) -> LoadResult<ComponentLoadFacts> {
+    if !checkpoint(
+        observer,
+        H3ComfyVaeArtifactRole::VisualConfig,
+        H3ComfyVaeLoadPhase::ValidateConfig,
+        0,
+        1,
+    ) {
+        return Err(H3ComfyVaeLoadError::Cancelled {
+            role: H3ComfyVaeArtifactRole::VisualConfig,
+            phase: H3ComfyVaeLoadPhase::ValidateConfig,
+        });
+    }
+    let config = inspect_visual_vae_config_bytes(config_bytes).map_err(|error| {
+        H3ComfyVaeLoadError::Validation {
+            role: H3ComfyVaeArtifactRole::VisualConfig,
+            message: error.to_string(),
+        }
+    })?;
+    if !checkpoint(
+        observer,
+        H3ComfyVaeArtifactRole::VisualConfig,
+        H3ComfyVaeLoadPhase::ValidateConfig,
+        1,
+        1,
+    ) || !checkpoint(
+        observer,
+        H3ComfyVaeArtifactRole::VisualWeights,
+        H3ComfyVaeLoadPhase::ValidateHeader,
+        0,
+        1,
+    ) {
+        return Err(H3ComfyVaeLoadError::Cancelled {
+            role: H3ComfyVaeArtifactRole::VisualWeights,
+            phase: H3ComfyVaeLoadPhase::ValidateHeader,
+        });
+    }
+    let header = inspect_safetensors_header(weight_path).map_err(|error| {
+        H3ComfyVaeLoadError::Validation {
+            role: H3ComfyVaeArtifactRole::VisualWeights,
+            message: error.to_string(),
+        }
+    })?;
+    let validated = validate_comfy_weight_file(&config, weight_path).map_err(|error| {
+        H3ComfyVaeLoadError::Validation {
+            role: H3ComfyVaeArtifactRole::VisualWeights,
+            message: error.to_string(),
+        }
+    })?;
+    let resident_device_weight_bytes = expected_visual_vae_parameter_bytes(&config, DType::F16)
+        .map_err(|error| H3ComfyVaeLoadError::Validation {
+            role: H3ComfyVaeArtifactRole::VisualWeights,
+            message: error.to_string(),
+        })?;
+    if !checkpoint(
+        observer,
+        H3ComfyVaeArtifactRole::VisualWeights,
+        H3ComfyVaeLoadPhase::ValidateHeader,
+        1,
+        1,
+    ) {
+        return Err(H3ComfyVaeLoadError::Cancelled {
+            role: H3ComfyVaeArtifactRole::VisualWeights,
+            phase: H3ComfyVaeLoadPhase::ValidateHeader,
+        });
+    }
+    let header_bytes =
+        header
+            .header_len
+            .checked_add(8)
+            .ok_or_else(|| H3ComfyVaeLoadError::Validation {
+                role: H3ComfyVaeArtifactRole::VisualWeights,
+                message: "visual header byte overflow".into(),
+            })?;
+    let encoded_tensor_bytes = header.file_len.checked_sub(header_bytes).ok_or_else(|| {
+        H3ComfyVaeLoadError::Validation {
+            role: H3ComfyVaeArtifactRole::VisualWeights,
+            message: "visual tensor byte underflow".into(),
+        }
+    })?;
+    if validated.inspection().total_size != header.file_len {
+        return Err(H3ComfyVaeLoadError::Validation {
+            role: H3ComfyVaeArtifactRole::VisualWeights,
+            message: "visual validated file bytes differ from opened header".into(),
+        });
+    }
+    Ok(ComponentLoadFacts {
+        artifact_file_bytes: header.file_len,
+        header_bytes,
+        encoded_tensor_bytes,
+        resident_device_weight_bytes,
+        effective_device_weight_bytes: resident_device_weight_bytes,
+    })
+}
+
+fn inspect_audio_component(
+    weight_path: &Path,
+    config_bytes: &[u8],
+    observer: &mut dyn H3ComfyVaeLoadObserver,
+) -> LoadResult<ComponentLoadFacts> {
+    if !checkpoint(
+        observer,
+        H3ComfyVaeArtifactRole::AudioConfig,
+        H3ComfyVaeLoadPhase::ValidateConfig,
+        0,
+        1,
+    ) {
+        return Err(H3ComfyVaeLoadError::Cancelled {
+            role: H3ComfyVaeArtifactRole::AudioConfig,
+            phase: H3ComfyVaeLoadPhase::ValidateConfig,
+        });
+    }
+    let config = inspect_audio_vae_config_bytes(config_bytes).map_err(|error| {
+        H3ComfyVaeLoadError::Validation {
+            role: H3ComfyVaeArtifactRole::AudioConfig,
+            message: error.to_string(),
+        }
+    })?;
+    if !checkpoint(
+        observer,
+        H3ComfyVaeArtifactRole::AudioConfig,
+        H3ComfyVaeLoadPhase::ValidateConfig,
+        1,
+        1,
+    ) || !checkpoint(
+        observer,
+        H3ComfyVaeArtifactRole::AudioWeights,
+        H3ComfyVaeLoadPhase::ValidateHeader,
+        0,
+        1,
+    ) {
+        return Err(H3ComfyVaeLoadError::Cancelled {
+            role: H3ComfyVaeArtifactRole::AudioWeights,
+            phase: H3ComfyVaeLoadPhase::ValidateHeader,
+        });
+    }
+    let validated =
+        validate_audio_safetensors(weight_path, &config, AudioTensorLayout::ComfyFolded).map_err(
+            |error| H3ComfyVaeLoadError::Validation {
+                role: H3ComfyVaeArtifactRole::AudioWeights,
+                message: error.to_string(),
+            },
+        )?;
+    let file_bytes = std::fs::metadata(weight_path)
+        .map_err(|error| H3ComfyVaeLoadError::Validation {
+            role: H3ComfyVaeArtifactRole::AudioWeights,
+            message: error.to_string(),
+        })?
+        .len();
+    if !checkpoint(
+        observer,
+        H3ComfyVaeArtifactRole::AudioWeights,
+        H3ComfyVaeLoadPhase::ValidateHeader,
+        1,
+        1,
+    ) {
+        return Err(H3ComfyVaeLoadError::Cancelled {
+            role: H3ComfyVaeArtifactRole::AudioWeights,
+            phase: H3ComfyVaeLoadPhase::ValidateHeader,
+        });
+    }
+    let header_bytes = file_bytes
+        .checked_sub(validated.tensor_bytes)
+        .ok_or_else(|| H3ComfyVaeLoadError::Validation {
+            role: H3ComfyVaeArtifactRole::AudioWeights,
+            message: "audio header byte underflow".into(),
+        })?;
+    Ok(ComponentLoadFacts {
+        artifact_file_bytes: file_bytes,
+        header_bytes,
+        encoded_tensor_bytes: validated.tensor_bytes,
+        resident_device_weight_bytes: validated.tensor_bytes,
+        effective_device_weight_bytes: validated.tensor_bytes,
+    })
+}
+
+fn vae_runtime_memory(
+    visual: &ComponentLoadFacts,
+    audio: &ComponentLoadFacts,
+    visual_config_bytes: usize,
+    audio_config_bytes: usize,
+    required_staging_bytes: u64,
+) -> LoadResult<H3ComfyVaeRuntimeMemory> {
+    let visual = visual.memory();
+    let audio = audio.memory();
+    let resident_device_weight_bytes = visual
+        .resident_device_weight_bytes
+        .checked_add(audio.resident_device_weight_bytes)
+        .ok_or_else(|| H3ComfyVaeLoadError::InvalidPlan("resident VAE byte overflow".into()))?;
+    let effective_device_weight_bytes = visual
+        .effective_device_weight_bytes
+        .checked_add(audio.effective_device_weight_bytes)
+        .ok_or_else(|| H3ComfyVaeLoadError::InvalidPlan("effective VAE byte overflow".into()))?;
+    let config_bytes = u64::try_from(visual_config_bytes)
+        .ok()
+        .and_then(|visual| {
+            u64::try_from(audio_config_bytes)
+                .ok()
+                .and_then(|audio| visual.checked_add(audio))
+        })
+        .ok_or_else(|| H3ComfyVaeLoadError::InvalidPlan("VAE config byte overflow".into()))?;
+    Ok(H3ComfyVaeRuntimeMemory {
+        peak_host_mapped_file_bytes: visual.artifact_file_bytes.max(audio.artifact_file_bytes),
+        visual,
+        audio,
+        config_bytes,
+        peak_host_io_buffer_bytes: AUTHENTICATION_CHUNK_BYTES as u64,
+        peak_staging_disk_bytes: required_staging_bytes,
+        resident_host_weight_bytes: 0,
+        resident_device_weight_bytes,
+        effective_device_weight_bytes,
+    })
+}
+
+fn authenticated_vae_authority_identity(authority: &H3AuthenticatedComfyVaeAuthority) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"mold.minimax-h3.comfy-vae-authenticated-open.v1\0");
+    digest.update(authority.plan.identity_sha256().as_bytes());
+    digest.update(artifact_lease_identity(
+        authority.plan.identity_sha256(),
+        &authority.opened,
+    ));
+    authority.staged.update_identity(&mut digest);
+    for fact in &authority.artifact_facts {
+        digest.update(fact.role.stable_id().as_bytes());
+        digest.update([0]);
+        digest.update(fact.content_sha256.as_bytes());
+        digest.update(fact.file_bytes.to_le_bytes());
+    }
+    for value in [
+        authority.memory.visual.artifact_file_bytes,
+        authority.memory.visual.header_bytes,
+        authority.memory.visual.encoded_tensor_bytes,
+        authority.memory.visual.resident_device_weight_bytes,
+        authority.memory.audio.artifact_file_bytes,
+        authority.memory.audio.header_bytes,
+        authority.memory.audio.encoded_tensor_bytes,
+        authority.memory.audio.resident_device_weight_bytes,
+        authority.memory.config_bytes,
+        authority.memory.peak_host_io_buffer_bytes,
+        authority.memory.peak_host_mapped_file_bytes,
+        authority.memory.peak_staging_disk_bytes,
+        authority.memory.resident_host_weight_bytes,
+        authority.memory.resident_device_weight_bytes,
+        authority.memory.effective_device_weight_bytes,
+    ] {
+        digest.update(value.to_le_bytes());
+    }
+    format!("{:x}", digest.finalize())
 }
 
 trait VaeFactory {
@@ -1086,8 +1676,15 @@ fn checkpoint(
 
 struct StagedWeights {
     _directory: tempfile::TempDir,
-    visual: PathBuf,
-    audio: PathBuf,
+    visual: StagedWeight,
+    audio: StagedWeight,
+}
+
+struct StagedWeight {
+    role: H3ComfyVaeArtifactRole,
+    path: PathBuf,
+    identity: FileIdentity,
+    file: File,
 }
 
 impl StagedWeights {
@@ -1124,11 +1721,69 @@ impl StagedWeights {
 
     fn path(&self, role: H3ComfyVaeArtifactRole) -> LoadResult<&Path> {
         match role {
-            H3ComfyVaeArtifactRole::VisualWeights => Ok(&self.visual),
-            H3ComfyVaeArtifactRole::AudioWeights => Ok(&self.audio),
+            H3ComfyVaeArtifactRole::VisualWeights => Ok(&self.visual.path),
+            H3ComfyVaeArtifactRole::AudioWeights => Ok(&self.audio.path),
             _ => Err(H3ComfyVaeLoadError::InvalidPlan(format!(
                 "artifact {role:?} is not a staged weight"
             ))),
+        }
+    }
+
+    fn validate(&self, operation: &str) -> LoadResult<()> {
+        self.visual.validate(operation)?;
+        self.audio.validate(operation)
+    }
+
+    fn update_identity(&self, digest: &mut Sha256) {
+        self.visual.update_identity(digest);
+        self.audio.update_identity(digest);
+    }
+}
+
+impl StagedWeight {
+    fn validate(&self, operation: &str) -> LoadResult<()> {
+        let descriptor_identity = file_identity(&self.file.metadata().map_err(|error| {
+            artifact_error(
+                self.role,
+                format!("cannot stat retained staging descriptor {operation}: {error}"),
+            )
+        })?)?;
+        let path_metadata = std::fs::symlink_metadata(&self.path).map_err(|error| {
+            artifact_error(
+                self.role,
+                format!("cannot stat private staging path {operation}: {error}"),
+            )
+        })?;
+        if path_metadata.file_type().is_symlink()
+            || !path_metadata.file_type().is_file()
+            || descriptor_identity != self.identity
+            || file_identity(&path_metadata)? != self.identity
+        {
+            return Err(artifact_error(
+                self.role,
+                format!("retained staging descriptor or path changed {operation}"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn update_identity(&self, digest: &mut Sha256) {
+        digest.update(self.role.stable_id().as_bytes());
+        digest.update([0]);
+        let path = self.path.as_os_str().as_encoded_bytes();
+        digest.update((path.len() as u64).to_le_bytes());
+        digest.update(path);
+        digest.update(self.identity.len.to_le_bytes());
+        #[cfg(unix)]
+        for value in [
+            self.identity.device,
+            self.identity.inode,
+            self.identity.modified_seconds as u64,
+            self.identity.modified_nanoseconds as u64,
+            self.identity.changed_seconds as u64,
+            self.identity.changed_nanoseconds as u64,
+        ] {
+            digest.update(value.to_le_bytes());
         }
     }
 }
@@ -1137,7 +1792,7 @@ fn stage_weight(
     artifact: &mut OpenedArtifact,
     directory: &Path,
     observer: &mut dyn H3ComfyVaeLoadObserver,
-) -> LoadResult<PathBuf> {
+) -> LoadResult<StagedWeight> {
     let role = artifact.expected.role;
     let target = directory.join(artifact.expected.basename()?);
     let mut options = OpenOptions::new();
@@ -1221,16 +1876,24 @@ fn stage_weight(
     output
         .set_permissions(permissions)
         .map_err(|error| artifact_error(role, format!("cannot seal staging file: {error}")))?;
-    drop(output);
-    if std::fs::metadata(&target)
-        .map_err(|error| artifact_error(role, format!("cannot stat sealed staging file: {error}")))?
-        .len()
-        != total
-    {
+    let identity = file_identity(&output.metadata().map_err(|error| {
+        artifact_error(
+            role,
+            format!("cannot stat sealed staging descriptor: {error}"),
+        )
+    })?)?;
+    if identity.len != total {
         return Err(artifact_error(role, "sealed staging length changed"));
     }
     artifact.validate_source("after authentication and staging")?;
-    Ok(target)
+    let staged = StagedWeight {
+        role,
+        path: target,
+        identity,
+        file: output,
+    };
+    staged.validate("after sealing")?;
+    Ok(staged)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1288,6 +1951,18 @@ impl OpenedArtifact {
                     requested_path.display()
                 ),
             ));
+        }
+        #[cfg(unix)]
+        {
+            // SAFETY: `geteuid` has no preconditions and only reads process
+            // state.
+            let effective_uid = unsafe { libc::geteuid() };
+            if requested_metadata.uid() != effective_uid || requested_metadata.mode() & 0o022 != 0 {
+                return Err(artifact_error(
+                    role,
+                    "source must be process-owned and not group/other writable",
+                ));
+            }
         }
         let canonical_path = std::fs::canonicalize(requested_path).map_err(|error| {
             artifact_error(
@@ -1481,6 +2156,53 @@ fn file_identity(metadata: &std::fs::Metadata) -> LoadResult<FileIdentity> {
         #[cfg(not(unix))]
         modified: metadata.modified().ok(),
     })
+}
+
+fn validate_private_storage_directory(path: &Path, label: &str) -> LoadResult<PathBuf> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(H3ComfyVaeLoadError::InvalidPlan(format!(
+            "private H3 {label} must be an absolute canonical path"
+        )));
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        H3ComfyVaeLoadError::InvalidPlan(format!(
+            "cannot inspect private H3 {label} {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(H3ComfyVaeLoadError::InvalidPlan(format!(
+            "private H3 {label} must be a real directory"
+        )));
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: `geteuid` has no preconditions and only reads the process
+        // effective user identifier.
+        let effective_uid = unsafe { libc::geteuid() };
+        if metadata.uid() != effective_uid || metadata.mode() & 0o022 != 0 {
+            return Err(H3ComfyVaeLoadError::InvalidPlan(format!(
+                "private H3 {label} must be process-owned and not group/other writable"
+            )));
+        }
+    }
+    #[cfg(not(unix))]
+    return Err(H3ComfyVaeLoadError::InvalidPlan(
+        "private H3 storage resolution currently requires Unix ownership semantics".into(),
+    ));
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        H3ComfyVaeLoadError::InvalidPlan(format!("cannot canonicalize private H3 {label}: {error}"))
+    })?;
+    if canonical != path {
+        return Err(H3ComfyVaeLoadError::InvalidPlan(format!(
+            "private H3 {label} must not contain aliases or symlink components"
+        )));
+    }
+    Ok(canonical)
 }
 
 fn production_artifacts(manifest: &ModelManifest) -> LoadResult<Vec<ExpectedArtifact>> {
@@ -1900,6 +2622,63 @@ mod tests {
     }
 
     #[test]
+    fn hidden_storage_plan_uses_manifest_paths_without_model_paths() {
+        let models = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let models_root = models.path().canonicalize().unwrap();
+        let staging_root = staging.path().canonicalize().unwrap();
+        let plan = FrozenH3ComfyVaeLoadPlan::from_hidden_storage(
+            contract::FL2VA_COMFY,
+            &models_root,
+            &staging_root,
+        )
+        .unwrap();
+        let manifest = find_manifest(contract::FL2VA_COMFY).unwrap();
+        for role in H3ComfyVaeArtifactRole::ALL {
+            let source = plan.artifact(role).unwrap().source_path.as_str();
+            let file = manifest
+                .files
+                .iter()
+                .find(|file| file.hf_filename == source)
+                .unwrap();
+            assert_eq!(
+                plan.paths.get(role),
+                models_root.join(storage_path(manifest, file))
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hidden_storage_plan_rejects_alias_and_writable_roots() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let parent = tempfile::tempdir().unwrap();
+        let models = parent.path().join("models");
+        let staging = parent.path().join("staging");
+        std::fs::create_dir(&models).unwrap();
+        std::fs::create_dir(&staging).unwrap();
+        let models = models.canonicalize().unwrap();
+        let staging = staging.canonicalize().unwrap();
+        let alias = parent.path().join("models-alias");
+        symlink(&models, &alias).unwrap();
+        assert!(FrozenH3ComfyVaeLoadPlan::from_hidden_storage(
+            contract::FL2VA_COMFY,
+            &alias,
+            &staging,
+        )
+        .is_err());
+
+        std::fs::set_permissions(&models, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(FrozenH3ComfyVaeLoadPlan::from_hidden_storage(
+            contract::FL2VA_COMFY,
+            &models,
+            &staging,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn synthetic_loader_is_opened_file_bound_and_reports_exact_memory() {
         let source = tempfile::tempdir().unwrap();
         let staging = tempfile::tempdir().unwrap();
@@ -1956,6 +2735,80 @@ mod tests {
             }
         ));
         assert_eq!(std::fs::read_dir(staging.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_vae_source_rejects_group_writable_artifacts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let (paths, artifacts) = write_artifacts(source.path(), b"\x08visual");
+        std::fs::set_permissions(
+            &paths.visual_weights,
+            std::fs::Permissions::from_mode(0o666),
+        )
+        .unwrap();
+        let plan =
+            FrozenH3ComfyVaeLoadPlan::synthetic(paths, staging.path().to_path_buf(), artifacts)
+                .unwrap();
+        let error = load_with_factory(
+            &plan,
+            &Device::Cpu,
+            &mut RecordingObserver::default(),
+            &mut FakeFactory,
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(
+            error,
+            H3ComfyVaeLoadError::Artifact {
+                role: H3ComfyVaeArtifactRole::VisualWeights,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn authenticated_staging_descriptor_rejects_path_replacement_before_allocation() {
+        let source = tempfile::tempdir().unwrap();
+        let staging_root = tempfile::tempdir().unwrap();
+        let (paths, artifacts) = write_artifacts(source.path(), b"\x08visual");
+        let plan = FrozenH3ComfyVaeLoadPlan::synthetic(
+            paths,
+            staging_root.path().to_path_buf(),
+            artifacts,
+        )
+        .unwrap();
+        let mut observer = RecordingObserver::default();
+        let mut opened = H3ComfyVaeArtifactRole::WEIGHTS
+            .into_iter()
+            .map(|role| {
+                OpenedArtifact::open(
+                    plan.artifact(role).unwrap().clone(),
+                    plan.paths.get(role),
+                    &mut observer,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let staged = StagedWeights::create(&plan, &mut opened, &mut observer).unwrap();
+        let target = staged
+            .path(H3ComfyVaeArtifactRole::VisualWeights)
+            .unwrap()
+            .to_path_buf();
+        let authenticated = target.with_extension("authenticated");
+        std::fs::rename(&target, &authenticated).unwrap();
+        std::fs::write(&target, b"replacement").unwrap();
+
+        let error = staged.validate("before allocation").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("staging descriptor or path changed"),
+            "{error}"
+        );
     }
 
     struct ReplacingObserver {

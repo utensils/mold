@@ -205,7 +205,18 @@ pub(crate) struct H3PrivateQwenSupport {
     conditioner_config: H3ConditionerConfig,
     tokenizer: Arc<Tokenizer>,
     support_identity_sha256: String,
+    artifact_facts: Vec<H3PrivateQwenSupportArtifactFact>,
     artifacts: Vec<OpenedSupportArtifact>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct H3PrivateQwenSupportArtifactFact {
+    pub(crate) role: &'static str,
+    pub(crate) source_repository: String,
+    pub(crate) source_revision: String,
+    pub(crate) source_path: String,
+    pub(crate) content_sha256: String,
+    pub(crate) file_bytes: u64,
 }
 
 impl H3PrivateQwenSupport {
@@ -227,6 +238,26 @@ impl H3PrivateQwenSupport {
 
     pub(crate) fn support_identity_sha256(&self) -> &str {
         &self.support_identity_sha256
+    }
+
+    pub(crate) fn artifact_facts(&self) -> &[H3PrivateQwenSupportArtifactFact] {
+        &self.artifact_facts
+    }
+
+    pub(crate) fn validate_storage_root(&self, models_root: &Path) -> Result<()> {
+        let contracts = production_support_contracts(&self.model)?;
+        for artifact in &self.artifacts {
+            let contract = contracts
+                .iter()
+                .find(|contract| contract.role == artifact.role)
+                .ok_or_else(|| anyhow!("private H3 support storage binding omits a role"))?;
+            if artifact.path != models_root.join(&contract.relative_path)
+                || std::fs::canonicalize(&artifact.path)? != artifact.path
+            {
+                bail!("private H3 support descriptor is outside the hidden storage authority")
+            }
+        }
+        Ok(())
     }
 
     /// Re-hash the retained descriptors and prove that every manifest path
@@ -343,12 +374,31 @@ fn load_support_from_contracts_at_boundary(
     if !root_metadata.file_type().is_dir() || root_metadata.file_type().is_symlink() {
         bail!("private H3 models root must be a real non-symlink directory")
     }
+    #[cfg(unix)]
+    {
+        // SAFETY: `geteuid` has no preconditions and only reads process state.
+        let effective_uid = unsafe { libc::geteuid() };
+        if root_metadata.uid() != effective_uid || root_metadata.mode() & 0o022 != 0 {
+            bail!("private H3 models root must be process-owned and not group/other writable")
+        }
+    }
     let root_identity = FileIdentity::from_metadata(&root_metadata);
     root_validated(models_root)?;
     validate_models_root_identity(models_root, &root_identity)?;
     let root = models_root.to_path_buf();
 
     let support_identity_sha256 = support_identity(model, &contracts)?;
+    let artifact_facts = contracts
+        .iter()
+        .map(|contract| H3PrivateQwenSupportArtifactFact {
+            role: contract.role.stable_id(),
+            source_repository: contract.source_repo.clone(),
+            source_revision: contract.source_revision.clone(),
+            source_path: contract.source_path.clone(),
+            content_sha256: contract.sha256.clone(),
+            file_bytes: contract.size_bytes,
+        })
+        .collect();
     let mut opened = Vec::with_capacity(contracts.len());
     let mut bytes_by_role = BTreeMap::new();
     for contract in &contracts {
@@ -386,6 +436,7 @@ fn load_support_from_contracts_at_boundary(
         conditioner_config,
         tokenizer: Arc::new(tokenizer),
         support_identity_sha256,
+        artifact_facts,
         artifacts: opened,
     };
     support.revalidate()?;
@@ -475,7 +526,19 @@ fn authenticate_support_file(
             contract.relative_path.display()
         )
     })?;
-    let before = FileIdentity::from_metadata(&file.metadata()?);
+    let opened_metadata = file.metadata()?;
+    #[cfg(unix)]
+    {
+        // SAFETY: `geteuid` has no preconditions and only reads process state.
+        let effective_uid = unsafe { libc::geteuid() };
+        if opened_metadata.uid() != effective_uid || opened_metadata.mode() & 0o022 != 0 {
+            bail!(
+                "private H3 {} must be process-owned and not group/other writable",
+                contract.role.stable_id()
+            )
+        }
+    }
+    let before = FileIdentity::from_metadata(&opened_metadata);
     if before.len != contract.size_bytes {
         bail!(
             "private H3 {} has {} bytes, expected {}",
@@ -852,6 +915,58 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("models root changed"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_writable_models_root_fails_before_support_open() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let contracts = synthetic_contracts(root.path());
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o770)).unwrap();
+
+        let error = match load_support_from_contracts(root.path(), contract::FL2VA_COMFY, contracts)
+        {
+            Ok(_) => panic!("group-writable models root must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("process-owned and not group/other writable"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_writable_support_file_fails_before_authentication() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let contracts = synthetic_contracts(root.path());
+        let tokenizer = contracts
+            .iter()
+            .find(|contract| contract.role == SupportRole::Tokenizer)
+            .unwrap();
+        std::fs::set_permissions(
+            root.path().join(&tokenizer.relative_path),
+            std::fs::Permissions::from_mode(0o666),
+        )
+        .unwrap();
+
+        let error = match load_support_from_contracts(root.path(), contract::FL2VA_COMFY, contracts)
+        {
+            Ok(_) => panic!("group-writable support file must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("process-owned and not group/other writable"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -23,6 +23,9 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use super::artifacts::{expected_checkpoint_shapes, expected_materialized_keys};
 use super::config::{H3ConditionerConfig, H3_SELECTED_LANGUAGE_LAYERS};
 use super::qwen_quant::{H3QwenTensorDType, H3QwenTensorSpec};
@@ -696,6 +699,10 @@ pub(crate) struct OpenedH3QwenNvfp4AwqArtifact {
 }
 
 impl OpenedH3QwenNvfp4AwqArtifact {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub(crate) fn inspection(&self) -> &H3QwenNvfp4AwqInspection {
         &self.inspection
     }
@@ -837,6 +844,12 @@ fn checked_path_identity(
     if !metadata.file_type().is_file() {
         return Err(H3QwenNvfp4AwqError::Io(format!(
             "{operation}: artifact path must be a regular file"
+        )));
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o022 != 0 {
+        return Err(H3QwenNvfp4AwqError::Io(format!(
+            "{operation}: artifact path must not be group/other writable"
         )));
     }
     let identity = file_identity(&metadata);
@@ -1342,6 +1355,19 @@ pub(crate) mod tests {
         );
         std::fs::remove_file(link).unwrap();
         std::fs::remove_file(target).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_inspector_rejects_group_writable_weights() {
+        let path = temp_path("writable");
+        std::fs::write(&path, b"not opened while writable").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let error = inspect_h3_qwen_nvfp4_awq_header(&path).unwrap_err();
+        assert!(
+            matches!(error, H3QwenNvfp4AwqError::Io(message) if message.contains("group/other writable"))
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[cfg(unix)]

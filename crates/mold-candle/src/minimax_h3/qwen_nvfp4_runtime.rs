@@ -8,6 +8,7 @@
 
 use candle::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
@@ -98,6 +99,93 @@ pub struct H3QwenNvfp4RuntimeMemoryFacts {
 pub enum H3QwenNvfp4RuntimePlacement {
     Accelerated,
     Cpu,
+}
+
+/// Fully authenticated, still-open Qwen authority established before any
+/// model tensor is allocated.
+///
+/// This token is intentionally non-Clone and consumed by the loader. It binds
+/// the retained descriptor, released schema/policy/content identities,
+/// concrete host/device residency route, and every exact loader memory fact.
+pub struct H3AuthenticatedQwenNvfp4Authority {
+    artifact: OpenedH3QwenNvfp4AwqArtifact,
+    placement: H3QwenNvfp4RuntimePlacement,
+    memory_facts: H3QwenNvfp4RuntimeMemoryFacts,
+    identity_sha256: String,
+}
+
+impl H3AuthenticatedQwenNvfp4Authority {
+    pub const fn placement(&self) -> H3QwenNvfp4RuntimePlacement {
+        self.placement
+    }
+
+    pub const fn memory_facts(&self) -> &H3QwenNvfp4RuntimeMemoryFacts {
+        &self.memory_facts
+    }
+
+    pub fn artifact_identity_sha256(&self) -> &str {
+        &self.artifact.inspection().expected_artifact_sha256
+    }
+
+    pub fn header_identity_sha256(&self) -> &str {
+        &self.artifact.inspection().header_identity_sha256
+    }
+
+    pub fn policy_identity_sha256(&self) -> &str {
+        &self.artifact.inspection().policy_sha256
+    }
+
+    pub fn artifact_file_bytes(&self) -> u64 {
+        self.artifact.inspection().artifact_file_bytes
+    }
+
+    pub fn source_path(&self) -> &Path {
+        self.artifact.path()
+    }
+
+    pub fn identity_sha256(&self) -> &str {
+        &self.identity_sha256
+    }
+
+    pub fn revalidate(&self) -> Result<(), H3QwenNvfp4RuntimeError> {
+        self.artifact
+            .revalidate("while retaining authenticated H3 Qwen authority")?;
+        if self.identity_sha256 != authenticated_qwen_authority_identity(self) {
+            return Err(H3QwenNvfp4RuntimeError::Contract(
+                "authenticated Qwen authority identity changed".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn authenticated_qwen_authority_identity(authority: &H3AuthenticatedQwenNvfp4Authority) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"mold.minimax-h3.qwen-authenticated-open.v1\0");
+    digest.update(match authority.placement {
+        H3QwenNvfp4RuntimePlacement::Accelerated => b"accelerated".as_slice(),
+        H3QwenNvfp4RuntimePlacement::Cpu => b"cpu".as_slice(),
+    });
+    digest.update(authority.artifact_identity_sha256().as_bytes());
+    digest.update(authority.header_identity_sha256().as_bytes());
+    digest.update(authority.policy_identity_sha256().as_bytes());
+    let memory = &authority.memory_facts;
+    for value in [
+        memory.effective_parameter_bytes,
+        memory.host_resident_parameter_bytes,
+        memory.device_resident_parameter_bytes,
+        memory.retained_parameter_bytes,
+        memory.retained_raw_header_bytes,
+        memory.maximum_tensor_staging_bytes,
+        memory.authentication_scratch_bytes,
+        memory.bounded_inspection_io_bytes,
+        memory.authentication_io_bytes,
+        memory.tensor_io_bytes,
+        memory.aggregate_io_bytes,
+    ] {
+        digest.update(value.to_le_bytes());
+    }
+    format!("{:x}", digest.finalize())
 }
 
 /// Exact BF16 output-copy charge for the released `[1, sequence, hidden]`
@@ -356,33 +444,24 @@ impl TensorLoadProgress<'_> {
     }
 }
 
-/// Open and load the authenticated private Qwen object after the caller has
-/// established the complete attempt authority.
+/// Open and completely authenticate the private Qwen object without
+/// allocating any model tensors.
 ///
 /// # Safety
 ///
 /// Before calling, the consumer must validate one frozen factory authority,
 /// active conditioner/execution/artifact leases, the exact support identity,
-/// route, released quantization policy, and exact runtime memory facts. Those
-/// authorities must be polled by `observer` at every load checkpoint. This is
-/// an unsafe cross-crate implementation seam, not an independently callable
-/// model loader; the safe authority-first entrypoint lives in mold-inference.
-pub unsafe fn load_h3_qwen_nvfp4_conditioner_after_authorization(
+/// route, and released quantization policy. Those authorities must be polled
+/// by `observer` at every authentication checkpoint. This is an unsafe
+/// cross-crate implementation seam, not an independently callable artifact
+/// opener; the safe authority-first entrypoint lives in mold-inference.
+pub unsafe fn open_h3_qwen_nvfp4_authority_after_authorization(
     path: &Path,
-    config: &H3ConditionerConfig,
-    device: &Device,
+    placement: H3QwenNvfp4RuntimePlacement,
     observer: &mut dyn H3QwenNvfp4LoadObserver,
-) -> Result<LoadedH3QwenNvfp4Conditioner, H3QwenNvfp4RuntimeError> {
-    config
-        .validate()
-        .map_err(|error| H3QwenNvfp4RuntimeError::Contract(error.to_string()))?;
-    if config != &released_config()? {
-        return Err(H3QwenNvfp4RuntimeError::Contract(
-            "runtime config differs from the frozen published layer-50 Qwen contract".into(),
-        ));
-    }
-
-    let expected_memory_facts = released_h3_qwen_nvfp4_runtime_memory_facts(device)?;
+) -> Result<H3AuthenticatedQwenNvfp4Authority, H3QwenNvfp4RuntimeError> {
+    let expected_memory_facts =
+        released_h3_qwen_nvfp4_runtime_memory_facts_for_placement(placement)?;
     let mut artifact = open_h3_qwen_nvfp4_awq_artifact(path)?;
     artifact.authenticate_full_sha256(&mut |completed_bytes, total_bytes| {
         let event = H3QwenNvfp4LoadEvent::Authenticating {
@@ -421,6 +500,67 @@ pub unsafe fn load_h3_qwen_nvfp4_conditioner_after_authorization(
             expected_memory_facts.effective_parameter_bytes
         )));
     }
+    artifact.revalidate("after authenticating H3 Qwen authority")?;
+    let mut authority = H3AuthenticatedQwenNvfp4Authority {
+        artifact,
+        placement,
+        memory_facts: expected_memory_facts,
+        identity_sha256: String::new(),
+    };
+    authority.identity_sha256 = authenticated_qwen_authority_identity(&authority);
+    authority.revalidate()?;
+    Ok(authority)
+}
+
+/// Consume one authenticated Qwen authority and allocate the released runtime
+/// on its frozen placement route.
+///
+/// # Safety
+///
+/// The caller must retain and poll the same complete attempt authority used to
+/// open `authority`, and must have validated its exact memory facts at the
+/// allocation boundary. This function consumes the non-Clone authority so one
+/// authenticated descriptor cannot authorize multiple model allocations.
+pub unsafe fn load_h3_qwen_nvfp4_conditioner_from_authority(
+    mut authority: H3AuthenticatedQwenNvfp4Authority,
+    config: &H3ConditionerConfig,
+    device: &Device,
+    observer: &mut dyn H3QwenNvfp4LoadObserver,
+) -> Result<LoadedH3QwenNvfp4Conditioner, H3QwenNvfp4RuntimeError> {
+    config
+        .validate()
+        .map_err(|error| H3QwenNvfp4RuntimeError::Contract(error.to_string()))?;
+    if config != &released_config()? {
+        return Err(H3QwenNvfp4RuntimeError::Contract(
+            "runtime config differs from the frozen published layer-50 Qwen contract".into(),
+        ));
+    }
+    authority.revalidate()?;
+    let device_placement = if device.is_cpu() {
+        H3QwenNvfp4RuntimePlacement::Cpu
+    } else {
+        H3QwenNvfp4RuntimePlacement::Accelerated
+    };
+    if authority.placement != device_placement {
+        return Err(H3QwenNvfp4RuntimeError::Contract(format!(
+            "authenticated Qwen placement {:?} differs from selected device placement {:?}",
+            authority.placement, device_placement
+        )));
+    }
+    let expected_memory_facts = released_h3_qwen_nvfp4_runtime_memory_facts(device)?;
+    if authority.memory_facts != expected_memory_facts {
+        return Err(H3QwenNvfp4RuntimeError::Contract(
+            "authenticated Qwen memory facts differ from selected device facts".into(),
+        ));
+    }
+    let loadable_names = authority
+        .artifact
+        .tensors()
+        .iter()
+        .filter(|(name, _)| !name.ends_with(".comfy_quant"))
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let loadable_bytes = expected_memory_facts.effective_parameter_bytes;
     let mut progress = TensorLoadProgress {
         observer,
         tensor_index: 1,
@@ -430,13 +570,13 @@ pub unsafe fn load_h3_qwen_nvfp4_conditioner_after_authorization(
     };
 
     let embed_weight = load_tensor(
-        &mut artifact,
+        &mut authority.artifact,
         "model.embed_tokens.weight",
         &Device::Cpu,
         &mut progress,
     )?;
     let embed_scale = load_tensor(
-        &mut artifact,
+        &mut authority.artifact,
         "model.embed_tokens.weight_scale",
         &Device::Cpu,
         &mut progress,
@@ -447,40 +587,59 @@ pub unsafe fn load_h3_qwen_nvfp4_conditioner_after_authorization(
     for layer in 0..H3_SELECTED_LANGUAGE_LAYERS {
         layers.push(Qwen3VlNvfp4LayerWeights {
             q_proj: load_linear(
-                &mut artifact,
+                &mut authority.artifact,
                 config,
                 layer,
                 "self_attn.q_proj",
                 &mut progress,
             )?,
             k_proj: load_linear(
-                &mut artifact,
+                &mut authority.artifact,
                 config,
                 layer,
                 "self_attn.k_proj",
                 &mut progress,
             )?,
             v_proj: load_linear(
-                &mut artifact,
+                &mut authority.artifact,
                 config,
                 layer,
                 "self_attn.v_proj",
                 &mut progress,
             )?,
             o_proj: load_linear(
-                &mut artifact,
+                &mut authority.artifact,
                 config,
                 layer,
                 "self_attn.o_proj",
                 &mut progress,
             )?,
-            gate_proj: load_linear(&mut artifact, config, layer, "mlp.gate_proj", &mut progress)?,
-            up_proj: load_linear(&mut artifact, config, layer, "mlp.up_proj", &mut progress)?,
-            down_proj: load_linear(&mut artifact, config, layer, "mlp.down_proj", &mut progress)?,
+            gate_proj: load_linear(
+                &mut authority.artifact,
+                config,
+                layer,
+                "mlp.gate_proj",
+                &mut progress,
+            )?,
+            up_proj: load_linear(
+                &mut authority.artifact,
+                config,
+                layer,
+                "mlp.up_proj",
+                &mut progress,
+            )?,
+            down_proj: load_linear(
+                &mut authority.artifact,
+                config,
+                layer,
+                "mlp.down_proj",
+                &mut progress,
+            )?,
         });
     }
 
-    let dense_names = artifact
+    let dense_names = authority
+        .artifact
         .tensors()
         .iter()
         .filter(|(name, header)| header.dtype == "BF16" && !name.ends_with(".pre_quant_scale"))
@@ -488,7 +647,7 @@ pub unsafe fn load_h3_qwen_nvfp4_conditioner_after_authorization(
         .collect::<Vec<_>>();
     let mut dense = HashMap::with_capacity(dense_names.len());
     for name in dense_names {
-        let tensor = load_tensor(&mut artifact, &name, device, &mut progress)?;
+        let tensor = load_tensor(&mut authority.artifact, &name, device, &mut progress)?;
         if dense.insert(name.clone(), tensor).is_some() {
             return Err(H3QwenNvfp4RuntimeError::Contract(format!(
                 "duplicate dense tensor {name:?}"
@@ -506,7 +665,9 @@ pub unsafe fn load_h3_qwen_nvfp4_conditioner_after_authorization(
             progress.total_bytes
         )));
     }
-    artifact.revalidate("after constructing H3 Qwen tensor storage")?;
+    authority
+        .artifact
+        .revalidate("after constructing H3 Qwen tensor storage")?;
     let builder = VarBuilder::from_tensors(dense, DType::BF16, device);
     let model = H3QwenNvfp4Layer50Conditioner::new(
         config,
@@ -522,13 +683,47 @@ pub unsafe fn load_h3_qwen_nvfp4_conditioner_after_authorization(
             model.resident_language_layers()
         )));
     }
-    artifact.revalidate("after constructing H3 Qwen layer-50 model")?;
+    authority
+        .artifact
+        .revalidate("after constructing H3 Qwen layer-50 model")?;
     Ok(LoadedH3QwenNvfp4Conditioner {
         model,
-        artifact,
+        artifact: authority.artifact,
         device: device.clone(),
         memory_facts: expected_memory_facts,
     })
+}
+
+/// Compatibility wrapper for callers that do not need to inspect the opened
+/// evidence between authentication and allocation.
+///
+/// # Safety
+///
+/// The same authority requirements as
+/// [`open_h3_qwen_nvfp4_authority_after_authorization`] and
+/// [`load_h3_qwen_nvfp4_conditioner_from_authority`] apply.
+pub unsafe fn load_h3_qwen_nvfp4_conditioner_after_authorization(
+    path: &Path,
+    config: &H3ConditionerConfig,
+    device: &Device,
+    observer: &mut dyn H3QwenNvfp4LoadObserver,
+) -> Result<LoadedH3QwenNvfp4Conditioner, H3QwenNvfp4RuntimeError> {
+    config
+        .validate()
+        .map_err(|error| H3QwenNvfp4RuntimeError::Contract(error.to_string()))?;
+    if config != &released_config()? {
+        return Err(H3QwenNvfp4RuntimeError::Contract(
+            "runtime config differs from the frozen published layer-50 Qwen contract".into(),
+        ));
+    }
+    let placement = if device.is_cpu() {
+        H3QwenNvfp4RuntimePlacement::Cpu
+    } else {
+        H3QwenNvfp4RuntimePlacement::Accelerated
+    };
+    let authority =
+        unsafe { open_h3_qwen_nvfp4_authority_after_authorization(path, placement, observer)? };
+    unsafe { load_h3_qwen_nvfp4_conditioner_from_authority(authority, config, device, observer) }
 }
 
 fn load_linear(
@@ -707,10 +902,9 @@ mod tests {
         let path = sparse_published_fixture();
         let mut observer = CancelAuthentication { events: Vec::new() };
         let error = unsafe {
-            load_h3_qwen_nvfp4_conditioner_after_authorization(
+            open_h3_qwen_nvfp4_authority_after_authorization(
                 &path,
-                &released_config().unwrap(),
-                &Device::Cpu,
+                H3QwenNvfp4RuntimePlacement::Cpu,
                 &mut observer,
             )
         }

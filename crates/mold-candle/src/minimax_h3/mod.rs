@@ -67,7 +67,8 @@ pub use comfy_dit::{
     H3ComfyAccuracyTier, H3ComfyCheckpointCandidate, H3ComfyCheckpointError,
     H3ComfyCheckpointErrorCode, H3ComfyCurveInterpolation, H3ComfyFrozenStrategyMetadata,
     H3ComfyInt8BlockLoader, H3ComfyInt8BlockMemory, H3ComfyInt8Cancellation,
-    H3ComfyMemoryAccounting, H3ComfyNeverCancel, H3ComfyOpenedInt8Checkpoint, H3ComfyPrunedFormat,
+    H3ComfyMemoryAccounting, H3ComfyNeverCancel, H3ComfyOpenedBlockMemoryEvidence,
+    H3ComfyOpenedInt8Checkpoint, H3ComfyOpenedMemoryEvidence, H3ComfyPrunedFormat,
     H3ComfyPublishedArtifact, H3ComfyQuantizationPolicy, H3ComfyRuntimeBackend,
     H3ComfyRuntimeRejection, H3ComfyRuntimeRequirement, H3_COMFYUI_SOURCE_REVISION,
     H3_COMFY_KITCHEN_REPOSITORY, H3_COMFY_KITCHEN_SOURCE_REVISION, H3_COMFY_KITCHEN_VERSION,
@@ -125,11 +126,14 @@ pub use qwen_nvfp4::{
 #[cfg(feature = "h3-private-uat")]
 #[doc(hidden)]
 pub use qwen_nvfp4_runtime::{
-    load_h3_qwen_nvfp4_conditioner_after_authorization, released_h3_qwen_nvfp4_output_tensor_bytes,
+    load_h3_qwen_nvfp4_conditioner_after_authorization,
+    load_h3_qwen_nvfp4_conditioner_from_authority,
+    open_h3_qwen_nvfp4_authority_after_authorization, released_h3_qwen_nvfp4_output_tensor_bytes,
     released_h3_qwen_nvfp4_runtime_memory_facts,
-    released_h3_qwen_nvfp4_runtime_memory_facts_for_placement, H3QwenNvfp4LoadEvent,
-    H3QwenNvfp4LoadObserver, H3QwenNvfp4RuntimeError, H3QwenNvfp4RuntimeMemoryFacts,
-    H3QwenNvfp4RuntimePlacement, LoadedH3QwenNvfp4Conditioner, NoopH3QwenNvfp4LoadObserver,
+    released_h3_qwen_nvfp4_runtime_memory_facts_for_placement, H3AuthenticatedQwenNvfp4Authority,
+    H3QwenNvfp4LoadEvent, H3QwenNvfp4LoadObserver, H3QwenNvfp4RuntimeError,
+    H3QwenNvfp4RuntimeMemoryFacts, H3QwenNvfp4RuntimePlacement, LoadedH3QwenNvfp4Conditioner,
+    NoopH3QwenNvfp4LoadObserver,
 };
 pub use qwen_quant::{
     expected_h3_qwen_int8_weight_only_schema, validate_h3_qwen_int8_weight_only_schema,

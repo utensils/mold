@@ -995,7 +995,7 @@ struct EncodedVideo {
     thumbnail_png: Vec<u8>,
 }
 
-fn collect_endpoint_bytes(
+pub(crate) fn collect_endpoint_bytes(
     req: &GenerateRequest,
     mode: Mode,
 ) -> Result<Vec<(H3EndpointAnchor, &[u8])>> {

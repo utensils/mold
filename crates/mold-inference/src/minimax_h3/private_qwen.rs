@@ -8,14 +8,15 @@
 use anyhow::{anyhow, bail, Context, Result};
 use candle_core::{DType, Device, Tensor};
 use mold_candle::minimax_h3::{
-    build_ref2va_presentation, load_h3_qwen_nvfp4_conditioner_after_authorization,
-    pack_qwen_vision_u8, qwen_mrope_positions, released_h3_qwen_nvfp4_output_tensor_bytes,
-    released_h3_qwen_nvfp4_runtime_memory_facts,
+    build_ref2va_presentation, load_h3_qwen_nvfp4_conditioner_from_authority,
+    open_h3_qwen_nvfp4_authority_after_authorization, pack_qwen_vision_u8, qwen_mrope_positions,
+    released_h3_qwen_nvfp4_output_tensor_bytes, released_h3_qwen_nvfp4_runtime_memory_facts,
     released_h3_qwen_nvfp4_runtime_memory_facts_for_placement, ConditionerCheckpoint, GridThw,
-    H3ConditionerInput, H3ModalityTag, H3QwenNvfp4LoadObserver, H3QwenNvfp4RuntimeError,
-    H3QwenNvfp4RuntimeMemoryFacts, H3QwenNvfp4RuntimePlacement, H3RawTokenizer, H3VisionInput,
-    LoadedH3QwenNvfp4Conditioner, PackedVisionPatches, RefPresentationKind,
-    H3_QWEN_NVFP4_AWQ_POLICY_SHA256, H3_QWEN_NVFP4_AWQ_SHA256, H3_SELECTED_LANGUAGE_LAYERS,
+    H3AuthenticatedQwenNvfp4Authority, H3ConditionerInput, H3ModalityTag, H3QwenNvfp4LoadObserver,
+    H3QwenNvfp4RuntimeError, H3QwenNvfp4RuntimeMemoryFacts, H3QwenNvfp4RuntimePlacement,
+    H3RawTokenizer, H3VisionInput, LoadedH3QwenNvfp4Conditioner, PackedVisionPatches,
+    RefPresentationKind, H3_QWEN_NVFP4_AWQ_POLICY_SHA256, H3_QWEN_NVFP4_AWQ_SHA256,
+    H3_SELECTED_LANGUAGE_LAYERS,
 };
 use mold_core::minimax_h3::Task;
 use std::path::Path;
@@ -230,25 +231,87 @@ where
         authority: &'authority FrozenH3FactoryAuthority,
         checkpoint: &mut dyn H3PipelineCheckpoint,
     ) -> Result<Self> {
-        Self::load_with(
-            weights_path,
+        let mut resources = H3PrivateQwenResources {
+            model: None,
             support,
             conditioner_lease,
+            conditioner_released: false,
+        };
+        let device = resources.conditioner_lease.device();
+        let placement = if device.is_cpu() {
+            H3QwenNvfp4RuntimePlacement::Cpu
+        } else {
+            H3QwenNvfp4RuntimePlacement::Accelerated
+        };
+        let memory_facts = released_h3_qwen_nvfp4_runtime_memory_facts(device)?;
+        validate_preload_authorities(
+            &resources.support,
+            &resources.conditioner_lease,
+            &execution_lease,
+            &artifact_lease,
+            authority,
+            &memory_facts,
+        )?;
+
+        let opened = {
+            let mut observer = H3PrivateQwenLoadCheckpoint::new(checkpoint, || {
+                poll_active_authorities(
+                    &resources.support,
+                    &resources.conditioner_lease,
+                    &execution_lease,
+                    &artifact_lease,
+                    authority,
+                )
+            });
+            // SAFETY: every immutable attempt/lease binding was validated
+            // above and is polled at each bounded authentication checkpoint.
+            let result = unsafe {
+                open_h3_qwen_nvfp4_authority_after_authorization(
+                    weights_path,
+                    placement,
+                    &mut observer,
+                )
+            };
+            observer.finish(result)?
+        };
+        validate_opened_qwen_authority(&opened, &artifact_lease, authority, &memory_facts)?;
+        poll_active_authorities(
+            &resources.support,
+            &resources.conditioner_lease,
+            &execution_lease,
+            &artifact_lease,
+            authority,
+        )?;
+
+        let loaded = {
+            let config = resources.support.conditioner_config();
+            let device = resources.conditioner_lease.device();
+            let mut observer = H3PrivateQwenLoadCheckpoint::new(checkpoint, || {
+                poll_active_authorities(
+                    &resources.support,
+                    &resources.conditioner_lease,
+                    &execution_lease,
+                    &artifact_lease,
+                    authority,
+                )
+            });
+            // SAFETY: `opened` is the non-Clone authority validated at the
+            // allocation boundary above. It is consumed exactly once here.
+            let result = unsafe {
+                load_h3_qwen_nvfp4_conditioner_from_authority(opened, config, device, &mut observer)
+            };
+            observer.finish(result)?
+        };
+        validate_output_dtype(loaded.dtype_profile().output_dtype)?;
+        resources.model = Some(loaded);
+        let adapter = Self {
+            resources,
             execution_lease,
             artifact_lease,
             authority,
-            checkpoint,
-            |path, config, device, observer| {
-                // SAFETY: `load_with` invokes this closure only after the
-                // complete preload binding succeeds. The observer repeats
-                // that validation at every bounded load checkpoint.
-                unsafe {
-                    load_h3_qwen_nvfp4_conditioner_after_authorization(
-                        path, config, device, observer,
-                    )
-                }
-            },
-        )
+        };
+        adapter.validate_active_authorities()?;
+        Ok(adapter)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -773,6 +836,30 @@ where
     let frozen = frozen_binding_claims(authority)?;
     let leases = lease_binding_claims(conditioner, execution, artifact, true);
     validate_binding(&loaded, &frozen, &leases)
+}
+
+fn validate_opened_qwen_authority<A>(
+    opened: &H3AuthenticatedQwenNvfp4Authority,
+    artifact: &A,
+    authority: &FrozenH3FactoryAuthority,
+    expected_memory: &H3QwenNvfp4RuntimeMemoryFacts,
+) -> Result<()>
+where
+    A: H3PrivateQwenArtifactLease,
+{
+    opened.revalidate()?;
+    require_sha256(opened.identity_sha256(), "opened authority")?;
+    if opened.artifact_file_bytes() == 0
+        || opened.artifact_identity_sha256() != artifact.weight_identity_sha256()
+        || opened.header_identity_sha256() != artifact.weight_header_identity_sha256()
+        || opened.policy_identity_sha256() != artifact.weight_policy_identity_sha256()
+        || opened.memory_facts() != expected_memory
+    {
+        bail!(
+            "authenticated H3 Qwen opened evidence differs from the frozen artifact or memory authority"
+        )
+    }
+    validate_parameter_memory(authority, opened.memory_facts())
 }
 
 /// Cheap checkpoint poll. Expensive descriptor rehash/reopen validation runs
