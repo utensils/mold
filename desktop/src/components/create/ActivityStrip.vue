@@ -315,59 +315,61 @@ function deleteConfirmed() {
       </button>
     </div>
 
-    <LiveActivityList :rows="sharedRows" interactive @select="openLiveWork" />
+    <div data-test="activity-list-scroll" class="ms-activity__list">
+      <LiveActivityList :rows="sharedRows" interactive @select="openLiveWork" />
 
-    <!-- In-flight sequence rows (merged jobs surface) -->
-    <SequenceJobRow
-      v-for="vm in sequenceRows"
-      :key="vm.key"
-      data-test="activity-sequence"
-      :vm="vm"
-      :model-label="modelLabel(vm.model)"
-      :show-error="false"
-      @action="runAction"
-      @select="selectSequence"
-    />
+      <!-- In-flight sequence rows (merged jobs surface) -->
+      <SequenceJobRow
+        v-for="vm in sequenceRows"
+        :key="vm.key"
+        data-test="activity-sequence"
+        :vm="vm"
+        :model-label="modelLabel(vm.model)"
+        :show-error="false"
+        @action="runAction"
+        @select="selectSequence"
+      />
 
-    <!-- Settled but still wanting a decision: capped, expiring, dismissible. -->
-    <SequenceJobRow
-      v-for="vm in attentionSequences"
-      :key="vm.key"
-      data-test="activity-sequence"
-      :vm="vm"
-      :model-label="modelLabel(vm.model)"
-      :show-error="false"
-      dismissible
-      @action="runAction"
-      @select="selectSequence"
-      @dismiss="dismiss"
-    />
+      <!-- Settled but still wanting a decision: capped, expiring, dismissible. -->
+      <SequenceJobRow
+        v-for="vm in attentionSequences"
+        :key="vm.key"
+        data-test="activity-sequence"
+        :vm="vm"
+        :model-label="modelLabel(vm.model)"
+        :show-error="false"
+        dismissible
+        @action="runAction"
+        @select="selectSequence"
+        @dismiss="dismiss"
+      />
 
-    <div
-      v-for="vm in attentionPrints"
-      :key="vm.key"
-      class="ms-activity__seq"
-      data-test="activity-print-attention"
-      role="alert"
-      tabindex="0"
-      @click="selectPrintVm(vm)"
-      @keydown.enter.prevent="selectPrintVm(vm)"
-      @keydown.space.prevent="selectPrintVm(vm)"
-    >
-      <span class="ms-activity__state data-mono text-stop">failed</span>
-      <span class="ms-activity__seq-model" :title="vm.prompt">{{ vm.prompt }}</span>
-      <div class="ms-activity__seq-spacer" />
-      <span class="ms-activity__seq-error">Open Create for details</span>
-      <button
-        type="button"
-        class="ms-activity__cancel"
-        data-test="print-dismiss"
-        title="Hide this failure. Nothing is deleted."
-        :aria-label="`Dismiss failed print: ${vm.prompt}`"
-        @click.stop="dismiss(vm)"
+      <div
+        v-for="vm in attentionPrints"
+        :key="vm.key"
+        class="ms-activity__seq"
+        data-test="activity-print-attention"
+        role="alert"
+        tabindex="0"
+        @click="selectPrintVm(vm)"
+        @keydown.enter.prevent="selectPrintVm(vm)"
+        @keydown.space.prevent="selectPrintVm(vm)"
       >
-        ✕
-      </button>
+        <span class="ms-activity__state data-mono text-stop">failed</span>
+        <span class="ms-activity__seq-model" :title="vm.prompt">{{ vm.prompt }}</span>
+        <div class="ms-activity__seq-spacer" />
+        <span class="ms-activity__seq-error">Open Create for details</span>
+        <button
+          type="button"
+          class="ms-activity__cancel"
+          data-test="print-dismiss"
+          title="Hide this failure. Nothing is deleted."
+          :aria-label="`Dismiss failed print: ${vm.prompt}`"
+          @click.stop="dismiss(vm)"
+        >
+          ✕
+        </button>
+      </div>
     </div>
 
     <ConfirmDialog
@@ -391,8 +393,20 @@ function deleteConfirmed() {
   flex-direction: column;
   gap: 8px;
   min-width: 0;
+  min-height: 0;
+  max-height: min(42cqh, 220px);
   overflow: hidden;
-  flex-shrink: 0;
+  flex-shrink: 1;
+}
+.ms-activity__list {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 .ms-activity__row {
   display: flex;

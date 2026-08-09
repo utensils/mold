@@ -5,6 +5,7 @@ import modelPickerSource from "../components/create/ModelPicker.vue?raw";
 import advancedSource from "../components/create/AdvancedSettings.vue?raw";
 import sequenceComposerSource from "../components/create/SequenceComposer.vue?raw";
 import composerCardSource from "../components/create/ComposerCard.vue?raw";
+import activityStripSource from "../components/create/ActivityStrip.vue?raw";
 
 function tagFor(source: string, testId: string): string {
   return source.match(new RegExp(`<[^>]*data-test="${testId}"[^>]*>`, "s"))?.[0] ?? "";
@@ -20,8 +21,17 @@ describe("GenerateView layout", () => {
     expect(classesFor(viewSource, "generate-layout")).toContain("overflow-hidden");
     expect(classesFor(viewSource, "generate-workbench")).toContain("min-h-0");
     expect(classesFor(viewSource, "generate-workbench")).toContain("overflow-hidden");
-    expect(classesFor(viewSource, "create-bottom-panel")).toContain("overflow-x-hidden");
+    expect(classesFor(viewSource, "create-bottom-panel")).toContain("overflow-hidden");
+    expect(classesFor(viewSource, "create-bottom-panel")).not.toContain("overflow-y-auto");
     expect(classesFor(viewSource, "generate-composer")).toContain("flex-1");
+  });
+
+  it("keeps activity as the bottom bench's only scroll surface", () => {
+    expect(classesFor(activityStripSource, "activity-list-scroll")).toContain("ms-activity__list");
+    expect(activityStripSource).toMatch(/\.ms-activity\s*\{[^}]*min-height:\s*0/s);
+    expect(activityStripSource).toMatch(/\.ms-activity\s*\{[^}]*max-height:/s);
+    expect(activityStripSource).toMatch(/\.ms-activity__list\s*\{[^}]*min-height:\s*0/s);
+    expect(activityStripSource).toMatch(/\.ms-activity__list\s*\{[^}]*overflow-y:\s*auto/s);
   });
 
   it("keeps the canvas visible and makes the bottom bench resizable", () => {
@@ -38,6 +48,8 @@ describe("GenerateView layout", () => {
   it("fills the bottom panel and pins composer actions to its bottom edge", () => {
     expect(classesFor(viewSource, "create-bottom-panel")).toContain("flex");
     expect(classesFor(viewSource, "create-bottom-panel")).toContain("flex-col");
+    expect(classesFor(viewSource, "generate-sequence-shell")).toContain("min-h-[300px]");
+    expect(classesFor(viewSource, "generate-sequence-shell")).toContain("flex-[1_0_300px]");
     expect(classesFor(viewSource, "generate-sequence-composer")).toContain("flex-1");
     expect(classesFor(viewSource, "generate-composer")).toContain("flex-1");
     expect(sequenceComposerSource).toMatch(/\.ms-seqbench__footer\s*\{[^}]*margin-top:\s*auto/s);
