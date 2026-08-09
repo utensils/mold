@@ -11,6 +11,50 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
+#[cfg(feature = "h3-private-uat")]
+pub(crate) fn private_work_identity_sha256(work_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update(b"mold.minimax-h3.private-work.v1\0");
+    digest.update((work_id.len() as u64).to_le_bytes());
+    digest.update(work_id.as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+#[cfg(feature = "h3-private-uat")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn private_cancellation_scope_identity_sha256(
+    work_identity_sha256: &str,
+    device_id: &str,
+    owner_epoch: u64,
+    state_version: u64,
+    plan_version: u64,
+    worker_generation: u64,
+    memory_sample_generation: u64,
+    memory_ledger_sequence: u64,
+) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update(b"mold.minimax-h3.private-cancellation-scope.v1\0");
+    for value in [work_identity_sha256, device_id] {
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value.as_bytes());
+    }
+    for value in [
+        owner_epoch,
+        state_version,
+        plan_version,
+        worker_generation,
+        memory_sample_generation,
+        memory_ledger_sequence,
+    ] {
+        digest.update(value.to_le_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct H3AttemptClaim {
     pub(crate) work_id: String,
@@ -25,6 +69,9 @@ pub(crate) struct H3AttemptClaim {
     pub(crate) execution_identity_sha256: String,
     pub(crate) prepared_attempt_identity_sha256: String,
     pub(crate) target_budget_identity_sha256: String,
+    pub(crate) component_set_identity_sha256: String,
+    pub(crate) predicted_device_peak_bytes: u64,
+    pub(crate) predicted_host_increment_bytes: u64,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -41,6 +88,9 @@ pub(crate) struct H3AttemptCurrent {
     pub(crate) execution_identity_sha256: String,
     pub(crate) prepared_attempt_identity_sha256: String,
     pub(crate) target_budget_identity_sha256: String,
+    pub(crate) component_set_identity_sha256: String,
+    pub(crate) predicted_device_peak_bytes: u64,
+    pub(crate) predicted_host_increment_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -248,8 +298,9 @@ impl H3AttemptRoot {
     /// Consume the root exactly once at the H3 invocation seam.
     ///
     /// The independently supplied current projection is deliberate: a future
-    /// runtime must echo the exact execution, prepared-attempt, and target-
-    /// budget identities instead of receiving a self-authenticating handle.
+    /// runtime must echo the exact execution, prepared-attempt, target-budget,
+    /// and component-set identities instead of receiving a self-authenticating
+    /// handle.
     pub(crate) fn run_once<T>(
         mut self,
         current: &H3AttemptCurrent,
@@ -264,6 +315,8 @@ impl H3AttemptRoot {
             .map_err(|_| H3AttemptError::Cancelled)?;
         let result = consume(H3AttemptScope {
             cancellation: &self.cancellation,
+            #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+            claim: &self.claim,
         });
         self.settle();
         Ok(result)
@@ -305,9 +358,11 @@ impl Drop for H3AttemptRoot {
 
 pub(crate) struct H3AttemptScope<'a> {
     cancellation: &'a mold_inference::InferenceCancellationToken,
+    #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+    claim: &'a H3AttemptClaim,
 }
 
-impl H3AttemptScope<'_> {
+impl<'a> H3AttemptScope<'a> {
     #[cfg(test)]
     pub(crate) fn checkpoint(&self) -> Result<(), mold_inference::InferenceCancelled> {
         self.cancellation.checkpoint()
@@ -315,6 +370,143 @@ impl H3AttemptScope<'_> {
 
     pub(crate) fn cancellation_token(&self) -> mold_inference::InferenceCancellationToken {
         self.cancellation.clone()
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn private_run_context(
+        &self,
+    ) -> anyhow::Result<mold_inference::H3PrivateFl2VaRunContext> {
+        let work_identity_sha256 = private_work_identity_sha256(&self.claim.work_id);
+        let cancellation_scope_identity_sha256 = private_cancellation_scope_identity_sha256(
+            &work_identity_sha256,
+            &self.claim.device_id,
+            self.claim.owner_epoch,
+            self.claim.state_version,
+            self.claim.plan_version,
+            self.claim.worker_generation,
+            self.claim.memory_sample_generation,
+            self.claim.memory_ledger_sequence,
+        );
+        mold_inference::H3PrivateFl2VaRunContext::new(
+            work_identity_sha256,
+            cancellation_scope_identity_sha256,
+            self.claim.memory_ledger_sequence,
+            self.cancellation.clone(),
+        )
+    }
+
+    /// Payload-free, read-only owner facts exposed to the private inference
+    /// facade. Scheduler sequence numbers and mutable worker state remain
+    /// inside this module; the runtime receives only the identities it must
+    /// independently echo at terminal publication.
+    #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+    pub(crate) fn facts(&self) -> H3AttemptScopeFacts<'a> {
+        H3AttemptScopeFacts {
+            work_id: &self.claim.work_id,
+            device_id: &self.claim.device_id,
+            device_ordinal: self.claim.device_ordinal,
+            owner_epoch: self.claim.owner_epoch,
+            worker_generation: self.claim.worker_generation,
+            state_version: self.claim.state_version,
+            plan_version: self.claim.plan_version,
+            memory_sample_generation: self.claim.memory_sample_generation,
+            memory_ledger_sequence: self.claim.memory_ledger_sequence,
+            execution_identity_sha256: &self.claim.execution_identity_sha256,
+            prepared_attempt_identity_sha256: &self.claim.prepared_attempt_identity_sha256,
+            target_budget_identity_sha256: &self.claim.target_budget_identity_sha256,
+            component_set_identity_sha256: &self.claim.component_set_identity_sha256,
+            predicted_device_peak_bytes: self.claim.predicted_device_peak_bytes,
+            predicted_host_increment_bytes: self.claim.predicted_host_increment_bytes,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct H3AttemptScopeFacts<'a> {
+    work_id: &'a str,
+    device_id: &'a str,
+    device_ordinal: usize,
+    owner_epoch: u64,
+    worker_generation: u64,
+    state_version: u64,
+    plan_version: u64,
+    memory_sample_generation: u64,
+    memory_ledger_sequence: u64,
+    execution_identity_sha256: &'a str,
+    prepared_attempt_identity_sha256: &'a str,
+    target_budget_identity_sha256: &'a str,
+    component_set_identity_sha256: &'a str,
+    predicted_device_peak_bytes: u64,
+    predicted_host_increment_bytes: u64,
+}
+
+#[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+impl<'a> H3AttemptScopeFacts<'a> {
+    pub(crate) fn device_id(self) -> &'a str {
+        self.device_id
+    }
+
+    pub(crate) fn device_ordinal(self) -> usize {
+        self.device_ordinal
+    }
+
+    pub(crate) fn matches_lease(self, lease: &crate::scheduler::LeaseFence) -> bool {
+        lease.work_id == self.work_id
+            && lease.device_id == self.device_id
+            && lease.owner_epoch == self.owner_epoch
+            && lease.worker_generation == self.worker_generation
+            && lease.state_version == self.state_version
+            && lease.plan_version == self.plan_version
+            && lease.memory_sample_generation == self.memory_sample_generation
+            && lease.memory_ledger_sequence == self.memory_ledger_sequence
+    }
+
+    pub(crate) fn execution_identity_sha256(self) -> &'a str {
+        self.execution_identity_sha256
+    }
+
+    pub(crate) fn prepared_attempt_identity_sha256(self) -> &'a str {
+        self.prepared_attempt_identity_sha256
+    }
+
+    pub(crate) fn target_budget_identity_sha256(self) -> &'a str {
+        self.target_budget_identity_sha256
+    }
+
+    pub(crate) fn component_set_identity_sha256(self) -> &'a str {
+        self.component_set_identity_sha256
+    }
+
+    pub(crate) fn predicted_device_peak_bytes(self) -> u64 {
+        self.predicted_device_peak_bytes
+    }
+
+    pub(crate) fn predicted_host_increment_bytes(self) -> u64 {
+        self.predicted_host_increment_bytes
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn matches_private_run_binding(
+        self,
+        work_identity_sha256: &str,
+        cancellation_scope_identity_sha256: &str,
+        memory_ledger_sequence: u64,
+    ) -> bool {
+        let expected_work_identity = private_work_identity_sha256(self.work_id);
+        let expected_cancellation_scope = private_cancellation_scope_identity_sha256(
+            &expected_work_identity,
+            self.device_id,
+            self.owner_epoch,
+            self.state_version,
+            self.plan_version,
+            self.worker_generation,
+            self.memory_sample_generation,
+            self.memory_ledger_sequence,
+        );
+        work_identity_sha256 == expected_work_identity
+            && cancellation_scope_identity_sha256 == expected_cancellation_scope
+            && memory_ledger_sequence == self.memory_ledger_sequence
     }
 }
 
@@ -358,6 +550,9 @@ pub(crate) fn generation_attempt_for_test(
         execution_identity_sha256: identity('a'),
         prepared_attempt_identity_sha256: identity('b'),
         target_budget_identity_sha256: identity('c'),
+        component_set_identity_sha256: identity('d'),
+        predicted_device_peak_bytes: 11_000_000_000,
+        predicted_host_increment_bytes: 2_000_000_000,
     };
     let current = H3AttemptCurrent {
         work_id: claim.work_id.clone(),
@@ -372,6 +567,9 @@ pub(crate) fn generation_attempt_for_test(
         execution_identity_sha256: claim.execution_identity_sha256.clone(),
         prepared_attempt_identity_sha256: claim.prepared_attempt_identity_sha256.clone(),
         target_budget_identity_sha256: claim.target_budget_identity_sha256.clone(),
+        component_set_identity_sha256: claim.component_set_identity_sha256.clone(),
+        predicted_device_peak_bytes: claim.predicted_device_peak_bytes,
+        predicted_host_increment_bytes: claim.predicted_host_increment_bytes,
     };
     let settlements = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let root = H3AttemptRoot::claim_inner(
@@ -385,17 +583,18 @@ pub(crate) fn generation_attempt_for_test(
     (H3GenerationAttempt { root }, current, settlements)
 }
 
-/// Claim a future H3 attempt from exact owner-local facts.
+/// Claim an H3 attempt from exact owner-local facts.
 ///
-/// The current production authority returns `None` because server admission
-/// deliberately leaves the prepared-attempt/target-budget/attention triad
-/// absent. That keeps this boundary testable without activating H3 or making
-/// a legal authorization record sufficient to reach model bytes.
+/// Under the private feature, the final-dispatch inference facade must first
+/// place its opaque attempt on the job. The claim copies only that value's
+/// payload-free identities after comparing them with the still-frozen base
+/// plan; an absent payload remains a non-H3/no-runtime outcome.
 pub(crate) fn claim_generation_attempt(
     worker: &crate::gpu_pool::GpuWorker,
     current_worker_generation: u64,
     fence: &crate::scheduler::LeaseFence,
     job: &crate::gpu_pool::GpuJob,
+    cancellation: mold_inference::InferenceCancellationToken,
 ) -> Result<Option<H3GenerationAttempt>, H3AttemptError> {
     if worker.owner_thread_id.get().copied() != Some(std::thread::current().id()) {
         return Err(H3AttemptError::StaleOwnerFence);
@@ -411,11 +610,29 @@ pub(crate) fn claim_generation_attempt(
         .h3_factory_authority
         .as_ref()
         .ok_or(H3AttemptError::IdentityMismatch)?;
-    let Some((prepared_attempt_identity, target_budget_identity)) =
-        authority.prepared_target_attempt_identities()
-    else {
-        return Ok(None);
+    #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+    let (prepared_attempt_identity, target_budget_identity) = {
+        let Some(prepared) = job.h3_prepared_attempt.as_ref() else {
+            return Ok(None);
+        };
+        let facts = prepared.facts();
+        validate_prepared_facts_against_plan(&facts, plan, authority)?;
+        #[cfg(feature = "h3-private-uat")]
+        validate_private_prepared_binding(&facts, fence, job)?;
+        (
+            facts.prepared_attempt_identity_sha256,
+            facts.target_budget_identity_sha256,
+        )
     };
+    #[cfg(not(any(test, feature = "h3-private-bridge", feature = "h3-private-uat")))]
+    let (prepared_attempt_identity, target_budget_identity) = authority
+        .prepared_target_attempt_identities()
+        .map(|(attempt, budget)| (attempt.to_string(), budget.to_string()))
+        .unwrap_or_else(|| (String::new(), String::new()));
+    #[cfg(not(any(test, feature = "h3-private-bridge", feature = "h3-private-uat")))]
+    if prepared_attempt_identity.is_empty() || target_budget_identity.is_empty() {
+        return Ok(None);
+    }
     let worker_device_id = crate::scheduler::worker_device_id(worker);
     let invocation = H3AttemptClaim {
         work_id: fence.work_id.clone(),
@@ -428,8 +645,11 @@ pub(crate) fn claim_generation_attempt(
         memory_sample_generation: fence.memory_sample_generation,
         memory_ledger_sequence: fence.memory_ledger_sequence,
         execution_identity_sha256: plan.execution_fingerprint.clone(),
-        prepared_attempt_identity_sha256: prepared_attempt_identity.to_string(),
-        target_budget_identity_sha256: target_budget_identity.to_string(),
+        prepared_attempt_identity_sha256: prepared_attempt_identity.clone(),
+        target_budget_identity_sha256: target_budget_identity.clone(),
+        component_set_identity_sha256: authority.component_set_identity_sha256().to_string(),
+        predicted_device_peak_bytes: plan.predicted_vram_peak_bytes,
+        predicted_host_increment_bytes: plan.predicted_host_increment_bytes,
     };
     let current = H3AttemptCurrent {
         work_id: job.id.clone(),
@@ -442,17 +662,16 @@ pub(crate) fn claim_generation_attempt(
         memory_sample_generation: fence.memory_sample_generation,
         memory_ledger_sequence: fence.memory_ledger_sequence,
         execution_identity_sha256: authority.execution_fingerprint().to_string(),
-        prepared_attempt_identity_sha256: prepared_attempt_identity.to_string(),
-        target_budget_identity_sha256: target_budget_identity.to_string(),
+        prepared_attempt_identity_sha256: prepared_attempt_identity,
+        target_budget_identity_sha256: target_budget_identity,
+        component_set_identity_sha256: authority.component_set_identity_sha256().to_string(),
+        predicted_device_peak_bytes: plan.predicted_vram_peak_bytes,
+        predicted_host_increment_bytes: plan.predicted_host_increment_bytes,
     };
     if authority.device_id() != worker_device_id || authority.device_ordinal() != worker.gpu.ordinal
     {
         return Err(H3AttemptError::StaleOwnerFence);
     }
-    let cancellation = job.batch_child.as_ref().map_or_else(
-        mold_inference::InferenceCancellationToken::default,
-        |child| child.cancellation.clone(),
-    );
     let root = H3AttemptRoot::claim(invocation, &current, cancellation)?;
     Ok(Some(H3GenerationAttempt { root }))
 }
@@ -461,10 +680,10 @@ pub(crate) fn claim_generation_attempt(
 ///
 /// The lease fields come from the exact fence installed on the job after
 /// acceptance. Owner and device facts come from the live worker, while the
-/// three execution identities come from the still-frozen plan authority. A
-/// future H3 backend must replace those authority-side identity values with
-/// its own echo before runtime activation; production cannot reach this helper
-/// while the target authority triad remains absent.
+/// execution and component identities come from the still-frozen plan while
+/// prepared-attempt and target-budget identities are re-read from the opaque
+/// inference value. This independently detects replacement between claim and
+/// consumption without retaining the attempt inside the scheduler plan.
 pub(crate) fn rebuild_generation_current(
     worker: &crate::gpu_pool::GpuWorker,
     current_worker_generation: u64,
@@ -486,8 +705,25 @@ pub(crate) fn rebuild_generation_current(
         .h3_factory_authority
         .as_ref()
         .ok_or(H3AttemptError::IdentityMismatch)?;
+    #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+    let (prepared_attempt_identity, target_budget_identity) = {
+        let prepared = job
+            .h3_prepared_attempt
+            .as_ref()
+            .ok_or(H3AttemptError::IdentityMismatch)?;
+        let facts = prepared.facts();
+        validate_prepared_facts_against_plan(&facts, plan, authority)?;
+        #[cfg(feature = "h3-private-uat")]
+        validate_private_prepared_binding(&facts, lease, job)?;
+        (
+            facts.prepared_attempt_identity_sha256,
+            facts.target_budget_identity_sha256,
+        )
+    };
+    #[cfg(not(any(test, feature = "h3-private-bridge", feature = "h3-private-uat")))]
     let (prepared_attempt_identity, target_budget_identity) = authority
         .prepared_target_attempt_identities()
+        .map(|(attempt, budget)| (attempt.to_string(), budget.to_string()))
         .ok_or(H3AttemptError::IdentityMismatch)?;
     let worker_device_id = crate::scheduler::worker_device_id(worker);
     if lease.work_id != job.id
@@ -511,9 +747,93 @@ pub(crate) fn rebuild_generation_current(
         memory_sample_generation: lease.memory_sample_generation,
         memory_ledger_sequence: lease.memory_ledger_sequence,
         execution_identity_sha256: authority.execution_fingerprint().to_string(),
-        prepared_attempt_identity_sha256: prepared_attempt_identity.to_string(),
-        target_budget_identity_sha256: target_budget_identity.to_string(),
+        prepared_attempt_identity_sha256: prepared_attempt_identity,
+        target_budget_identity_sha256: target_budget_identity,
+        component_set_identity_sha256: authority.component_set_identity_sha256().to_string(),
+        predicted_device_peak_bytes: plan.predicted_vram_peak_bytes,
+        predicted_host_increment_bytes: plan.predicted_host_increment_bytes,
     })
+}
+
+#[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+fn validate_prepared_facts_against_plan(
+    facts: &crate::h3_private_bridge::H3PreparedAttemptFacts,
+    plan: &crate::execution_plan::ResolvedExecutionPlan,
+    authority: &mold_inference::FrozenH3FactoryAuthority,
+) -> Result<(), H3AttemptError> {
+    if facts.device_id != authority.device_id()
+        || facts.device_ordinal != plan.device_ordinal
+        || facts.device_ordinal != authority.device_ordinal()
+        || facts.execution_identity_sha256 != plan.execution_fingerprint
+        || facts.execution_identity_sha256 != authority.execution_fingerprint()
+        || facts.component_set_identity_sha256 != authority.component_set_identity_sha256()
+        || facts.predicted_device_peak_bytes != plan.predicted_vram_peak_bytes
+        || facts.predicted_host_increment_bytes != plan.predicted_host_increment_bytes
+        || facts.media.canonical_model != authority.canonical_model()
+        || facts.media.task != authority.task()
+        || facts.media.task != mold_core::minimax_h3::Task::Fl2va
+        || facts.media.mode == mold_core::minimax_h3::Mode::ReferenceToAudioVideo
+        || facts.media.fps != mold_core::minimax_h3::FIXED_FPS
+        || !valid_sha256(&facts.prepared_attempt_identity_sha256)
+        || !valid_sha256(&facts.target_budget_identity_sha256)
+        || !valid_sha256(&facts.admission_evidence_identity_sha256)
+        || !valid_sha256(&facts.artifact_qualification_identity_sha256)
+        || !valid_sha256(&facts.runtime_qualification_identity_sha256)
+        || !valid_sha256(&facts.work_identity_sha256)
+        || !valid_sha256(&facts.cancellation_scope_identity_sha256)
+        || !valid_sha256(&facts.consumption_identity_sha256)
+        || facts.memory_ledger_sequence == 0
+    {
+        return Err(H3AttemptError::IdentityMismatch);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "h3-private-uat")]
+fn validate_private_prepared_binding(
+    facts: &crate::h3_private_bridge::H3PreparedAttemptFacts,
+    fence: &crate::scheduler::LeaseFence,
+    job: &crate::gpu_pool::GpuJob,
+) -> Result<(), H3AttemptError> {
+    let prepared = job
+        .prepared_execution_inputs
+        .as_ref()
+        .ok_or(H3AttemptError::IdentityMismatch)?;
+    prepared
+        .h3_private_ingress_grant
+        .as_ref()
+        .ok_or(H3AttemptError::IdentityMismatch)?
+        .validate_for_request(&job.request)
+        .map_err(|_| H3AttemptError::IdentityMismatch)?;
+    let evidence = prepared
+        .h3_private_admission_by_device
+        .get(&fence.device_id)
+        .ok_or(H3AttemptError::IdentityMismatch)?;
+    let work_identity_sha256 = private_work_identity_sha256(&fence.work_id);
+    let cancellation_scope_identity_sha256 = private_cancellation_scope_identity_sha256(
+        &work_identity_sha256,
+        &fence.device_id,
+        fence.owner_epoch,
+        fence.state_version,
+        fence.plan_version,
+        fence.worker_generation,
+        fence.memory_sample_generation,
+        fence.memory_ledger_sequence,
+    );
+    if facts.admission_evidence_identity_sha256 != evidence.identity_sha256()
+        || facts.artifact_qualification_identity_sha256
+            != evidence.artifact_qualification_identity_sha256()
+        || facts.runtime_qualification_identity_sha256
+            != evidence.runtime_qualification_identity_sha256()
+        || facts.prepared_attempt_identity_sha256 != evidence.prepared_attempt_identity_sha256()
+        || facts.target_budget_identity_sha256 != evidence.target_budget_identity_sha256()
+        || facts.work_identity_sha256 != work_identity_sha256
+        || facts.cancellation_scope_identity_sha256 != cancellation_scope_identity_sha256
+        || facts.memory_ledger_sequence != fence.memory_ledger_sequence
+    {
+        return Err(H3AttemptError::IdentityMismatch);
+    }
+    Ok(())
 }
 
 fn validate_claim(claim: &H3AttemptClaim) -> Result<(), H3AttemptError> {
@@ -528,6 +848,9 @@ fn validate_claim(claim: &H3AttemptClaim) -> Result<(), H3AttemptError> {
         || !valid_sha256(&claim.execution_identity_sha256)
         || !valid_sha256(&claim.prepared_attempt_identity_sha256)
         || !valid_sha256(&claim.target_budget_identity_sha256)
+        || !valid_sha256(&claim.component_set_identity_sha256)
+        || claim.predicted_device_peak_bytes == 0
+        || claim.predicted_host_increment_bytes == 0
     {
         return Err(H3AttemptError::InvalidClaim);
     }
@@ -553,6 +876,9 @@ fn validate_current(
     if claim.execution_identity_sha256 != current.execution_identity_sha256
         || claim.prepared_attempt_identity_sha256 != current.prepared_attempt_identity_sha256
         || claim.target_budget_identity_sha256 != current.target_budget_identity_sha256
+        || claim.component_set_identity_sha256 != current.component_set_identity_sha256
+        || claim.predicted_device_peak_bytes != current.predicted_device_peak_bytes
+        || claim.predicted_host_increment_bytes != current.predicted_host_increment_bytes
     {
         return Err(H3AttemptError::IdentityMismatch);
     }
@@ -595,6 +921,9 @@ mod tests {
             execution_identity_sha256: sha('a'),
             prepared_attempt_identity_sha256: sha('b'),
             target_budget_identity_sha256: sha('c'),
+            component_set_identity_sha256: sha('d'),
+            predicted_device_peak_bytes: 11_000_000_000,
+            predicted_host_increment_bytes: 2_000_000_000,
         }
     }
 
@@ -612,6 +941,9 @@ mod tests {
             execution_identity_sha256: claim.execution_identity_sha256.clone(),
             prepared_attempt_identity_sha256: claim.prepared_attempt_identity_sha256.clone(),
             target_budget_identity_sha256: claim.target_budget_identity_sha256.clone(),
+            component_set_identity_sha256: claim.component_set_identity_sha256.clone(),
+            predicted_device_peak_bytes: claim.predicted_device_peak_bytes,
+            predicted_host_increment_bytes: claim.predicted_host_increment_bytes,
         }
     }
 

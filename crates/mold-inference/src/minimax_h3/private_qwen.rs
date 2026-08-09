@@ -59,6 +59,131 @@ pub struct H3PrivateQwenLoaderMemoryAuthority {
     pub device_resident_parameter_bytes: u64,
 }
 
+/// Payload-free authority for authenticating the private Qwen checkpoint
+/// before the scheduler commits any CUDA allocation. It binds the future
+/// concrete route without retaining or constructing a Candle [`Device`].
+pub(crate) struct H3PrivateQwenOpenRouteAuthority {
+    route: H3PrivateQwenLoaderMemoryRoute,
+    device_id: String,
+    device_ordinal: usize,
+    compute_capability: (u16, u16),
+    factory_identity_sha256: String,
+    execution_fingerprint: String,
+    component_set_identity_sha256: String,
+    conditioner_component_content_sha256: String,
+    conditioner_component_validation_sha256: String,
+    support_identity_sha256: String,
+    weight_identity_sha256: String,
+    weight_header_identity_sha256: String,
+    weight_policy_identity_sha256: String,
+    memory_facts: H3QwenNvfp4RuntimeMemoryFacts,
+}
+
+impl H3PrivateQwenOpenRouteAuthority {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn capture(
+        authority: &FrozenH3FactoryAuthority,
+        support: &H3PrivateQwenSupport,
+        device_id: &str,
+        device_ordinal: usize,
+        compute_capability: (u16, u16),
+        weight_identity_sha256: &str,
+        weight_header_identity_sha256: &str,
+        weight_policy_identity_sha256: &str,
+    ) -> Result<Self> {
+        let route = match authority.conditioner_placement() {
+            H3FactoryConditionerPlacement::AssignedCudaThenDrop => {
+                H3PrivateQwenLoaderMemoryRoute::Cuda
+            }
+            H3FactoryConditionerPlacement::HostCpuThenDrop => H3PrivateQwenLoaderMemoryRoute::Cpu,
+        };
+        let placement = route.placement();
+        let memory_facts = released_h3_qwen_nvfp4_runtime_memory_facts_for_placement(placement)?;
+        let (component_content, component_validation) = authority.conditioner_component_authority();
+        let captured = Self {
+            route,
+            device_id: device_id.into(),
+            device_ordinal,
+            compute_capability,
+            factory_identity_sha256: authority.identity_sha256().into(),
+            execution_fingerprint: authority.execution_fingerprint().into(),
+            component_set_identity_sha256: authority.component_set_identity_sha256().into(),
+            conditioner_component_content_sha256: component_content.into(),
+            conditioner_component_validation_sha256: component_validation.into(),
+            support_identity_sha256: support.support_identity_sha256().into(),
+            weight_identity_sha256: weight_identity_sha256.into(),
+            weight_header_identity_sha256: weight_header_identity_sha256.into(),
+            weight_policy_identity_sha256: weight_policy_identity_sha256.into(),
+            memory_facts,
+        };
+        captured.revalidate(authority, support)?;
+        Ok(captured)
+    }
+
+    fn revalidate(
+        &self,
+        authority: &FrozenH3FactoryAuthority,
+        support: &H3PrivateQwenSupport,
+    ) -> Result<()> {
+        support.revalidate()?;
+        authority.validate_engine_seam(
+            support.model(),
+            self.device_ordinal,
+            authority.block_offload(),
+        )?;
+        let qwen_policy = match authority.quantization() {
+            H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
+                qwen_policy_sha256,
+                ..
+            } => qwen_policy_sha256,
+            H3FactoryQuantizationAuthority::OfficialBf16 => {
+                bail!("private H3 Qwen open route changed to the official BF16 layout")
+            }
+        };
+        let (component_content, component_validation) = authority.conditioner_component_authority();
+        let expected_route = match authority.conditioner_placement() {
+            H3FactoryConditionerPlacement::AssignedCudaThenDrop => {
+                H3PrivateQwenLoaderMemoryRoute::Cuda
+            }
+            H3FactoryConditionerPlacement::HostCpuThenDrop => H3PrivateQwenLoaderMemoryRoute::Cpu,
+        };
+        let expected_memory =
+            released_h3_qwen_nvfp4_runtime_memory_facts_for_placement(expected_route.placement())?;
+        if self.route != expected_route
+            || self.device_id != authority.device_id()
+            || self.device_ordinal != authority.device_ordinal()
+            || self.compute_capability != authority.compute_capability()
+            || self.factory_identity_sha256 != authority.identity_sha256()
+            || self.execution_fingerprint != authority.execution_fingerprint()
+            || self.component_set_identity_sha256 != authority.component_set_identity_sha256()
+            || self.conditioner_component_content_sha256 != component_content
+            || self.conditioner_component_validation_sha256 != component_validation
+            || self.support_identity_sha256 != support.support_identity_sha256()
+            || self.weight_identity_sha256 != H3_QWEN_NVFP4_AWQ_SHA256
+            || self.weight_policy_identity_sha256 != H3_QWEN_NVFP4_AWQ_POLICY_SHA256
+            || self.weight_policy_identity_sha256 != qwen_policy.as_str()
+            || !valid_sha256(&self.weight_header_identity_sha256)
+            || self.memory_facts != expected_memory
+        {
+            bail!("private H3 payload-free Qwen open route changed before authentication")
+        }
+        validate_parameter_memory(authority, &self.memory_facts)
+    }
+
+    const fn placement(&self) -> H3QwenNvfp4RuntimePlacement {
+        self.route.placement()
+    }
+}
+
+impl H3PrivateQwenLoaderMemoryRoute {
+    const fn placement(self) -> H3QwenNvfp4RuntimePlacement {
+        match self {
+            Self::Cuda => H3QwenNvfp4RuntimePlacement::Accelerated,
+            Self::Cpu => H3QwenNvfp4RuntimePlacement::Cpu,
+        }
+    }
+}
+
 /// Return the same released facts the private loader derives at its
 /// authority-before-open boundary, without requiring a local CUDA device.
 pub fn released_h3_private_qwen_loader_memory_authority(
@@ -175,6 +300,45 @@ where
     execution_lease: E,
     artifact_lease: A,
     authority: &'authority FrozenH3FactoryAuthority,
+}
+
+/// Authenticate the exact Qwen checkpoint without constructing model tensors.
+/// This is the atomic preparation counterpart of `load_authorized`: it uses
+/// the same frozen authority, lease graph, memory facts, and bounded polling,
+/// then returns the non-Clone opened object for the target-budget binder.
+pub(crate) fn open_authorized_private_qwen_authority(
+    weights_path: &Path,
+    support: &H3PrivateQwenSupport,
+    route: &H3PrivateQwenOpenRouteAuthority,
+    authority: &FrozenH3FactoryAuthority,
+    checkpoint: &mut dyn H3PipelineCheckpoint,
+) -> Result<H3AuthenticatedQwenNvfp4Authority> {
+    route.revalidate(authority, support)?;
+    let mut observer =
+        H3PrivateQwenLoadCheckpoint::new(checkpoint, H3PipelinePhase::QwenLoadChunk, || {
+            route.revalidate(authority, support)
+        });
+    // SAFETY: the payload-free route binds the same immutable factory,
+    // support, artifact, placement, and owner facts that concrete leases must
+    // re-prove at load time. This open path creates no model tensors.
+    let opened = unsafe {
+        open_h3_qwen_nvfp4_authority_after_authorization(
+            weights_path,
+            route.placement(),
+            &mut observer,
+        )
+    };
+    let opened = observer.finish(opened)?;
+    opened.revalidate()?;
+    if opened.artifact_identity_sha256() != route.weight_identity_sha256
+        || opened.header_identity_sha256() != route.weight_header_identity_sha256
+        || opened.policy_identity_sha256() != route.weight_policy_identity_sha256
+        || opened.memory_facts() != &route.memory_facts
+    {
+        bail!("authenticated H3 Qwen opened evidence differs from its payload-free route")
+    }
+    route.revalidate(authority, support)?;
+    Ok(opened)
 }
 
 impl<'authority, C, E, A> H3PrivateQwenAdapter<'authority, C, E, A>
@@ -1091,6 +1255,10 @@ fn require_sha256(value: &str, label: &str) -> Result<()> {
     } else {
         bail!("private H3 Qwen {label} identity is not lowercase SHA-256")
     }
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn validate_prepared_authority(
@@ -2632,6 +2800,14 @@ mod tests {
         weight: String,
         header: String,
         policy: String,
+        active: Arc<AtomicBool>,
+    }
+
+    #[cfg(feature = "cuda")]
+    impl Drop for RealArtifactLease {
+        fn drop(&mut self) {
+            self.active.store(false, Ordering::SeqCst);
+        }
     }
 
     #[cfg(feature = "cuda")]
@@ -2640,7 +2816,7 @@ mod tests {
             &self.components
         }
         fn is_active(&self) -> bool {
-            true
+            self.active.load(Ordering::SeqCst)
         }
     }
 
@@ -2791,6 +2967,7 @@ mod tests {
             device_id: "cuda:0".into(),
             device: device.clone(),
         };
+        let artifact_active = Arc::new(AtomicBool::new(true));
         let artifact_lease = RealArtifactLease {
             factory,
             components: component_set,
@@ -2800,6 +2977,7 @@ mod tests {
             weight: H3_QWEN_NVFP4_AWQ_SHA256.into(),
             header: header_identity,
             policy: H3_QWEN_NVFP4_AWQ_POLICY_SHA256.into(),
+            active: Arc::clone(&artifact_active),
         };
         let mut checkpoint = NoopCheckpoint;
         let mut adapter = H3PrivateQwenAdapter::load_authorized(
@@ -2807,7 +2985,7 @@ mod tests {
             support,
             conditioner_lease,
             &execution_lease,
-            &artifact_lease,
+            artifact_lease,
             &authority,
             &mut checkpoint,
         )
@@ -2819,9 +2997,9 @@ mod tests {
         assert!(rows > 0);
         assert!(!active.load(Ordering::SeqCst));
         assert!(execution_lease.is_active());
-        assert!(H3BackendArtifactLease::is_active(&artifact_lease));
+        assert!(artifact_active.load(Ordering::SeqCst));
         drop(adapter);
         assert!(execution_lease.is_active());
-        assert!(H3BackendArtifactLease::is_active(&artifact_lease));
+        assert!(!artifact_active.load(Ordering::SeqCst));
     }
 }

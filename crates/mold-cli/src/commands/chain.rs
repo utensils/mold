@@ -694,6 +694,7 @@ fn encode_local_frames(
         frames: frame_count,
         fps,
         pipeline: None,
+        pipeline_provenance_sha256: None,
         thumbnail,
         gif_preview,
         has_audio,

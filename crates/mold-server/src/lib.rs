@@ -12,6 +12,8 @@ mod gallery_authority;
 #[allow(dead_code)]
 mod h3_admission;
 mod h3_attempt;
+#[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+mod h3_private_bridge;
 pub mod test_support;
 // Agent A (downloads)
 pub mod device_registry;
@@ -1222,6 +1224,9 @@ fn build_cors_layer() -> Result<CorsLayer> {
                     axum::http::header::HeaderName::from_static("x-mold-video-width"),
                     axum::http::header::HeaderName::from_static("x-mold-video-height"),
                     axum::http::header::HeaderName::from_static("x-mold-video-pipeline"),
+                    axum::http::header::HeaderName::from_static(
+                        "x-mold-video-pipeline-provenance-sha256",
+                    ),
                     axum::http::header::HeaderName::from_static("x-mold-video-has-audio"),
                     axum::http::header::HeaderName::from_static("x-mold-video-duration-ms"),
                     axum::http::header::HeaderName::from_static("x-mold-video-audio-sample-rate"),

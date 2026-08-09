@@ -2376,6 +2376,8 @@ async fn run_queue_dispatcher_with_tuning(
             events: state.events.clone(),
             execution_plan: None,
             prepared_execution_inputs: None,
+            #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+            h3_prepared_attempt: None,
             lease: None,
             batch_child: job.batch_child,
         });
@@ -3636,6 +3638,8 @@ mod tests {
             events: state.events.clone(),
             execution_plan: None,
             prepared_execution_inputs: None,
+            #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+            h3_prepared_attempt: None,
             lease: None,
             batch_child: None,
         };
@@ -4190,6 +4194,7 @@ mod tests {
             frames: 124,
             fps: 24,
             pipeline: None,
+            pipeline_provenance_sha256: None,
             thumbnail: b"synthetic-h3-thumbnail".to_vec(),
             gif_preview: Vec::new(),
             has_audio: true,
@@ -4341,6 +4346,7 @@ mod tests {
             frames: request.frames.unwrap(),
             fps: request.fps.unwrap(),
             pipeline: None,
+            pipeline_provenance_sha256: None,
             thumbnail: b"synthetic-ref2va-thumbnail".to_vec(),
             gif_preview: Vec::new(),
             has_audio: true,
@@ -4706,6 +4712,7 @@ mod tests {
             frames: 25,
             fps: 24,
             pipeline: None,
+            pipeline_provenance_sha256: None,
             thumbnail: vec![0x89, 0x50, 0x4E, 0x47],
             gif_preview: vec![b'G', b'I', b'F', b'8'],
             has_audio: true,
@@ -4809,6 +4816,7 @@ mod tests {
             frames: 17,
             fps: 12,
             pipeline: None,
+            pipeline_provenance_sha256: None,
             thumbnail: vec![0x89, 0x50],
             gif_preview: Vec::new(),
             has_audio: false,
@@ -5036,6 +5044,7 @@ mod tests {
             frames: 25,
             fps: 24,
             pipeline: None,
+            pipeline_provenance_sha256: None,
             thumbnail: vec![9, 9],
             gif_preview: vec![],
             has_audio: false,
@@ -5187,6 +5196,8 @@ mod tests {
             events: state.events.clone(),
             execution_plan: None,
             prepared_execution_inputs: None,
+            #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+            h3_prepared_attempt: None,
             lease: None,
             batch_child: None,
         };
@@ -5210,6 +5221,8 @@ mod tests {
             result_tx,
             output_dir: None,
             batch_child: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_ingress_grant: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
 
@@ -5259,6 +5272,8 @@ mod tests {
             result_tx,
             output_dir: None,
             batch_child: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_ingress_grant: None,
         };
         queue.submit(job, 8).await.unwrap();
 
@@ -5339,6 +5354,8 @@ mod tests {
             result_tx: tx,
             output_dir: None,
             batch_child: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_ingress_grant: None,
         })
     }
 
@@ -5353,6 +5370,8 @@ mod tests {
             result_tx: tx,
             output_dir: None,
             batch_child: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_ingress_grant: None,
         })
     }
 
@@ -5610,6 +5629,8 @@ mod tests {
                 result_tx: tx,
                 output_dir: None,
                 batch_child: None,
+                #[cfg(feature = "h3-private-uat")]
+                h3_private_ingress_grant: None,
             };
             queue.submit(job, 8).await.unwrap();
             result_rxs.push(rx);
@@ -5682,6 +5703,8 @@ mod tests {
                 result_tx: tx,
                 output_dir: None,
                 batch_child: None,
+                #[cfg(feature = "h3-private-uat")]
+                h3_private_ingress_grant: None,
             };
             queue.submit(job, 8).await.unwrap();
             result_rxs.push(rx);
@@ -5739,6 +5762,8 @@ mod tests {
                 result_tx: tx,
                 output_dir: None,
                 batch_child: None,
+                #[cfg(feature = "h3-private-uat")]
+                h3_private_ingress_grant: None,
             };
             job_tx.send(job).await.unwrap();
         }
@@ -5843,6 +5868,8 @@ mod tests {
                 result_tx: tx,
                 output_dir: None,
                 batch_child: None,
+                #[cfg(feature = "h3-private-uat")]
+                h3_private_ingress_grant: None,
             };
             queue.submit(job, 32).await.unwrap();
         }
@@ -5976,6 +6003,8 @@ mod tests {
             result_tx,
             output_dir: None,
             batch_child: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_ingress_grant: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
 
@@ -6016,6 +6045,8 @@ mod tests {
             result_tx,
             output_dir: None,
             batch_child: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_ingress_grant: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
 
@@ -6065,6 +6096,8 @@ mod tests {
             result_tx,
             output_dir: None,
             batch_child: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_ingress_grant: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
 
@@ -6123,6 +6156,8 @@ mod tests {
                         result_tx,
                         output_dir: None,
                         batch_child: None,
+                        #[cfg(feature = "h3-private-uat")]
+                        h3_private_ingress_grant: None,
                     },
                     8,
                 )
@@ -6183,6 +6218,8 @@ mod tests {
             result_tx,
             output_dir: None,
             batch_child: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_ingress_grant: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
 

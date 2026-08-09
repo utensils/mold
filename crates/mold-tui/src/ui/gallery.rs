@@ -363,6 +363,7 @@ mod tests {
             extend_video_path: None,
             extend_overlap_frames: None,
             pipeline: None,
+            pipeline_provenance_sha256: None,
             ic_lora_control: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,

@@ -192,6 +192,7 @@ fn raw_cuda_uuid_v2(
     use std::mem::MaybeUninit;
 
     let mut uuid = MaybeUninit::<sys::CUuuid>::uninit();
+    context.preflight_raw_call()?;
     // SAFETY: `context.cu_device()` is a live CUdevice obtained by cudarc and
     // `uuid` points to writable storage of the exact CUDA ABI type.
     unsafe {
@@ -208,6 +209,7 @@ fn cuda_pci_bus_id(
     use std::ffi::CStr;
 
     let mut buffer = [0_i8; 32];
+    context.preflight_raw_call().ok()?;
     // SAFETY: CUDA writes at most `buffer.len()` bytes and the CUdevice comes
     // from the live cudarc context.
     unsafe {
@@ -1410,6 +1412,10 @@ fn fatal_cuda_driver_message(message: &str) -> bool {
         "CUDA_ERROR_INVALID_ADDRESS_SPACE",
         "CUDA_ERROR_INVALID_PC",
         "CUDA_ERROR_LAUNCH_TIMEOUT",
+        "CUDA_ERROR_EXTERNAL_DEVICE",
+        "CUDA_ERROR_MPS_CLIENT_TERMINATED",
+        "CUDA_ERROR_CONTAINED",
+        "CUDA_ERROR_TENSOR_MEMORY_LEAK",
     ]
     .iter()
     .any(|needle| message.contains(needle))
@@ -1850,20 +1856,26 @@ fn sample_phase_vram(ordinal: usize, rearm_high_water: bool) -> VramSample {
     if !context.has_async_alloc() {
         return sample;
     }
+    if context.preflight_raw_call().is_err() {
+        return sample;
+    }
     // SAFETY: `context.cu_device()` is a live CUdevice owned by the retained
     // cudarc context, and this is the pool `cuMemAllocAsync` allocates from.
     let Ok(pool) = (unsafe { result::device::get_mem_pool(context.cu_device()) }) else {
         return sample;
     };
     sample.pool_used_bytes = pool_attribute(
+        &context,
         pool,
         sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_CURRENT,
     );
     sample.pool_used_high_bytes = pool_attribute(
+        &context,
         pool,
         sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH,
     );
     sample.pool_reserved_high_bytes = pool_attribute(
+        &context,
         pool,
         sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH,
     );
@@ -1872,10 +1884,12 @@ fn sample_phase_vram(ordinal: usize, rearm_high_water: bool) -> VramSample {
         // mark to the pool's *current* value, which is precisely the baseline
         // the next interval should measure against.
         reset_pool_high_water(
+            &context,
             pool,
             sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH,
         );
         reset_pool_high_water(
+            &context,
             pool,
             sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH,
         );
@@ -1885,12 +1899,14 @@ fn sample_phase_vram(ordinal: usize, rearm_high_water: bool) -> VramSample {
 
 #[cfg(feature = "cuda")]
 fn pool_attribute(
+    context: &candle_core::cuda_backend::cudarc::driver::CudaContext,
     pool: candle_core::cuda_backend::cudarc::driver::sys::CUmemoryPool,
     attribute: candle_core::cuda_backend::cudarc::driver::sys::CUmemPool_attribute,
 ) -> Option<u64> {
     use candle_core::cuda_backend::cudarc::driver::result;
 
     let mut value: u64 = 0;
+    context.preflight_raw_call().ok()?;
     // SAFETY: `pool` is a live pool handle from the driver and `value` is a
     // writable `cuuint64_t`, the documented type for every `*_MEM_*` pool
     // attribute queried here.
@@ -1907,12 +1923,16 @@ fn pool_attribute(
 
 #[cfg(feature = "cuda")]
 fn reset_pool_high_water(
+    context: &candle_core::cuda_backend::cudarc::driver::CudaContext,
     pool: candle_core::cuda_backend::cudarc::driver::sys::CUmemoryPool,
     attribute: candle_core::cuda_backend::cudarc::driver::sys::CUmemPool_attribute,
 ) {
     use candle_core::cuda_backend::cudarc::driver::result;
 
     let mut value: u64 = 0;
+    if context.preflight_raw_call().is_err() {
+        return;
+    }
     // SAFETY: same contract as `pool_attribute`; the driver reads one
     // `cuuint64_t` from `value`.
     unsafe {
@@ -4106,6 +4126,34 @@ mod tests {
             0,
             "fatal synchronize must fence every later CUDA callback"
         );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn every_contained_driver_status_is_a_typed_fatal_memory_error() {
+        for status in [
+            "CUDA_ERROR_ILLEGAL_ADDRESS",
+            "CUDA_ERROR_ECC_UNCORRECTABLE",
+            "CUDA_ERROR_LAUNCH_FAILED",
+            "CUDA_ERROR_ASSERT",
+            "CUDA_ERROR_MISALIGNED_ADDRESS",
+            "CUDA_ERROR_HARDWARE_STACK_ERROR",
+            "CUDA_ERROR_ILLEGAL_INSTRUCTION",
+            "CUDA_ERROR_INVALID_ADDRESS_SPACE",
+            "CUDA_ERROR_INVALID_PC",
+            "CUDA_ERROR_LAUNCH_TIMEOUT",
+            "CUDA_ERROR_EXTERNAL_DEVICE",
+            "CUDA_ERROR_MPS_CLIENT_TERMINATED",
+            "CUDA_ERROR_CONTAINED",
+            "CUDA_ERROR_TENSOR_MEMORY_LEAK",
+        ] {
+            let error = memory_error("synthetic memory sample", status);
+            assert!(error.is_fatal_cuda(), "not classified as fatal: {status}");
+        }
+        assert!(matches!(
+            memory_error("synthetic memory sample", "CUDA_ERROR_OUT_OF_MEMORY"),
+            DeviceMemoryError::Unavailable { .. }
+        ));
     }
 
     #[test]

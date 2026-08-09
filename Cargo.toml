@@ -58,3 +58,4 @@ strip = false
 candle-core = { git = "https://github.com/utensils/candle", branch = "fix/mold-compat-0.11" }
 candle-nn = { git = "https://github.com/utensils/candle", branch = "fix/mold-compat-0.11" }
 candle-transformers = { git = "https://github.com/utensils/candle", branch = "fix/mold-compat-0.11" }
+cudarc = { git = "https://github.com/utensils/cudarc", rev = "9b3b1bc276bc27c3e99343ee82db7f99705b9ed5" }

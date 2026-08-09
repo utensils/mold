@@ -573,6 +573,7 @@ pub(crate) struct H3AuthenticatedComfyVaeAuthority {
     audio_facts: ComponentLoadFacts,
     memory: H3ComfyVaeRuntimeMemory,
     artifact_facts: Vec<H3ComfyVaeOpenedArtifactFact>,
+    artifact_validation_identity_sha256: String,
     identity_sha256: String,
 }
 
@@ -601,7 +602,17 @@ impl H3AuthenticatedComfyVaeAuthority {
         self.plan.artifact_plan_identity_sha256()
     }
 
-    pub(crate) fn identity_sha256(&self) -> &str {
+    /// Stable, path-independent validation of the authenticated artifact bytes
+    /// and their inspected memory facts. This is the only VAE-open identity
+    /// suitable for scheduler, component, execution, or provenance records.
+    pub(crate) fn artifact_validation_identity_sha256(&self) -> &str {
+        &self.artifact_validation_identity_sha256
+    }
+
+    /// Identity of this exact opened/staged attempt. It deliberately binds
+    /// descriptor, local path, inode, and timestamp facts and must remain
+    /// confined to the attempt-local activation authority.
+    pub(crate) fn attempt_open_identity_sha256(&self) -> &str {
         &self.identity_sha256
     }
 
@@ -620,7 +631,11 @@ impl H3AuthenticatedComfyVaeAuthority {
         }
         self.staged
             .validate("while authenticated VAE authority is retained")?;
-        if self.identity_sha256 != authenticated_vae_authority_identity(self) {
+        if !valid_sha256(&self.artifact_validation_identity_sha256)
+            || self.artifact_validation_identity_sha256
+                != authenticated_vae_artifact_validation_identity(self)
+            || self.identity_sha256 != authenticated_vae_authority_identity(self)
+        {
             return Err(H3ComfyVaeLoadError::InvalidPlan(
                 "authenticated VAE authority identity changed".into(),
             ));
@@ -804,8 +819,11 @@ pub(crate) fn open_h3_comfy_vae_authority(
         audio_facts,
         memory,
         artifact_facts,
+        artifact_validation_identity_sha256: String::new(),
         identity_sha256: String::new(),
     };
+    authority.artifact_validation_identity_sha256 =
+        authenticated_vae_artifact_validation_identity(&authority);
     authority.identity_sha256 = authenticated_vae_authority_identity(&authority);
     authority.validate()?;
     Ok(authority)
@@ -834,6 +852,7 @@ pub(crate) fn load_h3_comfy_vae_runtime_from_authority(
         audio_facts,
         memory,
         artifact_facts: _,
+        artifact_validation_identity_sha256: _,
         identity_sha256: _,
     } = authority;
     let mut factory = ProductionVaeFactory;
@@ -1158,6 +1177,66 @@ fn authenticated_vae_authority_identity(authority: &H3AuthenticatedComfyVaeAutho
         authority.memory.audio.header_bytes,
         authority.memory.audio.encoded_tensor_bytes,
         authority.memory.audio.resident_device_weight_bytes,
+        authority.memory.config_bytes,
+        authority.memory.peak_host_io_buffer_bytes,
+        authority.memory.peak_host_mapped_file_bytes,
+        authority.memory.peak_staging_disk_bytes,
+        authority.memory.resident_host_weight_bytes,
+        authority.memory.resident_device_weight_bytes,
+        authority.memory.effective_device_weight_bytes,
+    ] {
+        digest.update(value.to_le_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
+/// Canonical validation identity for independently reopened VAE artifacts.
+///
+/// Unlike `authenticated_vae_authority_identity`, this excludes local load
+/// paths, source descriptors, the random staging directory, and staged-file
+/// inode/timestamp facts. The artifact plan and authenticated inspection facts
+/// are sufficient to prove that two attempts opened the same pinned bytes and
+/// derived the same memory contract.
+fn authenticated_vae_artifact_validation_identity(
+    authority: &H3AuthenticatedComfyVaeAuthority,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"mold.minimax-h3.comfy-vae-artifact-validation.v1\0");
+    digest.update(authority.plan.artifact_plan_identity_sha256().as_bytes());
+    for fact in &authority.artifact_facts {
+        digest.update(fact.role.stable_id().as_bytes());
+        digest.update([0]);
+        digest.update(fact.source_repository.as_bytes());
+        digest.update([0]);
+        digest.update(fact.source_revision.as_bytes());
+        digest.update([0]);
+        digest.update(fact.source_path.as_bytes());
+        digest.update([0]);
+        digest.update(fact.content_sha256.as_bytes());
+        digest.update(fact.file_bytes.to_le_bytes());
+    }
+    for facts in [&authority.visual_facts, &authority.audio_facts] {
+        for value in [
+            facts.artifact_file_bytes,
+            facts.header_bytes,
+            facts.encoded_tensor_bytes,
+            facts.resident_device_weight_bytes,
+            facts.effective_device_weight_bytes,
+        ] {
+            digest.update(value.to_le_bytes());
+        }
+    }
+    for value in [
+        authority.memory.visual.artifact_file_bytes,
+        authority.memory.visual.header_bytes,
+        authority.memory.visual.encoded_tensor_bytes,
+        authority.memory.visual.resident_device_weight_bytes,
+        authority.memory.visual.effective_device_weight_bytes,
+        authority.memory.audio.artifact_file_bytes,
+        authority.memory.audio.header_bytes,
+        authority.memory.audio.encoded_tensor_bytes,
+        authority.memory.audio.resident_device_weight_bytes,
+        authority.memory.audio.effective_device_weight_bytes,
         authority.memory.config_bytes,
         authority.memory.peak_host_io_buffer_bytes,
         authority.memory.peak_host_mapped_file_bytes,
@@ -2578,6 +2657,119 @@ mod tests {
             })
             .collect();
         (paths, artifacts)
+    }
+
+    fn open_synthetic_authority(
+        plan: &FrozenH3ComfyVaeLoadPlan,
+    ) -> H3AuthenticatedComfyVaeAuthority {
+        let mut observer = RecordingObserver::default();
+        let mut opened = H3ComfyVaeArtifactRole::ALL
+            .into_iter()
+            .map(|role| {
+                OpenedArtifact::open(
+                    plan.artifact(role).unwrap().clone(),
+                    plan.paths.get(role),
+                    &mut observer,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let visual_config = opened_for_mut(&mut opened, H3ComfyVaeArtifactRole::VisualConfig)
+            .unwrap()
+            .read_authenticated_config(&mut observer)
+            .unwrap();
+        let audio_config = opened_for_mut(&mut opened, H3ComfyVaeArtifactRole::AudioConfig)
+            .unwrap()
+            .read_authenticated_config(&mut observer)
+            .unwrap();
+        let staged = StagedWeights::create(plan, &mut opened, &mut observer).unwrap();
+        let (_, visual_facts) = fake_load(
+            H3ComfyVaeArtifactRole::VisualWeights,
+            staged.path(H3ComfyVaeArtifactRole::VisualWeights).unwrap(),
+            &mut observer,
+        )
+        .map_err(factory_error)
+        .unwrap();
+        let (_, audio_facts) = fake_load(
+            H3ComfyVaeArtifactRole::AudioWeights,
+            staged.path(H3ComfyVaeArtifactRole::AudioWeights).unwrap(),
+            &mut observer,
+        )
+        .map_err(factory_error)
+        .unwrap();
+        let required_staging_bytes = required_staging_bytes(plan).unwrap();
+        let memory = vae_runtime_memory(
+            &visual_facts,
+            &audio_facts,
+            visual_config.len(),
+            audio_config.len(),
+            required_staging_bytes,
+        )
+        .unwrap();
+        let artifact_facts = opened
+            .iter()
+            .map(|artifact| H3ComfyVaeOpenedArtifactFact {
+                role: artifact.expected.role,
+                source_repository: artifact.expected.source_repository.clone(),
+                source_revision: artifact.expected.source_revision.clone(),
+                source_path: artifact.expected.source_path.clone(),
+                content_sha256: artifact.expected.content_sha256.clone(),
+                file_bytes: artifact.expected.file_bytes,
+            })
+            .collect();
+        let mut authority = H3AuthenticatedComfyVaeAuthority {
+            plan: plan.clone(),
+            opened,
+            staged,
+            visual_config,
+            audio_config,
+            visual_facts,
+            audio_facts,
+            memory,
+            artifact_facts,
+            artifact_validation_identity_sha256: String::new(),
+            identity_sha256: String::new(),
+        };
+        authority.artifact_validation_identity_sha256 =
+            authenticated_vae_artifact_validation_identity(&authority);
+        authority.identity_sha256 = authenticated_vae_authority_identity(&authority);
+        authority.validate().unwrap();
+        authority
+    }
+
+    #[test]
+    fn artifact_validation_identity_is_stable_across_fresh_sources_and_staging() {
+        let source_a = tempfile::tempdir().unwrap();
+        let source_b = tempfile::tempdir().unwrap();
+        let staging_a = tempfile::tempdir().unwrap();
+        let staging_b = tempfile::tempdir().unwrap();
+        let (paths_a, artifacts_a) = write_artifacts(source_a.path(), b"\x08visual");
+        let (paths_b, artifacts_b) = write_artifacts(source_b.path(), b"\x08visual");
+        assert_eq!(artifacts_a, artifacts_b);
+        let plan_a = FrozenH3ComfyVaeLoadPlan::synthetic(
+            paths_a,
+            staging_a.path().to_path_buf(),
+            artifacts_a,
+        )
+        .unwrap();
+        let plan_b = FrozenH3ComfyVaeLoadPlan::synthetic(
+            paths_b,
+            staging_b.path().to_path_buf(),
+            artifacts_b,
+        )
+        .unwrap();
+        assert_ne!(plan_a.identity_sha256(), plan_b.identity_sha256());
+
+        let authority_a = open_synthetic_authority(&plan_a);
+        let authority_b = open_synthetic_authority(&plan_b);
+        assert_ne!(
+            authority_a.attempt_open_identity_sha256(),
+            authority_b.attempt_open_identity_sha256()
+        );
+        assert_eq!(
+            authority_a.artifact_validation_identity_sha256(),
+            authority_b.artifact_validation_identity_sha256()
+        );
     }
 
     #[test]

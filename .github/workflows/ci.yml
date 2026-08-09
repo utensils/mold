@@ -469,6 +469,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy CUDA forced-local and server paths
         run: cargo clippy -p mold-ai --features cuda,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings
+      - name: Clippy the CUDA private H3 server bridge
+        run: cargo clippy -p mold-ai-server --features h3-private-uat --all-targets -- -D warnings
 
   # The `flash-attn` feature was decorative for months (issue #598) precisely
   # because nothing ever compiled it: the cfg-stripped fallback in

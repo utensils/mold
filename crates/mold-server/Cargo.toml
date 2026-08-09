@@ -23,10 +23,23 @@ path = "src/main.rs"
 
 [features]
 default = []
-cuda = ["mold-inference/cuda", "nvml"]
+cuda = ["mold-inference/cuda", "nvml", "dep:cudarc"]
 metal = ["mold-inference/metal"]
 expand = ["mold-inference/expand"]
 mp4 = ["mold-inference/mp4"]
+# Structural seam for opaque, one-shot H3 owner attempts. This compiles the
+# scheduler/server contract without making the private runtime runnable.
+h3-private-bridge = []
+# Developer-only runnable edge for the authenticated MiniMax H3 UAT runtime.
+# Keep CUDA, the reviewed attention kernel, and MP4 in this exact edge so an
+# incomplete private server binary cannot be built accidentally.
+h3-private-uat = [
+    "h3-private-bridge",
+    "mold-inference/h3-private-uat",
+    "mold-inference/h3-attention-rc",
+    "mp4",
+    "cuda",
+]
 webp = ["mold-inference/webp"]
 metrics = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 mdns = ["dep:mdns-sd"]
@@ -76,6 +89,7 @@ mdns-sd = { version = "0.20", optional = true }
 rust-embed = { version = "8", features = ["mime-guess", "interpolate-folder-path"] }
 mime_guess = "2"
 nvml-wrapper = { version = "0.10", optional = true }
+cudarc = { version = "0.19.8", default-features = false, features = ["driver"], optional = true }
 sysinfo = "0.34"
 fs2 = "0.4"
 async-stream = "0.3"

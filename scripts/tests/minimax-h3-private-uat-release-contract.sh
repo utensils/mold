@@ -22,6 +22,35 @@ require_text crates/mold-candle/Cargo.toml \
 require_text crates/mold-inference/Cargo.toml \
   'h3-private-uat = ["mold-candle/h3-private-uat"]' \
   "mold-inference does not narrowly forward the private H3 runtime feature"
+containment_rev=9b3b1bc276bc27c3e99343ee82db7f99705b9ed5
+containment_patch="cudarc = { git = \"https://github.com/utensils/cudarc\", rev = \"${containment_rev}\" }"
+require_text Cargo.toml "$containment_patch" \
+  "the root workspace does not pin the reviewed CUDA attempt-containment revision"
+require_text desktop/src-tauri/Cargo.toml "$containment_patch" \
+  "the standalone desktop graph does not pin the reviewed CUDA attempt-containment revision"
+inference_cuda_feature=$(sed -n '/^cuda = \[/,/^\]/p' crates/mold-inference/Cargo.toml)
+grep -Fq '"dep:cudarc"' <<<"$inference_cuda_feature" \
+  || fail "the inference CUDA feature does not activate the attempt-containment dependency"
+require_text crates/mold-inference/Cargo.toml \
+  'cudarc = { version = "0.19.8", default-features = false, features = ["driver"], optional = true }' \
+  "mold-inference lacks a direct typed CUDA attempt-containment dependency"
+server_cuda_feature=$(grep -E '^cuda[[:space:]]*=' crates/mold-server/Cargo.toml)
+grep -Fq 'dep:cudarc' <<<"$server_cuda_feature" \
+  || fail "the server CUDA feature does not activate preparation containment"
+require_text crates/mold-server/Cargo.toml \
+  'cudarc = { version = "0.19.8", default-features = false, features = ["driver"], optional = true }' \
+  "mold-server lacks a direct typed CUDA preparation-containment dependency"
+require_text flake.nix \
+  '"cudarc-0.19.8" = "sha256-ARnabIhBCzahrk/kVCt5084gftGDyCBme3jxg+mvkUA=";' \
+  "the standalone desktop Nix graph does not pin the CUDA containment source hash"
+containment_source="source = \"git+https://github.com/utensils/cudarc?rev=${containment_rev}#${containment_rev}\""
+for lockfile in Cargo.lock desktop/src-tauri/Cargo.lock; do
+  locked_cudarc=$(grep -A2 '^name = "cudarc"$' "$lockfile")
+  if [[ $(grep -Fc 'version = "0.19.8"' <<<"$locked_cudarc") -ne 1 ]] \
+    || ! grep -Fq "$containment_source" <<<"$locked_cudarc"; then
+    fail "${lockfile} does not resolve cudarc 0.19.8 exactly once from the reviewed containment revision"
+  fi
+done
 audio_encode_checkpoint=$(sed -n \
   '/This developer-only seam lets a private Ref2VA runtime/,/fn encode_with_checkpoint/p' \
   crates/mold-candle/src/minimax_h3/audio.rs)
@@ -48,17 +77,115 @@ require_text crates/mold-inference/src/minimax_h3/private_qwen_support.rs \
   '"mold.minimax-h3.private-uat-qwen-support-loader.v1"' \
   "the private H3 Qwen support loader has no release-rejectable claim marker"
 require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
-  'pub enum Token {}' \
-  "private H3 FL2VA composition is not safely uninhabited before scheduler memory binding"
-require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
   '_activation: admitted_overlap_seal::Token,' \
-  "private H3 FL2VA overlap authority no longer contains its uninhabited token"
+  "private H3 FL2VA overlap authority no longer contains its private issuer token"
 require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
-  'b"mold.minimax-h3.private-fl2va-overlap.v2\0"' \
-  "private H3 FL2VA overlap identity does not use its version-two serializer domain"
-if grep -Fq 'private-fl2va-overlap.v1' \
+  'b"mold.minimax-h3.private-fl2va-overlap.v3\0"' \
+  "private H3 FL2VA overlap identity does not use its scheduler-ledger-bound version-three domain"
+if grep -Eq 'private-fl2va-overlap\.v(1|2)' \
   crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs; then
-  fail "private H3 FL2VA overlap identity still accepts its changed version-one domain"
+  fail "private H3 FL2VA overlap identity still accepts a pre-ledger serializer domain"
+fi
+require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
+  'pub(crate) fn issue_private_fl2va_memory_overlap(' \
+  "private H3 FL2VA overlap has no scheduler-ledger-bound production issuer"
+require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
+  'scheduler_ledger_identity_sha256: ledger.identity_sha256().into(),' \
+  "private H3 FL2VA overlap does not retain the issuing scheduler ledger identity"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'const REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256: &[&str] = &[];' \
+  "private H3 runtime qualification does not fail closed before reviewed CUDA evidence"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'pub const fn reviewed_h3_private_runtime_available() -> bool {' \
+  "private H3 ingress has no zero-I/O reviewed-runtime availability probe"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'pub fn prepare_h3_private_fl2va_admission(' \
+  "private H3 scheduler has no allocation-free inference-owned admission facade"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'pub fn validate_for(' \
+  "private H3 admission DTO cannot revalidate its exact request, route, and fit facts"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'b"mold.minimax-h3.private-admission-evidence.v2\0"' \
+  "private H3 admission evidence does not bind canonical host headroom"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'prepared_attempt_identity_sha256: String,' \
+  "private H3 owner fence no longer binds the exact prepared-attempt identity"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'prepared.prepared_attempt_identity_sha256()' \
+  "private H3 owner rebuild no longer compares the prepared-attempt identity"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'prepare_reviewed_h3_private_fl2va_attempt(input, progress)' \
+  "private H3 reviewed record cannot enter the complete atomic preparation path"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'let phase_owner = bind_private_comfy_fl2va_phase_owner(' \
+  "private H3 server facade does not bind its prepared evidence into the singular phase owner"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'let cuda_device = commit_private_h3_allocation_then(&mut allocation_commit, || {' \
+  "private H3 server facade does not commit the scheduler allocation before CUDA construction"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'let mut attempt = CudaExecutionAttempt::begin_unbound()' \
+  "private H3 server facade does not install containment before CUDA context construction"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));' \
+  "private H3 server facade does not catch the complete CUDA attempt"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'attempt.mark_panicked();' \
+  "private H3 server facade does not mark caught panics before attempt teardown"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'CUDA execution attempt retained resources; server restart required' \
+  "private H3 server facade does not convert retained resources into restart-required failure"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  '.context("private H3 completion synchronization failed")?;' \
+  "private H3 server facade does not synchronize successful work before teardown"
+runner_source=$(awk '
+  /^impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner/ { capture = 1 }
+  capture { print }
+  capture && /^fn private_run_output/ { exit }
+' crates/mold-inference/src/minimax_h3/private_server.rs)
+boundary_line=$(grep -nF 'with_private_h3_cuda_execution_attempt(||' <<<"$runner_source" | cut -d: -f1)
+commit_line=$(grep -nF 'commit_private_h3_allocation_then' <<<"$runner_source" | cut -d: -f1)
+device_line=$(grep -nF 'Device::new_cuda' <<<"$runner_source" | cut -d: -f1)
+execute_line=$(grep -nF 'run_private_comfy_fl2va_attempt' <<<"$runner_source" | cut -d: -f1)
+sync_line=$(grep -nF '.synchronize()' <<<"$runner_source" | cut -d: -f1)
+if [[ -z "$boundary_line" || -z "$commit_line" || -z "$device_line" \
+  || -z "$execute_line" || -z "$sync_line" ]] \
+  || (( boundary_line >= commit_line || commit_line >= device_line \
+    || device_line >= execute_line || execute_line >= sync_line )); then
+  fail "private H3 containment, allocation, construction, execution, and completion ordering changed"
+fi
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  '.runner' \
+  "private H3 prepared attempt no longer retains its one-shot runner"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'private H3 prepared attempt was already consumed' \
+  "private H3 prepared attempt no longer rejects replay"
+prepare_source=$(sed -n \
+  '/fn prepare_reviewed_h3_private_fl2va_attempt/,/fn validate_base_factory/p' \
+  crates/mold-inference/src/minimax_h3/private_server.rs)
+if grep -Fq 'Device::new_cuda' <<<"$prepare_source"; then
+  fail "private H3 preparation constructs a CUDA device before the owner allocation commit"
+fi
+reviewed_line=$(grep -nF 'open_reviewed_h3_private_runtime_qualification' \
+  <<<"$prepare_source" | head -n 1 | cut -d: -f1)
+artifact_line=$(grep -nF 'qualify_private_artifacts_with_control' \
+  <<<"$prepare_source" | head -n 1 | cut -d: -f1)
+if [[ -z "$reviewed_line" || -z "$artifact_line" ]] \
+  || (( reviewed_line >= artifact_line )); then
+  fail "private H3 reviewed-record hash gate no longer precedes bulk artifact qualification"
+fi
+admission_source=$(sed -n \
+  '/fn prepare_reviewed_h3_private_fl2va_admission/,/struct H3PrivateComponentDigest/p' \
+  crates/mold-inference/src/minimax_h3/private_server.rs)
+if grep -Fq 'Device::new_cuda' <<<"$admission_source"; then
+  fail "private H3 admission constructs a CUDA device"
+fi
+admission_reviewed_line=$(grep -nF 'open_reviewed_h3_private_runtime_qualification' \
+  <<<"$admission_source" | head -n 1 | cut -d: -f1)
+admission_artifact_line=$(grep -nF 'qualify_private_artifacts_with_control' \
+  <<<"$admission_source" | head -n 1 | cut -d: -f1)
+if [[ -z "$admission_reviewed_line" || -z "$admission_artifact_line" ]] \
+  || (( admission_reviewed_line >= admission_artifact_line )); then
+  fail "private H3 admission no longer checks reviewed evidence before bulk artifact I/O"
 fi
 require_text crates/mold-inference/src/minimax_h3/private_runtime.rs \
   'pub(crate) struct H3PrivateBoundComfyStream' \
@@ -129,11 +256,11 @@ if [[ $(grep -Fc 'bound_execution.device()' <<<"$owner_bind") -ne 1 ]] \
 fi
 runtime_source=crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs
 vae_load_line=$(grep -nF 'let loaded = load_h3_comfy_vae_runtime_from_authority(' "$runtime_source" | cut -d: -f1)
-qwen_load_line=$(grep -nF 'let mut qwen = H3PrivateQwenAdapter::load_authorized_from_opened(' "$runtime_source" | cut -d: -f1)
+qwen_load_line=$(grep -nF 'let qwen = H3PrivateQwenAdapter::load_authorized_from_opened(' "$runtime_source" | cut -d: -f1)
 transformer_load_line=$(grep -nF 'let stream = load_and_pair_private_comfy_stream(' "$runtime_source" | cut -d: -f1)
 transformer_drop_line=$(grep -nF 'drop(self.denoiser.take());' "$runtime_source" | cut -d: -f1)
-vae_drop_line=$(grep -nF 'drop(vae);' "$runtime_source" | head -n 1 | cut -d: -f1)
-terminal_line=$(grep -nF 'let terminal = backend.into_empty()?;' "$runtime_source" | cut -d: -f1)
+vae_drop_line=$(grep -nF 'drop(self.vae.take());' "$runtime_source" | head -n 1 | cut -d: -f1)
+terminal_line=$(grep -nF 'let identity_echo = backend.terminal_identity_echo()?;' "$runtime_source" | cut -d: -f1)
 mux_line=$(grep -nF 'let output = super::pipeline::finalize_av(' "$runtime_source" | cut -d: -f1)
 if [[ -z "$vae_load_line" || -z "$qwen_load_line" || -z "$transformer_load_line" \
   || -z "$transformer_drop_line" || -z "$vae_drop_line" || -z "$terminal_line" \
@@ -147,8 +274,79 @@ require_text "$runtime_source" \
   'pub(crate) struct H3PrivatePhaseIdentityEcho {' \
   "private H3 runtime output omits its server bridge identity echo"
 require_text "$runtime_source" \
-  'let identity_echo = terminal.identity_echo()?;' \
-  "private H3 runtime does not derive its identity echo from the terminal proof"
+  'with_contained_private_cuda_resources(backend, |backend| {' \
+  "private H3 runtime does not retain its concrete backend across panic and fatal CUDA errors"
+require_text "$runtime_source" \
+  'let mut resources = ManuallyDrop::new(resources);' \
+  "private H3 runtime containment does not suppress suspect CUDA destructors"
+require_text "$runtime_source" \
+  'Ok(Err(error)) if is_fatal_private_cuda_error(&error) => Err(error),' \
+  "private H3 runtime containment does not retain concrete resources on fatal CUDA errors"
+for marker in \
+  CUDA_ERROR_EXTERNAL_DEVICE \
+  CUDA_ERROR_MPS_CLIENT_TERMINATED \
+  CUDA_ERROR_CONTAINED \
+  CUDA_ERROR_TENSOR_MEMORY_LEAK \
+  CUBLAS_STATUS_MAPPING_ERROR \
+  CUBLAS_STATUS_EXECUTION_FAILED \
+  CUBLAS_STATUS_INTERNAL_ERROR \
+  CURAND_STATUS_LAUNCH_FAILURE \
+  CURAND_STATUS_PREEXISTING_FAILURE \
+  CURAND_STATUS_INTERNAL_ERROR; do
+  require_text "$runtime_source" "$marker" \
+    "private H3 runtime fatal classifier omits ${marker}"
+  require_text crates/mold-server/src/gpu_worker.rs "$marker" \
+    "server restart classifier omits ${marker}"
+  if [[ "$marker" == CUDA_ERROR_* ]]; then
+    require_text crates/mold-inference/src/device.rs "$marker" \
+      "typed device-memory fatal classifier omits ${marker}"
+  fi
+done
+require_text crates/mold-server/src/gpu_worker.rs \
+  'CUDA execution attempt retained resources' \
+  "server restart classifier omits the generic retained-resource marker"
+require_text crates/mold-server/src/gpu_worker.rs \
+  'with_private_h3_cuda_preparation_attempt(worker, || {' \
+  "server owner preparation is not inside a separate CUDA containment scope"
+require_text crates/mold-server/src/gpu_worker.rs \
+  'request_private_h3_host_headroom(' \
+  "private H3 live owner does not request ledger-aware host headroom"
+require_text crates/mold-server/src/scheduler/mod.rs \
+  'WorkerEvent::HostMemoryRecheck { fence, reply }' \
+  "Scheduler V2 does not reconcile the private H3 live host-memory fence"
+require_text crates/mold-server/src/scheduler/mod.rs \
+  '.filter(|(candidate, _)| candidate.as_str() != work_id)' \
+  "the private H3 live host-memory fence does not retain every peer reservation"
+require_text crates/mold-server/src/scheduler/mod.rs \
+  'charge_until_release: bool,' \
+  "Scheduler V2 cannot keep gradual private H3 allocations reserved through lease release"
+require_text crates/mold-server/src/scheduler/mod.rs \
+  '!reservation.charge_until_release' \
+  "Scheduler V2 can absorb a gradual private H3 reservation into a premature host sample"
+require_text crates/mold-server/src/scheduler/mod.rs \
+  'mold_core::minimax_h3::is_family(&execution.model_family)' \
+  "Scheduler V2 does not select private H3 leases for sticky host-memory accounting"
+require_text crates/mold-server/src/scheduler/mod.rs \
+  'fn h3_reservation_stays_charged_until_release_and_blocks_ordinary_work()' \
+  "Scheduler V2 lacks a regression for private H3 host-memory isolation"
+metrics_endpoint=$(sed -n \
+  '/pub async fn metrics_endpoint(/,/HTTP metrics middleware/p' \
+  crates/mold-server/src/metrics.rs)
+if grep -Fq 'vram_in_use_bytes' <<<"$metrics_endpoint"; then
+  fail "the HTTP metrics task can enter CUDA outside the serialized owner"
+fi
+device_raw_source=crates/mold-inference/src/device.rs
+if [[ $(grep -Fc 'context.preflight_raw_call()' "$device_raw_source") -lt 5 ]]; then
+  fail "direct CUDA device and memory-pool calls are not all attempt-preflighted"
+fi
+pinned_source=crates/mold-inference/src/flux/pinned.rs
+if [[ $(grep -Fc 'preflight_current_execution_attempt_latch()' "$pinned_source") -ne 2 ]] \
+  || [[ $(grep -Fc '.result()' "$pinned_source") -lt 2 ]]; then
+  fail "raw pinned-memory registration does not preflight and observe the attempt latch"
+fi
+require_text "$runtime_source" \
+  'let identity_echo = backend.terminal_identity_echo()?;' \
+  "private H3 runtime does not derive its identity echo from the retained terminal authority"
 require_text "$runtime_source" \
   'if stream.authority != self.stream_authority {' \
   "private H3 loaded transformer discards its retained bound authority"
@@ -185,11 +383,6 @@ loader=$(sed -n \
   crates/mold-inference/src/minimax_h3/private_runtime.rs)
 if grep -Fq 'device:' <<<"$loader"; then
   fail "private H3 resident loader still accepts an external device after binding"
-fi
-overlap_seal=$(sed -n '/mod admitted_overlap_seal {/,/^}/p' \
-  crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs)
-if ! grep -Fq '#[cfg(not(test))]' <<<"$overlap_seal"; then
-  fail "private H3 FL2VA overlap seal is constructible in non-test builds"
 fi
 overlap_constructor=$(sed -n \
   '/impl H3PrivateFl2VaMemoryOverlapAuthority {/,/fn validate(&self)/p' \
@@ -264,9 +457,22 @@ server_dependencies=$(sed -n '/^\[dependencies\]/,/^\[/p' crates/mold-server/Car
 if grep -Eq '^mold-inference[[:space:]]*=.*h3-private-uat' <<<"$server_dependencies"; then
   fail "mold-ai-server activates the private H3 UAT path through an ordinary dependency"
 fi
-if sed -n '/^\[features\]/,/^\[/p' crates/mold-server/Cargo.toml \
-  | grep -Eq '^h3-private-uat[[:space:]]*='; then
-  fail "mold-ai-server forwards the private H3 UAT feature into a runnable product binary"
+server_features=$(sed -n '/^\[features\]/,/^\[/p' crates/mold-server/Cargo.toml)
+if ! grep -Fq 'h3-private-bridge = []' <<<"$server_features"; then
+  fail "mold-ai-server does not expose the payload-free private H3 bridge seam"
+fi
+h3_uat_feature=$(sed -n '/^h3-private-uat = \[/,/^\]/p' crates/mold-server/Cargo.toml)
+for edge in \
+  h3-private-bridge \
+  mold-inference/h3-private-uat \
+  mold-inference/h3-attention-rc \
+  mp4 \
+  cuda; do
+  grep -Fq "\"${edge}\"" <<<"$h3_uat_feature" \
+    || fail "mold-ai-server private H3 UAT feature omits ${edge}"
+done
+if [[ $(grep -Ec '^[[:space:]]*"[^"]+",?$' <<<"$h3_uat_feature") -ne 5 ]]; then
+  fail "mold-ai-server private H3 UAT feature contains an unexpected runtime edge"
 fi
 
 release_feature_sources="$({
@@ -296,6 +502,9 @@ require_text .github/workflows/ci.yml \
 require_text .github/workflows/ci.yml \
   'cargo test -p mold-ai-inference --lib --features h3-private-uat minimax_h3' \
   "CI does not execute the private H3 foundation tests"
+require_text .github/workflows/ci.yml \
+  'cargo clippy -p mold-ai-server --features h3-private-uat --all-targets -- -D warnings' \
+  "CUDA CI does not compile the concrete private H3 server bridge and tests"
 require_text .github/workflows/ci.yml \
   "'crates/mold-inference/src/minimax_h3/private_*.rs'" \
   "private H3 runtime source changes do not trigger release exclusion checks"

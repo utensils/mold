@@ -8,6 +8,8 @@
 //! consumes a fresh session per job; this private composer remains additionally
 //! sealed until every artifact, memory, and execution authority is available.
 
+use std::mem::ManuallyDrop;
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -43,7 +45,12 @@ use super::private_runtime::{
     H3PrivateComfyCancellationSlot, H3PrivateComfyCheckpointFacts, H3PrivateComfyStreamAuthority,
     H3PrivateComfyTransformerExecutor,
 };
+use super::private_server::{
+    H3PrivateAllocationCommit, H3PrivateFactoryActivationEvidence, H3PrivateSchedulerLedgerIdentity,
+};
 use super::private_vae_adapter::H3PrivateVaeRuntime;
+#[cfg(test)]
+use super::vae_runtime::H3ComfyVaeLoadPhase;
 use super::vae_runtime::{
     load_h3_comfy_vae_runtime_from_authority, H3AuthenticatedComfyVaeAuthority,
     H3ComfyVaeLoadEvent, H3ComfyVaeLoadObserver, H3ComfyVaeRuntimeBundle,
@@ -89,10 +96,9 @@ pub(crate) unsafe trait H3PrivateFl2VaArtifactLease:
 /// These are retained-lifetime facts, not estimates: composition rejects the
 /// attempt unless the opened artifact lease names this exact fingerprint.
 ///
-/// This PR intentionally provides no production issuer. Outside unit tests,
-/// `_activation` is an uninhabited type, making the otherwise concrete
-/// composer unreachable from safe code until a scheduler-owned frozen-memory
-/// projection is reviewed and added.
+/// Production issuance is possible only from an authenticated prepared target
+/// budget plus the exact scheduler-ledger identity that owns it. Callers never
+/// provide the overlap byte fields independently.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct H3PrivateFl2VaMemoryOverlapAuthority {
     factory_identity_sha256: String,
@@ -107,17 +113,13 @@ pub(crate) struct H3PrivateFl2VaMemoryOverlapAuthority {
     attempt_resident_vae_device_bytes: u64,
     visual_decode_peak_device_bytes: u64,
     normalized_endpoint_host_bytes: u64,
+    scheduler_ledger_identity_sha256: String,
     identity_sha256: String,
     _activation: admitted_overlap_seal::Token,
 }
 
 mod admitted_overlap_seal {
-    #[cfg(not(test))]
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    pub enum Token {}
-
-    #[cfg(test)]
-    #[derive(Clone, Debug, Eq, PartialEq)]
+    #[derive(Debug, Eq, PartialEq)]
     pub struct Token;
 }
 
@@ -151,6 +153,7 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
             attempt_resident_vae_device_bytes,
             visual_decode_peak_device_bytes,
             normalized_endpoint_host_bytes,
+            scheduler_ledger_identity_sha256: std::iter::repeat_n('e', 64).collect(),
             identity_sha256: String::new(),
             _activation: admitted_overlap_seal::Token,
         };
@@ -167,6 +170,7 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
         if !valid_sha256(&self.factory_identity_sha256)
             || !valid_sha256(&self.prepared_attempt_identity_sha256)
             || !valid_sha256(&self.target_budget_identity_sha256)
+            || !valid_sha256(&self.scheduler_ledger_identity_sha256)
             || self.target_audio_latent_device_bytes == 0
             || self.visual_vae_resident_device_bytes == 0
             || self.audio_vae_resident_device_bytes == 0
@@ -206,7 +210,7 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
 }
 
 const H3_PRIVATE_FL2VA_OVERLAP_IDENTITY_DOMAIN: &[u8] =
-    b"mold.minimax-h3.private-fl2va-overlap.v2\0";
+    b"mold.minimax-h3.private-fl2va-overlap.v3\0";
 
 fn memory_overlap_identity(authority: &H3PrivateFl2VaMemoryOverlapAuthority) -> String {
     let mut hash = Sha256::new();
@@ -227,7 +231,54 @@ fn memory_overlap_identity(authority: &H3PrivateFl2VaMemoryOverlapAuthority) -> 
     ] {
         hash.update(bytes.to_le_bytes());
     }
+    hash.update(authority.scheduler_ledger_identity_sha256.as_bytes());
     format!("{:x}", hash.finalize())
+}
+
+/// Issue the retained overlap record from one authenticated prepared budget
+/// and the scheduler-ledger identity that owns exactly that budget. Fine-
+/// grained memory fields are never accepted from the server.
+pub(crate) fn issue_private_fl2va_memory_overlap(
+    authority: &FrozenH3FactoryAuthority,
+    prepared: &H3PrivatePreparedFl2VaFactoryInputs,
+    ledger: &H3PrivateSchedulerLedgerIdentity,
+) -> Result<H3PrivateFl2VaMemoryOverlapAuthority> {
+    prepared.revalidate()?;
+    ledger.revalidate()?;
+    let identities = authority
+        .prepared_target_attempt_identities()
+        .ok_or_else(|| anyhow::anyhow!("private H3 factory has no prepared target identities"))?;
+    if authority.execution_fingerprint() != ledger.execution_fingerprint()
+        || identities.0 != prepared.prepared_attempt_identity_sha256()
+        || identities.1 != prepared.target_budget_identity_sha256()
+        || identities.0 != ledger.prepared_attempt_identity_sha256()
+        || identities.1 != ledger.target_budget_identity_sha256()
+        || authority.component_set_identity_sha256() != ledger.component_set_identity_sha256()
+    {
+        bail!("private H3 prepared budget differs from its scheduler ledger")
+    }
+    let request = &prepared.factory_attempt.request;
+    let budget = &prepared.factory_attempt.target_budget;
+    let mut overlap = H3PrivateFl2VaMemoryOverlapAuthority {
+        factory_identity_sha256: authority.identity_sha256().into(),
+        prepared_attempt_identity_sha256: identities.0.into(),
+        target_budget_identity_sha256: identities.1.into(),
+        condition_visual_rows: request.rows.condition_visual_rows,
+        condition_backing_host_bytes: budget.condition_backing_host_bytes,
+        condition_backing_device_bytes: budget.condition_latent_backing_device_bytes,
+        target_audio_latent_device_bytes: budget.target_audio_latent_device_bytes,
+        visual_vae_resident_device_bytes: budget.visual_vae_resident_device_bytes,
+        audio_vae_resident_device_bytes: budget.audio_vae_resident_device_bytes,
+        attempt_resident_vae_device_bytes: budget.attempt_resident_vae_device_bytes,
+        visual_decode_peak_device_bytes: budget.visual_decode_phase_device_bytes,
+        normalized_endpoint_host_bytes: budget.normalized_endpoint_host_bytes,
+        scheduler_ledger_identity_sha256: ledger.identity_sha256().into(),
+        identity_sha256: String::new(),
+        _activation: admitted_overlap_seal::Token,
+    };
+    overlap.identity_sha256 = memory_overlap_identity(&overlap);
+    overlap.validate()?;
+    Ok(overlap)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1018,11 +1069,13 @@ where
 /// Neither this root nor the retained overlap record implements `Clone`.
 ///
 /// The safe constructor below remains unreachable in production today because
-/// `private_fl2va_runtime_authority` retains all activation prerequisites and
-/// `H3PrivateFl2VaMemoryOverlapAuthority` has no non-test constructor.
+/// `private_fl2va_runtime_authority` retains the evidence-backed activation
+/// prerequisites. The overlap authority itself now has one production issuer,
+/// but only from a prepared budget and its scheduler-ledger identity.
 #[allow(dead_code)]
 pub(crate) struct H3PrivatePhaseRuntimeOwner<C, E, A> {
     authority: FrozenH3FactoryAuthority,
+    activation_evidence: H3PrivateFactoryActivationEvidence,
     admitted: H3PrivateFl2VaFactoryAuthority,
     prepared: H3PrivatePreparedFl2VaFactoryInputs,
     storage: H3PrivateComfyStorageAuthority,
@@ -1034,6 +1087,7 @@ pub(crate) struct H3PrivatePhaseRuntimeOwner<C, E, A> {
     qwen_artifact_authority: H3PrivateQwenArtifactAuthority,
     conditioner_lease: C,
     memory_overlap: H3PrivateFl2VaMemoryOverlapAuthority,
+    allocation_commit: H3PrivateAllocationCommit,
     // The singular attempt root is declared last so all opened/component state
     // releases before the scheduler execution and artifact leases.
     attempt: H3PrivateAttemptAuthority<E, A>,
@@ -1042,6 +1096,7 @@ pub(crate) struct H3PrivatePhaseRuntimeOwner<C, E, A> {
 #[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) fn bind_private_comfy_fl2va_phase_owner<C, E, A>(
     authority: FrozenH3FactoryAuthority,
+    activation_evidence: H3PrivateFactoryActivationEvidence,
     prepared: H3PrivatePreparedFl2VaFactoryInputs,
     storage: H3PrivateComfyStorageAuthority,
     qwen_support: H3PrivateQwenSupport,
@@ -1053,13 +1108,15 @@ pub(crate) fn bind_private_comfy_fl2va_phase_owner<C, E, A>(
     execution_lease: E,
     artifact_lease: A,
     memory_overlap: H3PrivateFl2VaMemoryOverlapAuthority,
+    allocation_commit: H3PrivateAllocationCommit,
 ) -> Result<H3PrivatePhaseRuntimeOwner<C, E, A>>
 where
     C: H3PrivateQwenConditionerLease + Send + Sync,
     E: H3BackendExecutionLease + Send + Sync,
     A: H3PrivateFl2VaArtifactLease + Send + Sync,
 {
-    let admitted = authority.private_fl2va_runtime_authority()?;
+    let admitted =
+        authority.private_fl2va_runtime_authority_with_activation(&activation_evidence)?;
     prepared.revalidate()?;
     storage.validate_opened_components(
         &qwen_support,
@@ -1106,6 +1163,7 @@ where
     let attempt = H3PrivateAttemptAuthority::new(bound_execution, artifact_lease);
     Ok(H3PrivatePhaseRuntimeOwner {
         authority,
+        activation_evidence,
         admitted,
         prepared,
         storage,
@@ -1117,6 +1175,7 @@ where
         qwen_artifact_authority,
         conditioner_lease,
         memory_overlap,
+        allocation_commit,
         attempt,
     })
 }
@@ -1568,11 +1627,13 @@ where
     continuing_artifacts: H3PrivateArtifactProjection<E, A>,
     identity: H3PipelineBackendIdentity,
     authority: FrozenH3FactoryAuthority,
+    activation_evidence: H3PrivateFactoryActivationEvidence,
     admitted: H3PrivateFl2VaFactoryAuthority,
     ledger: H3PrivatePhaseLedger,
     storage: H3PrivateComfyStorageAuthority,
     retention: H3PrivatePreparedFl2VaRetention,
     memory_overlap: H3PrivateFl2VaMemoryOverlapAuthority,
+    allocation_commit: H3PrivateAllocationCommit,
     cancellation_slot: H3PrivateComfyCancellationSlot,
     cancellation_guard: H3PrivateComfyCancellationGuard,
     // Last: singular scheduler/artifact owner outlives every projection.
@@ -1594,6 +1655,7 @@ where
     )> {
         let Self {
             authority,
+            activation_evidence,
             admitted,
             prepared,
             storage,
@@ -1605,6 +1667,7 @@ where
             qwen_artifact_authority,
             conditioner_lease,
             memory_overlap,
+            allocation_commit,
             attempt,
         } = self;
         let (prepared, retention) = prepared.into_runtime_parts();
@@ -1643,11 +1706,13 @@ where
             continuing_artifacts,
             identity,
             authority,
+            activation_evidence,
             admitted,
             ledger: H3PrivatePhaseLedger::new(expected_denoise_forwards)?,
             storage,
             retention,
             memory_overlap,
+            allocation_commit,
             cancellation_slot,
             cancellation_guard,
             attempt,
@@ -1666,6 +1731,7 @@ where
     fn validate_continuing_authority(&self) -> Result<()> {
         validate_private_continuing_authority(
             &self.authority,
+            &self.activation_evidence,
             &self.admitted,
             &self.stream_authority,
             &self.qwen_artifact_authority,
@@ -1723,11 +1789,13 @@ where
             continuing_artifacts,
             identity: _,
             authority,
+            activation_evidence,
             admitted,
             ledger: _,
             storage,
             retention,
             memory_overlap,
+            allocation_commit: _,
             cancellation_slot: _,
             cancellation_guard,
             attempt,
@@ -1736,6 +1804,7 @@ where
             continuing_execution,
             continuing_artifacts,
             authority,
+            activation_evidence,
             admitted,
             stream_authority,
             qwen_artifact_authority,
@@ -1744,6 +1813,59 @@ where
             memory_overlap,
             cancellation_guard,
             attempt,
+        })
+    }
+
+    fn validate_empty_terminal(&self) -> Result<()> {
+        self.validate_continuing_authority()?;
+        if !self.ledger.is_terminal()
+            || self.vae.is_some()
+            || self.denoiser.is_some()
+            || self.opened_vae.is_some()
+            || self.opened_qwen.is_some()
+            || self.qwen_support.is_some()
+            || self.conditioner_lease.is_some()
+            || self.bound_transformer.is_some()
+            || self.qwen_execution.is_some()
+            || self.qwen_artifacts.is_some()
+            || self.block_execution.is_some()
+        {
+            bail!("private H3 mux requires an empty terminal component state")
+        }
+        Ok(())
+    }
+
+    fn terminal_identity_echo(&self) -> Result<H3PrivatePhaseIdentityEcho> {
+        self.validate_empty_terminal()?;
+        let live = validate_private_continuing_authority(
+            &self.authority,
+            &self.activation_evidence,
+            &self.admitted,
+            &self.stream_authority,
+            &self.qwen_artifact_authority,
+            &self.storage,
+            &self.retention,
+            &self.memory_overlap,
+            &self.continuing_execution,
+            &self.continuing_artifacts,
+            &self.attempt,
+        )?;
+        let prepared_attempt_identity_sha256 =
+            self.retention.prepared_attempt_identity_sha256().to_owned();
+        let target_budget_identity_sha256 =
+            self.retention.target_budget_identity_sha256().to_owned();
+        if !valid_sha256(&prepared_attempt_identity_sha256)
+            || !valid_sha256(&target_budget_identity_sha256)
+            || !valid_sha256(&live.component_set_identity_sha256)
+        {
+            bail!("private H3 terminal identity echo contains an invalid digest")
+        }
+        Ok(H3PrivatePhaseIdentityEcho {
+            device_id: live.device_id,
+            execution_fingerprint: live.execution_fingerprint,
+            prepared_attempt_identity_sha256,
+            target_budget_identity_sha256,
+            component_set_identity_sha256: live.component_set_identity_sha256,
         })
     }
 }
@@ -1780,6 +1902,7 @@ where
             .take()
             .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
         let authority = &self.authority;
+        let activation_evidence = &self.activation_evidence;
         let admitted = &self.admitted;
         let stream_authority = &self.stream_authority;
         let qwen_artifact_authority = &self.qwen_artifact_authority;
@@ -1789,27 +1912,35 @@ where
         let continuing_execution = &self.continuing_execution;
         let continuing_artifacts = &self.continuing_artifacts;
         let attempt = &self.attempt;
-        let mut vae_observer = H3PrivateVaeLoadCheckpoint::new(checkpoint, || {
-            validate_private_continuing_authority(
-                authority,
-                admitted,
-                stream_authority,
-                qwen_artifact_authority,
-                storage,
-                retention,
-                memory_overlap,
-                continuing_execution,
-                continuing_artifacts,
-                attempt,
-            )
-            .map(|_| ())
-        });
+        let mut vae_observer = H3PrivateVaeLoadCheckpoint::new(
+            checkpoint,
+            || {
+                validate_private_continuing_authority(
+                    authority,
+                    activation_evidence,
+                    admitted,
+                    stream_authority,
+                    qwen_artifact_authority,
+                    storage,
+                    retention,
+                    memory_overlap,
+                    continuing_execution,
+                    continuing_artifacts,
+                    attempt,
+                )
+                .map(|_| ())
+            },
+            &self.allocation_commit,
+        );
         let loaded = load_h3_comfy_vae_runtime_from_authority(
             opened_vae,
             self.continuing_execution.device(),
             &mut vae_observer,
         );
         let vae = vae_observer.finish(loaded)?;
+        if !self.allocation_commit.is_committed() {
+            bail!("private H3 VAE construction returned without an allocation commitment")
+        }
         self.vae = Some(vae);
         checkpoint.checkpoint(H3PipelineEvent {
             phase: H3PipelinePhase::VaeLoad,
@@ -1824,7 +1955,7 @@ where
             completed: 0,
             total: 1,
         })?;
-        let mut qwen = H3PrivateQwenAdapter::load_authorized_from_opened(
+        let qwen = H3PrivateQwenAdapter::load_authorized_from_opened(
             self.opened_qwen
                 .take()
                 .ok_or_else(|| anyhow::anyhow!("private H3 Qwen authority was already consumed"))?,
@@ -1843,17 +1974,25 @@ where
             &self.authority,
             checkpoint,
         )?;
-        checkpoint.checkpoint(H3PipelineEvent {
-            phase: H3PipelinePhase::QwenLoad,
-            completed: 1,
-            total: 1,
-        })?;
-        let text = qwen.encode_fl2va(prompt, endpoints, checkpoint);
-        let continuing = qwen.validate_continuing_authorities();
-        drop(qwen);
+        let mut qwen = ManuallyDrop::new(qwen);
+        let text = (|| {
+            checkpoint.checkpoint(H3PipelineEvent {
+                phase: H3PipelinePhase::QwenLoad,
+                completed: 1,
+                total: 1,
+            })?;
+            let text = qwen.encode_fl2va(prompt, endpoints, checkpoint);
+            let continuing = qwen.validate_continuing_authorities();
+            text.and_then(|text| continuing.map(|()| text))
+        })();
+        if text.as_ref().is_err_and(is_fatal_private_cuda_error) {
+            return text;
+        }
+        // SAFETY: the fatal path above intentionally retains the concrete
+        // conditioner. Every ordinary result releases it exactly once.
+        unsafe { ManuallyDrop::drop(&mut qwen) };
         self.ledger.qwen_dropped()?;
         let text = text?;
-        continuing?;
         self.validate_continuing_authority()?;
         Ok(text)
     }
@@ -1957,12 +2096,15 @@ where
         if self.ledger.state != H3PrivatePhaseState::VisualDecoded {
             bail!("private H3 audio decode occurred before visual decode")
         }
-        let vae = self
+        let waveform = self
             .vae
-            .take()
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("private H3 VAE was not retained for audio decode"))?;
-        let waveform = vae.decode_audio(latents, checkpoint);
-        drop(vae);
+        let waveform = waveform.decode_audio(latents, checkpoint);
+        if waveform.as_ref().is_err_and(is_fatal_private_cuda_error) {
+            return waveform;
+        }
+        drop(self.vae.take());
         let waveform = waveform?;
         self.ledger.vaes_dropped()?;
         self.validate_continuing_authority()?;
@@ -1974,6 +2116,7 @@ struct H3PrivateTerminalAttempt<E, A> {
     continuing_execution: H3PrivateExecutionProjection<E, A>,
     continuing_artifacts: H3PrivateArtifactProjection<E, A>,
     authority: FrozenH3FactoryAuthority,
+    activation_evidence: H3PrivateFactoryActivationEvidence,
     admitted: H3PrivateFl2VaFactoryAuthority,
     stream_authority: H3PrivateComfyStreamAuthority,
     qwen_artifact_authority: H3PrivateQwenArtifactAuthority,
@@ -2015,6 +2158,7 @@ where
     fn validate(&self) -> Result<H3PrivateValidatedLiveIdentity> {
         let live = validate_private_continuing_authority(
             &self.authority,
+            &self.activation_evidence,
             &self.admitted,
             &self.stream_authority,
             &self.qwen_artifact_authority,
@@ -2128,6 +2272,7 @@ where
 #[allow(clippy::too_many_arguments)]
 fn validate_private_continuing_authority<E, A>(
     authority: &FrozenH3FactoryAuthority,
+    activation_evidence: &H3PrivateFactoryActivationEvidence,
     admitted: &H3PrivateFl2VaFactoryAuthority,
     stream_authority: &H3PrivateComfyStreamAuthority,
     qwen_artifact_authority: &H3PrivateQwenArtifactAuthority,
@@ -2142,6 +2287,7 @@ where
     E: H3BackendExecutionLease,
     A: H3PrivateFl2VaArtifactLease,
 {
+    activation_evidence.revalidate_for(authority)?;
     retention.revalidate()?;
     storage.validate()?;
     memory_overlap.validate()?;
@@ -2170,6 +2316,7 @@ where
 struct H3PrivateVaeLoadCheckpoint<'a, F> {
     checkpoint: &'a mut dyn H3PipelineCheckpoint,
     revalidate: F,
+    allocation_commit: &'a H3PrivateAllocationCommit,
     first_error: Option<anyhow::Error>,
 }
 
@@ -2177,10 +2324,15 @@ impl<'a, F> H3PrivateVaeLoadCheckpoint<'a, F>
 where
     F: FnMut() -> Result<()>,
 {
-    fn new(checkpoint: &'a mut dyn H3PipelineCheckpoint, revalidate: F) -> Self {
+    fn new(
+        checkpoint: &'a mut dyn H3PipelineCheckpoint,
+        revalidate: F,
+        allocation_commit: &'a H3PrivateAllocationCommit,
+    ) -> Self {
         Self {
             checkpoint,
             revalidate,
+            allocation_commit,
             first_error: None,
         }
     }
@@ -2209,6 +2361,12 @@ where
             self.first_error = Some(error);
             return false;
         }
+        if !self.allocation_commit.is_committed() {
+            self.first_error = Some(anyhow::anyhow!(
+                "private H3 VAE loading reached CUDA before the owner allocation commitment"
+            ));
+            return false;
+        }
         let total = usize::try_from(event.total).unwrap_or(usize::MAX).max(1);
         let completed = usize::try_from(event.completed)
             .unwrap_or(usize::MAX)
@@ -2222,6 +2380,57 @@ where
             false
         } else {
             true
+        }
+    }
+}
+
+fn is_fatal_private_cuda_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}");
+    [
+        "CUDA_ERROR_ILLEGAL_ADDRESS",
+        "CUDA_ERROR_ECC_UNCORRECTABLE",
+        "CUDA_ERROR_LAUNCH_FAILED",
+        "CUDA_ERROR_ASSERT",
+        "CUDA_ERROR_MISALIGNED_ADDRESS",
+        "CUDA_ERROR_HARDWARE_STACK_ERROR",
+        "CUDA_ERROR_ILLEGAL_INSTRUCTION",
+        "CUDA_ERROR_INVALID_ADDRESS_SPACE",
+        "CUDA_ERROR_INVALID_PC",
+        "CUDA_ERROR_LAUNCH_TIMEOUT",
+        "CUDA_ERROR_EXTERNAL_DEVICE",
+        "CUDA_ERROR_MPS_CLIENT_TERMINATED",
+        "CUDA_ERROR_CONTAINED",
+        "CUDA_ERROR_TENSOR_MEMORY_LEAK",
+        "CUBLAS_STATUS_MAPPING_ERROR",
+        "CUBLAS_STATUS_EXECUTION_FAILED",
+        "CUBLAS_STATUS_INTERNAL_ERROR",
+        "CURAND_STATUS_LAUNCH_FAILURE",
+        "CURAND_STATUS_PREEXISTING_FAILURE",
+        "CURAND_STATUS_INTERNAL_ERROR",
+        "CUDA execution attempt retained resources",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+/// Run with singular ownership of every concrete CUDA-bearing component.
+/// Fatal driver errors and panics deliberately retain the whole resource graph
+/// for process teardown; ordinary errors, cancellation, and success explicitly
+/// release it on the owner thread.
+fn with_contained_private_cuda_resources<R, T>(
+    resources: R,
+    operation: impl FnOnce(&mut R) -> Result<T>,
+) -> Result<T> {
+    let mut resources = ManuallyDrop::new(resources);
+    let outcome = catch_unwind(AssertUnwindSafe(|| operation(&mut resources)));
+    match outcome {
+        Err(payload) => resume_unwind(payload),
+        Ok(Err(error)) if is_fatal_private_cuda_error(&error) => Err(error),
+        Ok(result) => {
+            // SAFETY: fatal and panic paths return above without dropping. All
+            // remaining paths reach this exactly once with the resource live.
+            unsafe { ManuallyDrop::drop(&mut resources) };
+            result
         }
     }
 }
@@ -2240,25 +2449,22 @@ where
     E: H3BackendExecutionLease + Send + Sync,
     A: H3PrivateFl2VaArtifactLease + Send + Sync,
 {
-    let (prepared, mut backend) = owner.into_backend(progress)?;
-    let staged = super::pipeline::execute_staged(&prepared, &mut backend, progress, observer)?;
-    let terminal = backend.into_empty()?;
-    let identity_echo = terminal.identity_echo()?;
-    let output = super::pipeline::finalize_av(staged, progress, observer)?;
-    let post_mux_identity = terminal.validate()?;
-    if output.provenance.device_id != identity_echo.device_id
-        || output.provenance.execution_fingerprint != identity_echo.execution_fingerprint
-        || post_mux_identity.device_id != identity_echo.device_id
-        || post_mux_identity.execution_fingerprint != identity_echo.execution_fingerprint
-        || post_mux_identity.component_set_identity_sha256
-            != identity_echo.component_set_identity_sha256
-    {
-        bail!("private H3 mux output identity differs from the terminal authority")
-    }
-    drop(terminal);
-    Ok(H3PrivatePhaseRuntimeOutput {
-        output,
-        identity_echo,
+    let (prepared, backend) = owner.into_backend(progress)?;
+    with_contained_private_cuda_resources(backend, |backend| {
+        let staged = super::pipeline::execute_staged(&prepared, backend, progress, observer)?;
+        let identity_echo = backend.terminal_identity_echo()?;
+        let output = super::pipeline::finalize_av(staged, progress, observer)?;
+        let post_mux_identity = backend.terminal_identity_echo()?;
+        if output.provenance.device_id != identity_echo.device_id
+            || output.provenance.execution_fingerprint != identity_echo.execution_fingerprint
+            || post_mux_identity != identity_echo
+        {
+            bail!("private H3 mux output identity differs from the terminal authority")
+        }
+        Ok(H3PrivatePhaseRuntimeOutput {
+            output,
+            identity_echo,
+        })
     })
 }
 
@@ -3632,7 +3838,7 @@ mod tests {
     fn overlap_identity_uses_the_version_two_serializer_domain() {
         assert_eq!(
             H3_PRIVATE_FL2VA_OVERLAP_IDENTITY_DOMAIN,
-            b"mold.minimax-h3.private-fl2va-overlap.v2\0"
+            b"mold.minimax-h3.private-fl2va-overlap.v3\0"
         );
     }
 
@@ -3930,12 +4136,18 @@ mod tests {
                 events: Arc::clone(&drops),
             };
             let mut checkpoint = RevokeAfterFirstCheckpoint { active, events: 0 };
-            let mut observer = H3PrivateVaeLoadCheckpoint::new(&mut checkpoint, move || {
-                if !validator_active.load(Ordering::SeqCst) {
-                    bail!("synthetic VAE authority revoked")
-                }
-                Ok(())
-            });
+            let mut allocation_commit = H3PrivateAllocationCommit::new(|| Ok(()));
+            allocation_commit.commit_once()?;
+            let mut observer = H3PrivateVaeLoadCheckpoint::new(
+                &mut checkpoint,
+                move || {
+                    if !validator_active.load(Ordering::SeqCst) {
+                        bail!("synthetic VAE authority revoked")
+                    }
+                    Ok(())
+                },
+                &allocation_commit,
+            );
             assert!(observer.checkpoint(H3ComfyVaeLoadEvent {
                 role: super::super::vae_runtime::H3ComfyVaeArtifactRole::VisualConfig,
                 phase: super::super::vae_runtime::H3ComfyVaeLoadPhase::Open,
@@ -3955,6 +4167,152 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("revoked"));
         assert_eq!(*drops.lock().unwrap(), ["attempt"]);
         assert_eq!(mux_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn vae_observer_requires_the_owner_commit_before_any_load_checkpoint() {
+        struct AcceptAll;
+
+        impl H3PipelineCheckpoint for AcceptAll {
+            fn checkpoint(&mut self, _event: H3PipelineEvent) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let commits = Arc::new(AtomicUsize::new(0));
+        let captured = Arc::clone(&commits);
+        let mut allocation_commit = H3PrivateAllocationCommit::new(move || {
+            captured.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        allocation_commit.commit_once().unwrap();
+        assert_eq!(commits.load(Ordering::SeqCst), 1);
+        let mut checkpoint = AcceptAll;
+        let mut observer =
+            H3PrivateVaeLoadCheckpoint::new(&mut checkpoint, || Ok(()), &allocation_commit);
+        assert!(observer.checkpoint(H3ComfyVaeLoadEvent {
+            role: super::super::vae_runtime::H3ComfyVaeArtifactRole::VisualWeights,
+            phase: H3ComfyVaeLoadPhase::ValidateHeader,
+            completed: 1,
+            total: 1,
+        }));
+        for completed in [0, 1] {
+            assert!(observer.checkpoint(H3ComfyVaeLoadEvent {
+                role: super::super::vae_runtime::H3ComfyVaeArtifactRole::VisualWeights,
+                phase: H3ComfyVaeLoadPhase::Construct,
+                completed,
+                total: 1,
+            }));
+        }
+        assert_eq!(commits.load(Ordering::SeqCst), 1);
+        drop(observer);
+        assert!(allocation_commit.is_committed());
+    }
+
+    #[test]
+    fn vae_observer_rejects_an_uncommitted_owner_without_running_callback() {
+        struct AcceptAll;
+
+        impl H3PipelineCheckpoint for AcceptAll {
+            fn checkpoint(&mut self, _event: H3PipelineEvent) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let allocation_commit = H3PrivateAllocationCommit::new(|| {
+            bail!("synthetic scheduler ledger rejected allocation")
+        });
+        let mut checkpoint = AcceptAll;
+        let mut observer =
+            H3PrivateVaeLoadCheckpoint::new(&mut checkpoint, || Ok(()), &allocation_commit);
+        assert!(!observer.checkpoint(H3ComfyVaeLoadEvent {
+            role: super::super::vae_runtime::H3ComfyVaeArtifactRole::VisualWeights,
+            phase: H3ComfyVaeLoadPhase::Construct,
+            completed: 0,
+            total: 1,
+        }));
+        let error = observer.finish(Ok(())).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("before the owner allocation commitment"));
+        assert!(!allocation_commit.is_committed());
+    }
+
+    struct ConcreteCandleResources {
+        _device: Device,
+        _tensor: Tensor,
+        retained: Arc<()>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for ConcreteCandleResources {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn concrete_candle_resources(
+        drops: Arc<AtomicUsize>,
+    ) -> (ConcreteCandleResources, std::sync::Weak<()>) {
+        let retained = Arc::new(());
+        let weak = Arc::downgrade(&retained);
+        let device = Device::Cpu;
+        let tensor = Tensor::zeros((2, 2), DType::F32, &device).unwrap();
+        (
+            ConcreteCandleResources {
+                _device: device,
+                _tensor: tensor,
+                retained,
+                drops,
+            },
+            weak,
+        )
+    }
+
+    #[test]
+    fn concrete_candle_resources_are_retained_on_fatal_cuda_error() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let calls = AtomicUsize::new(0);
+        let (resources, retained) = concrete_candle_resources(Arc::clone(&drops));
+        let error = with_contained_private_cuda_resources(resources, |_| -> Result<()> {
+            calls.fetch_add(1, Ordering::SeqCst);
+            bail!("CUDA_ERROR_ILLEGAL_ADDRESS from synthetic concrete operation")
+        })
+        .unwrap_err();
+        assert!(is_fatal_private_cuda_error(&error));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(retained.upgrade().is_some());
+    }
+
+    #[test]
+    fn concrete_candle_resources_are_retained_when_operation_panics() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (resources, retained) = concrete_candle_resources(Arc::clone(&drops));
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = with_contained_private_cuda_resources(resources, |_| -> Result<()> {
+                panic!("synthetic concrete CUDA owner panic")
+            });
+        }));
+        assert!(panic.is_err());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(retained.upgrade().is_some());
+    }
+
+    #[test]
+    fn concrete_candle_resources_drop_once_on_ordinary_error() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let calls = AtomicUsize::new(0);
+        let (resources, retained) = concrete_candle_resources(Arc::clone(&drops));
+        let error = with_contained_private_cuda_resources(resources, |_| -> Result<()> {
+            calls.fetch_add(1, Ordering::SeqCst);
+            bail!("ordinary private H3 validation error")
+        })
+        .unwrap_err();
+        assert!(!is_fatal_private_cuda_error(&error));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(retained.upgrade().is_none());
     }
 
     #[test]

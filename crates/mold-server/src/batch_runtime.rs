@@ -289,6 +289,7 @@ async fn freeze_batch_plan(
         parent_id,
         &execution_request,
         None,
+        crate::variant_dependencies::DependencyPreparationContext::default(),
     )
     .await
     .map_err(anyhow::Error::msg)?;
@@ -863,6 +864,8 @@ async fn submit_child(
             execution_equivalence_fingerprint: plan.equivalence.clone(),
             prepared_inputs: plan.prepared_inputs.clone(),
         }),
+        #[cfg(feature = "h3-private-uat")]
+        h3_private_ingress_grant: None,
     };
     state
         .queue
@@ -1674,6 +1677,7 @@ mod tests {
                     frames: 9,
                     fps: 24,
                     pipeline: None,
+                    pipeline_provenance_sha256: None,
                     thumbnail: b"png".to_vec(),
                     gif_preview: b"GIF89a".to_vec(),
                     has_audio: false,
@@ -1928,6 +1932,10 @@ mod tests {
                 by_device: BTreeMap::new(),
                 retryable_device_failures: BTreeMap::new(),
                 model_config_overlay: None,
+                #[cfg(feature = "h3-private-uat")]
+                h3_private_ingress_grant: None,
+                #[cfg(feature = "h3-private-uat")]
+                h3_private_admission_by_device: BTreeMap::new(),
             },
         };
         let last = attempt.grant(1).unwrap().0;

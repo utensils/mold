@@ -20,6 +20,8 @@ use crate::minimax_h3::backend::{
     H3ValidatedComponentSet,
 };
 use crate::minimax_h3::offload::FrozenH3BlockStreamingPlan;
+#[cfg(feature = "h3-private-uat")]
+use crate::minimax_h3::private_server::H3PrivateFactoryActivationEvidence;
 use crate::minimax_h3::sampler::H3DualSchedule;
 use crate::minimax_h3::vae_runtime::expected_h3_comfy_vae_artifact_plan_identity;
 use crate::minimax_h3::{FrozenH3ConditionerPlacement, H3ConditionerExecution};
@@ -2010,6 +2012,52 @@ impl FrozenH3FactoryAuthority {
         &self.identity_sha256
     }
 
+    /// Atomically enrich one already-validated scheduler authority with the
+    /// opened/preprocessed attempt triad. The base authority remains
+    /// immutable; the returned authority receives a new canonical identity.
+    #[cfg(all(feature = "h3-private-uat", feature = "mp4"))]
+    pub(crate) fn with_private_prepared_attempt(
+        &self,
+        prepared_attempt: H3FactoryPreparedAttemptInput,
+        execution_budget_echo: H3FactoryExecutionBudgetEchoInput,
+        attention_runtime: H3FactoryAttentionInput,
+    ) -> Result<Self> {
+        self.validate_frozen()?;
+        if self.prepared_attempt.is_some()
+            || self.execution_budget_echo.is_some()
+            || self.attention_runtime.is_some()
+        {
+            bail!("private H3 factory base authority already contains an attempt triad")
+        }
+        validate_attention(&attention_runtime, self.compute_capability())?;
+        let prepared_attempt = H3FactoryPreparedAttemptAuthority::freeze(
+            prepared_attempt,
+            H3FactoryPreparedAttemptProjection {
+                execution_fingerprint: self.execution_fingerprint(),
+                qwen_output_text_rows: self.qwen_output_text_rows,
+                qwen_vision_rows: self.qwen_vision_rows,
+                condition_visual_rows: self.condition_visual_rows,
+                resident_block_count: u32::try_from(
+                    self.backend_plan.block_streaming().resident_block_count,
+                )
+                .map_err(|_| anyhow!("private H3 resident block count exceeds u32"))?,
+                prefetch_depth: u32::try_from(self.backend_plan.block_streaming().prefetch_depth)
+                    .map_err(|_| anyhow!("private H3 prefetch depth exceeds u32"))?,
+                qwen_activation_workspace_bytes: self.qwen_activation_workspace_bytes,
+                qwen_device_parameter_bytes: self.qwen_device_resident_parameter_bytes,
+                qwen_host_parameter_bytes: self.qwen_host_resident_parameter_bytes,
+                conditioner_placement: self.conditioner_placement,
+            },
+        )?;
+        let mut enriched = self.clone();
+        enriched.prepared_attempt = Some(prepared_attempt);
+        enriched.execution_budget_echo = Some(execution_budget_echo);
+        enriched.attention_runtime = Some(attention_runtime);
+        enriched.identity_sha256 = frozen_identity(&enriched);
+        enriched.validate_frozen()?;
+        Ok(enriched)
+    }
+
     pub fn component_set_identity_sha256(&self) -> &str {
         self.backend_plan.component_set_identity()
     }
@@ -2042,6 +2090,7 @@ impl FrozenH3FactoryAuthority {
     }
 
     #[cfg(feature = "h3-private-uat")]
+    #[allow(dead_code)]
     pub(crate) fn private_fl2va_runtime_authority(&self) -> Result<H3PrivateFl2VaFactoryAuthority> {
         self.validate_frozen()?;
         let attention = match (
@@ -2061,6 +2110,33 @@ impl FrozenH3FactoryAuthority {
                 "private MiniMax H3 execution remains unavailable until target-budget prerequisites are verified"
             );
         }
+        self.private_fl2va_runtime_authority_record(attention)
+    }
+
+    /// Private reviewed-evidence projection. Unlike the public/no-evidence
+    /// projection above, this requires a non-Clone token issued from the exact
+    /// opened, prepared, scheduler-ledger, owner-scope, and runtime-record
+    /// authorities. The public prerequisite list remains intact and is part
+    /// of the token identity.
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn private_fl2va_runtime_authority_with_activation(
+        &self,
+        activation: &H3PrivateFactoryActivationEvidence,
+    ) -> Result<H3PrivateFl2VaFactoryAuthority> {
+        self.validate_frozen()?;
+        activation.revalidate_for(self)?;
+        let attention = match (
+            &self.prepared_attempt,
+            &self.execution_budget_echo,
+            &self.attention_runtime,
+        ) {
+            (Some(_), Some(_), Some(attention)) => attention.clone(),
+            _ => {
+                bail!(
+                    "private MiniMax H3 activation requires the exact prepared attempt, budget echo, and typed attention triad"
+                )
+            }
+        };
         self.private_fl2va_runtime_authority_record(attention)
     }
 
@@ -2159,7 +2235,21 @@ impl FrozenH3FactoryAuthority {
     /// digests, never artifact paths or bytes.
     #[cfg(feature = "h3-private-uat")]
     pub(crate) fn conditioner_component_authority(&self) -> (&str, &str) {
-        self.component_authority(H3ComponentRole::Conditioner)
+        self.private_component_authority(H3FactoryComponentRole::Conditioner)
+    }
+
+    /// Exact payload-free authority for independently reopening one private
+    /// component. This comparison seam prevents an attempt-local artifact
+    /// object from inheriting admission digests without recomputing them.
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn private_component_authority(&self, role: H3FactoryComponentRole) -> (&str, &str) {
+        let role = match role {
+            H3FactoryComponentRole::Conditioner => H3ComponentRole::Conditioner,
+            H3FactoryComponentRole::Transformer => H3ComponentRole::Transformer,
+            H3FactoryComponentRole::VisualVae => H3ComponentRole::VisualVae,
+            H3FactoryComponentRole::AudioVae => H3ComponentRole::AudioVae,
+        };
+        self.component_authority(role)
     }
 
     #[cfg(feature = "h3-private-uat")]

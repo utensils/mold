@@ -850,6 +850,17 @@ pub struct PreparedExecutionInputs {
     /// admission, and pre-CUDA validation independent of endpoint call order
     /// and of `refresh_config()` erasing in-memory catalog entries.
     pub model_config_overlay: Option<Arc<mold_core::ModelConfig>>,
+    /// Payload-free authenticated authority for the private H3 ingress. This
+    /// is only a transport seam; per-device admission evidence is attached by
+    /// dependency preparation before generic execution planning may consume it.
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
+    /// One immutable inference-derived admission record per eligible device.
+    /// These DTOs contain identities/capacities only; opened artifacts and
+    /// executable authority remain inside the inference owner boundary.
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) h3_private_admission_by_device:
+        BTreeMap<String, mold_inference::H3PrivateFl2VaAdmissionEvidence>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1082,6 +1093,54 @@ pub fn eligible_devices_for_request(
         .collect())
 }
 
+/// Placement-only counterpart for an already authenticated private H3
+/// ingress grant. It deliberately does not call model/artifact activation;
+/// inference preflight owns that authority. The canonical private runtime
+/// keeps Qwen on the host and requires transformer/VAE execution on one CUDA
+/// owner, while preserving the generic explicit-device conflict semantics.
+#[cfg(feature = "h3-private-uat")]
+pub(crate) fn eligible_devices_for_private_h3(
+    config: &Config,
+    request: &GenerateRequest,
+    devices: &[DeviceFact],
+) -> Result<Vec<DeviceFact>, ExecutionPlanError> {
+    let normalized = config.effective_placement(&request.model, request.placement.as_ref());
+    let artifacts = BTreeMap::from([
+        (ComponentRole::Transformer, PathBuf::new()),
+        (ComponentRole::Vae, PathBuf::new()),
+        (ComponentRole::QwenShard(0), PathBuf::new()),
+    ]);
+    let effective = effective_constraints(&normalized, &artifacts);
+    for role in [ComponentRole::Transformer, ComponentRole::Vae] {
+        if effective.components.get(&role) == Some(&ResolvedComponentConstraint::Cpu) {
+            return Err(ExecutionPlanError::UnsupportedCpuPlacement {
+                family: mold_core::minimax_h3::FAMILY.to_string(),
+                role,
+            });
+        }
+    }
+    if matches!(
+        effective.components.get(&ComponentRole::QwenShard(0)),
+        Some(ResolvedComponentConstraint::Device(_))
+    ) {
+        return Err(ExecutionPlanError::PlanInvalidated(
+            "MiniMax H3 private Qwen placement is fixed to host CPU".into(),
+        ));
+    }
+    let hard = hard_device_ids(&effective, devices)?;
+    if hard.len() > 1 {
+        return Err(ExecutionPlanError::CrossDevicePlacement(
+            hard.into_iter().collect::<Vec<_>>().join(", "),
+        ));
+    }
+    let hard = hard.into_iter().next();
+    Ok(devices
+        .iter()
+        .filter(|device| hard.as_ref().is_none_or(|hard| hard == &device.id))
+        .cloned()
+        .collect())
+}
+
 pub fn resolve_execution_plans(
     config: &Config,
     request: &GenerateRequest,
@@ -1158,6 +1217,11 @@ fn resolve_execution_plans_with_policy(
     prepared: Option<&PreparedExecutionInputs>,
     fact_policy: EquivalenceFactPolicy,
 ) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
+    #[cfg(feature = "h3-private-uat")]
+    if let Some(prepared) = prepared.filter(|prepared| prepared.h3_private_ingress_grant.is_some())
+    {
+        return resolve_private_h3_execution_plans(config, request, devices, prepared);
+    }
     let overlaid_config = prepared_config_overlay(config, request, prepared);
     let config = overlaid_config.as_ref().unwrap_or(config);
     let family = config
@@ -1256,6 +1320,154 @@ fn resolve_execution_plans_with_policy(
         return Err(insufficient_vram_error(&rejections));
     }
     Ok(candidates)
+}
+
+#[cfg(feature = "h3-private-uat")]
+fn resolve_private_h3_execution_plans(
+    config: &Config,
+    request: &GenerateRequest,
+    devices: &[DeviceFact],
+    prepared: &PreparedExecutionInputs,
+) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
+    let grant = prepared.h3_private_ingress_grant.as_ref().ok_or_else(|| {
+        ExecutionPlanError::PreparedInputsStale(
+            "MiniMax H3 private planning lost its authenticated ingress grant".into(),
+        )
+    })?;
+    grant
+        .validate_for_request(request)
+        .map_err(ExecutionPlanError::PreparedInputsStale)?;
+    if prepared
+        .h3_private_admission_by_device
+        .keys()
+        .collect::<Vec<_>>()
+        != prepared.by_device.keys().collect::<Vec<_>>()
+    {
+        return Err(ExecutionPlanError::PreparedInputsStale(
+            "MiniMax H3 prepared device routes and admission evidence diverged".into(),
+        ));
+    }
+    let eligible = eligible_devices_for_private_h3(config, request, devices)?;
+    let available_host_headroom_bytes =
+        crate::h3_admission::current_h3_host_memory().headroom_bytes();
+    let mut plans = Vec::new();
+    let mut rejections = Vec::new();
+    for device in eligible {
+        let Some(evidence) = prepared.h3_private_admission_by_device.get(&device.id) else {
+            continue;
+        };
+        if let Err(error) = evidence.validate_for(
+            request,
+            &device.id,
+            device.ordinal,
+            device.compute_capability.ok_or_else(|| {
+                ExecutionPlanError::PreparedInputsStale(format!(
+                    "MiniMax H3 device '{}' lost its CUDA compute capability",
+                    device.id
+                ))
+            })?,
+            device.available_vram_bytes,
+            available_host_headroom_bytes,
+        ) {
+            rejections.push(DeviceInfeasibility {
+                device_id: device.id,
+                predicted_peak_bytes: evidence.predicted_device_peak_bytes(),
+                available_bytes: device.available_vram_bytes,
+                advice: Some(format!(
+                    "private admission evidence no longer fits: {error:#}"
+                )),
+            });
+            continue;
+        }
+        let inputs = prepared.by_device.get(&device.id).ok_or_else(|| {
+            ExecutionPlanError::PreparedInputsStale(format!(
+                "MiniMax H3 device '{}' lost its prepared engine inputs",
+                device.id
+            ))
+        })?;
+        let mut expected_engine_config =
+            mold_inference::FrozenEngineConfig::resolve(&request.model, config);
+        expected_engine_config.family = mold_core::minimax_h3::FAMILY.to_string();
+        expected_engine_config.h3_factory_authority =
+            Some(evidence.base_factory_authority().clone());
+        expected_engine_config.attention_backend = evidence.attention().generic_backend;
+        expected_engine_config.attention_chunk = evidence.attention().generic_chunk;
+        if inputs.engine_config != expected_engine_config {
+            return Err(ExecutionPlanError::PreparedInputsStale(format!(
+                "MiniMax H3 engine semantics changed after admission for '{}'",
+                device.id
+            )));
+        }
+        let attention_backend = match inputs.engine_config.attention_backend {
+            mold_inference::attention::AttentionBackend::Math => AttentionBackend::Math,
+            mold_inference::attention::AttentionBackend::Flash => AttentionBackend::Flash,
+        };
+        let offload_mode = if evidence.base_factory_authority().block_offload() {
+            OffloadMode::Block
+        } else {
+            OffloadMode::None
+        };
+        let determinism_class = DeterminismClass::CpuSeededCrossBackend;
+        let components = BTreeMap::new();
+        let effective_placement = EffectivePlacement {
+            components: BTreeMap::new(),
+        };
+        let execution_environment = execution_environment_descriptor(
+            &device,
+            &request.model,
+            mold_core::minimax_h3::FAMILY,
+            evidence.component_set_identity_sha256(),
+            &components,
+            &[],
+            &inputs.engine_config,
+            attention_backend,
+            mold_inference::LoadStrategy::Sequential,
+            offload_mode,
+            request.resolved_output_format(),
+            determinism_class,
+            true,
+            &BTreeMap::new(),
+        )?;
+        let execution_equivalence_fingerprint = execution_environment.fingerprint();
+        plans.push(ResolvedExecutionPlan {
+            device_id: device.id,
+            device_ordinal: device.ordinal,
+            model_family: mold_core::minimax_h3::FAMILY.to_string(),
+            model_fingerprint: evidence.component_set_identity_sha256().to_string(),
+            effective_placement,
+            components,
+            engine_paths: inputs.engine_paths.clone(),
+            engine_config: inputs.engine_config.clone(),
+            admission_paths: inputs.engine_paths.clone(),
+            admission_engine_config: inputs.engine_config.clone(),
+            effective_loras: Vec::new(),
+            attention_backend,
+            engine_load_strategy: mold_inference::LoadStrategy::Sequential,
+            offload_mode,
+            predicted_vram_peak_bytes: evidence.predicted_device_peak_bytes(),
+            admitted_available_vram_bytes: evidence.admitted_available_device_bytes(),
+            learned_vram_envelope_bytes: 0,
+            predicted_host_increment_bytes: evidence.predicted_host_increment_bytes(),
+            determinism_class,
+            execution_environment,
+            execution_equivalence_fingerprint,
+            execution_fingerprint: evidence.execution_fingerprint().to_string(),
+        });
+    }
+    if plans.is_empty() {
+        if rejections.iter().any(|rejection| {
+            rejection
+                .advice
+                .as_deref()
+                .is_some_and(|advice| advice.contains("host"))
+        }) {
+            return Err(ExecutionPlanError::PreparedInputsStale(
+                "MiniMax H3 host-memory capacity changed after private admission".into(),
+            ));
+        }
+        return Err(insufficient_vram_error(&rejections));
+    }
+    Ok(plans)
 }
 
 /// LTX-2 rejections name a shape that does fit on this device, so the user is
@@ -1437,6 +1649,18 @@ pub fn validate_before_cuda(
     request: &GenerateRequest,
     prepared: Option<&PreparedExecutionInputs>,
 ) -> Result<(), ExecutionPlanError> {
+    #[cfg(feature = "h3-private-uat")]
+    if let Some(prepared) = prepared.filter(|prepared| prepared.h3_private_ingress_grant.is_some())
+    {
+        return validate_private_h3_before_cuda(
+            plan,
+            worker_device_id,
+            worker_ordinal,
+            config,
+            request,
+            prepared,
+        );
+    }
     require_execution_plan_activation(&request.model, &plan.model_family)?;
     if plan.device_id != worker_device_id || plan.device_ordinal != worker_ordinal {
         return Err(ExecutionPlanError::PlanInvalidated(format!(
@@ -1476,6 +1700,81 @@ pub fn validate_before_cuda(
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "h3-private-uat")]
+fn validate_private_h3_before_cuda(
+    plan: &ResolvedExecutionPlan,
+    worker_device_id: &str,
+    worker_ordinal: usize,
+    config: &Config,
+    request: &GenerateRequest,
+    prepared: &PreparedExecutionInputs,
+) -> Result<(), ExecutionPlanError> {
+    if plan.device_id != worker_device_id || plan.device_ordinal != worker_ordinal {
+        return Err(ExecutionPlanError::PlanInvalidated(format!(
+            "lease targets {worker_device_id}/gpu:{worker_ordinal}, plan targets {}/gpu:{}",
+            plan.device_id, plan.device_ordinal
+        )));
+    }
+    let grant = prepared.h3_private_ingress_grant.as_ref().ok_or_else(|| {
+        ExecutionPlanError::PlanInvalidated(
+            "MiniMax H3 pre-CUDA validation lost its ingress grant".into(),
+        )
+    })?;
+    grant
+        .validate_for_request(request)
+        .map_err(ExecutionPlanError::PlanInvalidated)?;
+    let evidence = prepared
+        .h3_private_admission_by_device
+        .get(worker_device_id)
+        .ok_or_else(|| {
+            ExecutionPlanError::PlanInvalidated(format!(
+                "MiniMax H3 pre-CUDA validation has no evidence for '{worker_device_id}'"
+            ))
+        })?;
+    // This coordinator/acceptance fence proves immutable request and plan
+    // identity only. The final owner fence revalidates the evidence against
+    // the worker's actual compute capability and an authoritative post-drop
+    // device/host capacity sample immediately before private preparation;
+    // the run path repeats the exact-peak physical check before allocation.
+    evidence.resolve_request(request).map_err(|error| {
+        ExecutionPlanError::PlanInvalidated(format!(
+            "MiniMax H3 request changed after private admission: {error:#}"
+        ))
+    })?;
+    let inputs = prepared.by_device.get(worker_device_id).ok_or_else(|| {
+        ExecutionPlanError::PlanInvalidated(format!(
+            "MiniMax H3 pre-CUDA validation has no prepared route for '{worker_device_id}'"
+        ))
+    })?;
+    let mut expected_engine_config =
+        mold_inference::FrozenEngineConfig::resolve(&request.model, config);
+    expected_engine_config.family = mold_core::minimax_h3::FAMILY.to_string();
+    expected_engine_config.h3_factory_authority = Some(evidence.base_factory_authority().clone());
+    expected_engine_config.attention_backend = evidence.attention().generic_backend;
+    expected_engine_config.attention_chunk = evidence.attention().generic_chunk;
+    let exact = plan.model_family == mold_core::minimax_h3::FAMILY
+        && plan.model_fingerprint == evidence.component_set_identity_sha256()
+        && plan.components.is_empty()
+        && plan.engine_paths == inputs.engine_paths
+        && plan.engine_config == inputs.engine_config
+        && plan.engine_config == expected_engine_config
+        && plan.admission_paths == inputs.engine_paths
+        && plan.admission_engine_config == inputs.engine_config
+        && plan.effective_loras.is_empty()
+        && plan.execution_fingerprint == evidence.execution_fingerprint()
+        && plan.predicted_vram_peak_bytes == evidence.predicted_device_peak_bytes()
+        && plan.admitted_available_vram_bytes == evidence.admitted_available_device_bytes()
+        && plan.predicted_host_increment_bytes == evidence.predicted_host_increment_bytes()
+        && plan.engine_config.h3_factory_authority.as_ref()
+            == Some(evidence.base_factory_authority());
+    if !exact {
+        return Err(ExecutionPlanError::PlanInvalidated(
+            "MiniMax H3 plan changed from immutable private admission evidence".into(),
+        ));
     }
     Ok(())
 }
@@ -1527,6 +1826,12 @@ pub fn materialized_placement(plan: &ResolvedExecutionPlan) -> DevicePlacement {
 /// ordered default/request LoRA stack in the payload actually consumed by the
 /// engine; later config edits cannot inject or reorder adapters.
 pub fn materialize_request(plan: &ResolvedExecutionPlan, request: &mut GenerateRequest) {
+    #[cfg(feature = "h3-private-uat")]
+    if plan.engine_config.h3_factory_authority.is_some()
+        && mold_core::minimax_h3::is_family(&plan.model_family)
+    {
+        return;
+    }
     request.placement = Some(materialized_placement(plan));
     let loras = plan
         .effective_loras
@@ -4840,6 +5145,10 @@ mod tests {
             )]),
             retryable_device_failures: BTreeMap::new(),
             model_config_overlay: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_ingress_grant: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_admission_by_device: BTreeMap::new(),
         };
 
         let plans = resolve_execution_plans_with_prepared(
@@ -4922,6 +5231,10 @@ mod tests {
             )]),
             retryable_device_failures: BTreeMap::new(),
             model_config_overlay: Some(Arc::new(model_config)),
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_ingress_grant: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_admission_by_device: BTreeMap::new(),
         };
 
         assert!(matches!(
@@ -4976,6 +5289,10 @@ mod tests {
             )]),
             retryable_device_failures: BTreeMap::new(),
             model_config_overlay: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_ingress_grant: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_admission_by_device: BTreeMap::new(),
         };
 
         let mut changed_config = config.clone();
@@ -5438,6 +5755,10 @@ mod tests {
             )]),
             retryable_device_failures: BTreeMap::new(),
             model_config_overlay: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_ingress_grant: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_admission_by_device: BTreeMap::new(),
         };
         warm_execution_equivalence_cache(&config, &request, &prepared);
 

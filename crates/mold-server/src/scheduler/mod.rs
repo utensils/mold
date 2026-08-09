@@ -133,6 +133,13 @@ pub enum WorkerEvent {
         owner_epoch: u64,
         worker_generation: u64,
     },
+    /// Request one fresh host-memory sample reconciled with every Scheduler V2
+    /// reservation. The reply restores only this lease's own reservation so a
+    /// worker cannot spend headroom already promised to a peer GPU.
+    HostMemoryRecheck {
+        fence: LeaseFence,
+        reply: std::sync::mpsc::SyncSender<Result<u64, String>>,
+    },
     FollowupReady {
         work: Box<ScheduledOwnerWork>,
     },
@@ -643,7 +650,7 @@ enum PreparationState {
 enum PreparationEvent {
     Ready {
         work_id: String,
-        prepared: PreparedGeneration,
+        prepared: Box<PreparedGeneration>,
     },
     Failed {
         work_id: String,
@@ -654,6 +661,7 @@ enum PreparationEvent {
 #[derive(Clone, Debug, Default)]
 struct PreparedGeneration {
     expanded_prompt: Option<String>,
+    resolved_seed: Option<u64>,
     execution_inputs: Option<crate::execution_plan::PreparedExecutionInputs>,
 }
 
@@ -663,9 +671,20 @@ struct PreparedGeneration {
 /// Keep all pre-stage output reduction here so that execution never exposes a
 /// preview whose later stages have not yet frozen and executed the same plans.
 fn compose_prepared_generation(pending: &mut PendingGeneration, prepared: PreparedGeneration) {
+    if let Some(seed) = prepared.resolved_seed {
+        pending.job.request.seed = Some(seed);
+    }
     if let Some(expanded_prompt) = prepared.expanded_prompt {
         pending.job.request.original_prompt = Some(pending.job.request.prompt.clone());
         pending.job.request.prompt = expanded_prompt;
+    }
+    #[cfg(feature = "h3-private-uat")]
+    if let Some(grant) = prepared
+        .execution_inputs
+        .as_ref()
+        .and_then(|inputs| inputs.h3_private_ingress_grant.clone())
+    {
+        pending.job.h3_private_ingress_grant = Some(grant);
     }
     pending.prepared_inputs = prepared.execution_inputs;
 }
@@ -679,6 +698,7 @@ trait DependencyPreparer: Send + Sync {
         work_id: String,
         request: mold_core::GenerateRequest,
         progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+        context: crate::variant_dependencies::DependencyPreparationContext,
     ) -> PreparationFuture;
 }
 
@@ -691,6 +711,7 @@ impl DependencyPreparer for PostUpscalePreparer {
         work_id: String,
         request: mold_core::GenerateRequest,
         progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+        context: crate::variant_dependencies::DependencyPreparationContext,
     ) -> PreparationFuture {
         Box::pin(async move {
             crate::queue::ensure_post_upscale_model_downloaded(&state, &request, progress.as_ref())
@@ -700,11 +721,21 @@ impl DependencyPreparer for PostUpscalePreparer {
                 &work_id,
                 &request,
                 progress.as_ref(),
+                context,
             )
             .await?;
+            #[cfg(feature = "h3-private-uat")]
+            let resolved_seed = execution_inputs
+                .h3_private_admission_by_device
+                .values()
+                .next()
+                .map(mold_inference::H3PrivateFl2VaAdmissionEvidence::seed);
+            #[cfg(not(feature = "h3-private-uat"))]
+            let resolved_seed = None;
             if request.expand != Some(true) {
                 return Ok(PreparedGeneration {
                     expanded_prompt: None,
+                    resolved_seed,
                     execution_inputs: Some(execution_inputs),
                 });
             }
@@ -715,6 +746,7 @@ impl DependencyPreparer for PostUpscalePreparer {
                 // resolved before queue admission by the route.
                 return Ok(PreparedGeneration {
                     expanded_prompt: None,
+                    resolved_seed,
                     execution_inputs: Some(execution_inputs),
                 });
             }
@@ -787,6 +819,7 @@ impl DependencyPreparer for PostUpscalePreparer {
             }?;
             Ok(PreparedGeneration {
                 expanded_prompt: result.expanded.first().cloned(),
+                resolved_seed,
                 execution_inputs: Some(execution_inputs),
             })
         })
@@ -890,6 +923,10 @@ enum ReservationState {
 struct HostReservation {
     bytes: u64,
     state: ReservationState,
+    /// H3 announces its first allocation before gradual model/host loading.
+    /// No OS sample can prove the complete frozen increment is reflected, so
+    /// this reservation remains charged until its lease settles.
+    charge_until_release: bool,
 }
 
 impl HostMemoryLedger {
@@ -938,11 +975,13 @@ impl HostMemoryLedger {
         // to be present in `available_bytes`. A concurrent/later commit stays
         // charged until a following sample proves reflection.
         for reservation in self.reservations.values_mut() {
-            if matches!(
+            if !reservation.charge_until_release
+                && matches!(
                 reservation.state,
                 ReservationState::CommittedAfterSample { commit_sequence }
                     if commit_sequence < collection_started_sequence
-            ) {
+                )
+            {
                 reservation.state = ReservationState::ReflectedBySample;
             }
         }
@@ -973,6 +1012,35 @@ impl HostMemoryLedger {
         )
     }
 
+    fn headroom_for_reserved_work(&self, work_id: &str) -> Option<u64> {
+        self.reservations.get(work_id)?;
+        let Some(sample) = self.sample else {
+            return Some(0);
+        };
+        // A worker announces AllocationCommitted immediately before its first
+        // CUDA construction, while model and host allocations continue after
+        // that point. A fresh OS sample therefore cannot prove that a peer's
+        // entire frozen host increment is reflected. Keep every live peer
+        // reservation charged until that lease settles.
+        let peer_reserved_bytes = self
+            .reservations
+            .iter()
+            .filter(|(candidate, _)| candidate.as_str() != work_id)
+            .map(|(_, reservation)| reservation.bytes)
+            .sum::<u64>();
+        Some(
+            sample.available_bytes.saturating_sub(
+                self.safety_floor_bytes()
+                    .saturating_add(peer_reserved_bytes),
+            ),
+        )
+    }
+
+    fn collect_headroom_for_reserved_work(&mut self, work_id: &str) -> Option<u64> {
+        self.collect_now();
+        self.headroom_for_reserved_work(work_id)
+    }
+
     fn snapshot(&self) -> HostMemorySnapshot {
         HostMemorySnapshot {
             headroom_bytes: self.headroom_bytes(),
@@ -986,6 +1054,7 @@ impl HostMemoryLedger {
         plan: &Plan,
         state_version: u64,
         plan_version: u64,
+        charge_until_release: &BTreeSet<String>,
     ) -> Result<(), GrantFenceError> {
         plan.validate_for_grant(
             state_version,
@@ -1003,6 +1072,7 @@ impl HostMemoryLedger {
                 HostReservation {
                     bytes: item.host_ram_bytes,
                     state: ReservationState::Reserved,
+                    charge_until_release: charge_until_release.contains(item.work_id.as_str()),
                 },
             );
         }
@@ -1549,13 +1619,22 @@ impl Coordinator {
             let state = self.state.clone();
             let request = pending.job.request.clone();
             let progress = pending.job.progress_tx.clone();
+            #[cfg(feature = "h3-private-uat")]
+            let context = crate::variant_dependencies::DependencyPreparationContext {
+                h3_private_ingress_grant: pending.job.h3_private_ingress_grant.clone(),
+            };
+            #[cfg(not(feature = "h3-private-uat"))]
+            let context = crate::variant_dependencies::DependencyPreparationContext::default();
             let preparer = self.preparer.clone();
             let tx = self.preparation_tx.clone();
             self.preparation_tasks.spawn(async move {
-                let event = match preparer.prepare(state, id.clone(), request, progress).await {
+                let event = match preparer
+                    .prepare(state, id.clone(), request, progress, context)
+                    .await
+                {
                     Ok(prepared) => PreparationEvent::Ready {
                         work_id: id,
-                        prepared,
+                        prepared: Box::new(prepared),
                     },
                     Err(error) => PreparationEvent::Failed { work_id: id, error },
                 };
@@ -1573,7 +1652,7 @@ impl Coordinator {
                 if pending.preparation != PreparationState::Preparing {
                     return;
                 }
-                compose_prepared_generation(pending, prepared);
+                compose_prepared_generation(pending, *prepared);
                 pending.preparation = PreparationState::Ready;
                 pending.preparation_refresh_observation = None;
                 if pending
@@ -1770,6 +1849,26 @@ impl Coordinator {
                         "ignoring allocation commit for unknown lease"
                     );
                 }
+            }
+            WorkerEvent::HostMemoryRecheck { fence, reply } => {
+                let valid = self.leases.get(&fence.device_id).is_some_and(|lease| {
+                    lease.work_id == fence.work_id
+                        && lease.plan_version == fence.plan_version
+                        && lease.owner_epoch == fence.owner_epoch
+                        && lease.worker_generation == fence.worker_generation
+                });
+                let result = if valid {
+                    self.memory
+                        .collect_headroom_for_reserved_work(&fence.work_id)
+                        .ok_or_else(|| {
+                            "host-memory recheck lost the exact scheduler reservation".to_string()
+                        })
+                } else {
+                    Err("host-memory recheck rejected a stale owner lease".to_string())
+                };
+                let _ = reply.send(result);
+                self.mutate(immediate);
+                self.replan_and_publish_with(PlanningPass::Admission);
             }
             WorkerEvent::FollowupReady { work } => {
                 self.enqueue_owner_work(*work, immediate);
@@ -4183,10 +4282,26 @@ impl Coordinator {
                 )
                 .is_ok()
             });
+            let charge_until_release: BTreeSet<String> = plan
+                .immediate_leases
+                .iter()
+                .filter_map(|lease| {
+                    let work_id = lease.work_id.to_string();
+                    let execution = generation_plans
+                        .get(&work_id)
+                        .and_then(|plans| exact_leased_execution_plan(plans, lease))?;
+                    mold_core::minimax_h3::is_family(&execution.model_family).then_some(work_id)
+                })
+                .collect();
             if !grants_valid
                 || self
                     .memory
-                    .try_reserve(&plan, self.state_version, self.plan_version)
+                    .try_reserve(
+                        &plan,
+                        self.state_version,
+                        self.plan_version,
+                        &charge_until_release,
+                    )
                     .is_err()
             {
                 self.state_version = self.state_version.saturating_add(1);
@@ -5162,6 +5277,8 @@ fn gpu_job_from_generation(
         events: state.events.clone(),
         execution_plan,
         prepared_execution_inputs,
+        #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+        h3_prepared_attempt: None,
         lease: Some(lease),
         batch_child: job.batch_child,
     }
@@ -5174,6 +5291,10 @@ fn generation_and_prepared_from_gpu_job(
     Option<crate::execution_plan::PreparedExecutionInputs>,
 ) {
     let prepared = job.prepared_execution_inputs;
+    #[cfg(feature = "h3-private-uat")]
+    let h3_private_ingress_grant = prepared
+        .as_ref()
+        .and_then(|inputs| inputs.h3_private_ingress_grant.clone());
     (
         GenerationJob {
             id: job.id,
@@ -5184,6 +5305,8 @@ fn generation_and_prepared_from_gpu_job(
             result_tx: job.result_tx,
             output_dir: job.output_dir,
             batch_child: job.batch_child,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_ingress_grant,
         },
         prepared,
     )
@@ -6070,6 +6193,7 @@ mod tests {
             _work_id: String,
             _request: mold_core::GenerateRequest,
             _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+            _context: crate::variant_dependencies::DependencyPreparationContext,
         ) -> PreparationFuture {
             Box::pin(async { Ok(PreparedGeneration::default()) })
         }
@@ -6243,6 +6367,8 @@ mod tests {
                 result_tx,
                 output_dir: None,
                 batch_child: None,
+                #[cfg(feature = "h3-private-uat")]
+                h3_private_ingress_grant: None,
             },
             result_rx,
         )
@@ -6413,10 +6539,11 @@ mod tests {
         coordinator.handle_preparation_event(
             PreparationEvent::Ready {
                 work_id: "expanded".to_string(),
-                prepared: PreparedGeneration {
+                prepared: Box::new(PreparedGeneration {
                     expanded_prompt: Some("expanded prompt".to_string()),
+                    resolved_seed: None,
                     execution_inputs: None,
-                },
+                }),
             },
             &mut immediate,
         );
@@ -6514,7 +6641,7 @@ mod tests {
         let started = ledger.begin_collection();
         ledger.publish_sample(started, 40 << 30, 20 << 30);
         assert_eq!(
-            ledger.try_reserve(&plan, 3, 9),
+            ledger.try_reserve(&plan, 3, 9, &BTreeSet::new()),
             Err(GrantFenceError::StalePlan)
         );
         assert!(ledger.reservations.is_empty());
@@ -6555,7 +6682,7 @@ mod tests {
 
         let raced_collection = ledger.begin_collection();
         assert_eq!(
-            ledger.try_reserve(&stale_plan, 3, 9),
+            ledger.try_reserve(&stale_plan, 3, 9, &BTreeSet::new()),
             Err(GrantFenceError::StalePlan)
         );
         assert!(
@@ -6567,7 +6694,7 @@ mod tests {
         snapshot.host_memory = ledger.snapshot();
         let fresh_plan = planner.plan(&snapshot).expect("fresh two-lease plan");
         ledger
-            .try_reserve(&fresh_plan, 3, 9)
+            .try_reserve(&fresh_plan, 3, 9, &BTreeSet::new())
             .expect("fresh aggregate reservation");
         assert_eq!(ledger.reservations.len(), 2);
     }
@@ -6638,8 +6765,96 @@ mod tests {
         snapshot.host_memory = ledger.snapshot();
         let plan = planner.plan(&snapshot).unwrap();
         assert_eq!(plan.immediate_leases.len(), 1);
-        ledger.try_reserve(&plan, 1, 1).unwrap();
+        ledger.try_reserve(&plan, 1, 1, &BTreeSet::new()).unwrap();
         assert_eq!(ledger.reservations.len(), 1);
+    }
+
+    #[test]
+    fn live_owner_headroom_subtracts_peer_lease_after_fresh_pressure() {
+        let mut ledger = unsampled_memory(48 << 30, 33 << 30);
+        let initial = ledger.begin_collection();
+        ledger.publish_sample(initial, 48 << 30, 33 << 30);
+        for work_id in ["h3-a", "h3-b"] {
+            ledger.reservations.insert(
+                work_id.to_string(),
+                HostReservation {
+                    bytes: 10 << 30,
+                    state: ReservationState::Reserved,
+                    charge_until_release: false,
+                },
+            );
+        }
+        assert_eq!(ledger.headroom_for_reserved_work("h3-a"), Some(15 << 30));
+        assert_eq!(ledger.headroom_for_reserved_work("h3-b"), Some(15 << 30));
+
+        let pressured = ledger.begin_collection();
+        ledger.publish_sample(pressured, 48 << 30, 23 << 30);
+        assert_eq!(
+            ledger.headroom_for_reserved_work("h3-a"),
+            Some(5 << 30),
+            "the owner may restore its own reservation but must keep the peer charged"
+        );
+        assert_eq!(ledger.headroom_for_reserved_work("h3-b"), Some(5 << 30));
+
+        ledger.commit("h3-b");
+        let after_premature_commit = ledger.begin_collection();
+        ledger.publish_sample(after_premature_commit, 48 << 30, 23 << 30);
+        assert_eq!(
+            ledger.reservations["h3-b"].state,
+            ReservationState::ReflectedBySample
+        );
+        assert_eq!(
+            ledger.headroom_for_reserved_work("h3-a"),
+            Some(5 << 30),
+            "a pre-allocation commit notification cannot make the peer reservation spendable"
+        );
+    }
+
+    #[test]
+    fn h3_reservation_stays_charged_until_release_and_blocks_ordinary_work() {
+        let mut ledger = unsampled_memory(48 << 30, 33 << 30);
+        let initial = ledger.begin_collection();
+        ledger.publish_sample(initial, 48 << 30, 33 << 30);
+        ledger.reservations.insert(
+            "h3".to_string(),
+            HostReservation {
+                bytes: 10 << 30,
+                state: ReservationState::Reserved,
+                charge_until_release: true,
+            },
+        );
+
+        ledger.commit("h3");
+        let after_commit = ledger.begin_collection();
+        ledger.publish_sample(after_commit, 48 << 30, 23 << 30);
+        assert!(matches!(
+            ledger.reservations["h3"].state,
+            ReservationState::CommittedAfterSample { .. }
+        ));
+        assert_eq!(ledger.headroom_bytes(), 5 << 30);
+
+        let mut snapshot = PlannerSnapshot::new(
+            1,
+            1,
+            0,
+            ledger.headroom_bytes(),
+            vec![DeviceSnapshot::idle("gpu-b", 24 << 30)],
+            vec![WorkSnapshot::new(
+                "ordinary",
+                0,
+                vec![CandidatePlacement::new("gpu-b", "model", 6 << 30)],
+            )],
+        );
+        snapshot.host_memory = ledger.snapshot();
+        let plan = Planner::default().plan(&snapshot).unwrap();
+        assert!(plan.immediate_leases.is_empty());
+        assert_eq!(
+            plan.blocked_reason(&WorkId::new("ordinary")),
+            Some(&BlockedReason::InsufficientHostRam)
+        );
+
+        ledger.release("h3");
+        assert_eq!(ledger.headroom_bytes(), 15 << 30);
     }
 
     #[test]
@@ -6652,6 +6867,7 @@ mod tests {
             HostReservation {
                 bytes: 8 << 30,
                 state: ReservationState::Reserved,
+                charge_until_release: false,
             },
         );
         assert_eq!(ledger.headroom_bytes(), 16 << 30);
@@ -6685,6 +6901,7 @@ mod tests {
             HostReservation {
                 bytes: 8 << 30,
                 state: ReservationState::Reserved,
+                charge_until_release: false,
             },
         );
         for _ in 0..3 {
@@ -9359,6 +9576,7 @@ mod tests {
                 state: ReservationState::CommittedAfterSample {
                     commit_sequence: coordinator.memory.sequence,
                 },
+                charge_until_release: false,
             },
         );
 
@@ -9502,6 +9720,7 @@ mod tests {
                     state: ReservationState::CommittedAfterSample {
                         commit_sequence: coordinator.memory.sequence,
                     },
+                    charge_until_release: false,
                 },
             );
             let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
@@ -9615,6 +9834,7 @@ mod tests {
                 state: ReservationState::CommittedAfterSample {
                     commit_sequence: coordinator.memory.sequence,
                 },
+                charge_until_release: false,
             },
         );
         coordinator.replan_and_publish();
@@ -9772,6 +9992,7 @@ mod tests {
                 state: ReservationState::CommittedAfterSample {
                     commit_sequence: coordinator.memory.sequence,
                 },
+                charge_until_release: false,
             },
         );
         let conflicting_authority = mold_core::QueuePlan {
@@ -11175,6 +11396,7 @@ mod tests {
             _work_id: String,
             request: mold_core::GenerateRequest,
             _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+            _context: crate::variant_dependencies::DependencyPreparationContext,
         ) -> PreparationFuture {
             let release = self.release_blocked.clone();
             Box::pin(async move {

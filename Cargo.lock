@@ -1049,8 +1049,7 @@ dependencies = [
 [[package]]
 name = "cudarc"
 version = "0.19.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42310153e06cf4cd532901f7096beb27504d681736a29ee90728ae4e2d93b2a8"
+source = "git+https://github.com/utensils/cudarc?rev=9b3b1bc276bc27c3e99343ee82db7f99705b9ed5#9b3b1bc276bc27c3e99343ee82db7f99705b9ed5"
 dependencies = [
  "float8",
  "half",
@@ -3241,6 +3240,7 @@ dependencies = [
  "candle-flash-attn",
  "candle-nn",
  "candle-transformers",
+ "cudarc 0.19.8",
  "exr",
  "fdk-aac",
  "fs2",
@@ -3284,6 +3284,7 @@ dependencies = [
  "base64 0.22.1",
  "candle-core",
  "clap",
+ "cudarc 0.19.8",
  "dirs 5.0.1",
  "filetime",
  "fs2",

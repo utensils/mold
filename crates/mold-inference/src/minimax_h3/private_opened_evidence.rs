@@ -224,6 +224,25 @@ pub(crate) struct H3PrivateComfyStorageAuthority {
     identity_sha256: String,
 }
 
+/// Payload-free snapshot produced from the exact opened component objects
+/// that remain owned by one prepared attempt. It is not executable authority;
+/// the non-Clone activation token consumes this snapshot only while the
+/// opened objects themselves are still available for the runtime owner.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct H3PrivateOpenedActivationFacts {
+    pub(crate) identity_sha256: String,
+    pub(crate) storage_identity_sha256: String,
+    pub(crate) support_identity_sha256: String,
+    pub(crate) transformer_checkpoint_identity_sha256: String,
+    pub(crate) transformer_memory_identity_sha256: String,
+    pub(crate) qwen_authority_identity_sha256: String,
+    /// Exact descriptor/staging identity for this activation only. This value
+    /// must never escape into canonical scheduler or execution identities.
+    pub(crate) vae_attempt_open_identity_sha256: String,
+    pub(crate) vae_artifact_validation_identity_sha256: String,
+    pub(crate) vae_artifact_plan_identity_sha256: String,
+}
+
 impl H3PrivateComfyStorageAuthority {
     pub(crate) fn resolve(models_root: &Path) -> Result<Self> {
         let (models_root, root_identity) = validate_storage_root(models_root)?;
@@ -352,6 +371,50 @@ impl H3PrivateComfyStorageAuthority {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn opened_activation_facts(
+        &self,
+        support: &H3PrivateQwenSupport,
+        transformer: &H3ComfyOpenedInt8Checkpoint,
+        qwen: &H3AuthenticatedQwenNvfp4Authority,
+        vae: &H3AuthenticatedComfyVaeAuthority,
+    ) -> Result<H3PrivateOpenedActivationFacts> {
+        self.validate_opened_components(support, transformer, qwen, vae)?;
+        let mut facts = H3PrivateOpenedActivationFacts {
+            identity_sha256: String::new(),
+            storage_identity_sha256: self.identity_sha256.clone(),
+            support_identity_sha256: support.support_identity_sha256().into(),
+            transformer_checkpoint_identity_sha256: transformer.checkpoint_identity_sha256().into(),
+            transformer_memory_identity_sha256: transformer
+                .memory_evidence()
+                .identity_sha256
+                .clone(),
+            qwen_authority_identity_sha256: qwen.identity_sha256().into(),
+            vae_attempt_open_identity_sha256: vae.attempt_open_identity_sha256().into(),
+            vae_artifact_validation_identity_sha256: vae
+                .artifact_validation_identity_sha256()
+                .into(),
+            vae_artifact_plan_identity_sha256: vae.artifact_plan_identity_sha256().into(),
+        };
+        let mut digest = Sha256::new();
+        digest.update(b"mold.minimax-h3.private-opened-activation-facts.v1\0");
+        for value in [
+            facts.storage_identity_sha256.as_str(),
+            facts.support_identity_sha256.as_str(),
+            facts.transformer_checkpoint_identity_sha256.as_str(),
+            facts.transformer_memory_identity_sha256.as_str(),
+            facts.qwen_authority_identity_sha256.as_str(),
+            facts.vae_attempt_open_identity_sha256.as_str(),
+            facts.vae_artifact_validation_identity_sha256.as_str(),
+            facts.vae_artifact_plan_identity_sha256.as_str(),
+        ] {
+            require_sha256(value, "private H3 opened activation fact")?;
+            digest.update((value.len() as u64).to_le_bytes());
+            digest.update(value.as_bytes());
+        }
+        facts.identity_sha256 = format!("{:x}", digest.finalize());
+        Ok(facts)
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
@@ -535,6 +598,14 @@ pub(crate) struct H3PrivatePreparedFl2VaAttempt {
     _transformer_support: H3PrivateOpenedTaskConfigAuthority,
 }
 
+/// Payload-free result of exact CPU request preprocessing for scheduler
+/// admission. The concrete normalized tensors remain local to this function
+/// and are dropped before the value crosses the inference boundary.
+pub(crate) struct H3PrivateFl2VaAdmissionPreparedRequest {
+    pub(crate) request: H3FactoryPreparedRequestInput,
+    pub(crate) seed: u64,
+}
+
 pub(crate) struct H3PrivatePreparedFl2VaFactoryInputs {
     pub(crate) prepared: H3PreparedFl2VaRequest,
     pub(crate) factory_attempt: H3FactoryPreparedAttemptInput,
@@ -571,17 +642,10 @@ impl H3PrivatePreparedFl2VaAttempt {
         storage.validate_opened_components(support, transformer, qwen, vae)?;
         let transformer_support = storage.open_task_config()?;
         transformer_support.revalidate()?;
-        let mode = contract::validate_request_contract(request, Task::Fl2va)
-            .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
-        let encoded_endpoints = collect_endpoint_bytes(request, mode)?
-            .into_iter()
-            .map(|(anchor, bytes)| (anchor, bytes.len() as u64, sha256(bytes)))
-            .collect::<Vec<_>>();
-        let prepared = prepare_request(request, progress, observer)?;
-        let factory_request =
-            prepared_request_input(request, mode, &prepared, &encoded_endpoints, support)?;
+        let (prepared, factory_request) =
+            prepare_private_fl2va_request_input(request, support, progress, observer)?;
         let raw_checkpoint = raw_checkpoint_input(transformer)?;
-        let target_budget = bind_target_budget(
+        let target_budget = build_canonical_private_fl2va_target_budget(
             &factory_request,
             &raw_checkpoint,
             support,
@@ -630,6 +694,79 @@ impl H3PrivatePreparedFl2VaAttempt {
     }
 }
 
+pub(crate) fn prepare_private_fl2va_admission_request(
+    request: &GenerateRequest,
+    support: &H3PrivateQwenSupport,
+    progress: &ProgressReporter,
+    observer: &mut dyn H3PipelineObserver,
+) -> Result<H3PrivateFl2VaAdmissionPreparedRequest> {
+    // Admission intentionally performs endpoint normalization and seeded
+    // preparation before the allocation commit. The delegated pipeline path
+    // may construct CPU-only Candle tensors, but it cannot open a CUDA device
+    // or construct a CUDA tensor.
+    let (prepared, request) =
+        prepare_private_fl2va_request_input(request, support, progress, observer)?;
+    Ok(H3PrivateFl2VaAdmissionPreparedRequest {
+        seed: prepared.seed,
+        request,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_private_fl2va_admission_attempt(
+    execution_fingerprint: &str,
+    request: H3FactoryPreparedRequestInput,
+    storage: &H3PrivateComfyStorageAuthority,
+    support: &H3PrivateQwenSupport,
+    transformer: &H3ComfyOpenedInt8Checkpoint,
+    qwen: &H3AuthenticatedQwenNvfp4Authority,
+    vae: &H3AuthenticatedComfyVaeAuthority,
+    bounds: &H3PrivateQualifiedRuntimeBounds,
+) -> Result<H3FactoryPreparedAttemptInput> {
+    require_sha256(execution_fingerprint, "private H3 execution fingerprint")?;
+    bounds.validate()?;
+    storage.validate_opened_components(support, transformer, qwen, vae)?;
+    let transformer_support = storage.open_task_config()?;
+    transformer_support.revalidate()?;
+    let raw_checkpoint = raw_checkpoint_input(transformer)?;
+    let target_budget = build_canonical_private_fl2va_target_budget(
+        &request,
+        &raw_checkpoint,
+        support,
+        qwen,
+        vae,
+        &transformer_support,
+        bounds,
+    )?;
+    let mut attempt = H3FactoryPreparedAttemptInput {
+        identity_sha256: String::new(),
+        execution_fingerprint: execution_fingerprint.into(),
+        request,
+        raw_checkpoint,
+        target_budget,
+    };
+    attempt.identity_sha256 = expected_h3_factory_prepared_attempt_identity(&attempt);
+    Ok(attempt)
+}
+
+fn prepare_private_fl2va_request_input(
+    request: &GenerateRequest,
+    support: &H3PrivateQwenSupport,
+    progress: &ProgressReporter,
+    observer: &mut dyn H3PipelineObserver,
+) -> Result<(H3PreparedFl2VaRequest, H3FactoryPreparedRequestInput)> {
+    let mode = contract::validate_request_contract(request, Task::Fl2va)
+        .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
+    let encoded_endpoints = collect_endpoint_bytes(request, mode)?
+        .into_iter()
+        .map(|(anchor, bytes)| (anchor, bytes.len() as u64, sha256(bytes)))
+        .collect::<Vec<_>>();
+    let prepared = prepare_request(request, progress, observer)?;
+    let factory_request =
+        prepared_request_input(request, mode, &prepared, &encoded_endpoints, support)?;
+    Ok((prepared, factory_request))
+}
+
 impl H3PrivatePreparedFl2VaFactoryInputs {
     /// Revalidate the complete one-shot preparation without reopening any
     /// artifact path. The task-config descriptor remains shared-locked inside
@@ -675,6 +812,30 @@ impl H3PrivatePreparedFl2VaFactoryInputs {
 
     pub(crate) fn target_budget_identity_sha256(&self) -> &str {
         &self.factory_attempt.target_budget.identity_sha256
+    }
+
+    pub(crate) fn execution_fingerprint(&self) -> &str {
+        &self.factory_attempt.execution_fingerprint
+    }
+
+    pub(crate) fn predicted_device_peak_bytes(&self) -> u64 {
+        self.factory_attempt
+            .target_budget
+            .predicted_device_peak_bytes
+    }
+
+    pub(crate) fn predicted_host_increment_bytes(&self) -> u64 {
+        self.factory_attempt
+            .target_budget
+            .predicted_host_increment_bytes
+    }
+
+    pub(crate) fn factory_attempt_input(&self) -> &H3FactoryPreparedAttemptInput {
+        &self.factory_attempt
+    }
+
+    pub(crate) fn budget_echo_input(&self) -> &H3FactoryExecutionBudgetEchoInput {
+        &self.budget_echo
     }
 
     pub(crate) fn into_runtime_parts(
@@ -989,7 +1150,7 @@ fn validate_fl2va_vae_contract(task: Task, canonical_model: &str) -> Result<()> 
     Ok(())
 }
 
-fn bind_target_budget(
+fn build_canonical_private_fl2va_target_budget(
     request: &H3FactoryPreparedRequestInput,
     checkpoint: &H3FactoryRawCheckpointInput,
     support: &H3PrivateQwenSupport,
@@ -1364,7 +1525,9 @@ fn bind_target_budget(
         audio_vae_resident_device_bytes: vae_memory.audio.resident_device_weight_bytes,
         attempt_resident_vae_device_bytes: retained_vaes,
         vae_construction_device_workspace_bytes: bounds.vae_construction_device_workspace_bytes,
-        vae_memory_evidence_identity_sha256: vae.identity_sha256().into(),
+        vae_memory_evidence_identity_sha256: vae
+            .artifact_validation_identity_sha256()
+            .into(),
         qwen_device_parameter_bytes,
         qwen_activation_device_bytes,
         qwen_output_state_device_bytes,

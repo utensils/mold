@@ -420,6 +420,11 @@ pub struct GpuJob {
     /// All per-device dependency-prepared inputs retained across a fenced
     /// transport rejection or pre-CUDA plan invalidation.
     pub prepared_execution_inputs: Option<crate::execution_plan::PreparedExecutionInputs>,
+    /// Opaque one-shot private runtime state. It is created only for the final
+    /// owner handoff and is deliberately absent from scheduler, registry, and
+    /// cache types.
+    #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+    pub(crate) h3_prepared_attempt: Option<crate::h3_private_bridge::BoxedH3PreparedAttempt>,
     /// Version fence proving this job was granted by the authoritative
     /// scheduler after the worker published the matching Ready generation.
     /// `None` exists only for legacy unit tests and the single-GPU adapter.

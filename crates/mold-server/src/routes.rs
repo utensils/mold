@@ -760,19 +760,20 @@ pub(crate) async fn require_server_generation_request_activation(
     Ok(())
 }
 
+struct PreparedGenerationRoute {
+    output_dir: Option<std::path::PathBuf>,
+    warnings: RequestWarnings,
+    preferred_gpu: Option<usize>,
+    resolved_references: Option<crate::reference_uploads::ResolvedReferenceSet>,
+    #[cfg(feature = "h3-private-uat")]
+    h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
+}
+
 async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
     authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
-) -> Result<
-    (
-        Option<std::path::PathBuf>,
-        RequestWarnings,
-        Option<usize>,
-        Option<crate::reference_uploads::ResolvedReferenceSet>,
-    ),
-    ApiError,
-> {
+) -> Result<PreparedGenerationRoute, ApiError> {
     // Collapse every released H3 alias to one exact task/layout identity
     // before activation, upload scope, admission, placement, queue, metadata,
     // and retry state can observe the request. This is deliberately a no-op
@@ -790,8 +791,26 @@ async fn prepare_generation(
              re-run the CLI with --local so the EXR sidecar is written on your machine",
         ));
     }
-    let family = require_server_model_activation(state, &request.model).await?;
-    require_server_generation_request_activation(state, request, family.as_deref()).await?;
+    #[cfg(feature = "h3-private-uat")]
+    if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
+        request.normalise_output_format(Some(mold_core::minimax_h3::FAMILY));
+    }
+    #[cfg(feature = "h3-private-uat")]
+    let h3_private_ingress_grant =
+        crate::h3_private_bridge::classify_h3_private_ingress(request, authenticated)?;
+    #[cfg(feature = "h3-private-uat")]
+    let private_h3_ingress = h3_private_ingress_grant.is_some();
+    #[cfg(not(feature = "h3-private-uat"))]
+    let private_h3_ingress = false;
+
+    let family = if private_h3_ingress {
+        Some(mold_core::minimax_h3::FAMILY.to_string())
+    } else {
+        require_server_model_activation(state, &request.model).await?
+    };
+    if !private_h3_ingress {
+        require_server_generation_request_activation(state, request, family.as_deref()).await?;
+    }
     if request.references.is_some() && request.batch_size > 1 {
         return Err(ApiError::with_code(
             "MiniMax H3 reference requests do not support durable server batches yet",
@@ -855,13 +874,19 @@ async fn prepare_generation(
     // A `Network` error here means Civitai/HF is unreachable — surface it
     // immediately as 502 rather than letting the user fall through to
     // a "not installed" 404 they can't act on.
-    if let Err(e) = model_manager::install_catalog_model(state, &request.model).await {
-        return Err(model_manager::install_error_to_api_error(&e));
+    if !private_h3_ingress {
+        if let Err(e) = model_manager::install_catalog_model(state, &request.model).await {
+            return Err(model_manager::install_error_to_api_error(&e));
+        }
     }
     // Resolve the model family for normalisation. `family_for_model` checks the
     // static manifest first (covers all built-in models), then configured
     // models, and finally catalog metadata (`cv:*` / `hf:*` installed above).
-    let resolved_family = require_server_model_activation(state, &request.model).await?;
+    let resolved_family = if private_h3_ingress {
+        Some(mold_core::minimax_h3::FAMILY.to_string())
+    } else {
+        require_server_model_activation(state, &request.model).await?
+    };
     // Expand only after live catalog resolution, so opaque cv:/hf: IDs use
     // their authoritative family and conditioning-aware task template.
     maybe_expand_prompt(state, request, preferred_gpu, resolved_family.as_deref()).await?;
@@ -925,7 +950,9 @@ async fn prepare_generation(
     }
     materialize_builtin_ltx2_camera_controls(state, &planned_camera_controls).await?;
 
-    let _ = model_manager::check_model_available(state, &request.model).await?;
+    if !private_h3_ingress {
+        let _ = model_manager::check_model_available(state, &request.model).await?;
+    }
 
     let (output_dir, dim_warning) = {
         let config = state.config.read().await;
@@ -950,7 +977,20 @@ async fn prepare_generation(
     };
 
     warnings.dimension = dim_warning;
-    Ok((output_dir, warnings, preferred_gpu, resolved_references))
+    #[cfg(feature = "h3-private-uat")]
+    let h3_private_ingress_grant = if h3_private_ingress_grant.is_some() {
+        crate::h3_private_bridge::classify_h3_private_ingress(request, authenticated)?
+    } else {
+        None
+    };
+    Ok(PreparedGenerationRoute {
+        output_dir,
+        warnings,
+        preferred_gpu,
+        resolved_references,
+        #[cfg(feature = "h3-private-uat")]
+        h3_private_ingress_grant,
+    })
 }
 
 pub(crate) async fn plan_builtin_ltx2_camera_controls(
@@ -1638,12 +1678,20 @@ async fn generate(
         req.negative_prompt.clone(),
         req.model.clone(),
     );
-    let (output_dir, warnings, preferred_gpu, resolved_references) = prepare_generation(
+    let prepared = prepare_generation(
         &state,
         &mut req,
         authenticated.as_ref().map(|Extension(auth)| auth),
     )
     .await?;
+    let PreparedGenerationRoute {
+        output_dir,
+        warnings,
+        preferred_gpu,
+        resolved_references,
+        #[cfg(feature = "h3-private-uat")]
+        h3_private_ingress_grant,
+    } = prepared;
     record_prompt_history(&state, &typed.0, typed.1.as_deref(), &typed.2);
 
     if req.batch_size > 1 {
@@ -1724,6 +1772,8 @@ async fn generate(
         result_tx,
         output_dir,
         batch_child: None,
+        #[cfg(feature = "h3-private-uat")]
+        h3_private_ingress_grant,
     };
 
     let _position = state
@@ -1876,6 +1926,11 @@ pub(crate) fn apply_media_headers(
         if let Some(pipeline) = video.pipeline {
             if let Ok(v) = HeaderValue::from_str(pipeline.as_str()) {
                 headers.insert("x-mold-video-pipeline", v);
+            }
+        }
+        if let Some(provenance) = video.pipeline_provenance_sha256.as_deref() {
+            if let Ok(v) = HeaderValue::from_str(provenance) {
+                headers.insert("x-mold-video-pipeline-provenance-sha256", v);
             }
         }
         if video.has_audio {
@@ -2703,12 +2758,20 @@ async fn generate_stream(
         req.negative_prompt.clone(),
         req.model.clone(),
     );
-    let (output_dir, warnings, preferred_gpu, resolved_references) = prepare_generation(
+    let prepared = prepare_generation(
         &state,
         &mut req,
         authenticated.as_ref().map(|Extension(auth)| auth),
     )
     .await?;
+    let PreparedGenerationRoute {
+        output_dir,
+        warnings,
+        preferred_gpu,
+        resolved_references,
+        #[cfg(feature = "h3-private-uat")]
+        h3_private_ingress_grant,
+    } = prepared;
     if completion_payload == SseCompletionPayload::MetadataOnly && output_dir.is_none() {
         return Err(ApiError::validation(
             "metadata-only SSE completions require server gallery output to be enabled",
@@ -2832,6 +2895,8 @@ async fn generate_stream(
         result_tx,
         output_dir,
         batch_child: None,
+        #[cfg(feature = "h3-private-uat")]
+        h3_private_ingress_grant,
     };
 
     let position = state
@@ -2926,17 +2991,67 @@ async fn generate_estimate(
 )]
 async fn generate_placement_preview(
     State(state): State<AppState>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     Json(preview): Json<mold_core::GenerationPlacementPreviewRequest>,
-) -> Json<mold_core::GenerationPlacementPreview> {
-    Json(placement_preview_for_request(&state, preview.request, preview.copies).await)
+) -> Result<Json<mold_core::GenerationPlacementPreview>, ApiError> {
+    Ok(Json(
+        placement_preview_for_request_authenticated(
+            &state,
+            preview.request,
+            preview.copies,
+            authenticated.as_ref().map(|Extension(auth)| auth),
+        )
+        .await?,
+    ))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn placement_preview_for_request(
+    state: &AppState,
+    request: GenerateRequest,
+    copies: u32,
+) -> mold_core::GenerationPlacementPreview {
+    match placement_preview_for_request_authenticated(state, request, copies, None).await {
+        Ok(preview) => preview,
+        Err(error) => {
+            let plan = state.scheduled_work.latest_plan();
+            mold_core::GenerationPlacementPreview {
+                version: 1,
+                authoritative: true,
+                state_version: plan.as_ref().map_or(0, |plan| plan.state_version),
+                plan_version: plan.as_ref().map_or(0, |plan| plan.plan_version),
+                outcome: "infeasible".to_string(),
+                reason: Some(error.error),
+                candidate: None,
+                stage_candidates: Vec::new(),
+                pending_downloads: Vec::new(),
+                missing_components: Vec::new(),
+            }
+        }
+    }
+}
+
+async fn placement_preview_for_request_authenticated(
     state: &AppState,
     mut request: GenerateRequest,
     copies: u32,
-) -> mold_core::GenerationPlacementPreview {
+    authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
+) -> Result<mold_core::GenerationPlacementPreview, ApiError> {
+    #[cfg(not(feature = "h3-private-uat"))]
+    let _ = authenticated;
     mold_core::minimax_h3::canonicalize_request_model(&mut request);
+    #[cfg(feature = "h3-private-uat")]
+    if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
+        request.normalise_output_format(Some(mold_core::minimax_h3::FAMILY));
+        crate::h3_private_bridge::pin_private_preview_seed(&mut request)?;
+    }
+    #[cfg(feature = "h3-private-uat")]
+    let h3_private_ingress_grant =
+        crate::h3_private_bridge::classify_h3_private_ingress(&request, authenticated)?;
+    #[cfg(feature = "h3-private-uat")]
+    let private_h3_ingress = h3_private_ingress_grant.is_some();
+    #[cfg(not(feature = "h3-private-uat"))]
+    let private_h3_ingress = false;
     let plan = state.scheduled_work.latest_plan();
     let unavailable = |outcome: &str, reason: String| mold_core::GenerationPlacementPreview {
         version: 1,
@@ -2953,14 +3068,18 @@ pub(crate) async fn placement_preview_for_request(
     if !(1..=64).contains(&copies) {
         let mut response = unavailable("infeasible", "copies must be between 1 and 64".to_string());
         response.authoritative = true;
-        return response;
+        return Ok(response);
     }
-    let resolved_family = match require_server_model_activation(state, &request.model).await {
-        Ok(family) => family,
-        Err(error) => {
-            let mut response = unavailable("infeasible", error.error);
-            response.authoritative = true;
-            return response;
+    let resolved_family = if private_h3_ingress {
+        Some(mold_core::minimax_h3::FAMILY.to_string())
+    } else {
+        match require_server_model_activation(state, &request.model).await {
+            Ok(family) => family,
+            Err(error) => {
+                let mut response = unavailable("infeasible", error.error);
+                response.authoritative = true;
+                return Ok(response);
+            }
         }
     };
     // The source-image contract (#772) is part of admission: a preview that
@@ -2972,7 +3091,7 @@ pub(crate) async fn placement_preview_for_request(
     {
         let mut response = unavailable("infeasible", error.error);
         response.authoritative = true;
-        return response;
+        return Ok(response);
     }
     // Admission materializes the family's tuned default negative (wan) before
     // the scheduler prices the job, and `request_sensitive_activation_memory`
@@ -2991,7 +3110,7 @@ pub(crate) async fn placement_preview_for_request(
                 {
                     let mut response = unavailable("infeasible", error.to_string());
                     response.authoritative = true;
-                    return response;
+                    return Ok(response);
                 }
             }
             (mold_core::minimax_h3::Task::Ref2va, None) => {
@@ -3001,7 +3120,7 @@ pub(crate) async fn placement_preview_for_request(
                         .to_string(),
                 );
                 response.authoritative = true;
-                return response;
+                return Ok(response);
             }
             (mold_core::minimax_h3::Task::Fl2va, Some(_)) => {
                 let mut response = unavailable(
@@ -3009,7 +3128,7 @@ pub(crate) async fn placement_preview_for_request(
                     "MiniMax H3 FL2VA does not accept Ref2VA ordered references".to_string(),
                 );
                 response.authoritative = true;
-                return response;
+                return Ok(response);
             }
             (mold_core::minimax_h3::Task::Fl2va, None) => {}
         }
@@ -3019,7 +3138,7 @@ pub(crate) async fn placement_preview_for_request(
         Err(error) => {
             let mut response = unavailable("infeasible", error.error);
             response.authoritative = true;
-            return response;
+            return Ok(response);
         }
     };
     let planned_camera_controls = match plan_builtin_ltx2_camera_controls(state, &request).await {
@@ -3027,7 +3146,7 @@ pub(crate) async fn placement_preview_for_request(
         Err(error) => {
             let mut response = unavailable("infeasible", error.error);
             response.authoritative = true;
-            return response;
+            return Ok(response);
         }
     };
     if planned_control.is_some() {
@@ -3035,7 +3154,7 @@ pub(crate) async fn placement_preview_for_request(
         {
             let mut response = unavailable("infeasible", error);
             response.authoritative = true;
-            return response;
+            return Ok(response);
         }
     }
     let has_post_upscale = request
@@ -3052,31 +3171,44 @@ pub(crate) async fn placement_preview_for_request(
             .with_env_overrides()
             .is_local();
     if has_local_expansion || has_post_upscale {
-        return unavailable(
+        return Ok(unavailable(
             "unsupported",
             "exact utility CPU/GPU placement plans are not available on this server".to_string(),
-        );
+        ));
     }
     if !state.scheduled_work.v2_authoritative()
         || !state.scheduled_work.placement_preview_available()
     {
-        return unavailable(
+        return Ok(unavailable(
             "unsupported",
             "authoritative scheduler placement preview is unavailable".to_string(),
-        );
+        ));
     }
-    let prepared =
-        match crate::variant_dependencies::prepare_execution_inputs_existing_only(state, &request)
-            .await
-        {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                let mut response = unavailable("infeasible", error);
-                response.authoritative = true;
-                response.missing_components = missing_model_components(state, &request.model).await;
-                return response;
-            }
-        };
+    #[cfg(feature = "h3-private-uat")]
+    let dependency_context = crate::variant_dependencies::DependencyPreparationContext {
+        h3_private_ingress_grant: if h3_private_ingress_grant.is_some() {
+            crate::h3_private_bridge::classify_h3_private_ingress(&request, authenticated)?
+        } else {
+            None
+        },
+    };
+    #[cfg(not(feature = "h3-private-uat"))]
+    let dependency_context = crate::variant_dependencies::DependencyPreparationContext::default();
+    let prepared = match crate::variant_dependencies::prepare_execution_inputs_existing_only(
+        state,
+        &request,
+        dependency_context,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let mut response = unavailable("infeasible", error);
+            response.authoritative = true;
+            response.missing_components = missing_model_components(state, &request.model).await;
+            return Ok(response);
+        }
+    };
     match state
         .scheduled_work
         .preview_placement(request, copies, prepared)
@@ -3153,9 +3285,9 @@ pub(crate) async fn placement_preview_for_request(
                     }
                 }
             }
-            response
+            Ok(response)
         }
-        Err(error) => unavailable("temporarily_unavailable", error),
+        Err(error) => Ok(unavailable("temporarily_unavailable", error)),
     }
 }
 

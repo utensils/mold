@@ -205,6 +205,25 @@ impl ProgressReporter {
         self.cancellation = None;
     }
 
+    /// Run one private attempt with exactly one authoritative cancellation
+    /// token installed for every progress checkpoint. Any previously installed
+    /// token is restored even when the attempt panics; callers cannot supply a
+    /// second token for the reporter and diverge the two cancellation paths.
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn with_attempt_cancellation_token<T>(
+        &mut self,
+        token: InferenceCancellationToken,
+        run: impl FnOnce(&ProgressReporter) -> T,
+    ) -> T {
+        let previous = self.cancellation.replace(token);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self)));
+        self.cancellation = previous;
+        match outcome {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
     /// Snapshot a read-only view for one explicitly bounded runtime attempt.
     /// Callers must not retain it across `clear_cancellation_token` or a later
     /// `set_cancellation_token`; cached runtimes should install it behind an

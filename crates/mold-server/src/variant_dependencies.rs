@@ -989,6 +989,9 @@ fn materialize_gemma(
     Ok(())
 }
 
+// Keep the generic dependency inputs explicit: private admission must validate
+// its ingress context before any model-path resolution or materialization.
+#[allow(clippy::too_many_arguments)]
 async fn prepare_inputs_for_devices(
     state: Option<&AppState>,
     work_id: &str,
@@ -997,7 +1000,18 @@ async fn prepare_inputs_for_devices(
     devices: Vec<DeviceFact>,
     progress: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
     policy: DependencyMaterializationPolicy,
+    context: DependencyPreparationContext,
 ) -> Result<PreparedExecutionInputs, String> {
+    #[cfg(feature = "h3-private-uat")]
+    if let Some(grant) = context.h3_private_ingress_grant.clone() {
+        grant.validate_for_request(request)?;
+        return prepare_h3_private_inputs_for_devices(
+            state, work_id, request, config, devices, progress, policy, grant,
+        )
+        .await;
+    }
+    #[cfg(not(feature = "h3-private-uat"))]
+    let _ = &context;
     let resolution = crate::model_manager::resolve_existing_model_paths(&request.model, config)
         .map_err(|error| error.error)?
         .ok_or_else(|| format!("model '{}' has no concrete local artifacts", request.model))?;
@@ -1208,6 +1222,10 @@ async fn prepare_inputs_for_devices(
         by_device,
         retryable_device_failures: failures,
         model_config_overlay,
+        #[cfg(feature = "h3-private-uat")]
+        h3_private_ingress_grant: context.h3_private_ingress_grant,
+        #[cfg(feature = "h3-private-uat")]
+        h3_private_admission_by_device: BTreeMap::new(),
     };
     let warm_config = config.clone();
     let warm_request = request.clone();
@@ -1224,11 +1242,168 @@ async fn prepare_inputs_for_devices(
     Ok(prepared)
 }
 
+#[cfg(feature = "h3-private-uat")]
+#[allow(clippy::too_many_arguments)]
+async fn prepare_h3_private_inputs_for_devices(
+    _state: Option<&AppState>,
+    _work_id: &str,
+    request: &GenerateRequest,
+    config: &Config,
+    devices: Vec<DeviceFact>,
+    progress: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+    _policy: DependencyMaterializationPolicy,
+    ingress_grant: crate::h3_private_bridge::H3PrivateIngressGrant,
+) -> Result<PreparedExecutionInputs, String> {
+    use sha2::{Digest, Sha256};
+
+    let devices = crate::execution_plan::eligible_devices_for_private_h3(config, request, &devices)
+        .map_err(|error| error.to_string())?;
+    if devices.is_empty() {
+        return Err("request placement has no eligible schedulable device".into());
+    }
+    let available_host_headroom_bytes =
+        crate::h3_admission::current_h3_host_memory().headroom_bytes();
+    let uat_paths =
+        crate::h3_private_bridge::H3PrivateUatPathSet::resolve(config.resolved_models_dir());
+    let mut resolved_request = request.clone();
+    let mut evidence_by_device = BTreeMap::new();
+    let mut failures = BTreeMap::new();
+
+    for device in devices {
+        if device.backend != mold_core::GpuBackend::Cuda {
+            failures.insert(
+                device.id,
+                "MiniMax H3 private UAT requires a CUDA device".to_string(),
+            );
+            continue;
+        }
+        let Some(compute_capability) = device.compute_capability else {
+            failures.insert(
+                device.id,
+                "MiniMax H3 private UAT requires exact CUDA compute capability".to_string(),
+            );
+            continue;
+        };
+        let admission_request = resolved_request.clone();
+        let paths = uat_paths.clone();
+        let device_id = device.id.clone();
+        let device_ordinal = device.ordinal;
+        let available_device_bytes = device.available_vram_bytes;
+        let progress_tx = progress.cloned();
+        let evidence = tokio::task::spawn_blocking(move || {
+            let mut reporter = mold_inference::progress::ProgressReporter::default();
+            if let Some(progress_tx) = progress_tx {
+                reporter.set_callback(Box::new(move |event| {
+                    crate::gpu_worker::record_h3_progress(event, Some(&progress_tx));
+                }));
+            }
+            mold_inference::prepare_h3_private_fl2va_admission(
+                mold_inference::H3PrivateFl2VaAdmissionInput {
+                    request: &admission_request,
+                    paths: paths.inference_paths(),
+                    device_id: &device_id,
+                    device_ordinal,
+                    compute_capability,
+                    available_device_bytes,
+                    available_host_headroom_bytes,
+                },
+                &reporter,
+            )
+            .map_err(crate::h3_private_bridge::private_prepare_error_message)
+        })
+        .await
+        .map_err(|error| format!("MiniMax H3 admission worker failed: {error}"))?;
+        let evidence = match evidence {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                failures.insert(device.id, error);
+                continue;
+            }
+        };
+        let next_request = evidence
+            .resolve_request(&resolved_request)
+            .map_err(|error| format!("MiniMax H3 admission seed resolution failed: {error:#}"))?;
+        evidence
+            .validate_for(
+                &next_request,
+                &device.id,
+                device.ordinal,
+                compute_capability,
+                device.available_vram_bytes,
+                available_host_headroom_bytes,
+            )
+            .map_err(|error| {
+                format!("MiniMax H3 admission evidence did not revalidate: {error:#}")
+            })?;
+        resolved_request = next_request;
+        evidence_by_device.insert(device.id.clone(), (device, evidence));
+    }
+    if evidence_by_device.is_empty() {
+        return Err(format!(
+            "no request-eligible device passed MiniMax H3 private admission: {}",
+            failures
+                .iter()
+                .map(|(device, error)| format!("{device}: {error}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+
+    let rebound_grant = ingress_grant.rebind_resolved_request(request, &resolved_request)?;
+    let engine_paths = ModelPaths::resolve(&resolved_request.model, config).ok_or_else(|| {
+        "reviewed MiniMax H3 admission could not project its verified manifest paths".to_string()
+    })?;
+    let mut by_device = BTreeMap::new();
+    let mut admissions = BTreeMap::new();
+    for (device_id, (device, evidence)) in evidence_by_device {
+        let mut frozen =
+            mold_inference::FrozenEngineConfig::resolve(&resolved_request.model, config);
+        frozen.family = mold_core::minimax_h3::FAMILY.to_string();
+        frozen.h3_factory_authority = Some(evidence.base_factory_authority().clone());
+        frozen.attention_backend = evidence.attention().generic_backend;
+        frozen.attention_chunk = evidence.attention().generic_chunk;
+        by_device.insert(
+            device_id.clone(),
+            PreparedDeviceExecutionInputs {
+                engine_paths: engine_paths.clone(),
+                engine_config: frozen,
+                pending_artifacts: BTreeMap::new(),
+                prepared_available_vram_bytes: device.available_vram_bytes,
+                capacity_sensitive: true,
+            },
+        );
+        admissions.insert(device_id, evidence);
+    }
+    let mut authority = Sha256::new();
+    authority.update(b"mold.minimax-h3.private-prepared-inputs.v1\0");
+    authority.update(rebound_grant.authority_identity_sha256().as_bytes());
+    for (device_id, evidence) in &admissions {
+        authority.update((device_id.len() as u64).to_le_bytes());
+        authority.update(device_id.as_bytes());
+        authority.update(evidence.identity_sha256().as_bytes());
+    }
+    Ok(PreparedExecutionInputs {
+        authority_fingerprint: format!("{:x}", authority.finalize()),
+        by_device,
+        retryable_device_failures: failures,
+        model_config_overlay: None,
+        h3_private_ingress_grant: Some(rebound_grant),
+        h3_private_admission_by_device: admissions,
+    })
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DependencyPreparationContext {
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
+}
+
 pub async fn prepare_execution_inputs(
     state: &AppState,
     work_id: &str,
     request: &GenerateRequest,
     progress: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+    context: DependencyPreparationContext,
 ) -> Result<PreparedExecutionInputs, String> {
     let config = state.config.read().await.clone();
     let mut devices = resource_device_facts(state);
@@ -1243,6 +1418,7 @@ pub async fn prepare_execution_inputs(
         devices,
         progress,
         DependencyMaterializationPolicy::Admission,
+        context,
     )
     .await
 }
@@ -1250,6 +1426,7 @@ pub async fn prepare_execution_inputs(
 pub async fn prepare_execution_inputs_existing_only(
     state: &AppState,
     request: &GenerateRequest,
+    context: DependencyPreparationContext,
 ) -> Result<PreparedExecutionInputs, String> {
     let config = state.config.read().await.clone();
     let mut devices = resource_device_facts(state);
@@ -1264,6 +1441,7 @@ pub async fn prepare_execution_inputs_existing_only(
         devices,
         None,
         DependencyMaterializationPolicy::ExistingOnly,
+        context,
     )
     .await
 }
@@ -1284,6 +1462,7 @@ pub async fn prepare_local_execution_inputs(
         devices,
         None,
         DependencyMaterializationPolicy::Admission,
+        DependencyPreparationContext::default(),
     )
     .await
 }
@@ -1608,6 +1787,7 @@ mod tests {
             }],
             None,
             DependencyMaterializationPolicy::ExistingOnly,
+            DependencyPreparationContext::default(),
         )
         .await
         .unwrap();
@@ -1978,6 +2158,7 @@ mod tests {
             }],
             None,
             DependencyMaterializationPolicy::ExistingOnly,
+            DependencyPreparationContext::default(),
         )
         .await
         .unwrap_err();

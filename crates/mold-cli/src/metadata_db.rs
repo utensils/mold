@@ -199,6 +199,7 @@ mod tests {
             frames: 97,
             fps: 24,
             pipeline: Some(mold_core::Ltx2PipelineMode::TwoStageHq),
+            pipeline_provenance_sha256: None,
             thumbnail: Vec::new(),
             gif_preview: Vec::new(),
             has_audio: true,

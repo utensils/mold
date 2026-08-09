@@ -986,6 +986,20 @@ impl H3HostMemory {
     }
 }
 
+/// Capture the raw host-memory sample used by every H3 admission and live
+/// recheck. Consumers must compare allocations with `headroom_bytes()`, not
+/// raw available RAM, so the canonical 15%-or-8-GiB safety floor survives
+/// fresh external pressure after scheduler admission.
+pub(crate) fn current_h3_host_memory() -> H3HostMemory {
+    let ram = crate::resources::ram_snapshot();
+    H3HostMemory {
+        total_bytes: ram.total,
+        available_bytes: ram
+            .available
+            .unwrap_or_else(|| ram.total.saturating_sub(ram.used)),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum H3QwenPlacement {

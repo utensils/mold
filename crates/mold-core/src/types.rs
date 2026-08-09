@@ -1795,6 +1795,11 @@ pub struct VideoData {
     /// as executed; absent for non-LTX-2 video engines and older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<Ltx2PipelineMode>,
+    /// SHA-256 of the exact runtime pipeline provenance that produced this
+    /// video. Present for authenticated H3 outputs; absent for older servers
+    /// and pipelines without a terminal provenance contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_provenance_sha256: Option<String>,
     /// First frame as PNG thumbnail for gallery grid.
     pub thumbnail: Vec<u8>,
     /// Animated GIF preview for gallery detail view / TUI playback.
@@ -1955,6 +1960,10 @@ pub struct OutputMetadata {
     pub extend_overlap_frames: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<Ltx2PipelineMode>,
+    /// Persisted terminal runtime provenance for pipelines that expose an
+    /// exact additive SHA-256 identity. Absent for legacy and other outputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_provenance_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ic_lora_control: Option<String>,
     /// Where the HDR EXR sidecar was written. The gallery holds the tonemapped
@@ -2114,6 +2123,7 @@ impl OutputMetadata {
             extend_overlap_frames: (req.extend_video.is_some() || req.extend_video_path.is_some())
                 .then_some(req.effective_extend_overlap_frames()),
             pipeline: req.pipeline,
+            pipeline_provenance_sha256: None,
             ic_lora_control: req.ic_lora_control.clone(),
             hdr_exr_dir: req.hdr_exr_dir.clone(),
             hdr_exr_full_float: req.hdr_exr_full_float,
@@ -2147,6 +2157,7 @@ impl OutputMetadata {
         if let Some(pipeline) = video.pipeline {
             self.pipeline = Some(pipeline);
         }
+        self.pipeline_provenance_sha256 = video.pipeline_provenance_sha256.clone();
     }
 }
 
@@ -4052,6 +4063,53 @@ mod tests {
         assert_eq!(provenance.operation, PromptTransformOperation::Remix);
         assert_eq!(provenance.source_prompt, "an expanded cat portrait");
         assert_eq!(provenance.dimensions, vec![RemixDimension::Camera]);
+    }
+
+    #[test]
+    fn video_pipeline_provenance_is_additive_and_persisted() {
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"x","model":"minimax-h3-fl2va:comfy","width":768,"height":432,"steps":4}"#,
+        )
+        .unwrap();
+        let provenance = std::iter::repeat_n('a', 64).collect::<String>();
+        let video = VideoData {
+            data: vec![1],
+            format: OutputFormat::Mp4,
+            width: 768,
+            height: 432,
+            frames: 124,
+            fps: 24,
+            pipeline: None,
+            pipeline_provenance_sha256: Some(provenance.clone()),
+            thumbnail: vec![2],
+            gif_preview: Vec::new(),
+            has_audio: true,
+            duration_ms: Some(5_166),
+            audio_sample_rate: Some(44_100),
+            audio_channels: Some(2),
+        };
+        let mut metadata = OutputMetadata::from_generate_request(&request, 7, None, "test");
+
+        metadata.apply_video_output(&video);
+
+        assert_eq!(
+            metadata.pipeline_provenance_sha256.as_deref(),
+            Some(provenance.as_str())
+        );
+        let encoded = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(encoded["pipeline_provenance_sha256"], provenance);
+
+        let legacy: VideoData = serde_json::from_value(serde_json::json!({
+            "data": [],
+            "format": "mp4",
+            "width": 1,
+            "height": 1,
+            "frames": 1,
+            "fps": 24,
+            "thumbnail": []
+        }))
+        .unwrap();
+        assert!(legacy.pipeline_provenance_sha256.is_none());
     }
 
     // ── GET /api/queue wire types ────────────────────────────────────────

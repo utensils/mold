@@ -41,6 +41,18 @@ pub use minimax_h3::private_qwen::{
     validate_h3_private_qwen_loader_memory_authority, H3PrivateQwenLoaderMemoryAuthority,
     H3PrivateQwenLoaderMemoryRoute,
 };
+#[cfg(feature = "h3-private-uat")]
+#[doc(hidden)]
+pub use minimax_h3::private_server::{
+    authenticate_h3_private_runtime_qualification, prepare_h3_private_fl2va_admission,
+    prepare_h3_private_fl2va_attempt, reviewed_h3_private_runtime_available,
+    H3PrivateAllocationCommit, H3PrivateFl2VaAdmissionEvidence, H3PrivateFl2VaAdmissionInput,
+    H3PrivateFl2VaAttemptFacts, H3PrivateFl2VaMediaContract, H3PrivateFl2VaOwnerFenceFacts,
+    H3PrivateFl2VaPrepareError, H3PrivateFl2VaPrepareInput, H3PrivateFl2VaPreparedAttempt,
+    H3PrivateFl2VaRunContext, H3PrivateFl2VaRunOutput, H3PrivateFl2VaRuntimeBounds,
+    H3PrivateFl2VaTerminalIdentityEcho, H3PrivateFl2VaUatPaths,
+    H3PrivateRuntimeQualificationAuthority, H3PrivateSchedulerLedgerIdentity,
+};
 pub mod model_registry;
 pub(crate) mod nvfp4;
 pub mod progress;

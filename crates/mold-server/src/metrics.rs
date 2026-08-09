@@ -72,15 +72,13 @@ pub struct MetricsState {
 
 /// Render all collected metrics in Prometheus text exposition format.
 ///
-/// Records uptime and GPU memory gauges on each scrape so they are always
-/// current without needing a background ticker.
+/// Records uptime on each scrape. GPU owners update the memory gauge from
+/// their serialized load/unload path; an HTTP task must never enter CUDA.
 pub async fn metrics_endpoint(
     axum::extract::State(state): axum::extract::State<MetricsState>,
 ) -> impl IntoResponse {
     // Update point-in-time gauges right before rendering.
     record_uptime(state.start_time.elapsed().as_secs_f64());
-    record_gpu_memory(mold_inference::device::vram_in_use_bytes(0));
-
     let body = state.handle.render();
     (
         StatusCode::OK,
@@ -263,5 +261,18 @@ mod tests {
     fn normalize_gallery_base_preserved() {
         // Bare /api/gallery/image/ without a filename stays as-is
         assert_eq!(normalize_path("/api/gallery/image/"), "/api/gallery/image/");
+    }
+
+    #[test]
+    fn http_metrics_scrape_never_enters_cuda() {
+        let source = include_str!("metrics.rs");
+        let endpoint_start = source.find("pub async fn metrics_endpoint(").unwrap();
+        let endpoint_end = source[endpoint_start..]
+            .find("// ── HTTP metrics middleware")
+            .map(|offset| endpoint_start + offset)
+            .unwrap();
+        let endpoint = &source[endpoint_start..endpoint_end];
+        assert!(!endpoint.contains("vram_in_use_bytes"));
+        assert!(!endpoint.contains("mold_inference::device"));
     }
 }

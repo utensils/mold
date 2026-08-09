@@ -77,6 +77,11 @@ pub struct GenerationJob {
     /// Server-owned adaptive-batch child authority. Public singleton and
     /// client-owned prepared siblings leave this absent.
     pub batch_child: Option<BatchChildExecution>,
+    /// Cloneable, payload-free authenticated ingress authority. The API key
+    /// marker itself never leaves the route; dependency preparation must
+    /// revalidate this grant against the exact canonical request.
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
 }
 
 #[derive(Clone, Debug)]
@@ -866,6 +871,8 @@ mod tests {
             result_tx,
             output_dir: None,
             batch_child: None,
+            #[cfg(feature = "h3-private-uat")]
+            h3_private_ingress_grant: None,
         }
     }
 
