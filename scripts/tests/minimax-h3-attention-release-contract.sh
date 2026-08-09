@@ -41,6 +41,12 @@ if ! awk '
 ' crates/mold-candle/src/minimax_h3/attention.rs; then
   fail "the isolated H3 feature does not directly guard the production FlashAttention dispatch"
 fi
+require_text crates/mold-candle/src/minimax_h3/attention.rs \
+  'pub fn verify_current_release_candidate_dispatch' \
+  "private H3 dispatch does not revalidate the current compiled attention candidate"
+require_text crates/mold-candle/src/minimax_h3/attention.rs \
+  'H3AttentionReleaseCandidateBuild::current()' \
+  "attention dispatch trusts a serialized authority without current-build provenance"
 require_text crates/mold-inference/Cargo.toml \
   'h3-attention-rc = ["cuda", "mold-candle/h3-flash-attn-rc"]' \
   "mold-inference does not expose the synthetic-only H3 qualification path"
