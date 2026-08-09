@@ -400,20 +400,42 @@ fn contained_complete_file(
 /// counterpart is a half-pair that must never be reported installed —
 /// re-running the download resumes just the missing half.
 pub fn primary_path_if_present(sidecar_dir: &Path, sidecar: &CatalogSidecar) -> Option<PathBuf> {
-    if let Some(models_dir) = sidecar_dir.parent() {
-        if mold_core::download::pulling_marker_path_in(models_dir, &sidecar.id).exists() {
-            return None;
-        }
+    if install_pull_in_progress(sidecar_dir, sidecar) {
+        return None;
     }
     if sidecar.low_noise_filename_rel.is_some() {
-        let low = low_noise_path(sidecar_dir, sidecar)?;
-        contained_complete_file(sidecar_dir, low, sidecar.low_noise_size_bytes)?;
+        low_noise_file_if_complete(sidecar_dir, sidecar)?;
     }
+    primary_file_if_complete(sidecar_dir, sidecar)
+}
+
+/// True while a pull for this install is in flight — the files on disk are
+/// not authoritative yet.
+pub fn install_pull_in_progress(sidecar_dir: &Path, sidecar: &CatalogSidecar) -> bool {
+    sidecar_dir.parent().is_some_and(|models_dir| {
+        mold_core::download::pulling_marker_path_in(models_dir, &sidecar.id).exists()
+    })
+}
+
+/// Per-expert presence: whether the sidecar's primary file itself is
+/// contained and complete, ignoring the low-noise counterpart and any
+/// in-flight pull. Component diagnostics use this so a pair install with
+/// one half missing names the truly missing file; whole-install
+/// completeness remains [`primary_path_if_present`].
+pub fn primary_file_if_complete(sidecar_dir: &Path, sidecar: &CatalogSidecar) -> Option<PathBuf> {
     let abs = primary_path(sidecar_dir, sidecar)?;
     // `size_bytes` is the whole entry; a pair sidecar records the
     // primary's own size separately.
     let expected = sidecar.primary_size_bytes.or(sidecar.size_bytes);
     contained_complete_file(sidecar_dir, abs, expected)
+}
+
+/// Per-expert presence for the declared low-noise counterpart, with the
+/// same rules as [`primary_file_if_complete`]. `None` for single-file
+/// sidecars.
+pub fn low_noise_file_if_complete(sidecar_dir: &Path, sidecar: &CatalogSidecar) -> Option<PathBuf> {
+    let abs = low_noise_path(sidecar_dir, sidecar)?;
+    contained_complete_file(sidecar_dir, abs, sidecar.low_noise_size_bytes)
 }
 
 #[cfg(test)]

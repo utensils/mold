@@ -1174,8 +1174,15 @@ fn catalog_sidecar_component_status(
     )?;
 
     let primary = mold_catalog::sidecar::primary_path(&sidecar_dir, &sidecar);
-    let primary_present =
-        mold_catalog::sidecar::primary_path_if_present(&sidecar_dir, &sidecar).is_some();
+    // Per-expert presence: a pair sidecar's whole-install
+    // `primary_path_if_present` is None whenever EITHER half is missing,
+    // which would report the (present) high expert as the missing
+    // component and never name the low-noise file at all. Diagnostics
+    // check each half separately; installed detection elsewhere still
+    // requires both.
+    let pulling = mold_catalog::sidecar::install_pull_in_progress(&sidecar_dir, &sidecar);
+    let primary_present = !pulling
+        && mold_catalog::sidecar::primary_file_if_complete(&sidecar_dir, &sidecar).is_some();
     let mut components = vec![ModelComponentStatus {
         kind: "transformer".to_string(),
         name: "primary checkpoint".to_string(),
@@ -1186,6 +1193,19 @@ fn catalog_sidecar_component_status(
         repair_model: Some(model_name.to_string()),
         options: component_options_for_kind(config, "transformer", primary.as_deref()),
     }];
+    if sidecar.low_noise_filename_rel.is_some() {
+        let low = mold_catalog::sidecar::low_noise_path(&sidecar_dir, &sidecar);
+        let low_present = !pulling
+            && mold_catalog::sidecar::low_noise_file_if_complete(&sidecar_dir, &sidecar).is_some();
+        components.push(ModelComponentStatus {
+            kind: "transformer".to_string(),
+            name: "low-noise transformer".to_string(),
+            present: low_present,
+            path: low.as_ref().map(|path| path.to_string_lossy().to_string()),
+            repair_model: Some(model_name.to_string()),
+            options: component_options_for_kind(config, "transformer", low.as_deref()),
+        });
+    }
 
     let Ok(family) = mold_catalog::families::Family::from_str(&sidecar.family) else {
         return Ok(components);
@@ -2132,6 +2152,86 @@ mod tests {
         )
         .unwrap();
         primary
+    }
+
+    /// A pair sidecar with one half missing must name the truly missing
+    /// expert: the whole-install check is false either way, but the
+    /// diagnostic rows report each half's own presence.
+    #[test]
+    fn pair_sidecar_diagnostics_name_the_missing_half() {
+        let root = tempfile::tempdir().unwrap();
+        let _environment = IsolatedModelEnvironment::hermetic();
+        let models_dir = root.path();
+        let install = models_dir.join("cv-2057171");
+        let high_rel = "wan/civitai/2057171/high.safetensors";
+        let low_rel = "wan/civitai/2057100/low.safetensors";
+        let high = install.join(high_rel);
+        let low = install.join(low_rel);
+        std::fs::create_dir_all(high.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(low.parent().unwrap()).unwrap();
+        mold_catalog::sidecar::write_sidecar(
+            &install.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &mold_catalog::sidecar::CatalogSidecar {
+                schema: mold_catalog::sidecar::SIDECAR_SCHEMA,
+                id: "cv:2057171".to_string(),
+                source: "civitai".to_string(),
+                source_id: "2057171".to_string(),
+                name: "A14B pair fixture".to_string(),
+                author: None,
+                family: "wan".to_string(),
+                family_role: "base".to_string(),
+                sub_family: Some("wan22-t2v-a14b".to_string()),
+                kind: "checkpoint".to_string(),
+                modality: "video".to_string(),
+                nsfw: None,
+                description: None,
+                tags: Vec::new(),
+                license: None,
+                page_url: None,
+                thumbnail_url: None,
+                size_bytes: Some(7),
+                supported: true,
+                trained_words: Vec::new(),
+                primary_filename_rel: high_rel.to_string(),
+                primary_size_bytes: Some(4),
+                low_noise_filename_rel: Some(low_rel.to_string()),
+                low_noise_size_bytes: Some(3),
+                written_at: 0,
+            },
+        )
+        .unwrap();
+        let config = Config {
+            models_dir: models_dir.display().to_string(),
+            ..Default::default()
+        };
+        let presence =
+            |components: &[ModelComponentStatus], name: &str| -> (bool, Option<String>) {
+                let row = components
+                    .iter()
+                    .find(|component| component.name == name)
+                    .unwrap_or_else(|| panic!("diagnostics must carry a {name:?} row"));
+                (row.present, row.path.clone())
+            };
+
+        // Low missing: the (present) high expert must not be blamed, and
+        // the low-noise row must name the missing file.
+        std::fs::write(&high, b"high").unwrap();
+        let components = catalog_sidecar_component_status(&config, "cv:2057171").unwrap();
+        let (high_present, _) = presence(&components, "primary checkpoint");
+        let (low_present, low_path) = presence(&components, "low-noise transformer");
+        assert!(high_present, "present high expert must not read as missing");
+        assert!(!low_present, "the missing low expert is the repairable row");
+        assert!(low_path.unwrap().ends_with(low_rel));
+
+        // Inverse: high missing, low present.
+        std::fs::remove_file(&high).unwrap();
+        std::fs::write(&low, b"low").unwrap();
+        let components = catalog_sidecar_component_status(&config, "cv:2057171").unwrap();
+        let (high_present, high_path) = presence(&components, "primary checkpoint");
+        let (low_present, _) = presence(&components, "low-noise transformer");
+        assert!(!high_present);
+        assert!(low_present);
+        assert!(high_path.unwrap().ends_with(high_rel));
     }
 
     fn flux2_catalog_config(models_dir: &Path) -> Config {

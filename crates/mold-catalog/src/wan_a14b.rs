@@ -122,6 +122,17 @@ pub enum A14bPairingError {
          incompatible with the primary expert"
     )]
     CounterpartSizeMismatch { name: String, missing: &'static str },
+
+    /// A counterpart matched from this side, but resolving the pair from
+    /// the counterpart's own side does not choose this version back —
+    /// e.g. two same-role reuploads that are indistinguishable from the
+    /// counterpart's direction. A non-reciprocal match could silently mix
+    /// shape-compatible files from different revisions.
+    #[error(
+        "the {missing} counterpart candidate for {name:?} does not resolve \
+         back to this version; refusing a non-reciprocal pairing"
+    )]
+    NonReciprocalCounterpart { name: String, missing: &'static str },
 }
 
 /// One side of a resolved pair: the version that owns the file, and the
@@ -318,7 +329,57 @@ pub fn pair_experts<'a>(
         }
     })?;
     let missing = role.counterpart().label();
+    let chosen = select_counterpart(item, version, primary_file, role, &display_name)?;
 
+    // Reciprocity: pairing must be one-to-one. Resolve the counterpart
+    // from the chosen version's own side and require it to choose this
+    // version back. Without this, two same-role reuploads each see the
+    // single opposite-role version as their unique counterpart (while
+    // that version correctly rejects the duplicates as ambiguous), so
+    // two supported recipes would share one expert — silently mixing
+    // shape-compatible files from different revisions.
+    match select_counterpart(item, chosen.0, chosen.1, role.counterpart(), &display_name) {
+        Ok((back, _)) if back.id == version.id => {}
+        _ => {
+            return Err(A14bPairingError::NonReciprocalCounterpart {
+                name: display_name,
+                missing,
+            })
+        }
+    }
+
+    let own = PairedExpert {
+        version_id: version.id,
+        file: primary_file,
+    };
+    let other = PairedExpert {
+        version_id: chosen.0.id,
+        file: chosen.1,
+    };
+    let (high, low) = match role {
+        ExpertRole::HighNoise => (own, other),
+        ExpertRole::LowNoise => (other, own),
+    };
+    Ok(A14bPair {
+        high,
+        low,
+        requested_role: role,
+    })
+}
+
+/// Select the unique counterpart candidate for `version` (already
+/// classified as `role`) among `item`'s sibling versions: stage 1 is the
+/// exact marker-normalized name-key match, stage 2 the size-band +
+/// semantic-name fallback. Errors carry `display_name` as the version
+/// being paired.
+fn select_counterpart<'a>(
+    item: &'a CivitaiItem,
+    version: &'a CivitaiVersion,
+    primary_file: &'a CivitaiFile,
+    role: ExpertRole,
+    display_name: &str,
+) -> Result<(&'a CivitaiVersion, &'a CivitaiFile), A14bPairingError> {
+    let missing = role.counterpart().label();
     let candidates: Vec<(&CivitaiVersion, &CivitaiFile)> = item
         .model_versions
         .iter()
@@ -331,7 +392,7 @@ pub fn pair_experts<'a>(
 
     if candidates.is_empty() {
         return Err(A14bPairingError::NoCounterpart {
-            name: display_name,
+            name: display_name.to_string(),
             missing,
         });
     }
@@ -352,7 +413,7 @@ pub fn pair_experts<'a>(
                 && !sizes_compatible(one.1.size_kb, primary_file.size_kb)
             {
                 return Err(A14bPairingError::CounterpartSizeMismatch {
-                    name: display_name,
+                    name: display_name.to_string(),
                     missing,
                 });
             }
@@ -375,13 +436,13 @@ pub fn pair_experts<'a>(
                 (Some(one), None) => *one,
                 (None, _) => {
                     return Err(A14bPairingError::NoCounterpart {
-                        name: display_name,
+                        name: display_name.to_string(),
                         missing,
                     })
                 }
                 (Some(_), Some(_)) => {
                     return Err(A14bPairingError::AmbiguousCounterpart {
-                        name: display_name,
+                        name: display_name.to_string(),
                         missing,
                     })
                 }
@@ -389,29 +450,12 @@ pub fn pair_experts<'a>(
         }
         _ => {
             return Err(A14bPairingError::AmbiguousCounterpart {
-                name: display_name,
+                name: display_name.to_string(),
                 missing,
             })
         }
     };
-
-    let own = PairedExpert {
-        version_id: version.id,
-        file: primary_file,
-    };
-    let other = PairedExpert {
-        version_id: chosen.0.id,
-        file: chosen.1,
-    };
-    let (high, low) = match role {
-        ExpertRole::HighNoise => (own, other),
-        ExpertRole::LowNoise => (other, own),
-    };
-    Ok(A14bPair {
-        high,
-        low,
-        requested_role: role,
-    })
+    Ok(chosen)
 }
 
 /// Which counterpart a lone expert file is missing, for error messages.
@@ -664,6 +708,39 @@ mod tests {
             matches!(err, A14bPairingError::AmbiguousCounterpart { .. }),
             "{err:?}"
         );
+    }
+
+    /// Two same-role reuploads (two public HIGH versions with identical
+    /// normalized names) and one low: the low side correctly rejects the
+    /// two highs as ambiguous, so the high side must not succeed either —
+    /// each high seeing "exactly one low" would make two supported
+    /// recipes share one low expert, silently mixing shape-compatible
+    /// files from different revisions. Pairing must be reciprocal
+    /// one-to-one from BOTH directions.
+    #[test]
+    fn duplicate_same_role_reuploads_reject_from_both_directions() {
+        let mut item = load_item("civitai_wan22_model_1817671.json");
+        let mut dup = version(&item, 2057171).clone();
+        dup.id = 999_999;
+        item.model_versions.push(dup);
+
+        // Low side: two identical high candidates are ambiguous.
+        let err = pair_for(&item, 2057100).unwrap_err();
+        assert!(
+            matches!(err, A14bPairingError::AmbiguousCounterpart { .. }),
+            "{err:?}"
+        );
+
+        // High side: each reupload sees the one low as its unique
+        // counterpart, but the low cannot tell the two highs apart —
+        // non-reciprocal, refuse from this side too.
+        for high_id in [2057171, 999_999] {
+            let err = pair_for(&item, high_id).unwrap_err();
+            assert!(
+                matches!(err, A14bPairingError::NonReciprocalCounterpart { .. }),
+                "high {high_id} must refuse a counterpart it cannot hold exclusively: {err:?}"
+            );
+        }
     }
 
     /// A name-key match whose file size is wildly different is a different

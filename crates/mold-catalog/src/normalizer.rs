@@ -536,10 +536,25 @@ fn from_civitai_version(
     {
         match crate::wan_a14b::pair_experts(item, version, file) {
             Ok(pair) => {
-                if a14b_policy == A14bEmitPolicy::SkipLowNoise
-                    && pair.requested_role == crate::wan_a14b::ExpertRole::LowNoise
-                {
-                    return None;
+                if pair.requested_role == crate::wan_a14b::ExpertRole::LowNoise {
+                    if a14b_policy == A14bEmitPolicy::SkipLowNoise {
+                        return None;
+                    }
+                    // A direct low-noise lookup canonicalizes to the pair's
+                    // high-noise identity. Search only ever emits the high
+                    // row, and sidecar storage plus installed-detection key
+                    // off `entry.id` — an entry keyed by the low id would
+                    // create a second install of the same pair that
+                    // Discover reports as absent under the high id.
+                    // Recursing from the high version is safe: pairing is
+                    // reciprocal (enforced in `pair_experts`), so the high
+                    // side resolves the same pair with itself as primary
+                    // and cannot recurse again.
+                    let high = item
+                        .model_versions
+                        .iter()
+                        .find(|sibling| sibling.id == pair.high.version_id)?;
+                    return from_civitai_version(item, high, a14b_policy);
                 }
                 recipe_files = vec![
                     civitai_recipe_file(pair.high.version_id, pair.high.file, None),

@@ -351,6 +351,60 @@ fn sidecar_pair_is_installed_only_when_both_experts_are_on_disk() {
     assert_eq!(mold_catalog::sidecar::read_sidecar(&path).unwrap(), sidecar);
 }
 
+/// Per-expert presence for component diagnostics: whole-install
+/// completeness stays "both experts or nothing", but each half's own
+/// presence is reported separately so a diagnostic can name the truly
+/// missing file instead of blaming the (present) primary.
+#[test]
+fn component_presence_names_the_missing_half() {
+    let entry = paired_t2v_entry();
+    let mut sidecar = mold_catalog::sidecar::sidecar_from_entry(
+        &entry,
+        "wan/civitai/2057171/wanVideo22_t2vHighNoise14B.safetensors".into(),
+    );
+    sidecar.primary_size_bytes = Some(4);
+    sidecar.low_noise_size_bytes = Some(3);
+    sidecar.size_bytes = Some(7);
+
+    let dir = tempfile::tempdir().unwrap();
+    let install = dir.path().join("cv-2057171");
+    let high = install.join("wan/civitai/2057171/wanVideo22_t2vHighNoise14B.safetensors");
+    let low = install.join("wan/civitai/2057100/wanVideo22_t2vLowNoise14B.safetensors");
+    std::fs::create_dir_all(high.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(low.parent().unwrap()).unwrap();
+
+    // Low missing: the high expert is present, the low is the missing one,
+    // and the whole install still reads not-installed.
+    std::fs::write(&high, b"high").unwrap();
+    assert_eq!(
+        mold_catalog::sidecar::primary_file_if_complete(&install, &sidecar),
+        Some(high.clone())
+    );
+    assert!(mold_catalog::sidecar::low_noise_file_if_complete(&install, &sidecar).is_none());
+    assert!(mold_catalog::sidecar::primary_path_if_present(&install, &sidecar).is_none());
+
+    // Truncated low counts as missing.
+    std::fs::write(&low, b"lo").unwrap();
+    assert!(mold_catalog::sidecar::low_noise_file_if_complete(&install, &sidecar).is_none());
+
+    // Inverse: high missing, low present.
+    std::fs::remove_file(&high).unwrap();
+    std::fs::write(&low, b"low").unwrap();
+    assert!(mold_catalog::sidecar::primary_file_if_complete(&install, &sidecar).is_none());
+    assert_eq!(
+        mold_catalog::sidecar::low_noise_file_if_complete(&install, &sidecar),
+        Some(low.clone())
+    );
+    assert!(mold_catalog::sidecar::primary_path_if_present(&install, &sidecar).is_none());
+
+    // Both present: per-expert and whole-install agree.
+    std::fs::write(&high, b"high").unwrap();
+    assert_eq!(
+        mold_catalog::sidecar::primary_path_if_present(&install, &sidecar),
+        Some(high)
+    );
+}
+
 /// Sidecars written before pairing (no pair fields) keep deserializing and
 /// keep their original single-file completeness semantics.
 #[test]

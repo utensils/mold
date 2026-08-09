@@ -2428,7 +2428,17 @@ mod tests {
             let entry = fetch_civitai_version(&server.uri(), requested, None)
                 .await
                 .expect("A14B version resolves to the pair");
-            assert_eq!(entry.id.as_str(), format!("cv:{requested}"));
+            // Both entry points canonicalize to the pair's high-noise
+            // identity: search only emits the high row, and sidecar
+            // storage plus installed-detection key off `entry.id` — a
+            // low-keyed entry would create a second install of the same
+            // pair that Discover reports as absent under the high id.
+            assert_eq!(
+                entry.id.as_str(),
+                "cv:2057171",
+                "requested {requested} must resolve to the canonical high-noise identity"
+            );
+            assert_eq!(entry.source_id, "2057171");
             assert_eq!(entry.sub_family.as_deref(), Some("wan22-t2v-a14b"));
             assert!(entry.supported, "a confidently-paired entry is installable");
             let files = &entry.download_recipe.files;
