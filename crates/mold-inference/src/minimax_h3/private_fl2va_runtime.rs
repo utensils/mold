@@ -4,19 +4,18 @@
 //! feature. It does not register a model, loader, capability, catalog,
 //! download, server, CLI, or product-surface route.
 //!
-//! The concrete core is attempt-scoped and one-shot. Activation additionally
-//! requires an engine/session contract that consumes and reconstructs it on
-//! every success, error, and cancellation; the current cached H3 engine must
-//! never retain this runtime for a second job.
+//! The concrete core is attempt-scoped and one-shot. The engine constructs and
+//! consumes a fresh session per job; this private composer remains additionally
+//! sealed until every artifact, memory, and execution authority is available.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use candle_core::{Device, Tensor};
+use candle_core::{Device, DeviceLocation, Tensor};
 use mold_candle::minimax_h3::{
-    H3AttentionRuntimeAuthority, H3ComfyOpenedInt8Checkpoint, H3ForwardInput, H3FrozenPackedLayout,
-    H3TransformerOutput, H3TransformerTask, StereoLatents, StereoWaveform,
+    H3AttentionDevice, H3AttentionRuntimeAuthority, H3ComfyOpenedInt8Checkpoint, H3ForwardInput,
+    H3FrozenPackedLayout, H3TransformerOutput, H3TransformerTask, StereoLatents, StereoWaveform,
 };
 use mold_core::minimax_h3::{self as contract, Task};
 use sha2::{Digest, Sha256};
@@ -33,8 +32,9 @@ use super::private_qwen::{
 };
 use super::private_qwen_support::H3PrivateQwenSupport;
 use super::private_runtime::{
-    load_and_pair_private_comfy_stream, H3PrivateComfyBlockLoader, H3PrivateComfyCancellationGuard,
-    H3PrivateComfyCancellationSlot, H3PrivateComfyStreamAuthority,
+    bind_private_comfy_stream, load_and_pair_private_comfy_stream,
+    H3PrivateComfyBindingExpectation, H3PrivateComfyBlockLoader, H3PrivateComfyCancellationGuard,
+    H3PrivateComfyCancellationSlot, H3PrivateComfyCheckpointFacts, H3PrivateComfyStreamAuthority,
     H3PrivateComfyTransformerExecutor,
 };
 use super::private_vae_adapter::H3PrivateComfyVaeAdapter;
@@ -62,6 +62,9 @@ pub(crate) unsafe trait H3PrivateFl2VaArtifactLease:
     fn audio_vae_component_content_sha256(&self) -> &str;
     fn audio_vae_component_validation_sha256(&self) -> &str;
     fn vae_artifact_plan_identity_sha256(&self) -> &str;
+    fn transformer_task(&self) -> H3TransformerTask;
+    fn transformer_checkpoint_content_sha256(&self) -> &str;
+    fn transformer_checkpoint_layout_identity_sha256(&self) -> &str;
     fn transformer_checkpoint_identity_sha256(&self) -> &str;
     fn transformer_policy_identity_sha256(&self) -> &str;
     fn pruned_adaln_table_identity_sha256(&self) -> &str;
@@ -270,9 +273,12 @@ fn valid_sha256(value: &str) -> bool {
 /// The only owner of the scheduler execution grant and the complete artifact
 /// lease for one private attempt. All component-specific handles below are
 /// projections over this allocation; none can clone either underlying lease.
+/// Device selection is frozen from the validated route before construction so
+/// safe lease implementations cannot redirect later component operations.
 struct H3PrivateAttemptOwner<E, A> {
     execution: E,
     artifacts: A,
+    device: Device,
 }
 
 /// Singular attempt authority retained until every model, streamed block, and
@@ -292,11 +298,13 @@ impl<E, A> Clone for H3PrivateAttemptAuthority<E, A> {
 impl<E, A> H3PrivateAttemptAuthority<E, A> {
     /// Construction stays inside the private runtime composition boundary so
     /// callers can never build projections from independently owned leases.
-    fn new(execution: E, artifacts: A) -> Self {
+    fn new(bound: H3PrivateBoundExecution<E>, artifacts: A) -> Self {
+        let H3PrivateBoundExecution { execution, device } = bound;
         Self {
             owner: Arc::new(H3PrivateAttemptOwner {
                 execution,
                 artifacts,
+                device,
             }),
         }
     }
@@ -330,8 +338,8 @@ impl<E, A> H3PrivateAttemptAuthority<E, A> {
     }
 
     #[cfg(test)]
-    fn new_unchecked_for_test(execution: E, artifacts: A) -> Self {
-        Self::new(execution, artifacts)
+    fn new_unchecked_for_test(execution: E, artifacts: A, device: Device) -> Self {
+        Self::new(H3PrivateBoundExecution { execution, device }, artifacts)
     }
 }
 
@@ -377,7 +385,7 @@ where
     }
 
     fn device(&self) -> &Device {
-        self.owner.execution.device()
+        &self.owner.device
     }
 
     fn is_active(&self) -> bool {
@@ -518,6 +526,20 @@ where
 
     fn vae_artifact_plan_identity_sha256(&self) -> &str {
         self.owner.artifacts.vae_artifact_plan_identity_sha256()
+    }
+
+    fn transformer_task(&self) -> H3TransformerTask {
+        self.owner.artifacts.transformer_task()
+    }
+
+    fn transformer_checkpoint_content_sha256(&self) -> &str {
+        self.owner.artifacts.transformer_checkpoint_content_sha256()
+    }
+
+    fn transformer_checkpoint_layout_identity_sha256(&self) -> &str {
+        self.owner
+            .artifacts
+            .transformer_checkpoint_layout_identity_sha256()
     }
 
     fn transformer_checkpoint_identity_sha256(&self) -> &str {
@@ -743,8 +765,15 @@ where
                 != self.admitted.audio_vae_component_validation_sha256
             || artifacts.vae_artifact_plan_identity_sha256()
                 != self.admitted.vae_artifact_plan_identity_sha256
+            || artifacts.transformer_task() != self.stream_authority.task
+            || artifacts.transformer_checkpoint_content_sha256()
+                != self.stream_authority.transformer_content_sha256
+            || artifacts.transformer_checkpoint_layout_identity_sha256()
+                != self.stream_authority.transformer_layout_identity_sha256
             || artifacts.transformer_checkpoint_identity_sha256()
                 != self.stream_authority.checkpoint_identity_sha256
+            || artifacts.transformer_policy_identity_sha256()
+                != self.stream_authority.transformer_policy_identity_sha256
             || artifacts.attention_runtime_identity_sha256()
                 != self.stream_authority.attention_runtime_identity_sha256
             || artifacts.attention_runtime_identity_sha256()
@@ -895,18 +924,94 @@ type H3PrivateComfyCore<'authority, C, E, A> = H3PrivateVaeFreeStreamedCore<
 type H3PrivateComfyPipelineRuntime<'authority, C, E, A> =
     H3PipelineRuntime<H3PrivateComfyVaeAdapter<H3PrivateComfyCore<'authority, C, E, A>>>;
 
+/// Consuming proof that one execution lease and one retained Candle device
+/// passed route validation together. Keeping the fields private and this type
+/// non-cloneable prevents production composition from mixing authorities.
+struct H3PrivateBoundExecution<E> {
+    execution: E,
+    device: Device,
+}
+
+impl<E> H3PrivateBoundExecution<E> {
+    fn device(&self) -> &Device {
+        &self.device
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct H3PrivateExecutionRouteFacts {
+    active: bool,
+    lease_id: String,
+    device_id: String,
+    execution_fingerprint: String,
+    backend: H3CandleBackendDevice,
+    location: DeviceLocation,
+    attention_device: H3AttentionDevice,
+}
+
+fn validate_private_execution_route_facts(
+    actual: &H3PrivateExecutionRouteFacts,
+    admitted: &H3PrivateFl2VaFactoryAuthority,
+) -> Result<()> {
+    let expected_attention_device = H3AttentionDevice::Cuda {
+        compute_capability: Some(admitted.compute_capability),
+    };
+    if !actual.active
+        || actual.lease_id.trim().is_empty()
+        || actual.device_id != admitted.device_id
+        || actual.execution_fingerprint != admitted.execution_fingerprint
+        || actual.backend
+            != (H3CandleBackendDevice::Cuda {
+                compute_capability: admitted.compute_capability,
+            })
+        || actual.location
+            != (DeviceLocation::Cuda {
+                gpu_id: admitted.device_ordinal,
+            })
+        || admitted.attention.device != expected_attention_device
+        || actual.attention_device != admitted.attention.device
+    {
+        bail!("private MiniMax H3 execution route differs before component binding");
+    }
+    Ok(())
+}
+
+/// Snapshot the safe execution-lease surface once. In particular, the Candle
+/// device is cloned from one call and becomes the only device the bound
+/// transformer stream may later use.
+fn capture_private_execution_route<E>(
+    execution: E,
+    admitted: &H3PrivateFl2VaFactoryAuthority,
+) -> Result<H3PrivateBoundExecution<E>>
+where
+    E: H3BackendExecutionLease,
+{
+    let device = execution.device().clone();
+    let facts = H3PrivateExecutionRouteFacts {
+        active: execution.is_active(),
+        lease_id: execution.lease_id().into(),
+        device_id: execution.device_id().into(),
+        execution_fingerprint: execution.execution_fingerprint().into(),
+        backend: execution.backend(),
+        location: device.location(),
+        attention_device: H3AttentionDevice::from_candle(&device),
+    };
+    validate_private_execution_route_facts(&facts, admitted)?;
+    Ok(H3PrivateBoundExecution { execution, device })
+}
+
 /// Structural composition proof for one private FL2VA attempt. It is private
 /// to this module and its overlap argument is uninhabited in non-test builds,
-/// so there is deliberately no into-runtime escape for the cached H3 engine.
+/// so there is deliberately no production construction escape yet.
 ///
-/// Activation must replace this sealed entry with an attempt-consuming API
-/// that drops the full runtime on every success, error, and cancellation and
-/// reconstructs it per job. It must also accept authenticated VAE plans/opened
-/// descriptors and load both VAEs inside this same owner and cancellation
-/// scope; a preloaded bundle does not prove allocation or cancellation
-/// provenance and is not sufficient. The actual attention authority must also
-/// be bound directly to frozen backend, kernel, activation, device, and model
-/// contract facts before load; an artifact lease echo is not that proof.
+/// The engine already consumes one fresh session per job. Activating this
+/// sealed composer must also accept authenticated VAE plans/opened descriptors
+/// and load both VAEs inside this same owner and cancellation scope; a
+/// preloaded bundle does not prove allocation or cancellation provenance and
+/// is not sufficient. The binding below freezes the exact execution route,
+/// Candle device, concrete attention authority, and opened transformer
+/// identity before Qwen or transformer allocation, without activating any
+/// shipping path.
 #[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
 fn compose_private_comfy_fl2va_runtime<'authority, C, E, A>(
@@ -929,13 +1034,58 @@ where
     A: H3PrivateFl2VaArtifactLease + Send + Sync,
 {
     let admitted = authority.private_fl2va_runtime_authority()?;
+    let bound_execution = capture_private_execution_route(execution_lease, &admitted)?;
     memory_overlap.validate()?;
     if memory_overlap.factory_identity_sha256 != admitted.factory_identity_sha256
         || memory_overlap.identity_sha256() != artifact_lease.memory_overlap_identity_sha256()
     {
         bail!("private MiniMax H3 overlap authority differs before component loading");
     }
-    let attempt = H3PrivateAttemptAuthority::new(execution_lease, artifact_lease);
+    let expected_transformer_policy = match &admitted.quantization {
+        H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
+            transformer_policy_sha256,
+            ..
+        } => transformer_policy_sha256,
+        H3FactoryQuantizationAuthority::OfficialBf16 => {
+            bail!("private MiniMax H3 Comfy runtime requires quantized transformer authority")
+        }
+    };
+    if !artifact_lease.is_active()
+        || artifact_lease.transformer_task() != H3TransformerTask::T2VaFl2Va
+        || artifact_lease.transformer_policy_identity_sha256() != expected_transformer_policy
+        || artifact_lease.attention_runtime_identity_sha256()
+            != admitted.attention.runtime_identity_sha256
+        || artifact_lease.attention_kernel_identity()
+            != admitted.attention.qualification_kernel_identity
+        || artifact_lease.attention_qualification_sha256()
+            != admitted.attention.qualification_sha256
+    {
+        bail!("private MiniMax H3 artifact lease differs before component loading");
+    }
+    let bound_stream = bind_private_comfy_stream(
+        opened_transformer,
+        bound_execution.device(),
+        attention,
+        H3PrivateComfyBindingExpectation {
+            attention: admitted.attention.clone(),
+            checkpoint: H3PrivateComfyCheckpointFacts {
+                task: artifact_lease.transformer_task(),
+                content_sha256: artifact_lease
+                    .transformer_checkpoint_content_sha256()
+                    .into(),
+                layout_identity_sha256: artifact_lease
+                    .transformer_checkpoint_layout_identity_sha256()
+                    .into(),
+                opened_checkpoint_identity_sha256: artifact_lease
+                    .transformer_checkpoint_identity_sha256()
+                    .into(),
+                quantization_policy_identity_sha256: artifact_lease
+                    .transformer_policy_identity_sha256()
+                    .into(),
+            },
+        },
+    )?;
+    let attempt = H3PrivateAttemptAuthority::new(bound_execution, artifact_lease);
     let (qwen_execution, qwen_artifacts) = attempt.qwen_projections();
     let block_execution = attempt.block_projection();
     let core_execution = attempt.block_projection();
@@ -951,13 +1101,9 @@ where
         authority,
         checkpoint,
     )?;
-    let device = core_execution.device().clone();
     let stream = load_and_pair_private_comfy_stream(
-        opened_transformer,
-        &device,
-        attention,
+        bound_stream,
         &admitted.block_streaming,
-        H3TransformerTask::T2VaFl2Va,
         cancellation_slot,
     )?;
     let identity = H3PipelineBackendIdentity {
@@ -1076,6 +1222,146 @@ mod tests {
         .unwrap()
     }
 
+    fn exact_execution_route_facts(
+        admitted: &H3PrivateFl2VaFactoryAuthority,
+    ) -> H3PrivateExecutionRouteFacts {
+        H3PrivateExecutionRouteFacts {
+            active: true,
+            lease_id: "execution-lease".into(),
+            device_id: admitted.device_id.clone(),
+            execution_fingerprint: admitted.execution_fingerprint.clone(),
+            backend: H3CandleBackendDevice::Cuda {
+                compute_capability: admitted.compute_capability,
+            },
+            location: candle_core::DeviceLocation::Cuda {
+                gpu_id: admitted.device_ordinal,
+            },
+            attention_device: admitted.attention.device,
+        }
+    }
+
+    #[test]
+    fn every_execution_route_axis_fails_closed_before_binding() {
+        let admitted = authority()
+            .private_fl2va_runtime_authority_for_schema_tests()
+            .unwrap();
+        validate_private_execution_route_facts(&exact_execution_route_facts(&admitted), &admitted)
+            .unwrap();
+
+        for axis in [
+            "active",
+            "lease-id",
+            "device-id",
+            "execution",
+            "backend",
+            "location",
+            "attention-device",
+        ] {
+            let mut facts = exact_execution_route_facts(&admitted);
+            match axis {
+                "active" => facts.active = false,
+                "lease-id" => facts.lease_id = "   ".into(),
+                "device-id" => facts.device_id = "other-device".into(),
+                "execution" => facts.execution_fingerprint = sha('f'),
+                "backend" => {
+                    facts.backend = H3CandleBackendDevice::Cuda {
+                        compute_capability: (8, 6),
+                    }
+                }
+                "location" => {
+                    facts.location = candle_core::DeviceLocation::Cuda {
+                        gpu_id: admitted.device_ordinal + 1,
+                    }
+                }
+                "attention-device" => {
+                    facts.attention_device = mold_candle::minimax_h3::H3AttentionDevice::Cpu
+                }
+                _ => unreachable!(),
+            }
+            let error = validate_private_execution_route_facts(&facts, &admitted).expect_err(axis);
+            assert!(
+                error.to_string().contains("execution route"),
+                "{axis}: {error}"
+            );
+        }
+    }
+
+    struct AlternatingDeviceLease {
+        devices: [Device; 2],
+        calls: Arc<AtomicUsize>,
+        device_id: String,
+        execution_fingerprint: String,
+        compute_capability: (u16, u16),
+    }
+
+    impl H3BackendExecutionLease for AlternatingDeviceLease {
+        fn lease_id(&self) -> &str {
+            "alternating-execution-lease"
+        }
+
+        fn device_id(&self) -> &str {
+            &self.device_id
+        }
+
+        fn backend(&self) -> H3CandleBackendDevice {
+            H3CandleBackendDevice::Cuda {
+                compute_capability: self.compute_capability,
+            }
+        }
+
+        fn execution_fingerprint(&self) -> &str {
+            &self.execution_fingerprint
+        }
+
+        fn device(&self) -> &Device {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            &self.devices[usize::from(call > 0)]
+        }
+
+        fn is_active(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn execution_route_capture_reads_an_adversarial_device_lease_once() {
+        let admitted = authority()
+            .private_fl2va_runtime_authority_for_schema_tests()
+            .unwrap();
+        let lease = AlternatingDeviceLease {
+            devices: [Device::Cpu, Device::Cpu],
+            calls: Arc::new(AtomicUsize::new(0)),
+            device_id: admitted.device_id.clone(),
+            execution_fingerprint: admitted.execution_fingerprint.clone(),
+            compute_capability: admitted.compute_capability,
+        };
+        let error = capture_private_execution_route(&lease, &admitted)
+            .err()
+            .expect("the CPU route must fail before binding");
+        assert!(error.to_string().contains("execution route"));
+        assert_eq!(lease.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn attempt_projections_reuse_the_retained_device_without_repolling_the_lease() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let lease = AlternatingDeviceLease {
+            devices: [Device::Cpu, Device::Cpu],
+            calls: Arc::clone(&calls),
+            device_id: "synthetic-device".into(),
+            execution_fingerprint: sha('a'),
+            compute_capability: (8, 9),
+        };
+        let retained_device = lease.device().clone();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let attempt = H3PrivateAttemptAuthority::new_unchecked_for_test(lease, (), retained_device);
+        let projection = attempt.block_projection();
+        assert!(projection.device().is_cpu());
+        assert!(projection.clone().device().is_cpu());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
     fn overlap(admitted: &H3PrivateFl2VaFactoryAuthority) -> H3PrivateFl2VaMemoryOverlapAuthority {
         let (condition_host, condition_device, normalized_endpoints) =
             if admitted.condition_visual_rows == 0 {
@@ -1113,6 +1399,7 @@ mod tests {
             // Raw checkpoint bytes deliberately use a different identity
             // domain from the admitted logical component aggregate.
             transformer_content_sha256: sha('7'),
+            transformer_layout_identity_sha256: sha('8'),
             checkpoint_identity_sha256: sha('9'),
             transformer_policy_identity_sha256,
             attention_runtime_identity_sha256: admitted.attention.runtime_identity_sha256.clone(),
@@ -1253,6 +1540,18 @@ mod tests {
 
         fn vae_artifact_plan_identity_sha256(&self) -> &str {
             &self.admitted.vae_artifact_plan_identity_sha256
+        }
+
+        fn transformer_task(&self) -> H3TransformerTask {
+            self.stream.task
+        }
+
+        fn transformer_checkpoint_content_sha256(&self) -> &str {
+            &self.stream.transformer_content_sha256
+        }
+
+        fn transformer_checkpoint_layout_identity_sha256(&self) -> &str {
+            &self.stream.transformer_layout_identity_sha256
         }
 
         fn transformer_checkpoint_identity_sha256(&self) -> &str {
@@ -1467,6 +1766,9 @@ mod tests {
         TaskModel,
         ConditionShape,
         TransformerComponent,
+        TransformerTask,
+        TransformerContent,
+        TransformerLayout,
         TransformerCheckpoint,
         TransformerPolicy,
         AttentionRuntime,
@@ -1532,6 +1834,15 @@ mod tests {
             Some(AuthorityMismatch::TransformerComponent) => {
                 artifact_admitted.transformer_component_content_sha256 = sha('f');
             }
+            Some(AuthorityMismatch::TransformerTask) => {
+                artifact_stream.task = H3TransformerTask::Ref2Va;
+            }
+            Some(AuthorityMismatch::TransformerContent) => {
+                artifact_stream.transformer_content_sha256 = sha('f');
+            }
+            Some(AuthorityMismatch::TransformerLayout) => {
+                artifact_stream.transformer_layout_identity_sha256 = sha('f');
+            }
             Some(AuthorityMismatch::TransformerCheckpoint) => {
                 artifact_stream.checkpoint_identity_sha256 = sha('f');
             }
@@ -1555,7 +1866,7 @@ mod tests {
             }
             None => {}
         }
-        let attempt = H3PrivateAttemptAuthority::new(
+        let attempt = H3PrivateAttemptAuthority::new_unchecked_for_test(
             FakeExecution {
                 device: Device::Cpu,
                 device_id: execution_device_id,
@@ -1571,6 +1882,7 @@ mod tests {
                 active: Arc::clone(&artifact_active),
                 events: Arc::clone(&events),
             },
+            Device::Cpu,
         );
         let (qwen_execution, qwen_artifacts) = attempt.qwen_projections();
         let conditioner = FakeConditioner {
@@ -1978,6 +2290,9 @@ mod tests {
             AuthorityMismatch::TaskModel,
             AuthorityMismatch::ConditionShape,
             AuthorityMismatch::TransformerComponent,
+            AuthorityMismatch::TransformerTask,
+            AuthorityMismatch::TransformerContent,
+            AuthorityMismatch::TransformerLayout,
             AuthorityMismatch::TransformerCheckpoint,
             AuthorityMismatch::TransformerPolicy,
             AuthorityMismatch::AttentionRuntime,
@@ -2005,6 +2320,7 @@ mod tests {
                 name: "artifacts",
                 events: Arc::clone(&events),
             },
+            Device::Cpu,
         );
         let second = H3PrivateAttemptAuthority::new_unchecked_for_test(
             DropCount {
@@ -2015,6 +2331,7 @@ mod tests {
                 name: "artifacts",
                 events,
             },
+            Device::Cpu,
         );
         let (execution, artifacts) = first.qwen_projections();
         assert!(execution.belongs_to(&first));
@@ -2079,7 +2396,8 @@ mod tests {
             name: "artifacts",
             events: Arc::clone(&events),
         };
-        let attempt = H3PrivateAttemptAuthority::new_unchecked_for_test(execution, artifacts);
+        let attempt =
+            H3PrivateAttemptAuthority::new_unchecked_for_test(execution, artifacts, Device::Cpu);
         let (qwen_execution, qwen_artifacts) = attempt.qwen_projections();
         let block_execution = attempt.block_projection();
 

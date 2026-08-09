@@ -37,6 +37,78 @@ require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
 require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
   '_activation: admitted_overlap_seal::Token,' \
   "private H3 FL2VA overlap authority no longer contains its uninhabited token"
+require_text crates/mold-inference/src/minimax_h3/private_runtime.rs \
+  'pub(crate) struct H3PrivateBoundComfyStream' \
+  "private H3 checkpoint load lacks a non-cloneable pre-allocation binding"
+require_text crates/mold-inference/src/minimax_h3/private_runtime.rs \
+  'bound: H3PrivateBoundComfyStream,' \
+  "private H3 resident loader still accepts unbound checkpoint and attention values"
+require_text crates/mold-inference/src/minimax_h3/private_runtime.rs \
+  'device: Device,' \
+  "private H3 bound checkpoint does not retain the validated Candle device"
+attempt_owner=$(sed -n \
+  '/struct H3PrivateAttemptOwner/,/^}/p' \
+  crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs)
+if ! grep -Fq 'device: Device,' <<<"$attempt_owner"; then
+  fail "private H3 singular attempt owner does not retain the validated Candle device"
+fi
+require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
+  'struct H3PrivateBoundExecution<E>' \
+  "private H3 route capture returns forgeable lease/device parts"
+require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
+  'fn new(bound: H3PrivateBoundExecution<E>, artifacts: A)' \
+  "private H3 attempt construction can mix an execution lease with another device"
+execution_projection=$(sed -n \
+  '/impl<E, A> H3BackendExecutionLease for H3PrivateExecutionProjection/,/^}/p' \
+  crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs)
+if ! grep -Fq '&self.owner.device' <<<"$execution_projection" \
+  || grep -Fq 'execution.device()' <<<"$execution_projection"; then
+  fail "private H3 execution projections can repoll a safe lease for a different device"
+fi
+require_text crates/mold-inference/src/minimax_h3/private_runtime.rs \
+  '.verify_current_release_candidate_dispatch(device)' \
+  "private H3 binding does not verify the actual compiled attention candidate"
+for method in \
+  transformer_task \
+  transformer_checkpoint_content_sha256 \
+  transformer_checkpoint_layout_identity_sha256 \
+  transformer_checkpoint_identity_sha256 \
+  transformer_policy_identity_sha256; do
+  require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
+    "fn ${method}(&self)" \
+    "private H3 artifact lease omits ${method}"
+done
+composer=$(sed -n \
+  '/fn compose_private_comfy_fl2va_runtime/,/^}/p' \
+  crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs)
+bind_line=$(grep -nF 'let bound_stream = bind_private_comfy_stream(' <<<"$composer" | cut -d: -f1)
+attempt_line=$(grep -nF 'let attempt = H3PrivateAttemptAuthority::new' <<<"$composer" | cut -d: -f1)
+qwen_line=$(grep -nF 'let qwen = H3PrivateQwenAdapter::load_authorized' <<<"$composer" | cut -d: -f1)
+if [[ -z "$bind_line" || -z "$attempt_line" || -z "$qwen_line" ]] \
+  || (( bind_line >= attempt_line || bind_line >= qwen_line )); then
+  fail "private H3 attention/checkpoint binding no longer precedes attempt and Qwen allocation"
+fi
+if [[ $(grep -Fc 'capture_private_execution_route(execution_lease' <<<"$composer") -ne 1 ]] \
+  || grep -Fq 'execution_lease.device()' <<<"$composer"; then
+  fail "private H3 composer must consume and capture the execution lease route exactly once"
+fi
+if [[ $(grep -Fc 'bound_execution.device()' <<<"$composer") -ne 1 ]] \
+  || [[ $(grep -Fc 'H3PrivateAttemptAuthority::new(bound_execution, artifact_lease)' <<<"$composer") -ne 1 ]]; then
+  fail "private H3 bound execution token is not shared with attention binding and consumed by the attempt"
+fi
+capture=$(sed -n \
+  '/fn capture_private_execution_route/,/^}/p' \
+  crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs)
+if [[ $(grep -Fc 'execution.device()' <<<"$capture") -ne 1 ]] \
+  || [[ $(grep -Fc 'lease_id: execution.lease_id().into()' <<<"$capture") -ne 1 ]]; then
+  fail "private H3 route capture must bind one device and a concrete lease identity"
+fi
+loader=$(sed -n \
+  '/pub(crate) fn load_and_pair_private_comfy_stream/,/^[[:space:]]*{/p' \
+  crates/mold-inference/src/minimax_h3/private_runtime.rs)
+if grep -Fq 'device:' <<<"$loader"; then
+  fail "private H3 resident loader still accepts an external device after binding"
+fi
 overlap_seal=$(sed -n '/mod admitted_overlap_seal {/,/^}/p' \
   crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs)
 if ! grep -Fq '#[cfg(not(test))]' <<<"$overlap_seal"; then

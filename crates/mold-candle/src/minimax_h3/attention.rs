@@ -719,6 +719,51 @@ impl H3AttentionRuntimeAuthority {
         Ok(())
     }
 
+    /// Prove that this authority was issued by the exact release-candidate
+    /// kernel compiled into the current binary and targets the observed
+    /// Candle device. A serialized identity record alone is not executable
+    /// authority: private runtime composition calls this before any model
+    /// tensor is allocated.
+    pub fn verify_current_release_candidate_dispatch(
+        &self,
+        device: &Device,
+    ) -> InspectionResult<()> {
+        let observed = H3AttentionDevice::from_candle(device);
+        self.verify_release_candidate_build(
+            &H3AttentionReleaseCandidateBuild::current(),
+            observed,
+        )?;
+        if !self.device.matches_candle(device) {
+            return Err(failure(
+                H3AttentionErrorCode::RuntimePlanMismatch,
+                "MiniMax H3 release-candidate attention targets a different Candle device",
+                vec![H3AttentionRequirement::ExactDeviceBackend],
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_release_candidate_build(
+        &self,
+        build: &H3AttentionReleaseCandidateBuild,
+        observed: H3AttentionDevice,
+    ) -> InspectionResult<()> {
+        self.validate_identity()?;
+        let expected = build.qualify(observed)?;
+        if self != &expected {
+            return Err(failure(
+                H3AttentionErrorCode::RuntimePlanMismatch,
+                "MiniMax H3 attention authority does not match the current compiled release candidate",
+                vec![
+                    H3AttentionRequirement::CompiledH3FlashAttentionV2,
+                    H3AttentionRequirement::QualifiedCudaSm89,
+                    H3AttentionRequirement::UntamperedFrozenPlan,
+                ],
+            ));
+        }
+        Ok(())
+    }
+
     pub fn freeze_execution(
         &self,
         batch_size: usize,
@@ -1525,6 +1570,36 @@ mod tests {
             true,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn release_candidate_dispatch_requires_the_current_compiled_build() {
+        let authority = exact_flash_candidate();
+        let sm89 = H3AttentionDevice::Cuda {
+            compute_capability: Some((8, 9)),
+        };
+        let compiled = H3AttentionReleaseCandidateBuild::from_build_inputs(true, Some("89"));
+        authority
+            .verify_release_candidate_build(&compiled, sm89)
+            .unwrap();
+
+        for build in [
+            H3AttentionReleaseCandidateBuild::from_build_inputs(false, Some("89")),
+            H3AttentionReleaseCandidateBuild::from_build_inputs(true, Some("86")),
+            H3AttentionReleaseCandidateBuild::from_build_inputs(true, None),
+        ] {
+            assert!(authority
+                .verify_release_candidate_build(&build, sm89)
+                .is_err());
+        }
+        assert!(authority
+            .verify_release_candidate_build(
+                &compiled,
+                H3AttentionDevice::Cuda {
+                    compute_capability: Some((8, 6)),
+                },
+            )
+            .is_err());
     }
 
     #[test]
