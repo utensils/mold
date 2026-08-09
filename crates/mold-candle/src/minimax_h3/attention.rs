@@ -222,6 +222,12 @@ impl H3AttentionKernel {
             }
         }
     }
+
+    /// Canonical non-executable kernel identifier used by scheduler/factory
+    /// evidence. Runtime identity still binds the complete typed tuple.
+    pub const fn identity(self) -> &'static str {
+        self.stable_id()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -585,6 +591,26 @@ pub struct H3AttentionRuntimeAuthority {
 }
 
 impl H3AttentionRuntimeAuthority {
+    /// Compute the canonical identity for a typed H3 attention runtime tuple
+    /// without constructing executable authority.
+    ///
+    /// Scheduler/factory admission uses this to bind the exact backend,
+    /// kernel, activation, device, and released model contract independently
+    /// from qualification evidence. Invalid or unsupported tuples fail before
+    /// an identity is returned.
+    pub fn expected_identity_for(
+        backend: H3AttentionBackend,
+        kernel: H3AttentionKernel,
+        activation: H3AttentionActivation,
+        device: H3AttentionDevice,
+        contract: H3AttentionModelContract,
+    ) -> InspectionResult<String> {
+        validate_backend_contract(backend, kernel, activation, device, contract)?;
+        Ok(runtime_identity_fields(
+            backend, kernel, activation, device, contract,
+        ))
+    }
+
     pub fn bounded_synthetic_math(
         device: H3AttentionDevice,
         contract: H3AttentionModelContract,
@@ -1230,15 +1256,31 @@ fn release_candidate_build_identity(build: &H3AttentionReleaseCandidateBuild) ->
 }
 
 fn runtime_identity(authority: &H3AttentionRuntimeAuthority) -> String {
+    runtime_identity_fields(
+        authority.backend,
+        authority.kernel,
+        authority.activation,
+        authority.device,
+        authority.contract,
+    )
+}
+
+fn runtime_identity_fields(
+    backend: H3AttentionBackend,
+    kernel: H3AttentionKernel,
+    activation: H3AttentionActivation,
+    device: H3AttentionDevice,
+    contract: H3AttentionModelContract,
+) -> String {
     let mut digest = Sha256::new();
     digest.update(b"minimax-h3-attention-runtime-v1");
-    digest.update(authority.backend.stable_id().as_bytes());
-    digest.update(authority.kernel.stable_id().as_bytes());
-    digest.update(authority.activation.stable_id().as_bytes());
-    digest.update(authority.device.stable_id().as_bytes());
-    digest.update((authority.contract.heads as u64).to_le_bytes());
-    digest.update((authority.contract.head_dim as u64).to_le_bytes());
-    digest.update(authority.contract.dtype.stable_id().as_bytes());
+    digest.update(backend.stable_id().as_bytes());
+    digest.update(kernel.stable_id().as_bytes());
+    digest.update(activation.stable_id().as_bytes());
+    digest.update(device.stable_id().as_bytes());
+    digest.update((contract.heads as u64).to_le_bytes());
+    digest.update((contract.head_dim as u64).to_le_bytes());
+    digest.update(contract.dtype.stable_id().as_bytes());
     digest.update(H3_FLASH_ATTN_PACKAGE_VERSION.as_bytes());
     digest.update(H3_FLASH_ATTN_CRATE_SHA256.as_bytes());
     hex_digest(digest.finalize())
@@ -1564,6 +1606,17 @@ mod tests {
             H3AttentionActivation::ReleaseCandidateQualificationOnly
         );
         assert_eq!(authority.identity_sha256().len(), 64);
+        assert_eq!(
+            authority.identity_sha256(),
+            H3AttentionRuntimeAuthority::expected_identity_for(
+                authority.backend(),
+                authority.kernel(),
+                authority.activation(),
+                authority.device(),
+                authority.contract(),
+            )
+            .unwrap()
+        );
         assert_eq!(H3_FLASH_ATTN_PACKAGE_VERSION, "0.11.0");
         assert_eq!(H3_FLASH_ATTN_CRATE_SHA256.len(), 64);
         let rejection = authority.require_release_activation().unwrap_err();
@@ -1573,6 +1626,68 @@ mod tests {
         assert!(rejection
             .requirements
             .contains(&H3AttentionReleaseRequirement::CrossBackendReproducibilityDecision));
+    }
+
+    #[test]
+    fn expected_runtime_identity_rejects_each_crossed_tuple_field() {
+        let device = H3AttentionDevice::Cuda {
+            compute_capability: Some((8, 9)),
+        };
+        let contract = H3AttentionModelContract::released_bf16();
+        let identity = H3AttentionRuntimeAuthority::expected_identity_for(
+            H3AttentionBackend::FlashAttentionV2,
+            H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011,
+            H3AttentionActivation::ReleaseCandidateQualificationOnly,
+            device,
+            contract,
+        )
+        .unwrap();
+        assert_eq!(identity.len(), 64);
+
+        for result in [
+            H3AttentionRuntimeAuthority::expected_identity_for(
+                H3AttentionBackend::BoundedDenseMath,
+                H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011,
+                H3AttentionActivation::ReleaseCandidateQualificationOnly,
+                device,
+                contract,
+            ),
+            H3AttentionRuntimeAuthority::expected_identity_for(
+                H3AttentionBackend::FlashAttentionV2,
+                H3AttentionKernel::CandleDenseF32V011,
+                H3AttentionActivation::ReleaseCandidateQualificationOnly,
+                device,
+                contract,
+            ),
+            H3AttentionRuntimeAuthority::expected_identity_for(
+                H3AttentionBackend::FlashAttentionV2,
+                H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011,
+                H3AttentionActivation::SyntheticCorrectnessOnly,
+                device,
+                contract,
+            ),
+            H3AttentionRuntimeAuthority::expected_identity_for(
+                H3AttentionBackend::FlashAttentionV2,
+                H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011,
+                H3AttentionActivation::ReleaseCandidateQualificationOnly,
+                H3AttentionDevice::Cuda {
+                    compute_capability: Some((9, 0)),
+                },
+                contract,
+            ),
+            H3AttentionRuntimeAuthority::expected_identity_for(
+                H3AttentionBackend::FlashAttentionV2,
+                H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011,
+                H3AttentionActivation::ReleaseCandidateQualificationOnly,
+                device,
+                H3AttentionModelContract {
+                    heads: 55,
+                    ..contract
+                },
+            ),
+        ] {
+            assert!(result.is_err());
+        }
     }
 
     #[test]

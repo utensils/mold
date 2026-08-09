@@ -1518,6 +1518,9 @@ mod tests {
             attention_head_count: 56,
             attention_head_dim: 128,
             block_offload: true,
+            attention_runtime: None,
+            prepared_attempt: None,
+            execution_budget_echo: None,
             quantization: H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
                 transformer_policy_sha256: sha('b'),
                 qwen_policy_sha256: H3_QWEN_NVFP4_AWQ_POLICY_SHA256.into(),
@@ -2601,6 +2604,9 @@ mod tests {
             attention_head_count: 56,
             attention_head_dim: 128,
             block_offload: true,
+            attention_runtime: None,
+            prepared_attempt: None,
+            execution_budget_echo: None,
             quantization: H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
                 transformer_policy_sha256: sha('c'),
                 qwen_policy_sha256: H3_QWEN_NVFP4_AWQ_POLICY_SHA256.into(),

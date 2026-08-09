@@ -747,9 +747,12 @@ where
                 != self.stream_authority.checkpoint_identity_sha256
             || artifacts.attention_runtime_identity_sha256()
                 != self.stream_authority.attention_runtime_identity_sha256
-            || artifacts.attention_kernel_identity() != self.admitted.attention_kernel_identity
+            || artifacts.attention_runtime_identity_sha256()
+                != self.admitted.attention.runtime_identity_sha256
+            || artifacts.attention_kernel_identity()
+                != self.admitted.attention.qualification_kernel_identity
             || artifacts.attention_qualification_sha256()
-                != self.admitted.attention_qualification_sha256
+                != self.admitted.attention.qualification_sha256
             || self.stream_authority.task != H3TransformerTask::T2VaFl2Va
             || self.conditioner.model() != self.admitted.canonical_model
             || self.conditioner.task() != self.admitted.task
@@ -1044,6 +1047,9 @@ mod tests {
             attention_head_count: 56,
             attention_head_dim: 128,
             block_offload: true,
+            attention_runtime: None,
+            prepared_attempt: None,
+            execution_budget_echo: None,
             quantization: H3FactoryQuantizationAuthority::ComfyPrunedInt8ConvrotNvfp4Awq {
                 transformer_policy_sha256: sha('c'),
                 qwen_policy_sha256: sha('d'),
@@ -1109,7 +1115,7 @@ mod tests {
             transformer_content_sha256: sha('7'),
             checkpoint_identity_sha256: sha('9'),
             transformer_policy_identity_sha256,
-            attention_runtime_identity_sha256: sha('8'),
+            attention_runtime_identity_sha256: admitted.attention.runtime_identity_sha256.clone(),
         }
     }
 
@@ -1272,11 +1278,11 @@ mod tests {
         }
 
         fn attention_kernel_identity(&self) -> &str {
-            &self.admitted.attention_kernel_identity
+            &self.admitted.attention.qualification_kernel_identity
         }
 
         fn attention_qualification_sha256(&self) -> &str {
-            &self.admitted.attention_qualification_sha256
+            &self.admitted.attention.qualification_sha256
         }
 
         fn memory_overlap_identity_sha256(&self) -> &str {
@@ -1479,7 +1485,7 @@ mod tests {
         condition_visual_rows: u64,
     ) -> Result<Fixture> {
         let authority = authority_with_condition_visual_rows(condition_visual_rows);
-        let admitted = authority.private_fl2va_runtime_authority()?;
+        let admitted = authority.private_fl2va_runtime_authority_for_schema_tests()?;
         let mut overlap = overlap(&admitted);
         let stream = stream_authority(&admitted);
         let mut artifact_admitted = admitted.clone();
@@ -1536,7 +1542,7 @@ mod tests {
                 artifact_stream.attention_runtime_identity_sha256 = sha('f');
             }
             Some(AuthorityMismatch::AttentionQualification) => {
-                artifact_admitted.attention_qualification_sha256 = sha('f');
+                artifact_admitted.attention.qualification_sha256 = sha('f');
             }
             Some(AuthorityMismatch::VaePlan) => {
                 artifact_admitted.vae_artifact_plan_identity_sha256 = sha('f');
@@ -1869,7 +1875,9 @@ mod tests {
 
     #[test]
     fn conservative_overlap_rejects_condition_vae_and_audio_latent_undercharge() {
-        let admitted = authority().private_fl2va_runtime_authority().unwrap();
+        let admitted = authority()
+            .private_fl2va_runtime_authority_for_schema_tests()
+            .unwrap();
         let error = H3PrivateFl2VaMemoryOverlapAuthority::new(
             admitted.factory_identity_sha256.clone(),
             admitted.condition_visual_rows,
@@ -1916,7 +1924,7 @@ mod tests {
         assert!(error.to_string().contains("undercharges retained audio"));
 
         let t2va = authority_with_condition_visual_rows(0)
-            .private_fl2va_runtime_authority()
+            .private_fl2va_runtime_authority_for_schema_tests()
             .unwrap();
         H3PrivateFl2VaMemoryOverlapAuthority::new(
             t2va.factory_identity_sha256.clone(),
@@ -1949,7 +1957,9 @@ mod tests {
 
     #[test]
     fn raw_checkpoint_and_logical_transformer_identity_domains_remain_distinct() {
-        let admitted = authority().private_fl2va_runtime_authority().unwrap();
+        let admitted = authority()
+            .private_fl2va_runtime_authority_for_schema_tests()
+            .unwrap();
         let stream = stream_authority(&admitted);
         assert_ne!(
             stream.transformer_content_sha256,

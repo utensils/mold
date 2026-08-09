@@ -82,12 +82,24 @@ pub use factory::{
 pub use flux::FluxEngine;
 pub use flux2::Flux2Engine;
 pub use h3_factory::{
-    FrozenH3FactoryAuthority, H3FactoryAuthorityInput, H3FactoryComponentAuthority,
-    H3FactoryComponentRole, H3FactoryConditionerPlacement, H3FactoryQuantizationAuthority,
+    expected_h3_factory_prepared_attempt_identity, expected_h3_factory_prepared_request_identity,
+    expected_h3_factory_raw_checkpoint_identity, expected_h3_factory_target_budget_identity,
+    h3_factory_activation_prerequisites, FrozenH3FactoryAuthority, H3FactoryActivationPrerequisite,
+    H3FactoryArtifactHostInput, H3FactoryArtifactHostRole, H3FactoryAttentionInput,
+    H3FactoryAuthorityInput, H3FactoryBlockMemoryInput, H3FactoryComponentAuthority,
+    H3FactoryComponentRole, H3FactoryConditionerPlacement, H3FactoryEndpointAnchor,
+    H3FactoryEndpointInput, H3FactoryEndpointPreprocess, H3FactoryExecutionBudgetEchoInput,
+    H3FactoryPreparedAttemptInput, H3FactoryPreparedRequestInput, H3FactoryPreparedRowsInput,
+    H3FactoryQuantizationAuthority, H3FactoryRawCheckpointInput, H3FactoryTargetBudgetInput,
+    H3FactoryTargetDenoiseCopyPolicy, H3FactoryTargetLoadDropPolicy,
 };
 pub use ltx2::Ltx2Engine;
 pub use ltx_video::LtxVideoEngine;
 pub use model_registry::known_models;
+pub use mold_candle::minimax_h3::{
+    H3AttentionActivation, H3AttentionBackend, H3AttentionDType, H3AttentionDevice,
+    H3AttentionKernel, H3AttentionModelContract,
+};
 pub use progress::{
     is_inference_cancelled, InferenceCancellationToken, InferenceCancelled, ProgressEvent,
     ProgressPhase,
