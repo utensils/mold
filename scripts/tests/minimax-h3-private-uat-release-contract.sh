@@ -13,7 +13,7 @@ require_text() {
   local file=$1
   local text=$2
   local message=$3
-  grep -Fq "$text" "$file" || fail "$message"
+  grep -Fq -- "$text" "$file" || fail "$message"
 }
 
 require_text crates/mold-candle/Cargo.toml \
@@ -67,14 +67,41 @@ if [[ $(grep -Fxc 'mod vae_free_inner_seal {' \
   fail "private H3 VAE-free seal is not private in production and test-visible only"
 fi
 require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
-  'pub const H3_PRIVATE_HOST_AUTHORITY_SHA256: &str =' \
-  "private H3 qualification is not bound to an opaque authorized-host identity"
-require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
   'pub const H3_PRIVATE_AUTHORIZATION_SCOPE: &str = "private-h3-uat";' \
   "private H3 qualification does not use the generic private authorization scope"
 require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
-  '"/storage/jamesbrink/mold-uat/minimax-h3/models"' \
-  "private H3 qualification is not bound to the reviewed storage root"
+  'const AUTHORIZATION_SCHEMA: &str = "mold.minimax-h3.authorization.v1";' \
+  "private H3 qualification does not require the reviewed authorization schema"
+require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
+  'const REVIEWED_AUTHORIZATION_EVIDENCE_SHA256: &str =' \
+  "private H3 qualification does not pin the accepted authorization evidence"
+require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
+  '8cd4d6e52cff34d7d39721ebab13b8c1187aa87aafc1c4ae2a16609186f22f1d' \
+  "private H3 qualification pins a different authorization evidence identity"
+require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
+  'if record.source_document_sha256 != reviewed_evidence_sha256 {' \
+  "private H3 qualification does not reject self-declared authorization evidence"
+require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
+  'fn production_scope_rejects_unreviewed_evidence() {' \
+  "private H3 qualification lacks a regression test for unreviewed evidence"
+require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
+  'pub authorization_record_sha256: String,' \
+  "private H3 qualification report does not bind the authorization record identity"
+require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
+  'pub authorization_source_document_sha256: String,' \
+  "private H3 qualification report does not bind the authorization source identity"
+require_text crates/mold-inference/src/bin/h3_artifact_qualification.rs \
+  'remove("--authorization-record")' \
+  "private H3 qualifier CLI does not require the external authorization record"
+if grep -Eq 'H3_PRIVATE_HOST_AUTHORITY_SHA256|H3_PRIVATE_MODELS_ROOT|/etc/hostname|/storage/.*/minimax-h3' \
+  crates/mold-inference/src/minimax_h3/private_qualification.rs \
+  crates/mold-inference/src/bin/h3_artifact_qualification.rs; then
+  fail "private H3 qualification regressed to host-name or hardcoded-path authority"
+fi
+if grep -Fq -- '--authorization-scope' \
+  crates/mold-inference/src/bin/h3_artifact_qualification.rs; then
+  fail "private H3 qualifier accepts a caller-asserted authorization scope"
+fi
 
 if grep -Eq '^h3-private-uat[[:space:]]*=' crates/mold-cli/Cargo.toml; then
   fail "mold-ai forwards the private H3 UAT feature into a runnable product binary"
@@ -132,6 +159,9 @@ require_text .github/workflows/ci.yml \
 require_text docs/qualification/minimax-h3.md \
   'h3_artifact_qualification' \
   "the private artifact qualifier has no operator runbook"
+require_text docs/qualification/minimax-h3.md \
+  '--authorization-record' \
+  "the private artifact qualifier runbook omits its external authorization record"
 
 scratch_dir="$(mktemp -d)"
 trap 'rm -rf "$scratch_dir"' EXIT

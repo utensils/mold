@@ -1,16 +1,16 @@
 # MiniMax H3 qualification and authorization status
 
 - Public product status: **unavailable; compliance-gated**
-- Private qualification status: **authorized on the private UAT host**
-- Evidence snapshot: **2026-08-08, Mold main `8a826153`**
+- Private qualification status: **authorized under the external private-UAT record**
+- Evidence snapshot: **2026-08-08, Mold main `12bbad65`**
 - Authorization owner: [issue #831](https://github.com/utensils/mold/issues/831)
 - Final qualification owner: [issue #827](https://github.com/utensils/mold/issues/827)
 
 This is an engineering status record and the acceptance plan for a possible
 future MiniMax H3 qualification. It is not a support announcement, a license
 grant, or legal advice. Mold main contains fail-closed H3 contracts, primitives,
-factory authorities, and dispatch seams, but does not currently advertise,
-download, load, or execute H3.
+factory authorities, and dispatch seams, but ordinary product builds do not
+advertise, download, load, or execute H3.
 
 The research used public implementation source and small textual repository
 metadata only. The reviewed
@@ -20,11 +20,13 @@ United Kingdom, and Republic of Korea. On 2026-08-08, the maintainer accepted a
 direct attestation that MiniMax authorized H3 integration with Mold. The
 [decision record](../architecture/minimax-h3-authorization.md) limits that
 authority to private downloads, inference, benign outputs, and conformance work
-on the authorized private host. It does not authorize public product activation,
-hosted or third-party access, distribution, or redistribution. No binary H3
-checkpoint, production safetensors header, generated media, or real-checkpoint
-UAT had been accessed at this evidence snapshot. The excluded external-volume
-UAT home was not used for H3 artifacts.
+under the access-controlled campaign record. It does not authorize public
+product activation, hosted or third-party access, distribution, or
+redistribution. The external campaign contains revision-pinned official and
+practical Comfy artifacts whose size and full SHA-256 identities were verified;
+an authenticated real-checkpoint block-0 qualification also ran on CUDA. That
+does not constitute end-to-end synchronized-A/V generation or runtime
+qualification, and no generated media had been produced at this snapshot.
 
 See the separate [authorization decision record](../architecture/minimax-h3-authorization.md)
 for the reviewed license identity, activation requirements, review ownership,
@@ -197,46 +199,57 @@ conditioner, an FP16 video VAE, and an FP32 AudioVAE.
 
 Comfy's curve-AdaLN representation replaces the official timestep MLP and
 full-width AdaLN projections. Its QKV packing also differs from the official
-layout. The current main-branch validator uses synthetic headers and tiny
-zero-filled tensors; production H3 headers have not been read, and the
-validator deliberately rejects runtime activation.
+layout. Ordinary CI uses synthetic headers and tiny zero-filled tensors.
+Separately, the development-only private path authenticated the released
+headers and full transformer objects before isolated block-0 CUDA execution.
+That narrow evidence does not activate the factory or qualify a full runtime;
+`runtime_available` remains false.
 
 ### Local UAT storage status
 
-`/Volumes/ExternalStorage` was identified as the requested future `MOLD_HOME`
-and model-download volume. At the evidence timestamp, `df -h`, `diskutil info`,
-and `stat` returned nominal mount metadata for a mounted APFS volume with about
-966 GiB available and SMART status reported as Verified. However, time-bounded
-`ls` and `find` directory enumeration did not complete; an earlier bounded
-create/fsync/read/checksum/delete probe and later filesystem commands also did
-not complete. It is not a qualified storage target. Nominal metadata is not a
-substitute for usable filesystem operations.
+The earlier operational exclusion of `/Volumes/ExternalStorage` was superseded
+on 2026-08-08 after the maintainer selected it for private H3 UAT and a fresh
+qualification campaign passed directory enumeration, create/fsync/read/hash/
+delete probes, capacity checks, and repeat artifact inventories. The isolated
+campaign root is `/Volumes/ExternalStorage/mold/uat-h3`; its campaign,
+`mold-home`, `mold-home/models`, and `compliance` directories are owner-only
+mode `0700`, and authorization/model/evidence files are mode `0600`. The volume
+retained about 760 GiB free at this snapshot.
 
-The volume is excluded from Mold UAT. The only attempted write was the bounded
-non-H3 probe described above; after it hung, this audit made no additional
-write, repair, or remount attempt. A separate owner must authorize recovery,
-after which a fresh non-H3 storage probe and clean inventory must pass before
-the volume can even be proposed for an authorized campaign.
+The canonical private `MOLD_HOME` is
+`/Volumes/ExternalStorage/mold/uat-h3/mold-home`. Fifty official payloads at
+revision `bfc8ed0` total 144,028,152,581 bytes; 17 practical Comfy payloads at
+revision `eb8a161` total 42,482,090,318 bytes. Repeated size and SHA-256
+verification found no missing or partial payload. The external authorization
+record and its content-addressed source evidence remain under the sibling
+`compliance` directory. This storage result authorizes only the private scope
+in the decision record and does not alter the public-product gate.
 
 ### Private artifact campaign
 
 After the private authorization decision was accepted on 2026-08-08, the
-campaign moved to the authorized private host. Its reviewed root is
-`/storage/jamesbrink/mold-uat/minimax-h3`, with both that directory and its
-`models` child restricted to mode `0700`. The pinned Comfy FL2VA transformer,
-NVFP4-AWQ Qwen3-VL conditioner, FP16 visual VAE, FP32 AudioVAE, and exact small
-official support files were downloaded directly into that root. All complete
-objects matched the sizes and SHA-256 identities in the hidden manifest. No
-artifact or header was copied into the repository, and no real-checkpoint
-report is public evidence.
+campaign was established under the qualified external root above. The pinned
+Comfy FL2VA transformer, NVFP4-AWQ Qwen3-VL conditioner, FP16 visual VAE, FP32
+AudioVAE, and exact small official support files were downloaded directly into
+its private `mold-home/models`. All complete objects matched the sizes and
+SHA-256 identities in the hidden manifest. No artifact or header was copied
+into the repository, and no real-checkpoint report is public evidence.
 
 The development-only qualifier repeats full-content authentication and bounded
-structural inspection before any later runtime qualification. It is hard-bound
-to the authorized host, root, either exact canonical hidden task name, and the
-explicit scope. Qualify the two independently so a shared component cannot
-hide a task-transformer mismatch:
+structural inspection before any later runtime qualification. It requires the
+exact external authorization-record schema and license pins, hashes both the
+record and its source document, and accepts only the invoking user's owner-only
+`<campaign>/mold-home/models` plus sibling `<campaign>/compliance` layout. It
+does not trust a host name, caller-asserted scope, or hardcoded storage path.
+Qualify the two tasks independently so a shared component cannot hide a
+task-transformer mismatch:
 
 ```bash
+umask 077
+export MOLD_HOME=/Volumes/ExternalStorage/mold/uat-h3/mold-home
+export CARGO_TARGET_DIR=/Volumes/ExternalStorage/mold/uat-h3/cargo-target-qualification-record
+authorization_record=/Volumes/ExternalStorage/mold/uat-h3/compliance/minimax-h3-authorization.v1.json
+
 for model in \
   minimax-h3-fl2va:comfy-pruned-int8 \
   minimax-h3-ref2va:comfy-pruned-int8
@@ -248,24 +261,20 @@ do
     -p mold-ai-inference \
     --features dev-bins,h3-private-uat \
     --bin h3_artifact_qualification -- \
-    --models-root /storage/jamesbrink/mold-uat/minimax-h3/models \
+    --models-root "$MOLD_HOME/models" \
     --model "$model" \
-    --authorization-scope private-h3-uat \
-    > "/storage/jamesbrink/mold-uat/minimax-h3/evidence/artifact-qualification-$task.json"
+    --authorization-record "$authorization_record" \
+    > "/Volumes/ExternalStorage/mold/uat-h3/logs/artifact-qualification-$task.json"
 done
 ```
 
-Each report contains only relative paths and identities, says explicitly that
-no runtime or generated media was constructed, and remains private with the
-model campaign. The feature is not forwarded by `mold-ai`; every published
-binary is scanned for its claim marker and rejected if the private reader is
-present. This qualifies artifact identity only. It does not satisfy numerical
-parity, CUDA generation UAT, public authorization, or release activation.
-
-No H3 model download, `MOLD_HOME`, fixture bundle, checkpoint shard or header,
-generated output, or other H3 artifact was read from or placed on that volume.
-The storage failure is independent of the license restriction: fixing the
-volume would not authorize H3 artifact access or execution.
+Each report contains only relative artifact paths and content identities, binds
+the external record/source identities, says explicitly that no runtime or
+generated media was constructed, and remains private with the model campaign.
+The feature is not forwarded by `mold-ai`; every published binary is scanned
+for its claim marker and rejected if the private reader is present. This
+qualifies artifact identity only. It does not satisfy numerical parity, CUDA
+generation UAT, public authorization, or release activation.
 
 ### Parity and approximate-path rules
 
@@ -307,20 +316,22 @@ before a real run can be admitted.
 
 ## Current evidence status
 
-All evidence in this section is weight-free. A passing synthetic test proves a
-Rust contract or a tiny kernel route; it does not prove real-checkpoint
-correctness, throughput, memory fit, output quality, or release support.
+Most evidence in this section is weight-free. The explicit real-checkpoint row
+is the sole exception: it records authenticated, isolated block-0 execution for
+both released task transformers. A passing synthetic test proves only a Rust
+contract or tiny kernel route, while that block result proves neither an
+end-to-end run nor throughput, memory fit, output quality, or release support.
 
 | Surface             | Current evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Current claim                                                                                                                                                                                                                                                                                                                                                          |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | CPU                 | Deterministic frame/sampler/layout/noise fixtures; tiny processor, Qwen, VAE, DiT, ordered FL2VA/Ref2VA pipeline, mux, cancellation, memory-accounting, portable quantization, frozen-factory, and dispatch tests                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Reference and contract testing only; H3 CPU runtime is unsupported                                                                                                                                                                                                                                                                                                     |
-| CUDA primitives     | Tiny synthetic CPU/CUDA parity and execution tests on private UAT host for the sampler ([#845](https://github.com/utensils/mold/pull/845)), AudioVAE ([#849](https://github.com/utensils/mold/pull/849)), Qwen layer 50 ([#850](https://github.com/utensils/mold/pull/850)), visual VAE ([#851](https://github.com/utensils/mold/pull/851)), DiT ([#853](https://github.com/utensils/mold/pull/853)), and portable quantization ([#860](https://github.com/utensils/mold/pull/860)). The scaled-FP8/Qwen-INT8 slice ([#865](https://github.com/utensils/mold/pull/865)) and fail-closed dispatch seams ([#864](https://github.com/utensils/mold/pull/864), [#866](https://github.com/utensils/mold/pull/866)) have synthetic CPU/reference tests plus CUDA contract/typecheck evidence, not physical CUDA execution.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Selected tiny primitives only; CPU-only quantization/dispatch evidence and CUDA typechecks are identified separately. No real H3 execution or hardware qualification.                                                                                                                                                                                                  |
+| CUDA primitives     | Tiny synthetic CPU/CUDA parity and execution tests on private UAT host for the sampler ([#845](https://github.com/utensils/mold/pull/845)), AudioVAE ([#849](https://github.com/utensils/mold/pull/849)), Qwen layer 50 ([#850](https://github.com/utensils/mold/pull/850)), visual VAE ([#851](https://github.com/utensils/mold/pull/851)), DiT ([#853](https://github.com/utensils/mold/pull/853)), and portable quantization ([#860](https://github.com/utensils/mold/pull/860)). The scaled-FP8/Qwen-INT8 slice ([#865](https://github.com/utensils/mold/pull/865)) and fail-closed dispatch seams ([#864](https://github.com/utensils/mold/pull/864), [#866](https://github.com/utensils/mold/pull/866)) have synthetic CPU/reference tests plus CUDA contract/typecheck evidence, not physical CUDA execution.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Selected tiny primitives only; CPU-only quantization/dispatch evidence and CUDA typechecks are identified separately. No end-to-end H3 generation or hardware qualification; see the separate real-checkpoint row.                                                                                                                                                                                                  |
 | CUDA full attention | [PR #857](https://github.com/utensils/mold/pull/857) records the earlier synthetic dense-reference-to-FlashAttention-v2 work. Exact PR #871 implementation head `c0625402` and source tree `b1452b5f` were qualified on private UAT host (4× L40S with 46,068 MiB each, SM89, driver 595.71.05, CUDA 12.8.93, Rust 1.95) without model data or runtime activation. The H3 release contract and all 36 adversarial CUDA distribution/parser cases passed; the production dispatch stayed directly guarded by the release-candidate configuration; every actual `usize` tensor stride and rounded launch row was checked before conversion to the kernel's `u32` contract; the isolated 53-kernel candidate built offline with warnings denied; and 11 attention tests passed with 141 filtered. Ten network-isolated BF16 probes ran on GPU UUID `GPU-9ffc81c5-3944-6490-bfd9-f68366f98226`. Their timing samples were 4,974, 5,006, 5,045, 5,047, 5,056, 5,123, 5,130, 5,167, 5,708, and 168,321 microseconds, with p50 5,056 and p95 5,708 under the probe's percentile convention. Maximum absolute parity delta was `0.00048828125` against a `0.02` bound; swapping Q/K produced `0.04736328`, exceeding the required `0.02` sensitivity floor. The candidate binary SHA-256 was `0d494cfc8a165ff1f00ec9b48c6ce370375bd4ebf7634b5894d042d7e9f453af`; tracing found no internet socket or H3/model-artifact path, and recorded `model_artifacts_accessed = false` and `runtime_activated = false`. Long-row workspace shapes 37,296 and 107,856 were planning-only. | Synthetic development evidence only. The opt-in candidate correctly carries the compiled-kernel claim and is not a shipping binary. The same-tree ordinary fixture proves release-candidate exclusion only for a non-publishable shipping-feature build; it does not establish a public release artifact, real-model correctness, quality, peak memory, or throughput. |
 | Metal               | Shared primitive feature compilation, forced-local typecheck, and [#860](https://github.com/utensils/mold/pull/860)'s tiny deterministic CPU/Metal quantized-forward parity. [#865](https://github.com/utensils/mold/pull/865)'s newer scaled-FP8/Qwen-INT8 cases are CPU-only. The H3 capability and admission contracts reject Metal.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Unsupported; tiny primitive parity is not H3 Metal execution, hardware qualification, or UAT                                                                                                                                                                                                                                                                           |
 | Server/factory      | Hidden identities, HTTP 451 policy, request contracts, secure reference ingress, prepared shapes, frozen single-GPU admission, block-streaming ownership, immutable factory authority, fail-closed backend adapter, and FL2VA/Ref2VA worker dispatch                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | No catalog/download activation, admitted real engine, or public H3 runtime at this snapshot                                                                                                                                                                                                                                                                            |
 | Studio surfaces     | [#867](https://github.com/utensils/mold/pull/867) is merged in main `50f28de3` with web, desktop, and iPhone authoring, recovery, canonical upload, and provenance contracts. Its media-arithmetic fixtures use ordinary generated test media, not H3 output.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Authoring and recovery contracts only; gated readiness cannot make the runtime available                                                                                                                                                                                                                                                                               |
 | CLI/TUI/Discord     | [#868](https://github.com/utensils/mold/pull/868) is merged in main `50f28de3` with weight-free ordered-reference authoring, canonical reference leases, and media provenance.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Authoring and provenance contracts only; no runtime activation                                                                                                                                                                                                                                                                                                         |
-| Real checkpoint     | None                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Unqualified and unavailable                                                                                                                                                                                                                                                                                                                                            |
+| Real checkpoint     | [PR #883](https://github.com/utensils/mold/pull/883) authenticated both released 20.97 GB INT8 task transformers from retained descriptors, validated the shared 932-tensor header and 200 quantization sidecars, executed isolated block 0 on CUDA, and returned to zero live blocks; both reports recorded `factory_activated: false`. | Private block-0 execution only. Conditioner execution, all 50 denoise blocks, visual/audio decode, mux, synchronized output, quality, and end-to-end memory/performance remain unqualified; the product runtime remains unavailable. |
 
 The ordinary shipping-feature fixture used the same exact `b1452b5f` source
 tree. Its release-profile build completed in 766 seconds, sealed all
@@ -342,26 +353,30 @@ ordinary shipping-feature build assembled from the exact source tree; it is
 not a public Mold release artifact, H3 runtime activation, real-checkpoint
 qualification, or licensed H3 UAT.
 
-The named private UAT host runs used only synthetic tensors and fixtures. They are not
-real CUDA UAT, not a benchmark of H3, and not evidence about the excluded
-external-volume `MOLD_HOME`. No H3 artifact payload or production safetensors
-header-range byte was accessed for any row in this document.
+The earlier attention and primitive probes used synthetic tensors and fixtures.
+Separately, the qualified external campaign stores and authenticates the
+approved payloads, and authenticated real-checkpoint block-0 execution ran on
+CUDA. That narrow block result is not end-to-end synchronized-A/V generation,
+full runtime qualification, output-quality evidence, or a benchmark; no
+generated media was retained.
 
 ## Private qualification and future public acceptance matrix
 
 Private artifact-identity, numerical-parity, T2VA/FL2VA/Ref2VA, Comfy,
 memory/performance, cancellation, fault-recovery, and single-device rows may be
-attempted on authorized private host under the narrow decision record. Their
+attempted under the narrow private decision record. Their
 payloads and evidence remain private. Product-surface, hosted/remote-client,
 distribution, and release-artifact rows remain blocked until issue #831 records
-broader authority and the resulting obligations are implemented. Every row was
-unattempted at this evidence snapshot; the table defines required evidence and
-does not itself report a passing UAT result.
+broader authority and the resulting obligations are implemented. Private
+authorization, clean storage, artifact identity, and isolated block execution
+have partial evidence described above; numerical parity and end-to-end
+generation rows remain unattempted. The table defines final required evidence
+and does not itself report a completed release gate.
 
 | Gate                          | Required campaign                                                                                                                                                                    | Passing evidence                                                                                                                                                                                          |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Authorization                 | Revalidate the pinned license/Q&A and obtain written authority for every intended product, territory, user, artifact, and output flow                                                | Approved external authorization record with reviewed source-document hash, scope, owner, expiry/revocation terms, and issue #831 approval                                                                 |
-| Clean storage                 | Use the qualified private UAT host ZFS pool with a fresh access-controlled absolute `MOLD_HOME`; keep the unhealthy local external volume excluded and never reuse an ordinary Mold home       | Capacity and mount report, private ownership/mode, clean before/after inventory, and no H3 bytes in the checkout                                                                                          |
+| Clean storage                 | Use the qualified isolated external campaign with its access-controlled absolute `MOLD_HOME`; never reuse an ordinary Mold home                                                        | Capacity and mount report, private ownership/mode, clean before/after inventory, and no H3 bytes in the checkout                                                                                          |
 | Artifact identity             | Fetch only the approved task/layout and every pinned companion                                                                                                                       | Exact repository/revision/path/byte count/full SHA-256, component-index hashes, license/NOTICE capture, and no unexpected file                                                                            |
 | Full-path numerical parity    | Run tokenizer/processor, Qwen layer 50, visual VAE, AudioVAE, token refiner, transformer block, packed layout, noise allocation, and dual sampler against pinned Diffusers BF16/FP32 | External fixture bundle passes schema/hash validation and every recorded tolerance; no approximate backend contributed a golden value                                                                     |
 | T2VA                          | Generate 1344x768 at 124 and 362 frames, plus the 243-frame grid control                                                                                                             | Decoded 24 fps MP4, exact frame count, synchronized 32 kHz stereo audio, stable seed/provenance, phase telemetry, and full-reference quality metrics                                                      |
