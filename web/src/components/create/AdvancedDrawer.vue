@@ -335,6 +335,7 @@ const sourceConditioningError = computed(() =>
         hasSourceImage: hasSource.value,
         hasEndFrame: hasEndFrame.value,
         frames: caps.value.supportsVideo ? props.modelValue.frames : null,
+        model: props.modelValue.model,
       }),
 );
 const fitOptions = [

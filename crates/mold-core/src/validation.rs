@@ -1483,6 +1483,49 @@ pub fn require_generate_request_model_activation(
     Ok(())
 }
 
+/// The one wording for a source-image contract violation (#772), shared by
+/// server admission, the CLI preflight, and the Discord preflight so the
+/// rejection reads identically wherever it lands.
+///
+/// `family` selects the family-aware phrasing — Wan keeps its checkpoint-swap
+/// suggestions, every other family (plain LTX-Video today) gets wording that
+/// names the actual model instead of mislabeling it as Wan. `has_source`
+/// counts first/last-frame keyframes as well as a source image (#779): both
+/// carry source frames, so either satisfies a required contract and either is
+/// refused by a text-to-video-only checkpoint. A `None` capability enforces
+/// nothing — the engine remains the authority.
+pub fn source_image_contract_violation(
+    family: Option<&str>,
+    model: &str,
+    capability: Option<crate::types::SourceImageCapability>,
+    has_source: bool,
+) -> Option<String> {
+    use crate::types::SourceImageCapability;
+    let wan = family == Some("wan");
+    match capability {
+        Some(SourceImageCapability::Unsupported) if has_source => Some(if wan {
+            "this Wan checkpoint is text-to-video only and does not accept a source image \
+             or keyframes — remove them, or pick an I2V-capable checkpoint such as \
+             wan22-ti2v-5b or wan22-i2v-a14b"
+                .to_string()
+        } else {
+            format!(
+                "{model} is text-to-video only and does not accept a source image — its \
+                 engine has no image-to-video path; remove the image, or pick an \
+                 image-capable checkpoint such as an LTX-2 model"
+            )
+        }),
+        Some(SourceImageCapability::Required) if !has_source => Some(if wan {
+            "this Wan I2V checkpoint needs a source image; supply one, or pick a \
+             text-to-video checkpoint such as wan22-t2v-a14b"
+                .to_string()
+        } else {
+            format!("{model} needs a source image; supply one")
+        }),
+        _ => None,
+    }
+}
+
 /// Variant of [`validate_generate_request`] that accepts an explicit family
 /// hint. The hint takes precedence over the manifest lookup, letting the HTTP
 /// server feed in the catalog-resolved family for `cv:` / `hf:` model IDs.

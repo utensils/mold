@@ -337,40 +337,32 @@ fn validate_image_args_for_model(family: &str, model: &str, image: &[String]) ->
 
 /// Reject a request the selected checkpoint's source-image contract (#772)
 /// already refuses, before it costs a queue slot, a UMT5 encode, and an
-/// expert load. Returns the server's own admission wording so the message is
-/// identical wherever the rejection lands.
+/// expert load. Delegates to the shared `mold-core` builder so the wording is
+/// identical wherever the rejection lands — and family-aware, so a plain
+/// LTX-Video refusal names LTX-Video, never Wan.
 ///
-/// `None` — a checkpoint whose contract this side cannot resolve — enforces
-/// nothing: the engine remains the authority and its late error is no worse
-/// than today's behavior. Only Wan checkpoints carry a non-optional contract,
-/// which is why both messages name the family.
+/// A `None` capability — a checkpoint whose contract this side cannot
+/// resolve — enforces nothing: the engine remains the authority and its late
+/// error is no worse than today's behavior.
 ///
 /// `has_source` counts first/last-frame keyframes as well as a source image
 /// (#779), matching admission: both carry source frames, so either satisfies
 /// a required contract and either is refused by a T2V-only checkpoint.
 fn source_image_contract_error(
+    family: Option<&str>,
+    model: &str,
     capability: Option<mold_core::SourceImageCapability>,
     has_source: bool,
-) -> Option<&'static str> {
-    match capability {
-        Some(mold_core::SourceImageCapability::Unsupported) if has_source => Some(
-            "this Wan checkpoint is text-to-video only and does not accept a source image \
-             or keyframes — remove them, or pick an I2V-capable checkpoint such as \
-             wan22-ti2v-5b or wan22-i2v-a14b",
-        ),
-        Some(mold_core::SourceImageCapability::Required) if !has_source => Some(
-            "this Wan I2V checkpoint needs a source image; supply one, or pick a \
-             text-to-video checkpoint such as wan22-t2v-a14b",
-        ),
-        _ => None,
-    }
+) -> Option<String> {
+    mold_core::validation::source_image_contract_violation(family, model, capability, has_source)
 }
 
 /// The manifest is the same source the server's admission gate consults
-/// first, and it is on disk here — so this preflight costs no round trip and
-/// works identically for a remote run, a local fallback, and `--local`.
-/// An installed `cv:`/`hf:` checkpoint has no manifest entry; its contract
-/// stays unknown, exactly as it does for a server that cannot classify it.
+/// for cold tiers, and it is on disk here — so this preflight costs no round
+/// trip and works identically for a remote run, a local fallback, and
+/// `--local`. An installed `cv:`/`hf:` checkpoint has no manifest entry; its
+/// contract stays unknown, exactly as it does for a server that cannot
+/// classify it.
 fn manifest_source_image_contract(model: &str) -> Option<mold_core::SourceImageCapability> {
     mold_core::manifest::find_manifest(model).and_then(|manifest| manifest.defaults.source_image)
 }
@@ -667,6 +659,7 @@ fn parse_keyframes(values: &[String]) -> Result<Option<Vec<KeyframeCondition>>> 
 /// would otherwise have sent. The indices come from the resolved frame count
 /// the request will carry, never from a flag that may be absent.
 fn endpoint_keyframes(
+    model: &str,
     first_image: Vec<u8>,
     first_name: Option<String>,
     last_image: Vec<u8>,
@@ -677,6 +670,16 @@ fn endpoint_keyframes(
         anyhow::bail!(
             "--last-image needs a clip of at least two frames to have distinct endpoints, got \
              {frames}"
+        );
+    }
+    // TI2V pins endpoints in latent space (4x temporal stride): below nine
+    // pixel frames both latent frames are anchored and nothing remains to
+    // denoise. Mirrors the server's admission floor so the flag fails here,
+    // not after dispatch.
+    if mold_core::manifest::resolve_model_name(model).starts_with("wan22-ti2v-5b") && frames < 9 {
+        anyhow::bail!(
+            "--last-image on wan22-ti2v-5b needs at least 9 frames — shorter clips leave no \
+             latent frames to denoise between the pinned endpoints, got {frames}"
         );
     }
     Ok(vec![
@@ -980,6 +983,8 @@ pub async fn run(
     // text-to-video — withholding the check is recoverable at admission,
     // rejecting a satisfied contract is not.
     if let Some(message) = source_image_contract_error(
+        Some(family.as_str()),
+        &model,
         manifest_source_image_contract(&model),
         !image.is_empty() || !keyframe.is_empty() || first_frame.is_some() || last_frame.is_some(),
     ) {
@@ -1059,6 +1064,7 @@ pub async fn run(
             .or_else(|| config.resolved_model_config(&model).effective_frames())
             .ok_or_else(|| anyhow::anyhow!("--last-image needs a clip length; pass --frames"))?;
         let keyframes = endpoint_keyframes(
+            &model,
             first_bytes,
             image
                 .first()
@@ -1628,16 +1634,42 @@ mod tests {
             (Some(Required), true, false),
         ] {
             assert_eq!(
-                source_image_contract_error(capability, has_source).is_some(),
+                source_image_contract_error(
+                    Some("wan"),
+                    "wan22-t2v-a14b:q8",
+                    capability,
+                    has_source
+                )
+                .is_some(),
                 rejected,
                 "{capability:?} with has_source={has_source}"
             );
         }
 
-        assert!(source_image_contract_error(Some(Unsupported), true)
-            .is_some_and(|message| message.contains("text-to-video only")));
-        assert!(source_image_contract_error(Some(Required), false)
-            .is_some_and(|message| message.contains("needs a source image")));
+        assert!(source_image_contract_error(
+            Some("wan"),
+            "wan22-t2v-a14b:q8",
+            Some(Unsupported),
+            true
+        )
+        .is_some_and(|message| message.contains("wan22-ti2v-5b")));
+        assert!(source_image_contract_error(
+            Some("wan"),
+            "wan22-i2v-a14b:q8",
+            Some(Required),
+            false
+        )
+        .is_some_and(|message| message.contains("needs a source image")));
+        // Family-aware: a plain LTX-Video refusal names the actual model, not Wan.
+        let message = source_image_contract_error(
+            Some("ltx-video"),
+            "ltx-video-0.9.8-13b-dev:bf16",
+            Some(Unsupported),
+            true,
+        )
+        .expect("unsupported + source refuses");
+        assert!(message.contains("ltx-video-0.9.8-13b-dev"), "{message}");
+        assert!(!message.contains("Wan"), "{message}");
     }
 
     /// The closing anchor is derived from the clip length, never from a fixed
@@ -1647,6 +1679,7 @@ mod tests {
     fn endpoint_keyframes_anchor_the_resolved_clip_length() {
         for frames in [2, 53, 81, 121] {
             let keyframes = endpoint_keyframes(
+                "wan22-i2v-a14b:q5",
                 vec![1, 2, 3],
                 Some("first.png".into()),
                 vec![4, 5, 6],
@@ -1666,11 +1699,20 @@ mod tests {
         // A one-frame clip has no distinct endpoints, and anchoring both on
         // frame 0 would pass the engine's check while meaning nothing.
         for frames in [0, 1] {
-            let error = endpoint_keyframes(vec![1], None, vec![2], None, frames)
-                .unwrap_err()
-                .to_string();
+            let error =
+                endpoint_keyframes("wan22-i2v-a14b:q5", vec![1], None, vec![2], None, frames)
+                    .unwrap_err()
+                    .to_string();
             assert!(error.contains("at least two frames"), "{error}");
         }
+
+        // TI2V pins endpoints in latent space: 5 pixel frames is two latent
+        // frames, both anchored — the server floor is mirrored here.
+        let error = endpoint_keyframes("wan22-ti2v-5b:fp16", vec![1], None, vec![2], None, 5)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("at least 9 frames"), "{error}");
+        assert!(endpoint_keyframes("wan22-ti2v-5b:fp16", vec![1], None, vec![2], None, 9).is_ok());
     }
 
     /// The shipped Wan manifests are what this preflight reads, so a drift

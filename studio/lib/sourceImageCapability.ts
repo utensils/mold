@@ -152,6 +152,26 @@ export interface SourceImageValidationInput {
   hasEndFrame?: boolean;
   /** The clip length the request will carry. */
   frames?: number | null;
+  /**
+   * The raw model id the request will carry. TI2V pins endpoints in latent
+   * space, so its floor is stricter than the generic two-frame rule; the
+   * server rejects the difference at admission, and this check mirrors it so
+   * submit never offers a guaranteed 422. Opaque `cv:`/`hf:` ids get no
+   * floor, exactly like the server's manifest-name resolution.
+   */
+  model?: string | null;
+}
+
+/**
+ * TI2V's 2.2 VAE compresses time 4x, so a 5-frame pixel clip is two latent
+ * frames — both pinned by a first/last render, nothing left to denoise. Nine
+ * pixel frames (three latent frames) is the smallest 4k+1 clip with an
+ * interior. Mirrors `mold-core`'s admission rule for `wan22-ti2v-5b`.
+ */
+export const WAN_TI2V_FLF_MIN_FRAMES = 9;
+
+function isWanTi2vModel(model: string | null | undefined): boolean {
+  return (model ?? "").trim().toLowerCase().startsWith("wan22-ti2v-5b");
 }
 
 /**
@@ -172,7 +192,14 @@ export function sourceImageValidationError(
   if (!input.hasSourceImage) {
     return "An end frame needs a first frame. Attach a source image, or remove the end frame.";
   }
-  return Number.isInteger(input.frames) && (input.frames as number) >= 2
-    ? null
-    : "A first/last-frame render needs at least two frames.";
+  if (!Number.isInteger(input.frames) || (input.frames as number) < 2) {
+    return "A first/last-frame render needs at least two frames.";
+  }
+  if (
+    isWanTi2vModel(input.model) &&
+    (input.frames as number) < WAN_TI2V_FLF_MIN_FRAMES
+  ) {
+    return `This checkpoint pins both endpoints in latent space, so a first/last-frame render needs at least ${WAN_TI2V_FLF_MIN_FRAMES} frames.`;
+  }
+  return null;
 }

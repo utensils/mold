@@ -171,6 +171,24 @@ describe("buildRequest — wan first/last frames", () => {
     expect(req.keyframes).toBeUndefined();
   });
 
+  it("clears a staged end frame on metadata reuse — metadata carries no bytes", () => {
+    const form = wanFlfForm();
+    form.endFrame = { filename: "stale.png", base64: "STALE" };
+    applyMetadataToForm(form, {
+      prompt: "a lantern drifting downriver",
+      model: "wan22-i2v-a14b:q8",
+      seed: 7,
+      steps: 20,
+      guidance: 3.5,
+      width: 832,
+      height: 480,
+      version: "test",
+    } as OutputMetadata);
+    // A previous draft's closing image must never silently pair with this
+    // print's restored or newly attached opening image.
+    expect(form.endFrame).toBeNull();
+  });
+
   it("restores a keyframes-only request back into the two wells", () => {
     const form = wanFlfForm();
     form.endFrame = { filename: "close.png", base64: "LAST" };

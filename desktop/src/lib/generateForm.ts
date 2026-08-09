@@ -713,6 +713,11 @@ export function applyMetadataToForm(
   form.imageAttachments = [];
   form.sourceVideo = null;
   form.keyframes = [];
+  // The closing frame is binary media too: a staged end frame from the
+  // previous draft must never silently pair with this print's restored or
+  // newly attached opening image (the restore notice already says it cannot
+  // be rebuilt from metadata).
+  form.endFrame = null;
   form.audioFile = null;
   form.h3Authoring = {
     ...emptyMinimaxH3AuthoringState(),

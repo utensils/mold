@@ -203,4 +203,24 @@ describe("sourceImageValidationError", () => {
       }),
     ).toBeNull();
   });
+
+  it("enforces TI2V's latent-endpoint floor of nine frames", () => {
+    // TI2V pins endpoints in latent space (4x temporal stride): a 5-frame
+    // pixel clip is two latent frames, both anchored. The server rejects
+    // this at admission; the client must not offer a guaranteed 422.
+    const ti2v = (frames: number, model = "wan22-ti2v-5b:fp16") =>
+      sourceImageValidationError({
+        capability: "optional",
+        hasSourceImage: true,
+        hasEndFrame: true,
+        frames,
+        model,
+      });
+    expect(ti2v(5)).toMatch(/at least 9 frames/);
+    expect(ti2v(9)).toBeNull();
+    // A14B channel-concat has no such floor, and opaque catalog ids keep
+    // the engine as authority — exactly like the server's name resolution.
+    expect(ti2v(5, "wan22-i2v-a14b:q8")).toBeNull();
+    expect(ti2v(5, "cv:12345/some-wan-finetune")).toBeNull();
+  });
 });

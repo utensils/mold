@@ -243,21 +243,24 @@ fn annotate_audio_capabilities(catalog: &mut [ModelInfoExtended], config: &Confi
     }
 }
 
-/// Fill `source_image` for downloaded wan checkpoints the manifest layer
-/// could not classify (installed `cv:`/`hf:` models and `--transformer`
-/// overrides), from the checkpoints' own headers — the same shape-driven
-/// classification the engine applies at generate time (#772). Manifest
-/// tiers arrive pre-classified from their own task structure and are left
-/// untouched; a cold, unclassifiable entry stays `None`, which clients must
-/// read as "unknown", never as one of the three contracts.
+/// Fill `source_image` for downloaded wan checkpoints from their own headers
+/// — the same shape-driven classification the engine applies at generate
+/// time (#772). The probe outranks the manifest's task-structure answer for
+/// a downloaded checkpoint because `ModelPaths` honors config/env path
+/// overrides: the artifacts actually loaded can differ from what the
+/// manifest was assembled from. Cold (not-yet-downloaded) tiers keep the
+/// manifest classification, and an unclassifiable downloaded entry falls
+/// back to it too; entries neither can classify stay `None`, which clients
+/// must read as "unknown", never as one of the three contracts.
 fn annotate_source_image_capabilities(catalog: &mut [ModelInfoExtended], config: &Config) {
     for entry in catalog {
-        if entry.source_image.is_some() || !entry.downloaded || entry.info.family != "wan" {
+        if !entry.downloaded || entry.info.family != "wan" {
             continue;
         }
-        entry.source_image = ModelPaths::resolve(&entry.info.name, config).and_then(|paths| {
+        let probed = ModelPaths::resolve(&entry.info.name, config).and_then(|paths| {
             mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
         });
+        entry.source_image = probed.or(entry.source_image);
     }
 }
 

@@ -2304,6 +2304,7 @@ function validateSubmit(): boolean {
         frames: capabilities.value.supportsVideo
           ? form.state.value.frames
           : null,
+        model: form.state.value.model,
       });
   if (conditioningError) {
     composerError.value = conditioningError;

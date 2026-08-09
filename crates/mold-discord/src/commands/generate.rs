@@ -192,34 +192,25 @@ pub fn family_for_model<'a>(models: &'a [ModelInfoExtended], name: &str) -> Opti
 
 /// Reject a request the selected checkpoint's source-image contract (#772)
 /// already refuses, before it costs a queue slot, a UMT5 encode, and an
-/// expert load. Returns the server's own admission wording so the message is
-/// identical wherever the rejection lands.
+/// expert load. Delegates to the shared `mold-core` builder so the wording is
+/// identical wherever the rejection lands — and family-aware, so a plain
+/// LTX-Video refusal names LTX-Video, never Wan.
 ///
-/// `None` — an older server, or a checkpoint neither the server nor the
-/// built-in manifests could classify — enforces nothing: the engine remains
-/// the authority and its late error is no worse than today's behavior. Only
-/// Wan checkpoints carry a non-optional contract, which is why both messages
-/// name the family.
+/// A `None` capability — an older server, or a checkpoint neither the server
+/// nor the built-in manifests could classify — enforces nothing: the engine
+/// remains the authority and its late error is no worse than today's
+/// behavior.
 ///
 /// `has_source` counts first/last-frame keyframes as well as a source image
 /// (#779), matching admission: both carry source frames, so either satisfies
 /// a required contract and either is refused by a T2V-only checkpoint.
 fn source_image_contract_error(
+    family: Option<&str>,
+    model: &str,
     capability: Option<mold_core::SourceImageCapability>,
     has_source: bool,
-) -> Option<&'static str> {
-    match capability {
-        Some(mold_core::SourceImageCapability::Unsupported) if has_source => Some(
-            "this Wan checkpoint is text-to-video only and does not accept a source image \
-             or keyframes — remove them, or pick an I2V-capable checkpoint such as \
-             wan22-ti2v-5b or wan22-i2v-a14b",
-        ),
-        Some(mold_core::SourceImageCapability::Required) if !has_source => Some(
-            "this Wan I2V checkpoint needs a source image; supply one, or pick a \
-             text-to-video checkpoint such as wan22-t2v-a14b",
-        ),
-        _ => None,
-    }
+) -> Option<String> {
+    mold_core::validation::source_image_contract_violation(family, model, capability, has_source)
 }
 
 /// Resolve the checkpoint's source-image contract: the server's advertised
@@ -1002,11 +993,13 @@ pub async fn generate(
     // Preflight the source-image contract before the attachment download and
     // the enqueue, so an impossible pairing never takes a queue slot.
     if let Some(message) = source_image_contract_error(
+        family,
+        &model_name,
         resolve_source_image_contract(model_entry, &model_name),
         source_image.is_some() || !keyframe_attachments.is_empty(),
     ) {
         ctx.data().quotas.refund(user_id);
-        handler::send_error(ctx, message).await?;
+        handler::send_error(ctx, &message).await?;
         return Ok(());
     }
 
@@ -1245,16 +1238,42 @@ mod tests {
             (Some(Required), true, false),
         ] {
             assert_eq!(
-                source_image_contract_error(capability, has_source).is_some(),
+                source_image_contract_error(
+                    Some("wan"),
+                    "wan22-t2v-a14b:q8",
+                    capability,
+                    has_source
+                )
+                .is_some(),
                 rejected,
                 "{capability:?} with has_source={has_source}"
             );
         }
 
-        assert!(source_image_contract_error(Some(Unsupported), true)
-            .is_some_and(|message| message.contains("text-to-video only")));
-        assert!(source_image_contract_error(Some(Required), false)
-            .is_some_and(|message| message.contains("needs a source image")));
+        assert!(source_image_contract_error(
+            Some("wan"),
+            "wan22-t2v-a14b:q8",
+            Some(Unsupported),
+            true
+        )
+        .is_some_and(|message| message.contains("text-to-video only")));
+        assert!(source_image_contract_error(
+            Some("wan"),
+            "wan22-i2v-a14b:q8",
+            Some(Required),
+            false
+        )
+        .is_some_and(|message| message.contains("needs a source image")));
+        // Family-aware: a plain LTX-Video refusal names the actual model, not Wan.
+        let message = source_image_contract_error(
+            Some("ltx-video"),
+            "ltx-video-0.9.6:bf16",
+            Some(Unsupported),
+            true,
+        )
+        .expect("unsupported + source refuses");
+        assert!(message.contains("ltx-video-0.9.6"), "{message}");
+        assert!(!message.contains("Wan"), "{message}");
     }
 
     /// The served row is the first authority; the built-in manifest answers

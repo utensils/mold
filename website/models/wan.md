@@ -81,8 +81,10 @@ mold run wan22-t2v-a14b:fp8 "storm waves crash over the lighthouse"
 The `:fp8` tier is not faster than `:q8` — measured on an RTX 4090 at
 33f/832x480 under identical settings, both run ~28 s/step (the denoise is
 compute-bound, not weight-decode-bound) — but its peak VRAM is 17,646 MiB
-against `:q8`'s 20,278 MiB, and user LoRAs merge into fp8 weights at load
-instead of running as a per-step branch.
+against `:q8`'s 20,278 MiB. The trade-off: fp8-scaled weights refuse LoRA
+stacks (merging would re-round every targeted weight to three mantissa
+bits), so adapters — the Lightning distills included — need the GGUF or
+bf16 tiers.
 
 At `--frames 1` Wan renders a still: png/jpeg output is admitted (and png is
 the default there), the image embeds the same `mold:parameters` provenance as

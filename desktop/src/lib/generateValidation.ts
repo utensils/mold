@@ -175,6 +175,7 @@ export function sourceConditioningValidationError(form: GenerateForm): string | 
     hasSourceImage,
     hasEndFrame: caps.supportsEndFrame && Boolean(form.endFrame),
     frames: caps.supportsVideo ? form.frames : null,
+    model: form.model,
   });
 }
 

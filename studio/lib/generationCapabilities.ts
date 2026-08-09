@@ -186,6 +186,13 @@ const CONTROLNET_FAMILIES = new Set(["sd15", "sd1.5", "stable-diffusion-1.5"]);
  */
 const WAN_DISTILL_TIER = /a14b[:-]q[45]$/;
 
+/**
+ * Wan A14B tiers whose fp8-scaled loader refuses every LoRA stack (#777):
+ * an fp8 merge would dequantize each targeted weight, add the delta, and
+ * re-round it to three mantissa bits. The bf16 and GGUF tiers keep adapters.
+ */
+const WAN_FP8_TIER = /a14b[:-]fp8$/;
+
 export const MAX_LORA_STACK = 4;
 
 /**
@@ -291,6 +298,11 @@ export function baseGenerationCapabilities(
     supportsAudio: h3 || AUDIO_FAMILIES.has(normalized),
     supportsLora:
       !flux2Dev &&
+      // The wan fp8-scaled tier deliberately refuses every adapter stack —
+      // merging into e4m3 would re-round the delta to three mantissa bits —
+      // so offering the control would advertise a load that always fails.
+      // Mirrors `WanTransformer::from_safetensors_with_loras`.
+      !(wan && WAN_FP8_TIER.test(normalizedModel)) &&
       (LORA_CAPABLE_FAMILIES as readonly string[]).includes(normalized),
     supportsControlNet: CONTROLNET_FAMILIES.has(normalized),
     sourceImageMode: h3Ref2va

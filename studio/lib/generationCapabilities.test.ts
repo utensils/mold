@@ -88,6 +88,22 @@ describe("baseGenerationCapabilities", () => {
     expect(baseGenerationCapabilities("wan").supportsLora).toBe(true);
   });
 
+  it("withholds the LoRA control from the wan fp8-scaled tier", () => {
+    // `WanTransformer::from_safetensors_with_loras` refuses every adapter
+    // stack on fp8-scaled weights (merging would re-round the delta to three
+    // mantissa bits), so offering the control advertises a load that always
+    // fails. GGUF and bf16 tiers keep it.
+    expect(
+      baseGenerationCapabilities("wan", "wan22-t2v-a14b:fp8").supportsLora,
+    ).toBe(false);
+    expect(
+      baseGenerationCapabilities("wan", "wan22-i2v-a14b:fp8").supportsLora,
+    ).toBe(false);
+    expect(
+      baseGenerationCapabilities("wan", "wan22-t2v-a14b:q8").supportsLora,
+    ).toBe(true);
+  });
+
   it("separates image conditioning from the advanced-video panel", () => {
     // Two independent questions that happened to have the same answer while
     // LTX-2 was the only image-conditioned video family. Wan is the case that
