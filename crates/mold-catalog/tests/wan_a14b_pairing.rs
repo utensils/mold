@@ -133,6 +133,75 @@ fn i2v_search_page_pairs_across_naming_styles() {
     }
 }
 
+/// NF4/NVFP4-quantized safetensors pairs exist for A14B I2V, but the Wan
+/// loader reads dense, scaled-FP8, and GGUF weights only — a 4-bit pair
+/// would download two multi-GB experts that fail at load. Versions whose
+/// Civitai metadata reports a 4-bit `fp` are dropped at normalization,
+/// exactly like the GGUF publications.
+#[test]
+fn nf4_safetensors_versions_are_dropped_not_offered() {
+    let mut items = fixture_items("civitai_wan22_a14b_i2v_search.json");
+    for item in &mut items {
+        for version in &mut item.model_versions {
+            if [2057465u64, 2057270].contains(&version.id) {
+                for file in &mut version.files {
+                    file.metadata.fp = Some("nf4".into());
+                }
+            }
+        }
+    }
+    let entries: Vec<CatalogEntry> = items
+        .into_iter()
+        .flat_map(from_civitai_search_entries)
+        .collect();
+
+    // Neither half of the now-NF4 official repack fp8 pair surfaces at
+    // all — not even as an unsupported row promising a broken download.
+    for id in ["cv:2057465", "cv:2057270"] {
+        assert!(
+            entries.iter().all(|e| e.id.as_str() != id),
+            "{id} must be dropped: no Wan load path for 4-bit safetensors"
+        );
+    }
+    // The fp16 pair on the same model is untouched.
+    assert!(entries
+        .iter()
+        .any(|e| e.id.as_str() == "cv:2058318" && e.supported));
+}
+
+/// When the intended counterpart version vanishes upstream, a same-size
+/// low-noise expert from an unrelated finetune revision on the same model
+/// must not be silently adopted — the row stays visible but un-installable.
+#[test]
+fn removed_counterpart_leaves_the_version_unpaired_not_mispaired() {
+    let mut items = fixture_items("civitai_wan22_a14b_i2v_search.json");
+    for item in &mut items {
+        // Delete "BoundBite Low v10"; "SynthSeduction Low v9" on the same
+        // model is within ~0.01% of BoundBite's size.
+        item.model_versions.retain(|v| v.id != 2769497);
+    }
+    let entries: Vec<CatalogEntry> = items
+        .into_iter()
+        .flat_map(from_civitai_search_entries)
+        .collect();
+
+    let boundbite = entries
+        .iter()
+        .find(|e| e.id.as_str() == "cv:2769496")
+        .expect("high-noise version stays visible");
+    assert!(!boundbite.supported, "half-pair must be un-installable");
+    assert_eq!(boundbite.download_recipe.files.len(), 1);
+    assert!(wan_a14b::entry_is_unpaired_a14b(boundbite));
+
+    // The other pairs on the model are unaffected.
+    for id in ["cv:2959309", "cv:2557969"] {
+        assert!(
+            entries.iter().any(|e| e.id.as_str() == id && e.supported),
+            "{id} still pairs"
+        );
+    }
+}
+
 /// The paired recipe drives everything downstream: primary = high expert,
 /// the low expert keeps its own version's directory, sizes are per-file,
 /// and the entry size is the full download.

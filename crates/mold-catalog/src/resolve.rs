@@ -364,6 +364,16 @@ pub fn apply_catalog_runtime_defaults(cfg: &mut ModelConfig, intent: &CatalogMod
     cfg.default_height.get_or_insert(defaults.height);
     cfg.default_steps.get_or_insert(defaults.steps);
     cfg.default_guidance.get_or_insert(defaults.guidance);
+    // Video families must carry their frame defaults into the synthesized
+    // config: a catalog-installed Wan/LTX checkpoint with `default_frames`
+    // unset is treated as a still (frames=None → PNG) and rejected at
+    // admission when run without an explicit --frames/--fps.
+    if let Some(frames) = defaults.frames {
+        cfg.default_frames.get_or_insert(frames);
+    }
+    if let Some(fps) = defaults.fps {
+        cfg.default_fps.get_or_insert(fps);
+    }
     if let Some(is_schnell) = defaults.is_schnell {
         cfg.is_schnell.get_or_insert(is_schnell);
     }
@@ -880,6 +890,53 @@ mod tests {
         );
     }
 
+    // ── apply_catalog_runtime_defaults unit tests (no env) ─────────────────
+
+    fn intent_for(family: &str, sub_family: Option<&str>) -> crate::synthesis::CatalogModelIntent {
+        crate::synthesis::CatalogModelIntent {
+            family: family.to_string(),
+            sub_family: sub_family.map(str::to_string),
+            primary_recipe_path: PathBuf::from("/m/primary.safetensors"),
+            vae_recipe_path: None,
+            text_encoder_recipe_paths: Vec::new(),
+            low_noise_recipe_path: None,
+            companions: Vec::new(),
+            bundling: Bundling::SingleFile,
+        }
+    }
+
+    /// Video families must copy their catalog frame defaults into the
+    /// synthesized config — `default_frames: None` reads as a still
+    /// (PNG) and wan admission rejects a frameless video request.
+    #[test]
+    fn catalog_runtime_defaults_carry_video_frames() {
+        let mut cfg = ModelConfig::default();
+        apply_catalog_runtime_defaults(&mut cfg, &intent_for("wan", Some("wan22-t2v-a14b")));
+        assert_eq!((cfg.default_frames, cfg.default_fps), (Some(81), Some(16)));
+
+        let mut cfg = ModelConfig::default();
+        apply_catalog_runtime_defaults(&mut cfg, &intent_for("wan", Some("wan22-ti2v-5b")));
+        assert_eq!((cfg.default_frames, cfg.default_fps), (Some(121), Some(24)));
+
+        let mut cfg = ModelConfig::default();
+        apply_catalog_runtime_defaults(&mut cfg, &intent_for("ltx2", Some("v2")));
+        assert_eq!((cfg.default_frames, cfg.default_fps), (Some(97), Some(24)));
+
+        // Image families stay frameless.
+        let mut cfg = ModelConfig::default();
+        apply_catalog_runtime_defaults(&mut cfg, &intent_for("flux", Some("flux1-d")));
+        assert_eq!((cfg.default_frames, cfg.default_fps), (None, None));
+
+        // Caller-set values are never clobbered.
+        let mut cfg = ModelConfig {
+            default_frames: Some(49),
+            default_fps: Some(24),
+            ..Default::default()
+        };
+        apply_catalog_runtime_defaults(&mut cfg, &intent_for("wan", Some("wan22-t2v-a14b")));
+        assert_eq!((cfg.default_frames, cfg.default_fps), (Some(49), Some(24)));
+    }
+
     // ── resolve_intent_to_model_config (env-locked) ────────────────────────
 
     #[test]
@@ -1354,6 +1411,14 @@ mod tests {
         assert_eq!(
             (cfg.default_steps, cfg.default_guidance),
             (Some(20), Some(3.5))
+        );
+        // Video defaults must land in the synthesized config: without them
+        // `mold run cv:<id> "<prompt>"` treats the paired install as a
+        // still (frames=None → PNG) and wan admission rejects it.
+        assert_eq!(
+            (cfg.default_frames, cfg.default_fps),
+            (Some(81), Some(16)),
+            "paired A14B install must carry the catalog's 81-frame/16-fps defaults"
         );
 
         let paths = ModelPaths::resolve_from_model_config_exact(&cfg)

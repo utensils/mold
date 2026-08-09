@@ -15,18 +15,24 @@
 //! with confidence, or fails closed:
 //!
 //! 1. classify the clicked version as high- or low-noise from unambiguous
-//!    `high`/`low` name markers (version name first, primary file name as
-//!    fallback);
+//!    `high`/`low` name markers (version name first; the primary file name
+//!    is consulted only when the version name carries *no* marker — a
+//!    version named with BOTH markers is an explicit high+low bundle and
+//!    never falls back);
 //! 2. among the model's *other* public versions with the same `baseModel`
-//!    and a safetensors Model file, keep only those that classify as the
-//!    opposite expert;
+//!    and a loadable safetensors Model file, keep only those that classify
+//!    as the opposite expert;
 //! 3. prefer the candidate whose name matches the clicked version's name
 //!    with the marker swapped (`"HIGH Q5_0"` ↔ `"LOW Q5_0"`);
 //! 4. otherwise fall back to the unique candidate whose file size is
 //!    within ±10% of the primary — the two experts of one precision are
 //!    near-identical in size, while fp16↔fp8 and GGUF quant rungs differ
-//!    by ≥25% (this absorbs real uploader typos such as
-//!    `i2v_low_noise_14B_fp8_scd` ↔ `i2v_high_noise_14B_fp8_sd`);
+//!    by ≥25% — AND whose names are semantically compatible with the
+//!    clicked version's (same numeric tokens, near-identical text modulo
+//!    the marker). The band alone absorbs real uploader typos such as
+//!    `i2v_low_noise_14B_fp8_scd` ↔ `i2v_high_noise_14B_fp8_sd`, but a
+//!    same-precision sibling from an *unrelated* finetune revision is also
+//!    nearly identical in size, so size can never pair on its own;
 //! 5. anything else — no marker, both markers, zero or multiple surviving
 //!    candidates — is an [`A14bPairingError`], never a guess.
 //!
@@ -144,25 +150,49 @@ pub struct A14bPair<'a> {
 /// adjacent GGUF quant rungs differ ≥25%.
 const SIZE_BAND: f64 = 0.10;
 
-/// Classify a version as one expert of the pair from its name markers,
-/// falling back to the primary file's name. `None` when no unambiguous
-/// marker exists.
-pub fn classify_expert(version: &CivitaiVersion, file: &CivitaiFile) -> Option<ExpertRole> {
-    version
-        .name
-        .as_deref()
-        .and_then(classify_name)
-        .or_else(|| classify_name(&file.name))
+/// What one name says about the expert role. `NoMarker` and `Ambiguous`
+/// are deliberately distinct: an unmarked *version* name may still be
+/// resolved by the file name, but a name carrying BOTH markers is an
+/// explicit high+low bundle — falling back to a one-sided file name would
+/// classify a bundle as a single expert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NameMarker {
+    High,
+    Low,
+    NoMarker,
+    Ambiguous,
 }
 
-fn classify_name(name: &str) -> Option<ExpertRole> {
+/// Classify a version as one expert of the pair from its name markers.
+/// The primary file's name is consulted only when the version name carries
+/// no marker at all; an ambiguous (both-marker) version name fails closed.
+/// `None` when no unambiguous marker exists.
+pub fn classify_expert(version: &CivitaiVersion, file: &CivitaiFile) -> Option<ExpertRole> {
+    let version_marker = version
+        .name
+        .as_deref()
+        .map(classify_name)
+        .unwrap_or(NameMarker::NoMarker);
+    let marker = match version_marker {
+        NameMarker::NoMarker => classify_name(&file.name),
+        decided => decided,
+    };
+    match marker {
+        NameMarker::High => Some(ExpertRole::HighNoise),
+        NameMarker::Low => Some(ExpertRole::LowNoise),
+        NameMarker::NoMarker | NameMarker::Ambiguous => None,
+    }
+}
+
+fn classify_name(name: &str) -> NameMarker {
     let lower = name.to_ascii_lowercase();
     match (lower.contains("high"), lower.contains("low")) {
-        (true, false) => Some(ExpertRole::HighNoise),
-        (false, true) => Some(ExpertRole::LowNoise),
-        // Both markers ("high+low bundle") or neither (merged
-        // republications, plain "v2.0-fp8") — no confident classification.
-        _ => None,
+        (true, false) => NameMarker::High,
+        (false, true) => NameMarker::Low,
+        // Merged republications, plain "v2.0-fp8" — no marker at all.
+        (false, false) => NameMarker::NoMarker,
+        // "high+low bundle" — explicitly both experts, never one.
+        (true, true) => NameMarker::Ambiguous,
     }
 }
 
@@ -183,6 +213,64 @@ fn version_key(version: &CivitaiVersion, file: &CivitaiFile) -> (String, String)
     )
 }
 
+/// Maximum Levenshtein distance between two expert keys for the size-band
+/// fallback to consider them the same artifact. 1–2 characters covers real
+/// uploader typos (`…_fp8_sd` ↔ `…_fp8_scd`); different finetune names
+/// ("BoundBite" vs "SynthSeduction") are far beyond it.
+const KEY_EDIT_DISTANCE_MAX: usize = 2;
+
+/// The digit runs of a key, in order. Two keys naming the same artifact
+/// modulo the high/low marker carry identical numeric tokens (`14B`,
+/// `fp8`, `v10`); a different finetune *version* differs here even when
+/// the letters are one typo apart — `v10` vs `v9` must never pair.
+fn digit_runs(key: &str) -> Vec<String> {
+    let mut runs = Vec::new();
+    let mut current = String::new();
+    for ch in key.chars() {
+        if ch.is_ascii_digit() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            runs.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        runs.push(current);
+    }
+    runs
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut row = vec![0usize; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        row[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let substitute = prev[j] + usize::from(ca != cb);
+            row[j + 1] = substitute.min(prev[j + 1] + 1).min(row[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut row);
+    }
+    prev[b.len()]
+}
+
+/// Whether two marker-normalized keys name the same artifact: identical
+/// numeric tokens AND near-identical text. This is what keeps the
+/// size-band fallback from pairing a high-noise expert with a same-size,
+/// same-precision low-noise expert of an *unrelated* finetune revision
+/// when the intended counterpart version has vanished upstream.
+fn keys_semantically_compatible(a: &str, b: &str) -> bool {
+    digit_runs(a) == digit_runs(b) && levenshtein(a, b) <= KEY_EDIT_DISTANCE_MAX
+}
+
+/// Semantic name compatibility over both the version-name and file-name
+/// keys — the same finetune identity and version modulo the high/low
+/// marker.
+fn version_keys_semantically_compatible(own: &(String, String), other: &(String, String)) -> bool {
+    keys_semantically_compatible(&own.0, &other.0) && keys_semantically_compatible(&own.1, &other.1)
+}
+
 fn sizes_compatible(a: Option<f64>, b: Option<f64>) -> bool {
     match (a, b) {
         (Some(a), Some(b)) if a > 0.0 && b > 0.0 => {
@@ -198,9 +286,12 @@ fn sizes_compatible(a: Option<f64>, b: Option<f64>) -> bool {
 /// The safetensors Model file a version would install — the normalizer's
 /// own primary pick, so pairing candidates and installs can never select
 /// different files. GGUF-only versions return `None` and are never
-/// pairing candidates (the catalog's Civitai path is safetensors-only).
+/// pairing candidates (the catalog's Civitai path is safetensors-only),
+/// and neither are 4-bit (NF4/NVFP4) safetensors the Wan loader cannot
+/// read — pairing one in would download a counterpart that fails at load.
 fn safetensors_model_file(version: &CivitaiVersion) -> Option<&CivitaiFile> {
     crate::normalizer::pick_safetensors(&version.files)
+        .filter(|file| crate::normalizer::wan_precision_is_loadable(file))
 }
 
 fn version_is_public(version: &CivitaiVersion) -> bool {
@@ -268,12 +359,18 @@ pub fn pair_experts<'a>(
             **one
         }
         [] => {
-            // Stage 2: unique candidate within the size band. Covers real
-            // uploader typos where the two version names differ beyond the
-            // marker (`…_fp8_scd` ↔ `…_fp8_sd`).
-            let mut in_band = candidates
-                .iter()
-                .filter(|(_, file)| sizes_compatible(file.size_kb, primary_file.size_kb));
+            // Stage 2: unique candidate within the size band AND with
+            // semantically compatible names. Covers real uploader typos
+            // where the two version names differ slightly beyond the
+            // marker (`…_fp8_scd` ↔ `…_fp8_sd`) while refusing a
+            // same-size sibling from an unrelated finetune revision —
+            // one precision's experts are all near-identical in size, so
+            // the band alone cannot tell counterpart from stranger when
+            // the intended counterpart version has vanished upstream.
+            let mut in_band = candidates.iter().filter(|(sibling, file)| {
+                sizes_compatible(file.size_kb, primary_file.size_kb)
+                    && version_keys_semantically_compatible(&own_key, &version_key(sibling, file))
+            });
             match (in_band.next(), in_band.next()) {
                 (Some(one), None) => *one,
                 (None, _) => {
@@ -321,9 +418,9 @@ pub fn pair_experts<'a>(
 /// `"expert"` when the file name itself carries no confident marker.
 pub fn missing_counterpart_label(primary_name: &str) -> &'static str {
     match classify_name(primary_name) {
-        Some(ExpertRole::HighNoise) => "low-noise",
-        Some(ExpertRole::LowNoise) => "high-noise",
-        None => "expert",
+        NameMarker::High => "low-noise",
+        NameMarker::Low => "high-noise",
+        NameMarker::NoMarker | NameMarker::Ambiguous => "expert",
     }
 }
 
@@ -367,6 +464,18 @@ mod tests {
         serde_json::from_str(&raw).expect("fixture parses as CivitaiItem")
     }
 
+    fn load_search_item(fixture: &str, model_id: u64) -> CivitaiItem {
+        let path = format!("{}/tests/fixtures/{fixture}", env!("CARGO_MANIFEST_DIR"));
+        let raw = std::fs::read_to_string(path).expect("fixture readable");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("fixture parses");
+        let items: Vec<CivitaiItem> =
+            serde_json::from_value(value["items"].clone()).expect("items parse");
+        items
+            .into_iter()
+            .find(|item| item.id == model_id)
+            .unwrap_or_else(|| panic!("model {model_id} in fixture"))
+    }
+
     fn version(item: &CivitaiItem, id: u64) -> &CivitaiVersion {
         item.model_versions
             .iter()
@@ -400,25 +509,66 @@ mod tests {
     }
 
     /// Marker vocabulary from the captured fixtures: version-name styles
-    /// from four real models, file-name fallback included.
+    /// from four real models. `NoMarker` and `Ambiguous` are distinct
+    /// outcomes — only the former may consult the file name.
     #[test]
     fn classification_covers_the_published_marker_styles() {
         for (name, want) in [
-            ("HIGH Q5_0", Some(ExpertRole::HighNoise)),
-            ("LOW Q5_0", Some(ExpertRole::LowNoise)),
-            ("t2v_high_noise_14B", Some(ExpertRole::HighNoise)),
-            ("t2v_low_noise_14B_fp16", Some(ExpertRole::LowNoise)),
-            ("T2V A14B HIGH", Some(ExpertRole::HighNoise)),
-            ("SnatchKiss Low v11", Some(ExpertRole::LowNoise)),
-            ("i2v_high_noise_14B_fp8_sd", Some(ExpertRole::HighNoise)),
-            // Merged republications carry no marker — refuse.
-            ("Q4_K_M Rapid Base", None),
-            ("v2.0-fp8", None),
-            // Both markers is as unclassifiable as neither.
-            ("high and low bundle", None),
+            ("HIGH Q5_0", NameMarker::High),
+            ("LOW Q5_0", NameMarker::Low),
+            ("t2v_high_noise_14B", NameMarker::High),
+            ("t2v_low_noise_14B_fp16", NameMarker::Low),
+            ("T2V A14B HIGH", NameMarker::High),
+            ("SnatchKiss Low v11", NameMarker::Low),
+            ("i2v_high_noise_14B_fp8_sd", NameMarker::High),
+            // Merged republications carry no marker.
+            ("Q4_K_M Rapid Base", NameMarker::NoMarker),
+            ("v2.0-fp8", NameMarker::NoMarker),
+            // Both markers — an explicit high+low bundle.
+            ("high and low bundle", NameMarker::Ambiguous),
         ] {
             assert_eq!(classify_name(name), want, "{name:?}");
         }
+    }
+
+    fn version_with_file(version_name: Option<&str>, file_name: &str) -> CivitaiVersion {
+        serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "name": version_name,
+            "baseModel": "Wan Video 2.2 T2V-A14B",
+            "files": [{
+                "id": 10,
+                "name": file_name,
+                "type": "Model",
+                "metadata": { "format": "SafeTensor" },
+            }],
+        }))
+        .expect("synthetic version parses")
+    }
+
+    /// The file-name fallback exists for versions with *no* marker; a
+    /// version explicitly named as a high+low bundle must never be
+    /// classified as one expert just because its primary file name is
+    /// one-sided.
+    #[test]
+    fn ambiguous_version_name_never_falls_back_to_the_filename() {
+        let bundle = version_with_file(
+            Some("high and low bundle"),
+            "wan22_bundle_highNoise.safetensors",
+        );
+        assert_eq!(classify_expert(&bundle, &bundle.files[0]), None);
+
+        // No marker at all in the version name: the one-sided file name
+        // still decides.
+        let unmarked = version_with_file(Some("v2.0-fp8"), "wan22_t2v_lowNoise.safetensors");
+        assert_eq!(
+            classify_expert(&unmarked, &unmarked.files[0]),
+            Some(ExpertRole::LowNoise)
+        );
+        // ... and an ambiguous file name behind an unmarked version name
+        // stays unclassified.
+        let both = version_with_file(Some("v2.0-fp8"), "wan22_high_and_low.safetensors");
+        assert_eq!(classify_expert(&both, &both.files[0]), None);
     }
 
     /// The official Wan 2.2 repack (model 1817671): the fp8-scaled T2V
@@ -531,6 +681,81 @@ mod tests {
         let err = pair_for(&item, 2057171).unwrap_err();
         assert!(
             matches!(err, A14bPairingError::CounterpartSizeMismatch { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// The reviewer scenario: the DaSiWa TrueVision model publishes three
+    /// finetune pairs, and two of them (BoundBite v10 and SynthSeduction
+    /// v9) differ in size by ~0.01% — well inside the ±10% band. When the
+    /// intended counterpart version vanishes upstream (deleted/private),
+    /// the size band alone would silently pair a high-noise expert of one
+    /// finetune with a low-noise expert of an unrelated one. Semantic
+    /// name compatibility must fail this closed instead.
+    #[test]
+    fn vanished_counterpart_never_pairs_with_an_unrelated_finetune() {
+        let item = load_search_item("civitai_wan22_a14b_i2v_search.json", 2272580);
+
+        // Intact model: BoundBite High v10 pairs with BoundBite Low v10.
+        let pair = pair_for(&item, 2769496).expect("intact BoundBite pair resolves");
+        assert_eq!(pair.low.version_id, 2769497);
+
+        // Remove the intended counterpart. SynthSeduction Low v9 remains
+        // within the size band but is a different finetune revision.
+        let mut lone = item.clone();
+        lone.model_versions.retain(|v| v.id != 2769497);
+        let err = pair_for(&lone, 2769496).unwrap_err();
+        assert_eq!(
+            err,
+            A14bPairingError::NoCounterpart {
+                name: "BoundBite High v10".into(),
+                missing: "low-noise",
+            },
+            "a same-size stranger must never be adopted as the counterpart"
+        );
+    }
+
+    /// The semantic gate must not break the real uploader typo the size
+    /// band exists for: differing numeric tokens fail, tiny letter-level
+    /// typos pass.
+    #[test]
+    fn semantic_key_compatibility_separates_typos_from_strangers() {
+        // The official repack's real I2V typo: one character apart, same
+        // numeric tokens.
+        assert!(keys_semantically_compatible(
+            &expert_key("i2v_high_noise_14B_fp8_sd"),
+            &expert_key("i2v_low_noise_14B_fp8_scd"),
+        ));
+        // Different finetune revisions: numeric tokens differ (v10 vs v9)
+        // and the text is far apart.
+        assert!(!keys_semantically_compatible(
+            &expert_key("BoundBite High v10"),
+            &expert_key("SynthSeduction Low v9"),
+        ));
+        // Same finetune, different version: the letters are one edit
+        // apart, but v9 vs v8 is a different artifact.
+        assert!(!keys_semantically_compatible(
+            &expert_key("SynthSeduction High v9"),
+            &expert_key("SynthSeduction Low v8"),
+        ));
+    }
+
+    /// A 4-bit (NF4) safetensors sibling is not a pairing candidate: the
+    /// Wan loader has no NF4/NVFP4 load path, so adopting one as the
+    /// counterpart would download an expert that fails at load.
+    #[test]
+    fn unloadable_precision_siblings_are_not_candidates() {
+        let mut item = load_item("civitai_wan22_model_1817671.json");
+        for v in &mut item.model_versions {
+            if v.id == 2057100 {
+                for f in &mut v.files {
+                    f.metadata.fp = Some("nf4".into());
+                }
+            }
+        }
+        let err = pair_for(&item, 2057171).unwrap_err();
+        assert!(
+            matches!(err, A14bPairingError::NoCounterpart { .. }),
             "{err:?}"
         );
     }

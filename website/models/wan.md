@@ -258,6 +258,9 @@ What the catalog deliberately does not offer:
 - **Wan 2.5 and 2.7** are later architectures with no mold engine.
 - **GGUF Civitai rows** — the Civitai path is safetensors-only; the GGUF A14B
   tiers ship through the manifest names above.
+- **4-bit (NF4/NVFP4) safetensors** — the Wan loader reads dense, scaled-FP8,
+  and GGUF weights only, so these versions are dropped rather than offered as
+  multi-gigabyte downloads that fail at load.
 
 Wan 2.1 text-to-video at either size, TI2V-5B, and paired A14B fine-tunes
 install from the catalog normally.

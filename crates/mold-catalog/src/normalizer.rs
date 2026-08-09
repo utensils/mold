@@ -490,6 +490,18 @@ fn from_civitai_version(
     // Drop entries whose Civitai type isn't representable in the catalog
     // (TextualInversion, Hypernetwork, etc.) before doing any further work.
     let kind = civitai_kind_to_catalog_kind(&item.kind)?;
+    // 4-bit (NF4/NVFP4) safetensors checkpoints have no Wan load path
+    // (dense, scaled-FP8, and GGUF only) — drop them like the GGUF
+    // publications rather than offering a download that fails at load.
+    if kind == Kind::Checkpoint && family == Family::Wan && !wan_precision_is_loadable(file) {
+        tracing::debug!(
+            target: "catalog.wan_a14b",
+            version_id = version.id,
+            fp = file.metadata.fp.as_deref().unwrap_or_default(),
+            "Wan version dropped: 4-bit safetensors quantization has no Wan load path",
+        );
+        return None;
+    }
     let bundling = if version.base_model_type.as_deref() == Some("Standard") {
         Bundling::SingleFile
     } else {
@@ -737,6 +749,24 @@ pub(crate) fn pick_safetensors(files: &[CivitaiFile]) -> Option<&CivitaiFile> {
                 .is_some_and(|kind| kind.eq_ignore_ascii_case("Model"))
         })
         .or_else(|| files.iter().find(is_safetensors))
+}
+
+/// Whether the Wan loader can read a Civitai safetensors file of this
+/// reported precision. The engine loads dense (fp16/bf16/fp32), scaled-FP8,
+/// and GGUF weights only — 4-bit safetensors quantizations (Civitai `fp`
+/// metadata `nf4` / `fp4` / `nvfp4`, real for A14B I2V expert pairs) have
+/// no load path, so surfacing them would offer a multi-gigabyte download
+/// that fails at load. Mirrors the GGUF handling: the version is dropped,
+/// with the reason logged at the drop site.
+pub(crate) fn wan_precision_is_loadable(file: &CivitaiFile) -> bool {
+    !matches!(
+        file.metadata
+            .fp
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("nf4" | "fp4" | "nvfp4")
+    )
 }
 
 fn pick_civitai_text_encoder(files: &[CivitaiFile]) -> Option<&CivitaiFile> {
