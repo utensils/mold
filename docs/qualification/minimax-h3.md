@@ -343,11 +343,26 @@ fails if the two copies of the canonical feature set drift.
 Configuration paths are not compiler identities. `CUDA_HOME` and the host
 compiler variables record *where* the toolchain is, so a toolkit upgraded in
 place under the same prefix would otherwise leave the identity unchanged while
-producing a different executable. The identity therefore also binds what `nvcc`
-and the host C compiler report about themselves, and the build script watches
-both binaries so replacing either invalidates a cached identity. A CUDA
-campaign build whose `nvcc` cannot be resolved or run fails rather than
+producing a different executable. The identity therefore also binds the
+resolved absolute path and self-reported version of both `nvcc` and the host
+compiler, and the build script watches those two binaries so replacing either
+invalidates a cached identity. Resolution mirrors `cudaforge`'s own search
+order — `NVCC`, then `PATH`, then `CUDA_HOME`, then `CUDA_PATH` — and takes the
+host compiler from `NVCC_CCBIN` before `CC`, because naming a different
+compiler than the one that built the kernels would be worse than naming none.
+A CUDA campaign build whose `nvcc` cannot be resolved or run fails rather than
 producing an identity that cannot tell two toolkits apart.
+
+**The measured build must start from a clean target directory.** Watching the
+compiler binaries reruns only Mold's own build scripts. The CUDA objects are
+produced by dependency build scripts — `candle-kernels`, `candle-flash-attn` —
+whose cached outputs Mold cannot invalidate, so a toolchain replaced under an
+existing `target/` yields an executable that links objects from the previous
+compiler while the identity reports the new one. Nothing in the build can
+detect that, which makes it a campaign procedure requirement rather than a
+code-enforced invariant: run `cargo clean` (or build into a fresh target
+directory) before the measured build, and record that in the campaign notes
+alongside the measured server ELF hash.
 
 ```bash
 umask 077

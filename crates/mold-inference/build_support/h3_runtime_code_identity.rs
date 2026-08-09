@@ -47,6 +47,7 @@ const BUILD_ENVIRONMENT_KEYS: &[&str] = &[
     "LD",
     "LDFLAGS",
     "MACOSX_DEPLOYMENT_TARGET",
+    "NVCC",
     "NVCC_APPEND_FLAGS",
     "NVCC_CCBIN",
     "NVCC_PREPEND_FLAGS",
@@ -64,12 +65,17 @@ const BUILD_ENVIRONMENT_KEYS: &[&str] = &[
 // `rustc -vV` identical while producing a different compiled executable, so the
 // campaign identity must bind what the native compilers report about
 // themselves, not merely where they live.
-const CUDA_ROOT_KEYS: &[&str] = &[
-    "CUDA_HOME",
-    "CUDA_PATH",
-    "CUDA_ROOT",
-    "CUDA_TOOLKIT_ROOT_DIR",
-];
+//
+// Identifying a *different* nvcc than the one that compiled the kernels would
+// be worse than identifying none, so this mirrors `cudaforge`'s own search
+// order exactly (`cudaforge-0.1.6/src/toolkit.rs:108-135`): the `NVCC`
+// override, then `PATH`, then `CUDA_HOME`, then `CUDA_PATH` on Windows.
+// cudaforge hands the host compiler to `nvcc -ccbin` from `NVCC_CCBIN`
+// (`cudaforge-0.1.6/src/builder.rs:393`), so that variable wins here too.
+const CUDA_HOME_KEY: &str = "CUDA_HOME";
+const CUDA_PATH_KEY: &str = "CUDA_PATH";
+const NVCC_OVERRIDE_KEY: &str = "NVCC";
+const NVCC_HOST_COMPILER_KEY: &str = "NVCC_CCBIN";
 
 pub const CANONICAL_H3_SERVER_FEATURES: &[&str] = &[
     "CARGO_FEATURE_CUDA",
@@ -161,6 +167,12 @@ pub fn native_toolchain_identity_for(
     let nvcc = nvcc.ok_or_else(|| {
         "private H3 CUDA campaign builds must resolve nvcc to bind the toolkit identity".to_string()
     })?;
+    // Which nvcc `PATH` selected is itself an input: two toolkits can report
+    // the same version banner from different prefixes.
+    entries.push((
+        "MOLD_H3_NVCC_PATH".into(),
+        path_identity(&nvcc, "nvcc")?.into(),
+    ));
     entries.push((
         "MOLD_H3_NVCC_VERSION".into(),
         command_identity(&nvcc, "--version")?,
@@ -169,6 +181,10 @@ pub fn native_toolchain_identity_for(
     // nvcc delegates to a host compiler, so its upgrade changes the executable
     // just as a toolkit upgrade does.
     entries.push((
+        "MOLD_H3_HOST_COMPILER_PATH".into(),
+        path_identity(&host_compiler, "host compiler")?.into(),
+    ));
+    entries.push((
         "MOLD_H3_HOST_COMPILER_VERSION".into(),
         command_identity(&host_compiler, "--version")?,
     ));
@@ -176,6 +192,12 @@ pub fn native_toolchain_identity_for(
         watched.push(host_compiler);
     }
     Ok((entries, watched))
+}
+
+fn path_identity<'a>(program: &'a Path, label: &str) -> Result<&'a str, String> {
+    program
+        .to_str()
+        .ok_or_else(|| format!("resolved {label} path is not UTF-8"))
 }
 
 fn command_identity(program: &Path, argument: &str) -> Result<String, String> {
@@ -211,26 +233,78 @@ fn command_identity(program: &Path, argument: &str) -> Result<String, String> {
     Ok(reported)
 }
 
+/// Mirror of `cudaforge::toolkit::find_nvcc`, so the identity describes the
+/// compiler that actually built the kernels rather than a different one that
+/// happens to be installed.
 fn resolve_cuda_compiler() -> Option<PathBuf> {
-    for key in CUDA_ROOT_KEYS {
-        let Some(root) = std::env::var_os(key) else {
-            continue;
-        };
-        let candidate = PathBuf::from(root).join("bin").join("nvcc");
-        if candidate.is_file() {
+    resolve_cuda_compiler_from(
+        std::env::var_os(NVCC_OVERRIDE_KEY).map(PathBuf::from),
+        search_path_for("nvcc"),
+        std::env::var_os(CUDA_HOME_KEY).map(PathBuf::from),
+        std::env::var_os(CUDA_PATH_KEY).map(PathBuf::from),
+        &|path| path.exists(),
+    )
+}
+
+/// Precedence half of [`resolve_cuda_compiler`], split out so the order can be
+/// tested without mutating this process's environment.
+pub fn resolve_cuda_compiler_from(
+    nvcc_override: Option<PathBuf>,
+    path_hit: Option<PathBuf>,
+    cuda_home: Option<PathBuf>,
+    cuda_path: Option<PathBuf>,
+    exists: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    if let Some(candidate) = nvcc_override {
+        if exists(&candidate) {
             return Some(candidate);
         }
     }
-    // Fall back to PATH resolution; the bare name still yields a version
-    // string, it simply cannot be watched for in-place replacement.
-    Some(PathBuf::from("nvcc"))
+    if let Some(candidate) = path_hit {
+        return Some(candidate);
+    }
+    if let Some(home) = cuda_home {
+        let candidate = home.join("bin").join("nvcc");
+        if exists(&candidate) {
+            return Some(candidate);
+        }
+    }
+    if let Some(path) = cuda_path {
+        let candidate = path.join("bin").join("nvcc.exe");
+        if exists(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn host_compiler_command() -> PathBuf {
-    std::env::var_os("CC")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("cc"))
+    // cudaforge passes NVCC_CCBIN to `nvcc -ccbin`, so it, not CC, decides
+    // which host compiler compiles the device code's host halves.
+    for key in [NVCC_HOST_COMPILER_KEY, "CC"] {
+        if let Some(value) = std::env::var_os(key).filter(|value| !value.is_empty()) {
+            let candidate = PathBuf::from(value);
+            if candidate.is_absolute() {
+                return candidate;
+            }
+            if let Some(found) = candidate.to_str().and_then(search_path_for) {
+                return found;
+            }
+            return candidate;
+        }
+    }
+    search_path_for("cc").unwrap_or_else(|| PathBuf::from("cc"))
+}
+
+/// Absolute path of the first `PATH` entry holding `program`.
+///
+/// A bare command name would still yield a version string, but it could not be
+/// watched for in-place replacement, which is the point of resolving it.
+fn search_path_for(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(program))
+        .find(|candidate| candidate.is_file())
 }
 
 pub fn validate_canonical_h3_server_features() -> Result<(), String> {

@@ -87,6 +87,10 @@ fn runtime_identity_binds_the_native_cuda_toolchain() {
         .collect::<Vec<_>>();
     assert!(keys.contains(&"MOLD_H3_NVCC_VERSION"), "{keys:?}");
     assert!(keys.contains(&"MOLD_H3_HOST_COMPILER_VERSION"), "{keys:?}");
+    // Two toolkits can print the same version banner from different prefixes,
+    // so which one was selected is part of the identity.
+    assert!(keys.contains(&"MOLD_H3_NVCC_PATH"), "{keys:?}");
+    assert!(keys.contains(&"MOLD_H3_HOST_COMPILER_PATH"), "{keys:?}");
     assert_eq!(watched.len(), 2, "{watched:?}");
 
     let inputs = [("crates/mold-server/src/lib.rs".to_string(), b"x".to_vec())];
@@ -117,6 +121,54 @@ fn cuda_campaign_builds_reject_an_unresolvable_toolkit() {
     )
     .unwrap_err();
     assert!(error.contains("nvcc"), "{error}");
+}
+
+#[test]
+fn cuda_compiler_resolution_mirrors_cudaforge() {
+    // Naming a different nvcc than the one that compiled the kernels would be
+    // worse than naming none, so the precedence must match
+    // `cudaforge-0.1.6/src/toolkit.rs:108-135` exactly: NVCC, then PATH, then
+    // CUDA_HOME, then CUDA_PATH's Windows `nvcc.exe`.
+    let present = |_: &Path| true;
+    let missing = |_: &Path| false;
+    let resolve = h3_runtime_code_identity::resolve_cuda_compiler_from;
+
+    assert_eq!(
+        resolve(
+            Some("/override/nvcc".into()),
+            Some("/path/nvcc".into()),
+            Some("/home".into()),
+            None,
+            &present,
+        ),
+        Some(Path::new("/override/nvcc").to_path_buf()),
+        "the NVCC override outranks PATH",
+    );
+    assert_eq!(
+        resolve(
+            Some("/override/nvcc".into()),
+            Some("/path/nvcc".into()),
+            Some("/home".into()),
+            None,
+            &missing,
+        ),
+        Some(Path::new("/path/nvcc").to_path_buf()),
+        "an NVCC override that does not exist falls through to PATH, not to CUDA_HOME",
+    );
+    assert_eq!(
+        resolve(None, None, Some("/home".into()), None, &present),
+        Some(Path::new("/home/bin/nvcc").to_path_buf()),
+        "CUDA_HOME is the third choice, not the first",
+    );
+    assert_eq!(
+        resolve(None, None, None, Some("/win".into()), &present),
+        Some(Path::new("/win/bin/nvcc.exe").to_path_buf()),
+    );
+    assert_eq!(
+        resolve(None, None, Some("/home".into()), None, &missing),
+        None,
+        "an unresolvable toolkit fails closed rather than guessing",
+    );
 }
 
 fn synthetic_workspace(root: &Path) {
