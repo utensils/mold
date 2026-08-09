@@ -68,6 +68,11 @@ path = "src/bin/h3_attention_qualification.rs"
 required-features = ["dev-bins", "h3-attention-rc"]
 
 [[bin]]
+name = "h3_attention_benchmark"
+path = "src/bin/h3_attention_benchmark.rs"
+required-features = ["dev-bins", "h3-attention-rc"]
+
+[[bin]]
 name = "h3_artifact_qualification"
 path = "src/bin/h3_artifact_qualification.rs"
 required-features = ["dev-bins", "h3-private-uat"]

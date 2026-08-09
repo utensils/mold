@@ -53,6 +53,13 @@ require_text crates/mold-inference/Cargo.toml \
 require_text crates/mold-inference/Cargo.toml \
   'required-features = ["dev-bins", "h3-attention-rc"]' \
   "the H3 qualification probe is reachable without both opt-in features"
+benchmark_stanza="$(sed -n \
+  '/name = "h3_attention_benchmark"/,/required-features =/p' \
+  crates/mold-inference/Cargo.toml)"
+grep -Fq 'path = "src/bin/h3_attention_benchmark.rs"' <<<"$benchmark_stanza" \
+  || fail "the H3 packed-row benchmark binary is not registered"
+grep -Fq 'required-features = ["dev-bins", "h3-attention-rc"]' <<<"$benchmark_stanza" \
+  || fail "the H3 packed-row benchmark is reachable without both opt-in features"
 
 if grep -Eq '^h3-(flash-)?attention-rc[[:space:]]*=' crates/mold-cli/Cargo.toml; then
   fail "mold-ai must not forward the H3 release-candidate feature into a runnable binary"
@@ -105,6 +112,12 @@ require_text .github/workflows/ci.yml \
 require_text .github/workflows/ci.yml \
   'cargo clippy -p mold-ai-inference --features h3-attention-rc,dev-bins --bin h3_attention_qualification -- -D warnings' \
   "CI does not compile the synthetic H3 qualification executable"
+require_text .github/workflows/ci.yml \
+  'cargo clippy -p mold-ai-inference --features h3-attention-rc,dev-bins --bin h3_attention_benchmark -- -D warnings' \
+  "CI does not compile the synthetic H3 packed-row benchmark"
+require_text .github/workflows/ci.yml \
+  'crates/mold-inference/src/bin/h3_attention_benchmark.rs' \
+  "release CI classifier omits the H3 packed-row benchmark"
 flash_job="$(awk '
   $0 == "  flash-attn-check:" { selected = 1 }
   selected && $0 ~ /^  [[:alnum:]_-][[:alnum:]_-]*:$/ &&

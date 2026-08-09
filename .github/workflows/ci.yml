@@ -121,6 +121,7 @@ jobs:
               - 'crates/mold-inference/Cargo.toml'
               - 'crates/mold-inference/src/lib.rs'
               - 'crates/mold-inference/src/bin/h3_attention_qualification.rs'
+              - 'crates/mold-inference/src/bin/h3_attention_benchmark.rs'
               - 'crates/mold-inference/src/bin/h3_artifact_qualification.rs'
               - 'crates/mold-inference/src/minimax_h3/mod.rs'
               - 'crates/mold-inference/src/minimax_h3/private_*.rs'
@@ -539,6 +540,8 @@ jobs:
         run: cargo clippy -p mold-ai-candle --features h3-flash-attn-rc --all-targets -- -D warnings
       - name: Clippy the synthetic MiniMax H3 qualification probe
         run: cargo clippy -p mold-ai-inference --features h3-attention-rc,dev-bins --bin h3_attention_qualification -- -D warnings
+      - name: Clippy the synthetic MiniMax H3 packed-row benchmark
+        run: cargo clippy -p mold-ai-inference --features h3-attention-rc,dev-bins --bin h3_attention_benchmark -- -D warnings
 
   metal-check:
     name: Metal forced-local typecheck
