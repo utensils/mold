@@ -38,6 +38,7 @@ TEST_MEASUREMENT_KINDS = {
         "token-ids": "integer",
         "special-token-presentation": "integer",
         "processor-shapes": "integer",
+        "processor-grids": "integer",
         "sampled-values": "activation",
     },
     "qwen-layer-50": {
@@ -218,6 +219,16 @@ def exact_manifest_layers(tool) -> dict[str, dict[str, object]]:
             )
             for record in layer["pinned_provenance"]
         }
+        if layer["id"] == "tokenizer-processor":
+            layer["_pinned_provenance_values"].update(
+                {
+                    "transformers-revision": tool.EXPECTED_REVISIONS["transformers"],
+                    "oracle-runtime-sha256": canonical_json_sha256(
+                        tool.EXPECTED_ORACLE_RUNTIME
+                    ),
+                }
+            )
+        layer["_oracle_runtime"] = copy.deepcopy(tool.EXPECTED_ORACLE_RUNTIME)
         layer["_excluded_accelerations"] = frozenset(
             manifest["numerical_authority"]["excluded_accelerations"]
         )
@@ -270,7 +281,7 @@ def comparison_fixture(key: str, kind: str) -> dict[str, object]:
 
 
 def provenance_fixture(
-    manifest_layer: dict[str, object], document: dict[str, object]
+    tool, manifest_layer: dict[str, object], document: dict[str, object]
 ) -> list[dict[str, str]]:
     component_indexes = document["input"]["component_indexes"]
     component_index_hashes = ",".join(
@@ -281,6 +292,11 @@ def provenance_fixture(
     )
     values = {
         "source-revision": document["producer"]["revision"],
+        "transformers-revision": tool.EXPECTED_REVISIONS["transformers"],
+        "adapter-implementation-sha256": document["adapter"].get(
+            "implementation_sha256", "0" * 64
+        ),
+        "oracle-runtime-sha256": canonical_json_sha256(tool.EXPECTED_ORACLE_RUNTIME),
         "tokenizer-hash": "0" * 64,
         "processor-hash": "0" * 64,
         "component-index-hash": document["input"]["component_index_sha256"],
@@ -375,6 +391,40 @@ def layer_document(
         output_fixture(layer, key, TEST_MEASUREMENT_KINDS[layer][key])
         for key in manifest_layer["required_measurements"]
     ]
+    oracle_adapter = manifest_layer.get("oracle_adapter")
+    command = (
+        f"{oracle_adapter['command_prefix']} --device cuda:contract-test"
+        if role == "oracle" and oracle_adapter is not None
+        else f"contract-test {role} {layer} capture"
+    )
+    adapter = {
+        "schema_version": "mold.minimax-h3.layer-adapter.v1",
+        "id": (
+            oracle_adapter["id"]
+            if role == "oracle" and oracle_adapter is not None
+            else f"contract-{role}-adapter"
+        ),
+        "command": command,
+        "tensor_hash_encoding": "canonical-typed-le-v1",
+    }
+    if "adapter-implementation-sha256" in manifest_layer["required_provenance"]:
+        adapter["implementation_sha256"] = (
+            oracle_adapter["implementation_sha256"]
+            if role == "oracle" and oracle_adapter is not None
+            else "1" * 64
+        )
+    environment = {
+        "device": "cuda:contract-test",
+        "dtype": CANONICAL_BF16_DTYPE,
+        "attention_backend": "math",
+        "acceleration_policy": {
+            "enabled": ["math"],
+            "disabled": sorted(manifest_layer["_excluded_accelerations"]),
+        },
+        "forbidden_accelerations_disabled": True,
+    }
+    if role == "oracle":
+        environment["oracle_runtime"] = copy.deepcopy(tool.EXPECTED_ORACLE_RUNTIME)
     document: dict[str, object] = {
         "schema_version": tool.LAYER_OUTPUT_SCHEMA_VERSION,
         "family": "minimax-h3",
@@ -391,25 +441,11 @@ def layer_document(
                 tool.EXPECTED_REVISIONS["diffusers"] if role == "oracle" else SOURCE_SHA
             ),
         },
-        "adapter": {
-            "schema_version": "mold.minimax-h3.layer-adapter.v1",
-            "id": f"contract-{role}-adapter",
-            "command": f"contract-test {role} {layer} capture",
-            "tensor_hash_encoding": "canonical-typed-le-v1",
-        },
-        "environment": {
-            "device": "cuda:contract-test",
-            "dtype": CANONICAL_BF16_DTYPE,
-            "attention_backend": "math",
-            "acceleration_policy": {
-                "enabled": ["math"],
-                "disabled": sorted(manifest_layer["_excluded_accelerations"]),
-            },
-            "forbidden_accelerations_disabled": True,
-        },
+        "adapter": adapter,
+        "environment": environment,
         "outputs": outputs,
     }
-    document["provenance"] = provenance_fixture(manifest_layer, document)
+    document["provenance"] = provenance_fixture(tool, manifest_layer, document)
     if role == "oracle":
         document["comparison"] = [
             comparison_fixture(key, TEST_MEASUREMENT_KINDS[layer][key])
@@ -497,6 +533,25 @@ def bundle_fixture(
             },
             "fixtures": fixtures,
         }
+        if role == "oracle":
+            bundle["capture_environment"]["oracle_runtime"] = copy.deepcopy(
+                tool.EXPECTED_ORACLE_RUNTIME
+            )
+            bundle["capture_environment"]["oracle_adapters"] = [
+                {
+                    "layer": layer,
+                    "id": contract["oracle_adapter"]["id"],
+                    "command": (
+                        f"{contract['oracle_adapter']['command_prefix']} "
+                        "--device cuda:contract-test"
+                    ),
+                    "implementation_sha256": contract["oracle_adapter"][
+                        "implementation_sha256"
+                    ],
+                }
+                for layer, contract in sorted(manifest_layers.items())
+                if contract.get("oracle_adapter") is not None
+            ]
         bundle_path = fixture_root / f"{role}-bundle.json"
         write_json(bundle_path, bundle)
         bundle_paths.append(bundle_path)
@@ -568,6 +623,8 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
         "processor-hash": (
             "44e3ff907049587aa580bb17f0374bb78e704e74efbf4626ed6366f4d15be287"
         ),
+        "transformers-revision": tool.EXPECTED_REVISIONS["transformers"],
+        "oracle-runtime-sha256": canonical_json_sha256(tool.EXPECTED_ORACLE_RUNTIME),
     }
     bfloat16_max = float.fromhex("0x1.fep+127")
     assert runner.is_exact_bfloat16(bfloat16_max)
@@ -630,8 +687,8 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
 
             for provenance_key in manifest_layer["_pinned_provenance_values"]:
                 unpinned = copy.deepcopy(document)
-                record_by_key(unpinned["provenance"], provenance_key)["value"] = (
-                    "f" * 64
+                record_by_key(unpinned["provenance"], provenance_key)["value"] = "f" * (
+                    40 if provenance_key.endswith("revision") else 64
                 )
                 expect_failure(
                     lambda unpinned=unpinned, manifest_layer=manifest_layer, role=role: (
@@ -1531,6 +1588,116 @@ def test_runner_contract(runner, tool, temporary: pathlib.Path) -> None:
             "source_sha": SOURCE_SHA,
         }
         assert probes == 1
+
+        environment, oracle_bundle, _ = reset_campaign()
+        oracle_runtime = json.loads(oracle_bundle.read_text(encoding="utf-8"))
+        oracle_runtime["capture_environment"]["oracle_runtime"]["torch"] = "0.0.0"
+        write_json(oracle_bundle, oracle_runtime)
+        expect_failure(
+            lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
+            "oracle bundle runtime identity is not exact",
+        )
+
+        environment, oracle_bundle, _ = reset_campaign()
+        oracle_adapter = json.loads(oracle_bundle.read_text(encoding="utf-8"))
+        oracle_adapter["capture_environment"]["oracle_adapters"][0][
+            "implementation_sha256"
+        ] = "0" * 64
+        write_json(oracle_bundle, oracle_adapter)
+        expect_failure(
+            lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
+            "adapter record for layer tokenizer-processor is not exact",
+        )
+
+        excluded_accelerations = runner.manifest_excluded_accelerations(
+            tool.validate_manifest()
+        )
+        layer_contracts = runner.exact_layer_contracts(tool.validate_manifest())
+        _, valid_oracle_path, _ = reset_campaign()
+        valid_oracle = json.loads(valid_oracle_path.read_text(encoding="utf-8"))
+
+        missing_adapter = copy.deepcopy(valid_oracle)
+        del missing_adapter["capture_environment"]["oracle_adapters"]
+        expect_failure(
+            lambda: runner.validate_capture_environment(
+                tool,
+                missing_adapter,
+                "oracle",
+                SOURCE_SHA,
+                excluded_accelerations,
+                layer_contracts,
+            ),
+            "missing manifest-required adapter records",
+        )
+
+        extra_adapter = copy.deepcopy(valid_oracle)
+        extra_record = copy.deepcopy(
+            extra_adapter["capture_environment"]["oracle_adapters"][0]
+        )
+        extra_record["layer"] = "zz-extra-layer"
+        extra_adapter["capture_environment"]["oracle_adapters"].append(extra_record)
+        expect_failure(
+            lambda: runner.validate_capture_environment(
+                tool,
+                extra_adapter,
+                "oracle",
+                SOURCE_SHA,
+                excluded_accelerations,
+                layer_contracts,
+            ),
+            "adapter layers differ",
+        )
+
+        duplicate_adapter = copy.deepcopy(valid_oracle)
+        duplicate_adapter["capture_environment"]["oracle_adapters"].append(
+            copy.deepcopy(
+                duplicate_adapter["capture_environment"]["oracle_adapters"][0]
+            )
+        )
+        expect_failure(
+            lambda: runner.validate_capture_environment(
+                tool,
+                duplicate_adapter,
+                "oracle",
+                SOURCE_SHA,
+                excluded_accelerations,
+                layer_contracts,
+            ),
+            "repeats adapter record",
+        )
+
+        mixed_adapter = copy.deepcopy(valid_oracle)
+        mixed_adapter["capture_environment"]["oracle_adapters"][0]["id"] = (
+            "different-layer-adapter"
+        )
+        expect_failure(
+            lambda: runner.validate_capture_environment(
+                tool,
+                mixed_adapter,
+                "oracle",
+                SOURCE_SHA,
+                excluded_accelerations,
+                layer_contracts,
+            ),
+            "adapter record for layer tokenizer-processor is not exact",
+        )
+
+        environment, _, mold_bundle = reset_campaign()
+
+        def drift_processor_grid(document: dict[str, object]) -> None:
+            grid = record_by_key(document["outputs"], "processor-grids")
+            grid["content_sha256"] = "f" * 64
+
+        mutate_evidence(
+            fixture_root,
+            mold_bundle,
+            drift_processor_grid,
+            fixture_layer="tokenizer-processor",
+        )
+        expect_failure(
+            lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
+            "output 'processor-grids' content hashes differ",
+        )
 
         expect_failure(
             lambda: runner.run_campaign(environment, lambda: None, lambda: "b" * 40),

@@ -107,7 +107,8 @@
         "schema_version": { "const": "mold.minimax-h3.layer-adapter.v1" },
         "id": { "$ref": "#/$defs/key" },
         "command": { "type": "string", "minLength": 1 },
-        "tensor_hash_encoding": { "$ref": "#/$defs/key" }
+        "tensor_hash_encoding": { "$ref": "#/$defs/key" },
+        "implementation_sha256": { "$ref": "#/$defs/sha256" }
       }
     },
     "environment": {
@@ -124,6 +125,7 @@
         "dtype": { "type": "string", "minLength": 1 },
         "attention_backend": { "type": "string", "minLength": 1 },
         "acceleration_policy": { "$ref": "#/$defs/acceleration_policy" },
+        "oracle_runtime": { "$ref": "#/$defs/oracle_runtime" },
         "forbidden_accelerations_disabled": { "const": true }
       }
     },
@@ -141,6 +143,18 @@
           "minItems": 1,
           "items": { "$ref": "#/$defs/key" }
         }
+      }
+    },
+    "oracle_runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["python", "torch", "numpy", "cuda", "transformers_revision"],
+      "properties": {
+        "python": { "type": "string", "minLength": 1 },
+        "torch": { "type": "string", "minLength": 1 },
+        "numpy": { "type": "string", "minLength": 1 },
+        "cuda": { "type": "string", "minLength": 1 },
+        "transformers_revision": { "$ref": "#/$defs/commit" }
       }
     },
     "e2e_input": {

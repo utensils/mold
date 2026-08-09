@@ -70,6 +70,8 @@ jobs:
               - 'scripts/tests/minimax-h3-conformance-contract.py'
               - 'scripts/run-minimax-h3-gpu-conformance.py'
               - 'scripts/tests/minimax-h3-gpu-conformance-contract.py'
+              - 'scripts/capture-minimax-h3-conditioner.py'
+              - 'scripts/tests/minimax-h3-capture-producer-contract.py'
               - 'scripts/tests/minimax-h3-private-uat-release-contract.sh'
               - '.github/workflows/minimax-h3-private-conformance.yml'
               - 'tests/fixtures/minimax_h3/**'
@@ -420,6 +422,9 @@ jobs:
       - name: Test MiniMax H3 private GPU conformance contract
         if: env.RUN_RUST_SUITE == 'true'
         run: python3 scripts/tests/minimax-h3-gpu-conformance-contract.py
+      - name: Test MiniMax H3 capture producer contract
+        if: env.RUN_RUST_SUITE == 'true'
+        run: python3 scripts/tests/minimax-h3-capture-producer-contract.py
       - name: Clippy the private MiniMax H3 artifact qualifier
         if: env.RUN_RUST_SUITE == 'true'
         run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_artifact_qualification -- -D warnings

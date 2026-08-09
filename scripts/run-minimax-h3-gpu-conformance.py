@@ -70,6 +70,7 @@ MEASUREMENT_DTYPES = {
         "token-ids": CANONICAL_INTEGER_DTYPE,
         "special-token-presentation": CANONICAL_INTEGER_DTYPE,
         "processor-shapes": CANONICAL_INTEGER_DTYPE,
+        "processor-grids": CANONICAL_INTEGER_DTYPE,
         "sampled-values": CANONICAL_BF16_DTYPE,
     },
     "qwen-layer-50": {
@@ -141,6 +142,8 @@ MEASUREMENT_DTYPES = {
     },
 }
 PROVENANCE_HASH_KEYS = {
+    "adapter-implementation-sha256",
+    "oracle-runtime-sha256",
     "tokenizer-hash",
     "processor-hash",
 }
@@ -396,6 +399,21 @@ def component_authority_set_sha256(
 def exact_layer_contracts(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     component_authorities = manifest_component_authorities(manifest)
     excluded_accelerations = manifest_excluded_accelerations(manifest)
+    source_revisions = {
+        source["id"]: source["revision"] for source in manifest.get("sources", [])
+    }
+    oracle_runtime = manifest.get("numerical_authority", {}).get("oracle_runtime")
+    if (
+        not isinstance(oracle_runtime, dict)
+        or set(oracle_runtime)
+        != {"python", "torch", "numpy", "cuda", "transformers_revision"}
+        or any(
+            not isinstance(value, str) or not value for value in oracle_runtime.values()
+        )
+        or oracle_runtime["transformers_revision"]
+        != source_revisions.get("transformers")
+    ):
+        fail("checked manifest contains invalid oracle runtime authority")
     contracts: dict[str, dict[str, Any]] = {}
     for layer in manifest["fixture_layers"]:
         if layer["authority_tier"] != EXACT_AUTHORITY_TIER:
@@ -403,6 +421,39 @@ def exact_layer_contracts(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]
         identifier = layer["id"]
         if identifier in contracts:
             fail("checked manifest contains duplicate exact layer identities")
+        oracle_adapter = layer.get("oracle_adapter")
+        if oracle_adapter is not None:
+            if (
+                not isinstance(oracle_adapter, dict)
+                or set(oracle_adapter)
+                != {
+                    "id",
+                    "command_prefix",
+                    "implementation_path",
+                    "implementation_sha256",
+                }
+                or not isinstance(oracle_adapter["id"], str)
+                or not oracle_adapter["id"]
+                or not isinstance(oracle_adapter["command_prefix"], str)
+                or not oracle_adapter["command_prefix"]
+                or re.fullmatch(
+                    r"scripts/[a-zA-Z0-9._/-]+\.py",
+                    oracle_adapter["implementation_path"],
+                )
+                is None
+                or ".."
+                in pathlib.PurePosixPath(oracle_adapter["implementation_path"]).parts
+                or not oracle_adapter["command_prefix"].startswith(
+                    f"python3 {oracle_adapter['implementation_path']} "
+                )
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", oracle_adapter["implementation_sha256"]
+                )
+                is None
+            ):
+                fail(
+                    f"checked manifest layer {identifier} has invalid adapter authority"
+                )
         required_components = layer["required_component_indexes"]
         if len(required_components) != len(set(required_components)) or not set(
             required_components
@@ -466,6 +517,14 @@ def exact_layer_contracts(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]
             )
             for record in pinned_provenance
         }
+        if identifier == "tokenizer-processor":
+            contract["_pinned_provenance_values"].update(
+                {
+                    "transformers-revision": source_revisions["transformers"],
+                    "oracle-runtime-sha256": canonical_json_sha256(oracle_runtime),
+                }
+            )
+        contract["_oracle_runtime"] = dict(oracle_runtime)
         contract["_excluded_accelerations"] = excluded_accelerations
         contracts[identifier] = contract
 
@@ -508,13 +567,88 @@ def load_bundle_once(
     return bundle
 
 
+def expected_oracle_runtime(
+    layer_contracts: Mapping[str, dict[str, Any]],
+) -> dict[str, str]:
+    if not layer_contracts:
+        fail("protected layer contracts lack oracle runtime authority")
+    runtimes = {
+        json.dumps(
+            contract.get("_oracle_runtime"),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        for contract in layer_contracts.values()
+    }
+    if len(runtimes) != 1:
+        fail("protected layer contracts disagree on oracle runtime authority")
+    runtime = next(iter(layer_contracts.values())).get("_oracle_runtime")
+    if not isinstance(runtime, dict):
+        fail("protected layer contracts lack oracle runtime authority")
+    return dict(runtime)
+
+
+def validate_bundle_oracle_adapters(
+    bundle: dict[str, Any],
+    layer_contracts: Mapping[str, dict[str, Any]],
+    device: str,
+) -> dict[str, dict[str, str]]:
+    fixture_layers = {fixture["layer"] for fixture in bundle["fixtures"]}
+    expected = {
+        layer: contract["oracle_adapter"]
+        for layer, contract in layer_contracts.items()
+        if layer in fixture_layers and contract.get("oracle_adapter") is not None
+    }
+    records = bundle["capture_environment"].get("oracle_adapters")
+    if not expected:
+        if records is not None:
+            fail("oracle bundle declares adapter records for unbound fixture layers")
+        return {}
+    if not isinstance(records, list) or not records:
+        fail("oracle bundle is missing manifest-required adapter records")
+    observed: dict[str, dict[str, str]] = {}
+    order: list[str] = []
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {
+            "layer",
+            "id",
+            "command",
+            "implementation_sha256",
+        }:
+            fail("oracle bundle contains an invalid adapter record")
+        layer = record.get("layer")
+        if not isinstance(layer, str) or not layer:
+            fail("oracle bundle contains an invalid adapter layer")
+        if layer in observed:
+            fail(f"oracle bundle repeats adapter record for layer {layer}")
+        order.append(layer)
+        observed[layer] = record
+    if order != sorted(order):
+        fail("oracle bundle adapter records are not in canonical layer order")
+    if set(observed) != set(expected):
+        fail("oracle bundle adapter layers differ from its manifest-bound fixtures")
+    for layer, authority in expected.items():
+        expected_record = {
+            "layer": layer,
+            "id": authority["id"],
+            "command": f"{authority['command_prefix']} --device {device}",
+            "implementation_sha256": authority["implementation_sha256"],
+        }
+        if observed[layer] != expected_record:
+            fail(f"oracle bundle adapter record for layer {layer} is not exact")
+    return observed
+
+
 def validate_capture_environment(
     tool: Any,
     bundle: dict[str, Any],
     role: str,
     source_sha: str,
     excluded_accelerations: frozenset[str],
+    layer_contracts: Mapping[str, dict[str, Any]] | None = None,
 ) -> None:
+    if layer_contracts is None:
+        layer_contracts = exact_layer_contracts(tool.validate_manifest())
     capture = bundle["capture_environment"]
     if not is_cuda_environment(capture["device"]):
         fail(f"{role} bundle does not declare a CUDA capture environment")
@@ -524,9 +658,14 @@ def validate_capture_environment(
     if role == "oracle":
         expected_framework = "diffusers"
         expected_revision = tool.EXPECTED_REVISIONS["diffusers"]
+        if capture.get("oracle_runtime") != expected_oracle_runtime(layer_contracts):
+            fail("oracle bundle runtime identity is not exact")
+        validate_bundle_oracle_adapters(bundle, layer_contracts, capture["device"])
     else:
         expected_framework = "mold"
         expected_revision = source_sha
+        if "oracle_runtime" in capture or "oracle_adapters" in capture:
+            fail("Mold bundle must not claim oracle runtime or adapter identity")
     if capture["framework"] != expected_framework:
         fail(f"{role} bundle framework is not {expected_framework}")
     if capture["framework_revision"] != expected_revision:
@@ -591,6 +730,18 @@ def keyed_component_records(records: Any, label: str) -> dict[str, str]:
 def structured_provenance_value(document: dict[str, Any], key: str) -> str | None:
     if key == "source-revision":
         return document["producer"]["revision"]
+    if key == "transformers-revision":
+        runtime = document["environment"].get("oracle_runtime")
+        if isinstance(runtime, dict):
+            return runtime.get("transformers_revision")
+        return None
+    if key == "adapter-implementation-sha256":
+        return document["adapter"].get("implementation_sha256")
+    if key == "oracle-runtime-sha256":
+        runtime = document["environment"].get("oracle_runtime")
+        if isinstance(runtime, dict):
+            return canonical_json_sha256(runtime)
+        return None
     if key == "component-index-hash":
         components = document["input"]["component_indexes"]
         if len(components) != 1:
@@ -783,6 +934,34 @@ def validate_manifest_layer_evidence(
         fail(f"{role} evidence does not match manifest layer {layer}")
     if document["adapter"]["tensor_hash_encoding"] != CANONICAL_TENSOR_HASH_ENCODING:
         fail(f"{role} layer {layer} tensor hash encoding is not canonical")
+    expected_runtime = manifest_layer.get("_oracle_runtime")
+    if not isinstance(expected_runtime, dict):
+        fail(f"protected manifest layer {layer} lacks oracle runtime authority")
+    if role == "oracle":
+        if document["environment"].get("oracle_runtime") != expected_runtime:
+            fail(f"oracle layer {layer} runtime identity is not exact")
+    elif "oracle_runtime" in document["environment"]:
+        fail(f"Mold layer {layer} must not claim oracle runtime identity")
+
+    adapter_authority = manifest_layer.get("oracle_adapter")
+    if role == "oracle" and adapter_authority is not None:
+        expected_command = (
+            f"{adapter_authority['command_prefix']} "
+            f"--device {document['environment']['device']}"
+        )
+        if (
+            document["adapter"].get("id") != adapter_authority["id"]
+            or document["adapter"].get("command") != expected_command
+            or document["adapter"].get("implementation_sha256")
+            != adapter_authority["implementation_sha256"]
+        ):
+            fail(f"oracle layer {layer} adapter identity is not exact")
+    if "adapter-implementation-sha256" in manifest_layer["required_provenance"]:
+        implementation_sha256 = document["adapter"].get("implementation_sha256")
+        if re.fullmatch(r"[0-9a-f]{64}", implementation_sha256 or "") is None:
+            fail(
+                f"{role} layer {layer} adapter implementation is not content-addressed"
+            )
 
     required_components = manifest_layer.get("_required_component_authorities")
     if not isinstance(required_components, list) or not required_components:
@@ -824,7 +1003,9 @@ def validate_manifest_layer_evidence(
             or CONTROL_CHARACTER_PATTERN.search(value) is not None
         ):
             fail(f"{role} layer {layer} provenance {key!r} is not canonical")
-        if key == "source-revision" and COMMIT_SHA_PATTERN.fullmatch(value) is None:
+        if key in {"source-revision", "transformers-revision"} and (
+            COMMIT_SHA_PATTERN.fullmatch(value) is None
+        ):
             fail(f"{role} layer {layer} provenance {key!r} is not canonical")
         if key in PROVENANCE_HASH_KEYS and re.fullmatch(r"[0-9a-f]{64}", value) is None:
             fail(f"{role} layer {layer} provenance {key!r} is not canonical")
@@ -988,16 +1169,50 @@ def load_layer_documents(
             )
         if document["authority_tier"] != document_manifest_tier:
             fail(f"{role} layer authority tier drifts from the manifest")
+        manifest_layer = layer_contracts.get(document["layer"])
+        if manifest_layer is None:
+            fail(f"{role} layer lacks a protected manifest contract")
         if document["authorization_document_sha256"] != authorization_sha:
             fail(f"{role} layer is not bound to the authorization evidence")
         if not is_cuda_environment(document["environment"]["device"]):
             fail(f"{role} layer does not declare a CUDA execution environment")
         if document["environment"]["dtype"] != CANONICAL_BF16_DTYPE:
             fail(f"{role} layer environment dtype must be {CANONICAL_BF16_DTYPE}")
-        if document["environment"].get("acceleration_policy") != bundle[
-            "capture_environment"
-        ].get("acceleration_policy"):
+        reject_excluded_attention_backend(
+            document["environment"].get("attention_backend"),
+            excluded_accelerations,
+            f"{role} layer {document['layer']}",
+        )
+        capture_environment = bundle["capture_environment"]
+        if document["environment"].get(
+            "acceleration_policy"
+        ) != capture_environment.get("acceleration_policy"):
             fail(f"{role} layer acceleration policy differs from its bundle")
+        for field in ("device", "dtype", "attention_backend"):
+            if document["environment"].get(field) != capture_environment.get(field):
+                fail(f"{role} layer {field} differs from its bundle")
+        if document["environment"].get("oracle_runtime") != capture_environment.get(
+            "oracle_runtime"
+        ):
+            fail(f"{role} layer oracle runtime differs from its bundle")
+        if role == "oracle" and manifest_layer.get("oracle_adapter") is not None:
+            adapter_records = {
+                record["layer"]: record
+                for record in capture_environment["oracle_adapters"]
+            }
+            adapter_record = adapter_records[document["layer"]]
+            if {
+                "id": document["adapter"].get("id"),
+                "command": document["adapter"].get("command"),
+                "implementation_sha256": document["adapter"].get(
+                    "implementation_sha256"
+                ),
+            } != {
+                "id": adapter_record["id"],
+                "command": adapter_record["command"],
+                "implementation_sha256": adapter_record["implementation_sha256"],
+            }:
+                fail(f"{role} layer adapter identity differs from its bundle")
         if fixture["layer"] != document["layer"]:
             fail(f"{role} bundle layer does not match its evidence")
         if fixture["authority_tier"] != document["authority_tier"]:
@@ -1007,9 +1222,6 @@ def load_layer_documents(
             != document["input"]["component_index_sha256"]
         ):
             fail(f"{role} bundle component index does not match its evidence")
-        manifest_layer = layer_contracts.get(document["layer"])
-        if manifest_layer is None:
-            fail(f"{role} layer lacks a protected manifest contract")
         fixture_components = keyed_component_records(
             fixture.get("component_indexes"), f"{role} bundle component authorities"
         )
@@ -1140,10 +1352,20 @@ def run_campaign(
     )
     source_sha = values["MOLD_H3_SOURCE_SHA"]
     validate_capture_environment(
-        tool, oracle_bundle, "oracle", source_sha, excluded_accelerations
+        tool,
+        oracle_bundle,
+        "oracle",
+        source_sha,
+        excluded_accelerations,
+        layer_contracts,
     )
     validate_capture_environment(
-        tool, mold_bundle, "mold", source_sha, excluded_accelerations
+        tool,
+        mold_bundle,
+        "mold",
+        source_sha,
+        excluded_accelerations,
+        layer_contracts,
     )
     oracle_documents = load_layer_documents(
         tool,

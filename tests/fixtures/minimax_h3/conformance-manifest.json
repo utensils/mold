@@ -4,6 +4,13 @@
   "numerical_authority": {
     "source_id": "diffusers",
     "precision": "official-bf16-fp32-mixed",
+    "oracle_runtime": {
+      "python": "3.13.13",
+      "torch": "2.13.0+cu130",
+      "numpy": "2.5.1",
+      "cuda": "13.0",
+      "transformers_revision": "42f189ded85d18d00b51161d694cafd325e32b91"
+    },
     "excluded_accelerations": [
       "torch-compile",
       "fp8",
@@ -52,6 +59,13 @@
       "repository": "https://github.com/huggingface/diffusers",
       "revision": "9c6a68c32b3b2a64db91800b624d33cec6e25ab8",
       "role": "official full-precision executable oracle",
+      "authority": "numerical"
+    },
+    {
+      "id": "transformers",
+      "repository": "https://github.com/huggingface/transformers",
+      "revision": "42f189ded85d18d00b51161d694cafd325e32b91",
+      "role": "Qwen3-VL tokenizer and multimodal processor authority",
       "authority": "numerical"
     },
     {
@@ -242,6 +256,9 @@
       ],
       "required_provenance": [
         "source-revision",
+        "transformers-revision",
+        "adapter-implementation-sha256",
+        "oracle-runtime-sha256",
         "tokenizer-hash",
         "processor-hash",
         "device",
@@ -271,10 +288,17 @@
         }
       ],
       "role_invariant_provenance": ["tokenizer-hash", "processor-hash"],
+      "oracle_adapter": {
+        "id": "minimax-h3-tokenizer-processor-capture-v1",
+        "command_prefix": "python3 scripts/capture-minimax-h3-conditioner.py tokenizer-processor",
+        "implementation_path": "scripts/capture-minimax-h3-conditioner.py",
+        "implementation_sha256": "d3f9ec17fa877587821ebc55344e35ce11cae19525685185f1c4cc192655f1c3"
+      },
       "required_measurements": [
         "token-ids",
         "special-token-presentation",
         "processor-shapes",
+        "processor-grids",
         "sampled-values"
       ]
     },

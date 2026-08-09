@@ -28,12 +28,14 @@
       "required": [
         "source_id",
         "precision",
+        "oracle_runtime",
         "excluded_accelerations",
         "excluded_acceleration_aliases"
       ],
       "properties": {
         "source_id": { "const": "diffusers" },
         "precision": { "const": "official-bf16-fp32-mixed" },
+        "oracle_runtime": { "$ref": "#/$defs/oracle_runtime" },
         "excluded_accelerations": {
           "type": "array",
           "minItems": 7,
@@ -69,7 +71,7 @@
     },
     "sources": {
       "type": "array",
-      "minItems": 7,
+      "minItems": 8,
       "items": { "$ref": "#/$defs/source" }
     },
     "component_indexes": {
@@ -155,6 +157,37 @@
       "minItems": 1,
       "items": { "type": "string", "minLength": 1 }
     },
+    "oracle_runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["python", "torch", "numpy", "cuda", "transformers_revision"],
+      "properties": {
+        "python": { "type": "string", "minLength": 1 },
+        "torch": { "type": "string", "minLength": 1 },
+        "numpy": { "type": "string", "minLength": 1 },
+        "cuda": { "type": "string", "minLength": 1 },
+        "transformers_revision": { "$ref": "#/$defs/commit" }
+      }
+    },
+    "oracle_adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "command_prefix",
+        "implementation_path",
+        "implementation_sha256"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "command_prefix": { "type": "string", "minLength": 1 },
+        "implementation_path": {
+          "type": "string",
+          "pattern": "^scripts/[a-zA-Z0-9._/-]+\\.py$"
+        },
+        "implementation_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
     "source": {
       "type": "object",
       "additionalProperties": false,
@@ -199,6 +232,7 @@
           "enum": ["exact-full-bf16", "quantized-structural", "synthetic"]
         },
         "input_contract": { "$ref": "#/$defs/input_contract" },
+        "oracle_adapter": { "$ref": "#/$defs/oracle_adapter" },
         "required_component_indexes": {
           "type": "array",
           "minItems": 1,
