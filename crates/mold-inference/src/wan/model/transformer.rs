@@ -564,9 +564,11 @@ impl WanKeyLayout {
 /// Wrap `vb` so every name this module asks for is translated into the
 /// checkpoint's diffusers spelling (#803). A no-op for native layouts.
 ///
-/// The construction order matters: the prefix is applied by the caller with
-/// `pp` BEFORE this wrapper, so the renamer only ever sees module-relative
-/// original names — exactly what [`original_to_diffusers`] expects.
+/// The renamer sees the FULL path the model requests, which already carries
+/// whatever prefix the caller applied with `pp`. `original_to_diffusers`
+/// matches module-relative names only, so the prefix is split off, the
+/// suffix translated, and the prefix reattached — otherwise a prefixed
+/// diffusers repack matches nothing and every key resolves double-prefixed.
 ///
 /// A name the table does not cover passes through unchanged, which surfaces
 /// as candle's own missing-tensor error naming that key. That is the right
@@ -579,7 +581,17 @@ pub(crate) fn apply_diffusers_renaming<'a>(
     if !layout.diffusers_names {
         return vb;
     }
-    vb.rename_f(|name: &str| original_to_diffusers(name).unwrap_or_else(|| name.to_string()))
+    let prefix = layout.prefix.to_string();
+    vb.rename_f(move |name: &str| {
+        let (head, tail) = match name.strip_prefix(prefix.as_str()) {
+            Some(tail) if !prefix.is_empty() => (prefix.as_str(), tail),
+            _ => ("", name),
+        };
+        match original_to_diffusers(tail) {
+            Some(renamed) => format!("{head}{renamed}"),
+            None => name.to_string(),
+        }
+    })
 }
 
 /// Classify a checkpoint's key layout from a `contains` probe.
@@ -1009,7 +1021,11 @@ impl WanTransformer {
                 first.display()
             );
         };
-        let prefix = layout.prefix.trim_end_matches('.').to_string();
+        // Dotted: `WanLoraBackend` concatenates this with the requested name
+        // directly, so trimming the separator here would look up
+        // `model.diffusion_modelblocks.0…` and break adapters on every
+        // prefixed checkpoint. The `pp` calls below only test emptiness.
+        let prefix = layout.prefix.to_string();
 
         if let Some(checkpoint) = scaled_fp8 {
             // Native dtypes all the way in: the weights stay fp8 and the
@@ -1037,8 +1053,14 @@ impl WanTransformer {
             return Self::from_var_builder(vb, config);
         }
 
-        let backend =
-            unsafe { crate::wan::lora::WanLoraBackend::new(paths, prefix, loras.clone())? };
+        let backend = unsafe {
+            crate::wan::lora::WanLoraBackend::new(
+                paths,
+                prefix,
+                layout.diffusers_names,
+                loras.clone(),
+            )?
+        };
         backend
             .ensure_lora_targets_present(
                 paths.first().map(PathBuf::as_path).unwrap_or(Path::new("")),
