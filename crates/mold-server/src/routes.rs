@@ -796,8 +796,11 @@ async fn prepare_generation(
         request.normalise_output_format(Some(mold_core::minimax_h3::FAMILY));
     }
     #[cfg(feature = "h3-private-uat")]
-    let h3_private_ingress_grant =
-        crate::h3_private_bridge::classify_h3_private_ingress(request, authenticated)?;
+    let h3_private_ingress_grant = crate::h3_private_bridge::classify_h3_private_ingress(
+        request,
+        authenticated,
+        state.instance_id.as_str(),
+    )?;
     #[cfg(feature = "h3-private-uat")]
     let private_h3_ingress = h3_private_ingress_grant.is_some();
     #[cfg(not(feature = "h3-private-uat"))]
@@ -979,7 +982,11 @@ async fn prepare_generation(
     warnings.dimension = dim_warning;
     #[cfg(feature = "h3-private-uat")]
     let h3_private_ingress_grant = if h3_private_ingress_grant.is_some() {
-        crate::h3_private_bridge::classify_h3_private_ingress(request, authenticated)?
+        crate::h3_private_bridge::classify_h3_private_ingress(
+            request,
+            authenticated,
+            state.instance_id.as_str(),
+        )?
     } else {
         None
     };
@@ -3046,8 +3053,11 @@ async fn placement_preview_for_request_authenticated(
         crate::h3_private_bridge::pin_private_preview_seed(&mut request)?;
     }
     #[cfg(feature = "h3-private-uat")]
-    let h3_private_ingress_grant =
-        crate::h3_private_bridge::classify_h3_private_ingress(&request, authenticated)?;
+    let h3_private_ingress_grant = crate::h3_private_bridge::classify_h3_private_ingress(
+        &request,
+        authenticated,
+        state.instance_id.as_str(),
+    )?;
     #[cfg(feature = "h3-private-uat")]
     let private_h3_ingress = h3_private_ingress_grant.is_some();
     #[cfg(not(feature = "h3-private-uat"))]
@@ -3187,7 +3197,11 @@ async fn placement_preview_for_request_authenticated(
     #[cfg(feature = "h3-private-uat")]
     let dependency_context = crate::variant_dependencies::DependencyPreparationContext {
         h3_private_ingress_grant: if h3_private_ingress_grant.is_some() {
-            crate::h3_private_bridge::classify_h3_private_ingress(&request, authenticated)?
+            crate::h3_private_bridge::classify_h3_private_ingress(
+                &request,
+                authenticated,
+                state.instance_id.as_str(),
+            )?
         } else {
             None
         },

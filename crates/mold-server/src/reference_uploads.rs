@@ -180,6 +180,31 @@ impl ResolvedReferenceSet {
         &self.fingerprint
     }
 
+    /// Payload-free authority fixture for owner/publication contract tests.
+    /// It deliberately contains no opened media and therefore must never be
+    /// passed to `inference_bindings`; production sets are built only by the
+    /// authenticated resolver above.
+    #[cfg(test)]
+    pub(crate) fn authority_only_for_test(request: &mold_core::GenerateRequest) -> Self {
+        let references = request.references.as_deref().unwrap_or_default();
+        let metadata = references
+            .iter()
+            .enumerate()
+            .map(|(index, reference)| reference.redacted_metadata_lossless(index))
+            .collect::<Vec<_>>();
+        let root = std::env::temp_dir().join(format!(
+            "mold-h3-reference-authority-{}",
+            uuid::Uuid::new_v4()
+        ));
+        Self {
+            root: root.clone(),
+            entries: Vec::new(),
+            fingerprint: mold_core::generation_reference_fingerprint(&metadata),
+            _quota: ResolvedQuotaLease::new(Arc::new(AtomicU64::new(0))),
+            _store_lifetime: Arc::new(StoreLifetime { root }),
+        }
+    }
+
     /// Bind the payload-free queued request back to the private staged files
     /// immediately before inference. The order, complete probed metadata, and
     /// aggregate fingerprint must all still match; paths never enter the
