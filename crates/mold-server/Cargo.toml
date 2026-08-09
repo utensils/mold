@@ -36,6 +36,7 @@ h3-private-bridge = []
 h3-private-uat = [
     "h3-private-bridge",
     "mold-inference/h3-private-uat",
+    "mold-inference/dev-bins",
     "mold-inference/h3-attention-rc",
     "mp4",
     "cuda",
@@ -46,6 +47,9 @@ mdns = ["dep:mdns-sd"]
 nvml = ["dep:nvml-wrapper"]
 # Exposes test helpers (TestApp, etc.) for integration tests.
 test-support = []
+
+[build-dependencies]
+sha2 = "0.10"
 
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.21.0" }

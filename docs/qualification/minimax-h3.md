@@ -290,10 +290,14 @@ marker as well as the underlying private artifact reader.
 
 The capture manifest uses
 [`mold.minimax-h3.private-runtime-bound-capture.v1`](./minimax-h3-private-runtime-capture.schema.json).
-It binds the exact Mold
-source SHA, artifact/authorization identities, `cuda:<ordinal>` route,
-compute capability, attention runtime/kernel/qualification identities, and a
-sorted list of relative evidence paths. Each of these bounds has an
+It binds the exact 40-character Mold source SHA, the stable runtime-code
+identity, the measured server executable, artifact/authorization identities,
+`cuda:<ordinal>` route, compute capability, attention
+runtime/kernel/qualification identities, and a sorted list of relative
+evidence paths. The candidate producer requires its own embedded source SHA and
+runtime-code identity to equal the capture and proves that both exact values
+occur in the retained ELF server executable before recording that executable's
+independently measured SHA-256. Each of these bounds has an
 independent `{observed_bytes,bound_bytes,evidence_artifact}` record, with a
 nonzero observation no larger than its proposed bound:
 
@@ -305,7 +309,32 @@ nonzero observation no larger than its proposed bound:
 
 The evidence root and every parent directory must be mode `0700`; the capture
 and evidence files must be mode `0600`, process-owned, regular, non-symlink
-files outside the checkout. Paths must be sorted, unique, and canonical.
+files outside the checkout. The measured server executable must be one of those
+files. Paths must be sorted, unique, and canonical.
+
+The producer authenticates and retains that ELF, but it does not itself prove
+that external profiler or log samples came from the process executing that
+file. The live campaign must therefore retain process/executable attestation
+alongside each sample, and the independent review must verify that binding
+before accepting any measured bound.
+
+The stable runtime-code identity hashes `Cargo.toml`, `Cargo.lock`, Cargo build
+configuration, and every regular manifest, build script, Rust source, and
+non-Rust compiled input in the complete local `mold-server` dependency closure:
+core, catalog, database, scheduler, Candle adapter, inference, and server.
+Traversal fails on symbolic links and non-regular entries. The only normalized
+source region is the reviewed runtime-record allowlist value array, which
+avoids an executable-hash fixed point: a later review-only allowlist rebuild
+may have a different exact source SHA and executable SHA, but activation still
+requires the same runtime-code identity. Any other local runtime or dependency
+input change invalidates the campaign. `Cargo.lock` binds external registry and
+Git dependency revisions. The identity also binds `rustc -vV`, host and target,
+profile and optimization mode, the sorted Cargo feature and target-cfg axes,
+encoded Rust flags, and relevant compiler, linker, and CUDA configuration. The
+build script declares every captured environment key as a rebuild input. The
+private server build separately rejects any feature set beyond the canonical
+CUDA, private bridge/runtime, MP4, and NVML campaign edge, and that canonical
+server feature set is itself part of the composite identity.
 
 ```bash
 umask 077
@@ -315,7 +344,7 @@ capture_manifest="$evidence_root/runtime-bound-capture.json"
 nix develop --offline --no-write-lock-file -c \
   cargo run --locked --offline --release \
   -p mold-ai-inference \
-  --features dev-bins,h3-private-uat \
+  --features dev-bins,h3-private-uat,h3-attention-rc,mp4,cuda \
   --bin h3_runtime_qualification_record -- \
   --models-root "$MOLD_HOME/models" \
   --authorization-record "$authorization_record" \
@@ -328,7 +357,9 @@ The final stderr line names the exact candidate file SHA-256, record identity,
 and retained evidence count. Treat that hash as unreviewed input. A later PR
 must independently inspect the measurements, reproduce the bounds, and add the
 exact candidate file hash to the allowlist; generating a candidate is not a
-passing runtime qualification or permission to run the server path.
+passing runtime qualification or permission to run the server path. Candidate
+serialization and activation share one 128 KiB record limit, so the producer
+cannot emit a record the runtime will refuse solely for size.
 
 ### Parity and approximate-path rules
 

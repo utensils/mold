@@ -21,6 +21,9 @@ pub(crate) mod private_qwen_support;
 #[cfg(feature = "h3-private-uat")]
 pub(crate) mod private_runtime;
 #[cfg(feature = "h3-private-uat")]
+pub(crate) const PRIVATE_RUNTIME_CODE_IDENTITY_SHA256: &str =
+    env!("MOLD_H3_RUNTIME_CODE_IDENTITY_SHA256");
+#[cfg(feature = "h3-private-uat")]
 pub mod private_runtime_qualification;
 #[cfg(feature = "h3-private-uat")]
 pub(crate) mod private_server;

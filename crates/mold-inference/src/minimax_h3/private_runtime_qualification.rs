@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{File, Metadata};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -23,8 +23,8 @@ use super::private_qualification::{
 use super::private_server::{
     runtime_qualification_identity, validate_runtime_qualification_record_shape,
     H3PrivateRuntimeBoundRecord, H3PrivateRuntimeEvidenceArtifact,
-    H3PrivateRuntimeQualificationRecord, RUNTIME_QUALIFICATION_DECISION,
-    RUNTIME_QUALIFICATION_SCHEMA,
+    H3PrivateRuntimeQualificationRecord, MAX_RUNTIME_QUALIFICATION_BYTES,
+    RUNTIME_QUALIFICATION_DECISION, RUNTIME_QUALIFICATION_SCHEMA,
 };
 
 pub const H3_PRIVATE_RUNTIME_RECORD_PRODUCER_MARKER: &str =
@@ -168,6 +168,8 @@ struct H3PrivateRuntimeBoundCaptureManifest {
     canonical_model: String,
     task: String,
     source_sha: String,
+    runtime_code_identity_sha256: String,
+    measured_server_executable: String,
     authorization_record_sha256: String,
     authorization_source_document_sha256: String,
     artifact_qualification_identity_sha256: String,
@@ -182,7 +184,12 @@ struct H3PrivateRuntimeBoundCaptureManifest {
 }
 
 impl H3PrivateRuntimeBoundCaptureManifest {
-    fn validate(&self, artifact: &H3PrivateArtifactQualificationReport) -> Result<()> {
+    fn validate(
+        &self,
+        artifact: &H3PrivateArtifactQualificationReport,
+        embedded_source_sha: &str,
+        embedded_runtime_code_identity_sha256: &str,
+    ) -> Result<()> {
         if self.schema != CAPTURE_SCHEMA
             || self.canonical_model != minimax_h3::FL2VA_COMFY
             || self.task != "fl2va"
@@ -195,16 +202,16 @@ impl H3PrivateRuntimeBoundCaptureManifest {
         {
             bail!("private H3 runtime capture differs from authenticated campaign authority")
         }
-        if self.source_sha.len() != 40
-            || !self
-                .source_sha
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        if !valid_lower_hex(&self.source_sha, 40)
+            || self.source_sha != embedded_source_sha
+            || !valid_lower_sha256(&self.runtime_code_identity_sha256)
+            || self.runtime_code_identity_sha256 != embedded_runtime_code_identity_sha256
         {
-            bail!("private H3 runtime capture source SHA is not canonical")
+            bail!("private H3 runtime capture differs from the embedded campaign build")
         }
         if self.device_id != format!("cuda:{}", self.device_ordinal)
             || self.compute_capability[0] == 0
+            || self.compute_capability[0] > 99
             || self.compute_capability[1] > 99
             || !valid_lower_sha256(&self.attention_runtime_identity_sha256)
             || !valid_lower_sha256(&self.attention_qualification_sha256)
@@ -225,6 +232,16 @@ impl H3PrivateRuntimeBoundCaptureManifest {
         }
         for relative_path in &self.evidence_artifacts {
             validate_relative_path(relative_path, "runtime evidence")?;
+        }
+        validate_relative_path(
+            &self.measured_server_executable,
+            "measured server executable",
+        )?;
+        if !self
+            .evidence_artifacts
+            .contains(&self.measured_server_executable)
+        {
+            bail!("private H3 runtime capture omits its measured server executable")
         }
         let retained = self.evidence_artifacts.iter().cloned().collect();
         self.bounds.validate(&retained)?;
@@ -270,6 +287,14 @@ pub fn produce_h3_private_runtime_qualification_candidate(
     capture_manifest: &Path,
     progress: impl FnMut(H3ArtifactHashProgress),
 ) -> Result<H3PrivateRuntimeQualificationCandidate> {
+    let embedded_source_sha = mold_core::build_info::GIT_SHA;
+    if !valid_lower_hex(embedded_source_sha, 40) {
+        bail!("private H3 runtime candidate requires an exact embedded source SHA")
+    }
+    let embedded_runtime_code_identity_sha256 = super::PRIVATE_RUNTIME_CODE_IDENTITY_SHA256;
+    if !valid_lower_sha256(embedded_runtime_code_identity_sha256) {
+        bail!("private H3 runtime candidate lacks an embedded runtime-code identity")
+    }
     let evidence_root = canonical_private_evidence_root(evidence_root)?;
     let capture_relative = relative_evidence_path(&evidence_root, capture_manifest)?;
     let capture_artifact =
@@ -294,6 +319,8 @@ pub fn produce_h3_private_runtime_qualification_candidate(
         capture_relative,
         capture_artifact,
         capture,
+        embedded_source_sha,
+        embedded_runtime_code_identity_sha256,
     )
 }
 
@@ -303,6 +330,8 @@ fn build_candidate(
     capture_relative: String,
     capture_artifact: H3PrivateRuntimeEvidenceArtifact,
     capture: H3PrivateRuntimeBoundCaptureManifest,
+    embedded_source_sha: &str,
+    embedded_runtime_code_identity_sha256: &str,
 ) -> Result<H3PrivateRuntimeQualificationCandidate> {
     if artifact.decision != "qualified-private-artifacts"
         || artifact.canonical_model != minimax_h3::FL2VA_COMFY
@@ -317,7 +346,11 @@ fn build_candidate(
     {
         bail!("private H3 runtime candidate lacks exact artifact qualification")
     }
-    capture.validate(artifact)?;
+    capture.validate(
+        artifact,
+        embedded_source_sha,
+        embedded_runtime_code_identity_sha256,
+    )?;
     if capture
         .evidence_artifacts
         .iter()
@@ -332,7 +365,16 @@ fn build_candidate(
     evidence_artifacts.push(capture_artifact);
     let mut total_bytes = evidence_artifacts[0].bytes;
     for relative_path in &capture.evidence_artifacts {
-        let evidence = hash_evidence_artifact(evidence_root, relative_path, None)?;
+        let evidence = if relative_path == &capture.measured_server_executable {
+            hash_measured_server_executable(
+                evidence_root,
+                relative_path,
+                &capture.source_sha,
+                &capture.runtime_code_identity_sha256,
+            )?
+        } else {
+            hash_evidence_artifact(evidence_root, relative_path, None)?
+        };
         total_bytes = total_bytes
             .checked_add(evidence.bytes)
             .ok_or_else(|| anyhow!("private H3 runtime evidence byte count overflow"))?;
@@ -342,12 +384,20 @@ fn build_candidate(
         evidence_artifacts.push(evidence);
     }
     evidence_artifacts.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let measured_server_executable = evidence_artifacts
+        .iter()
+        .find(|artifact| artifact.relative_path == capture.measured_server_executable)
+        .ok_or_else(|| anyhow!("private H3 runtime candidate lost its measured executable"))?;
 
     let mut record = H3PrivateRuntimeQualificationRecord {
         schema: RUNTIME_QUALIFICATION_SCHEMA.into(),
         decision: RUNTIME_QUALIFICATION_DECISION.into(),
         canonical_model: artifact.canonical_model.clone(),
         task: artifact.task.into(),
+        campaign_source_sha: capture.source_sha.clone(),
+        campaign_runtime_code_identity_sha256: capture.runtime_code_identity_sha256.clone(),
+        measured_server_executable_relative_path: measured_server_executable.relative_path.clone(),
+        measured_server_executable_sha256: measured_server_executable.sha256.clone(),
         authorization_record_sha256: artifact.authorization_record_sha256.clone(),
         authorization_source_document_sha256: artifact.authorization_source_document_sha256.clone(),
         artifact_qualification_identity_sha256: artifact.qualification_identity_sha256.clone(),
@@ -363,9 +413,20 @@ fn build_candidate(
         identity_sha256: String::new(),
     };
     record.identity_sha256 = runtime_qualification_identity(&record);
+    finish_candidate(record)
+}
+
+fn finish_candidate(
+    record: H3PrivateRuntimeQualificationRecord,
+) -> Result<H3PrivateRuntimeQualificationCandidate> {
     validate_runtime_qualification_record_shape(&record)?;
     let mut json_bytes = serde_json::to_vec_pretty(&record)?;
     json_bytes.push(b'\n');
+    let json_len = u64::try_from(json_bytes.len())
+        .map_err(|_| anyhow!("private H3 runtime candidate length exceeded u64"))?;
+    if json_len > MAX_RUNTIME_QUALIFICATION_BYTES {
+        bail!("private H3 runtime candidate exceeds the activation record limit")
+    }
     let record_file_sha256 = format!("{:x}", Sha256::digest(&json_bytes));
     Ok(H3PrivateRuntimeQualificationCandidate {
         evidence_artifact_count: record.evidence_artifacts.len(),
@@ -417,6 +478,9 @@ fn validate_relative_path(path: &str, label: &str) -> Result<()> {
     if path.is_empty()
         || path.contains('\\')
         || path.chars().any(char::is_control)
+        || path
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
         || candidate.is_absolute()
         || candidate
             .components()
@@ -454,6 +518,109 @@ fn hash_evidence_artifact(
         bytes: before.len,
         sha256,
     })
+}
+
+fn hash_measured_server_executable(
+    root: &Path,
+    relative_path: &str,
+    source_sha: &str,
+    runtime_code_identity_sha256: &str,
+) -> Result<H3PrivateRuntimeEvidenceArtifact> {
+    if !valid_lower_hex(source_sha, 40) || !valid_lower_sha256(runtime_code_identity_sha256) {
+        bail!("private H3 measured server requires exact embedded identities")
+    }
+    validate_relative_path(relative_path, "measured server executable")?;
+    let path = root.join(relative_path);
+    validate_private_parent_chain(root, &path)?;
+    let mut file = open_regular_file_no_follow(&path)
+        .with_context(|| format!("failed to open private H3 measured server {relative_path}"))?;
+    let before = require_private_file(&file, relative_path)?;
+    if before.len == 0 || before.len > MAX_EVIDENCE_ARTIFACT_BYTES {
+        bail!("private H3 measured server {relative_path} has an invalid size")
+    }
+
+    let mut magic = [0_u8; 4];
+    file.read_exact(&mut magic)
+        .context("failed to read private H3 measured server header")?;
+    if magic != *b"\x7fELF" {
+        bail!("private H3 measured server evidence is not an ELF executable")
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let markers = [
+        ("source SHA", source_sha.as_bytes()),
+        (
+            "runtime-code identity",
+            runtime_code_identity_sha256.as_bytes(),
+        ),
+    ];
+    verify_embedded_markers(&mut file, &markers)?;
+    let sha256 = sha256_open_file(&file)?;
+
+    let after = EvidenceFileIdentity::from_metadata(&file.metadata()?);
+    let current = open_regular_file_no_follow(&path)?;
+    let current_identity = EvidenceFileIdentity::from_metadata(&current.metadata()?);
+    if before != after || before != current_identity || sha256_open_file(&current)? != sha256 {
+        bail!("private H3 measured server {relative_path} changed while authenticating")
+    }
+    Ok(H3PrivateRuntimeEvidenceArtifact {
+        relative_path: relative_path.into(),
+        bytes: before.len,
+        sha256,
+    })
+}
+
+fn verify_embedded_markers(file: &mut File, markers: &[(&str, &[u8])]) -> Result<()> {
+    let prefixes = markers
+        .iter()
+        .map(|(_, marker)| marker_prefix(marker))
+        .collect::<Vec<_>>();
+    let mut states = vec![0_usize; markers.len()];
+    let mut found = vec![false; markers.len()];
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        for byte in &buffer[..read] {
+            for (index, (_, marker)) in markers.iter().enumerate() {
+                if found[index] {
+                    continue;
+                }
+                while states[index] > 0 && marker[states[index]] != *byte {
+                    states[index] = prefixes[index][states[index] - 1];
+                }
+                if marker[states[index]] == *byte {
+                    states[index] += 1;
+                    if states[index] == marker.len() {
+                        found[index] = true;
+                        states[index] = prefixes[index][states[index] - 1];
+                    }
+                }
+            }
+        }
+    }
+    for ((label, _), found) in markers.iter().zip(found) {
+        if !found {
+            bail!("private H3 measured server does not embed its campaign {label}")
+        }
+    }
+    Ok(())
+}
+
+fn marker_prefix(marker: &[u8]) -> Vec<usize> {
+    let mut prefix = vec![0_usize; marker.len()];
+    let mut matched = 0_usize;
+    for index in 1..marker.len() {
+        while matched > 0 && marker[matched] != marker[index] {
+            matched = prefix[matched - 1];
+        }
+        if marker[matched] == marker[index] {
+            matched += 1;
+            prefix[index] = matched;
+        }
+    }
+    prefix
 }
 
 fn read_evidence_bytes(root: &Path, relative_path: &str, limit: u64) -> Result<Vec<u8>> {
@@ -573,7 +740,11 @@ impl EvidenceFileIdentity {
 }
 
 fn valid_lower_sha256(value: &str) -> bool {
-    value.len() == 64
+    valid_lower_hex(value, 64)
+}
+
+fn valid_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -587,6 +758,14 @@ mod tests {
 
     fn sha(byte: char) -> String {
         std::iter::repeat_n(byte, 64).collect()
+    }
+
+    fn source_sha() -> String {
+        std::iter::repeat_n('d', 40).collect()
+    }
+
+    fn runtime_code_identity() -> String {
+        sha('f')
     }
 
     fn artifact_report() -> H3PrivateArtifactQualificationReport {
@@ -629,7 +808,9 @@ mod tests {
             schema: CAPTURE_SCHEMA.into(),
             canonical_model: minimax_h3::FL2VA_COMFY.into(),
             task: "fl2va".into(),
-            source_sha: std::iter::repeat_n('d', 40).collect(),
+            source_sha: source_sha(),
+            runtime_code_identity_sha256: runtime_code_identity(),
+            measured_server_executable: "bin/mold-server".into(),
             authorization_record_sha256: sha('a'),
             authorization_source_document_sha256: sha('b'),
             artifact_qualification_identity_sha256: sha('c'),
@@ -654,16 +835,27 @@ mod tests {
                 mux_output_host_bytes_bound: bound(path, 12),
                 aac_mux_staging_host_bytes: bound(path, 13),
             },
-            evidence_artifacts: vec![path.into()],
+            evidence_artifacts: vec!["bin/mold-server".into(), path.into()],
         }
     }
 
     #[cfg(unix)]
-    fn private_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    fn private_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
 
         let root = tempfile::tempdir().unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
+        let executable = bin.join("mold-server");
+        let executable_bytes = format!(
+            "\x7fELF\0fixture\0{}\0{}\0",
+            source_sha(),
+            runtime_code_identity()
+        );
+        fs::write(&executable, executable_bytes.as_bytes()).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o600)).unwrap();
         let logs = root.path().join("logs");
         fs::create_dir(&logs).unwrap();
         fs::set_permissions(&logs, fs::Permissions::from_mode(0o700)).unwrap();
@@ -674,13 +866,13 @@ mod tests {
         let capture = capture("logs/runtime.log");
         fs::write(&capture_path, serde_json::to_vec_pretty(&capture).unwrap()).unwrap();
         fs::set_permissions(&capture_path, fs::Permissions::from_mode(0o600)).unwrap();
-        (root, capture_path, evidence)
+        (root, capture_path, evidence, executable)
     }
 
     #[cfg(unix)]
     #[test]
     fn candidate_is_deterministic_and_accepted_by_the_runtime_shape_validator() {
-        let (root, capture_path, _) = private_fixture();
+        let (root, capture_path, _, _) = private_fixture();
         let capture_relative = relative_evidence_path(root.path(), &capture_path).unwrap();
         let capture_artifact =
             hash_evidence_artifact(root.path(), &capture_relative, Some(MAX_CAPTURE_BYTES))
@@ -693,6 +885,8 @@ mod tests {
             capture_relative.clone(),
             capture_artifact.clone(),
             manifest.clone(),
+            &source_sha(),
+            &runtime_code_identity(),
         )
         .unwrap();
         let second = build_candidate(
@@ -701,10 +895,12 @@ mod tests {
             capture_relative,
             capture_artifact,
             manifest,
+            &source_sha(),
+            &runtime_code_identity(),
         )
         .unwrap();
         assert_eq!(first, second);
-        assert_eq!(first.evidence_artifact_count(), 2);
+        assert_eq!(first.evidence_artifact_count(), 3);
         assert!(valid_lower_sha256(first.record_file_sha256()));
         let record: H3PrivateRuntimeQualificationRecord =
             serde_json::from_slice(first.json_bytes()).unwrap();
@@ -715,7 +911,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn candidate_rejects_an_unmeasured_or_unretained_bound() {
-        let (root, capture_path, _) = private_fixture();
+        let (root, capture_path, _, _) = private_fixture();
         let capture_relative = relative_evidence_path(root.path(), &capture_path).unwrap();
         let capture_artifact =
             hash_evidence_artifact(root.path(), &capture_relative, Some(MAX_CAPTURE_BYTES))
@@ -729,6 +925,8 @@ mod tests {
             capture_relative.clone(),
             capture_artifact.clone(),
             manifest,
+            &source_sha(),
+            &runtime_code_identity(),
         )
         .unwrap_err()
         .to_string()
@@ -743,6 +941,8 @@ mod tests {
             capture_relative,
             capture_artifact,
             manifest,
+            &source_sha(),
+            &runtime_code_identity(),
         )
         .unwrap_err()
         .to_string()
@@ -754,7 +954,7 @@ mod tests {
     fn evidence_permissions_and_order_fail_closed() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (root, capture_path, evidence) = private_fixture();
+        let (root, capture_path, evidence, _) = private_fixture();
         fs::set_permissions(&evidence, fs::Permissions::from_mode(0o640)).unwrap();
         assert!(
             hash_evidence_artifact(root.path(), "logs/runtime.log", None)
@@ -767,9 +967,97 @@ mod tests {
             serde_json::from_slice(&fs::read(capture_path).unwrap()).unwrap();
         manifest.evidence_artifacts = vec!["logs/z.log".into(), "logs/a.log".into()];
         assert!(manifest
-            .validate(&artifact_report())
+            .validate(&artifact_report(), &source_sha(), &runtime_code_identity())
             .unwrap_err()
             .to_string()
             .contains("sorted and unique"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_rejects_unembedded_source_or_out_of_schema_compute_capability() {
+        let mut manifest = capture("logs/runtime.log");
+        assert!(manifest
+            .validate(
+                &artifact_report(),
+                &std::iter::repeat_n('e', 40).collect::<String>(),
+                &runtime_code_identity()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("embedded campaign build"));
+
+        manifest.compute_capability = [100, 0];
+        assert!(manifest
+            .validate(&artifact_report(), &source_sha(), &runtime_code_identity())
+            .unwrap_err()
+            .to_string()
+            .contains("CUDA attention authority"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_rejects_a_measured_server_without_embedded_identity() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, capture_path, _, executable) = private_fixture();
+        fs::write(&executable, b"\x7fELF\0unbound-server\0").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o600)).unwrap();
+        let capture_relative = relative_evidence_path(root.path(), &capture_path).unwrap();
+        let capture_artifact =
+            hash_evidence_artifact(root.path(), &capture_relative, Some(MAX_CAPTURE_BYTES))
+                .unwrap();
+        let manifest: H3PrivateRuntimeBoundCaptureManifest =
+            serde_json::from_slice(&fs::read(&capture_path).unwrap()).unwrap();
+        let error = build_candidate(
+            &artifact_report(),
+            root.path(),
+            capture_relative,
+            capture_artifact,
+            manifest,
+            &source_sha(),
+            &runtime_code_identity(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not embed"), "{error:#}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_emission_rejects_records_over_the_activation_limit() {
+        let (root, capture_path, _, _) = private_fixture();
+        let capture_relative = relative_evidence_path(root.path(), &capture_path).unwrap();
+        let capture_artifact =
+            hash_evidence_artifact(root.path(), &capture_relative, Some(MAX_CAPTURE_BYTES))
+                .unwrap();
+        let manifest: H3PrivateRuntimeBoundCaptureManifest =
+            serde_json::from_slice(&fs::read(&capture_path).unwrap()).unwrap();
+        let candidate = build_candidate(
+            &artifact_report(),
+            root.path(),
+            capture_relative,
+            capture_artifact,
+            manifest,
+            &source_sha(),
+            &runtime_code_identity(),
+        )
+        .unwrap();
+        let mut record: H3PrivateRuntimeQualificationRecord =
+            serde_json::from_slice(candidate.json_bytes()).unwrap();
+        for index in 0..128 {
+            record
+                .evidence_artifacts
+                .push(H3PrivateRuntimeEvidenceArtifact {
+                    relative_path: format!("oversized/{index:03}-{}", "x".repeat(1_024)),
+                    bytes: 1,
+                    sha256: sha('9'),
+                });
+        }
+        record
+            .evidence_artifacts
+            .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        record.identity_sha256 = runtime_qualification_identity(&record);
+        let error = finish_candidate(record).unwrap_err();
+        assert!(error.to_string().contains("activation record limit"));
     }
 }

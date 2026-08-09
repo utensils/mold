@@ -91,6 +91,45 @@ require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.
 require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
   'H3PrivateRuntimeQualificationCandidate' \
   "the private H3 runtime-record producer does not emit a review-only candidate"
+require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
+  'hash_measured_server_executable(' \
+  "the private H3 runtime-record producer does not authenticate its measured server"
+require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
+  'MAX_RUNTIME_QUALIFICATION_BYTES' \
+  "the private H3 runtime-record producer does not share the activation record limit"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'campaign_runtime_code_identity_sha256: String,' \
+  "the private H3 runtime record omits its stable campaign code identity"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'measured_server_executable_sha256: String,' \
+  "the private H3 runtime record omits its measured server identity"
+require_text crates/mold-inference/build_support/h3_runtime_code_identity.rs \
+  'const LOCAL_RUNTIME_CRATES: &[&str] = &[' \
+  "the private H3 runtime code identity omits its reviewed local dependency closure"
+require_text crates/mold-inference/build_support/h3_runtime_code_identity.rs \
+  'runtime identity entry {} is a symbolic link' \
+  "the private H3 runtime code identity does not reject linked traversal entries"
+require_text crates/mold-inference/build_support/h3_runtime_code_identity.rs \
+  'RUSTC_VERBOSE_VERSION' \
+  "the private H3 runtime code identity omits the compiler identity"
+require_text crates/mold-inference/build_support/h3_runtime_code_identity.rs \
+  'key.starts_with("CARGO_FEATURE_")' \
+  "the private H3 runtime code identity omits enabled Cargo features"
+require_text crates/mold-inference/build.rs \
+  'cargo:rerun-if-env-changed={key}' \
+  "the private H3 runtime code identity does not track build-environment changes"
+require_text crates/mold-inference/build.rs \
+  'if std::env::var_os("CARGO_FEATURE_H3_PRIVATE_UAT").is_none()' \
+  "ordinary builds are not isolated from the private H3 identity collector"
+require_text crates/mold-server/Cargo.toml \
+  '"mold-inference/dev-bins",' \
+  "the measured private server does not match the producer inference feature set"
+require_text crates/mold-server/build.rs \
+  'validate_canonical_h3_server_features()' \
+  "the measured private server does not reject non-canonical campaign features"
+require_text crates/mold-inference/build_support/h3_runtime_code_identity.rs \
+  '"MOLD_H3_CANONICAL_SERVER_FEATURES"' \
+  "the private H3 runtime identity omits the canonical server feature set"
 require_text scripts/verify-h3-release-exclusion.sh \
   'private_runtime_record_marker=' \
   "published-binary verification does not reject the private runtime-record producer"
@@ -483,13 +522,14 @@ h3_uat_feature=$(sed -n '/^h3-private-uat = \[/,/^\]/p' crates/mold-server/Cargo
 for edge in \
   h3-private-bridge \
   mold-inference/h3-private-uat \
+  mold-inference/dev-bins \
   mold-inference/h3-attention-rc \
   mp4 \
   cuda; do
   grep -Fq "\"${edge}\"" <<<"$h3_uat_feature" \
     || fail "mold-ai-server private H3 UAT feature omits ${edge}"
 done
-if [[ $(grep -Ec '^[[:space:]]*"[^"]+",?$' <<<"$h3_uat_feature") -ne 5 ]]; then
+if [[ $(grep -Ec '^[[:space:]]*"[^"]+",?$' <<<"$h3_uat_feature") -ne 6 ]]; then
   fail "mold-ai-server private H3 UAT feature contains an unexpected runtime edge"
 fi
 

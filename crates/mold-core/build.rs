@@ -8,7 +8,7 @@ fn main() {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
             Command::new("git")
-                .args(["rev-parse", "--short", "HEAD"])
+                .args(["rev-parse", "HEAD"])
                 .output()
                 .ok()
                 .filter(|o| o.status.success())
