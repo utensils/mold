@@ -521,6 +521,111 @@ pub fn select_best_gpu(gpus: &[DiscoveredGpu]) -> Option<&DiscoveredGpu> {
     gpus.iter().max_by_key(|g| g.free_vram_bytes)
 }
 
+// ── Metal device identity ──────────────────────────────────────────────────
+//
+// `Device::new_metal(ordinal)` mints a brand-new `MetalDevice` on every call.
+// candle identifies a Metal device by a process-global counter
+// (`metal_backend::DeviceId::new`), not by the physical GPU — its own comment
+// says "the registryID is not sufficient as it identifies the GPU rather than
+// the device itself" — and `MetalDevice::new` builds a fresh command queue,
+// kernel cache, buffer pools and residency set each time. Two such devices for
+// one GPU therefore fail `same_device`, and `Tensor::to_device` has no
+// Metal->Metal arm: it bails with "not implemented yet, self.device:
+// Metal(DeviceId(3)), device: Metal(DeviceId(1))".
+//
+// Engines resolve each component's placement independently — Z-Image asks for
+// the transformer, the VAE and the Qwen3 encoder in turn — so once the
+// scheduler began materializing an explicit `DeviceRef` per component, each one
+// opened its own device and the first cross-component tensor move died. Sharing
+// one device per ordinal is also strictly better than deduplicating the copy:
+// one buffer pool and one command queue, instead of N competing for the same
+// unified memory.
+//
+// CUDA is deliberately not memoized. `CudaDevice::new` takes
+// `context.per_thread_stream()`, so a cached device would leak one thread's
+// stream to another, and `to_device` already implements Cuda->Cuda.
+
+static METAL_DEVICES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::BTreeMap<usize, candle_core::Device>>,
+> = std::sync::OnceLock::new();
+
+/// Insert-or-clone against a memo table, creating at most one value per key.
+///
+/// The lock is deliberately held across `create`: two threads racing on a cold
+/// key must not both construct a device, which is the whole point of the table.
+/// A failed creation is not cached, so a transient error stays retryable.
+fn memoized<K, V, F>(
+    cache: &std::sync::Mutex<std::collections::BTreeMap<K, V>>,
+    key: K,
+    create: F,
+) -> anyhow::Result<V>
+where
+    K: Ord,
+    V: Clone,
+    F: FnOnce() -> anyhow::Result<V>,
+{
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(existing) = guard.get(&key) {
+        return Ok(existing.clone());
+    }
+    let created = create()?;
+    guard.insert(key, created.clone());
+    Ok(created)
+}
+
+/// Return pooled Metal buffers for `ordinal` to the OS.
+///
+/// candle's `MetalDevice` owns a caching allocator: a freed buffer stays in
+/// `buffers`/`private_buffers` at `strong_count == 1` and is only released by
+/// `drop_unused_buffers`, which runs solely from `wait_until_completed` /
+/// `flush_and_wait_current` (`metal_backend/device.rs`) — or when the device
+/// itself is dropped.
+///
+/// Before memoization the device was the last thing holding that pool, so
+/// dropping the final engine dropped the pool with it. Now the device outlives
+/// every engine, and an unload has to ask for the sweep explicitly. Without it
+/// `mold model unload` frees the engine but leaves the buffers checked out,
+/// which is precisely what users run it to undo — and the post-drop VRAM sample
+/// would report no recovery.
+///
+/// Only sweeps a device this process already opened; never creates one.
+pub fn release_pooled_metal_memory(ordinal: usize) {
+    let Some(cache) = METAL_DEVICES.get() else {
+        return;
+    };
+    // Clone out from under the lock: `synchronize` waits on the GPU and must
+    // not hold up an unrelated ordinal's device lookup.
+    let device = {
+        let guard = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.get(&ordinal).cloned()
+    };
+    let Some(device) = device else {
+        return;
+    };
+    if let Err(error) = device.synchronize() {
+        tracing::warn!(
+            ordinal,
+            %error,
+            "could not sweep the Metal buffer pool after unload; freed memory stays cached"
+        );
+    }
+}
+
+/// Open Metal `ordinal`, reusing this process's existing device for that GPU.
+///
+/// Every Metal device construction in Mold must go through here. Calling
+/// `Device::new_metal` directly reintroduces the split-identity bug above.
+pub fn metal_device(ordinal: usize) -> anyhow::Result<candle_core::Device> {
+    memoized(METAL_DEVICES.get_or_init(Default::default), ordinal, || {
+        candle_core::Device::new_metal(ordinal)
+            .map_err(|error| anyhow::anyhow!("failed to open Metal device {ordinal}: {error}"))
+    })
+}
+
 // ── Device creation ────────────────────────────────────────────────────────
 
 /// Create a device on the specified GPU ordinal.
@@ -548,7 +653,7 @@ pub fn create_device(
     } else if candle_core::utils::metal_is_available() {
         progress.info(&format!("Using Metal device {ordinal}"));
         tracing::info!("Using Metal device {ordinal}");
-        Ok(Device::new_metal(ordinal)?)
+        metal_device(ordinal)
     } else {
         progress.info("No GPU detected, using CPU");
         tracing::warn!("No GPU detected, falling back to CPU");
@@ -588,9 +693,7 @@ pub(crate) fn create_exact_gpu_device(
             #[cfg(feature = "metal")]
             {
                 progress.info(&format!("Using exact Metal device {ordinal}"));
-                candle_core::Device::new_metal(ordinal).map_err(|error| {
-                    anyhow::anyhow!("failed to open exact Metal device {ordinal}: {error}")
-                })
+                metal_device(ordinal)
             }
             #[cfg(not(feature = "metal"))]
             {
@@ -1455,8 +1558,7 @@ fn resolve_gpu_ordinal(ordinal: usize) -> anyhow::Result<candle_core::Device> {
 #[cfg(all(not(feature = "cuda"), feature = "metal"))]
 fn resolve_gpu_ordinal(ordinal: usize) -> anyhow::Result<candle_core::Device> {
     debug_assert_ordinal_matches_thread(ordinal, "resolve_device");
-    candle_core::Device::new_metal(ordinal)
-        .map_err(|e| anyhow::anyhow!("failed to open Metal device {ordinal}: {e}"))
+    metal_device(ordinal)
 }
 
 #[cfg(all(not(feature = "cuda"), not(feature = "metal")))]
@@ -4710,6 +4812,156 @@ mod tests {
             outer_report.peak_pool_used.expect("outer peak") >= 2_147_483_648,
             "the enclosing phase keeps the peak it reached before the nested \
              probe rearmed the counter: {outer_report}"
+        );
+    }
+
+    // ── Metal device identity ──────────────────────────────────────────────
+
+    #[test]
+    fn memoized_creates_at_most_one_value_per_key() {
+        let cache = std::sync::Mutex::new(std::collections::BTreeMap::new());
+        let calls = std::cell::Cell::new(0_usize);
+        let create = |ordinal: usize| {
+            calls.set(calls.get() + 1);
+            Ok(format!("device-{ordinal}"))
+        };
+
+        assert_eq!(memoized(&cache, 0, || create(0)).unwrap(), "device-0");
+        assert_eq!(memoized(&cache, 0, || create(0)).unwrap(), "device-0");
+        assert_eq!(calls.get(), 1, "a repeated ordinal must reuse its device");
+
+        assert_eq!(memoized(&cache, 1, || create(1)).unwrap(), "device-1");
+        assert_eq!(calls.get(), 2, "a distinct ordinal gets its own device");
+    }
+
+    #[test]
+    fn memoized_does_not_cache_a_failed_creation() {
+        let cache = std::sync::Mutex::new(std::collections::BTreeMap::<usize, String>::new());
+        assert!(memoized(&cache, 0, || anyhow::bail!("no such GPU")).is_err());
+        assert_eq!(
+            memoized(&cache, 0, || Ok("recovered".to_string())).unwrap(),
+            "recovered"
+        );
+    }
+
+    #[test]
+    fn repeated_metal_resolution_yields_one_shared_device() {
+        if !candle_core::utils::metal_is_available() {
+            eprintln!("skipping: no Metal device");
+            return;
+        }
+        // candle identifies a Metal device by a process-global counter, not by
+        // the physical GPU, and `Tensor::to_device` has no Metal->Metal arm. Two
+        // devices for one GPU therefore make every cross-component tensor move
+        // fail with "not implemented yet, self.device: Metal(..), device:
+        // Metal(..)" — which is exactly what Z-Image hit once the scheduler
+        // started handing each component an explicit placement.
+        let transformer = metal_device(0).expect("metal device");
+        let text_encoder = metal_device(0).expect("metal device");
+
+        assert!(
+            transformer.same_device(&text_encoder),
+            "every component on GPU 0 must share one MetalDevice"
+        );
+
+        let embeddings = candle_core::Tensor::zeros((2, 4), candle_core::DType::F32, &text_encoder)
+            .expect("allocate on the text-encoder device");
+        embeddings
+            .to_device(&transformer)
+            .expect("moving text embeddings onto the transformer device must not fail");
+    }
+
+    #[test]
+    fn production_code_never_constructs_a_metal_device_directly() {
+        // `metal_device` is only load-bearing if it is the sole constructor.
+        // A stray `Device::new_metal` reintroduces the split-identity bug, and
+        // the failure is a runtime error in one family rather than a build
+        // break, so pin it here. Tests may construct freely.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates dir");
+        let mut offenders = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("readable crate dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("readable source");
+                // Everything from the first `#[cfg(test)]` on is test code.
+                let production = source
+                    .split_once("#[cfg(test)]")
+                    .map_or(source.as_str(), |(before, _)| before);
+                for (index, line) in production.lines().enumerate() {
+                    if line.contains("new_metal(")
+                        && !line.trim_start().starts_with("//")
+                        && !line.contains("candle_core::Device::new_metal(ordinal)")
+                    {
+                        offenders.push(format!("{}:{}", path.display(), index + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "production code must open Metal through device::metal_device: {offenders:?}"
+        );
+    }
+
+    #[test]
+    fn releasing_pooled_metal_memory_is_a_noop_for_an_unopened_ordinal() {
+        // The sweep must never construct a device: an unload on a box with no
+        // Metal GPU, or for an ordinal this process never touched, has nothing
+        // to return and must not allocate one to find that out.
+        release_pooled_metal_memory(usize::MAX);
+    }
+
+    #[test]
+    fn releasing_pooled_metal_memory_keeps_the_device_usable() {
+        if !candle_core::utils::metal_is_available() {
+            eprintln!("skipping: no Metal device");
+            return;
+        }
+        let device = metal_device(0).expect("metal device");
+        let before =
+            candle_core::Tensor::ones((64, 64), candle_core::DType::F32, &device).expect("alloc");
+        drop(before);
+
+        release_pooled_metal_memory(0);
+
+        // Sweeping returns pooled buffers to the OS; the memoized device must
+        // survive it, keep its identity, and still allocate.
+        let after = metal_device(0).expect("metal device after sweep");
+        assert!(
+            after.same_device(&device),
+            "the sweep must not re-mint the device"
+        );
+        candle_core::Tensor::ones((64, 64), candle_core::DType::F32, &after).expect("alloc after");
+    }
+
+    #[test]
+    fn every_metal_entry_point_shares_the_memoized_device() {
+        if !candle_core::utils::metal_is_available() || candle_core::utils::cuda_is_available() {
+            eprintln!("skipping: not a Metal-only host");
+            return;
+        }
+        let progress = ProgressReporter::default();
+        let auto = create_device(0, &progress).expect("auto device");
+        let exact = create_exact_gpu_device(GpuBackend::Metal, 0, &progress).expect("exact device");
+        let resolved = resolve_gpu_ordinal(0).expect("resolved device");
+
+        assert!(
+            auto.same_device(&exact),
+            "create_device vs create_exact_gpu_device"
+        );
+        assert!(
+            auto.same_device(&resolved),
+            "create_device vs resolve_gpu_ordinal"
         );
     }
 }

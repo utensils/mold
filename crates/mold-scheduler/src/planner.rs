@@ -7,7 +7,7 @@ use crate::{
     AssignmentReason, BlockedReason, BlockedWork, BypassUpdate, CandidatePlacement, DeviceActivity,
     DeviceId, DeviceLane, DeviceSnapshot, ImmediateLease, MatchingReservation, OptimizerState,
     Plan, PlannedAssignment, PlannerConfig, PlannerError, PlannerSnapshot, PlanningMode,
-    ReservationItem, WarmWait, WorkId, WorkSnapshot,
+    ReservationItem, WarmWait, WorkId, WorkKind, WorkSnapshot,
 };
 
 #[derive(Clone, Debug)]
@@ -75,9 +75,26 @@ impl Planner {
             .iter()
             .map(|device| (device.id.clone(), device))
             .collect::<BTreeMap<_, _>>();
+        // A device that only `accepts_releasing_work` still needs a slot in the
+        // matcher, or an unload queued against a degraded GPU has nowhere to be
+        // matched and comes back `LowerPriorityOpening`. Ordinary work cannot
+        // reach those devices: `candidate_is_eligible` keeps gating it on
+        // `is_schedulable`, and `try_with` builds edges only from a work item's
+        // own candidates, so an extra slot is an isolated node that cannot
+        // change the matching.
+        //
+        // The filter is derived from `is_idle_for` rather than restating its
+        // rule, because `immediate_candidates` is selected with the same
+        // predicate and one candidate outside this slot set blocks its whole
+        // work item. The two must not drift.
+        let kinds_present = snapshot
+            .work
+            .iter()
+            .map(|item| item.kind)
+            .collect::<BTreeSet<_>>();
         let idle_device_ids = devices
             .iter()
-            .filter(|device| device.is_idle())
+            .filter(|device| kinds_present.iter().any(|kind| device.is_idle_for(*kind)))
             .map(|device| device.id.clone())
             .collect::<Vec<_>>();
 
@@ -362,7 +379,7 @@ fn prepare_work(
             }
             Some(MatchCandidate {
                 setup_ms: setup_ms(candidate, device),
-                placement: candidate.clone(),
+                placement: normalized_placement(work.kind, candidate),
             })
         })
         .collect::<Vec<_>>();
@@ -374,7 +391,7 @@ fn prepare_work(
             work.ready_at_ms <= now_ms
                 && devices
                     .get(&candidate.placement.device_id)
-                    .is_some_and(|device| device.is_idle())
+                    .is_some_and(|device| device.is_idle_for(work.kind))
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -486,16 +503,24 @@ fn classify_no_candidate(
         let Some(device) = devices.get(hard_device_id) else {
             return BlockedReason::HardPinUnavailable;
         };
-        match device.admin_state {
-            crate::DeviceAdminState::Disabled => return BlockedReason::DeviceDisabled,
-            crate::DeviceAdminState::Draining => return BlockedReason::DeviceDraining,
-            crate::DeviceAdminState::StartupExcluded => {
-                return BlockedReason::DeviceStartupExcluded;
+        // Releasing work is admitted on a degraded, disabled or draining
+        // device, so those states must not be reported as its blocker either —
+        // only quarantine is, and that is checked below.
+        if !work.kind.releases_resources() {
+            match device.admin_state {
+                crate::DeviceAdminState::Disabled => return BlockedReason::DeviceDisabled,
+                crate::DeviceAdminState::Draining => return BlockedReason::DeviceDraining,
+                crate::DeviceAdminState::StartupExcluded => {
+                    return BlockedReason::DeviceStartupExcluded;
+                }
+                crate::DeviceAdminState::Enabled => {}
             }
-            crate::DeviceAdminState::Enabled => {}
+            if device.health == crate::DeviceHealth::Degraded {
+                return BlockedReason::DeviceDegraded;
+            }
         }
         match device.health {
-            crate::DeviceHealth::Degraded => return BlockedReason::DeviceDegraded,
+            crate::DeviceHealth::Degraded => {}
             crate::DeviceHealth::Unavailable | crate::DeviceHealth::Poisoned => {
                 return BlockedReason::DeviceUnavailable;
             }
@@ -510,11 +535,13 @@ fn classify_no_candidate(
             return BlockedReason::BackendUnsupported;
         }
     }
-    let vram_blocked = candidates.iter().any(|candidate| {
-        devices.get(&candidate.device_id).is_some_and(|device| {
-            device.is_schedulable() && candidate.predicted_vram_bytes > device.available_vram_bytes
-        })
-    });
+    let vram_blocked = !work.kind.releases_resources()
+        && candidates.iter().any(|candidate| {
+            devices.get(&candidate.device_id).is_some_and(|device| {
+                device.is_schedulable()
+                    && candidate.predicted_vram_bytes > device.available_vram_bytes
+            })
+        });
     if vram_blocked {
         BlockedReason::InsufficientVram
     } else {
@@ -554,6 +581,11 @@ fn minimum_immediate_host_ram(
     candidates: &[CandidatePlacement],
     devices: &BTreeMap<DeviceId, &DeviceSnapshot>,
 ) -> Option<u64> {
+    // Work that releases resources is never charged for them. `None` skips both
+    // the per-item and the aggregate headroom gate below.
+    if work.kind.releases_resources() {
+        return None;
+    }
     candidates
         .iter()
         .filter(|candidate| {
@@ -565,14 +597,43 @@ fn minimum_immediate_host_ram(
         .min()
 }
 
+/// Price a candidate as the matching will see it.
+///
+/// [`prepare_work`] is the one place a `CandidatePlacement` is cloned into the
+/// matching, so normalizing here keeps the matcher's cost, the aggregate
+/// headroom check, the immediate leases, the reservation the coordinator
+/// commits, and the pre-grant VRAM revalidation all telling the same story.
+///
+/// Releasing work enters at zero. Charging it would shrink the very headroom it
+/// is about to enlarge, let one queued unload block a peer through the
+/// aggregate gate, and fail `validate_lease_for_grant` on exactly the full
+/// device that needs unloading.
+fn normalized_placement(kind: WorkKind, candidate: &CandidatePlacement) -> CandidatePlacement {
+    if !kind.releases_resources() {
+        return candidate.clone();
+    }
+    CandidatePlacement {
+        predicted_vram_bytes: 0,
+        incremental_host_ram_bytes: 0,
+        ..candidate.clone()
+    }
+}
+
 fn candidate_is_eligible(
     work: &WorkSnapshot,
     candidate: &CandidatePlacement,
     device: &DeviceSnapshot,
     require_idle: bool,
 ) -> bool {
-    device.is_schedulable()
-        && (!require_idle || device.is_idle())
+    let releasing = work.kind.releases_resources();
+    // Releasing work answers to `accepts_releasing_work`, which still excludes
+    // a quarantined device but not one that is merely degraded, draining or
+    // disabled — those are where an unload is most needed.
+    (if releasing {
+        device.accepts_releasing_work()
+    } else {
+        device.is_schedulable()
+    }) && (!require_idle || device.is_idle_for(work.kind))
         && work
             .hard_device_id
             .as_ref()
@@ -580,7 +641,9 @@ fn candidate_is_eligible(
         && work
             .backend_requirement
             .is_none_or(|backend| backend == device.backend)
-        && candidate.predicted_vram_bytes <= device.available_vram_bytes
+        // A full device is precisely when an unload must run, so releasing work
+        // is not asked to fit in the VRAM it is about to return.
+        && (releasing || candidate.predicted_vram_bytes <= device.available_vram_bytes)
 }
 
 fn build_immediate_leases(
@@ -623,6 +686,7 @@ fn build_reservation(
     snapshot: &PlannerSnapshot,
     immediate_leases: &[ImmediateLease],
 ) -> MatchingReservation {
+    // `lease.placement` already carries `normalized_placement`'s pricing.
     let items = immediate_leases
         .iter()
         .map(|lease| ReservationItem {

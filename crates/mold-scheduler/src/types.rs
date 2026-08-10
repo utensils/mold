@@ -148,8 +148,48 @@ impl DeviceSnapshot {
         self.admin_state == DeviceAdminState::Enabled && self.health == DeviceHealth::Healthy
     }
 
+    /// Whether this device may still be asked to *release* what it is holding.
+    ///
+    /// Being taken out of scheduling and being forbidden to free memory are
+    /// different statements, and conflating them recreates the deadlock that
+    /// [`WorkKind::releases_resources`] exists to break. The reachable case is
+    /// **Degraded**: three consecutive failures degrade a worker, and a wedged
+    /// model is exactly what causes those failures while still holding the
+    /// memory — so refusing the unload there leaves no recovery short of
+    /// restarting the process.
+    ///
+    /// This keys on health alone and deliberately ignores `admin_state`, but
+    /// note that `activity` still gates through [`Self::is_idle_for`], so a
+    /// Draining device is *not* admitted in practice: the server reports it as
+    /// `Stopping`, never `Idle`. That is the right outcome rather than an
+    /// oversight — a drain tears the worker down and drops the engine on its
+    /// way out, and the teardown path returns the memory itself. Disabled and
+    /// StartupExcluded are likewise moot: neither has a worker, so neither
+    /// produces a candidate to schedule against.
+    ///
+    /// Quarantine is the one line this does not cross. A Poisoned or
+    /// Unavailable device has a fatal context that must never be touched again
+    /// in-process (see CLAUDE.md, "Fatal CUDA contexts are never reused or
+    /// reset in-process") — its memory comes back with the process, not with an
+    /// unload.
+    pub fn accepts_releasing_work(&self) -> bool {
+        matches!(self.health, DeviceHealth::Healthy | DeviceHealth::Degraded)
+    }
+
     pub fn is_idle(&self) -> bool {
         self.is_schedulable() && self.activity == DeviceActivity::Idle
+    }
+
+    /// Idle in the sense that matters for work of `kind`.
+    ///
+    /// Releasing work uses [`Self::accepts_releasing_work`] instead of
+    /// [`Self::is_schedulable`]; everything else keeps the stricter rule.
+    pub fn is_idle_for(&self, kind: WorkKind) -> bool {
+        if kind.releases_resources() {
+            self.accepts_releasing_work() && self.activity == DeviceActivity::Idle
+        } else {
+            self.is_idle()
+        }
     }
 }
 
@@ -320,6 +360,25 @@ pub enum WorkKind {
     AdminModelLoad,
     AdminModelUnload,
     BatchChild,
+}
+
+impl WorkKind {
+    /// Whether this work returns resources instead of consuming them.
+    ///
+    /// Admission gates exist to stop work from over-committing memory, so they
+    /// price every candidate against free host RAM and free VRAM. An unload is
+    /// the operation that *frees* both. Pricing it as a consumer creates an
+    /// unbreakable deadlock: once a resident engine has exhausted memory, the
+    /// only work that can release it is exactly the work the gate rejects, and
+    /// the user's sole recovery is killing the server.
+    ///
+    /// Releasing work is therefore admitted on device availability alone — it
+    /// still needs an idle, schedulable owner thread (engine destruction must
+    /// happen on the thread owning the CUDA/Metal context), but never has to
+    /// prove headroom it is about to create.
+    pub const fn releases_resources(self) -> bool {
+        matches!(self, Self::AdminModelUnload)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

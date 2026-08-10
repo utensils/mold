@@ -3073,6 +3073,8 @@ impl Coordinator {
             };
             let planned_vram_bytes =
                 planned_vram_bytes.max(failure_only_vram_floor(&self.estimates, &key));
+            let (planned_vram_bytes, planned_host_bytes) =
+                planned_memory_bytes(owner.kind, planned_vram_bytes, planned_host_bytes);
             CandidatePlacement::new(
                 device_id.clone(),
                 ExecutionFingerprint::new(execution_fingerprint),
@@ -3110,6 +3112,15 @@ impl Coordinator {
                 .iter()
                 .filter_map(|plan| match plan.placement() {
                     UtilityPlacement::Cpu => {
+                        // `planned_memory_bytes` zeroes releasing work, while
+                        // `utility_plan_for_lease` matches a lease back to its
+                        // plan on those same byte counts. Nothing submits an
+                        // unload with utility plans today; if that changes, the
+                        // lease would be silently dropped every turn.
+                        debug_assert!(
+                            !owner.kind.releases_resources(),
+                            "releasing work is priced at zero and cannot carry a utility plan"
+                        );
                         let device_id = DeviceId::new(CPU_UTILITY_DEVICE_ID);
                         authoritative_available_vram
                             .contains_key(&device_id)
@@ -5836,6 +5847,31 @@ fn device_class(worker: &GpuWorker) -> String {
     );
     let gib = worker.gpu.total_vram_bytes.div_ceil(1 << 30);
     format!("{backend}:{capability}:{gib}gb")
+}
+
+/// Memory a scheduled work item commits, given what its kind actually does.
+///
+/// The learned estimator prices every kind the same way, from recorded
+/// observations. That is wrong for work that *releases* memory: an unload
+/// priced as a consumer is rejected by admission on exactly the full device it
+/// was queued to empty, so a resident engine that has exhausted host RAM or
+/// VRAM can never be evicted and the user's only recovery is killing the
+/// server. Releasing work therefore commits nothing.
+///
+/// `mold_scheduler::WorkKind::releases_resources` enforces the same rule inside
+/// the planner, which is the authority. This keeps the demand the coordinator
+/// publishes consistent with the demand the planner admits, so the server-side
+/// eligibility filters and the host-memory ledger agree with it too.
+fn planned_memory_bytes(
+    kind: mold_scheduler::WorkKind,
+    vram_bytes: u64,
+    host_bytes: u64,
+) -> (u64, u64) {
+    if kind.releases_resources() {
+        (0, 0)
+    } else {
+        (vram_bytes, host_bytes)
+    }
 }
 
 /// Memory floor implied by a failure-only `scheduler_estimates` row.
@@ -13029,6 +13065,43 @@ mod tests {
             predicted_run_ms: 1,
             vram_bytes: 1_000_000_000,
             host_bytes: 1_000_000_000,
+        }
+    }
+
+    #[test]
+    fn a_model_unload_is_priced_at_zero_so_admission_can_never_block_it() {
+        // The learned estimator cannot know that an unload releases memory —
+        // it reports whatever the recorded observations cost. Pricing an
+        // unload as a consumer is what deadlocked recovery: a resident engine
+        // exhausts host RAM and VRAM, and the only work that frees them is
+        // then rejected for lack of the resources it was about to return.
+        assert_eq!(
+            planned_memory_bytes(
+                mold_scheduler::WorkKind::AdminModelUnload,
+                20 << 30,
+                4 << 30
+            ),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn consuming_work_keeps_its_full_predicted_memory() {
+        for kind in [
+            mold_scheduler::WorkKind::Generation,
+            mold_scheduler::WorkKind::PreparedSibling,
+            mold_scheduler::WorkKind::ChainStage,
+            mold_scheduler::WorkKind::PostUpscale,
+            mold_scheduler::WorkKind::StandaloneUpscale,
+            mold_scheduler::WorkKind::PromptExpansion,
+            mold_scheduler::WorkKind::AdminModelLoad,
+            mold_scheduler::WorkKind::BatchChild,
+        ] {
+            assert_eq!(
+                planned_memory_bytes(kind, 20 << 30, 4 << 30),
+                (20 << 30, 4 << 30),
+                "{kind:?}"
+            );
         }
     }
 }

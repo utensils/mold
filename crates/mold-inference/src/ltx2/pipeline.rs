@@ -576,7 +576,10 @@ impl Ltx2Engine {
             }
             Ltx2Backend::Metal => {
                 self.info("Metal detected, using native LTX-2 correctness path");
-                Ok(Device::new_metal(self.gpu_ordinal)?)
+                // Never `Device::new_metal` directly: candle mints a distinct
+                // device identity per call and cannot move tensors between two
+                // of them. See `device::metal_device`.
+                crate::device::metal_device(self.gpu_ordinal)
             }
         }
     }
