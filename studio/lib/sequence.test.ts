@@ -90,11 +90,49 @@ describe("sequence authoring", () => {
     ).toBe(17);
   });
 
+  /**
+   * Wan's carryover is a property of the checkpoint, not the family (#783):
+   * it has no latent motion tail, so its handoff is last-frame image
+   * conditioning, which only an image-conditioned checkpoint accepts.
+   */
+  it("reads wan's overlap from the checkpoint's own conditioning contract", () => {
+    const wan = (source_image: string | null) =>
+      sequenceMotionTailFrames({
+        name: "wan22-t2v-a14b:q5",
+        family: "wan",
+        source_image,
+      });
+    expect(wan("optional")).toBe(17);
+    expect(wan("required")).toBe(17);
+    // A text-to-video checkpoint has no conditioning channel at all.
+    expect(wan("unsupported")).toBe(0);
+    // Unclassified is unknown, never an assumed handoff.
+    expect(wan(null)).toBe(0);
+  });
+
   it("offers only clip durations that exceed the active motion tail", () => {
     expect(sequenceFrameOptions(97, 17)).toEqual([
       25, 33, 41, 49, 57, 65, 73, 81, 89, 97,
     ]);
     expect(sequenceFrameOptions(25, 0)).toEqual([9, 17, 25]);
+  });
+
+  /**
+   * Wan's VAE compresses time by 4 where the LTX families compress by 8, so
+   * its clip options are `4k+1`. Offering an `8k+1` option sends the request
+   * into a 422 from the validator that owns the real rule.
+   */
+  it("offers wan clip durations on the 4k+1 grid", () => {
+    expect(sequenceFrameOptions(25, 0, "wan")).toEqual([5, 9, 13, 17, 21, 25]);
+    // The tail still filters, and every surviving option is on-grid.
+    for (const frames of sequenceFrameOptions(121, 17, "wan")) {
+      expect(frames).toBeGreaterThan(17);
+      expect((frames - 1) % 4, `${frames} is off the 4k+1 grid`).toBe(0);
+    }
+    // An absent family keeps the LTX grid, so existing callers are unchanged.
+    expect(sequenceFrameOptions(25, 0)).toEqual(
+      sequenceFrameOptions(25, 0, "ltx2"),
+    );
   });
 
   it("computes stitched duration using transition overlap", () => {

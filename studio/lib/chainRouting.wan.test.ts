@@ -81,7 +81,14 @@ describe("wan chain routing", () => {
 
   it("keeps every clip length on wan's 4k+1 grid", () => {
     for (const model of ["wan22-t2v-a14b:q5", "wan22-ti2v-5b:fp16"]) {
-      const decision = decideChainRouting(300, "wan", model, undefined, 16, "optional");
+      const decision = decideChainRouting(
+        300,
+        "wan",
+        model,
+        undefined,
+        16,
+        "optional",
+      );
       expect(decision.kind).toBe("chain");
       if (decision.kind !== "chain") continue;
       expect(
