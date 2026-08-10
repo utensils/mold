@@ -3533,6 +3533,8 @@ pub(crate) fn build_stage_generate_request(
                 .map(|lora| mold_core::LoraWeight {
                     path: lora.path.clone(),
                     scale: lora.scale,
+
+                    expert: None,
                 })
                 .collect()
         }),

@@ -440,6 +440,20 @@ fn resolve_ic_lora_pipeline(
     }
 }
 
+/// Split an optional `@high` / `@low` expert suffix off a `--lora` value.
+///
+/// Wan 2.2 A14B adapters ship as pairs that are not interchangeable, and the
+/// wire carries the binding per entry; this is the CLI spelling of it. The
+/// suffix is only stripped when it names an expert, so a path that genuinely
+/// contains an `@` is left alone.
+fn split_lora_expert(value: &str) -> (String, Option<mold_core::LoraExpert>) {
+    match value.rsplit_once('@') {
+        Some((path, "high")) => (path.to_string(), Some(mold_core::LoraExpert::High)),
+        Some((path, "low")) => (path.to_string(), Some(mold_core::LoraExpert::Low)),
+        _ => (value.to_string(), None),
+    }
+}
+
 fn resolve_effective_loras_for_family(
     family: &str,
     lora: &[String],
@@ -452,9 +466,11 @@ fn resolve_effective_loras_for_family(
     }
 
     let effective_lora = if let Some(lora_path) = lora.first() {
+        let (path, expert) = split_lora_expert(lora_path);
         Some(LoraWeight {
-            path: lora_path.clone(),
+            path,
             scale: lora_scale,
+            expert,
         })
     } else {
         default_lora
@@ -462,15 +478,23 @@ fn resolve_effective_loras_for_family(
 
     let mut stack = Vec::new();
     if lora.len() > 1 {
-        stack.extend(lora.iter().cloned().map(|path| LoraWeight {
-            path,
-            scale: lora_scale,
+        stack.extend(lora.iter().map(|value| {
+            let (path, expert) = split_lora_expert(value);
+            LoraWeight {
+                path,
+                scale: lora_scale,
+                expert,
+            }
         }));
     } else if family == "ltx2" {
         if !lora.is_empty() {
-            stack.extend(lora.iter().cloned().map(|path| LoraWeight {
-                path,
-                scale: lora_scale,
+            stack.extend(lora.iter().map(|value| {
+                let (path, expert) = split_lora_expert(value);
+                LoraWeight {
+                    path,
+                    scale: lora_scale,
+                    expert,
+                }
             }));
         } else if let Some(lora) = effective_lora.clone() {
             stack.push(lora);
@@ -483,7 +507,11 @@ fn resolve_effective_loras_for_family(
         } else {
             format!("camera-control:{camera_control}")
         };
-        stack.push(LoraWeight { path, scale: 1.0 });
+        stack.push(LoraWeight {
+            path,
+            scale: 1.0,
+            expert: None,
+        });
     }
 
     let lora_stack = if stack.is_empty() { None } else { Some(stack) };
@@ -1374,10 +1402,15 @@ pub async fn run(
 
     // Resolve LoRA: explicit CLI values override config defaults.
     let model_cfg = config.resolved_model_config(&model);
-    let default_lora = (!is_h3)
-        .then(|| model_cfg.effective_lora())
-        .flatten()
-        .map(|(path, scale)| LoraWeight { path, scale });
+    let default_lora =
+        (!is_h3)
+            .then(|| model_cfg.effective_lora())
+            .flatten()
+            .map(|(path, scale)| LoraWeight {
+                path,
+                scale,
+                expert: None,
+            });
     let (effective_lora, loras) = resolve_effective_loras_for_family(
         &family,
         &lora,

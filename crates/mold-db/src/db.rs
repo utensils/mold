@@ -981,6 +981,8 @@ mod tests {
         rec.metadata.loras = Some(vec![mold_core::LoraWeight {
             path: "/loras/style.safetensors".into(),
             scale: 0.6,
+
+            expert: None,
         }]);
         rec.metadata.output_format = Some(OutputFormat::Png);
         rec.metadata.cfg_plus = Some(true);

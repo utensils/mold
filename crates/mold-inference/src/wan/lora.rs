@@ -675,6 +675,7 @@ mod tests {
         LoraWeight {
             path: path.to_string_lossy().to_string(),
             scale,
+            expert: None,
         }
     }
 

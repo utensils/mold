@@ -1262,6 +1262,8 @@ async fn materialize_local_builtin_control(
     let mut ordered = vec![LoraWeight {
         path: path.to_string_lossy().into_owned(),
         scale: 1.0,
+
+        expert: None,
     }];
     if let Some(legacy) = request.lora.take() {
         ordered.push(legacy);
@@ -4294,6 +4296,8 @@ mod tests {
         request.lora = Some(LoraWeight {
             path: format!("{root}/custom/MiniMax-H3/adapter.safetensors"),
             scale: 1.0,
+
+            expert: None,
         });
         assert!(require_local_request_model_activation(&request, &config).is_err());
 

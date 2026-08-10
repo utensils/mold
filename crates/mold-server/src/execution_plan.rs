@@ -1846,6 +1846,8 @@ pub fn materialize_request(plan: &ResolvedExecutionPlan, request: &mut GenerateR
         .map(|lora| mold_core::LoraWeight {
             path: lora.path.to_string_lossy().into_owned(),
             scale: lora.scale(),
+
+            expert: None,
         })
         .collect::<Vec<_>>();
     request.lora = None;
@@ -2010,7 +2012,11 @@ fn effective_lora_requests(
             config
                 .resolved_model_config(&request.model)
                 .effective_lora()
-                .map(|(path, scale)| mold_core::LoraWeight { path, scale })
+                .map(|(path, scale)| mold_core::LoraWeight {
+                    path,
+                    scale,
+                    expert: None,
+                })
                 .map(|lora| vec![lora])
         })
         .unwrap_or_default()
@@ -4646,6 +4652,8 @@ mod tests {
                     .display()
                     .to_string(),
                 scale: -0.5,
+
+                expert: None,
             },
             mold_core::LoraWeight {
                 path: root
@@ -4654,6 +4662,8 @@ mod tests {
                     .display()
                     .to_string(),
                 scale: 1.25,
+
+                expert: None,
             },
         ]);
         let request_plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
@@ -4712,6 +4722,8 @@ mod tests {
         request.loras = Some(vec![mold_core::LoraWeight {
             path: "camera-control:dolly-in".into(),
             scale: 1.0,
+
+            expert: None,
         }]);
         let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
             .unwrap()
@@ -4739,6 +4751,8 @@ mod tests {
         request.loras = Some(vec![mold_core::LoraWeight {
             path: "camera-control:no-such-move".into(),
             scale: 1.0,
+
+            expert: None,
         }]);
 
         let err = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
@@ -4775,6 +4789,8 @@ mod tests {
         request.loras = Some(vec![mold_core::LoraWeight {
             path: lora_path.display().to_string(),
             scale: 1.0,
+
+            expert: None,
         }]);
 
         let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)

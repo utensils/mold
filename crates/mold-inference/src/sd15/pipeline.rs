@@ -2165,14 +2165,20 @@ mod tests {
         let a = mold_core::LoraWeight {
             path: "/a.safetensors".to_string(),
             scale: 0.8,
+
+            expert: None,
         };
         let b = mold_core::LoraWeight {
             path: "/b.safetensors".to_string(),
             scale: 0.4,
+
+            expert: None,
         };
         let same_a = mold_core::LoraWeight {
             path: "/a.safetensors".to_string(),
             scale: 0.8,
+
+            expert: None,
         };
 
         // Identical contents → identical fingerprint.
@@ -2185,6 +2191,8 @@ mod tests {
         let scaled = mold_core::LoraWeight {
             path: "/a.safetensors".to_string(),
             scale: 0.81,
+
+            expert: None,
         };
         assert_ne!(
             lora_stack_fingerprint(std::slice::from_ref(&a)),

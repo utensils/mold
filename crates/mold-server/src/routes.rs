@@ -1085,6 +1085,8 @@ pub(crate) async fn materialize_chain_camera_controls(
             .map(|lora| mold_core::LoraWeight {
                 path: lora.path.clone(),
                 scale: lora.scale,
+
+                expert: None,
             })
             .collect(),
     );
@@ -1336,6 +1338,8 @@ async fn materialize_builtin_ltx2_control(
     let mut ordered = vec![mold_core::LoraWeight {
         path: path.to_string_lossy().into_owned(),
         scale: 1.0,
+
+        expert: None,
     }];
     if let Some(lora) = request.lora.take() {
         ordered.push(lora);
@@ -8763,6 +8767,8 @@ mod tests {
         ordinary.lora = Some(mold_core::LoraWeight {
             path: format!("{root}/flux/ordinary.safetensors"),
             scale: 1.0,
+
+            expert: None,
         });
         require_server_generation_request_activation(&state, &ordinary, Some("flux"))
             .await
@@ -8772,6 +8778,8 @@ mod tests {
         nested_lora.lora = Some(mold_core::LoraWeight {
             path: format!("{root}/custom/MiniMax-H3/adapter.safetensors"),
             scale: 1.0,
+
+            expert: None,
         });
         let error =
             require_server_generation_request_activation(&state, &nested_lora, Some("flux"))

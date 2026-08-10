@@ -1298,16 +1298,22 @@ mod tests {
             mold_core::LoraWeight {
                 path: "/a.safetensors".into(),
                 scale: 0.8,
+
+                expert: None,
             },
             mold_core::LoraWeight {
                 path: "/b.safetensors".into(),
                 scale: 0.4,
+
+                expert: None,
             },
         ];
         let req = req_with_loras(
             Some(mold_core::LoraWeight {
                 path: "/legacy.safetensors".into(),
                 scale: 1.0,
+
+                expert: None,
             }),
             Some(plural.clone()),
         );
@@ -1323,6 +1329,8 @@ mod tests {
             Some(mold_core::LoraWeight {
                 path: "/legacy.safetensors".into(),
                 scale: 0.7,
+
+                expert: None,
             }),
             None,
         );
@@ -1339,10 +1347,14 @@ mod tests {
                 mold_core::LoraWeight {
                     path: "/active.safetensors".into(),
                     scale: 0.5,
+
+                    expert: None,
                 },
                 mold_core::LoraWeight {
                     path: "/off.safetensors".into(),
                     scale: 0.0,
+
+                    expert: None,
                 },
             ]),
         );

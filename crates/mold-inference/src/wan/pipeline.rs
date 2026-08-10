@@ -213,6 +213,73 @@ fn normalize_loras(req: &GenerateRequest) -> Vec<mold_core::LoraWeight> {
     out
 }
 
+/// One user adapter with the expert it resolved to.
+pub(crate) struct RoutedLora {
+    pub(crate) weight: mold_core::LoraWeight,
+    pub(crate) expert: Option<mold_core::LoraExpert>,
+    /// True when the expert came from the filename rather than the request.
+    inferred: bool,
+}
+
+/// Every user adapter, routed.
+pub(crate) struct WanLoraRouting {
+    pub(crate) entries: Vec<RoutedLora>,
+}
+
+impl WanLoraRouting {
+    /// Lines describing any routing the caller did not state explicitly.
+    ///
+    /// Inference is never silent: a user who names a file `..._high_noise` and
+    /// gets it on one expert must be told, because the alternative reading —
+    /// that it applied to both — produces a different render.
+    pub(crate) fn disclosures(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.inferred)
+            .filter_map(|entry| {
+                let expert = match entry.expert? {
+                    mold_core::LoraExpert::High => "high-noise",
+                    mold_core::LoraExpert::Low => "low-noise",
+                };
+                let name = std::path::Path::new(&entry.weight.path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(entry.weight.path.as_str());
+                Some(format!(
+                    "LoRA {name}: routed to the {expert} expert from its filename"
+                ))
+            })
+            .collect()
+    }
+}
+
+/// Resolve each user adapter to an expert.
+///
+/// An explicit `expert` field wins. Otherwise the filename is consulted for the
+/// conventions publishers use, and anything still unresolved keeps the
+/// historical apply-to-both behavior.
+pub(crate) fn resolve_user_lora_experts(loras: &[mold_core::LoraWeight]) -> WanLoraRouting {
+    WanLoraRouting {
+        entries: loras
+            .iter()
+            .map(|weight| {
+                let (expert, inferred) = match weight.expert {
+                    Some(expert) => (Some(expert), false),
+                    None => (
+                        mold_core::LoraExpert::infer_from_filename(&weight.path),
+                        true,
+                    ),
+                };
+                RoutedLora {
+                    weight: weight.clone(),
+                    expert,
+                    inferred: inferred && expert.is_some(),
+                }
+            })
+            .collect(),
+    }
+}
+
 /// Resolve the unconditional prompt for CFG. Only *absence* falls back to
 /// the tuned default the checkpoints were trained against — an explicit
 /// value is authoritative, including the empty string `--no-negative`
@@ -1113,20 +1180,46 @@ impl WanEngine {
                 "Lightning distill strength: high {distill_high:.2}, low {distill_low:.2}"
             ));
         }
-        let stack = |distill: Option<&Path>, distill_scale: f64| -> Result<WanLoraRegistry> {
+        // Which expert each user adapter belongs to, and whether that was
+        // stated or inferred. Resolved once so the disclosure below describes
+        // the same decision the registries are built from.
+        let routing = resolve_user_lora_experts(&user_loras);
+        for note in routing.disclosures() {
+            progress.info(&note);
+        }
+
+        let stack = |distill: Option<&Path>,
+                     distill_scale: f64,
+                     slot: Option<mold_core::LoraExpert>|
+         -> Result<WanLoraRegistry> {
             let mut weights: Vec<mold_core::LoraWeight> = Vec::new();
             if let Some(path) = distill {
                 weights.push(mold_core::LoraWeight {
                     path: path.to_string_lossy().to_string(),
                     scale: distill_scale,
+                    expert: None,
                 });
             }
-            weights.extend(user_loras.iter().cloned());
+            // A pair's halves are distilled together and are not
+            // interchangeable: putting the high-noise adapter on the low-noise
+            // expert degrades the render rather than failing, which is why
+            // this is a correctness concern and not a nicety. An adapter with
+            // no expert affinity still applies to both.
+            weights.extend(
+                routing
+                    .entries
+                    .iter()
+                    .filter(|entry| match (slot, entry.expert) {
+                        (Some(slot), Some(bound)) => slot == bound,
+                        _ => true,
+                    })
+                    .map(|entry| entry.weight.clone()),
+            );
             WanLoraRegistry::load(&weights)
         };
 
         let Some(low_noise_path) = low_noise_expert else {
-            let loras = stack(paths.distilled_lora.as_deref(), distill_high)?;
+            let loras = stack(paths.distilled_lora.as_deref(), distill_high, None)?;
             if !loras.is_empty() {
                 progress.info(&format!(
                     "Applying {} LoRA patch(es) across {} tensors",
@@ -1161,11 +1254,19 @@ impl WanEngine {
         let pair = WanExpertPair {
             high_noise: WanExpertSlot {
                 path: paths.transformer.clone(),
-                loras: stack(paths.distilled_lora.as_deref(), distill_high)?,
+                loras: stack(
+                    paths.distilled_lora.as_deref(),
+                    distill_high,
+                    Some(mold_core::LoraExpert::High),
+                )?,
             },
             low_noise: WanExpertSlot {
                 path: low_noise_path.to_path_buf(),
-                loras: stack(paths.low_noise_distilled_lora.as_deref(), distill_low)?,
+                loras: stack(
+                    paths.low_noise_distilled_lora.as_deref(),
+                    distill_low,
+                    Some(mold_core::LoraExpert::Low),
+                )?,
             },
             boundary_timestep: WanExpertPair::boundary_for(
                 shape == WanConditioningShape::ChannelConcat,
@@ -1697,6 +1798,130 @@ mod tests {
     use crate::engine::InferenceEngine;
     use candle_nn::{VarBuilder, VarMap};
     use std::collections::HashMap;
+
+    fn user_lora(path: &str, expert: Option<mold_core::LoraExpert>) -> mold_core::LoraWeight {
+        mold_core::LoraWeight {
+            path: path.to_string(),
+            scale: 1.0,
+            expert,
+        }
+    }
+
+    /// The defect this exists for: a HIGH/LOW pair applied to both experts.
+    ///
+    /// lightx2v distills the halves together and states they are not
+    /// interchangeable, so landing both on both experts degrades the render
+    /// while succeeding — the same bug the reference HF space's loader had.
+    #[test]
+    fn a_paired_adapter_reaches_only_its_own_expert() {
+        let routing = resolve_user_lora_experts(&[
+            user_lora("/loras/high_noise_model.safetensors", None),
+            user_lora("/loras/low_noise_model.safetensors", None),
+        ]);
+        let experts: Vec<_> = routing.entries.iter().map(|entry| entry.expert).collect();
+        assert_eq!(
+            experts,
+            vec![
+                Some(mold_core::LoraExpert::High),
+                Some(mold_core::LoraExpert::Low)
+            ]
+        );
+
+        // Inference is disclosed, never silent — the alternative reading
+        // ("it applied to both") produces a different render.
+        let notes = routing.disclosures();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes[0].contains("high-noise"), "{notes:?}");
+        assert!(notes[1].contains("low-noise"), "{notes:?}");
+    }
+
+    #[test]
+    fn an_explicit_expert_beats_the_filename_and_is_not_disclosed() {
+        // The file says low, the request says high: the request wins, and
+        // nothing is disclosed because nothing was guessed.
+        let routing = resolve_user_lora_experts(&[user_lora(
+            "/loras/low_noise_model.safetensors",
+            Some(mold_core::LoraExpert::High),
+        )]);
+        assert_eq!(routing.entries[0].expert, Some(mold_core::LoraExpert::High));
+        assert!(routing.disclosures().is_empty());
+    }
+
+    #[test]
+    fn an_unpaired_adapter_keeps_applying_to_both_experts() {
+        let routing = resolve_user_lora_experts(&[user_lora("/loras/style.safetensors", None)]);
+        assert_eq!(routing.entries[0].expert, None);
+        assert!(routing.disclosures().is_empty());
+    }
+
+    /// Substring matching would read "highlight" and "slow" as markers.
+    #[test]
+    fn expert_inference_matches_tokens_not_substrings() {
+        for name in [
+            "/loras/highlight-boost.safetensors",
+            "/loras/slow-motion.safetensors",
+            "/loras/shallow.safetensors",
+        ] {
+            assert_eq!(
+                mold_core::LoraExpert::infer_from_filename(name),
+                None,
+                "{name} must not be read as an expert marker"
+            );
+        }
+        for (name, expected) in [
+            (
+                "/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors",
+                mold_core::LoraExpert::High,
+            ),
+            ("/loras/HighNoise.safetensors", mold_core::LoraExpert::High),
+            ("/loras/model-LOW.safetensors", mold_core::LoraExpert::Low),
+        ] {
+            assert_eq!(
+                mold_core::LoraExpert::infer_from_filename(name),
+                Some(expected),
+                "{name}"
+            );
+        }
+        // Both markers present is a merged or ambiguous publication: guessing
+        // either half is worse than not guessing.
+        assert_eq!(
+            mold_core::LoraExpert::infer_from_filename("/loras/high_and_low_merged.safetensors"),
+            None
+        );
+
+        // The published digit-glued convention, which the catalog already had
+        // to handle for Civitai pairing (#784). Sharing that classifier rather
+        // than writing a second one is what makes this work — a token-only
+        // matcher reads `A14BHIGH` as one non-marker word.
+        assert_eq!(
+            mold_core::LoraExpert::infer_from_filename("/loras/wan2_2_t2vA14BHIGH.safetensors"),
+            Some(mold_core::LoraExpert::High)
+        );
+        assert_eq!(
+            mold_core::LoraExpert::infer_from_filename("/loras/wan2_2_t2vA14BLOW.safetensors"),
+            Some(mold_core::LoraExpert::Low)
+        );
+        // "SLOW" is never digit-preceded, so the glued rule cannot claim it.
+        assert_eq!(
+            mold_core::LoraExpert::infer_from_filename("/loras/SLOW-motion.safetensors"),
+            None
+        );
+        // Consecutive capitals still split correctly.
+        assert_eq!(
+            mold_core::LoraExpert::infer_from_filename("/loras/HIGHNoise.safetensors"),
+            Some(mold_core::LoraExpert::High)
+        );
+    }
+
+    /// A directory named after one expert must not route an adapter — only
+    /// the file's own name carries the marker.
+    #[test]
+    fn expert_inference_ignores_the_directory_path() {
+        assert_eq!(
+            mold_core::LoraExpert::infer_from_filename("/loras/high_noise/style.safetensors"),
+            None
+        );
+    }
 
     fn dummy_paths() -> ModelPaths {
         ModelPaths {

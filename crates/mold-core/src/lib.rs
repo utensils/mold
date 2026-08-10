@@ -32,6 +32,7 @@ pub mod secure_file;
 pub mod time;
 pub mod types;
 pub mod validation;
+pub mod wan_expert_marker;
 
 #[cfg(test)]
 mod config_test;

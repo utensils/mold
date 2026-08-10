@@ -960,6 +960,8 @@ pub async fn validate_chain(
             .map(|lora| mold_core::LoraWeight {
                 path: lora.path.clone(),
                 scale: lora.scale,
+
+                expert: None,
             })
             .collect(),
     );

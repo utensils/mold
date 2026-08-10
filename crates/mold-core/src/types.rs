@@ -1684,6 +1684,53 @@ pub struct LoraWeight {
     #[serde(default = "default_lora_scale")]
     #[schema(example = 1.0)]
     pub scale: f64,
+    /// Which Wan 2.2 A14B expert this adapter belongs to.
+    ///
+    /// The community publishes A14B adapters as high/low pairs distilled
+    /// together and explicitly not interchangeable — applying a high-noise
+    /// adapter to the low-noise expert degrades the render rather than failing.
+    /// Absent keeps the historical apply-to-both behavior, which is correct for
+    /// a genuinely unpaired adapter and for every single-expert family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expert: Option<LoraExpert>,
+}
+
+/// The A14B expert an adapter is bound to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoraExpert {
+    /// The early, structural half of the schedule.
+    High,
+    /// The late, detail half.
+    Low,
+}
+
+impl LoraExpert {
+    /// Infer the expert from the conventions publishers actually use.
+    ///
+    /// Delegates to [`crate::wan_expert_marker`], the same classifier the
+    /// catalog uses to pair Civitai's separately-published A14B experts
+    /// (#784). Sharing it is the point: a file the catalog reads as the
+    /// high-noise half must route the same way when the user passes it as an
+    /// adapter, and a second tokenizer here drifted immediately — it missed
+    /// the published digit-glued `…A14BHIGH` convention that one already
+    /// handles.
+    ///
+    /// A name carrying both markers is a bundle, not one expert, and stays
+    /// unresolved. An explicit field always wins; this is the fallback, and a
+    /// caller that uses it must disclose that it did.
+    pub fn infer_from_filename(name: &str) -> Option<Self> {
+        let stem = std::path::Path::new(name)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(name);
+        match crate::wan_expert_marker::classify_name(stem) {
+            crate::wan_expert_marker::NameMarker::High => Some(Self::High),
+            crate::wan_expert_marker::NameMarker::Low => Some(Self::Low),
+            crate::wan_expert_marker::NameMarker::NoMarker
+            | crate::wan_expert_marker::NameMarker::Ambiguous => None,
+        }
+    }
 }
 
 /// Installed LoRA adapter available to generation clients.
@@ -5043,6 +5090,7 @@ mod tests {
             loras: Some(vec![LoraWeight {
                 path: "/loras/camera.safetensors".to_string(),
                 scale: 0.7,
+                expert: None,
             }]),
             retake_range: Some(TimeRange {
                 start_seconds: 1.0,

@@ -2748,6 +2748,8 @@ mod tests {
         engine.pending_loras = vec![LoraWeight {
             path: dir.join("adapter.safetensors").display().to_string(),
             scale: 1.0,
+
+            expert: None,
         }];
 
         assert!(
