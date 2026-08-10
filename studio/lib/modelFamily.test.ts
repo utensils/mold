@@ -30,7 +30,9 @@ function fixturePath(): string {
     if (existsSync(candidate)) return candidate;
     const parent = dirname(directory);
     if (parent === directory) {
-      throw new Error(`could not find ${FIXTURE_RELATIVE} above ${process.cwd()}`);
+      throw new Error(
+        `could not find ${FIXTURE_RELATIVE} above ${process.cwd()}`,
+      );
     }
     directory = parent;
   }

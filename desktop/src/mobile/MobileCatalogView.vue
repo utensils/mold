@@ -1375,8 +1375,7 @@ onBeforeUnmount(() => {
                 :show-modality="false"
               />
               <span class="mobile-catalog-card-meta">
-                {{ entry.author ? `${entry.author} · ` : ""
-                }}{{ familyLabel(entry.family) }}
+                {{ entry.author ? `${entry.author} · ` : "" }}{{ familyLabel(entry.family) }}
                 <template v-if="entry.download_count">
                   · ↓ {{ formatCount(entry.download_count) }}
                 </template>
