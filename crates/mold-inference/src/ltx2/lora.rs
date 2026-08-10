@@ -297,6 +297,8 @@ mod tests {
         req.lora = Some(LoraWeight {
             path: "/tmp/a.safetensors".to_string(),
             scale: 0.75,
+
+            expert: None,
         });
         let loras = normalize_loras(&req);
         assert_eq!(loras.len(), 1);
@@ -310,10 +312,14 @@ mod tests {
             LoraWeight {
                 path: "/tmp/one.safetensors".to_string(),
                 scale: 0.5,
+
+                expert: None,
             },
             LoraWeight {
                 path: "/tmp/two.safetensors".to_string(),
                 scale: 1.0,
+
+                expert: None,
             },
         ]);
         let loras = normalize_loras(&req);
@@ -392,6 +398,8 @@ mod tests {
         let registry = load_lora_registry(&[LoraWeight {
             path: path.to_string_lossy().to_string(),
             scale: 0.5,
+
+            expert: None,
         }])
         .unwrap()
         .unwrap();
@@ -432,10 +440,14 @@ mod tests {
             LoraWeight {
                 path: paths[0].to_string_lossy().to_string(),
                 scale: 0.8,
+
+                expert: None,
             },
             LoraWeight {
                 path: paths[1].to_string_lossy().to_string(),
                 scale: 0.5,
+
+                expert: None,
             },
         ])
         .unwrap()
@@ -472,6 +484,8 @@ mod tests {
         let scale = reference_video_downscale_factor(&[LoraWeight {
             path: path.to_string_lossy().to_string(),
             scale: 1.0,
+
+            expert: None,
         }])
         .unwrap();
 
@@ -492,6 +506,8 @@ mod tests {
         let scale = reference_video_downscale_factor(&[LoraWeight {
             path: path.to_string_lossy().to_string(),
             scale: 1.0,
+
+            expert: None,
         }])
         .unwrap();
 
@@ -532,10 +548,14 @@ mod tests {
             LoraWeight {
                 path: path_one.to_string_lossy().to_string(),
                 scale: 1.0,
+
+                expert: None,
             },
             LoraWeight {
                 path: path_two.to_string_lossy().to_string(),
                 scale: 1.0,
+
+                expert: None,
             },
         ])
         .unwrap_err();

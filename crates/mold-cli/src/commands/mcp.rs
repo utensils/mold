@@ -1321,6 +1321,7 @@ fn resolve_mcp_lora_refs(
             Ok(LoraWeight {
                 path,
                 scale: lora.scale,
+                expert: None,
             })
         })
         .collect()
@@ -2140,10 +2141,14 @@ mod tests {
                 LoraWeight {
                     path: "/models/a.safetensors".into(),
                     scale: 0.8,
+
+                    expert: None,
                 },
                 LoraWeight {
                     path: "/models/b.safetensors".into(),
                     scale: 0.4,
+
+                    expert: None,
                 },
             ]),
         )

@@ -1832,7 +1832,11 @@ fn stage_lora_stack(plan: &Ltx2GeneratePlan, stage_index: usize) -> Result<Vec<L
             .distilled_lora_path
             .clone()
             .context("native LTX-2 two-stage runtime requires a distilled LoRA asset")?;
-        loras.push(LoraWeight { path, scale });
+        loras.push(LoraWeight {
+            path,
+            scale,
+            expert: None,
+        });
     }
     Ok(loras)
 }
@@ -9087,6 +9091,8 @@ mod tests {
         req.loras = Some(vec![LoraWeight {
             path: "/tmp/ic-lora.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         }]);
     }
 
@@ -9761,6 +9767,8 @@ mod tests {
         req.loras = Some(vec![LoraWeight {
             path: "/tmp/ic-lora.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         }]);
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
@@ -10316,6 +10324,8 @@ mod tests {
         req.loras = Some(vec![LoraWeight {
             path: "/tmp/ic-lora.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         }]);
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
@@ -10379,6 +10389,8 @@ mod tests {
         req.loras = Some(vec![LoraWeight {
             path: "/tmp/camera-control.safetensors".to_string(),
             scale: 0.63,
+
+            expert: None,
         }]);
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
@@ -10408,10 +10420,14 @@ mod tests {
             LoraWeight {
                 path: "/tmp/camera-control-dolly-in.safetensors".to_string(),
                 scale: 0.8,
+
+                expert: None,
             },
             LoraWeight {
                 path: "/tmp/camera-control-jib-up.safetensors".to_string(),
                 scale: 0.5,
+
+                expert: None,
             },
         ]);
         let temp_dir = tempfile::tempdir().unwrap();
@@ -10837,6 +10853,8 @@ mod tests {
         req.loras = Some(vec![LoraWeight {
             path: "/tmp/ltx-2-19b-camera-dolly-in.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         }]);
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
@@ -10854,6 +10872,8 @@ mod tests {
         req.loras = Some(vec![LoraWeight {
             path: "/tmp/ltx-2-19b-camera-dolly-in.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         }]);
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
@@ -10871,6 +10891,8 @@ mod tests {
         req.loras = Some(vec![LoraWeight {
             path: "/tmp/ltx-2-19b-camera-dolly-in.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         }]);
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
@@ -10903,6 +10925,8 @@ mod tests {
         req.loras = Some(vec![LoraWeight {
             path: "/tmp/ic-lora.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         }]);
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
@@ -11131,6 +11155,8 @@ mod tests {
         req.loras = Some(vec![LoraWeight {
             path: "/tmp/ltx-2.3-22b-ic-lora-dubit-0.9.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         }]);
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
@@ -11380,6 +11406,8 @@ mod tests {
         req.loras = Some(vec![LoraWeight {
             path: "/tmp/ic-lora.safetensors".to_string(),
             scale: 0.8,
+
+            expert: None,
         }]);
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();

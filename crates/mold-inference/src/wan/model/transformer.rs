@@ -3162,6 +3162,8 @@ mod tests {
         let registry = crate::wan::lora::WanLoraRegistry::load(&[mold_core::LoraWeight {
             path: adapter.to_string_lossy().to_string(),
             scale: 1.0,
+
+            expert: None,
         }])
         .unwrap();
         assert!(!registry.is_empty());

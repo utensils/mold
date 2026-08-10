@@ -55,6 +55,15 @@ second checkpoint it was not fitted to. A rejection names frames first, because
 that is the most effective lever, and suggests the next quantized tier down
 rather than the one that just failed.
 
+Community A14B adapters are published the same way: a high-noise file and a
+low-noise file, distilled together and explicitly not interchangeable. Bind one
+to its expert with `--lora file.safetensors@high` (or `@low`), or the additive
+per-entry `expert` field on the API. mold infers the binding from the dominant
+filename conventions (`high_noise`, `HighNoise`, `HIGH`) when the field is
+absent and says so in the progress output — an adapter with no expert marker
+still applies to both experts, which is right for a genuinely unpaired one. A
+single-expert checkpoint refuses an explicit `expert` rather than ignoring it.
+
 The `:q5` tier additionally pulls lightx2v's 4-step distill — a separate
 adapter for each expert — and defaults to guidance 1.0. That is not a weak
 setting: at guidance ≤ 1 mold skips the unconditional pass entirely, so each

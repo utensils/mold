@@ -1151,6 +1151,44 @@ fn validate_lora_weight(lora: &LoraWeight, field_name: &str) -> Result<(), Strin
     Ok(())
 }
 
+/// Refuse an explicit `expert` on a model that has no experts to route to.
+///
+/// Only the Wan 2.2 A14B pair has a high/low split. Silently ignoring the
+/// field on a single-expert checkpoint would let a user believe an adapter was
+/// bound to half the schedule when it was applied to all of it.
+fn require_expert_routable_model(
+    lora: &LoraWeight,
+    model: &str,
+    family: Option<&str>,
+) -> Result<(), String> {
+    let Some(expert) = lora.expert else {
+        return Ok(());
+    };
+    let expert = match expert {
+        crate::LoraExpert::High => "high",
+        crate::LoraExpert::Low => "low",
+    };
+    if family != Some("wan") {
+        return Err(format!(
+            "lora expert ('{expert}') applies to the Wan 2.2 A14B expert pair; \
+             {} is not a Wan model",
+            model
+        ));
+    }
+    // An opaque catalog id cannot be classified by name, and the engine reads
+    // the real pair from the checkpoint, so those are left to it rather than
+    // guessed at here.
+    let opaque = model.starts_with("cv:") || model.starts_with("hf:");
+    if !opaque && !model.to_ascii_lowercase().contains("a14b") {
+        return Err(format!(
+            "lora expert ('{expert}') needs the Wan 2.2 A14B two-expert pair; \
+             {model} is a single-expert checkpoint — drop the expert field to \
+             apply the adapter to it"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_keyframes(
     keyframes: &[KeyframeCondition],
     frames: Option<u32>,
@@ -1814,6 +1852,7 @@ fn validate_generate_request_after_activation(
     if let Some(ref lora) = req.lora {
         require_lora_capable_family(family)?;
         validate_lora_weight(lora, "lora")?;
+        require_expert_routable_model(lora, &req.model, family)?;
     }
     if let Some(ref loras) = req.loras {
         if loras.is_empty() {
@@ -1822,6 +1861,7 @@ fn validate_generate_request_after_activation(
         require_lora_capable_family(family)?;
         for lora in loras {
             validate_lora_weight(lora, "loras")?;
+            require_expert_routable_model(lora, &req.model, family)?;
         }
     }
     if let Some(fps) = req.fps {
@@ -2616,6 +2656,59 @@ mod tests {
     use super::*;
     use crate::OutputFormat;
 
+    /// Only the A14B pair has experts; silently ignoring the field elsewhere
+    /// would let a user believe an adapter was bound to half the schedule when
+    /// it was applied to all of it.
+    #[test]
+    fn an_expert_bound_lora_needs_a_two_expert_checkpoint() {
+        let lora = |expert| LoraWeight {
+            path: "/loras/high_noise_model.safetensors".to_string(),
+            scale: 1.0,
+            expert,
+        };
+
+        // The A14B pair accepts it.
+        assert!(require_expert_routable_model(
+            &lora(Some(crate::LoraExpert::High)),
+            "wan22-t2v-a14b:q5",
+            Some("wan"),
+        )
+        .is_ok());
+
+        // Single-expert wan checkpoints name the problem and the remedy.
+        for model in ["wan21-t2v-1.3b:bf16", "wan22-ti2v-5b:fp16"] {
+            let error = require_expert_routable_model(
+                &lora(Some(crate::LoraExpert::Low)),
+                model,
+                Some("wan"),
+            )
+            .unwrap_err();
+            assert!(error.contains("single-expert"), "{error}");
+            assert!(error.contains("drop the expert field"), "{error}");
+        }
+
+        // A non-wan family has no experts at all.
+        let error = require_expert_routable_model(
+            &lora(Some(crate::LoraExpert::High)),
+            "flux-dev:q8",
+            Some("flux"),
+        )
+        .unwrap_err();
+        assert!(error.contains("not a Wan model"), "{error}");
+
+        // An opaque catalog id cannot be classified by name; the engine reads
+        // the real pair from the checkpoint, so admission does not guess.
+        assert!(require_expert_routable_model(
+            &lora(Some(crate::LoraExpert::High)),
+            "cv:123456",
+            Some("wan"),
+        )
+        .is_ok());
+
+        // Absent stays absent — the historical apply-to-both path.
+        assert!(require_expert_routable_model(&lora(None), "flux-dev:q8", Some("flux")).is_ok());
+    }
+
     /// Upstream's own shipped LTX-2.3 HQ default is 1920x1088
     /// (`LTX_2_3_HQ_PARAMS`: stage 1 at 960x544, refined x2). That is
     /// 2,088,960 px, so the flat 1.8 MP ceiling made mold unable to express
@@ -3155,6 +3248,8 @@ mod tests {
         req.loras = Some(vec![LoraWeight {
             path: "/models/hdr.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         }]);
         validate_generate_request_with_family(&req, Some("ltx2"))
             .expect("the HDR adapter makes EXR output valid");
@@ -3426,6 +3521,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "/tmp/adapter.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         });
         let error =
             validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
@@ -3505,6 +3602,8 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
             scale: 1.0,
+
+            expert: None,
         });
         assert!(require_generate_request_model_activation(&req, Some(root), Some("flux")).is_err());
 
@@ -4865,6 +4964,8 @@ mod tests {
         wan.loras = Some(vec![crate::LoraWeight {
             path: "distill.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         }]);
         let err = validate_generate_request(&wan).unwrap_err();
         assert!(err.contains("fp8-scaled"), "got: {err}");
@@ -5496,6 +5597,8 @@ mod tests {
         req.lora = Some(LoraWeight {
             path: "adapter.safetensors".into(),
             scale: 1.0,
+
+            expert: None,
         });
         assert_eq!(
             validate_generate_request(&req).unwrap_err(),
@@ -5803,6 +5906,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "adapter.safetensors".to_string(),
             scale: -0.1,
+
+            expert: None,
         });
         let err = validate_generate_request(&req).unwrap_err();
         assert!(
@@ -5817,6 +5922,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "adapter.safetensors".to_string(),
             scale: 2.1,
+
+            expert: None,
         });
         let err = validate_generate_request(&req).unwrap_err();
         assert!(
@@ -5832,6 +5939,8 @@ mod tests {
             req.lora = Some(crate::LoraWeight {
                 path: "adapter.safetensors".to_string(),
                 scale,
+
+                expert: None,
             });
             assert!(
                 validate_generate_request(&req).is_ok(),
@@ -5848,6 +5957,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "/nonexistent/path/adapter.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         });
         assert!(validate_generate_request(&req).is_ok());
     }
@@ -5858,6 +5969,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "/some/path/adapter.bin".to_string(),
             scale: 1.0,
+
+            expert: None,
         });
         let err = validate_generate_request(&req).unwrap_err();
         assert!(
@@ -5885,6 +5998,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "adapter.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         });
         assert!(
             validate_generate_request(&req).is_ok(),
@@ -5899,10 +6014,14 @@ mod tests {
             crate::LoraWeight {
                 path: "a.safetensors".to_string(),
                 scale: 0.8,
+
+                expert: None,
             },
             crate::LoraWeight {
                 path: "b.safetensors".to_string(),
                 scale: 0.4,
+
+                expert: None,
             },
         ]);
         assert!(
@@ -5926,6 +6045,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "adapter.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         });
         assert!(
             validate_generate_request(&req).is_ok(),
@@ -5937,10 +6058,14 @@ mod tests {
             crate::LoraWeight {
                 path: "a.safetensors".to_string(),
                 scale: 0.8,
+
+                expert: None,
             },
             crate::LoraWeight {
                 path: "b.safetensors".to_string(),
                 scale: 0.4,
+
+                expert: None,
             },
         ]);
         assert!(
@@ -5958,10 +6083,14 @@ mod tests {
             crate::LoraWeight {
                 path: "a.safetensors".into(),
                 scale: 0.8,
+
+                expert: None,
             },
             crate::LoraWeight {
                 path: "b.safetensors".into(),
                 scale: 0.4,
+
+                expert: None,
             },
         ]);
         assert!(validate_generate_request(&req).is_ok());
@@ -5983,6 +6112,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "LTX2.3_Crisp_Enhance.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         });
         assert!(
             validate_generate_request(&req).is_ok(),
@@ -5999,10 +6130,14 @@ mod tests {
             crate::LoraWeight {
                 path: "a.safetensors".into(),
                 scale: 0.8,
+
+                expert: None,
             },
             crate::LoraWeight {
                 path: "b.safetensors".into(),
                 scale: 0.4,
+
+                expert: None,
             },
         ]);
         assert!(
@@ -6033,6 +6168,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "sd35_style.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         });
         assert!(
             validate_generate_request(&req).is_ok(),
@@ -6048,10 +6185,14 @@ mod tests {
             crate::LoraWeight {
                 path: "a.safetensors".into(),
                 scale: 0.8,
+
+                expert: None,
             },
             crate::LoraWeight {
                 path: "b.safetensors".into(),
                 scale: 0.4,
+
+                expert: None,
             },
         ]);
         assert!(
@@ -6070,6 +6211,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "adapter.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         });
         let err = validate_generate_request(&req).unwrap_err();
         assert!(
@@ -6086,6 +6229,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "NSFW_master_ZIT_000017532.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         });
         assert!(
             validate_generate_request(&req).is_ok(),
@@ -6100,10 +6245,14 @@ mod tests {
             crate::LoraWeight {
                 path: "a.safetensors".into(),
                 scale: 0.8,
+
+                expert: None,
             },
             crate::LoraWeight {
                 path: "b.safetensors".into(),
                 scale: 0.4,
+
+                expert: None,
             },
         ]);
         assert!(
@@ -6125,6 +6274,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "DarkKlein9b.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         });
         assert!(
             validate_generate_request(&req).is_ok(),
@@ -6141,10 +6292,14 @@ mod tests {
             crate::LoraWeight {
                 path: "lora-a.safetensors".into(),
                 scale: 0.8,
+
+                expert: None,
             },
             crate::LoraWeight {
                 path: "lora-b.safetensors".into(),
                 scale: 0.4,
+
+                expert: None,
             },
         ]);
         assert!(
@@ -6163,6 +6318,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "adapter.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         });
         let err = validate_generate_request(&req).unwrap_err();
         assert!(
@@ -6196,6 +6353,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "adapter.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         });
         assert!(
             validate_generate_request(&req).is_ok(),
@@ -6215,6 +6374,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "adapter.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         });
         // The request fails on its target-image requirement, but the
         // LoRA gate is permissive.
@@ -6237,10 +6398,14 @@ mod tests {
             crate::LoraWeight {
                 path: "a.safetensors".into(),
                 scale: 0.8,
+
+                expert: None,
             },
             crate::LoraWeight {
                 path: "b.safetensors".into(),
                 scale: 0.4,
+
+                expert: None,
             },
         ]);
         assert!(
@@ -6257,6 +6422,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "adapter.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         });
         let err = validate_generate_request(&req).unwrap_err();
         assert!(
@@ -6277,6 +6444,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "adapter.safetensors".to_string(),
             scale: 0.8,
+
+            expert: None,
         });
         assert!(
             validate_generate_request(&req).is_ok(),
@@ -6297,10 +6466,14 @@ mod tests {
             crate::LoraWeight {
                 path: "a.safetensors".into(),
                 scale: 0.8,
+
+                expert: None,
             },
             crate::LoraWeight {
                 path: "b.safetensors".into(),
                 scale: 0.4,
+
+                expert: None,
             },
         ]);
         assert!(
@@ -6319,6 +6492,8 @@ mod tests {
         req.lora = Some(crate::LoraWeight {
             path: "adapter.safetensors".to_string(),
             scale: 1.0,
+
+            expert: None,
         });
         let err = validate_generate_request(&req).unwrap_err();
         assert!(
@@ -6568,6 +6743,8 @@ mod tests {
                 .map(|index| crate::LoraWeight {
                     path: format!("/loras/{index}.safetensors"),
                     scale: 1.0,
+
+                    expert: None,
                 })
                 .collect(),
         );

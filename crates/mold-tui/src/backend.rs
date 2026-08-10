@@ -806,6 +806,8 @@ fn build_request(
     let lora = params.lora_path.as_ref().map(|path| LoraWeight {
         path: path.clone(),
         scale: params.lora_scale,
+
+        expert: None,
     });
 
     let source_image = params

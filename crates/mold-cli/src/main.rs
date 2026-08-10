@@ -1002,6 +1002,8 @@ Examples:
         device_qwen: Option<String>,
 
         /// LoRA adapter safetensors file path. Repeat for multiple LTX-2 adapters.
+        /// Suffix `@high` or `@low` to bind an adapter to one Wan 2.2 A14B
+        /// expert; the community publishes those as non-interchangeable pairs.
         #[arg(long, help_heading = "LoRA", value_hint = ValueHint::FilePath)]
         lora: Vec<String>,
 

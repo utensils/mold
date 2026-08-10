@@ -535,6 +535,8 @@ fn build_stage_generate_request(
                 .map(|lora| mold_core::LoraWeight {
                     path: lora.path.clone(),
                     scale: lora.scale,
+
+                    expert: None,
                 })
                 .collect()
         }),
@@ -1177,6 +1179,8 @@ mod tests {
             control_loras: vec![mold_core::LoraWeight {
                 path: "/models/loras/ltx2-hdr-adapter.safetensors".to_string(),
                 scale: 1.0,
+
+                expert: None,
             }],
             total_frames_cap: cap,
         }

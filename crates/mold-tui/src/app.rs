@@ -7294,6 +7294,8 @@ impl App {
                                 vec![mold_core::LoraWeight {
                                     path: path.clone(),
                                     scale: submitted_params.lora_scale,
+
+                                    expert: None,
                                 }]
                             }),
                             control_model: submitted_params.control_model.clone(),
@@ -9058,6 +9060,8 @@ mod tests {
             loras: Some(vec![mold_core::LoraWeight {
                 path: "/path/to/adapter.safetensors".to_string(),
                 scale: 0.8,
+
+                expert: None,
             }]),
             control_model: None,
             control_scale: None,

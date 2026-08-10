@@ -2325,14 +2325,20 @@ mod tests {
         let a = mold_core::LoraWeight {
             path: "/x.safetensors".into(),
             scale: 0.8,
+
+            expert: None,
         };
         let b = mold_core::LoraWeight {
             path: "/y.safetensors".into(),
             scale: 0.4,
+
+            expert: None,
         };
         let same_a = mold_core::LoraWeight {
             path: "/x.safetensors".into(),
             scale: 0.8,
+
+            expert: None,
         };
         // Equal stacks → equal fingerprints.
         assert_eq!(
@@ -2343,6 +2349,8 @@ mod tests {
         let scaled = mold_core::LoraWeight {
             path: "/x.safetensors".into(),
             scale: 0.9,
+
+            expert: None,
         };
         assert_ne!(
             lora_stack_fingerprint(std::slice::from_ref(&a)),

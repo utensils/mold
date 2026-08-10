@@ -3223,14 +3223,20 @@ mod tests {
                 LoraWeight {
                     path: "p1".into(),
                     scale: 0.8,
+
+                    expert: None,
                 },
                 LoraWeight {
                     path: "p2".into(),
                     scale: 0.0,
+
+                    expert: None,
                 },
                 LoraWeight {
                     path: "p3".into(),
                     scale: 0.5,
+
+                    expert: None,
                 },
             ]),
         );
@@ -3253,6 +3259,8 @@ mod tests {
             Some(vec![LoraWeight {
                 path: "p1".into(),
                 scale: -0.3,
+
+                expert: None,
             }]),
         );
         let stack = effective_loras(&req);
@@ -3267,6 +3275,8 @@ mod tests {
             Some(LoraWeight {
                 path: "p1".into(),
                 scale: 0.0,
+
+                expert: None,
             }),
             None,
         );
