@@ -348,6 +348,21 @@ impl UMt5Encoder {
         dtype: DType,
     ) -> Result<Self> {
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(paths, dtype, device)? };
+        Self::from_checkpoint_var_builder(vb, config, device)
+    }
+
+    /// Build from a VarBuilder over raw checkpoint tensor names, probing for
+    /// the two layouts in the wild before delegating to
+    /// [`Self::from_var_builder`].
+    ///
+    /// Shared by the mmap path and the CPU-park path: both hand over the
+    /// checkpoint's own key names, so the prefix probe has to live in one
+    /// place or an unparked encoder silently misses every weight.
+    pub fn from_checkpoint_var_builder(
+        vb: VarBuilder,
+        config: UMt5Config,
+        device: &Device,
+    ) -> Result<Self> {
         let vb = if vb.contains_tensor("shared.weight") {
             vb
         } else {
@@ -593,9 +608,10 @@ impl UMt5Encoder {
 
 /// Disk-loading + retention wrapper around [`UMt5Encoder`], mirroring the
 /// `encoders/t5.rs` surface the engines already use: tokenize, encode with
-/// the zero-pad contract, and `drop_weights`/`reload` so the transformer gets
-/// the VRAM during denoise. (CPU parking via `MOLD_KEEP_TE_RAM` follows when
-/// the engine wires residency in the wan/04 layer.)
+/// the zero-pad contract, `drop_weights`/`reload` so the transformer gets the
+/// VRAM during denoise, and `park_to_cpu`/`unpark_to_gpu` so `MOLD_KEEP_TE_RAM`
+/// can keep the weights in host RAM between requests instead of re-reading
+/// 11.4 GB from disk every generation.
 pub(crate) struct WanTextEncoder {
     model: Option<UMt5Encoder>,
     pub tokenizer: Arc<Tokenizer>,
@@ -603,6 +619,10 @@ pub(crate) struct WanTextEncoder {
     dtype: DType,
     encoder_paths: Vec<PathBuf>,
     pub is_quantized: bool,
+    /// Parameters parked on host RAM at the checkpoint's own dtype. `None`
+    /// when the encoder has never parked, or on the GGUF path, whose
+    /// device-tied `QTensor` storage parks by dropping instead.
+    parked_tensors: Option<HashMap<String, Tensor>>,
 }
 
 impl WanTextEncoder {
@@ -629,7 +649,25 @@ impl WanTextEncoder {
             dtype,
             encoder_paths: encoder_paths.to_vec(),
             is_quantized,
+            parked_tensors: None,
         })
+    }
+
+    /// The exact weight files this encoder was built from.
+    pub fn encoder_paths(&self) -> &[PathBuf] {
+        &self.encoder_paths
+    }
+
+    /// Whether a retained encoder can serve a render planned for these
+    /// weights on this device at this dtype.
+    ///
+    /// All three have to match. The variant resolver re-measures free VRAM
+    /// every request, so consecutive renders of the same model can legitimately
+    /// land on a different GGUF tier or move between GPU and CPU — reusing a
+    /// retained encoder across any of those changes would silently ignore the
+    /// decision that was just made.
+    pub fn matches(&self, paths: &[PathBuf], device: &Device, dtype: DType) -> bool {
+        self.encoder_paths == paths && self.device.same_device(device) && self.dtype == dtype
     }
 
     /// Tokenize to the fixed 512-token window and encode.
@@ -682,6 +720,60 @@ impl WanTextEncoder {
             )?
         });
         Ok(())
+    }
+
+    /// Park the parameters on host RAM and free the compute device.
+    ///
+    /// The parked copy keeps the checkpoint's own dtype — F16 for the shipped
+    /// `umt5_xxl_fp16.safetensors`, so ~11.4 GB of host RAM, not the ~22.7 GB
+    /// an F32 CPU-compute copy would take. Widening to the compute dtype
+    /// happens inside the VarBuilder on the way back out, which is why
+    /// unparking to a CPU device (where candle needs F32) is still correct.
+    ///
+    /// The first park after a load reads the safetensors from disk once; every
+    /// later cycle is pure RAM. GGUF encoders park by dropping — their
+    /// `QTensor` storage is device-tied and not walkable — so they keep paying
+    /// the reload, which is already far cheaper than the FP16 path's.
+    /// No-op when already parked.
+    pub fn park_to_cpu(&mut self) -> Result<()> {
+        if self.is_parked() {
+            self.model = None;
+            return Ok(());
+        }
+        if self.is_quantized {
+            self.drop_weights();
+            return Ok(());
+        }
+        self.parked_tensors = Some(crate::encoders::park::load_tensors_to_cpu(
+            &self.encoder_paths,
+        )?);
+        self.model = None;
+        Ok(())
+    }
+
+    /// Rebuild on this encoder's own device from the parked tensors, falling
+    /// back to a disk `reload()` when nothing is parked (GGUF, or a first
+    /// request). No-op when the model is already resident.
+    pub fn unpark(&mut self) -> Result<()> {
+        if self.model.is_some() {
+            return Ok(());
+        }
+        let Some(parked) = self.parked_tensors.as_ref() else {
+            return self.reload();
+        };
+        let vb = crate::encoders::park::varbuilder_from_parked(parked, self.dtype, &self.device);
+        self.model = Some(UMt5Encoder::from_checkpoint_var_builder(
+            vb,
+            UMt5Config::xxl(),
+            &self.device,
+        )?);
+        Ok(())
+    }
+
+    /// Whether the parameters are currently on host RAM rather than the
+    /// compute device. Always false on the GGUF path.
+    pub fn is_parked(&self) -> bool {
+        self.model.is_none() && self.parked_tensors.is_some()
     }
 }
 
@@ -802,6 +894,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Unparking has to reproduce the mmap load exactly.
+    ///
+    /// The parked map carries the checkpoint's own key names, which for the
+    /// shipped `umt5_xxl_fp16.safetensors` repack are under
+    /// `text_encoders.umt5xxl.transformer.`. That prefix probe lives in
+    /// `from_checkpoint_var_builder` precisely so both paths share it — an
+    /// unpark that skipped it would find no weights, and one that applied it
+    /// unconditionally would break the bare-key layout. Pin the equivalence on
+    /// output, not on key lists.
+    #[test]
+    fn an_unparked_encoder_matches_the_mmap_load_under_the_repack_prefix() {
+        let config = tiny_config();
+        let device = Device::Cpu;
+        let varmap = VarMap::new();
+        // Root the builder at the repack prefix so the saved file carries the
+        // prefixed names, exactly like the shipped encoder.
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device)
+            .pp("text_encoders.umt5xxl.transformer");
+        UMt5Encoder::from_var_builder(vb, config.clone(), &device).unwrap();
+
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "mold-umt5-park-{}-{}.safetensors",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        varmap.save(&path).unwrap();
+
+        let files = vec![path.clone()];
+        let from_disk =
+            UMt5Encoder::from_safetensors(&files, config.clone(), &device, DType::F32).unwrap();
+        let parked = crate::encoders::park::load_tensors_to_cpu(&files).unwrap();
+        let unparked = UMt5Encoder::from_checkpoint_var_builder(
+            crate::encoders::park::varbuilder_from_parked(&parked, DType::F32, &device),
+            config,
+            &device,
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let ids = Tensor::new(vec![vec![1u32, 2, 3, 4, 5, 6]], &device).unwrap();
+        let disk: Vec<Vec<Vec<f32>>> = from_disk.forward(&ids, &[6]).unwrap().to_vec3().unwrap();
+        let ram: Vec<Vec<Vec<f32>>> = unparked.forward(&ids, &[6]).unwrap().to_vec3().unwrap();
+        assert_eq!(
+            disk, ram,
+            "an unparked encoder must be bit-identical to the mmap load"
+        );
+        // Guard against the assertion passing on two all-zero stacks.
+        assert!(disk.iter().flatten().flatten().any(|v| *v != 0.0));
     }
 
     /// Padding tokens must not influence real positions: the same prompt

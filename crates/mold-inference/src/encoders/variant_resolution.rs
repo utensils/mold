@@ -525,6 +525,21 @@ pub(crate) fn resolve_qwen2_vl_gguf_path(
 
 // ── UMT5 (Wan) ──────────────────────────────────────────────────────────────
 
+/// Whether an encoder of `size_bytes` fits this device's free VRAM.
+///
+/// Split out for the prepared route, where admission has already chosen the
+/// file and only the placement is still open. It applies the same threshold
+/// the auto policy does, so a prepared render and an unprepared one land the
+/// same encoder on the same device.
+pub(crate) fn umt5_fits_on_gpu(gpu_device: &Device, free_vram: u64, size_bytes: u64) -> bool {
+    should_use_gpu(
+        gpu_device.is_cuda(),
+        gpu_device.is_metal(),
+        free_vram,
+        t5_vram_threshold(size_bytes),
+    )
+}
+
 /// Resolve which UMT5 encoder variant a wan render should use, and where.
 ///
 /// Returns `(encoder_path, on_gpu, device_label)`, matching
