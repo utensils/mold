@@ -483,6 +483,30 @@ CLI surfaces. `mold jobs gc` mirrors `POST /api/chain-jobs/gc`, pruning
 successful ephemeral shim jobs and completed non-ephemeral artifacts older than
 `chain.jobs_artifact_ttl_days`.
 
+## Reference implementations
+
+When debugging or changing a model family, compare against the documented upstream — and prefer one you can **run** over one you can only read.
+
+| Family  | Primary reference                                                                             |
+| ------- | --------------------------------------------------------------------------------------------- |
+| Z-Image | [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) — `src/model/diffusion/z_image.hpp`, `docs/z_image.md` |
+| LTX-2   | [Lightricks/LTX-2](https://github.com/Lightricks/LTX-2) — `packages/ltx-core`, `packages/ltx-pipelines` |
+| Wan     | diffusers/Lightning flow-UniPC schedule (deliberately *not* upstream `fm_solvers_unipc.py`)     |
+
+sd.cpp is Z-Image's primary reference because it is a runnable oracle: it publishes the `leejet/Z-Image-Turbo-GGUF` checkpoints mold downloads, supports Metal, and renders those exact files correctly — so it answers "is this mold's bug?" in one command instead of an argument. Clone references into gitignored `tmp/`.
+
+```bash
+# Build sd.cpp with Metal (Accelerate off avoids Apple's vDSP.h/-Welaborated-enum-base
+# failures on recent SDKs; the deployment target avoids MTL4CommandQueue availability errors)
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DSD_METAL=ON -DGGML_ACCELERATE=OFF -DGGML_BLAS=OFF \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 -DCMAKE_C_FLAGS="-Wno-error" -DCMAKE_OBJC_FLAGS="-Wno-error"
+cmake --build build --config Release -j 8
+
+# Render the same checkpoint mold uses
+./build/bin/sd-cli --diffusion-model z_image_turbo-Q4_K.gguf --vae <flux-ae.safetensors> \
+  --llm <qwen3-4b.gguf> -p "a single red apple on a white table" --cfg-scale 1.0 -H 768 -W 768 --steps 8
+```
+
 ## Model Selection Guide
 
 Pick the right model for the task:
