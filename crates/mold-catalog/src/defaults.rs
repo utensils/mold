@@ -93,7 +93,11 @@ pub fn runtime_defaults_for_family(
             // the identical model installed by manifest renders at 30 / 6.0,
             // so the same checkpoint produces materially different quality
             // depending on how it was pulled.
-            Some("wan21-t2v-1.3b") => CatalogRuntimeDefaults {
+            // The 2.1 14B renders at the same resolution with the same
+            // template as the 1.3B, and the shipped manifests use that recipe,
+            // so a catalog-installed 14B finetune must not land on the generic
+            // 20 / 3.5 fallback while the manifest tier renders at 30 / 6.0.
+            Some("wan21-t2v-1.3b") | Some("wan21-t2v-14b") => CatalogRuntimeDefaults {
                 width: 832,
                 height: 480,
                 steps: 30,
@@ -222,8 +226,15 @@ mod tests {
         assert_eq!((one_three_b.width, one_three_b.height), (832, 480));
         assert_eq!((one_three_b.frames, one_three_b.fps), (Some(81), Some(16)));
 
-        // The 14B-class fallback keeps the A14B tier's recipe.
-        let fallback = runtime_defaults_for_family("wan", Some("wan21-t2v-14b"));
+        // The 2.1 14B now has shipped tiers behind it (#797) and renders at
+        // the same 480p template as the 1.3B, so it takes that recipe rather
+        // than the generic family fallback.
+        let fourteen_b = runtime_defaults_for_family("wan", Some("wan21-t2v-14b"));
+        assert_eq!((fourteen_b.steps, fourteen_b.guidance), (30, 6.0));
+        assert_eq!((fourteen_b.width, fourteen_b.height), (832, 480));
+
+        // The family fallback — an unrecognized wan sub-family — is unchanged.
+        let fallback = runtime_defaults_for_family("wan", Some("wan-something-new"));
         assert_eq!((fallback.steps, fallback.guidance), (20, 3.5));
 
         // Every default sits on the family's 4n+1 frame grid.

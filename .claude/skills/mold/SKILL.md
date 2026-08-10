@@ -259,6 +259,9 @@ mold run ltx-video-0.9.6-distilled:bf16 "a sunset" --format gif | mpv -
 # Wan 2.1 text-to-video (frames must be 4n+1: 77, 81, 121, ...; MP4 default)
 mold run wan21-t2v-1.3b "a red fox trotting through snow" --frames 81 --fps 16
 
+# Wan 2.1 14B — the dense 2.1 quality tier (bare name resolves :q8)
+mold run wan21-t2v-14b "a red fox trotting through snow"
+
 # Wan 2.2 5B at 720p24
 mold run wan22-ti2v-5b "waves on a black sand beach" --width 1280 --height 704 --frames 121 --fps 24
 
