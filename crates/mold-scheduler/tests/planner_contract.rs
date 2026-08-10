@@ -1838,3 +1838,131 @@ fn local_pure_optimizer_benchmark_harness() {
         );
     }
 }
+
+// ── Releasing work is never gated by the resources it frees ────────────────
+//
+// An unload returns memory to the host and the device. Pricing it like a
+// consumer deadlocks recovery: once a resident model has exhausted host RAM or
+// VRAM, the only work that can free it is exactly the work the gate rejects.
+
+fn unload(id: &str, candidates: Vec<CandidatePlacement>) -> WorkSnapshot {
+    let mut work = WorkSnapshot::new(id, 0, candidates);
+    work.kind = WorkKind::AdminModelUnload;
+    work
+}
+
+#[test]
+fn model_unload_is_admitted_with_no_host_headroom() {
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0")],
+            vec![unload("unload", vec![candidate("gpu-0", 16)])],
+            0,
+        ))
+        .expect("valid plan");
+
+    assert_eq!(plan.blocked_reason(&WorkId::from("unload")), None);
+    assert_eq!(
+        assignments(&plan).get("unload").map(String::as_str),
+        Some("gpu-0")
+    );
+}
+
+#[test]
+fn model_unload_is_admitted_against_a_device_with_no_free_vram() {
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![DeviceSnapshot::idle("gpu-0", 0)],
+            vec![unload(
+                "unload",
+                vec![CandidatePlacement::new("gpu-0", "exec", 0)
+                    .with_vram(20 * GIB)
+                    .with_device_available_vram(0)
+                    .with_timing(1_000, 50, 1_000)],
+            )],
+            0,
+        ))
+        .expect("valid plan");
+
+    assert_eq!(plan.blocked_reason(&WorkId::from("unload")), None);
+    assert_eq!(
+        assignments(&plan).get("unload").map(String::as_str),
+        Some("gpu-0")
+    );
+}
+
+#[test]
+fn model_unload_does_not_consume_the_reservation_other_work_needs() {
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0"), device("gpu-1")],
+            vec![
+                unload("unload", vec![candidate("gpu-0", 64)]),
+                work("generation", 1, vec![candidate("gpu-1", 4)]),
+            ],
+            8,
+        ))
+        .expect("valid plan");
+
+    assert_eq!(plan.blocked_reason(&WorkId::from("unload")), None);
+    assert_eq!(plan.blocked_reason(&WorkId::from("generation")), None);
+    assert_eq!(
+        plan.reservation.total_host_ram_bytes,
+        4 * GIB,
+        "an unload must contribute nothing to the host-RAM reservation"
+    );
+}
+
+#[test]
+fn consuming_work_is_still_gated_by_host_headroom_and_vram() {
+    let host_blocked = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0")],
+            vec![work("generation", 0, vec![candidate("gpu-0", 16)])],
+            0,
+        ))
+        .expect("valid plan");
+    assert_eq!(
+        host_blocked.blocked_reason(&WorkId::from("generation")),
+        Some(&BlockedReason::InsufficientHostRam)
+    );
+
+    let vram_blocked = Planner::default()
+        .plan(&snapshot(
+            vec![DeviceSnapshot::idle("gpu-0", 0)],
+            vec![work(
+                "generation",
+                0,
+                vec![CandidatePlacement::new("gpu-0", "exec", 0)
+                    .with_vram(20 * GIB)
+                    .with_device_available_vram(0)
+                    .with_timing(1_000, 50, 1_000)],
+            )],
+            64,
+        ))
+        .expect("valid plan");
+    assert_eq!(
+        vram_blocked.blocked_reason(&WorkId::from("generation")),
+        Some(&BlockedReason::InsufficientVram)
+    );
+}
+
+#[test]
+fn only_model_unload_is_exempt_from_admission_pressure() {
+    for kind in [
+        WorkKind::Generation,
+        WorkKind::PreparedSibling,
+        WorkKind::ChainStage,
+        WorkKind::PostUpscale,
+        WorkKind::StandaloneUpscale,
+        WorkKind::PromptExpansion,
+        WorkKind::AdminModelLoad,
+        WorkKind::BatchChild,
+    ] {
+        assert!(
+            !kind.releases_resources(),
+            "{kind:?} consumes resources and must stay gated"
+        );
+    }
+    assert!(WorkKind::AdminModelUnload.releases_resources());
+}

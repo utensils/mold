@@ -2837,10 +2837,16 @@ pub(crate) fn build_observed_dispatch(
         let safety_floor = (snapshot.system_ram.total.saturating_mul(15) / 100).max(8 << 30);
         available.saturating_sub(safety_floor)
     });
+    // Work that frees memory is not asked to prove it has memory — see
+    // `WorkKind::releases_resources`. This mirrors the planner's own exemption
+    // so a preview never reports an unload as unschedulable.
+    let releases_resources = work_kind.releases_resources();
     let mut eligible_idle_device_ids =
         work.candidate_placements
             .iter()
-            .filter(|candidate| candidate.incremental_host_ram_bytes <= host_memory_headroom)
+            .filter(|candidate| {
+                releases_resources || candidate.incremental_host_ram_bytes <= host_memory_headroom
+            })
             .filter_map(|candidate| {
                 let device = devices
                     .iter()
@@ -2849,7 +2855,8 @@ pub(crate) fn build_observed_dispatch(
                     crate::scheduler::worker_device_id(worker) == device.id.as_str()
                 })?;
                 (device.is_idle()
-                    && candidate.predicted_vram_bytes <= device.available_vram_bytes
+                    && (releases_resources
+                        || candidate.predicted_vram_bytes <= device.available_vram_bytes)
                     && hard_ordinal.is_none_or(|ordinal| ordinal == worker.gpu.ordinal))
                 .then(|| device.id.to_string())
             })

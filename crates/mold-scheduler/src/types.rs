@@ -322,6 +322,25 @@ pub enum WorkKind {
     BatchChild,
 }
 
+impl WorkKind {
+    /// Whether this work returns resources instead of consuming them.
+    ///
+    /// Admission gates exist to stop work from over-committing memory, so they
+    /// price every candidate against free host RAM and free VRAM. An unload is
+    /// the operation that *frees* both. Pricing it as a consumer creates an
+    /// unbreakable deadlock: once a resident engine has exhausted memory, the
+    /// only work that can release it is exactly the work the gate rejects, and
+    /// the user's sole recovery is killing the server.
+    ///
+    /// Releasing work is therefore admitted on device availability alone — it
+    /// still needs an idle, schedulable owner thread (engine destruction must
+    /// happen on the thread owning the CUDA/Metal context), but never has to
+    /// prove headroom it is about to create.
+    pub const fn releases_resources(self) -> bool {
+        matches!(self, Self::AdminModelUnload)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PriorityClass {
     Critical,
