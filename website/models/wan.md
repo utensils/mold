@@ -44,6 +44,17 @@ I2V), and drops each expert before loading its partner — so **VRAM is the
 larger of the two experts, not their sum** (~10.8 GB at `:q5`, ~15.4 GB at
 `:q8`). Disk is the sum, which is why the pull totals are large.
 
+Admission prices a wan render from its frame count, not just its resolution.
+Video memory is dominated by the token count — `((frames − 1) / 4 + 1)` latent
+frames times the patch grid — so the same 832×480 shape costs several times
+more at 81 frames than at 17. The server predicts that peak from the
+checkpoint's own header before the UMT5 encode and the expert load, and refuses
+a shape that cannot fit rather than failing part-way through the denoise. The
+model is calibrated against measured peaks on an RTX 4090 and validated on a
+second checkpoint it was not fitted to. A rejection names frames first, because
+that is the most effective lever, and suggests the next quantized tier down
+rather than the one that just failed.
+
 The `:q5` tier additionally pulls lightx2v's 4-step distill — a separate
 adapter for each expert — and defaults to guidance 1.0. That is not a weak
 setting: at guidance ≤ 1 mold skips the unconditional pass entirely, so each

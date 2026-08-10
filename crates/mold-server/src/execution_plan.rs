@@ -1639,6 +1639,13 @@ pub(crate) fn warm_execution_equivalence_cache(
             crate::ltx2_admission::warm_checkpoint_facts(&inputs.engine_paths.transformer);
         }
     }
+    // Wan's admission model reads its token grid and per-token slope from the
+    // checkpoint header, which is the same blocking work for the same reason.
+    if family == "wan" {
+        for inputs in prepared.by_device.values() {
+            crate::wan_admission::warm_checkpoint_geometry(&inputs.engine_paths.transformer);
+        }
+    }
 }
 
 pub fn validate_before_cuda(
