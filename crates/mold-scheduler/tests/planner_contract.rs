@@ -1966,3 +1966,70 @@ fn only_model_unload_is_exempt_from_admission_pressure() {
     }
     assert!(WorkKind::AdminModelUnload.releases_resources());
 }
+
+#[test]
+fn model_unload_is_admitted_on_a_degraded_or_draining_device() {
+    // A wedged model is the usual cause of all three of these states, and it is
+    // still holding the memory. "Stop giving it new work" and "never let it
+    // release what it holds" are different statements.
+    for state in [
+        DeviceSnapshot::idle("gpu-0", 24 * GIB).with_health(DeviceHealth::Degraded),
+        DeviceSnapshot::idle("gpu-0", 24 * GIB).with_admin_state(DeviceAdminState::Draining),
+        DeviceSnapshot::idle("gpu-0", 24 * GIB).with_admin_state(DeviceAdminState::Disabled),
+    ] {
+        let label = format!("{:?}/{:?}", state.admin_state, state.health);
+        let plan = Planner::default()
+            .plan(&snapshot(
+                vec![state],
+                vec![unload("unload", vec![candidate("gpu-0", 1)]).with_hard_device("gpu-0")],
+                64,
+            ))
+            .expect("valid plan");
+        assert_eq!(
+            plan.blocked_reason(&WorkId::from("unload")),
+            None,
+            "unload must be admitted on {label}"
+        );
+    }
+}
+
+#[test]
+fn model_unload_is_still_refused_on_a_quarantined_device() {
+    // A fatal context is quarantined and must never be touched again in this
+    // process -- CLAUDE.md's "fatal CUDA contexts are never reused or reset".
+    // Unblocking an unload must not reach across that line.
+    for health in [DeviceHealth::Poisoned, DeviceHealth::Unavailable] {
+        let plan = Planner::default()
+            .plan(&snapshot(
+                vec![DeviceSnapshot::idle("gpu-0", 24 * GIB).with_health(health)],
+                vec![unload("unload", vec![candidate("gpu-0", 1)]).with_hard_device("gpu-0")],
+                64,
+            ))
+            .expect("valid plan");
+        assert_eq!(
+            plan.blocked_reason(&WorkId::from("unload")),
+            Some(&BlockedReason::DeviceUnavailable),
+            "{health:?}"
+        );
+    }
+}
+
+#[test]
+fn model_unload_still_honours_its_hard_device_pin() {
+    // Engine destruction has to happen on the thread owning the device
+    // context, so the hard pin is the one constraint the exemption must not
+    // relax. With the VRAM gate gone it is all that keeps an unload on its GPU.
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0"), device("gpu-1")],
+            vec![unload("unload", vec![candidate("gpu-1", 1)]).with_hard_device("gpu-1")],
+            64,
+        ))
+        .expect("valid plan");
+
+    assert_eq!(
+        assignments(&plan).get("unload").map(String::as_str),
+        Some("gpu-1"),
+        "an unload must never be rehomed off its pinned owner"
+    );
+}

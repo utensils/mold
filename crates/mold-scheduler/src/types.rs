@@ -148,8 +148,38 @@ impl DeviceSnapshot {
         self.admin_state == DeviceAdminState::Enabled && self.health == DeviceHealth::Healthy
     }
 
+    /// Whether this device may still be asked to *release* what it is holding.
+    ///
+    /// Being taken out of scheduling and being forbidden to free memory are
+    /// different statements, and conflating them recreates the deadlock that
+    /// [`WorkKind::releases_resources`] exists to break: a wedged model is the
+    /// usual cause of Degraded, and of an operator Disabling or Draining the
+    /// device, while that same model is still holding the memory. Refusing the
+    /// unload there leaves no recovery short of restarting the process.
+    ///
+    /// Quarantine is the one line this does not cross. A Poisoned or
+    /// Unavailable device has a fatal context that must never be touched again
+    /// in-process (see CLAUDE.md, "Fatal CUDA contexts are never reused or
+    /// reset in-process") — its memory comes back with the process, not with an
+    /// unload.
+    pub fn accepts_releasing_work(&self) -> bool {
+        matches!(self.health, DeviceHealth::Healthy | DeviceHealth::Degraded)
+    }
+
     pub fn is_idle(&self) -> bool {
         self.is_schedulable() && self.activity == DeviceActivity::Idle
+    }
+
+    /// Idle in the sense that matters for work of `kind`.
+    ///
+    /// Releasing work uses [`Self::accepts_releasing_work`] instead of
+    /// [`Self::is_schedulable`]; everything else keeps the stricter rule.
+    pub fn is_idle_for(&self, kind: WorkKind) -> bool {
+        if kind.releases_resources() {
+            self.accepts_releasing_work() && self.activity == DeviceActivity::Idle
+        } else {
+            self.is_idle()
+        }
     }
 }
 

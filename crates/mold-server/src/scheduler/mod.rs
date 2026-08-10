@@ -3112,6 +3112,15 @@ impl Coordinator {
                 .iter()
                 .filter_map(|plan| match plan.placement() {
                     UtilityPlacement::Cpu => {
+                        // `planned_memory_bytes` zeroes releasing work, while
+                        // `utility_plan_for_lease` matches a lease back to its
+                        // plan on those same byte counts. Nothing submits an
+                        // unload with utility plans today; if that changes, the
+                        // lease would be silently dropped every turn.
+                        debug_assert!(
+                            !owner.kind.releases_resources(),
+                            "releasing work is priced at zero and cannot carry a utility plan"
+                        );
                         let device_id = DeviceId::new(CPU_UTILITY_DEVICE_ID);
                         authoritative_available_vram
                             .contains_key(&device_id)

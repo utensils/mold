@@ -575,6 +575,46 @@ where
     Ok(created)
 }
 
+/// Return pooled Metal buffers for `ordinal` to the OS.
+///
+/// candle's `MetalDevice` owns a caching allocator: a freed buffer stays in
+/// `buffers`/`private_buffers` at `strong_count == 1` and is only released by
+/// `drop_unused_buffers`, which runs solely from `wait_until_completed` /
+/// `flush_and_wait_current` (`metal_backend/device.rs`) — or when the device
+/// itself is dropped.
+///
+/// Before memoization the device was the last thing holding that pool, so
+/// dropping the final engine dropped the pool with it. Now the device outlives
+/// every engine, and an unload has to ask for the sweep explicitly. Without it
+/// `mold model unload` frees the engine but leaves the buffers checked out,
+/// which is precisely what users run it to undo — and the post-drop VRAM sample
+/// would report no recovery.
+///
+/// Only sweeps a device this process already opened; never creates one.
+pub fn release_pooled_metal_memory(ordinal: usize) {
+    let Some(cache) = METAL_DEVICES.get() else {
+        return;
+    };
+    // Clone out from under the lock: `synchronize` waits on the GPU and must
+    // not hold up an unrelated ordinal's device lookup.
+    let device = {
+        let guard = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.get(&ordinal).cloned()
+    };
+    let Some(device) = device else {
+        return;
+    };
+    if let Err(error) = device.synchronize() {
+        tracing::warn!(
+            ordinal,
+            %error,
+            "could not sweep the Metal buffer pool after unload; freed memory stays cached"
+        );
+    }
+}
+
 /// Open Metal `ordinal`, reusing this process's existing device for that GPU.
 ///
 /// Every Metal device construction in Mold must go through here. Calling
@@ -4829,6 +4869,79 @@ mod tests {
         embeddings
             .to_device(&transformer)
             .expect("moving text embeddings onto the transformer device must not fail");
+    }
+
+    #[test]
+    fn production_code_never_constructs_a_metal_device_directly() {
+        // `metal_device` is only load-bearing if it is the sole constructor.
+        // A stray `Device::new_metal` reintroduces the split-identity bug, and
+        // the failure is a runtime error in one family rather than a build
+        // break, so pin it here. Tests may construct freely.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates dir");
+        let mut offenders = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("readable crate dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("readable source");
+                // Everything from the first `#[cfg(test)]` on is test code.
+                let production = source
+                    .split_once("#[cfg(test)]")
+                    .map_or(source.as_str(), |(before, _)| before);
+                for (index, line) in production.lines().enumerate() {
+                    if line.contains("new_metal(")
+                        && !line.trim_start().starts_with("//")
+                        && !line.contains("candle_core::Device::new_metal(ordinal)")
+                    {
+                        offenders.push(format!("{}:{}", path.display(), index + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "production code must open Metal through device::metal_device: {offenders:?}"
+        );
+    }
+
+    #[test]
+    fn releasing_pooled_metal_memory_is_a_noop_for_an_unopened_ordinal() {
+        // The sweep must never construct a device: an unload on a box with no
+        // Metal GPU, or for an ordinal this process never touched, has nothing
+        // to return and must not allocate one to find that out.
+        release_pooled_metal_memory(usize::MAX);
+    }
+
+    #[test]
+    fn releasing_pooled_metal_memory_keeps_the_device_usable() {
+        if !candle_core::utils::metal_is_available() {
+            eprintln!("skipping: no Metal device");
+            return;
+        }
+        let device = metal_device(0).expect("metal device");
+        let before =
+            candle_core::Tensor::ones((64, 64), candle_core::DType::F32, &device).expect("alloc");
+        drop(before);
+
+        release_pooled_metal_memory(0);
+
+        // Sweeping returns pooled buffers to the OS; the memoized device must
+        // survive it, keep its identity, and still allocate.
+        let after = metal_device(0).expect("metal device after sweep");
+        assert!(
+            after.same_device(&device),
+            "the sweep must not re-mint the device"
+        );
+        candle_core::Tensor::ones((64, 64), candle_core::DType::F32, &after).expect("alloc after");
     }
 
     #[test]

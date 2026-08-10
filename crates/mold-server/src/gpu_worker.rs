@@ -4891,6 +4891,12 @@ pub fn unload_blocking(worker: &GpuWorker) -> anyhow::Result<Option<String>> {
     if unloaded.is_some() {
         worker.set_resident_model(None);
         ensure_worker_not_poisoned(worker, "admin unload")?;
+        // Metal devices are memoized per ordinal, so dropping the engine no
+        // longer drops candle's caching allocator with it. Sweep it before
+        // sampling, or the unload frees nothing the OS can see.
+        if worker.gpu.backend == mold_core::GpuBackend::Metal {
+            device::release_pooled_metal_memory(worker.gpu.ordinal);
+        }
         match device::post_drop_free_vram_bytes(worker.gpu.ordinal) {
             Ok(free_after_drop) => tracing::info!(
                 gpu = worker.gpu.ordinal,

@@ -75,9 +75,23 @@ impl Planner {
             .iter()
             .map(|device| (device.id.clone(), device))
             .collect::<BTreeMap<_, _>>();
+        // A device that only `accepts_releasing_work` still needs a slot in the
+        // matcher, or an unload queued against a degraded/disabled/draining GPU
+        // has nowhere to be matched and comes back `LowerPriorityOpening`.
+        // Ordinary work cannot reach those devices: `candidate_is_eligible`
+        // keeps gating it on `is_schedulable`.
+        let releasing_present = snapshot
+            .work
+            .iter()
+            .any(|item| item.kind.releases_resources());
         let idle_device_ids = devices
             .iter()
-            .filter(|device| device.is_idle())
+            .filter(|device| {
+                device.is_idle()
+                    || (releasing_present
+                        && device.accepts_releasing_work()
+                        && device.activity == DeviceActivity::Idle)
+            })
             .map(|device| device.id.clone())
             .collect::<Vec<_>>();
 
@@ -374,7 +388,7 @@ fn prepare_work(
             work.ready_at_ms <= now_ms
                 && devices
                     .get(&candidate.placement.device_id)
-                    .is_some_and(|device| device.is_idle())
+                    .is_some_and(|device| device.is_idle_for(work.kind))
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -486,16 +500,24 @@ fn classify_no_candidate(
         let Some(device) = devices.get(hard_device_id) else {
             return BlockedReason::HardPinUnavailable;
         };
-        match device.admin_state {
-            crate::DeviceAdminState::Disabled => return BlockedReason::DeviceDisabled,
-            crate::DeviceAdminState::Draining => return BlockedReason::DeviceDraining,
-            crate::DeviceAdminState::StartupExcluded => {
-                return BlockedReason::DeviceStartupExcluded;
+        // Releasing work is admitted on a degraded, disabled or draining
+        // device, so those states must not be reported as its blocker either —
+        // only quarantine is, and that is checked below.
+        if !work.kind.releases_resources() {
+            match device.admin_state {
+                crate::DeviceAdminState::Disabled => return BlockedReason::DeviceDisabled,
+                crate::DeviceAdminState::Draining => return BlockedReason::DeviceDraining,
+                crate::DeviceAdminState::StartupExcluded => {
+                    return BlockedReason::DeviceStartupExcluded;
+                }
+                crate::DeviceAdminState::Enabled => {}
             }
-            crate::DeviceAdminState::Enabled => {}
+            if device.health == crate::DeviceHealth::Degraded {
+                return BlockedReason::DeviceDegraded;
+            }
         }
         match device.health {
-            crate::DeviceHealth::Degraded => return BlockedReason::DeviceDegraded,
+            crate::DeviceHealth::Degraded => {}
             crate::DeviceHealth::Unavailable | crate::DeviceHealth::Poisoned => {
                 return BlockedReason::DeviceUnavailable;
             }
@@ -600,8 +622,15 @@ fn candidate_is_eligible(
     device: &DeviceSnapshot,
     require_idle: bool,
 ) -> bool {
-    device.is_schedulable()
-        && (!require_idle || device.is_idle())
+    let releasing = work.kind.releases_resources();
+    // Releasing work answers to `accepts_releasing_work`, which still excludes
+    // a quarantined device but not one that is merely degraded, draining or
+    // disabled — those are where an unload is most needed.
+    (if releasing {
+        device.accepts_releasing_work()
+    } else {
+        device.is_schedulable()
+    }) && (!require_idle || device.is_idle_for(work.kind))
         && work
             .hard_device_id
             .as_ref()
@@ -611,8 +640,7 @@ fn candidate_is_eligible(
             .is_none_or(|backend| backend == device.backend)
         // A full device is precisely when an unload must run, so releasing work
         // is not asked to fit in the VRAM it is about to return.
-        && (work.kind.releases_resources()
-            || candidate.predicted_vram_bytes <= device.available_vram_bytes)
+        && (releasing || candidate.predicted_vram_bytes <= device.available_vram_bytes)
 }
 
 fn build_immediate_leases(
