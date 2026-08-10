@@ -304,6 +304,22 @@ indistinguishable from the default on the wire and selects the per-expert
 pair. The Lightning tiers (default 1.0) treat every value, 3.5 included, as
 an explicit uniform choice.
 
+### The Turbo tier on 24 GB
+
+Measured on an RTX 4090 at the tier's own defaults (1280x704, 24 fps,
+4 steps, guidance 1.0):
+
+| Run                  | Time    | Peak VRAM                                  |
+| -------------------- | ------- | ------------------------------------------ |
+| Text-to-video, 121f  | 160.7 s | 18,986 MiB                                 |
+| Image-to-video, 81f  | 92.0 s  | fits                                       |
+| Image-to-video, 121f | refused | ~24.9 GB estimated against ~24.8 GB usable |
+
+Image-to-video at the full 121-frame default does not fit a 24 GB card at this
+weight class — `wan22-ti2v-5b:fp16` is refused at the identical estimate, so
+this is the fp16-weight envelope rather than anything the distill changes. Use
+`--frames 81`, or the `:q8` tier, which carries ~4.5 GB less of transformer.
+
 The A14B frame defaults are the measured 24 GB envelope, not the checkpoint's
 trained 81-frame clip length: on an RTX 4090 the `:q5` pair peaks at
 23,975 MiB rendering 53 frames at 832x480 (81 frames peaked at 23.0 GB and

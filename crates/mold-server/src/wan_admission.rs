@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
+use mold_core::ModelPaths;
 use mold_inference::device::{
     wan_activation_budget_bytes, WanActivationGeometry, WanVaeGeneration,
 };
@@ -182,8 +183,27 @@ const WAN_A14B_Q5_EXPERT_BYTES: u64 = 10_790_416_896;
 /// `wan22-ti2v-5b:q8` that is a 4x token over-count (dim 3072 / 32 px per
 /// token axis priced as dim 5120 / 16 px), which would make the tier that
 /// exists for 8-12 GB cards unadmittable anywhere.
-pub(crate) fn wan_geometry_from_header(path: &Path) -> Option<WanActivationGeometry> {
-    mold_inference::wan::pipeline::activation_geometry(path)
+///
+/// Reads every file the DiT spans, not just the primary: a diffusers export
+/// splits the transformer without regard for the probe set, so the
+/// output-channel probe can live alone in a later shard. Missing it makes the
+/// geometry unknown and falls the estimate back to the conservative A14B
+/// shape — which for the sharded 5B is a refusal at ~67 GB against ~24.8 GB
+/// usable, for a checkpoint that actually renders.
+pub(crate) fn wan_geometry_from_header(paths: &ModelPaths) -> Option<WanActivationGeometry> {
+    mold_inference::wan::pipeline::activation_geometry_across(
+        &mold_inference::wan::pipeline::transformer_files(paths),
+    )
+}
+
+/// The file whose identity keys the geometry cache: the first of the DiT's
+/// own files that exists. Sharded checkpoints have no single "the"
+/// transformer, and keying on a path that is not on disk would never cache.
+fn cache_identity(paths: &ModelPaths) -> PathBuf {
+    mold_inference::wan::pipeline::transformer_files(paths)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| paths.transformer.clone())
 }
 
 /// Identity of a checkpoint file, so a re-pull at the same path invalidates.
@@ -219,11 +239,12 @@ fn facts_cache() -> &'static FactsCache {
 /// calls this and never [`warm_checkpoint_geometry`]. A miss falls back to the
 /// conservative A14B shape for that one estimate rather than blocking the
 /// coordinator on a GGUF header parse.
-pub(crate) fn checkpoint_geometry_cached(path: &Path) -> Option<WanActivationGeometry> {
-    let key = cache_key(path)?;
+pub(crate) fn checkpoint_geometry_cached(paths: &ModelPaths) -> Option<WanActivationGeometry> {
+    let identity = cache_identity(paths);
+    let key = cache_key(&identity)?;
     let cache = facts_cache().read().ok()?;
     cache
-        .get(path)
+        .get(&identity)
         .filter(|(cached, _)| cached == &key)
         .map(|(_, geometry)| *geometry)
 }
@@ -235,14 +256,15 @@ pub(crate) fn checkpoint_geometry_cached(path: &Path) -> Option<WanActivationGeo
 /// result is deliberately not cached — a placement preview can run against a
 /// checkpoint whose bytes have not landed yet, and pinning that path to the
 /// fallback for the process lifetime would outlive the download.
-pub(crate) fn warm_checkpoint_geometry(path: &Path) -> Option<WanActivationGeometry> {
-    let key = cache_key(path)?;
-    if let Some(hit) = checkpoint_geometry_cached(path) {
+pub(crate) fn warm_checkpoint_geometry(paths: &ModelPaths) -> Option<WanActivationGeometry> {
+    let identity = cache_identity(paths);
+    let key = cache_key(&identity)?;
+    if let Some(hit) = checkpoint_geometry_cached(paths) {
         return Some(hit);
     }
-    let geometry = wan_geometry_from_header(path)?;
+    let geometry = wan_geometry_from_header(paths)?;
     if let Ok(mut cache) = facts_cache().write() {
-        cache.insert(path.to_path_buf(), (key, geometry));
+        cache.insert(identity, (key, geometry));
     }
     Some(geometry)
 }
@@ -548,11 +570,69 @@ mod tests {
         assert!(single < a14b);
     }
 
+    /// A `ModelPaths` naming only the DiT files, which is all the geometry
+    /// probe reads.
+    fn dit_paths(transformer: &Path, shards: &[PathBuf]) -> ModelPaths {
+        ModelPaths {
+            transformer: transformer.to_path_buf(),
+            transformer_shards: shards.to_vec(),
+            low_noise_transformer: None,
+            vae: PathBuf::new(),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            low_noise_distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: Vec::new(),
+            text_tokenizer: None,
+            decoder: None,
+        }
+    }
+
     #[test]
     fn geometry_is_rejected_rather_than_guessed_for_a_non_wan_header() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("not-wan.safetensors");
         std::fs::write(&path, b"not a safetensors file at all").unwrap();
-        assert!(wan_geometry_from_header(&path).is_none());
+        assert!(wan_geometry_from_header(&dit_paths(&path, &[])).is_none());
+    }
+
+    /// A sharded checkpoint's geometry probe must read every shard.
+    ///
+    /// The published `Wan2.2-TI2V-5B-Turbo-Diffusers` splits the DiT so the
+    /// output-channel probe (`proj_out.weight`) sits alone in an 89 MB second
+    /// shard. Reading only `paths.transformer` leaves the geometry unknown,
+    /// and the estimate falls back to the conservative A14B shape — which
+    /// refused that checkpoint at ~67 GB against ~24.8 GB usable.
+    #[test]
+    fn the_geometry_probe_reads_every_shard_not_just_the_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("shard-1.safetensors");
+        let second = dir.path().join("shard-2.safetensors");
+        std::fs::write(&primary, b"x").unwrap();
+        std::fs::write(&second, b"y").unwrap();
+
+        let files = mold_inference::wan::pipeline::transformer_files(&dit_paths(
+            &primary,
+            &[primary.clone(), second.clone()],
+        ));
+        assert_eq!(
+            files,
+            vec![primary.clone(), second.clone()],
+            "both shards must reach the probe, and the primary must not repeat",
+        );
+
+        // A path that is not on disk is not silently dropped to an empty set:
+        // the caller still gets something to fail by name on.
+        let missing = dir.path().join("absent.safetensors");
+        assert_eq!(
+            mold_inference::wan::pipeline::transformer_files(&dit_paths(&missing, &[])),
+            vec![missing],
+        );
     }
 }
