@@ -91,6 +91,15 @@ fn wan_default_clip_frames(model: &str) -> u32 {
     }
 }
 
+/// Pixel frames a wan continuation duplicates from the clip before it.
+///
+/// The handoff seeds the continuation with the previous clip's final frame, so
+/// it re-renders exactly that one frame and the stitch trims exactly one. This
+/// is not LTX-2's 17: that is the pixel window its VAE turns into three latent
+/// slots of carryover, which wan has no equivalent of. Mirrors
+/// `mold_inference::wan::WAN_HANDOFF_DUPLICATED_FRAMES`.
+const WAN_HANDOFF_DUPLICATED_FRAMES: u32 = 1;
+
 /// Pure decision function — given a model family, the user's requested
 /// `frames`, and the optional `--clip-frames` override, decide whether to
 /// chain, stay single-clip, or reject.
@@ -183,12 +192,17 @@ pub fn decide_chain_routing(
         return ChainRoutingDecision::SingleClip;
     }
 
-    // Wan has no latent motion tail. Its smooth handoff is last-frame image
-    // conditioning, which only an image-conditioned checkpoint accepts, so a
-    // text-to-video checkpoint concatenates independent clips and trims
-    // nothing at the seam.
-    let motion_tail = if is_wan && !wan_carries_context(source_image) {
-        0
+    // Wan has no latent motion tail, so `--motion-tail` (an LTX-2 pixel window
+    // sized for its VAE's 8x carryover) does not apply. Its handoff seeds the
+    // continuation with the previous clip's final frame, so exactly one frame
+    // is duplicated; a text-to-video checkpoint carries nothing and trims
+    // nothing.
+    let motion_tail = if is_wan {
+        if wan_carries_context(source_image) {
+            WAN_HANDOFF_DUPLICATED_FRAMES
+        } else {
+            0
+        }
     } else {
         motion_tail
     };
@@ -1255,11 +1269,13 @@ mod tests {
             None,
             Some(Optional),
         );
+        // The seam duplicates exactly the one frame the continuation was
+        // seeded with -- NOT the caller's LTX-shaped 24.
         assert_eq!(
             five_b,
             ChainRoutingDecision::Chain {
                 clip_frames: 121,
-                motion_tail: 24,
+                motion_tail: WAN_HANDOFF_DUPLICATED_FRAMES,
             },
         );
 
@@ -1278,7 +1294,7 @@ mod tests {
             a14b,
             ChainRoutingDecision::Chain {
                 clip_frames: 53,
-                motion_tail: 24,
+                motion_tail: WAN_HANDOFF_DUPLICATED_FRAMES,
             },
         );
 
@@ -1350,7 +1366,7 @@ mod tests {
             ),
             ChainRoutingDecision::Chain {
                 clip_frames: mold_core::validation::MAX_FRAMES_GLOBAL,
-                motion_tail: 0,
+                motion_tail: WAN_HANDOFF_DUPLICATED_FRAMES,
             },
         );
     }

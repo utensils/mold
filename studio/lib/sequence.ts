@@ -4,6 +4,10 @@ import {
 } from "@ui/lib/seam";
 import { FALLBACK_VIDEO_FPS } from "@ui/lib/duration";
 
+// One owner for the wan seam size; `./chainRouting` computes the routing that
+// applies it, so the constant lives there and authoring reads it.
+import { WAN_HANDOFF_DUPLICATED_FRAMES } from "./chainRouting";
+
 // The seam vocabulary is presentational and lives beside the SeamPill /
 // SeamEditor primitives in ui/; re-exported here so studio consumers keep
 // one import surface for sequence logic.
@@ -73,7 +77,7 @@ export function sequenceMotionTailFrames(
   if (family === "wan") {
     const source = model?.source_image;
     return source === "required" || source === "optional"
-      ? DEFAULT_SEQUENCE_MOTION_TAIL_FRAMES
+      ? WAN_HANDOFF_DUPLICATED_FRAMES
       : 0;
   }
   return DEFAULT_SEQUENCE_MOTION_TAIL_FRAMES;

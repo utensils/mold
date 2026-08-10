@@ -175,6 +175,15 @@ export function wanCarriesContext(
 export const WAN_DEFAULT_CLIP_FRAMES = 53;
 export const WAN_SINGLE_EXPERT_CLIP_FRAMES = 121;
 
+/**
+ * Pixel frames a wan continuation duplicates from the clip before it.
+ *
+ * The handoff seeds the continuation with the previous clip's final frame, so
+ * it re-renders exactly that one frame. Mirrors `WAN_HANDOFF_DUPLICATED_FRAMES`
+ * in `wan/pipeline.rs` and `./sequence`.
+ */
+export const WAN_HANDOFF_DUPLICATED_FRAMES = 1;
+
 function wanDefaultClipFrames(model: string): number {
   return /a14b/i.test(model)
     ? WAN_DEFAULT_CLIP_FRAMES
@@ -286,10 +295,15 @@ export function decideChainRouting(
   // Families without context handoff are forced to zero by the server. Wan's
   // answer is per checkpoint, so it comes from the advertised source-image
   // contract rather than from the family set.
-  const carriesContext = isWan
+  // Wan's seam duplicates exactly one frame — the one it was seeded with — so
+  // the caller's LTX-shaped tail does not apply to it in either direction.
+  const effectiveMotionTail = isWan
     ? wanCarriesContext(sourceImage)
-    : FAMILIES_WITH_CONTEXT_HANDOFF.has(normalizedFamily);
-  const effectiveMotionTail = carriesContext ? motionTail : 0;
+      ? WAN_HANDOFF_DUPLICATED_FRAMES
+      : 0
+    : FAMILIES_WITH_CONTEXT_HANDOFF.has(normalizedFamily)
+      ? motionTail
+      : 0;
 
   if (effectiveMotionTail >= clipFrames) {
     return {

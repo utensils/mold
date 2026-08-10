@@ -20,6 +20,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   WAN_DEFAULT_CLIP_FRAMES,
+  WAN_HANDOFF_DUPLICATED_FRAMES,
   WAN_SINGLE_EXPERT_CLIP_FRAMES,
   decideChainRouting,
   wanCarriesContext,
@@ -98,31 +99,35 @@ describe("wan chain routing", () => {
     }
   });
 
-  it("zeroes the motion tail on a text-to-video checkpoint", () => {
-    // A T2V checkpoint concatenates independent clips: no frames are trimmed
-    // at the seam, so N clips carry N * clipFrames of content. With a tail the
-    // same request would need fewer stages, which is the arithmetic that would
-    // silently change if the carryover were read from the family.
-    const independent = decideChainRouting(
-      300,
-      "wan",
-      "wan22-t2v-a14b:q5",
-      24,
-      16,
-      "unsupported",
-    );
-    const carrying = decideChainRouting(
-      300,
-      "wan",
-      "wan22-t2v-a14b:q5",
-      24,
-      16,
-      "optional",
-    );
-    expect(independent.kind).toBe("chain");
-    expect(carrying.kind).toBe("chain");
-    if (independent.kind !== "chain" || carrying.kind !== "chain") return;
-    expect(carrying.stageCount).toBeGreaterThan(independent.stageCount);
+  it("sizes the seam from the checkpoint, not from the caller's LTX tail", () => {
+    // The seam is observable directly, so assert it rather than a stage-count
+    // side effect: at 53-frame clips a tail of 0 and a tail of 1 need the same
+    // number of stages, so a count comparison would pass whatever the tail was.
+    const routed = (sourceImage: string | null) => {
+      const decision = decideChainRouting(
+        300,
+        "wan",
+        "wan22-t2v-a14b:q5",
+        // A caller-supplied LTX-shaped tail must not reach wan in either
+        // direction: wan has no latent motion tail to size.
+        24,
+        16,
+        sourceImage,
+      );
+      if (decision.kind !== "chain") throw new Error("expected a chain");
+      return decision.motionTail;
+    };
+
+    expect(routed("optional")).toBe(WAN_HANDOFF_DUPLICATED_FRAMES);
+    expect(routed("required")).toBe(WAN_HANDOFF_DUPLICATED_FRAMES);
+    // A text-to-video checkpoint has no conditioning channel, so nothing
+    // crosses the seam and nothing is trimmed.
+    expect(routed("unsupported")).toBe(0);
+    expect(routed(null)).toBe(0);
+
+    // The seeded frame is the only duplicate; 17 would discard sixteen good
+    // frames at every boundary.
+    expect(WAN_HANDOFF_DUPLICATED_FRAMES).toBe(1);
   });
 
   it("leaves the LTX families exactly as they were", () => {

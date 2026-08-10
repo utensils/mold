@@ -102,8 +102,9 @@ describe("sequence authoring", () => {
         family: "wan",
         source_image,
       });
-    expect(wan("optional")).toBe(17);
-    expect(wan("required")).toBe(17);
+    // One frame -- the one the continuation is seeded with -- not LTX-2's 17.
+    expect(wan("optional")).toBe(1);
+    expect(wan("required")).toBe(1);
     // A text-to-video checkpoint has no conditioning channel at all.
     expect(wan("unsupported")).toBe(0);
     // Unclassified is unknown, never an assumed handoff.
