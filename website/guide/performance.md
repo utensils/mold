@@ -26,6 +26,7 @@ Reference hardware: RTX 4090 class GPU, warm model cache, default resolution.
 | `ltx-2-19b-distilled:fp8`           | 8             | ~2-6 min      | Joint audio-video; native Rust FP8 path         |
 | `ltx-2.3-22b-distilled:fp8`         | 8             | ~3-8 min      | Larger native joint audio-video path            |
 | `wan21-t2v-1.3b:bf16`               | 30            | ~3.5 min      | 480p16; measured 209 s at 33 frames             |
+| `wan21-t2v-14b:q8`                  | 30            | ~15 min       | 480p16; measured 877 s at 33 frames, 20.4 GB    |
 | `wan22-ti2v-5b:fp16`                | 20            | ~2-4 min      | Measured 246 s T2V 720p24 / 105 s I2V 480p, 49f |
 | `wan22-i2v-a14b:q5`                 | 4             | ~3.5 min      | Two-expert Lightning tier; 199 s at 53 frames   |
 
