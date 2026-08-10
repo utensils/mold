@@ -219,6 +219,38 @@ mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" \
   --frames 100 --clip-frames 49
 ```
 
+Authored sequences work through the same `mold.chain.v1` script the LTX
+families use — per-stage prompts, frames, and transitions — with `mold chain
+validate shot.toml` reporting the normalized stage list and stitched length
+before anything is submitted:
+
+```toml
+schema = "mold.chain.v1"
+
+[chain]
+model = "wan22-ti2v-5b:q8"
+width = 704
+height = 384
+fps = 24
+steps = 20
+guidance = 5.0
+strength = 1.0
+motion_tail_frames = 1
+output_format = "mp4"
+
+[[stage]]
+prompt = "a paper boat drifting down a rain gutter"
+frames = 49
+
+[[stage]]
+prompt = "the boat passes a storm drain"
+frames = 49
+transition = "smooth"
+```
+
+`motion_tail_frames` is normalized to what the checkpoint can carry, so a value
+carried over from an LTX script does not silently trim frames.
+
 Measured on an RTX 4090: 145 frames at 704x384, three stages, 141 s. The boat,
 gutter, and railing persist across both seams.
 

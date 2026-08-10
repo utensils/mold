@@ -869,6 +869,60 @@ pub(crate) fn validate_and_normalize_chain_family(
             )));
         }
     }
+    // Every stage is denoised as one generation, so its frame count has to sit
+    // on the family's own grid. Wan is `4k+1` where the LTX families are
+    // `8k+1`; catching it here names the stage, instead of failing mid-chain
+    // once the stage reaches the engine's request validator.
+    if let (Some(step), Some(offset)) = (
+        mold_core::validation::frame_step_for_family(&family),
+        mold_core::validation::frame_offset_for_family(&family),
+    ) {
+        if let Some((idx, stage)) = req
+            .stages
+            .iter()
+            .enumerate()
+            .find(|(_, stage)| stage.frames % step != offset % step)
+        {
+            return Err(ApiError::validation(format!(
+                "stage {idx} asks for {} frames; '{family}' clips must be {step}k+{offset}",
+                stage.frames,
+            )));
+        }
+    }
+    if family == "wan" {
+        // Wan has no latent motion tail. Its seam re-renders exactly the one
+        // frame the continuation was seeded with, and only an image-conditioned
+        // checkpoint can be seeded at all — so the tail is 1 or 0, never the
+        // LTX-shaped value a client may have carried over.
+        // Probe the resolved checkpoint's own headers first, exactly as
+        // `/api/models` and generation admission do; the manifest is the cold
+        // fallback for a model that is not downloaded yet.
+        let probed = mold_core::ModelPaths::resolve(&req.model, config).and_then(|paths| {
+            mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
+        });
+        let contract = probed.or_else(|| manifest.and_then(|model| model.defaults.source_image));
+        let carries_context = contract.is_some_and(|capability| {
+            matches!(
+                capability,
+                mold_core::SourceImageCapability::Required
+                    | mold_core::SourceImageCapability::Optional
+            )
+        });
+        let normalized = if carries_context {
+            mold_inference::wan::pipeline::WAN_HANDOFF_DUPLICATED_FRAMES
+        } else {
+            0
+        };
+        if req.motion_tail_frames != normalized {
+            tracing::debug!(
+                model = %req.model,
+                original = req.motion_tail_frames,
+                normalized,
+                "wan carries one seeded frame at most; normalizing motion_tail_frames"
+            );
+            req.motion_tail_frames = normalized;
+        }
+    }
     if family == "ltx-video" && req.motion_tail_frames > 0 {
         // LtxVideoEngine has no img2vid path, so the carry tail can't anchor
         // the next stage's denoise. Zero motion_tail makes Smooth boundaries
@@ -1810,6 +1864,64 @@ mod tests {
         let error = validate_and_normalize_chain_family(&config, &mut request)
             .expect_err("the 5B must reject a canvas off its 32px grid");
         assert!(error.error.contains("multiples of 32"), "{}", error.error);
+    }
+
+    /// Wan chain stages must sit on wan's own `4k+1` grid (#783).
+    ///
+    /// The default request's 9- and 17-frame stages are on `8k+1` and happen
+    /// to be on `4k+1` too, so this uses a value that separates them: 13 is a
+    /// valid wan clip and an invalid LTX one, and 12 is invalid for both.
+    #[test]
+    fn chain_preflight_holds_wan_stages_to_the_4k_plus_1_grid() {
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "wan22-ti2v-5b".into();
+        request.width = 1280;
+        request.height = 704;
+        request.stages[0].frames = 13;
+        request.stages[1].frames = 12;
+        let config = mold_core::Config::default();
+
+        let error = validate_and_normalize_chain_family(&config, &mut request)
+            .expect_err("12 is off wan's 4k+1 grid");
+        assert!(error.error.contains("4k+1"), "{}", error.error);
+        assert!(error.error.contains("stage 1"), "{}", error.error);
+
+        // 13 alone is admitted — it is on wan's grid even though it is off the
+        // LTX grid the check used to hardcode.
+        request.stages[1].frames = 13;
+        validate_and_normalize_chain_family(&config, &mut request)
+            .expect("13-frame wan clips are on the 4k+1 grid");
+    }
+
+    /// Wan carries at most the one frame its continuation was seeded with, so
+    /// a client's LTX-shaped motion tail is normalized rather than honoured.
+    /// A text-to-video checkpoint carries nothing at all.
+    #[test]
+    fn chain_preflight_normalizes_the_wan_motion_tail() {
+        let config = mold_core::Config::default();
+
+        // TI2V-5B conditions on an image (latent inpaint), so it keeps one
+        // frame of seam — never the 17 an LTX-shaped client would send.
+        let mut conditioned = req(OutputFormat::Mp4);
+        conditioned.model = "wan22-ti2v-5b".into();
+        conditioned.width = 1280;
+        conditioned.height = 704;
+        conditioned.motion_tail_frames = 17;
+        validate_and_normalize_chain_family(&config, &mut conditioned).expect("admitted");
+        assert_eq!(
+            conditioned.motion_tail_frames,
+            mold_inference::wan::pipeline::WAN_HANDOFF_DUPLICATED_FRAMES,
+        );
+
+        // A text-to-video checkpoint has no conditioning channel, so nothing
+        // crosses its seam.
+        let mut t2v = req(OutputFormat::Mp4);
+        t2v.model = "wan21-t2v-1.3b".into();
+        t2v.width = 832;
+        t2v.height = 480;
+        t2v.motion_tail_frames = 17;
+        validate_and_normalize_chain_family(&config, &mut t2v).expect("admitted");
+        assert_eq!(t2v.motion_tail_frames, 0);
     }
 
     struct HandlerFailingExecutor;
