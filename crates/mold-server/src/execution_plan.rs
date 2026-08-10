@@ -298,6 +298,7 @@ pub enum RuntimeSemanticVariable {
     VaeDtype,
     VaeTiled,
     WanForceDmmv,
+    WanPrefetch,
     WanStepCache,
     WanStepProfile,
     WuerstchenDecoderGuidance,
@@ -641,6 +642,9 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         // runtime. Distinct classes keep their fingerprints and learned
         // timings out of normal buckets.
         "MOLD_WAN_FORCE_DMMV" => RuntimeSemanticVariable::WanForceDmmv,
+        // #802 item 3: changes wall-clock only, but that is enough to keep it
+        // out of another run's learned-timing bucket.
+        "MOLD_WAN_PREFETCH" => RuntimeSemanticVariable::WanPrefetch,
         // #801: residual reuse changes the rendered output and the step
         // count that actually runs, so it is its own equivalence class.
         "MOLD_WAN_STEP_CACHE" => RuntimeSemanticVariable::WanStepCache,

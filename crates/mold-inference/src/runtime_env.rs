@@ -66,6 +66,10 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     // device syncs change runtime. Neither may share a fingerprint or a
     // learned-timing bucket with normal execution.
     "MOLD_WAN_FORCE_DMMV",
+    // #802 item 3: the partner page-cache warm changes wall-clock (that is its
+    // purpose), so a run with it off must not share a learned-timing bucket
+    // with one that had it on.
+    "MOLD_WAN_PREFETCH",
     // #801: residual reuse changes the rendered output, so it can never share
     // an execution-equivalence class or a learned-timing bucket with a run
     // that denoised every block.
