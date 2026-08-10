@@ -275,6 +275,18 @@ impl WanExperts {
     /// from disk rather than a park to host RAM: the file was just read, so the
     /// page cache usually still holds it, and a 10.8 GB round trip over PCIe
     /// costs more than re-reading it does.
+    /// Which expert this timestep belongs to, or `None` for a single-expert
+    /// checkpoint where the question does not arise.
+    ///
+    /// Read-only: consulted by the step cache (#801), which must invalidate on
+    /// the swap and so needs the role without forcing a load.
+    pub fn current_role(&self, timestep: i64) -> Option<WanExpertRole> {
+        match self {
+            Self::Single(_) => None,
+            Self::Pair(state) => Some(state.pair.role_for(timestep)),
+        }
+    }
+
     pub fn transformer_for(
         &mut self,
         timestep: i64,

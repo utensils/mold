@@ -66,6 +66,10 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     // device syncs change runtime. Neither may share a fingerprint or a
     // learned-timing bucket with normal execution.
     "MOLD_WAN_FORCE_DMMV",
+    // #801: residual reuse changes the rendered output, so it can never share
+    // an execution-equivalence class or a learned-timing bucket with a run
+    // that denoised every block.
+    "MOLD_WAN_STEP_CACHE",
     "MOLD_WAN_STEP_PROFILE",
     "MOLD_WUERSTCHEN_DECODER_GUIDANCE",
 ];
