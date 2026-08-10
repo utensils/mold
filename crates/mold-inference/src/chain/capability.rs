@@ -66,8 +66,9 @@ pub const WAN_FRAMES_PER_CLIP_CAP: u32 = mold_core::validation::MAX_FRAMES_GLOBA
 ///   `ltx-video` precedent: Cut and Crossfade, never a fake "Continue motion".
 pub fn wan_carryover(source_image: mold_core::SourceImageCapability) -> CarryoverKind {
     match source_image {
-        mold_core::SourceImageCapability::Required
-        | mold_core::SourceImageCapability::Optional => CarryoverKind::TemporalHandoff,
+        mold_core::SourceImageCapability::Required | mold_core::SourceImageCapability::Optional => {
+            CarryoverKind::TemporalHandoff
+        }
         mold_core::SourceImageCapability::Unsupported => CarryoverKind::IndependentClips,
     }
 }
@@ -159,7 +160,10 @@ mod tests {
         let family = capability_for_family("wan").expect("wan is chain-capable");
         assert_eq!(family.carryover, CarryoverKind::IndependentClips);
         assert!(!family.supports_audio, "wan has no audio decode path");
-        assert_eq!(family.runtime_seconds_cap, None, "wan's cap is not a duration");
+        assert_eq!(
+            family.runtime_seconds_cap, None,
+            "wan's cap is not a duration"
+        );
 
         // The two image-conditioned contracts carry context; text-to-video
         // cannot. This is the same classification `/api/models` advertises as

@@ -461,12 +461,19 @@ pub async fn run(
 
     // ── Chain routing ─────────────────────────────────────────────────────
     // When --frames exceeds the per-clip cap, auto-build a ChainRequest and
-    // delegate to the chain helper. Only LTX-2 distilled is chainable in v1;
-    // other video families error fast rather than silently over-producing.
+    // delegate to the chain helper. LTX-2 and wan auto-chain; other video
+    // families error fast rather than silently over-producing.
     // `decide_chain_routing` declines outright for an audio-only pipeline.
     {
         use super::chain::{decide_chain_routing, warn_if_clamped, ChainRoutingDecision};
         let routing_fps = effective_fps.unwrap_or(mold_core::validation::LTX2_DEFAULT_FPS);
+        // Wan's seam is last-frame image conditioning, so the routing needs
+        // the checkpoint's own source-image contract (#783). The manifest is
+        // where it is recorded; an unknown model yields `None`, which routes
+        // to independent clips rather than an assumed handoff.
+        let source_image_contract =
+            mold_core::manifest::find_manifest(&mold_core::manifest::resolve_model_name(model))
+                .and_then(|manifest| manifest.defaults.source_image);
         let decision = decide_chain_routing(
             effective_frames,
             family.as_deref(),
@@ -475,6 +482,7 @@ pub async fn run(
             motion_tail,
             routing_fps,
             ltx2.pipeline,
+            source_image_contract,
         );
         match decision {
             ChainRoutingDecision::SingleClip => {

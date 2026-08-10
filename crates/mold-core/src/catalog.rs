@@ -68,7 +68,7 @@ pub fn resolution_defaults(model: &str, family: &str) -> ResolutionDefaults {
 /// carryover, which `/api/models` advertises separately as `source_image` —
 /// so sequence *availability* stays a family fact while the seam options a
 /// picker may offer stay a checkpoint fact.
-fn chain_capable_family(family: &str) -> bool {
+pub fn chain_capable_family(family: &str) -> bool {
     matches!(family, "ltx2" | "ltx-video" | "wan")
 }
 
