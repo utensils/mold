@@ -1,3 +1,5 @@
+import { familyLabel } from "@studio/lib/modelFamily";
+
 import type { ModelInfoExtended } from "../types";
 
 export type ModelFilterMode = "all" | "any" | "not";
@@ -61,28 +63,6 @@ const FAMILY_ORDER = [
   "minimax_h3",
   "minimaxh3",
 ];
-
-const FAMILY_LABELS: Record<string, string> = {
-  flux: "FLUX",
-  flux2: "Flux.2",
-  "flux-2": "Flux.2",
-  sd15: "SD 1.5",
-  "sd1.5": "SD 1.5",
-  sdxl: "SDXL",
-  sd3: "SD3",
-  "sd3.5": "SD3.5",
-  "z-image": "Z-Image",
-  "qwen-image": "Qwen Image",
-  "qwen-image-edit": "Qwen Image Edit",
-  wuerstchen: "Wuerstchen",
-  "ltx-video": "LTX Video",
-  ltx2: "LTX-2",
-  "ltx-2": "LTX-2",
-  wan: "Wan Video",
-  "minimax-h3": "MiniMax H3",
-  minimax_h3: "MiniMax H3",
-  minimaxh3: "MiniMax H3",
-};
 
 const VARIANT_RANKS: Record<string, number> = {
   bf16: 0,
@@ -232,16 +212,9 @@ export function groupModelsByFamily(
     }));
 }
 
-export function familyLabel(family: string): string {
-  return (
-    FAMILY_LABELS[family] ??
-    family
-      .split(/[-_]/)
-      .filter(Boolean)
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(" ")
-  );
-}
+// The label table is shared with desktop and iPhone (#806); re-exported here
+// so every existing `modelFilters` consumer keeps its import.
+export { familyLabel };
 
 function compareFamilies(a: string, b: string): number {
   const ai = FAMILY_ORDER.indexOf(a);

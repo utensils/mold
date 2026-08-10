@@ -28,7 +28,20 @@ describe("ModelTableRow", () => {
       "hal9000",
     ]);
     expect(wrapper.text()).toContain("q8");
-    expect(wrapper.get("[data-test='row-family']").text()).toBe("flux");
+    // The chip shows the family's name, not its wire slug (#806).
+    expect(wrapper.get("[data-test='row-family']").text()).toBe("FLUX");
+  });
+
+  /**
+   * #806 acceptance criterion 1: the family reads as **Wan Video** on every
+   * surface. Desktop rendered the raw `wan` slug because the label table lived
+   * in `web/`; it is now shared through `@studio/lib/modelFamily`, where a test
+   * pins it to `tests/fixtures/wan/surface-parity-v1.json` alongside the CLI
+   * and TUI readers.
+   */
+  it("names wan the way the other surfaces name it", () => {
+    const wrapper = mountRow({ name: "wan22-t2v-a14b:q5", family: "wan" });
+    expect(wrapper.get("[data-test='row-family']").text()).toBe("Wan Video");
   });
 
   it("shows a warm residency dot when loaded, a cold placeholder when not, none when omitted", () => {

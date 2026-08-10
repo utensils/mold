@@ -33,6 +33,7 @@ import {
   type CatalogKindFilter,
   type CatalogSortOption,
 } from "../lib/catalogFilters";
+import { familyLabel } from "@studio/lib/modelFamily";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 import { modelKindLabel, modelKindValue, modelWeightsLabel } from "@studio/lib/modelMetadata";
@@ -1374,7 +1375,8 @@ onBeforeUnmount(() => {
                 :show-modality="false"
               />
               <span class="mobile-catalog-card-meta">
-                {{ entry.author ? `${entry.author} · ` : "" }}{{ entry.family }}
+                {{ entry.author ? `${entry.author} · ` : ""
+                }}{{ familyLabel(entry.family) }}
                 <template v-if="entry.download_count">
                   · ↓ {{ formatCount(entry.download_count) }}
                 </template>
@@ -1513,7 +1515,7 @@ onBeforeUnmount(() => {
               </div>
               <div>
                 <dt>Family</dt>
-                <dd>{{ mergedDetail.family }}</dd>
+                <dd>{{ familyLabel(mergedDetail.family) }}</dd>
               </div>
               <div v-if="mergedDetail.file_format">
                 <dt>Format</dt>
