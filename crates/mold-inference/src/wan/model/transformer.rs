@@ -845,14 +845,21 @@ impl WanBlock {
         })
     }
 
-    /// `timestep_proj` is `[batch, n, 6, dim]` in F32.
-    fn modulation(&self, timestep_proj: &Tensor) -> Result<BlockModulation> {
+    /// Build this block's modulation from the compact timestep embedding.
+    ///
+    /// The block's own `[1, 1, 6, dim]` parameter is added to the `k` distinct
+    /// rows first and the result is expanded per token, rather than adding to
+    /// an already-expanded `[1, tokens, 6, dim]` table. Identical arithmetic —
+    /// the add is elementwise over rows either way — but the expensive tensor
+    /// is never the one that gets held.
+    fn modulation(&self, timestep: &WanTimestepEmbedding) -> Result<BlockModulation> {
         let dim = self.modulation.dim(2)?;
-        let table = self
+        let compact = self
             .modulation
             .to_dtype(DType::F32)?
             .reshape((1, 1, 6, dim))?
-            .broadcast_add(timestep_proj)?;
+            .broadcast_add(&timestep.projection)?;
+        let table = timestep.expand(&compact)?;
         Ok(BlockModulation {
             shift_attn: chunk_at(&table, 0)?,
             scale_attn: chunk_at(&table, 1)?,
@@ -867,12 +874,12 @@ impl WanBlock {
         &self,
         x: &Tensor,
         context: &Tensor,
-        timestep_proj: &Tensor,
+        timestep: &WanTimestepEmbedding,
         cos: &Tensor,
         sin: &Tensor,
     ) -> Result<Tensor> {
         let dtype = x.dtype();
-        let m = self.modulation(timestep_proj)?;
+        let m = self.modulation(timestep)?;
 
         // 1. Self-attention, shift/scale in, gate out.
         let normed = self
@@ -917,6 +924,51 @@ impl WanBlock {
 /// Evaluated in `f64` on the host like upstream. That is exact for the scalar
 /// timestep every variant except TI2V uses; a per-token vector at 720p is
 /// ~75k entries, which is a visible but not dominant host cost.
+/// A timestep embedding kept at its distinct values, with the per-token map
+/// that expands it.
+///
+/// TI2V's per-token schedule holds two values by construction — 0 for the
+/// pinned frame's tokens and `t` for the rest, three when both endpoints are
+/// pinned — but the dense form materializes `[batch, tokens, 6, dim]` F32 and
+/// holds it for the whole forward: 2.01 GB at the 5B's 121-frame 1280x704
+/// default, plus a host-side f64 sinusoid evaluated once per token after a
+/// GPU->CPU round trip of the whole vector.
+///
+/// Storing the `k` distinct rows and an index makes the resident cost ~150 KB.
+/// Per-block transients are unchanged: a block still multiplies against the
+/// hidden state and needs `[batch, tokens, dim]` either way. The saving is
+/// what is *held* across the forward, which is what the profile showed.
+#[derive(Clone, Debug)]
+pub(crate) struct WanTimestepEmbedding {
+    /// `[batch, k, dim]` — the unprojected embedding.
+    temb: Tensor,
+    /// `[batch, k, 6, dim]` — the six modulation components.
+    projection: Tensor,
+    /// Row each token reads, or `None` when the schedule is a single scalar
+    /// (every token shares row 0 and broadcasting already handles it).
+    index: Option<Tensor>,
+    /// Token count the index expands to.
+    tokens: usize,
+}
+
+impl WanTimestepEmbedding {
+    /// Expand a `[batch, k, ...]` table to `[batch, tokens, ...]`.
+    ///
+    /// A scalar schedule skips the gather entirely and broadcasts, which keeps
+    /// the non-TI2V families on exactly the tensors they had before.
+    fn expand(&self, compact: &Tensor) -> Result<Tensor> {
+        let Some(index) = &self.index else {
+            return Ok(compact.clone());
+        };
+        compact.index_select(index, 1)
+    }
+
+    /// `[batch, tokens, dim]` for the head's modulation.
+    fn temb_tokens(&self) -> Result<Tensor> {
+        self.expand(&self.temb)
+    }
+}
+
 fn sinusoidal_embedding(values: &[f64], dim: usize, device: &Device) -> Result<Tensor> {
     let half = dim / 2;
     let mut out = Vec::with_capacity(values.len() * dim);
@@ -1223,9 +1275,14 @@ impl WanTransformer {
             .reshape((batch, out_dim, gf * pt, gh * ph, gw * pw))
     }
 
-    /// Timestep -> `(temb [b, n, dim], timestep_proj [b, n, 6, dim])`, both
-    /// F32. `n` is 1 for a `[b]` timestep and `tokens` for a `[b, tokens]` one.
-    fn embed_timestep(&self, timestep: &Tensor, batch: usize) -> Result<(Tensor, Tensor)> {
+    /// Timestep -> a [`WanTimestepEmbedding`] holding the distinct rows and the
+    /// per-token map, both F32.
+    ///
+    /// The schedule is `[b]` (one scalar) or `[b, tokens]` (TI2V's per-token
+    /// form). The per-token form is deduplicated before the sinusoid, so the
+    /// host-side f64 work and the embedding MLP run over the handful of
+    /// distinct values rather than once per token.
+    fn embed_timestep(&self, timestep: &Tensor, batch: usize) -> Result<WanTimestepEmbedding> {
         let per_token = match timestep.rank() {
             1 => None,
             2 => Some(timestep.dim(1)?),
@@ -1248,21 +1305,57 @@ impl WanTransformer {
             .collect();
         let n = per_token.unwrap_or(1);
 
-        let sinusoid = sinusoidal_embedding(&values, self.config.freq_dim, timestep.device())?
+        // Deduplicate before the sinusoid. Bit patterns are compared rather
+        // than float values so the mapping is exact — two tokens share a row
+        // only when their schedule value is byte-identical, which is what the
+        // dense table produced.
+        let (unique, index): (Vec<f64>, Option<Vec<u32>>) = if per_token.is_some() && batch == 1 {
+            let mut rows: Vec<f64> = Vec::new();
+            let mut map: Vec<u32> = Vec::with_capacity(values.len());
+            for value in &values {
+                let bits = value.to_bits();
+                let position = rows.iter().position(|row| row.to_bits() == bits);
+                let position = match position {
+                    Some(position) => position,
+                    None => {
+                        rows.push(*value);
+                        rows.len() - 1
+                    }
+                };
+                map.push(position as u32);
+            }
+            (rows, Some(map))
+        } else {
+            // Multi-batch schedules interleave per-sample values; the dense
+            // path stays until a family actually renders batch > 1.
+            (values.clone(), None)
+        };
+        let rows = unique.len();
+
+        let sinusoid = sinusoidal_embedding(&unique, self.config.freq_dim, timestep.device())?
             .to_dtype(self.dtype)?;
         let temb = self
             .time_embedding_out
             .forward(&ops::silu(&self.time_embedding_in.forward(&sinusoid)?)?)?;
         let projection = self.time_projection.forward(&ops::silu(&temb)?)?;
 
+        let compact_rows = if index.is_some() { rows } else { n };
         let temb = temb
             .to_dtype(DType::F32)?
-            .reshape((batch, n, self.config.dim))?;
+            .reshape((batch, compact_rows, self.config.dim))?;
         let projection =
             projection
                 .to_dtype(DType::F32)?
-                .reshape((batch, n, 6, self.config.dim))?;
-        Ok((temb, projection))
+                .reshape((batch, compact_rows, 6, self.config.dim))?;
+        let index = index
+            .map(|map| Tensor::from_vec(map, n, timestep.device()))
+            .transpose()?;
+        Ok(WanTimestepEmbedding {
+            temb,
+            projection,
+            index,
+            tokens: n,
+        })
     }
 
     /// `x`: `[batch, in_dim, frames, height, width]`. `timestep`: `[batch]`, or
@@ -1323,7 +1416,7 @@ impl WanTransformer {
             );
         }
         let mut hidden = self.patchify(x)?.to_dtype(self.dtype)?;
-        let (temb, timestep_proj) = self.embed_timestep(timestep, batch)?;
+        let timestep = self.embed_timestep(timestep, batch)?;
 
         let context = self.text_embedding_out.forward(
             &self
@@ -1333,7 +1426,7 @@ impl WanTransformer {
         )?;
 
         for block in &self.blocks {
-            hidden = block.forward(&hidden, &context, &timestep_proj, cos, sin)?;
+            hidden = block.forward(&hidden, &context, &timestep, cos, sin)?;
         }
 
         // Head: a 2-entry modulation table over the *unprojected* time
@@ -1342,7 +1435,7 @@ impl WanTransformer {
             .head_modulation
             .to_dtype(DType::F32)?
             .reshape((1, 1, 2, self.config.dim))?
-            .broadcast_add(&temb.unsqueeze(2)?)?;
+            .broadcast_add(&timestep.temb_tokens()?.unsqueeze(2)?)?;
         let shift = chunk_at(&table, 0)?;
         let scale = chunk_at(&table, 1)?;
         let normed = self
@@ -2379,6 +2472,81 @@ mod tests {
     /// under its *diffusers* name and inserted under its *original* name, so a
     /// wrong rename (the `norm2`/`norm3` swap especially) fails here just as
     /// loudly as wrong math.
+    /// A per-token schedule whose values are all equal must produce output
+    /// bit-identical to the scalar schedule carrying that value.
+    ///
+    /// This is the real equality check for the compaction. The scalar path is
+    /// untouched by it — one row, no gather, pure broadcast — so if the
+    /// deduplication and `index_select` reproduce broadcasting exactly, the
+    /// two must agree to the bit. They exercise different code: the scalar
+    /// path skips the gather entirely, the per-token path builds a one-row
+    /// table and indexes every token into it.
+    #[test]
+    fn a_uniform_per_token_schedule_equals_the_scalar_schedule() {
+        let model = golden_model();
+        let x = synth("input.hidden_states", &[1, 16, 2, 4, 4]);
+        let context = synth("input.encoder_hidden_states", &[1, 6, 32]);
+        let tokens = 2 * 2 * 2;
+
+        let scalar = Tensor::from_vec(vec![500f32], 1, &Device::Cpu).unwrap();
+        let uniform = Tensor::from_vec(vec![500f32; tokens], (1, tokens), &Device::Cpu).unwrap();
+
+        let from_scalar = values(&model.forward(&x, &scalar, &context).unwrap());
+        let from_tokens = values(&model.forward(&x, &uniform, &context).unwrap());
+        assert_eq!(
+            from_scalar, from_tokens,
+            "the gathered per-token path must reproduce broadcasting exactly"
+        );
+    }
+
+    /// TI2V's real shape: frame 0 pinned clean, the rest on the step value.
+    ///
+    /// The schedule holds two distinct values by construction, so the compact
+    /// table must carry exactly two rows while every token still reads the row
+    /// it would have read from the dense `[1, tokens, 6, dim]` form — that
+    /// dense form is 2.01 GB at the 5B's 121-frame default and was held for
+    /// the whole forward.
+    #[test]
+    fn a_pinned_frame_schedule_compacts_to_its_distinct_rows() {
+        let model = golden_model();
+        let x = synth("input.hidden_states", &[1, 16, 2, 4, 4]);
+        let context = synth("input.encoder_hidden_states", &[1, 6, 32]);
+        let tokens = 2 * 2 * 2;
+
+        let mut schedule = vec![500f32; tokens];
+        for slot in schedule.iter_mut().take(tokens / 2) {
+            *slot = 0.0;
+        }
+        let per_token = Tensor::from_vec(schedule, (1, tokens), &Device::Cpu).unwrap();
+
+        let embedding = model.embed_timestep(&per_token, 1).unwrap();
+        assert_eq!(
+            embedding.projection.dims(),
+            &[1, 2, 6, model.config.dim],
+            "two distinct schedule values must embed as two rows, not {tokens}"
+        );
+        assert_eq!(embedding.tokens, tokens);
+
+        // Expanded, every token reads the row its own value produced.
+        let expanded = embedding.expand(&embedding.projection).unwrap();
+        assert_eq!(expanded.dims(), &[1, tokens, 6, model.config.dim]);
+        let rows = values(&expanded);
+        let width = 6 * model.config.dim;
+        let pinned = &rows[..width];
+        let noise = &rows[(tokens - 1) * width..];
+        assert_ne!(pinned, noise, "pinned and noise tokens must differ");
+        for token in 0..tokens / 2 {
+            assert_eq!(&rows[token * width..(token + 1) * width], pinned);
+        }
+        for token in tokens / 2..tokens {
+            assert_eq!(&rows[token * width..(token + 1) * width], noise);
+        }
+
+        let out = model.forward(&x, &per_token, &context).unwrap();
+        assert_eq!(out.dims(), &[1, 16, 2, 4, 4]);
+        assert!(values(&out).iter().all(|v| v.is_finite()));
+    }
+
     #[test]
     fn golden_parity_with_diffusers() {
         let model = golden_model();
@@ -2394,7 +2562,7 @@ mod tests {
             .freqs(grid.0, grid.1, grid.2, &Device::Cpu)
             .unwrap();
         let mut hidden = model.patchify(&x).unwrap();
-        let (temb, timestep_proj) = model.embed_timestep(&timestep, batch).unwrap();
+        let timestep_embedding = model.embed_timestep(&timestep, batch).unwrap();
         let ctx = model
             .text_embedding_out
             .forward(
@@ -2410,13 +2578,13 @@ mod tests {
         let mut worst = 0.0f64;
         for (i, block) in model.blocks.iter().enumerate() {
             hidden = block
-                .forward(&hidden, &ctx, &timestep_proj, &cos, &sin)
+                .forward(&hidden, &ctx, &timestep_embedding, &cos, &sin)
                 .unwrap();
             let err = max_abs_diff(&values(&hidden), GOLDEN_BLOCK_OUTPUTS[i]);
             assert!(err < GOLDEN_TOLERANCE, "block {i} max error {err:e}");
             worst = worst.max(err);
         }
-        let _ = temb;
+        let _ = &timestep_embedding;
 
         let out = model.forward(&x, &timestep, &context).unwrap();
         assert_eq!(out.dims(), &[1, 16, 2, 4, 4]);

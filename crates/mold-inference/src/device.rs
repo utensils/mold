@@ -1122,9 +1122,19 @@ pub fn wan_activation_budget_bytes(
     let attention_output = 2 * dim * BF16_BYTES;
 
     let modulation = if geometry.per_token_timesteps {
-        // The forward-wide `timestep_proj` table plus the one a block
-        // materializes from it.
-        2 * WAN_MODULATION_COMPONENTS * dim * F32_BYTES
+        // One block's expanded `[1, tokens, 6, dim]` modulation table.
+        //
+        // This used to be charged twice: the forward-wide `timestep_proj` was
+        // dense too, so a per-token schedule held one table for the whole
+        // forward *and* built another in every block. `WanTimestepEmbedding`
+        // now keeps the forward-wide copy at its handful of distinct rows
+        // (~150 KiB instead of 1.87 GiB at the 5B's 121-frame default), so
+        // only the per-block expansion remains.
+        //
+        // Charging the retired term made admission refuse a 121-frame 1280x704
+        // image-to-video render at ~25.9 GB against ~24.8 GB usable — a shape
+        // whose recorded measurement is 18,460 MiB.
+        WAN_MODULATION_COMPONENTS * dim * F32_BYTES
     } else {
         0
     };
