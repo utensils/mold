@@ -277,6 +277,48 @@ pub(crate) fn rejection_suggestion(hint: Option<ActivationHint>) -> &'static str
     }
 }
 
+/// [`rejection_suggestion`] with the resolved model name in hand, so a video
+/// rejection can name a tier the user is not already on.
+///
+/// `(e.g. ':q8')` is circular advice for someone whose request just failed
+/// *on* `:q8` — the next lever down is `:q5`, and below that the shape itself.
+pub(crate) fn rejection_suggestion_for_model(
+    hint: Option<ActivationHint>,
+    model_name: &str,
+) -> String {
+    let video = hint.is_some_and(|h| h.family.is_full_weight_video());
+    if !video {
+        return rejection_suggestion(hint).to_string();
+    }
+    // Only name a tier when the model's own tag proves the ladder exists.
+    //
+    // An untagged name, an opaque `cv:`/`hf:` id, or a family that ships no
+    // quantized tier at all must not be told to try `:q8`: every shipped
+    // LTX-Video checkpoint is `:bf16`-only, so naming a quantization there
+    // sends the user after a variant that does not exist.
+    let next_tier = match model_name.rsplit_once(':').map(|(_, tag)| tag) {
+        Some("q8") => Some("':q5'"),
+        Some("q5") => Some("':q4'"),
+        // Already the smallest tier that ships: the levers left are the shape
+        // and the card.
+        Some("q4") => {
+            return "Try reducing --frames or --width/--height, or close other GPU apps — \
+                    this is already the smallest quantized tier."
+                .to_string();
+        }
+        _ => None,
+    };
+    match next_tier {
+        Some(next) => format!(
+            "Try reducing --frames or --width/--height, use a smaller quantized \
+             variant (e.g. {next}), or close other GPU apps."
+        ),
+        None => "Try reducing --frames or --width/--height, use a quantized variant if \
+                 one is published for this model, or close other GPU apps."
+            .to_string(),
+    }
+}
+
 /// Pure inner: given an `available_bytes` budget and the active model's
 /// reclaimable VRAM, decide whether the new model fits. Adding
 /// `active_vram_bytes` to `available_bytes` accounts for the currently-loaded
@@ -464,13 +506,13 @@ fn preflight_memory_guard_with_available_and_policy_for_request(
     if qwen_family && peak_with_activation <= effective_available {
         return Ok(());
     }
-    let suggestion = rejection_suggestion(hint);
+    let suggestion = rejection_suggestion_for_model(hint, model_name);
 
     check_model_memory_budget(
         model_name,
         peak_with_activation,
         effective_available,
-        suggestion,
+        &suggestion,
     )
 }
 
@@ -500,6 +542,20 @@ fn base_peak_memory_for_paths(
 
     mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Sequential)
 }
+
+/// The `MEMORY_BUDGET_HEADROOM` baked into `estimate_peak_memory`.
+///
+/// It is a stand-in for activation and fragmentation the generic estimate does
+/// not model. The request-aware wan path models both — `wan_admission`'s term
+/// is fitted to whole-process peaks measured on real hardware — so charging
+/// both there counts fragmentation twice, which pushed the shipped 53-frame
+/// A14B default to ~26.9 GB against ~25.2 GB usable and refused a render that
+/// measures 23,975 MiB and completes.
+///
+/// Deliberately NOT subtracted inside `base_peak_memory_for_paths`: that
+/// function also serves the model-load guard, which has no request, prices
+/// activations with the generic estimate, and still needs the headroom.
+const WAN_REQUEST_AWARE_HEADROOM_BYTES: u64 = 2_000_000_000;
 
 fn activation_memory_for_estimate(hint: Option<ActivationHint>, qwen_quantized: bool) -> u64 {
     if qwen_quantized {
@@ -736,7 +792,7 @@ pub(crate) fn preflight_planned_memory_guard(
             predicted_peak_bytes,
             free,
             active_vram_bytes,
-            rejection_suggestion(hint),
+            &rejection_suggestion_for_model(hint, model_name),
         )
     }
 
@@ -1130,7 +1186,18 @@ pub(crate) fn estimate_generation_memory_for_request(
         .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
     let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
         && transformer_path_is_gguf(paths);
-    let activation = request_sensitive_activation_memory(req, hint, qwen_quantized);
+    // Wan's token grid and per-token slope are properties of the checkpoint,
+    // so price against its own header when one is reachable rather than the
+    // conservative A14B fallback.
+    let wan_geometry = hint
+        .filter(|h| h.family == ActivationFamily::WanVideo)
+        .and_then(|_| crate::wan_admission::checkpoint_geometry_cached(&paths.transformer));
+    let activation = request_sensitive_activation_memory_with_wan_geometry(
+        req,
+        hint,
+        qwen_quantized,
+        wan_geometry,
+    );
     let conservative_block_offload = server_offload_enabled_for_paths_with_request(
         paths,
         hint,
@@ -1172,7 +1239,7 @@ pub(crate) fn estimate_generation_memory_for_request(
             (estimate.peak_bytes, activation)
         }
         None => {
-            let base_peak = base_peak_memory_for_paths(
+            let mut base_peak = base_peak_memory_for_paths(
                 paths,
                 hint,
                 streaming,
@@ -1180,7 +1247,19 @@ pub(crate) fn estimate_generation_memory_for_request(
                 qwen_quantized,
                 gemma_competes,
             );
-            let activation = request_sensitive_activation_memory(req, hint, qwen_quantized);
+            if hint.is_some_and(|h| h.family == ActivationFamily::WanVideo) {
+                base_peak = base_peak.saturating_sub(WAN_REQUEST_AWARE_HEADROOM_BYTES);
+            }
+            // Carry the wan checkpoint geometry in here too. Wan is never
+            // streaming, so this arm is the only one it takes — recomputing
+            // without the geometry silently discarded the header read and
+            // priced every wan request with the A14B fallback.
+            let activation = request_sensitive_activation_memory_with_wan_geometry(
+                req,
+                hint,
+                qwen_quantized,
+                wan_geometry,
+            );
             (base_peak.saturating_add(activation), activation)
         }
     };
@@ -1197,8 +1276,23 @@ pub(crate) fn estimate_generation_memory_for_request(
     let under_memory_pressure = available_memory_bytes
         .is_some_and(|available| eager_peak > available.saturating_mul(9) / 10);
     let qwen_family = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit);
+    // Wan joins Qwen-Image on the un-derated cap, for the same reason and now
+    // with the evidence to back it.
+    //
+    // The 90% cap is a proxy for "the estimate is a heuristic, so leave room".
+    // Wan's is no longer a heuristic: it is a measured per-token slope plus a
+    // measured flat term, validated against four points on real hardware, and
+    // the family is phase-sequential — the UMT5 encoder is dropped before the
+    // transformer denoises, so the peak this predicts is the whole peak.
+    //
+    // Derating it a second time is not conservatism, it is a wrong answer: the
+    // shipped 53-frame A14B default measures 23,975 MiB on a 24 GB card, so a
+    // 90% cap refuses the tier's own default at the shape it was chosen for.
+    // Admission still refuses 81 frames, which is the shape that actually
+    // OOM'd.
+    let wan_family = hint.is_some_and(|h| h.family == ActivationFamily::WanVideo);
     let fits_available_memory = available_memory_bytes.map(|available| {
-        if qwen_family {
+        if qwen_family || wan_family {
             peak <= available
         } else {
             peak <= available.saturating_mul(9) / 10
@@ -1217,13 +1311,37 @@ pub(crate) fn estimate_generation_memory_for_request(
     }
 }
 
+#[cfg(test)]
 fn request_sensitive_activation_memory(
     req: &GenerateRequest,
     hint: Option<ActivationHint>,
     qwen_quantized: bool,
 ) -> u64 {
+    request_sensitive_activation_memory_with_wan_geometry(req, hint, qwen_quantized, None)
+}
+
+/// As [`request_sensitive_activation_memory`], with the wan checkpoint's real
+/// geometry when the caller has read its header.
+///
+/// Wan is the one family whose activation cost cannot be recovered from the
+/// request alone: the token grid depends on which VAE generation the
+/// checkpoint pairs with, and the per-token slope on its width. Callers
+/// without a path pass `None` and get the A14B shape, which is the largest
+/// shipped tier and therefore the conservative choice for admission.
+fn request_sensitive_activation_memory_with_wan_geometry(
+    req: &GenerateRequest,
+    hint: Option<ActivationHint>,
+    qwen_quantized: bool,
+    wan_geometry: Option<mold_inference::device::WanActivationGeometry>,
+) -> u64 {
     let batch = u64::from(req.batch_size.max(1));
-    let cfg_factor = if req.guidance > 1.0 && req.negative_prompt.is_some() {
+    // Wan prices its own CFG: `wan::pipeline::needs_cfg_pass` keys on guidance
+    // alone, and an absent negative is filled engine-side with the tuned
+    // default, so the `negative_prompt.is_some()` gate below is wrong for it.
+    // The two forwards are also sequential, so CFG is a bounded additive term
+    // rather than a multiplier — see `crate::wan_admission`.
+    let wan = hint.is_some_and(|h| h.family == ActivationFamily::WanVideo);
+    let cfg_factor = if !wan && req.guidance > 1.0 && req.negative_prompt.is_some() {
         2
     } else {
         1
@@ -1232,7 +1350,17 @@ fn request_sensitive_activation_memory(
     // of image pixel area: the pixel-area heuristic scaled by latent frames
     // under-counted the 1024x1024 x 97 frame stage-2 shape by several GB
     // (#641). Price it from the same token model admission uses.
-    let base = if hint.is_some_and(|h| h.family.streaming_transformer()) {
+    let base = if wan {
+        // Wan owns its own token model, including its own CFG treatment, so
+        // it bypasses the pixel-area estimate and the `cfg_factor` above. It
+        // does NOT bypass the per-request tail below: an I2V request carries a
+        // source image and the distill tiers ship two adapters, both of which
+        // are real resident memory.
+        crate::wan_admission::wan_activation_bytes(
+            crate::wan_admission::WanShapeHint::from_request(req),
+            wan_geometry.unwrap_or_else(mold_inference::device::WanActivationGeometry::a14b),
+        )
+    } else if hint.is_some_and(|h| h.family.streaming_transformer()) {
         // Cold-cache fallback: no checkpoint header has been read here, so the
         // AdaLN width is unknown and falls back to the six-component default.
         // The authoritative path in `estimate_generation_memory_for_request`
@@ -1247,7 +1375,7 @@ fn request_sensitive_activation_memory(
 
     let mut activation = base.saturating_mul(batch).saturating_mul(cfg_factor);
 
-    if hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit) {
+    if !wan && hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit) {
         if let Some(images) = req.edit_images.as_ref().filter(|images| !images.is_empty()) {
             let target_pixels = u64::from(req.width)
                 .saturating_mul(u64::from(req.height))

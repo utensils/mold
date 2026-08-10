@@ -931,6 +931,208 @@ pub fn ltx2_activation_budget_bytes(
         .saturating_add(LTX2_FIXED_WORKSPACE_BYTES)
 }
 
+// ── Wan activation model ────────────────────────────────────────────────────
+
+/// The Wan VAE groups four pixel frames into one latent frame after the
+/// ungrouped first frame, in both generations
+/// (`crates/mold-inference/src/wan/model/vae.rs:1398`).
+const WAN_TEMPORAL_STRIDE: u64 = 4;
+
+/// Query-chunk width `math_attention_chunk_size` picks on CUDA
+/// (`crates/mold-inference/src/attention.rs:206-218`). The chunk bounds the
+/// query axis of the score matrix; the key axis stays the full token count,
+/// which is what makes the score tensor a *per-token* cost.
+const WAN_ATTENTION_QUERY_CHUNK: u64 = 512;
+
+/// Live `[1, T, dim]` BF16 buffers in a block's residual stream: the block
+/// input, the normalized copy, and the attention/FFN output
+/// (`wan/model/transformer.rs:866-906`).
+const WAN_RESIDUAL_LIVE_BUFFERS: u64 = 3;
+
+/// Live `[1, T, dim]` F32 buffers at a gated residual: the upcast hidden
+/// state, the upcast branch output, and their sum (`transformer.rs:885-888`
+/// and `:902-905`).
+const WAN_GATED_RESIDUAL_F32_BUFFERS: u64 = 3;
+
+/// Modulation components a block slices out of its timestep table —
+/// shift/scale/gate for attention and for the feed-forward
+/// (`transformer.rs:849-864`).
+const WAN_MODULATION_COMPONENTS: u64 = 6;
+
+/// Which VAE generation a checkpoint pairs with. Only the spatial stride
+/// differs for token math: 2.1 encodes 8:1 and 2.2 16:1, and the DiT's
+/// `(1, 2, 2)` patch halves each spatial axis again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WanVaeGeneration {
+    /// Wan 2.1 — 16-channel latents, 8:1 spatial.
+    V21,
+    /// Wan 2.2 — 48-channel latents, 16:1 spatial (TI2V-5B).
+    V22,
+}
+
+impl WanVaeGeneration {
+    /// Spatial compression of the VAE itself, before the DiT's patch.
+    pub const fn spatial_stride(self) -> u64 {
+        match self {
+            Self::V21 => 8,
+            Self::V22 => 16,
+        }
+    }
+}
+
+/// Checkpoint geometry the wan activation model prices against. Read from the
+/// DiT's own safetensors header, never from the model name — a repack or a
+/// community fine-tune carries its shape in the file, which is the same rule
+/// `wan::pipeline::detect_transformer_config` follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WanActivationGeometry {
+    /// Model width (`patch_embedding.weight[0]`).
+    pub dim: u64,
+    /// Feed-forward width (`blocks.0.ffn.0.weight[0]`).
+    pub ffn_dim: u64,
+    /// Attention heads — every shipped variant uses a 128-wide head.
+    pub num_heads: u64,
+    /// VAE generation, which sets the latent grid.
+    pub vae: WanVaeGeneration,
+    /// The DiT patch's spatial width (`patch_size.1`), which halves each
+    /// latent axis again. Read from the checkpoint rather than assumed: every
+    /// shipped variant is `(1, 2, 2)`, but a community fine-tune is exactly
+    /// the case a shape-driven probe exists to cover.
+    pub patch_spatial: u64,
+    /// Whether the checkpoint drives per-token timesteps. TI2V's latent
+    /// inpaint gives frame 0 its own timestep
+    /// (`wan/conditioning.rs:331-360`), which turns every block's modulation
+    /// table from one broadcast row into a full `[1, T, 6, dim]` F32 tensor.
+    pub per_token_timesteps: bool,
+}
+
+impl WanActivationGeometry {
+    /// Wan 2.1 T2V-1.3B.
+    pub const fn t2v_1_3b() -> Self {
+        Self {
+            dim: 1536,
+            ffn_dim: 8960,
+            num_heads: 12,
+            vae: WanVaeGeneration::V21,
+            patch_spatial: 2,
+            per_token_timesteps: false,
+        }
+    }
+
+    /// Wan 2.1 T2V-14B and both Wan 2.2 A14B experts.
+    pub const fn a14b() -> Self {
+        Self {
+            dim: 5120,
+            ffn_dim: 13824,
+            num_heads: 40,
+            vae: WanVaeGeneration::V21,
+            patch_spatial: 2,
+            per_token_timesteps: false,
+        }
+    }
+
+    /// Wan 2.2 TI2V-5B.
+    pub const fn ti2v_5b() -> Self {
+        Self {
+            dim: 3072,
+            ffn_dim: 14336,
+            num_heads: 24,
+            vae: WanVaeGeneration::V22,
+            patch_spatial: 2,
+            per_token_timesteps: true,
+        }
+    }
+}
+
+/// Token count for a wan render at `width × height × frames`.
+///
+/// `((F - 1) / 4 + 1)` latent frames, each contributing a patch grid that is
+/// the frame divided by the VAE stride and again by the DiT's patch width.
+pub fn wan_token_count(
+    width: u32,
+    height: u32,
+    frames: u32,
+    geometry: WanActivationGeometry,
+) -> u64 {
+    let latent_frames = (u64::from(frames.max(1)) - 1) / WAN_TEMPORAL_STRIDE + 1;
+    let axis = geometry
+        .vae
+        .spatial_stride()
+        .saturating_mul(geometry.patch_spatial.max(1));
+    let grid_h = (u64::from(height) / axis).max(1);
+    let grid_w = (u64::from(width) / axis).max(1);
+    latent_frames.saturating_mul(grid_h).saturating_mul(grid_w)
+}
+
+/// Peak transformer activation bytes for one wan forward at this shape.
+///
+/// Derived from the tensors `WanBlock::forward` actually materializes
+/// (`wan/model/transformer.rs:866-906`), priced per token of the `[1, T, dim]`
+/// hidden state. A block runs two gated-residual phases; they do not overlap,
+/// so the block's cost is the larger phase, not their sum:
+///
+/// * **self-attention phase** — the BF16 residual buffers, `q`/`k`/`v`, and the
+///   F32 upcast trio at the gate.
+/// * **feed-forward phase** — the same F32 trio plus the BF16 `[1, T, ffn_dim]`
+///   projection, which is the wider of the two on every shipped variant.
+///
+/// **The score matrix is the dominant term and is per-token.** Chunking bounds
+/// the *query* axis at [`WAN_ATTENTION_QUERY_CHUNK`], but the key axis is the
+/// full token count, so `[heads, 512, T]` costs `heads × 512 × 4` bytes for
+/// every token — 82 KiB/token at A14B's 40 heads, more than the whole residual
+/// stream. The softmax result is a second tensor of the same shape.
+///
+/// That linear form depends on chunking being active, which
+/// `math_attention_chunk_size` makes true on CUDA above 1,024 queries
+/// (`crates/mold-inference/src/attention.rs:206-218`). Below that the score
+/// matrix is the unchunked `[heads, T, T]`, and the two forms **coincide
+/// exactly at T = 1,024** because the chunked form counts both the score and
+/// the softmax copy (`2 × 512 = 1024`); under that threshold this estimate is
+/// conservative, over it chunking holds. A build with `flash-attn` compiled
+/// materializes no score matrix at all, so this over-estimates there — the
+/// safe direction for admission. Forcing `MOLD_ATTN_CHUNK=off` at a real video
+/// shape is the one case this does not model, and it OOMs on its own long
+/// before admission could help (`[40, 21840, 21840]` F32 is ~76 TB).
+///
+/// Per-token modulation is charged only when the checkpoint drives per-token
+/// timesteps: for a scalar timestep the table is a single broadcast row.
+pub fn wan_activation_budget_bytes(
+    width: u32,
+    height: u32,
+    frames: u32,
+    geometry: WanActivationGeometry,
+) -> u64 {
+    let dim = geometry.dim;
+    let residual = WAN_RESIDUAL_LIVE_BUFFERS * dim * BF16_BYTES;
+    let gated = WAN_GATED_RESIDUAL_F32_BUFFERS * dim * F32_BYTES;
+    let qkv = 3 * dim * BF16_BYTES;
+    let attention_phase = residual + gated + qkv;
+    let feed_forward_phase = residual + gated + geometry.ffn_dim * BF16_BYTES;
+    let block = attention_phase.max(feed_forward_phase);
+
+    // Score plus softmax, both `[heads, chunk, T]`. BF16, not F32:
+    // `q_chunk.matmul(&k_t)` inherits q/k's dtype
+    // (`crates/mold-inference/src/attention.rs:235`) and `softmax_last_dim`
+    // preserves it, and the wan compute dtype on CUDA is BF16
+    // (`gpu_dtype`).
+    let scores = 2 * geometry.num_heads * WAN_ATTENTION_QUERY_CHUNK * BF16_BYTES;
+    // `math_attention_chunked_flat` accumulates every chunk's `[heads, len,
+    // head_dim]` output and then `Tensor::cat` allocates the joined copy
+    // (`attention.rs:240-251`), so the output is live twice at the seam.
+    let attention_output = 2 * dim * BF16_BYTES;
+
+    let modulation = if geometry.per_token_timesteps {
+        // The forward-wide `timestep_proj` table plus the one a block
+        // materializes from it.
+        2 * WAN_MODULATION_COMPONENTS * dim * F32_BYTES
+    } else {
+        0
+    };
+
+    let per_token = block + scores + attention_output + modulation;
+    wan_token_count(width, height, frames, geometry).saturating_mul(per_token)
+}
+
 /// Map a manifest family slug (e.g. `"flux"`, `"sdxl"`, `"qwen-image"`) to the
 /// activation-budget family. Falls back to [`ActivationFamily::FluxDit`] for
 /// unknown slugs — the FLUX factor is the most common diffusion default and
@@ -3371,6 +3573,92 @@ mod tests {
             activation_family_for("bogus-family"),
             ActivationFamily::FluxDit
         );
+    }
+
+    #[test]
+    fn wan_token_count_follows_the_vae_generation_and_frame_grid() {
+        // 2.1 groups 4:1 temporally and 8:1 spatially, then the (1,2,2) patch
+        // halves each spatial axis: 832x480 -> 52 x 30.
+        let v21 = WanActivationGeometry::a14b();
+        let v22 = WanActivationGeometry::ti2v_5b();
+        assert_eq!(wan_token_count(832, 480, 53, v21), 14 * 30 * 52);
+        // The ungrouped first frame: 1 pixel frame is still 1 latent frame.
+        assert_eq!(wan_token_count(832, 480, 1, v21), 30 * 52);
+        // 2.2 is 16:1 spatially, so the same pixels are a quarter of the grid.
+        assert_eq!(wan_token_count(1280, 704, 121, v22), 31 * 22 * 40);
+        // Frames are the axis the old pixel-area estimate was blind to.
+        let short = wan_token_count(832, 480, 17, v21);
+        let long = wan_token_count(832, 480, 81, v21);
+        assert_eq!(long, short * 21 / 5);
+    }
+
+    #[test]
+    fn wan_activation_scales_with_frames_and_never_collapses_to_area() {
+        let geometry = WanActivationGeometry::a14b();
+        let short = wan_activation_budget_bytes(832, 480, 17, geometry);
+        let long = wan_activation_budget_bytes(832, 480, 81, geometry);
+        // 5 latent frames -> 21: the estimate must move by the token ratio,
+        // which is the whole point of #774. The generic pixel-area estimate
+        // returns the same number for both.
+        assert_eq!(long, short * 21 / 5);
+        assert!(
+            long > short,
+            "frames must move the wan activation estimate: {short} -> {long}"
+        );
+    }
+
+    #[test]
+    fn wan_attention_scores_dominate_the_per_token_slope() {
+        // Chunking bounds the query axis, not the key axis, so the score
+        // matrix is per-token and larger than the residual stream. If a future
+        // change prices it as flat workspace the estimate silently loses its
+        // dominant term.
+        let geometry = WanActivationGeometry::a14b();
+        let tokens = wan_token_count(832, 480, 53, geometry);
+        let per_token = wan_activation_budget_bytes(832, 480, 53, geometry) / tokens;
+        let scores = 2 * geometry.num_heads * WAN_ATTENTION_QUERY_CHUNK * F32_BYTES;
+        assert!(
+            scores > per_token / 2,
+            "score matrix {scores} should dominate the {per_token} B/token slope"
+        );
+    }
+
+    #[test]
+    fn wan_score_term_meets_the_unchunked_form_exactly_at_the_chunk_threshold() {
+        // The linear score term assumes `math_attention_chunk_size` is active,
+        // which it is on CUDA above 1,024 queries. At exactly the threshold the
+        // chunked estimate (score + softmax, each `[heads, 512, T]`) and the
+        // unchunked reality (`[heads, T, T]`) are the same number, because
+        // 2 x 512 = 1024. Below it this over-estimates, which is the safe
+        // direction; above it chunking holds. If either constant moves without
+        // the other, that continuity breaks and the model silently starts
+        // under-counting small shapes.
+        const THRESHOLD_TOKENS: u64 = 1024;
+        let heads = WanActivationGeometry::a14b().num_heads;
+        let chunked = 2 * heads * WAN_ATTENTION_QUERY_CHUNK * F32_BYTES * THRESHOLD_TOKENS;
+        let unchunked = heads * THRESHOLD_TOKENS * THRESHOLD_TOKENS * F32_BYTES;
+        assert_eq!(
+            chunked, unchunked,
+            "the chunked and unchunked score forms must meet at the threshold"
+        );
+    }
+
+    #[test]
+    fn wan_per_token_timesteps_only_charge_ti2v() {
+        // A scalar timestep broadcasts one modulation row; TI2V's latent
+        // inpaint makes it a full [1, T, 6, dim] table in every block.
+        let scalar = WanActivationGeometry {
+            per_token_timesteps: false,
+            ..WanActivationGeometry::ti2v_5b()
+        };
+        let per_token = WanActivationGeometry::ti2v_5b();
+        assert!(
+            wan_activation_budget_bytes(1280, 704, 121, per_token)
+                > wan_activation_budget_bytes(1280, 704, 121, scalar),
+        );
+        // The A14B pair drives a scalar timestep, so it must not be charged.
+        assert!(!WanActivationGeometry::a14b().per_token_timesteps);
+        assert!(!WanActivationGeometry::t2v_1_3b().per_token_timesteps);
     }
 
     /// `dtype_bytes` returns the right element width for activation budget math.

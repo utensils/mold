@@ -122,6 +122,37 @@ fn header_shapes(path: &Path) -> Result<Vec<(String, Vec<usize>)>> {
         .collect())
 }
 
+/// Activation geometry for admission, read from the checkpoint's own header.
+///
+/// Admission needs the same shape facts the engine derives, and it must get
+/// them through the same reader: [`header_shapes`] handles GGUF and
+/// safetensors alike, and four of the shipped wan tiers are GGUF. A second
+/// hand-rolled safetensors parser on the server side silently fell back for
+/// every one of them.
+///
+/// Returns `None` when the file is not a Wan DiT in a layout this engine
+/// recognizes; the caller keeps its conservative fallback rather than
+/// inventing a shape.
+pub fn activation_geometry(path: &Path) -> Option<crate::device::WanActivationGeometry> {
+    let config = detect_transformer_config(path).ok()?;
+    let vae = match config.in_dim {
+        48 => crate::device::WanVaeGeneration::V22,
+        16 | 36 => crate::device::WanVaeGeneration::V21,
+        _ => return None,
+    };
+    Some(crate::device::WanActivationGeometry {
+        dim: config.dim as u64,
+        ffn_dim: config.ffn_dim as u64,
+        num_heads: config.num_heads as u64,
+        vae,
+        patch_spatial: config.patch_size.1.max(1) as u64,
+        // Per-token timesteps are a property of the *request* — only the
+        // TI2V latent inpaint drives them — so the geometry does not decide
+        // it. The caller sets it from the request it is pricing.
+        per_token_timesteps: false,
+    })
+}
+
 /// Detect the VAE generation from the checkpoint's own key layout.
 ///
 /// Wan 2.2 nests its stages (`decoder.upsamples.{s}.upsamples.{j}`) while 2.1
