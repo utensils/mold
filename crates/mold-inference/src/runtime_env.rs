@@ -58,6 +58,7 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     "MOLD_QWEN3_VARIANT",
     "MOLD_RESERVE_VRAM_MB",
     "MOLD_T5_VARIANT",
+    "MOLD_UMT5_VARIANT",
     "MOLD_VAE_DTYPE",
     "MOLD_VAE_TILED",
     // #775 diagnostics: forcing the quantized-matmul fallback changes

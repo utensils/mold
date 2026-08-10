@@ -75,3 +75,11 @@ uat-*
 *.exr
 *.zip
 .superpowers/
+
+# Catalog tests write sidecar fixtures next to the crate root when they run
+# with a relative models dir; they are scratch, never sources.
+crates/*/cv-*/
+# CLI tests that exercise the real download path write a HF cache and a model
+# directory next to the crate root. Both are scratch.
+crates/*/.hf-cache/
+crates/mold-cli/ltx2-control-union-19b/

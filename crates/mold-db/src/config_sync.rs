@@ -839,6 +839,7 @@ mod tests {
         let cfg_cleared = Config {
             default_negative_prompt: None,
             t5_variant: None,
+            umt5_variant: None,
             qwen3_variant: None,
             ..Config::default()
         };

@@ -64,6 +64,7 @@ pub struct FrozenEngineConfig {
     pub qwen2_variant: Option<String>,
     pub qwen2_text_encoder_mode: Option<String>,
     pub ltx2_gemma_variant: Option<String>,
+    pub umt5_variant: Option<String>,
     /// Exact encoder artifacts materialized before scheduler admission. Empty
     /// fields mean the legacy non-planned factory path; the planned factory
     /// verifies every populated path is already local before constructing an
@@ -113,6 +114,10 @@ impl FrozenEngineConfig {
             ltx2_gemma_variant: runtime_environment
                 .value("MOLD_LTX2_GEMMA_VARIANT")
                 .map(str::to_string),
+            umt5_variant: runtime_environment
+                .value("MOLD_UMT5_VARIANT")
+                .map(str::to_string)
+                .or_else(|| config.umt5_variant.clone()),
             selected_t5_path: None,
             selected_qwen3_paths: Vec::new(),
             selected_qwen2_path: None,
@@ -702,13 +707,10 @@ where
         }
         // Wan resolves its geometry from the checkpoint's own tensor shapes at
         // load time, so one arm serves 2.1 and 2.2 and any future width.
-        "wan" => Ok(boxed_inference_engine(WanEngine::new(
-            model_name,
-            paths,
-            load_strategy,
-            gpu_ordinal,
-            shared_pool,
-        ))),
+        "wan" => Ok(boxed_inference_engine(
+            WanEngine::new(model_name, paths, load_strategy, gpu_ordinal, shared_pool)
+                .with_umt5_variant(frozen.umt5_variant.clone()),
+        )),
         family if mold_core::minimax_h3::is_family(family) => {
             let authority = frozen.h3_factory_authority.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(

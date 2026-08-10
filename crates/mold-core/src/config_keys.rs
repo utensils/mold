@@ -88,6 +88,12 @@ pub const ALL_KEYS: &[ConfigKeyInfo] = &[
         section: "General",
     },
     ConfigKeyInfo {
+        key: "umt5_variant",
+        value_type: ValueType::OptionalString,
+        env_var: Some("MOLD_UMT5_VARIANT"),
+        section: "General",
+    },
+    ConfigKeyInfo {
         key: "qwen3_variant",
         value_type: ValueType::OptionalString,
         env_var: Some("MOLD_QWEN3_VARIANT"),

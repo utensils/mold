@@ -280,6 +280,7 @@ pub enum RuntimeSemanticVariable {
     Ltx2Fp8WeightScaleMode,
     Ltx2GemmaDevice,
     Ltx2GemmaVariant,
+    Umt5Variant,
     Ltx2SpatialTile,
     Ltx2VaeDecodeChunkFrames,
     Ltx2VaeDecodeContextFrames,
@@ -334,6 +335,14 @@ pub struct ExecutionSemanticConfig {
     pub qwen2_variant: Option<String>,
     pub qwen2_text_encoder_mode: Option<String>,
     pub ltx2_gemma_variant: Option<String>,
+    /// Explicit Wan UMT5 encoder variant.
+    ///
+    /// A different encoder produces different embeddings and therefore a
+    /// different render, so it belongs in the execution-equivalence identity.
+    /// Skipped when absent so fingerprints for every family that has no UMT5
+    /// stay exactly as they were.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub umt5_variant: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub h3_factory_authority_sha256: Option<String>,
     pub attention_backend: SemanticAttentionBackend,
@@ -494,6 +503,7 @@ impl ExecutionSemanticConfig {
             qwen2_variant,
             qwen2_text_encoder_mode,
             ltx2_gemma_variant,
+            umt5_variant,
             // Selected artifacts are represented by component content/format
             // facts and the conservative exact runtime route in the enclosing
             // descriptor.
@@ -528,6 +538,7 @@ impl ExecutionSemanticConfig {
             qwen2_variant: qwen2_variant.clone(),
             qwen2_text_encoder_mode: qwen2_text_encoder_mode.clone(),
             ltx2_gemma_variant: ltx2_gemma_variant.clone(),
+            umt5_variant: umt5_variant.clone(),
             h3_factory_authority_sha256: h3_factory_authority
                 .as_ref()
                 .map(|authority| authority.identity_sha256().to_string()),
@@ -604,6 +615,7 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_LTX2_FP8_WEIGHT_SCALE_MODE" => RuntimeSemanticVariable::Ltx2Fp8WeightScaleMode,
         "MOLD_LTX2_GEMMA_DEVICE" => RuntimeSemanticVariable::Ltx2GemmaDevice,
         "MOLD_LTX2_GEMMA_VARIANT" => RuntimeSemanticVariable::Ltx2GemmaVariant,
+        "MOLD_UMT5_VARIANT" => RuntimeSemanticVariable::Umt5Variant,
         "MOLD_LTX2_SPATIAL_TILE" => RuntimeSemanticVariable::Ltx2SpatialTile,
         "MOLD_LTX2_VAE_DECODE_CHUNK_FRAMES" => RuntimeSemanticVariable::Ltx2VaeDecodeChunkFrames,
         "MOLD_LTX2_VAE_DECODE_CONTEXT_FRAMES" => {
@@ -3901,6 +3913,7 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             qwen2_variant,
             qwen2_text_encoder_mode,
             ltx2_gemma_variant,
+            umt5_variant,
             selected_t5_path,
             selected_qwen3_paths,
             selected_qwen2_path,
@@ -3928,6 +3941,9 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             .field("selected_qwen3_paths", selected_qwen3_paths)
             .field("selected_qwen2_path", selected_qwen2_path)
             .field("selected_gemma_paths", selected_gemma_paths);
+        if let Some(variant) = umt5_variant {
+            debug.field("umt5_variant", variant);
+        }
         if let Some(authority) = h3_factory_authority {
             debug.field("h3_factory_authority", &authority.identity_sha256());
         }
@@ -6010,6 +6026,7 @@ mod tests {
             qwen2_variant: None,
             qwen2_text_encoder_mode: None,
             ltx2_gemma_variant: None,
+            umt5_variant: None,
             selected_t5_path: None,
             selected_qwen3_paths: Vec::new(),
             selected_qwen2_path: None,
@@ -6076,6 +6093,7 @@ mod tests {
                 qwen2_variant: None,
                 qwen2_text_encoder_mode: None,
                 ltx2_gemma_variant: None,
+                umt5_variant: None,
                 h3_factory_authority_sha256: None,
                 attention_backend: SemanticAttentionBackend::Math,
                 attention_chunk: SemanticAttentionChunk::Auto,

@@ -552,6 +552,7 @@ mod tests {
             default_steps: 4,
             embed_metadata: true,
             t5_variant: None,
+            umt5_variant: None,
             qwen3_variant: None,
             output_dir: None,
             media_roots: None,
@@ -620,8 +621,9 @@ mod tests {
 
     #[test]
     fn all_keys_count() {
-        // 11 General + 8 Expand + 4 Logging + 8 RunPod + 9 Lambda = 40 static keys
-        assert_eq!(ALL_KEYS.len(), 43);
+        // 12 General + 8 Expand + 4 Logging + 8 RunPod + 9 Lambda static keys.
+        // General gained `umt5_variant` with the Wan quantized encoder (#778).
+        assert_eq!(ALL_KEYS.len(), 44);
     }
 
     #[test]

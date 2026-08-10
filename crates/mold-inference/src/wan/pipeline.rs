@@ -955,6 +955,8 @@ pub struct WanEngine {
     base: EngineBase<()>,
     shared_pool: Option<Arc<Mutex<SharedPool>>>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    /// Explicit UMT5 variant tag, or `None` for the auto policy.
+    umt5_variant: Option<String>,
 }
 
 impl WanEngine {
@@ -968,12 +970,19 @@ impl WanEngine {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             shared_pool,
+            umt5_variant: None,
             pending_placement: None,
         }
     }
 
     /// UMT5 weight shards. The manifest ships one fp16 safetensors, but the
     /// multi-shard field is the general contract.
+    /// Freeze the explicit UMT5 variant this render was planned with.
+    pub fn with_umt5_variant(mut self, variant: Option<String>) -> Self {
+        self.umt5_variant = variant;
+        self
+    }
+
     fn text_encoder_paths(&self) -> Result<Vec<PathBuf>> {
         let paths = &self.base.paths;
         if !paths.text_encoder_files.is_empty() {
@@ -988,6 +997,46 @@ impl WanEngine {
             .ok_or_else(|| {
                 anyhow::anyhow!("Wan: no UMT5 encoder weights configured for this model")
             })
+    }
+
+    /// Pick the UMT5 weights for this render.
+    ///
+    /// An explicit `--umt5-variant` / `MOLD_UMT5_VARIANT` wins. Otherwise the
+    /// shared resolver prefers FP16 on GPU when it fits and the largest GGUF
+    /// that does when it does not — a quantized GPU encode beats parking UMT5
+    /// on CPU, where it widens to F32.
+    ///
+    /// A configured `text_encoder_files` list that is already a single GGUF is
+    /// honoured as-is: a hand-pointed encoder is an explicit choice.
+    fn resolve_umt5_weights(
+        &self,
+        progress: &crate::progress::ProgressReporter,
+        device: &Device,
+    ) -> Result<(Vec<PathBuf>, bool)> {
+        let configured = self.text_encoder_paths()?;
+        let preference = self.umt5_variant.clone();
+        let already_gguf = configured
+            .iter()
+            .all(|path| crate::wan::experts::is_gguf(path));
+        if already_gguf || (preference.is_none() && configured.len() != 1) {
+            // Nothing to choose between: either the operator already pointed
+            // at a quantized file, or the model ships sharded FP16 weights the
+            // variant registry does not describe.
+            return Ok((configured, true));
+        }
+
+        let free_vram = crate::device::usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
+        let (path, on_gpu, _label) = crate::encoders::variant_resolution::resolve_umt5_variant(
+            progress,
+            preference.as_deref(),
+            device,
+            free_vram,
+            configured
+                .first()
+                .map(PathBuf::as_path)
+                .unwrap_or_else(|| Path::new("")),
+        )?;
+        Ok((vec![path], on_gpu))
     }
 
     fn tokenizer_path(&self) -> Result<PathBuf> {
@@ -1416,8 +1465,17 @@ impl WanEngine {
             ),
             || Ok(device.clone()),
         )?;
+        // Which UMT5 weights to read. The GGUF loader has existed and been
+        // tested since the family landed; what was missing was a way to select
+        // one, so every wan render read the 11.4 GB FP16 file.
+        let (encoder_paths, encoder_on_gpu) = self.resolve_umt5_weights(progress, &device)?;
+        let text_device = if encoder_on_gpu {
+            text_device
+        } else {
+            candle_core::Device::Cpu
+        };
         let mut encoder = WanTextEncoder::load_with_tokenizer(
-            &self.text_encoder_paths()?,
+            &encoder_paths,
             &text_device,
             encoder_dtype_for(&text_device, dtype),
             tokenizer,

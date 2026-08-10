@@ -153,6 +153,7 @@ mod tests {
             default_steps: 4,
             embed_metadata: true,
             t5_variant: None,
+            umt5_variant: None,
             qwen3_variant: None,
             output_dir: None,
             media_roots: None,
