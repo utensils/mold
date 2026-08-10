@@ -511,6 +511,7 @@ impl ExecutionSemanticConfig {
             selected_qwen3_paths: _,
             selected_qwen2_path: _,
             selected_gemma_paths: _,
+            selected_umt5_path: _,
             h3_factory_authority,
             runtime_environment,
             attention_backend,
@@ -1938,6 +1939,10 @@ fn concrete_artifacts_for_family(
             .cloned()
             .chain(paths.text_encoder_files.iter().cloned())
             .collect()
+    } else if let Some(path) = engine_config.selected_umt5_path.as_ref() {
+        // Wan's selected UMT5 GGUF fully replaces the manifest's FP16 shard:
+        // the tokenizer lives in `text_tokenizer`, not in this list.
+        vec![path.clone()]
     } else {
         paths.text_encoder_files.clone()
     };
@@ -3918,6 +3923,7 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             selected_qwen3_paths,
             selected_qwen2_path,
             selected_gemma_paths,
+            selected_umt5_path,
             h3_factory_authority,
             runtime_environment,
             attention_backend,
@@ -3941,8 +3947,13 @@ impl std::fmt::Debug for ExecutionFingerprintEngineConfig<'_> {
             .field("selected_qwen3_paths", selected_qwen3_paths)
             .field("selected_qwen2_path", selected_qwen2_path)
             .field("selected_gemma_paths", selected_gemma_paths);
+        // Both UMT5 fields are emitted only when present, so every fingerprint
+        // that predates the Wan quantized encoder keeps its exact bytes.
         if let Some(variant) = umt5_variant {
             debug.field("umt5_variant", variant);
+        }
+        if let Some(path) = selected_umt5_path {
+            debug.field("selected_umt5_path", path);
         }
         if let Some(authority) = h3_factory_authority {
             debug.field("h3_factory_authority", &authority.identity_sha256());
@@ -6031,6 +6042,7 @@ mod tests {
             selected_qwen3_paths: Vec::new(),
             selected_qwen2_path: None,
             selected_gemma_paths: Vec::new(),
+            selected_umt5_path: None,
             h3_factory_authority: None,
             runtime_environment: mold_inference::runtime_env::FrozenRuntimeEnvironment::default(),
             attention_backend: mold_inference::attention::AttentionBackend::Math,

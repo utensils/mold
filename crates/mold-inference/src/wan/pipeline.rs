@@ -951,12 +951,45 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
     Ok(latents)
 }
 
+/// Where the UMT5 encode runs.
+///
+/// Wan is sequential by construction: the encoder is loaded, used, and gone
+/// before the DiT is built, so the two never coexist in VRAM. The scheduler's
+/// text-encoder placement is shaped for families where they do, which on a
+/// 24 GB card means it parks UMT5 on CPU for every 5B and A14B checkpoint —
+/// and a CPU-parked UMT5 has to widen to F32 (candle has no CPU BF16 matmul),
+/// costing ~22.7 GB of host RAM and minutes per encode.
+///
+/// So when the variant resolver has *just measured* that the selected encoder
+/// fits in free VRAM right now, that measurement wins over the placement. This
+/// is not overriding the scheduler's grant: the grant covers the denoise peak,
+/// which is unchanged, and the encoder is released before that peak is
+/// reached. Placement still decides when the encoder genuinely does not fit.
+fn encode_device(placement: Device, execution: &Device, fits_on_gpu: bool) -> Device {
+    match (fits_on_gpu, placement.is_cpu(), execution.is_cpu()) {
+        // Placement parked it, but it fits and there is a real device to run
+        // it on — promote to the execution device.
+        (true, true, false) => execution.clone(),
+        // It does not fit: CPU regardless of what placement said.
+        (false, _, _) => Device::Cpu,
+        _ => placement,
+    }
+}
+
 pub struct WanEngine {
     base: EngineBase<()>,
     shared_pool: Option<Arc<Mutex<SharedPool>>>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
     /// Explicit UMT5 variant tag, or `None` for the auto policy.
     umt5_variant: Option<String>,
+    /// Exact encoder file admission already materialized, when it selected a
+    /// GGUF variant. Set, it is authoritative: the download happened before
+    /// the lease, so re-running the auto policy here could pick a tier that
+    /// is not on disk.
+    selected_umt5_path: Option<PathBuf>,
+    /// Encoder retained between requests under `MOLD_KEEP_TE_RAM=1`, parked on
+    /// host RAM. `None` in the default drop-and-reload mode.
+    retained_encoder: Option<WanTextEncoder>,
 }
 
 impl WanEngine {
@@ -971,7 +1004,9 @@ impl WanEngine {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             shared_pool,
             umt5_variant: None,
+            selected_umt5_path: None,
             pending_placement: None,
+            retained_encoder: None,
         }
     }
 
@@ -980,6 +1015,12 @@ impl WanEngine {
     /// Freeze the explicit UMT5 variant this render was planned with.
     pub fn with_umt5_variant(mut self, variant: Option<String>) -> Self {
         self.umt5_variant = variant;
+        self
+    }
+
+    /// Freeze the exact encoder file admission materialized for this render.
+    pub fn with_selected_umt5_path(mut self, path: Option<PathBuf>) -> Self {
+        self.selected_umt5_path = path;
         self
     }
 
@@ -1014,6 +1055,23 @@ impl WanEngine {
         device: &Device,
     ) -> Result<(Vec<PathBuf>, bool)> {
         let configured = self.text_encoder_paths()?;
+        // Admission already chose and downloaded a variant: that file is the
+        // route, and only the device is still open. Re-running the auto policy
+        // here would re-measure free VRAM against a different resident set and
+        // could name a tier that was never fetched.
+        if let Some(path) = &self.selected_umt5_path {
+            let on_gpu = crate::encoders::variant_resolution::umt5_fits_on_gpu(
+                device,
+                crate::device::usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0),
+                std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
+            );
+            progress.info(&format!(
+                "Using prepared UMT5 encoder {} on {}",
+                path.display(),
+                if on_gpu { "GPU" } else { "CPU" },
+            ));
+            return Ok((vec![path.clone()], on_gpu));
+        }
         let preference = self.umt5_variant.clone();
         let already_gguf = configured
             .iter()
@@ -1456,7 +1514,7 @@ impl WanEngine {
                     .map_err(|e| anyhow::anyhow!("Wan: loading UMT5 tokenizer failed: {e}"))?,
             ),
         };
-        let text_device = crate::device::resolve_device(
+        let placement_device = crate::device::resolve_device(
             Some(
                 self.pending_placement
                     .as_ref()
@@ -1469,17 +1527,29 @@ impl WanEngine {
         // tested since the family landed; what was missing was a way to select
         // one, so every wan render read the 11.4 GB FP16 file.
         let (encoder_paths, encoder_on_gpu) = self.resolve_umt5_weights(progress, &device)?;
-        let text_device = if encoder_on_gpu {
-            text_device
-        } else {
-            candle_core::Device::Cpu
+        let text_device = encode_device(placement_device, &device, encoder_on_gpu);
+        let encoder_dtype = encoder_dtype_for(&text_device, dtype);
+        // Reuse the parked encoder when this render was planned for the same
+        // weights, device, and dtype; otherwise the retained one is stale and
+        // is dropped before the fresh load so both are never resident.
+        let retained = self.retained_encoder.take();
+        let mut encoder = match retained {
+            Some(retained) if retained.matches(&encoder_paths, &text_device, encoder_dtype) => {
+                retained
+            }
+            stale => {
+                // Explicit: a `_` arm would keep the stale encoder's ~11.4 GB
+                // alive until the end of the match, i.e. across the fresh load.
+                drop(stale);
+                WanTextEncoder::load_with_tokenizer(
+                    &encoder_paths,
+                    &text_device,
+                    encoder_dtype,
+                    tokenizer,
+                )?
+            }
         };
-        let mut encoder = WanTextEncoder::load_with_tokenizer(
-            &encoder_paths,
-            &text_device,
-            encoder_dtype_for(&text_device, dtype),
-            tokenizer,
-        )?;
+        encoder.unpark()?;
         progress.phase_done(
             ProgressPhase::ModelLoad,
             "Loading UMT5-XXL encoder",
@@ -1511,11 +1581,30 @@ impl WanEngine {
             encode_start.elapsed(),
         );
 
-        // The encoder is 11.4 GB at fp16; it must be gone before the DiT loads.
-        encoder.drop_weights();
-        drop(encoder);
-        device.synchronize()?;
-        progress.info("UMT5 encoder dropped, VRAM freed");
+        // The encoder is 11.4 GB at fp16; it must be gone from the compute
+        // device before the DiT loads. Under `MOLD_KEEP_TE_RAM=1` it moves to
+        // host RAM instead of vanishing, so the next request skips the disk
+        // read; the VRAM is released either way.
+        // Metal is unified memory: "parking on CPU" copies within the same
+        // physical RAM, so every other family skips it there and so does wan.
+        if crate::device::keep_te_in_ram() && !text_device.is_metal() {
+            encoder.park_to_cpu()?;
+            let parked = encoder.is_parked();
+            self.retained_encoder = Some(encoder);
+            device.synchronize()?;
+            progress.info(if parked {
+                "UMT5 encoder parked on host RAM, VRAM freed"
+            } else {
+                // GGUF: device-tied storage parks by dropping, so the next
+                // request reloads — cheaper than the FP16 path's read anyway.
+                "UMT5 encoder dropped, VRAM freed"
+            });
+        } else {
+            encoder.drop_weights();
+            drop(encoder);
+            device.synchronize()?;
+            progress.info("UMT5 encoder dropped, VRAM freed");
+        }
 
         // ------------------------------------------------------------------
         // 2. Denoise
@@ -1821,6 +1910,11 @@ impl crate::engine::InferenceEngine for WanEngine {
     }
 
     fn unload(&mut self) {
+        // A parked encoder is ~11.4 GB of host RAM held by this engine. Unload
+        // means "give the resources back", so the retention opt-in does not
+        // survive it — the cache evicting this engine, or an explicit unload,
+        // releases it.
+        self.retained_encoder = None;
         self.base.unload();
     }
 
@@ -1863,6 +1957,38 @@ mod tests {
             scale: 1.0,
             expert,
         }
+    }
+
+    /// A CPU placement is not the last word when the encoder measurably fits.
+    ///
+    /// Placement is shaped for families where the encoder and the transformer
+    /// coexist. Wan releases the encoder before the DiT is built, so honouring
+    /// a CPU park it does not need costs an F32 widening (~22.7 GB host RAM)
+    /// and a CPU encode of a 5.7B-parameter model. The measurement the variant
+    /// resolver just took is the better authority — but only in that one
+    /// direction: it must never move an encoder onto a device it does not fit.
+    #[test]
+    fn a_fitting_encoder_beats_a_cpu_placement_but_never_the_reverse() {
+        let cuda = Device::new_cuda(0).ok();
+        let execution = cuda.clone().unwrap_or(Device::Cpu);
+
+        // Fits, placement parked it on CPU: promoted to the execution device.
+        let promoted = encode_device(Device::Cpu, &execution, true);
+        assert_eq!(promoted.is_cpu(), execution.is_cpu());
+
+        // Does not fit: CPU, whatever placement said.
+        assert!(encode_device(execution.clone(), &execution, false).is_cpu());
+        assert!(encode_device(Device::Cpu, &execution, false).is_cpu());
+
+        // A CPU-only host has nowhere to promote to; the fit flag must not
+        // conjure a device.
+        assert!(encode_device(Device::Cpu, &Device::Cpu, true).is_cpu());
+
+        // Placement already chose the device and it fits: left alone.
+        assert_eq!(
+            encode_device(execution.clone(), &execution, true).is_cpu(),
+            execution.is_cpu()
+        );
     }
 
     /// The defect this exists for: a HIGH/LOW pair applied to both experts.
