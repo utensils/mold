@@ -3911,6 +3911,67 @@ pub fn find_t5_variant(tag: &str) -> Option<&'static T5Variant> {
     known_t5_variants().iter().find(|v| v.tag == tag)
 }
 
+// ── Quantized UMT5 variant registry ─────────────────────────────────────────
+
+/// FP16 UMT5-XXL encoder size in bytes — the encoder every Wan checkpoint
+/// shares.
+///
+/// It is also the floor of a wan render's memory: the sequential weight peak is
+/// `max(encoder, transformer + vae)`, and 11.4 GB is larger than every shipped
+/// wan transformer except the A14B experts. Shrinking it is the one lever that
+/// moves every tier at once.
+pub const UMT5_FP16_SIZE: u64 = 11_366_399_385;
+
+/// A quantized UMT5 encoder variant available from HuggingFace.
+#[derive(Debug, Clone)]
+pub struct Umt5Variant {
+    pub tag: &'static str,
+    pub hf_repo: &'static str,
+    pub hf_filename: &'static str,
+    pub size_bytes: u64,
+}
+
+/// Known UMT5 quantized variants, sorted largest → smallest.
+///
+/// city96's `umt5-xxl-encoder-gguf` is the same publisher and conversion
+/// lineage as the T5 registry above, and the loader that reads them already
+/// exists (`wan::text::umt5::UMt5Encoder::from_gguf`). The publisher's own
+/// floor is Q5_K_M — "use Q5_K_M or larger" — so nothing smaller ships here;
+/// a text encoder that drifts takes the whole render with it, and the download
+/// saving below that point is marginal.
+///
+/// Sizes are the repository's own, read from the HF blob listing rather than
+/// from the survey that prompted this work: that report has Q5_K_M at 3.66 GB,
+/// which is in fact Q4_K_M's size. The real Q5_K_M is 4.15 GB.
+pub fn known_umt5_variants() -> &'static [Umt5Variant] {
+    static VARIANTS: &[Umt5Variant] = &[
+        Umt5Variant {
+            tag: "q8",
+            hf_repo: "city96/umt5-xxl-encoder-gguf",
+            hf_filename: "umt5-xxl-encoder-Q8_0.gguf",
+            size_bytes: 6_043_068_256,
+        },
+        Umt5Variant {
+            tag: "q6",
+            hf_repo: "city96/umt5-xxl-encoder-gguf",
+            hf_filename: "umt5-xxl-encoder-Q6_K.gguf",
+            size_bytes: 4_667_283_296,
+        },
+        Umt5Variant {
+            tag: "q5",
+            hf_repo: "city96/umt5-xxl-encoder-gguf",
+            hf_filename: "umt5-xxl-encoder-Q5_K_M.gguf",
+            size_bytes: 4_145_878_880,
+        },
+    ];
+    VARIANTS
+}
+
+/// Look up a UMT5 variant by tag.
+pub fn find_umt5_variant(tag: &str) -> Option<&'static Umt5Variant> {
+    known_umt5_variants().iter().find(|v| v.tag == tag)
+}
+
 // ── Quantized Qwen3 variant registry ──────────────────────────────────────────
 
 /// A quantized Qwen3 text encoder variant available from HuggingFace.
@@ -7603,6 +7664,57 @@ mod tests {
                 w[1].size_bytes,
             );
         }
+    }
+
+    #[test]
+    fn umt5_variants_are_ordered_gguf_and_stay_above_the_publisher_floor() {
+        let variants = known_umt5_variants();
+        assert!(!variants.is_empty());
+
+        // Largest to smallest: the auto policy walks this order and takes the
+        // first that fits, so a mis-ordered registry silently picks a smaller
+        // encoder than the card could hold.
+        for pair in variants.windows(2) {
+            assert!(
+                pair[0].size_bytes > pair[1].size_bytes,
+                "{} must be larger than {}",
+                pair[0].tag,
+                pair[1].tag
+            );
+        }
+
+        for variant in variants {
+            assert!(variant.hf_filename.ends_with(".gguf"), "{}", variant.tag);
+            // Every variant must actually save something against FP16, or it
+            // is not worth a second artifact.
+            assert!(variant.size_bytes < UMT5_FP16_SIZE, "{}", variant.tag);
+        }
+
+        // city96 publishes below Q5_K_M, but the publisher's own guidance is
+        // "use Q5_K_M or larger" — a drifting text encoder takes the whole
+        // render with it, and the download saving below that is marginal.
+        assert!(
+            variants.iter().all(|v| v.size_bytes >= 4_000_000_000),
+            "no variant may sit below the publisher's Q5_K_M floor"
+        );
+
+        assert_eq!(find_umt5_variant("q8").unwrap().tag, "q8");
+        assert_eq!(find_umt5_variant("q5").unwrap().tag, "q5");
+        assert!(find_umt5_variant("q3").is_none());
+        assert!(find_umt5_variant("nonexistent").is_none());
+    }
+
+    #[test]
+    fn umt5_fp16_size_matches_the_shared_wan_encoder_file() {
+        // The registry's FP16 constant and the file every wan manifest pulls
+        // must agree: the constant is what admission and the auto policy price
+        // against, and a drift would make both reason about a file that is not
+        // the one on disk.
+        let encoder = shared_wan_files()
+            .into_iter()
+            .find(|file| file.component == ModelComponent::TextEncoder)
+            .expect("wan ships a text encoder");
+        assert_eq!(encoder.size_bytes, UMT5_FP16_SIZE);
     }
 
     #[test]

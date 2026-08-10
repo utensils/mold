@@ -37,6 +37,7 @@ const STRIPPED_GLOBAL_KEYS: &[&str] = &[
     "embed_metadata",
     "default_negative_prompt",
     "t5_variant",
+    "umt5_variant",
     "qwen3_variant",
     "expand",
     "scheduler",
@@ -564,6 +565,10 @@ pub struct Config {
     /// An explicit quantized tag always uses that variant regardless of VRAM.
     #[serde(default)]
     pub t5_variant: Option<String>,
+    /// Quantized UMT5 encoder variant for Wan (`q8`, `q6`, `q5`, `fp16`,
+    /// `auto`). Wan's encoder is 11.4 GB at FP16 and is the floor of every
+    /// wan render's memory estimate.
+    pub umt5_variant: Option<String>,
 
     /// Preferred Qwen3 text encoder variant: "bf16" (default), "q8", "q6", "iq4", "q3", or "auto".
     /// "auto" selects the best variant that fits in GPU VRAM (with drop-and-reload).
@@ -784,6 +789,7 @@ impl Default for Config {
             default_steps: default_steps(),
             embed_metadata: default_embed_metadata(),
             t5_variant: None,
+            umt5_variant: None,
             qwen3_variant: None,
             output_dir: None,
             media_roots: None,

@@ -522,3 +522,154 @@ pub(crate) fn resolve_qwen2_vl_gguf_path(
     download_single_file_sync(variant.hf_repo, variant.hf_filename, Some(CACHE_SUBDIR))
         .map_err(|e| anyhow::anyhow!("failed to download Qwen2.5-VL {}: {e}", variant.tag))
 }
+
+// ── UMT5 (Wan) ──────────────────────────────────────────────────────────────
+
+/// Resolve which UMT5 encoder variant a wan render should use, and where.
+///
+/// Returns `(encoder_path, on_gpu, device_label)`, matching
+/// [`resolve_t5_variant`].
+///
+/// Wan differs from the T5 families in one way that changes the auto policy:
+/// its engine is sequential by construction — the encoder is dropped before
+/// the transformer denoises — so the encoder never competes with the DiT for
+/// residency. What it does compete with is the *download*, and 11.4 GB of
+/// FP16 is the largest single artifact in a wan pull. It is also the floor of
+/// the render's memory estimate, since the sequential weight peak is
+/// `max(encoder, transformer + vae)`.
+///
+/// The auto rule therefore prefers the largest GGUF that fits over FP16 when
+/// the encoder would otherwise land on CPU. A CPU-parked UMT5 widens to F32
+/// (~22.7 GB of host RAM and a slow F32 encode of a 5.7 B-parameter model),
+/// which is the case a quantized GPU encode most clearly beats.
+pub(crate) fn resolve_umt5_variant(
+    progress: &ProgressReporter,
+    preference: Option<&str>,
+    gpu_device: &Device,
+    free_vram: u64,
+    default_umt5_path: &Path,
+) -> Result<(PathBuf, bool, String)> {
+    use mold_core::manifest::{find_umt5_variant, known_umt5_variants, UMT5_FP16_SIZE};
+
+    let is_cuda = gpu_device.is_cuda();
+    let is_metal = gpu_device.is_metal();
+
+    match preference {
+        Some(tag) if tag != "fp16" && tag != "auto" => {
+            let variant = find_umt5_variant(tag).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown UMT5 variant '{tag}'. Valid: fp16, auto, {}",
+                    known_umt5_variants()
+                        .iter()
+                        .map(|v| v.tag)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )
+            })?;
+            let path = resolve_umt5_gguf_path(progress, variant)?;
+            let on_gpu = should_use_gpu(
+                is_cuda,
+                is_metal,
+                free_vram,
+                t5_vram_threshold(variant.size_bytes),
+            );
+            progress.info(&format!(
+                "Using UMT5 {} ({}) on {} (explicit)",
+                variant.tag,
+                fmt_gb(variant.size_bytes),
+                if on_gpu { "GPU" } else { "CPU" },
+            ));
+            Ok((
+                path,
+                on_gpu,
+                if on_gpu {
+                    "GPU, quantized".to_string()
+                } else {
+                    "CPU, quantized".to_string()
+                },
+            ))
+        }
+
+        Some("fp16") => {
+            let on_gpu = should_use_gpu(
+                is_cuda,
+                is_metal,
+                free_vram,
+                t5_vram_threshold(UMT5_FP16_SIZE),
+            );
+            let label = if on_gpu { "GPU" } else { "CPU" };
+            progress.info(&format!("Using FP16 UMT5 on {label} (explicit)"));
+            Ok((default_umt5_path.to_path_buf(), on_gpu, label.to_string()))
+        }
+
+        _ => {
+            if fits_in_memory(
+                is_cuda,
+                is_metal,
+                free_vram,
+                t5_vram_threshold(UMT5_FP16_SIZE),
+            ) {
+                progress.info(&format!(
+                    "Loading FP16 UMT5 on GPU ({} free)",
+                    fmt_gb(free_vram),
+                ));
+                return Ok((default_umt5_path.to_path_buf(), true, "GPU".to_string()));
+            }
+
+            // FP16 does not fit: the largest GGUF that does beats parking the
+            // encoder on CPU, where it widens to F32.
+            if is_cuda || is_metal {
+                for variant in known_umt5_variants() {
+                    if fits_in_memory(
+                        is_cuda,
+                        is_metal,
+                        free_vram,
+                        t5_vram_threshold(variant.size_bytes),
+                    ) {
+                        let path = resolve_umt5_gguf_path(progress, variant)?;
+                        progress.info(&format!(
+                            "FP16 UMT5 ({}) exceeds free VRAM ({}). Using UMT5 {} ({}) on GPU.",
+                            fmt_gb(UMT5_FP16_SIZE),
+                            fmt_gb(free_vram),
+                            variant.tag,
+                            fmt_gb(variant.size_bytes),
+                        ));
+                        return Ok((path, true, format!("GPU, quantized {}", variant.tag)));
+                    }
+                }
+            }
+
+            progress.info(&format!(
+                "Loading FP16 UMT5 on CPU ({} free, no variant fits on GPU)",
+                fmt_gb(free_vram),
+            ));
+            Ok((default_umt5_path.to_path_buf(), false, "CPU".to_string()))
+        }
+    }
+}
+
+/// Cache-or-download one UMT5 GGUF, deduped under `shared/wan/umt5-gguf`.
+pub(crate) fn resolve_umt5_gguf_path(
+    progress: &ProgressReporter,
+    variant: &mold_core::manifest::Umt5Variant,
+) -> Result<PathBuf> {
+    use mold_core::download::{cached_file_path, download_single_file_sync};
+
+    const SUBDIR: &str = "shared/wan/umt5-gguf";
+    if let Some(path) = cached_file_path(variant.hf_repo, variant.hf_filename, Some(SUBDIR)) {
+        return Ok(path);
+    }
+    progress.info(&format!(
+        "Downloading UMT5 {} ({})...",
+        variant.tag,
+        fmt_gb(variant.size_bytes),
+    ));
+    tracing::info!(
+        variant = variant.tag,
+        repo = variant.hf_repo,
+        file = variant.hf_filename,
+        "downloading quantized UMT5 encoder"
+    );
+    download_single_file_sync(variant.hf_repo, variant.hf_filename, Some(SUBDIR))
+        .map_err(|error| anyhow::anyhow!("failed to download UMT5 {}: {error}", variant.tag))
+}
