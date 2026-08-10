@@ -1361,7 +1361,7 @@ fn validate_guidance_overrides(overrides: &Ltx2GuidanceOverrides) -> Result<(), 
 /// the rendered clip or the continuation contributes no new frames at all.
 fn validate_extend(req: &GenerateRequest, family: Option<&str>) -> Result<(), String> {
     if let Some(video) = &req.extend_video {
-        require_ltx2_family(family, "extend_video")?;
+        require_extend_capable_family(family, "extend_video")?;
         if req.extend_video_path.is_some() {
             return Err("extend_video_path cannot be combined with extend_video".to_string());
         }
@@ -1371,7 +1371,7 @@ fn validate_extend(req: &GenerateRequest, family: Option<&str>) -> Result<(), St
         validate_inline_media_size(video, "extend_video", MAX_INLINE_EXTEND_VIDEO_BYTES)?;
     }
     if let Some(path) = &req.extend_video_path {
-        require_ltx2_family(family, "extend_video_path")?;
+        require_extend_capable_family(family, "extend_video_path")?;
         if path.trim().is_empty() {
             return Err("extend_video_path must not be empty".to_string());
         }
@@ -1413,10 +1413,16 @@ fn validate_extend(req: &GenerateRequest, family: Option<&str>) -> Result<(), St
             "extend_overlap_frames must be >= 1 so the continuation has motion context".to_string(),
         );
     }
-    if overlap % 8 != 1 {
+    // The carryover frames re-encode through the family's own video VAE, so the
+    // overlap has to sit on that VAE's temporal grid — 8x causal for LTX-2,
+    // 4x for wan. A hardcoded 8 rejected every valid wan overlap.
+    let step = family.and_then(frame_step_for_family).unwrap_or(8);
+    if overlap % step != 1 {
+        let examples: Vec<String> = (0..4).map(|k| (k * step + 1).to_string()).collect();
         return Err(format!(
-            "extend_overlap_frames ({overlap}) must be 8k+1 (1, 9, 17, 25, …) so the carryover \
-             frames re-encode cleanly through the LTX-2 video VAE's 8x causal grid"
+            "extend_overlap_frames ({overlap}) must be {step}k+1 ({}, …) so the carryover \
+             frames re-encode cleanly through this family's video VAE temporal grid",
+            examples.join(", "),
         ));
     }
     if let Some(frames) = req.frames {
@@ -1428,6 +1434,26 @@ fn validate_extend(req: &GenerateRequest, family: Option<&str>) -> Result<(), St
         }
     }
     Ok(())
+}
+
+/// Families whose engines can continue an existing clip.
+///
+/// LTX-2 re-encodes the tail as a latent motion carryover. Wan has no latent
+/// motion tail, so it continues the way its chain seam does — the source
+/// clip's final frame becomes the continuation's image conditioning — which
+/// only an image-conditioned checkpoint can accept. The per-model
+/// `supports_extend` field is what narrows the family to those checkpoints;
+/// this gate only rejects families with no continuation path at all.
+fn require_extend_capable_family(family: Option<&str>, feature_name: &str) -> Result<(), String> {
+    match family {
+        Some("ltx2") | Some("wan") => Ok(()),
+        None => Err(format!(
+            "unknown model family; {feature_name} is only supported for LTX-2 / LTX-2.3 and Wan models"
+        )),
+        _ => Err(format!(
+            "{feature_name} is only supported for LTX-2 / LTX-2.3 and Wan models"
+        )),
+    }
 }
 
 fn require_ltx2_family(family: Option<&str>, feature_name: &str) -> Result<(), String> {
@@ -4528,11 +4554,44 @@ mod tests {
     }
 
     #[test]
-    fn extend_is_ltx2_only() {
+    fn extend_is_limited_to_families_with_a_continuation_path() {
         let mut req = extend_req();
         req.model = "ltx-video-0.9.6-distilled:bf16".to_string();
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("extend_video"), "got: {err}");
+    }
+
+    /// Wan continues a clip too (#783), but on its own VAE grid.
+    ///
+    /// The overlap re-encodes through the family's video VAE, and wan's
+    /// compresses time by 4 where LTX-2's compresses by 8 — a hardcoded 8
+    /// rejected every valid wan overlap.
+    #[test]
+    fn wan_extend_uses_wans_own_temporal_grid() {
+        let wan_req = |overlap: Option<u32>| {
+            let mut req = extend_req();
+            req.model = "wan22-ti2v-5b:fp16".to_string();
+            req.width = 704;
+            req.height = 384;
+            req.fps = Some(24);
+            req.frames = Some(49);
+            req.extend_overlap_frames = overlap;
+            req
+        };
+
+        // Wan carries exactly one frame — the seed — and 1 is on both grids.
+        assert!(validate_generate_request(&wan_req(Some(1))).is_ok());
+        // 5 and 13 are on 4k+1 but not on 8k+1: the old rule refused them.
+        for overlap in [5u32, 9, 13] {
+            assert!(
+                validate_generate_request(&wan_req(Some(overlap))).is_ok(),
+                "{overlap} is on wan's 4k+1 grid",
+            );
+        }
+        // Off wan's grid, and the message must name wan's step, not LTX-2's.
+        let err = validate_generate_request(&wan_req(Some(4))).unwrap_err();
+        assert!(err.contains("4k+1"), "got: {err}");
+        assert!(!err.contains("8k+1"), "got: {err}");
     }
 
     #[test]

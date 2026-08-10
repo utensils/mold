@@ -519,10 +519,8 @@ fn reject_unsupported_conditioning(req: &GenerateRequest) -> Result<()> {
             req.source_video.is_some() || req.source_video_path.is_some(),
             "source_video",
         ),
-        (
-            req.extend_video.is_some() || req.extend_video_path.is_some(),
-            "extend_video",
-        ),
+        // `extend_video` is handled before this guard (`extend_inner`), so
+        // reaching here with one set would mean the route was missed.
         // Core validation accepts source_image + mask_image as generic
         // inpainting, but Wan's conditioning never reads the mask — the
         // render would succeed while repainting everything, which reads as
@@ -1890,7 +1888,11 @@ impl crate::engine::InferenceEngine for WanEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
-        let result = self.generate_inner(req);
+        let result = if req.is_extend() {
+            self.extend_inner(req)
+        } else {
+            self.generate_inner(req)
+        };
         self.pending_placement = None;
         result
     }
@@ -1959,6 +1961,113 @@ impl crate::engine::InferenceEngine for WanEngine {
 pub const WAN_HANDOFF_DUPLICATED_FRAMES: u32 = 1;
 
 impl WanEngine {
+    /// Continue an existing clip in one request.
+    ///
+    /// This is the chain seam with the carryover coming from a file rather
+    /// than from the previous stage: the source's final frame becomes the
+    /// continuation's image conditioning, the continuation re-renders exactly
+    /// that frame, and the stitch drops it before appending. `overlap` is
+    /// therefore always [`WAN_HANDOFF_DUPLICATED_FRAMES`] in effect — a larger
+    /// value is accepted by validation for grid symmetry with LTX-2 but wan
+    /// has only ever one frame of real carryover, so anything above one is
+    /// refused here rather than silently trimming good frames.
+    ///
+    /// Resolution and fps are locked to the source: the stitched output is one
+    /// video, and rescaling or retiming mid-clip is always a surprise.
+    fn extend_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        let overlap = req.effective_extend_overlap_frames();
+        if overlap != WAN_HANDOFF_DUPLICATED_FRAMES {
+            bail!(
+                "Wan continuations carry exactly {WAN_HANDOFF_DUPLICATED_FRAMES} frame of \
+                 context — the source's final frame becomes the continuation's conditioning — \
+                 so extend_overlap_frames must be {WAN_HANDOFF_DUPLICATED_FRAMES}, not {overlap}. \
+                 (LTX-2's multi-frame overlap is a latent motion tail wan does not have.)"
+            );
+        }
+
+        let work_dir = tempfile::tempdir().context("Wan: creating the continuation temp dir")?;
+        let path = match (&req.extend_video, &req.extend_video_path) {
+            (Some(bytes), _) => {
+                let staged = work_dir.path().join("extend-source.mp4");
+                std::fs::write(&staged, bytes).context("Wan: staging the video to extend")?;
+                staged
+            }
+            (None, Some(path)) => PathBuf::from(path),
+            (None, None) => {
+                bail!("Wan: extend requested without extend_video or extend_video_path")
+            }
+        };
+        let (probe, source_frames) = crate::ltx2::media::decode_video_frames_from_path(&path)
+            .with_context(|| format!("Wan: decoding the video to extend ({})", path.display()))?;
+        let Some(last) = source_frames.last() else {
+            bail!(
+                "Wan: the video to extend ({}) decoded to zero frames",
+                path.display()
+            );
+        };
+
+        // Reject rather than rescale: the stitched result is one video.
+        if req.width != probe.width || req.height != probe.height {
+            bail!(
+                "the video to extend is {}x{} but this request renders {width}x{height}; \
+                 continuations must render at the source's resolution",
+                probe.width,
+                probe.height,
+                width = req.width,
+                height = req.height,
+            );
+        }
+        let fps = req.fps.unwrap_or(probe.fps);
+        if fps != probe.fps {
+            bail!(
+                "the video to extend runs at {} fps but this request renders {fps} fps; \
+                 continuations must render at the source's frame rate (pass --fps {} to match)",
+                probe.fps,
+                probe.fps,
+            );
+        }
+
+        let mut png = std::io::Cursor::new(Vec::new());
+        last.write_to(&mut png, image::ImageFormat::Png)
+            .context("Wan: encoding the continuation's seed frame")?;
+
+        let mut continuation_req = req.clone();
+        continuation_req.extend_video = None;
+        continuation_req.extend_video_path = None;
+        continuation_req.extend_overlap_frames = None;
+        continuation_req.source_image = Some(png.into_inner());
+        continuation_req.width = probe.width;
+        continuation_req.height = probe.height;
+        continuation_req.fps = Some(probe.fps);
+        continuation_req.output_format = Some(mold_core::OutputFormat::Apng);
+        continuation_req.gif_preview = false;
+
+        let response = self.generate_inner(&continuation_req)?;
+        let video = response
+            .video
+            .ok_or_else(|| anyhow::anyhow!("Wan: the continuation returned no video data"))?;
+        let continuation = crate::chain::decode_apng_to_rgb_frames(&video.data)?;
+        let stitched = crate::ltx2::stitch_extend_frames(source_frames, &continuation, overlap)?;
+
+        let requested_format = req.output_format.unwrap_or(mold_core::OutputFormat::Mp4);
+        let encoded =
+            crate::chain::encode_chain_frames(&stitched, probe.fps, requested_format, None)?;
+        for warning in &encoded.warnings {
+            self.base.progress.info(&warning.message());
+        }
+        Ok(GenerateResponse {
+            video: Some(mold_core::VideoData {
+                data: encoded.bytes,
+                format: encoded.format,
+                frames: stitched.len() as u32,
+                fps: probe.fps,
+                gif_preview: encoded.gif_preview,
+                ..video
+            }),
+            ..response
+        })
+    }
+
     /// Seed a continuation stage from the previous clip's last frame.
     ///
     /// Returns `false` when the carryover cannot be applied, which is not an
@@ -2473,11 +2582,13 @@ mod tests {
         assert!(engine.is_loaded());
     }
 
+    /// `extend_video` is deliberately absent from this list now (#783): it
+    /// routes to `extend_inner` before the guard, so rejecting it here would
+    /// refuse a continuation the engine can render.
     #[test]
     fn video_conditioning_is_rejected_but_images_are_accepted() {
         for mutate in [
             (|req: &mut GenerateRequest| req.source_video = Some(vec![1, 2, 3])) as fn(&mut _),
-            |req: &mut GenerateRequest| req.extend_video = Some(vec![1, 2, 3]),
             |req: &mut GenerateRequest| req.source_video_path = Some("clip.mp4".into()),
         ] {
             let mut req = request();

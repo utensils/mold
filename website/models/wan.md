@@ -222,6 +222,30 @@ mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" \
 Measured on an RTX 4090: 145 frames at 704x384, three stages, 141 s. The boat,
 gutter, and railing persist across both seams.
 
+### Extending a clip
+
+`--extend` continues an existing video in one request. It is the same seam as
+a sequence boundary with the carryover coming from a file: the source clip's
+final frame becomes the continuation's conditioning, so `--extend-overlap` is
+always **1** on wan — the multi-frame overlap LTX-2 accepts is a latent motion
+tail wan does not have, and a larger value is refused rather than silently
+trimming good frames.
+
+Resolution and fps are locked to the source clip; a mismatch is refused rather
+than rescaled, because the stitched result is one video. `/api/models`
+advertises `supports_extend` per checkpoint, from the same `source_image`
+contract the seam reads — a text-to-video checkpoint cannot extend.
+
+```bash
+mold run wan22-ti2v-5b:q8 "the paper boat drifts on past a storm drain" \
+  --extend clip.mp4 --extend-overlap 1 --frames 49 \
+  --width 704 --height 384 --fps 24
+```
+
+Measured on an RTX 4090: a 48-frame source plus a 49-frame continuation minus
+the 1-frame overlap = 96 frames, in 53 s, with the boat and gutter continuous
+across the join.
+
 ## Defaults and limits
 
 | Property   | `wan21-t2v-1.3b`  | `wan21-t2v-14b:*` | `wan22-ti2v-5b`     | `wan22-*-a14b:q5` | `wan22-*-a14b:q8` |

@@ -68,6 +68,29 @@ pub fn resolution_defaults(model: &str, family: &str) -> ResolutionDefaults {
 /// carryover, which `/api/models` advertises separately as `source_image` —
 /// so sequence *availability* stays a family fact while the seam options a
 /// picker may offer stay a checkpoint fact.
+/// Whether a concrete model can continue an existing clip.
+///
+/// LTX-2 extends through its latent motion carryover, so every checkpoint can.
+/// Wan has no latent motion tail: its continuation is seeded with the source
+/// clip's final frame, which a text-to-video checkpoint has no channel to
+/// accept — so wan's answer is per checkpoint, from the same `source_image`
+/// contract the chain carryover reads. An unclassified checkpoint is "unknown"
+/// and does not advertise extend.
+pub fn extend_capable_model(
+    family: &str,
+    source_image: Option<crate::types::SourceImageCapability>,
+) -> bool {
+    match family {
+        "ltx2" => true,
+        "wan" => matches!(
+            source_image,
+            Some(crate::types::SourceImageCapability::Required)
+                | Some(crate::types::SourceImageCapability::Optional)
+        ),
+        _ => false,
+    }
+}
+
 pub fn chain_capable_family(family: &str) -> bool {
     matches!(family, "ltx2" | "ltx-video" | "wan")
 }
@@ -168,7 +191,14 @@ pub fn build_model_catalog(
             modality: None,
             nsfw: None,
             supports_audio: None,
-            supports_extend: Some(manifest.family == "ltx2"),
+            // Wan continues a clip the way its chain seam does — the source's
+            // final frame becomes image conditioning — so only an
+            // image-conditioned checkpoint can extend. `source_image` is that
+            // classification (#783).
+            supports_extend: Some(extend_capable_model(
+                &manifest.family,
+                manifest.defaults.source_image,
+            )),
             supports_sequence: Some(chain_capable_family(&manifest.family)),
             extend_default_overlap_frames: Some(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
             guidance_capabilities: Some(crate::GuidanceCapabilities::for_recipe(
