@@ -713,6 +713,78 @@ async fn materialize_t5(
     Ok(())
 }
 
+/// Which UMT5 variant a device with `free` bytes of VRAM should render with.
+///
+/// The ladder mirrors `resolve_umt5_variant` in the engine, because admission
+/// and execution disagreeing here means a download the render then does not
+/// use. FP16 when it fits this device; otherwise the largest GGUF that does;
+/// otherwise FP16, which is what the manifest already ships — so the "fits
+/// nowhere" case downloads nothing and the engine parks the FP16 encoder.
+fn select_umt5_tag(preference: Option<&str>, free: u64) -> Result<&'static str, String> {
+    use mold_core::manifest::{find_umt5_variant, known_umt5_variants, UMT5_FP16_SIZE};
+
+    // The engine's own threshold, not a second constant: the encoder needs its
+    // weights plus activation headroom.
+    let fits = |bytes: u64| free >= mold_inference::device::t5_vram_threshold(bytes);
+    Ok(match preference {
+        Some("fp16") => "fp16",
+        Some("auto") | Some("") | None if fits(UMT5_FP16_SIZE) => "fp16",
+        // `known_umt5_variants` is ordered largest-first, so the first fit is
+        // the highest-quality one that fits.
+        Some("auto") | Some("") | None => known_umt5_variants()
+            .iter()
+            .find(|variant| fits(variant.size_bytes))
+            .map_or("fp16", |variant| variant.tag),
+        Some(tag) => {
+            find_umt5_variant(tag)
+                .ok_or_else(|| format!("unknown UMT5 encoder variant '{tag}'"))?
+                .tag
+        }
+    })
+}
+
+/// Wan's UMT5-XXL encoder.
+///
+/// Only the GGUF branch freezes a path. `fp16` leaves `selected_umt5_path`
+/// unset, which is what tells the engine the manifest encoder is the route.
+async fn materialize_umt5(
+    context: &DependencyContext<'_>,
+    selection: VariantSelection<'_>,
+    paths: &mut ModelPaths,
+    frozen: &mut mold_inference::FrozenEngineConfig,
+    pending: &mut Vec<MissingDependency>,
+) -> Result<(), String> {
+    use mold_core::manifest::find_umt5_variant;
+
+    let tag = select_umt5_tag(selection.preference, selection.free)?;
+    frozen.umt5_variant = Some(tag.to_string());
+    if tag == "fp16" {
+        frozen.selected_umt5_path = None;
+        return Ok(());
+    }
+    let variant =
+        find_umt5_variant(tag).ok_or_else(|| format!("unknown UMT5 encoder variant '{tag}'"))?;
+    let selected = ensure_downloaded(
+        context.state,
+        context.work_id,
+        DependencySpec {
+            models_root: context.models_root,
+            repo: variant.hf_repo,
+            filename: variant.hf_filename,
+            expected_bytes: Some(variant.size_bytes),
+            quantization: registry_quantization(variant.tag),
+            subdir: "shared/wan/umt5-gguf",
+        },
+        context.progress,
+        context.policy,
+    )
+    .await?
+    .into_path(pending);
+    paths.text_encoder_files = vec![selected.clone()];
+    frozen.selected_umt5_path = Some(selected);
+    Ok(())
+}
+
 async fn materialize_qwen3(
     context: &DependencyContext<'_>,
     model: &str,
@@ -1104,6 +1176,10 @@ async fn prepare_inputs_for_devices(
             .qwen2_variant
             .as_deref()
             .is_none_or(|value| value.is_empty() || value == "auto"),
+        "wan" => base
+            .umt5_variant
+            .as_deref()
+            .is_none_or(|value| value.is_empty() || value == "auto"),
         _ => false,
     };
 
@@ -1179,6 +1255,20 @@ async fn prepare_inputs_for_devices(
                 &selected_paths,
                 &mut frozen,
             ),
+            "wan" => {
+                materialize_umt5(
+                    &dependency_context,
+                    VariantSelection {
+                        preference: base.umt5_variant.as_deref(),
+                        auto_quantized_tag: None,
+                        free: device.available_vram_bytes,
+                    },
+                    &mut selected_paths,
+                    &mut frozen,
+                    &mut pending,
+                )
+                .await
+            }
             _ => Ok(()),
         };
         if let Err(error) = materialized {
@@ -1487,6 +1577,71 @@ mod tests {
     #[test]
     fn encoder_dependency_headroom_contract_is_decimal_two_gigabytes() {
         assert_eq!(ENCODER_DEPENDENCY_HEADROOM_BYTES, 2_000_000_000);
+    }
+
+    /// Admission's UMT5 ladder has to be the engine's ladder.
+    ///
+    /// If they disagree, admission downloads one tier and the engine renders
+    /// with another — which on the shipped 24 GB card is the difference
+    /// between a 6 GB fetch and an 11.4 GB one that was never needed.
+    #[test]
+    fn the_umt5_ladder_steps_down_with_free_vram_and_bottoms_out_at_fp16() {
+        use mold_core::manifest::{known_umt5_variants, UMT5_FP16_SIZE};
+        let threshold = mold_inference::device::t5_vram_threshold(UMT5_FP16_SIZE);
+
+        // Room for FP16: FP16, whether asked implicitly or by name.
+        assert_eq!(select_umt5_tag(None, threshold).unwrap(), "fp16");
+        assert_eq!(select_umt5_tag(Some("auto"), threshold).unwrap(), "fp16");
+        // A stored-but-empty preference is "auto", not a variant lookup.
+        assert_eq!(select_umt5_tag(Some(""), threshold).unwrap(), "fp16");
+
+        // One byte short of FP16: the largest GGUF that fits, which is the
+        // registry's first entry given its largest-first order.
+        let variants = known_umt5_variants();
+        let largest = variants.first().expect("the registry ships GGUF variants");
+        assert_eq!(
+            select_umt5_tag(None, threshold - 1).unwrap(),
+            largest.tag,
+            "just below the FP16 threshold must step to the largest GGUF, not to CPU FP16",
+        );
+        // Each successive tier is reachable by dropping below the one above it.
+        for pair in variants.windows(2) {
+            let below = mold_inference::device::t5_vram_threshold(pair[0].size_bytes) - 1;
+            assert_eq!(select_umt5_tag(None, below).unwrap(), pair[1].tag);
+        }
+
+        // Nothing fits: FP16, which the manifest already ships, so admission
+        // downloads nothing and the engine parks it.
+        assert_eq!(select_umt5_tag(None, 0).unwrap(), "fp16");
+
+        // Explicit beats auto in both directions, and an unknown tag is an
+        // error rather than a silent fallback.
+        assert_eq!(select_umt5_tag(Some("fp16"), 0).unwrap(), "fp16");
+        assert_eq!(
+            select_umt5_tag(Some(largest.tag), u64::MAX).unwrap(),
+            largest.tag,
+        );
+        assert!(select_umt5_tag(Some("q3"), u64::MAX).is_err());
+    }
+
+    /// A selected GGUF must be addressable: the arm that downloads it reads
+    /// repo, filename, and the dedupe subdir straight off the registry entry,
+    /// and the factory's prepared-artifact check resolves the same subdir.
+    #[test]
+    fn every_umt5_gguf_variant_is_a_complete_download_identity() {
+        for variant in mold_core::manifest::known_umt5_variants() {
+            assert!(!variant.hf_repo.is_empty(), "{} has no repo", variant.tag);
+            assert!(
+                variant.hf_filename.ends_with(".gguf"),
+                "{} is not a GGUF",
+                variant.tag
+            );
+            assert!(variant.size_bytes > 0, "{} has no size", variant.tag);
+            assert_eq!(
+                mold_core::manifest::find_umt5_variant(variant.tag).map(|found| found.tag),
+                Some(variant.tag),
+            );
+        }
     }
 
     struct TestDownloadAdapterGuard {

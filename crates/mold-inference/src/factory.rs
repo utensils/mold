@@ -73,6 +73,9 @@ pub struct FrozenEngineConfig {
     pub selected_qwen3_paths: Vec<PathBuf>,
     pub selected_qwen2_path: Option<PathBuf>,
     pub selected_gemma_paths: Vec<PathBuf>,
+    /// Exact Wan UMT5 encoder file admission materialized, when it chose a
+    /// GGUF variant. `None` means the manifest's FP16 encoder.
+    pub selected_umt5_path: Option<PathBuf>,
     /// Exact contract-only MiniMax H3 admission/factory authority. This is
     /// `None` for every runnable family and cannot activate H3 by itself.
     pub h3_factory_authority: Option<crate::FrozenH3FactoryAuthority>,
@@ -122,6 +125,7 @@ impl FrozenEngineConfig {
             selected_qwen3_paths: Vec::new(),
             selected_qwen2_path: None,
             selected_gemma_paths: Vec::new(),
+            selected_umt5_path: None,
             h3_factory_authority: None,
             runtime_environment,
             attention_backend: crate::attention::AttentionBackend::resolve(),
@@ -277,6 +281,22 @@ fn validate_prepared_quantized_dependencies(frozen: &FrozenEngineConfig) -> Resu
             variant.hf_repo,
             variant.hf_filename,
             "shared/qwen2-vl-gguf",
+        )?;
+    }
+    if let Some(path) = &frozen.selected_umt5_path {
+        let tag = frozen
+            .umt5_variant
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("prepared UMT5 path has no frozen variant"))?;
+        // `fp16` is the manifest's own encoder, not a shared-cache download,
+        // so admission never freezes a path for it.
+        let variant = mold_core::manifest::find_umt5_variant(tag)
+            .ok_or_else(|| anyhow::anyhow!("unknown prepared UMT5 variant '{tag}'"))?;
+        require_prepared_cache_entry(
+            path,
+            variant.hf_repo,
+            variant.hf_filename,
+            "shared/wan/umt5-gguf",
         )?;
     }
     Ok(())
@@ -469,6 +489,7 @@ where
         .chain(frozen.selected_qwen3_paths.iter())
         .chain(frozen.selected_qwen2_path.iter())
         .chain(frozen.selected_gemma_paths.iter())
+        .chain(frozen.selected_umt5_path.iter())
     {
         if !path.is_file() {
             bail!(
@@ -709,7 +730,8 @@ where
         // load time, so one arm serves 2.1 and 2.2 and any future width.
         "wan" => Ok(boxed_inference_engine(
             WanEngine::new(model_name, paths, load_strategy, gpu_ordinal, shared_pool)
-                .with_umt5_variant(frozen.umt5_variant.clone()),
+                .with_umt5_variant(frozen.umt5_variant.clone())
+                .with_selected_umt5_path(frozen.selected_umt5_path.clone()),
         )),
         family if mold_core::minimax_h3::is_family(family) => {
             let authority = frozen.h3_factory_authority.as_ref().ok_or_else(|| {
