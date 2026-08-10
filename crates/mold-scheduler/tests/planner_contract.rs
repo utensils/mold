@@ -1968,29 +1968,46 @@ fn only_model_unload_is_exempt_from_admission_pressure() {
 }
 
 #[test]
-fn model_unload_is_admitted_on_a_degraded_or_draining_device() {
-    // A wedged model is the usual cause of all three of these states, and it is
-    // still holding the memory. "Stop giving it new work" and "never let it
-    // release what it holds" are different statements.
-    for state in [
-        DeviceSnapshot::idle("gpu-0", 24 * GIB).with_health(DeviceHealth::Degraded),
-        DeviceSnapshot::idle("gpu-0", 24 * GIB).with_admin_state(DeviceAdminState::Draining),
-        DeviceSnapshot::idle("gpu-0", 24 * GIB).with_admin_state(DeviceAdminState::Disabled),
-    ] {
-        let label = format!("{:?}/{:?}", state.admin_state, state.health);
-        let plan = Planner::default()
-            .plan(&snapshot(
-                vec![state],
-                vec![unload("unload", vec![candidate("gpu-0", 1)]).with_hard_device("gpu-0")],
-                64,
-            ))
-            .expect("valid plan");
-        assert_eq!(
-            plan.blocked_reason(&WorkId::from("unload")),
-            None,
-            "unload must be admitted on {label}"
-        );
-    }
+fn model_unload_is_admitted_on_a_degraded_device() {
+    // Three consecutive failures degrade a worker, and a wedged model is
+    // exactly what produces those failures while still holding the memory --
+    // so this is the state where refusing an unload strands the user.
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![DeviceSnapshot::idle("gpu-0", 24 * GIB).with_health(DeviceHealth::Degraded)],
+            vec![unload("unload", vec![candidate("gpu-0", 1)]).with_hard_device("gpu-0")],
+            64,
+        ))
+        .expect("valid plan");
+
+    assert_eq!(plan.blocked_reason(&WorkId::from("unload")), None);
+    assert_eq!(
+        assignments(&plan).get("unload").map(String::as_str),
+        Some("gpu-0")
+    );
+}
+
+#[test]
+fn a_draining_device_is_reported_stopping_and_takes_no_releasing_work() {
+    // `accepts_releasing_work` ignores admin_state, but activity still gates,
+    // and the server never reports a draining device as Idle -- device_registry
+    // rewrites Draining+Idle to Stopping. Pinning that here so the exemption is
+    // not mistaken for something it does not deliver: a drain tears the worker
+    // down and drops the engine, and the teardown path returns the memory.
+    let draining =
+        DeviceSnapshot::busy("gpu-0", 24 * GIB, 5_000).with_admin_state(DeviceAdminState::Draining);
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![draining],
+            vec![unload("unload", vec![candidate("gpu-0", 1)]).with_hard_device("gpu-0")],
+            64,
+        ))
+        .expect("valid plan");
+
+    assert_eq!(
+        plan.blocked_reason(&WorkId::from("unload")),
+        Some(&BlockedReason::NoIdleDevice)
+    );
 }
 
 #[test]

@@ -2378,6 +2378,17 @@ fn teardown_inference_engines_safely(
         }
     }
 
+    // Dropping the engine is not enough on Metal. Devices are memoized per
+    // ordinal, so candle's caching allocator outlives every engine and only
+    // releases pooled buffers when someone waits on the queue. This is the one
+    // chokepoint every engine drop passes through -- TTL eviction, cached
+    // eviction, drain and shutdown alike -- so sweeping here keeps the freed
+    // bytes visible to the next `sampled_free_vram_bytes` instead of leaving
+    // the device looking full until something else happens to synchronize.
+    if count > 0 && worker.gpu.backend == mold_core::GpuBackend::Metal {
+        mold_inference::device::release_pooled_metal_memory(worker.gpu.ordinal);
+    }
+
     Ok(count)
 }
 

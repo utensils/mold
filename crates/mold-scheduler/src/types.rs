@@ -152,10 +152,20 @@ impl DeviceSnapshot {
     ///
     /// Being taken out of scheduling and being forbidden to free memory are
     /// different statements, and conflating them recreates the deadlock that
-    /// [`WorkKind::releases_resources`] exists to break: a wedged model is the
-    /// usual cause of Degraded, and of an operator Disabling or Draining the
-    /// device, while that same model is still holding the memory. Refusing the
-    /// unload there leaves no recovery short of restarting the process.
+    /// [`WorkKind::releases_resources`] exists to break. The reachable case is
+    /// **Degraded**: three consecutive failures degrade a worker, and a wedged
+    /// model is exactly what causes those failures while still holding the
+    /// memory — so refusing the unload there leaves no recovery short of
+    /// restarting the process.
+    ///
+    /// This keys on health alone and deliberately ignores `admin_state`, but
+    /// note that `activity` still gates through [`Self::is_idle_for`], so a
+    /// Draining device is *not* admitted in practice: the server reports it as
+    /// `Stopping`, never `Idle`. That is the right outcome rather than an
+    /// oversight — a drain tears the worker down and drops the engine on its
+    /// way out, and the teardown path returns the memory itself. Disabled and
+    /// StartupExcluded are likewise moot: neither has a worker, so neither
+    /// produces a candidate to schedule against.
     ///
     /// Quarantine is the one line this does not cross. A Poisoned or
     /// Unavailable device has a fatal context that must never be touched again

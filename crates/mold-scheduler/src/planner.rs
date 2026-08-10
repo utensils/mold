@@ -76,22 +76,25 @@ impl Planner {
             .map(|device| (device.id.clone(), device))
             .collect::<BTreeMap<_, _>>();
         // A device that only `accepts_releasing_work` still needs a slot in the
-        // matcher, or an unload queued against a degraded/disabled/draining GPU
-        // has nowhere to be matched and comes back `LowerPriorityOpening`.
-        // Ordinary work cannot reach those devices: `candidate_is_eligible`
-        // keeps gating it on `is_schedulable`.
-        let releasing_present = snapshot
+        // matcher, or an unload queued against a degraded GPU has nowhere to be
+        // matched and comes back `LowerPriorityOpening`. Ordinary work cannot
+        // reach those devices: `candidate_is_eligible` keeps gating it on
+        // `is_schedulable`, and `try_with` builds edges only from a work item's
+        // own candidates, so an extra slot is an isolated node that cannot
+        // change the matching.
+        //
+        // The filter is derived from `is_idle_for` rather than restating its
+        // rule, because `immediate_candidates` is selected with the same
+        // predicate and one candidate outside this slot set blocks its whole
+        // work item. The two must not drift.
+        let kinds_present = snapshot
             .work
             .iter()
-            .any(|item| item.kind.releases_resources());
+            .map(|item| item.kind)
+            .collect::<BTreeSet<_>>();
         let idle_device_ids = devices
             .iter()
-            .filter(|device| {
-                device.is_idle()
-                    || (releasing_present
-                        && device.accepts_releasing_work()
-                        && device.activity == DeviceActivity::Idle)
-            })
+            .filter(|device| kinds_present.iter().any(|kind| device.is_idle_for(*kind)))
             .map(|device| device.id.clone())
             .collect::<Vec<_>>();
 
