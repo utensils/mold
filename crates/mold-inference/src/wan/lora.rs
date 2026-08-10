@@ -386,13 +386,19 @@ fn canonical_stem(stem: &str) -> Option<String> {
 /// registry is built once per request and the branch is built once per module
 /// that the checkpoint actually has.
 enum WanLoraBranch {
-    /// `y += scale * ((x @ A^T) @ B^T)`.
+    /// `y += (x @ A^T) @ B'^T`, where `B' = scale * B`.
+    ///
+    /// The scale is folded into `B` once at build time rather than applied as
+    /// an `affine` on every forward. The adapter is built once per module and
+    /// the forward runs once per denoise step per module — ~400 patched
+    /// projections on the fast tier, doubled under CFG — so this removes a
+    /// kernel launch per projection per step, on a tier whose branch GEMMs are
+    /// launch-bound rather than FLOP-bound at rank 64.
     LowRank {
         /// `[rank, in_features]`.
         a: Tensor,
-        /// `[out_features, rank]`.
+        /// `[out_features, rank]`, pre-scaled.
         b: Tensor,
-        scale: f64,
     },
     /// `y += scale * (x @ diff^T)` — a full-weight `.diff` on a quantized
     /// projection. The merge-vs-branch reasoning on
@@ -402,9 +408,9 @@ enum WanLoraBranch {
     /// (`city96/ComfyUI-GGUF ops.py:176-190`). Cost: the delta resident in
     /// F32 and one extra dense matmul on the patched projection.
     Dense {
-        /// `[in_features, out_features]` — pre-transposed once at build.
+        /// `[in_features, out_features]` — pre-transposed and pre-scaled once
+        /// at build, for the same reason as [`WanLoraBranch::LowRank`].
         delta_t: Tensor,
-        scale: f64,
     },
 }
 
@@ -451,12 +457,12 @@ impl candle_core::Module for WanQuantizedLoraLinear {
             // broadcast form is the one that does not materialize a per-batch
             // copy of the adapter.
             match branch {
-                WanLoraBranch::LowRank { a, b, scale } => {
+                WanLoraBranch::LowRank { a, b } => {
                     let hidden = x.broadcast_matmul(&a.t()?)?;
-                    out = out.add(&hidden.broadcast_matmul(&b.t()?)?.affine(*scale, 0.0)?)?;
+                    out = out.add(&hidden.broadcast_matmul(&b.t()?)?)?;
                 }
-                WanLoraBranch::Dense { delta_t, scale } => {
-                    out = out.add(&x.broadcast_matmul(delta_t)?.affine(*scale, 0.0)?)?;
+                WanLoraBranch::Dense { delta_t } => {
+                    out = out.add(&x.broadcast_matmul(delta_t)?)?;
                 }
             }
         }
@@ -496,8 +502,10 @@ pub(crate) fn quantized_linear(
         match patch {
             WanLoraPatch::LowRank { a, b, scale } => branches.push(WanLoraBranch::LowRank {
                 a: a.to_device(device)?.to_dtype(DType::F32)?,
-                b: b.to_device(device)?.to_dtype(DType::F32)?,
-                scale: *scale,
+                // Fold the scale here, once, instead of on every forward.
+                b: b.to_device(device)?
+                    .to_dtype(DType::F32)?
+                    .affine(*scale, 0.0)?,
             }),
             WanLoraPatch::Delta { diff, scale } => {
                 if diff.dims() != [out_dim, in_dim] {
@@ -512,9 +520,9 @@ pub(crate) fn quantized_linear(
                     delta_t: diff
                         .to_device(device)?
                         .to_dtype(DType::F32)?
+                        .affine(*scale, 0.0)?
                         .t()?
                         .contiguous()?,
-                    scale: *scale,
                 });
             }
         }
