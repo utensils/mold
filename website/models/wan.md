@@ -183,6 +183,45 @@ endpoint latent frames through the same inpaint path diffusers' `last_image`
 uses. Any other keyframe layout is refused at admission — the family has no
 mid-clip keyframe path.
 
+## Sequences
+
+Wan renders multi-clip sequences, and `mold run --frames N` past the per-clip
+envelope auto-chains rather than failing. What crosses a clip boundary depends
+on the **checkpoint**, never the family, because wan has no latent motion tail:
+its smooth handoff is last-frame image conditioning, which only an
+image-conditioned checkpoint accepts.
+
+| Checkpoint                        | Seam                   | Why                                               |
+| --------------------------------- | ---------------------- | ------------------------------------------------- |
+| `wan22-ti2v-5b:*`                 | Continues              | The latent inpaint pins the seeded frame          |
+| `wan22-i2v-a14b:*`                | Continues              | The 36-channel mask+latent concat takes the frame |
+| `wan21-t2v-*`, `wan22-t2v-a14b:*` | Join / Cut / Crossfade | No conditioning channel at all                    |
+
+That classification is exactly the `source_image` contract `/api/models`
+already advertises, so a picker can never offer a seam the checkpoint would
+reject. A text-to-video checkpoint is still sequence-capable — it simply
+concatenates independent clips, the same honest behaviour LTX-Video has.
+
+The continuation is seeded with the previous clip's final frame, so it
+re-renders exactly that one frame and the stitch trims exactly one. This is
+deliberately **not** LTX-2's 17-frame motion tail, which is the pixel window
+its VAE turns into three latent slots of carryover — wan has no equivalent,
+and reusing the number would discard sixteen good frames at every seam.
+
+Clip lengths sit on wan's `4k+1` grid. The auto-chaining default is a VRAM
+envelope rather than a ceiling: 53 frames for the two-expert A14B, 121 for the
+single-expert 5B. `--clip-frames` overrides it, clamped to the real 257-frame
+request cap.
+
+```bash
+# Auto-chains into three 49-frame clips and stitches one MP4
+mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" \
+  --frames 100 --clip-frames 49
+```
+
+Measured on an RTX 4090: 145 frames at 704x384, three stages, 141 s. The boat,
+gutter, and railing persist across both seams.
+
 ## Defaults and limits
 
 | Property   | `wan21-t2v-1.3b`  | `wan21-t2v-14b:*` | `wan22-ti2v-5b`     | `wan22-*-a14b:q5` | `wan22-*-a14b:q8` |
