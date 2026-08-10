@@ -135,10 +135,51 @@ export function autoChainFieldList(
 const CHAIN_CAPABLE_FAMILIES: ReadonlySet<string> = new Set([
   "ltx2",
   "ltx-video",
+  "wan",
 ]);
 
-/** Only LTX-2 carries latent context between clips. */
+/**
+ * Families where latent context crosses a clip boundary for every checkpoint.
+ *
+ * Wan is deliberately absent: it has no latent motion tail, and its smooth
+ * handoff is last-frame *image* conditioning, which only an image-conditioned
+ * checkpoint accepts (#783). Wan's carryover therefore comes from the model's
+ * advertised `source_image` contract via {@link wanCarriesContext}, never from
+ * this set — a T2V-only wan checkpoint must never be offered "Continue
+ * motion".
+ */
 const FAMILIES_WITH_CONTEXT_HANDOFF: ReadonlySet<string> = new Set(["ltx2"]);
+
+/**
+ * Whether a wan checkpoint carries context across a clip boundary.
+ *
+ * Mirrors `mold_inference::chain::wan_carryover`. `Required` is the A14B I2V
+ * 36-channel concat and `Optional` the TI2V-5B latent inpaint; both can be
+ * seeded from the previous clip. `Unsupported` is text-to-video only, and an
+ * unclassified checkpoint is "unknown", never an assumed handoff.
+ */
+export function wanCarriesContext(
+  sourceImage: string | null | undefined,
+): boolean {
+  return sourceImage === "required" || sourceImage === "optional";
+}
+
+/**
+ * Auto-chaining clip length for a wan render.
+ *
+ * Wan's per-clip ceiling is the family's flat 257-frame request cap, but the
+ * routing default is a VRAM envelope, not a ceiling: the A14B pair measures
+ * near the 24 GB limit well before 257 frames, while the single-expert 5B has
+ * room for its own shipped 121. Both values sit on wan's `4k+1` grid.
+ */
+export const WAN_DEFAULT_CLIP_FRAMES = 53;
+export const WAN_SINGLE_EXPERT_CLIP_FRAMES = 121;
+
+function wanDefaultClipFrames(model: string): number {
+  return /a14b/i.test(model)
+    ? WAN_DEFAULT_CLIP_FRAMES
+    : WAN_SINGLE_EXPERT_CLIP_FRAMES;
+}
 
 function canonicalizeFamily(family: string | null | undefined): string {
   const normalized = (family ?? "").trim().toLowerCase();
@@ -205,6 +246,13 @@ export function decideChainRouting(
   model: string,
   motionTail: number = DEFAULT_MOTION_TAIL,
   fps: number | null | undefined = undefined,
+  /**
+   * The model's advertised `source_image` contract. Only wan reads it, and
+   * only to decide whether the seam can carry context (#783); omitting it
+   * keeps the conservative independent-clip behaviour, which is also what an
+   * older server that does not advertise the field gets.
+   */
+  sourceImage: string | null | undefined = undefined,
 ): ChainRoutingDecision {
   if (!frames || frames <= 0) return { kind: "single" };
 
@@ -229,15 +277,19 @@ export function decideChainRouting(
     };
   }
 
-  const clipFrames = LTX2_DEFAULT_CLIP_FRAMES;
+  const isWan = normalizedFamily === "wan";
+  const clipFrames = isWan
+    ? wanDefaultClipFrames(model)
+    : LTX2_DEFAULT_CLIP_FRAMES;
   if (frames <= clipFrames) return { kind: "single" };
 
-  // Families without context handoff are forced to zero by the server.
-  const effectiveMotionTail = FAMILIES_WITH_CONTEXT_HANDOFF.has(
-    normalizedFamily,
-  )
-    ? motionTail
-    : 0;
+  // Families without context handoff are forced to zero by the server. Wan's
+  // answer is per checkpoint, so it comes from the advertised source-image
+  // contract rather than from the family set.
+  const carriesContext = isWan
+    ? wanCarriesContext(sourceImage)
+    : FAMILIES_WITH_CONTEXT_HANDOFF.has(normalizedFamily);
+  const effectiveMotionTail = carriesContext ? motionTail : 0;
 
   if (effectiveMotionTail >= clipFrames) {
     return {

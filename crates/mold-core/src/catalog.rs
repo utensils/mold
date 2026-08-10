@@ -62,8 +62,14 @@ pub fn resolution_defaults(model: &str, family: &str) -> ResolutionDefaults {
 /// This is the same answer `mold-server`'s `sequence_support` gives; it lives
 /// here too because `/api/models` must advertise it per model, and the picker
 /// on every surface reads it instead of guessing from the checkpoint name.
+/// Wan joins on the `ltx-video` precedent, not the `ltx2` one: every wan
+/// checkpoint can render sequence clips, but only an image-conditioned one
+/// carries context across the seam (#783). What differs by checkpoint is the
+/// carryover, which `/api/models` advertises separately as `source_image` —
+/// so sequence *availability* stays a family fact while the seam options a
+/// picker may offer stay a checkpoint fact.
 fn chain_capable_family(family: &str) -> bool {
-    matches!(family, "ltx2" | "ltx-video")
+    matches!(family, "ltx2" | "ltx-video" | "wan")
 }
 
 pub fn build_model_catalog(
