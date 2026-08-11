@@ -9,6 +9,7 @@ authorization record whose source document is content-addressed.
 from __future__ import annotations
 
 import argparse
+import heapq
 import hashlib
 import importlib.util
 import json
@@ -18,6 +19,10 @@ import struct
 import subprocess
 import sys
 from typing import Any
+
+
+MAX_COMPARISON_DIAGNOSTICS = 128
+MAX_INDEX_DIAGNOSTICS = 16
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -931,9 +936,16 @@ def compare_layer_outputs(oracle: Any, mold: Any) -> list[str]:
         fail("--mold document producer role is not mold")
 
     issues: list[str] = []
+    issue_count = 0
+
+    def report_issue(issue: str) -> None:
+        nonlocal issue_count
+        issue_count += 1
+        if len(issues) < MAX_COMPARISON_DIAGNOSTICS:
+            issues.append(issue)
     for field in ("case_id", "layer", "authority_tier"):
         if oracle[field] != mold[field]:
-            issues.append(
+            report_issue(
                 f"comparison {field} mismatch: oracle={oracle[field]!r}, "
                 f"mold={mold[field]!r}"
             )
@@ -943,25 +955,25 @@ def compare_layer_outputs(oracle: Any, mold: Any) -> list[str]:
         for role, evidence in (("oracle", oracle_input), ("mold", mold_input)):
             expected_checkpoint = AUDIO_VAE_CHECKPOINT_SHA256_BY_ROLE[role]
             if evidence.pop("checkpoint_sha256", None) != expected_checkpoint:
-                issues.append(
+                report_issue(
                     f"audio-vae {role} checkpoint authority differs from the "
                     "reviewed role-specific checkpoint"
                 )
     if oracle_input != mold_input:
-        issues.append(
+        report_issue(
             f"comparison input mismatch: oracle={oracle_input!r}, mold={mold_input!r}"
         )
     if (
         oracle["adapter"]["tensor_hash_encoding"]
         != mold["adapter"]["tensor_hash_encoding"]
     ):
-        issues.append(
+        report_issue(
             "tensor hash encoding mismatch: "
             f"oracle={oracle['adapter']['tensor_hash_encoding']!r}, "
             f"mold={mold['adapter']['tensor_hash_encoding']!r}"
         )
     if oracle["authorization_document_sha256"] != mold["authorization_document_sha256"]:
-        issues.append("authorization document hash mismatch between producers")
+        report_issue("authorization document hash mismatch between producers")
 
     layer = oracle["layer"]
     case_id = oracle["case_id"]
@@ -970,7 +982,7 @@ def compare_layer_outputs(oracle: Any, mold: Any) -> list[str]:
     missing_outputs = sorted(set(oracle_outputs) - set(mold_outputs))
     extra_outputs = sorted(set(mold_outputs) - set(oracle_outputs))
     if missing_outputs or extra_outputs:
-        issues.append(
+        report_issue(
             f"layer={layer} case={case_id} output key mismatch: "
             f"missing Mold outputs={missing_outputs}, extra Mold outputs={extra_outputs}"
         )
@@ -983,12 +995,12 @@ def compare_layer_outputs(oracle: Any, mold: Any) -> list[str]:
         policy = policies[key]
         context = f"layer={layer} case={case_id} output={key}"
         if expected["shape"] != actual["shape"]:
-            issues.append(
+            report_issue(
                 f"{context} shape mismatch: oracle={expected['shape']}, "
                 f"mold={actual['shape']}"
             )
         if expected["dtype"] != actual["dtype"]:
-            issues.append(
+            report_issue(
                 f"{context} dtype mismatch: oracle={expected['dtype']!r}, "
                 f"mold={actual['dtype']!r}"
             )
@@ -998,7 +1010,7 @@ def compare_layer_outputs(oracle: Any, mold: Any) -> list[str]:
                 f"mold={actual['content_sha256']}, policy={policy['hash_policy']}"
             )
             if policy["hash_policy"] == "exact":
-                issues.append(hash_message)
+                report_issue(hash_message)
             else:
                 notes.append(hash_message)
 
@@ -1010,17 +1022,21 @@ def compare_layer_outputs(oracle: Any, mold: Any) -> list[str]:
                 policy,
             )
             if issue is not None:
-                issues.append(issue)
+                report_issue(issue)
 
         expected_samples = sample_records(expected, f"oracle output {key!r}")
         actual_samples = sample_records(actual, f"Mold output {key!r}")
-        missing_samples = sorted(set(expected_samples) - set(actual_samples))
-        extra_samples = sorted(set(actual_samples) - set(expected_samples))
+        missing_samples = set(expected_samples) - set(actual_samples)
+        extra_samples = set(actual_samples) - set(expected_samples)
         if missing_samples or extra_samples:
-            issues.append(
-                f"{context} sample key mismatch: missing Mold indexes="
-                f"{[list(index) for index in missing_samples]}, extra Mold indexes="
-                f"{[list(index) for index in extra_samples]}"
+            missing_preview = heapq.nsmallest(MAX_INDEX_DIAGNOSTICS, missing_samples)
+            extra_preview = heapq.nsmallest(MAX_INDEX_DIAGNOSTICS, extra_samples)
+            report_issue(
+                f"{context} sample key mismatch: missing Mold indexes "
+                f"(first {len(missing_preview)} of {len(missing_samples)})="
+                f"{[list(index) for index in missing_preview]}, extra Mold indexes "
+                f"(first {len(extra_preview)} of {len(extra_samples)})="
+                f"{[list(index) for index in extra_preview]}"
             )
         for index in sorted(set(expected_samples) & set(actual_samples)):
             issue = tolerance_issue(
@@ -1030,9 +1046,13 @@ def compare_layer_outputs(oracle: Any, mold: Any) -> list[str]:
                 policy,
             )
             if issue is not None:
-                issues.append(issue)
+                report_issue(issue)
 
     if issues:
+        if issue_count > len(issues):
+            issues.append(
+                f"{issue_count - len(issues)} additional comparison issues omitted"
+            )
         fail("Mold-vs-oracle comparison failed:\n- " + "\n- ".join(issues))
     return notes
 

@@ -140,7 +140,6 @@ MAXIMUM_RAW_OUTPUT_BYTES = 128 * 1024 * 1024
 MAXIMUM_REQUEST_BYTES = 32 * 1024 * 1024
 MINIMUM_HOST_AVAILABLE_BYTES = 96 * 1024**3
 MINIMUM_DEVICE_FREE_BYTES = 12 * 1024**3
-SAMPLED_ACTIVATION_VALUES = 257
 REQUIRED_ENVIRONMENT = (
     "MOLD_H3_FIXTURE_ROOT",
     "MOLD_H3_AUTHORIZATION_RECORD",
@@ -1598,13 +1597,7 @@ def float64_tensor_record(key: str, values: Sequence[float]) -> dict[str, Any]:
 def activation_sample_indexes(length: int) -> list[int]:
     if length <= 0:
         fail("Qwen layer-50 activation is empty")
-    count = min(SAMPLED_ACTIVATION_VALUES, length)
-    if count == 1:
-        return [0]
-    indexes = [index * (length - 1) // (count - 1) for index in range(count)]
-    if len(indexes) != len(set(indexes)):
-        fail("Qwen activation sampling geometry produced duplicate indexes")
-    return indexes
+    return list(range(length))
 
 
 def activation_tensor_record(

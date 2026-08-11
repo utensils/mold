@@ -191,12 +191,9 @@ class ProducerContractTests(unittest.TestCase):
         with self.assertRaises(PRODUCER.CaptureFailure):
             PRODUCER.qwen_positions([0, 1, 1], [[1, 4, 4]], [])
 
-    def test_activation_sampling_is_deterministic_and_bounded(self) -> None:
+    def test_activation_sampling_is_complete_and_ordered(self) -> None:
         indexes = PRODUCER.activation_sample_indexes(10_000)
-        self.assertEqual(len(indexes), PRODUCER.SAMPLED_ACTIVATION_VALUES)
-        self.assertEqual(indexes[0], 0)
-        self.assertEqual(indexes[-1], 9_999)
-        self.assertEqual(indexes, sorted(set(indexes)))
+        self.assertEqual(indexes, list(range(10_000)))
 
     def test_activation_evidence_retains_real_tensor_coordinates(self) -> None:
         shape, bits = activation()
@@ -205,10 +202,19 @@ class ProducerContractTests(unittest.TestCase):
             record for record in outputs if record["key"] == "sampled-values"
         )
         self.assertEqual(sampled["shape"], shape)
-        self.assertEqual(len(sampled["samples"]), PRODUCER.SAMPLED_ACTIVATION_VALUES)
+        self.assertEqual(len(sampled["samples"]), len(bits))
         self.assertEqual(sampled["samples"][0]["index"], [0, 0, 0])
         self.assertEqual(sampled["samples"][-1]["index"], [0, 2, 5119])
         self.assertTrue(all(len(sample["index"]) == 3 for sample in sampled["samples"]))
+
+    def test_protected_policy_rejects_incomplete_activation_coordinates(self) -> None:
+        document = self.layer_document("oracle")
+        sampled = next(
+            record for record in document["outputs"] if record["key"] == "sampled-values"
+        )
+        sampled["samples"].pop()
+        with self.assertRaises(GPU.GpuConformanceFailure):
+            GPU.validate_manifest_layer_evidence(document, self.contract, "oracle")
 
     def test_measurement_output_rejects_shape_payload_drift(self) -> None:
         with self.assertRaises(PRODUCER.CaptureFailure):
