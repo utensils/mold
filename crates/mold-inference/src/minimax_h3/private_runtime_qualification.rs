@@ -122,12 +122,13 @@ impl H3PrivateRuntimeBoundCaptureSet {
         evidence_artifacts: &BTreeSet<String>,
     ) -> Result<H3PrivateRuntimeBoundRecord> {
         for (label, capture) in self.entries() {
-            if capture.observed_bytes == 0
+            let zero_observation_allowed = label == "vae_construction_device_workspace_bytes";
+            if (!zero_observation_allowed && capture.observed_bytes == 0)
                 || capture.bound_bytes == 0
                 || capture.observed_bytes > capture.bound_bytes
             {
                 bail!(
-                    "private H3 runtime bound {label} must retain a nonzero observation no larger than its bound"
+                    "private H3 runtime bound {label} must retain an allowed observation no larger than its nonzero bound"
                 )
             }
             validate_relative_path(&capture.evidence_artifact, "bound evidence")?;
@@ -949,6 +950,35 @@ mod tests {
         .unwrap_err()
         .to_string()
         .contains("unretained evidence"));
+    }
+
+    #[test]
+    fn candidate_accepts_zero_only_for_retained_vae_construction_growth() {
+        let mut manifest = capture("logs/runtime.log");
+        let evidence = manifest.evidence_artifacts.iter().cloned().collect();
+        manifest
+            .bounds
+            .vae_construction_device_workspace_bytes
+            .observed_bytes = 0;
+        assert_eq!(
+            manifest
+                .bounds
+                .validate(&evidence)
+                .unwrap()
+                .vae_construction_device_workspace_bytes,
+            5
+        );
+
+        manifest
+            .bounds
+            .audio_decode_workspace_device_bytes
+            .observed_bytes = 0;
+        assert!(manifest
+            .bounds
+            .validate(&evidence)
+            .unwrap_err()
+            .to_string()
+            .contains("audio_decode_workspace_device_bytes"));
     }
 
     #[cfg(unix)]
