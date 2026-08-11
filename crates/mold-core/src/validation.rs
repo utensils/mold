@@ -1611,6 +1611,25 @@ pub fn validate_generate_request_with_family(
     validate_generate_request_after_activation(req, family_hint)
 }
 
+/// Validate the exact MiniMax H3 private-UAT request partition after the
+/// server has issued its authenticated ingress grant.
+///
+/// This feature-gated helper does not grant authorization or activate a model;
+/// it only prevents the already-authorized private route from re-entering the
+/// public compliance gate before applying the same field validation.
+#[cfg(feature = "h3-private-uat")]
+pub fn validate_h3_private_uat_request(req: &GenerateRequest) -> Result<(), String> {
+    if !matches!(
+        req.model.as_str(),
+        crate::minimax_h3::FL2VA_COMFY | crate::minimax_h3::REF2VA_COMFY
+    ) {
+        return Err(
+            "private MiniMax H3 validation requires an exact reviewed task model".to_string(),
+        );
+    }
+    validate_generate_request_after_activation(req, Some(crate::minimax_h3::FAMILY))
+}
+
 /// Shape/feature validation after the caller has passed the model-activation
 /// authority. Kept private so tests can prove the future authorized H3 path
 /// without exposing a compliance-gate bypass to production callers.
@@ -3478,6 +3497,23 @@ mod tests {
         // value rather than inheriting the generic img2img default.
         req.strength = 1.0;
         req
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    #[test]
+    fn private_h3_validation_bypasses_only_activation_for_exact_reviewed_models() {
+        let req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+        let public_error =
+            validate_generate_request_with_family(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(public_error.contains(crate::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        validate_h3_private_uat_request(&req).unwrap();
+
+        let mut official = req;
+        official.model = crate::minimax_h3::FL2VA_OFFICIAL.to_string();
+        assert!(validate_h3_private_uat_request(&official)
+            .unwrap_err()
+            .contains("exact reviewed task model"));
     }
 
     #[test]

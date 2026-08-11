@@ -13,6 +13,12 @@ description = "Shared types, API protocol, and HTTP client for mold"
 [lib]
 name = "mold_core"
 
+[features]
+default = []
+# Validation-only edge consumed by the authenticated private H3 server. This
+# does not expose artifacts, loaders, or model activation.
+h3-private-uat = []
+
 [dependencies]
 anyhow = "1"
 console = "0.15"

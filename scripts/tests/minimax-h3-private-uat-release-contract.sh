@@ -22,6 +22,15 @@ require_text crates/mold-candle/Cargo.toml \
 require_text crates/mold-inference/Cargo.toml \
   'h3-private-uat = ["mold-candle/h3-private-uat"]' \
   "mold-inference does not narrowly forward the private H3 runtime feature"
+require_text crates/mold-server/Cargo.toml \
+  '"mold-core/h3-private-uat"' \
+  "the private H3 server does not activate its validation-only core edge"
+require_text crates/mold-core/src/validation.rs \
+  '#[cfg(feature = "h3-private-uat")]' \
+  "the private H3 post-authorization validator is not feature-gated"
+require_text crates/mold-server/src/routes.rs \
+  'validate_h3_private_uat_request(validation_request)' \
+  "authenticated private H3 ingress re-enters the public compliance validator"
 containment_rev=9b3b1bc276bc27c3e99343ee82db7f99705b9ed5
 containment_patch="cudarc = { git = \"https://github.com/utensils/cudarc\", rev = \"${containment_rev}\" }"
 require_text Cargo.toml "$containment_patch" \
@@ -646,6 +655,7 @@ fi
 h3_uat_feature=$(sed -n '/^h3-private-uat = \[/,/^\]/p' crates/mold-server/Cargo.toml)
 for edge in \
   h3-private-bridge \
+  mold-core/h3-private-uat \
   mold-inference/h3-private-uat \
   mold-inference/dev-bins \
   mold-inference/h3-attention-rc \
@@ -654,7 +664,7 @@ for edge in \
   grep -Fq "\"${edge}\"" <<<"$h3_uat_feature" \
     || fail "mold-ai-server private H3 UAT feature omits ${edge}"
 done
-if [[ $(grep -Ec '^[[:space:]]*"[^"]+",?$' <<<"$h3_uat_feature") -ne 6 ]]; then
+if [[ $(grep -Ec '^[[:space:]]*"[^"]+",?$' <<<"$h3_uat_feature") -ne 7 ]]; then
   fail "mold-ai-server private H3 UAT feature contains an unexpected runtime edge"
 fi
 

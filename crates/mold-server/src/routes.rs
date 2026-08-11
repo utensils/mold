@@ -924,7 +924,15 @@ async fn prepare_generation(
     } else {
         &*request
     };
-    if let Err(e) = validate_generate_request(validation_request, resolved_family.as_deref()) {
+    #[cfg(feature = "h3-private-uat")]
+    let validation = if private_h3_ingress {
+        mold_core::validation::validate_h3_private_uat_request(validation_request)
+    } else {
+        validate_generate_request(validation_request, resolved_family.as_deref())
+    };
+    #[cfg(not(feature = "h3-private-uat"))]
+    let validation = validate_generate_request(validation_request, resolved_family.as_deref());
+    if let Err(e) = validation {
         return Err(ApiError::validation(e));
     }
     enforce_source_image_capability(state, request, resolved_family.as_deref()).await?;

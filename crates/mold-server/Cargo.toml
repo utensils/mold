@@ -35,6 +35,7 @@ h3-private-bridge = []
 # incomplete private server binary cannot be built accidentally.
 h3-private-uat = [
     "h3-private-bridge",
+    "mold-core/h3-private-uat",
     "mold-inference/h3-private-uat",
     "mold-inference/dev-bins",
     "mold-inference/h3-attention-rc",
