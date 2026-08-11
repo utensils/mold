@@ -172,6 +172,34 @@ pub(crate) fn forced_block_count() -> Option<usize> {
     None
 }
 
+/// Usable VRAM actually returned per byte of parked weight, measured.
+///
+/// 6,272 MiB came back from parking ~8.1 GB of Q5 blocks (see [`plan_offload`]),
+/// i.e. 77% at that count, and only 13% at 8 blocks — relief is non-linear and
+/// worst when few blocks are parked, because the allocator has already grown
+/// its pool to the unparked high-water mark.
+///
+/// Carried at 35%, which is lower than any single measurement and is set by the
+/// one that matters: at 81 frames / 832x480 a 58% assumption planned ~12 blocks
+/// and **OOM'd**, while 20 blocks rendered the clip at a 22,218 MiB peak. 35%
+/// is what turns that shortfall into ~19 blocks. Under-parking OOMs
+/// mid-denoise; over-parking only costs wall-clock, so the asymmetry is
+/// deliberate.
+const RELIEF_EFFICIENCY_NUMERATOR: u64 = 35;
+const RELIEF_EFFICIENCY_DENOMINATOR: u64 = 100;
+
+/// Most of a transformer's weight bytes that block offload can be relied on to
+/// free, for admission (#776 item 3).
+///
+/// Admission has to answer "is this shape feasible at all", which parking can
+/// change — but it must not assume the whole expert can leave the device: the
+/// blocks still take turns being resident, and the non-block weights never
+/// move. This is the measured relief fraction applied to the transformer's own
+/// bytes, so a shape is admitted only when parking can genuinely reach it.
+pub fn max_block_offload_relief_bytes(transformer_bytes: u64) -> u64 {
+    transformer_bytes.saturating_mul(RELIEF_EFFICIENCY_NUMERATOR) / RELIEF_EFFICIENCY_DENOMINATOR
+}
+
 /// What the offload policy decided for one load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WanOffloadPlan {
@@ -219,8 +247,19 @@ pub(crate) fn plan_offload(
     if predicted_peak_bytes <= available_bytes {
         return WanOffloadPlan::None;
     }
+    // Parking N blocks does not return N block-sizes of usable VRAM. Measured
+    // on an RTX 4090 (`wan22-t2v-a14b:q5`, 53f/832x480): parking 30 of 40
+    // blocks — ~8.1 GB of Q5 weights — moved the peak 21,354 -> 15,082 MiB, so
+    // 6.27 GB of 8.1 came back, and parking 8 returned only 288 MiB of the
+    // ~2.2 GB they occupy. The allocator has already grown its pool to the
+    // unparked high-water mark, so relief is non-linear and worst at small
+    // counts. Scaling the shortfall by the measured efficiency is what stops
+    // the policy parking the arithmetic minimum and still OOMing.
     let shortfall = predicted_peak_bytes - available_bytes;
-    let blocks = WanBlockParking::blocks_to_park(shortfall, bytes_per_block, total_blocks);
+    let needed = shortfall
+        .saturating_mul(RELIEF_EFFICIENCY_DENOMINATOR)
+        .div_ceil(RELIEF_EFFICIENCY_NUMERATOR);
+    let blocks = WanBlockParking::blocks_to_park(needed, bytes_per_block, total_blocks);
     if blocks == 0 {
         WanOffloadPlan::None
     } else {
@@ -482,10 +521,27 @@ mod tests {
         const MIB: u64 = 1024 * 1024;
         // The real shape: 25,461 MiB predicted against 24,564 MiB usable is a
         // 897 MiB shortfall, and a Q5 block is ~270 MiB.
+        // 897 MiB short, scaled by the measured 35% relief efficiency is
+        // 2,563 MiB of weights to park, so 10 blocks rather than the naive 4 —
+        // parking the arithmetic minimum is what the measurement showed does
+        // not actually come back.
         assert_eq!(
             plan_offload(25_461 * MIB, 24_564 * MIB, 270 * MIB, 40, None),
-            WanOffloadPlan::Park { blocks: 4 }
+            WanOffloadPlan::Park { blocks: 10 }
         );
+    }
+
+    #[test]
+    fn admission_relief_never_assumes_the_whole_expert_leaves() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        // A14B q5's expert is ~10.05 GiB; relief is the measured 58% of it,
+        // never all of it — the blocks still take turns being resident and the
+        // non-block weights never move.
+        let expert = 10 * GIB;
+        let relief = max_block_offload_relief_bytes(expert);
+        assert!(relief < expert, "relief must not free the whole expert");
+        assert_eq!(relief, expert * 35 / 100);
+        assert_eq!(max_block_offload_relief_bytes(0), 0);
     }
 
     #[test]

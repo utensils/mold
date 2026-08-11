@@ -143,8 +143,15 @@ fn header_shapes(path: &Path) -> Result<Vec<(String, Vec<usize>)>> {
 fn denoise_activation_bytes(req: &GenerateRequest, files: &[PathBuf]) -> Option<u64> {
     let geometry = activation_geometry_across(files)?;
     let frames = req.frames?;
-    Some(crate::device::wan_activation_budget_bytes(
-        req.width, req.height, frames, geometry,
+    // The CALIBRATED budget, not the raw derived one. Using the raw sum here
+    // under-estimated by 2.14x, so the policy parked nothing and the render
+    // OOM'd at a shape admission had just accepted.
+    Some(crate::device::wan_calibrated_activation_bytes(
+        req.width,
+        req.height,
+        frames,
+        geometry,
+        needs_cfg_pass(req.guidance),
     ))
 }
 

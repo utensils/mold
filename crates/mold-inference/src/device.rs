@@ -1256,6 +1256,45 @@ pub fn wan_activation_budget_bytes(
     wan_token_count(width, height, frames, geometry).saturating_mul(per_token)
 }
 
+/// Measured multiplier on the derived per-token tensor sum, and the flat terms
+/// that go with it.
+///
+/// These live here, beside the derived formula, because two consumers need the
+/// same number: `mold-server`'s admission decides whether a shape is feasible,
+/// and the wan engine's block-offload policy decides how many blocks to park to
+/// make it so. They diverged once — the engine used the RAW derived budget and
+/// therefore under-estimated by 2.14x, parked nothing, and OOM'd at a shape
+/// admission had just accepted. One authority, so that cannot recur.
+///
+/// See `mold_server::wan_admission` for the fit: RTX 4090, `wan22-t2v-a14b:q5`,
+/// 832x480, CFG off, 16,074 MiB at 17f and 21,354 MiB at 53f.
+pub const WAN_MEASURED_SLOPE_NUMERATOR: u64 = 214;
+pub const WAN_MEASURED_SLOPE_DENOMINATOR: u64 = 100;
+/// Token-independent denoise workspace, fitted as the intercept of that pair.
+pub const WAN_FIXED_WORKSPACE_BYTES: u64 = 2301 * 1024 * 1024;
+/// Extra device memory a CFG step holds beyond a single forward.
+pub const WAN_CFG_RESIDENT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// [`wan_activation_budget_bytes`] with the measured calibration applied.
+///
+/// The derived sum counts the tensors a block visibly materializes; this is
+/// what a real forward actually holds.
+pub fn wan_calibrated_activation_bytes(
+    width: u32,
+    height: u32,
+    frames: u32,
+    geometry: WanActivationGeometry,
+    cfg: bool,
+) -> u64 {
+    let derived = wan_activation_budget_bytes(width, height, frames, geometry);
+    let transformer =
+        derived.saturating_mul(WAN_MEASURED_SLOPE_NUMERATOR) / WAN_MEASURED_SLOPE_DENOMINATOR;
+    let cfg = if cfg { WAN_CFG_RESIDENT_BYTES } else { 0 };
+    transformer
+        .saturating_add(cfg)
+        .saturating_add(WAN_FIXED_WORKSPACE_BYTES)
+}
+
 /// Map a manifest family slug (e.g. `"flux"`, `"sdxl"`, `"qwen-image"`) to the
 /// activation-budget family. Falls back to [`ActivationFamily::FluxDit`] for
 /// unknown slugs — the FLUX factor is the most common diffusion default and
