@@ -448,8 +448,11 @@ records use the protected 1/64 comparison bound; FP32 heads retain their hashes
 as record-only evidence. TF32, approximate attention, compilation, FP8, and
 non-deterministic algorithms remain disabled. Raw adapter output and evidence
 use create-new owner-only files below the external fixture root, and raw output
-is parsed from the exact descriptor-retained bytes before revalidation. This
-producer and its CI contract do not claim that the real CUDA campaign has run.
+is parsed from the exact descriptor-retained bytes before revalidation. Every
+published layer and bundle binds the reviewed authorization source-evidence
+hash carried by the validated wrapper record, never the wrapper file's own
+hash. The producer and its CI contract do not claim that the real CUDA campaign
+has passed.
 
 ### Opt-in protected GPU validation
 
