@@ -1501,7 +1501,12 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                 policy["absolute"] = 0.25
                 expected_policy_error = "integer policy"
             else:
-                policy["absolute"] = 1.0
+                policy["absolute"] = (
+                    runner.REVIEWED_ABSOLUTE_TOLERANCE_CAPS.get(
+                        (layer, measurement), runner.MAX_EXACT_ABSOLUTE_TOLERANCE
+                    )
+                    + 1.0
+                )
                 expected_policy_error = "bounded protected policy"
             expect_failure(
                 lambda wrong_policy=wrong_policy, manifest_layer=manifest_layer: (
@@ -1649,6 +1654,13 @@ def test_runner_contract(runner, tool, temporary: pathlib.Path) -> None:
 
     tool.sha256_file = controlled_sha256_file
     runner.load_tool = lambda: tool
+
+    oversized = temporary / "oversized-layer.json"
+    oversized.write_bytes(b"{" + b" " * 16 + b"}")
+    expect_failure(
+        lambda: runner.read_json_once(oversized, "oversized layer", 16),
+        "bounded regular-file contract",
+    )
 
     def reset_campaign() -> tuple[dict[str, str], pathlib.Path, pathlib.Path]:
         oracle_bundle, mold_bundle = bundle_fixture(

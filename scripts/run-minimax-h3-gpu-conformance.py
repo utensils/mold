@@ -15,6 +15,7 @@ import math
 import os
 import pathlib
 import re
+import stat
 import struct
 import subprocess
 import sys
@@ -33,6 +34,8 @@ REQUIRED_ENVIRONMENT = (
     "MOLD_H3_SOURCE_SHA",
 )
 COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+MAX_BUNDLE_JSON_BYTES = 2 * 1024 * 1024
+MAX_LAYER_JSON_BYTES = 64 * 1024 * 1024
 EXACT_AUTHORITY_TIERS = frozenset({"exact-full-bf16", "exact-full-fp32"})
 CANONICAL_BF16_DTYPE = "bfloat16"
 CANONICAL_F16_DTYPE = "float16"
@@ -48,6 +51,12 @@ IDENTITY_INPUT_KIND = "identity-sha256-v1"
 COMPONENT_AUTHORITY_SET_SCHEMA = "mold.minimax-h3.component-authority-set.v1"
 MAX_EXACT_ABSOLUTE_TOLERANCE = 1.0 / 64.0
 MAX_EXACT_RELATIVE_TOLERANCE = 1.0 / 64.0
+REVIEWED_ABSOLUTE_TOLERANCE_CAPS = {
+    ("token-refiner", "sampled-values"): 8.0,
+    ("transformer-block", "partial-mm-rope"): 1.0 / 16.0,
+    ("transformer-block", "video-head"): 1.25,
+    ("transformer-block", "audio-head"): 0.5,
+}
 AUDIO_VAE_CHECKPOINT_SHA256_BY_ROLE = {
     "oracle": "52c59e67ba8de5477c81bfbced0327aabf500f1bfdeefd5ee754529241cb26cb",
     "mold": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
@@ -190,7 +199,15 @@ RECORD_ONLY_FLOAT_MEASUREMENTS = {
             "sampled-values",
         }
     ),
-    "transformer-block": frozenset({"video-head", "audio-head"}),
+    "token-refiner": frozenset({"statistics", "sampled-values"}),
+    "transformer-block": frozenset(
+        {"qk-rms", "partial-mm-rope", "adaln", "video-head", "audio-head"}
+    ),
+}
+COMPLETE_SAMPLE_MEASUREMENTS = {
+    "visual-vae": frozenset({"posterior-seed-42"}),
+    "token-refiner": RECORD_ONLY_FLOAT_MEASUREMENTS["token-refiner"],
+    "transformer-block": RECORD_ONLY_FLOAT_MEASUREMENTS["transformer-block"],
 }
 CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 REVIEWED_AUTHORIZATION_EVIDENCE_SHA256 = (
@@ -368,12 +385,33 @@ def call_redacted(tool: Any, context: str, action: Callable[[], Any]) -> Any:
         fail(f"{context} failed; inspect evidence only on the protected runner")
 
 
-def read_json_once(path: pathlib.Path, label: str) -> tuple[bytes, Any]:
+def read_json_once(
+    path: pathlib.Path, label: str, max_bytes: int
+) -> tuple[bytes, Any]:
+    descriptor = -1
     try:
-        encoded = path.read_bytes()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size <= 0
+            or metadata.st_size > max_bytes
+        ):
+            fail(f"{label} exceeds its bounded regular-file contract")
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            descriptor = -1
+            encoded = handle.read(metadata.st_size + 1)
+        if len(encoded) != metadata.st_size:
+            fail(f"{label} changed during its bounded read")
         value = json.loads(encoded)
     except (OSError, ValueError):
         fail(f"{label} is unavailable or invalid")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     return encoded, value
 
 
@@ -596,7 +634,7 @@ def load_bundle_once(
     authorization_sha: str,
     label: str,
 ) -> dict[str, Any]:
-    _, bundle = read_json_once(path, label)
+    _, bundle = read_json_once(path, label, MAX_BUNDLE_JSON_BYTES)
     call_redacted(
         tool,
         f"{label} schema validation",
@@ -968,6 +1006,21 @@ def validate_output_numeric_domain(
         fail(f"{context} metric min/max and samples must be finite float64")
 
 
+def validate_complete_sample_coverage(output: dict[str, Any], context: str) -> None:
+    shape = output["shape"]
+    total = math.prod(shape)
+    samples = output["samples"]
+    if len(samples) != total:
+        fail(f"{context} must retain every tensor coordinate")
+    for ordinal, sample in enumerate(samples):
+        index = [0] * len(shape)
+        remaining = ordinal
+        for axis in range(len(shape) - 1, -1, -1):
+            index[axis], remaining = remaining % shape[axis], remaining // shape[axis]
+        if sample["index"] != index:
+            fail(f"{context} sample coordinates are not complete and ordered")
+
+
 def validate_e2e_input_contract(
     document: dict[str, Any], manifest_layer: dict[str, Any], role: str
 ) -> None:
@@ -1204,6 +1257,10 @@ def validate_manifest_layer_evidence(
             expected_dtype,
             f"{role} layer {layer} output {key!r}",
         )
+        if key in COMPLETE_SAMPLE_MEASUREMENTS.get(layer, frozenset()):
+            validate_complete_sample_coverage(
+                output, f"{role} layer {layer} output {key!r}"
+            )
         if role != "oracle":
             continue
         policy = policies[key]
@@ -1224,10 +1281,13 @@ def validate_manifest_layer_evidence(
             record_only_allowed = key in RECORD_ONLY_FLOAT_MEASUREMENTS.get(
                 layer, frozenset()
             )
+            absolute_cap = REVIEWED_ABSOLUTE_TOLERANCE_CAPS.get(
+                (layer, key), MAX_EXACT_ABSOLUTE_TOLERANCE
+            )
             if (
                 not is_finite_float64(policy.get("absolute"))
                 or not is_finite_float64(policy.get("relative"))
-                or policy["absolute"] > MAX_EXACT_ABSOLUTE_TOLERANCE
+                or policy["absolute"] > absolute_cap
                 or policy["relative"] > MAX_EXACT_RELATIVE_TOLERANCE
                 or policy["absolute"] < 0
                 or policy["relative"] < 0
@@ -1295,7 +1355,7 @@ def load_layer_documents(
         except ValueError:
             fail(f"{role} evidence escapes MOLD_H3_FIXTURE_ROOT")
         encoded, raw_document = read_json_once(
-            evidence_path, f"{role} evidence {position}"
+            evidence_path, f"{role} evidence {position}", MAX_LAYER_JSON_BYTES
         )
         if hashlib.sha256(encoded).hexdigest() != fixture["sha256"]:
             fail(f"{role} evidence {position} hash does not match its bundle")
