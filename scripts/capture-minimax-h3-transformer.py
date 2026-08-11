@@ -204,6 +204,13 @@ def required_environment(environment: Mapping[str, str]) -> dict[str, str]:
     return values
 
 
+def reviewed_authorization_sha256(authorization: Mapping[str, Any]) -> str:
+    observed = authorization.get("source_document_sha256")
+    if observed != AUTHORIZATION_SHA256:
+        fail("authorization differs from reviewed evidence")
+    return observed
+
+
 def component_ids(manifest: Mapping[str, Any]) -> tuple[str, ...]:
     layer = next(item for item in manifest["fixture_layers"] if item["id"] == "token-refiner")
     identifiers = tuple(layer["required_component_indexes"])
@@ -745,7 +752,7 @@ def run_capture(
     fixture_root = BASE.external_directory("fixture root", values["MOLD_H3_FIXTURE_ROOT"])
     authorization = BASE.external_file("authorization record", values["MOLD_H3_AUTHORIZATION_RECORD"])
     auth = BASE.validate_reviewed_authorization(conformance, authorization)
-    if auth["source_document_sha256"] != AUTHORIZATION_SHA256: fail("authorization differs from reviewed evidence")
+    authorization_sha256 = reviewed_authorization_sha256(auth)
     model_root = BASE.external_directory("official model", values["MOLD_H3_OFFICIAL_MODEL"])
     diffusers = BASE.external_directory("Diffusers checkout", values["MOLD_H3_DIFFUSERS_CHECKOUT"])
     transformers = BASE.external_directory("Transformers checkout", values["MOLD_H3_TRANSFORMERS_CHECKOUT"])
@@ -754,7 +761,6 @@ def run_capture(
     runtime = load_runtime(diffusers, transformers)
     runtime_identity = BASE.observed_oracle_runtime(runtime)
     if runtime_identity != manifest["numerical_authority"]["oracle_runtime"]: fail("oracle runtime differs from reviewed authority")
-    authorization_sha256 = BASE.sha256_file(authorization)
     paths: list[pathlib.Path] = []
     bundles: list[pathlib.Path] = []
     revision = (

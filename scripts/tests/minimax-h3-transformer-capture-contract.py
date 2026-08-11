@@ -89,6 +89,21 @@ def raw_document(task: str, revision: str = "b" * 40) -> dict:
 
 
 class TransformerCaptureContract(unittest.TestCase):
+    def test_bundle_authorization_binds_reviewed_source_evidence(self) -> None:
+        self.assertEqual(
+            producer.reviewed_authorization_sha256(
+                {"source_document_sha256": producer.AUTHORIZATION_SHA256}
+            ),
+            producer.AUTHORIZATION_SHA256,
+        )
+        with self.assertRaisesRegex(
+            producer.CaptureFailure,
+            "authorization differs from reviewed evidence",
+        ):
+            producer.reviewed_authorization_sha256(
+                {"source_document_sha256": "0" * 64}
+            )
+
     def test_task_cases_are_distinct_and_content_addressed(self) -> None:
         fl2va = producer.build_case("fl2va")
         ref2va = producer.build_case("ref2va")

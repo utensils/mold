@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Private H3 transformer bundles bind the reviewed authorization evidence.** Real CUDA oracle capture exposed that the paired producer wrote the authorization wrapper file hash into layer and bundle evidence even though the validator requires the reviewed source-document hash carried by that wrapper. The producer now derives the published authority only from the validated reviewed source hash and retains transactional rollback on rejection.
+
 - **Private H3 AudioVAE comparison binds its two reviewed checkpoints by role.** Real CUDA capture exposed that the generic input-equality gate rejected the intentionally different official oracle and Comfy folded Mold checkpoint hashes before comparing their record-only numerical evidence. The comparator and protected runner now require each exact role-specific hash, compare the shared input authority separately, and reject any substituted checkpoint.
 
 - **Private H3 visual-VAE seed evidence is bounded across scalar math backends.** The independently generated PyTorch and Mold seed-42 MT19937 streams now retain both hashes and every scalar while enforcing the reviewed `2e-6 + 1e-6 * abs(oracle)` FP32 bound, instead of incorrectly requiring byte identity from different normal-transform implementations. The real 67,200-element CUDA pair measured a maximum absolute difference of `4.7683716e-7` with no violations.
