@@ -72,7 +72,7 @@ on:
       - "desktop/src/stores/**"
       - "desktop/src/styles/**"
       - "desktop/src/views/**"
-      - "desktop/src-tauri/**"
+      - "desktop/src-tauri/**/*.rs"
       - "desktop/.prettierignore"
       - "desktop/icon-master.png"
       - "desktop/index.html"
@@ -85,37 +85,6 @@ on:
       - "package.json"
       - "bun.lock"
       - "bun.nix"
-      - "crates/mold-core/**"
-      - "crates/mold-catalog/**"
-      - "crates/mold-db/**"
-      - "crates/mold-candle/**"
-      - "crates/mold-inference/**"
-      - "crates/mold-scheduler/**"
-      - "crates/mold-server/**"
-      - "flake.nix"
-      - "Cargo.toml"
-      - ".github/workflows/desktop.yml"
-      - ".github/workflows/desktop-distribution.yml"
-      - "scripts/check-desktop-nightly-main-head.sh"
-      - "scripts/create-desktop-bundle-version.sh"
-      - "scripts/create-desktop-nightly-version.sh"
-      - "scripts/create-desktop-update-manifest.sh"
-      - "scripts/fix-desktop-macos-linkage.sh"
-      - "scripts/notarize-desktop-dmg.sh"
-      - "scripts/prepare-desktop-linuxdeploy.sh"
-      - "scripts/verify-h3-release-exclusion.sh"
-      - "scripts/prune-desktop-nightly-assets.sh"
-      - "scripts/select-desktop-stable-latest.sh"
-      - "scripts/tests/check-desktop-nightly-main-head.sh"
-      - "scripts/tests/create-desktop-bundle-version.sh"
-      - "scripts/tests/create-desktop-nightly-version.sh"
-      - "scripts/tests/create-desktop-update-manifest.sh"
-      - "scripts/tests/desktop-nightly-race-guards.sh"
-      - "scripts/tests/prune-desktop-nightly-assets.sh"
-      - "scripts/tests/select-desktop-stable-latest.sh"
-      - "scripts/tests/verify-desktop-updater-signature.sh"
-      - "scripts/verify-desktop-release.sh"
-      - "scripts/verify-desktop-updater-signature.sh"
   workflow_dispatch:
 
 concurrency:
@@ -148,8 +117,7 @@ jobs:
     outputs:
       frontend: ${{ steps.filter.outputs.frontend }}
       rust: ${{ steps.filter.outputs.rust }}
-      updater: ${{ steps.filter.outputs.updater }}
-      bundle: ${{ steps.filter.outputs.bundle }}
+      rust_format: ${{ steps.filter.outputs.rust_format }}
     steps:
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v3
@@ -177,27 +145,6 @@ jobs:
               - 'package.json'
               - 'bun.lock'
               - 'bun.nix'
-              - '.github/workflows/desktop.yml'
-              - '.github/workflows/desktop-distribution.yml'
-              - 'scripts/check-desktop-nightly-main-head.sh'
-              - 'scripts/create-desktop-bundle-version.sh'
-              - 'scripts/create-desktop-nightly-version.sh'
-              - 'scripts/create-desktop-update-manifest.sh'
-              - 'scripts/fix-desktop-macos-linkage.sh'
-              - 'scripts/notarize-desktop-dmg.sh'
-              - 'scripts/prepare-desktop-linuxdeploy.sh'
-              - 'scripts/prune-desktop-nightly-assets.sh'
-              - 'scripts/select-desktop-stable-latest.sh'
-              - 'scripts/tests/check-desktop-nightly-main-head.sh'
-              - 'scripts/tests/create-desktop-bundle-version.sh'
-              - 'scripts/tests/create-desktop-nightly-version.sh'
-              - 'scripts/tests/create-desktop-update-manifest.sh'
-              - 'scripts/tests/desktop-nightly-race-guards.sh'
-              - 'scripts/tests/prune-desktop-nightly-assets.sh'
-              - 'scripts/tests/select-desktop-stable-latest.sh'
-              - 'scripts/tests/verify-desktop-updater-signature.sh'
-              - 'scripts/verify-desktop-release.sh'
-              - 'scripts/verify-desktop-updater-signature.sh'
             rust:
               - 'desktop/src-tauri/**'
               - 'crates/mold-core/**'
@@ -213,42 +160,8 @@ jobs:
               - 'scripts/verify-h3-release-exclusion.sh'
               - '.github/workflows/desktop.yml'
               - '.github/workflows/desktop-distribution.yml'
-            updater:
-              - '.github/workflows/desktop.yml'
-              - '.github/workflows/desktop-distribution.yml'
-              - 'scripts/check-desktop-nightly-main-head.sh'
-              - 'scripts/create-desktop-bundle-version.sh'
-              - 'scripts/create-desktop-nightly-version.sh'
-              - 'scripts/create-desktop-update-manifest.sh'
-              - 'scripts/notarize-desktop-dmg.sh'
-              - 'scripts/prune-desktop-nightly-assets.sh'
-              - 'scripts/select-desktop-stable-latest.sh'
-              - 'scripts/tests/check-desktop-nightly-main-head.sh'
-              - 'scripts/tests/create-desktop-bundle-version.sh'
-              - 'scripts/tests/create-desktop-nightly-version.sh'
-              - 'scripts/tests/create-desktop-update-manifest.sh'
-              - 'scripts/tests/desktop-nightly-race-guards.sh'
-              - 'scripts/tests/prune-desktop-nightly-assets.sh'
-              - 'scripts/tests/select-desktop-stable-latest.sh'
-              - 'scripts/tests/verify-desktop-updater-signature.sh'
-              - 'scripts/verify-desktop-release.sh'
-              - 'scripts/verify-desktop-updater-signature.sh'
-            # The debug bundle has caught macOS packaging/linkage regressions,
-            # but ordinary Rust/frontend changes are already covered by their
-            # focused gates. Run it only when bundle inputs actually change.
-            bundle:
-              - 'desktop/src-tauri/Cargo.toml'
-              - 'desktop/src-tauri/Cargo.lock'
-              - 'desktop/src-tauri/build.rs'
-              - 'desktop/src-tauri/tauri.conf.json'
-              - 'desktop/src-tauri/tauri.macos.conf.json'
-              - 'desktop/src-tauri/Entitlements.plist'
-              - 'desktop/src-tauri/Info.plist'
-              - 'desktop/src-tauri/capabilities/**'
-              - 'desktop/src-tauri/icons/**'
-              - 'desktop/package.json'
-              - 'desktop/vite.config.ts'
-              - 'scripts/fix-desktop-macos-linkage.sh'
+            rust_format:
+              - 'desktop/src-tauri/**/*.rs'
 
   desktop-frontend:
     name: Frontend (typecheck, tests, format)
@@ -262,10 +175,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - name: Install updater verification tooling
-        if: github.event_name != 'pull_request' || needs.changes.outputs.updater == 'true'
+        if: github.event_name == 'push'
         run: sudo apt-get update && sudo apt-get install -y minisign
       - name: Test updater release scripts
-        if: github.event_name != 'pull_request' || needs.changes.outputs.updater == 'true'
+        if: github.event_name == 'push'
         run: |
           bash ../scripts/tests/check-desktop-nightly-main-head.sh
           bash ../scripts/tests/create-desktop-bundle-version.sh
@@ -279,47 +192,47 @@ jobs:
         working-directory: .
       - run: bun run fmt:check
       - run: bun run test
+        if: github.event_name == 'push'
       # `build` already runs vue-tsc before Vite; a separate typecheck compiled
       # the same project twice on every frontend PR.
       - run: bun run build
+        if: github.event_name == 'push'
 
   desktop-rust:
-    name: macOS Rust (fmt, clippy, test)
+    name: Native Rust (fmt; main clippy and test)
     needs: changes
     if: >-
-      github.event_name != 'pull_request' ||
-      needs.changes.outputs.rust == 'true' ||
-      needs.changes.outputs.bundle == 'true'
-    runs-on: macos-14
+      github.event_name != 'pull_request' || needs.changes.outputs.rust_format == 'true'
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'macos-14' }}
     defaults:
       run:
         working-directory: desktop
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        if: github.event_name == 'pull_request'
+        with:
+          components: rustfmt
+      - uses: dtolnay/rust-toolchain@stable
+        if: github.event_name == 'push'
+        with:
+          components: rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
+        if: github.event_name == 'push'
         with:
           workspaces: desktop/src-tauri
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-        if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-        if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
+        if: github.event_name == 'push'
       # CPU-only: the metal feature is deliberately off in CI.
       - run: cargo test --manifest-path src-tauri/Cargo.toml
-        if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
-      - uses: oven-sh/setup-bun@v2
-        if: github.event_name == 'pull_request' && needs.changes.outputs.bundle == 'true'
-      - run: bun install --frozen-lockfile
-        if: github.event_name == 'pull_request' && needs.changes.outputs.bundle == 'true'
-        working-directory: .
-      - name: Bundle macOS packaging inputs (debug .app)
-        if: github.event_name == 'pull_request' && needs.changes.outputs.bundle == 'true'
-        run: bunx tauri build --debug --bundles app --ci
+        if: github.event_name == 'push'
 
   desktop-linux:
     name: Linux (clippy, test; main AppImage)
     needs: changes
-    # macOS remains the single native PR gate. Every relevant main push repeats
-    # Linux clippy/tests and adds the stronger CUDA AppImage build + launch.
+    # Native PR feedback is rustfmt-only on Linux. Every relevant main push
+    # runs Linux clippy/tests and the stronger CUDA AppImage build + launch.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04
     defaults:
@@ -481,8 +394,7 @@ jobs:
   # Every desktop-relevant main commit that passes the frontend and macOS Rust
   # gates becomes a signed, notarized nightly. Linux remains an independent
   # required check so its slower AppImage build cannot delay macOS updates.
-  # The updater-artifact overlay stays isolated from the fast debug PR bundle
-  # proof above.
+  # Distribution packaging remains isolated from pull-request formatting.
   desktop-nightly:
     name: Build nightly distribution
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
