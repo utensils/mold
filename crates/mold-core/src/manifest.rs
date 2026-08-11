@@ -5687,8 +5687,10 @@ fn a14b_manifest(tier: A14bTier, task: A14bTask) -> ModelManifest {
             // arithmetic rather than a measurement is what produced the
             // 81-frame OOM this replaces. Those move when they are measured.
             //
-            // Q4's resident expert is ~1.1 GB smaller than Q5's, so 81 fits
-            // wherever Q5's does.
+            // Q4 is measured too, not inferred from Q5: 81f at 832x480 renders
+            // in 317.5 s at a 15,722 MiB peak on the same card. Inferring it
+            // from Q5's smaller resident would have been the same
+            // arithmetic-not-measurement move this comment refuses for Q8.
             frames: Some(match tier {
                 A14bTier::Fast | A14bTier::Compact => 81,
                 A14bTier::Quality | A14bTier::Fp8 => 33,

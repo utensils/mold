@@ -151,6 +151,10 @@ Measured on an RTX 4090, `wan22-t2v-a14b:q5` at 832x480:
 | 81 | none | — | **OOM** |
 | 81 | automatic | 316.3 s | 17,322 MiB |
 
+The Q4 tier is measured at the same shape rather than inferred from Q5's
+smaller resident: 317.5 s at a 15,722 MiB peak.
+
+
 It engages by itself and a render that already fits parks nothing, so shorter
 clips are unchanged. `MOLD_WAN_OFFLOAD_BLOCKS=N` pins the block count and `0`
 disables it.
