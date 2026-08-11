@@ -316,10 +316,12 @@ parity.
 
 `scripts/capture-minimax-h3-visual-vae.py` is the paired producer for the
 `visual-vae` boundary. It uses one deterministic
-`visual-vae-320x320x5-seed42-v1` case. That geometry exercises the released
-five-frame temporal path and a real two-by-two spatial tile grid. The input
-identity binds the 256-pixel tile, 64-pixel minimum overlap, effective seam
-boundaries at pixels 64 and 256, and representative seam frames 0, 2, and 4.
+`visual-vae-320x320x22-seed42-v1` case. That geometry exercises the released
+shortest round-trip temporal path: two 17-frame encoder chunks produce seven
+latent frames and decode back to 22 frames. It also exercises a real two-by-two
+spatial tile grid. The input identity binds the 256-pixel tile, 64-pixel minimum
+overlap, effective seam boundaries at pixels 64 and 256, and representative
+seam frames 0, 10, and 21.
 
 The oracle is the pinned Diffusers `AutoencoderKLMiniMaxH3` loaded from the
 official three-shard FP32 checkpoint. The Mold role compiles the isolated

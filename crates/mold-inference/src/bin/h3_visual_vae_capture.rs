@@ -51,7 +51,14 @@ const REQUIRED_SCOPES: [&str; 3] = [
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 const MAX_AUTHORIZATION_BYTES: u64 = 64 * 1024;
 const MAX_AUTHORIZATION_SOURCE_BYTES: u64 = 1024 * 1024;
-const MAX_RAW_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RAW_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
+const CASE_FRAMES: usize = 22;
+const LATENT_FRAMES: usize = 7;
+const CASE_HEIGHT: usize = 320;
+const CASE_WIDTH: usize = 320;
+const LATENT_HEIGHT: usize = 20;
+const LATENT_WIDTH: usize = 20;
+const SEAM_FRAMES: [usize; 3] = [0, 10, 21];
 const OFFICIAL_VISUAL_SHARDS: [(&str, &str, &str); 3] = [
     (
         "official-video-vae-shard-00001-of-00003",
@@ -627,14 +634,19 @@ fn case_identity(case: &CaptureCase) -> Result<String> {
     put_u64(&mut digest, case.width)?;
     put_u64(&mut digest, 256)?;
     put_u64(&mut digest, 64)?;
-    for value in [64usize, 256, 0, 2, 4] {
+    for value in [64usize, 256, SEAM_FRAMES[0], SEAM_FRAMES[1], SEAM_FRAMES[2]] {
         put_u64(&mut digest, value)?;
     }
     Ok(format!("{:x}", digest.finalize()))
 }
 
 fn validate_cases(cases: &[CaptureCase]) -> Result<()> {
-    let expected = [("visual-vae-320x320x5-seed42-v1", 5, 320, 320)];
+    let expected = [(
+        "visual-vae-320x320x22-seed42-v1",
+        CASE_FRAMES,
+        CASE_HEIGHT,
+        CASE_WIDTH,
+    )];
     if cases.len() != expected.len() {
         bail!("capture request must contain the reviewed visual case")
     }
@@ -723,12 +735,14 @@ fn capture_tensor(key: &'static str, tensor: &Tensor, expected: DType) -> Result
 }
 
 fn tile_seam_probe(decoded: &Tensor) -> Result<Tensor> {
-    if decoded.dims5()? != (1, 3, 5, 320, 320) || decoded.dtype() != DType::F32 {
+    if decoded.dims5()? != (1, 3, CASE_FRAMES, CASE_HEIGHT, CASE_WIDTH)
+        || decoded.dtype() != DType::F32
+    {
         bail!("decoded visual evidence does not match the reviewed seam canvas")
     }
     let probe_axis = [0usize, 63, 64, 255, 256, 319];
     let mut values = Vec::new();
-    for frame in [0usize, 2, 4] {
+    for frame in SEAM_FRAMES {
         for channel in 0..3 {
             for seam in [64usize, 256] {
                 for probe in probe_axis {
@@ -760,6 +774,18 @@ fn tile_seam_probe(decoded: &Tensor) -> Result<Tensor> {
 }
 
 fn raw_case(case: &CaptureCase, evidence: VisualVaeCaptureEvidence) -> Result<RawCaseOutput> {
+    let latent_shape = (1, 24, LATENT_FRAMES, LATENT_HEIGHT, LATENT_WIDTH);
+    if evidence.normalized_pixels.dims5()? != (1, 3, CASE_FRAMES, CASE_HEIGHT, CASE_WIDTH)
+        || evidence.posterior_moments.dims5()?
+            != (1, 48, LATENT_FRAMES, LATENT_HEIGHT, LATENT_WIDTH)
+        || evidence.posterior_seed42_noise.dims5()? != latent_shape
+        || evidence.posterior_sample.dims5()? != latent_shape
+        || evidence.posterior_fp16_roundtrip.dims5()? != latent_shape
+        || evidence.normalized_latents.dims5()? != latent_shape
+        || evidence.decoded_pixels.dims5()? != (1, 3, CASE_FRAMES, CASE_HEIGHT, CASE_WIDTH)
+    {
+        bail!("captured visual tensors differ from the reviewed temporal case")
+    }
     let tile_seams = tile_seam_probe(&evidence.decoded_pixels)?;
     Ok(RawCaseOutput {
         case_id: case.case_id.clone(),
