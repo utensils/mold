@@ -311,9 +311,33 @@
         "key": { "$ref": "#/$defs/key" },
         "absolute": { "type": "number", "minimum": 0 },
         "relative": { "type": "number", "minimum": 0 },
-        "metric": { "const": "elementwise-atol-plus-rtol" },
+        "metric": {
+          "enum": [
+            "elementwise-atol-plus-rtol",
+            "piecewise-magnitude-atol-plus-rtol"
+          ]
+        },
+        "magnitude_threshold": { "type": "number", "minimum": 0 },
+        "large_absolute": { "type": "number", "minimum": 0 },
+        "large_relative": { "type": "number", "minimum": 0 },
         "hash_policy": { "enum": ["exact", "record-only"] }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "metric": { "const": "piecewise-magnitude-atol-plus-rtol" }
+            }
+          },
+          "then": {
+            "required": [
+              "magnitude_threshold",
+              "large_absolute",
+              "large_relative"
+            ]
+          }
+        }
+      ]
     }
   }
 }

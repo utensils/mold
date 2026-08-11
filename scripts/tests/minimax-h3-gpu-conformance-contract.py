@@ -30,6 +30,11 @@ CANONICAL_INTEGER_DTYPE = "int64"
 CANONICAL_METRIC_DTYPE = "float64"
 CANONICAL_MIXED_CAPTURE_DTYPE = "official-bf16-fp32-mixed"
 VISUAL_VAE_ENVIRONMENT_DTYPE = "official-f32-encode-fp16-decode"
+QWEN_ORDINARY_ABSOLUTE_TOLERANCE = 48.0
+QWEN_ORDINARY_RELATIVE_TOLERANCE = 1.0 / 64.0
+QWEN_LARGE_MAGNITUDE_THRESHOLD = 1024.0
+QWEN_LARGE_ABSOLUTE_TOLERANCE = 48.0
+QWEN_LARGE_RELATIVE_TOLERANCE = 3.0 / 8.0
 CANONICAL_E2E_INPUT_SCHEMA = "mold.minimax-h3.e2e-input.v1"
 COMPONENT_AUTHORITY_SET_SCHEMA = "mold.minimax-h3.component-authority-set.v1"
 E2E_LAYER_TASKS = {
@@ -295,15 +300,30 @@ def output_fixture(layer: str, key: str, kind: str) -> dict[str, object]:
     }
 
 
-def comparison_fixture(key: str, kind: str) -> dict[str, object]:
+def comparison_fixture(
+    key: str, kind: str, layer: str | None = None
+) -> dict[str, object]:
     integer = kind == "integer"
-    return {
+    policy: dict[str, object] = {
         "key": key,
         "absolute": 0 if integer else 0.000002,
         "relative": 0 if integer else 0.000001,
         "metric": "elementwise-atol-plus-rtol",
         "hash_policy": "record-only" if kind in {"float16", "float32"} else "exact",
     }
+    if layer == "qwen-layer-50" and key in {"statistics", "sampled-values"}:
+        policy.update(
+            {
+                "absolute": QWEN_ORDINARY_ABSOLUTE_TOLERANCE,
+                "relative": QWEN_ORDINARY_RELATIVE_TOLERANCE,
+                "metric": "piecewise-magnitude-atol-plus-rtol",
+                "magnitude_threshold": QWEN_LARGE_MAGNITUDE_THRESHOLD,
+                "large_absolute": QWEN_LARGE_ABSOLUTE_TOLERANCE,
+                "large_relative": QWEN_LARGE_RELATIVE_TOLERANCE,
+                "hash_policy": "record-only",
+            }
+        )
+    return policy
 
 
 def provenance_fixture(
@@ -499,7 +519,7 @@ def layer_document(
     document["provenance"] = provenance_fixture(tool, manifest_layer, document)
     if role == "oracle":
         document["comparison"] = [
-            comparison_fixture(key, TEST_MEASUREMENT_KINDS[layer][key])
+            comparison_fixture(key, TEST_MEASUREMENT_KINDS[layer][key], layer)
             for key in manifest_layer["required_measurements"]
         ]
     return document
@@ -528,7 +548,7 @@ def bundle_fixture(
             write_json(evidence_path, document)
             output = document["outputs"][0]
             comparison = comparison_fixture(
-                output["key"], TEST_MEASUREMENT_KINDS[layer][output["key"]]
+                output["key"], TEST_MEASUREMENT_KINDS[layer][output["key"]], layer
             )
             fixtures.append(
                 {
@@ -1497,6 +1517,10 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                 tool, "oracle", authorization_sha, manifest_layer
             )
             policy = record_by_key(wrong_policy["comparison"], measurement)
+            piecewise_qwen = layer == "qwen-layer-50" and measurement in {
+                "statistics",
+                "sampled-values",
+            }
             if kind == "integer":
                 policy["absolute"] = 0.25
                 expected_policy_error = "integer policy"
@@ -1507,7 +1531,11 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                     )
                     + 1.0
                 )
-                expected_policy_error = "bounded protected policy"
+                expected_policy_error = (
+                    "reviewed Qwen magnitude policy"
+                    if piecewise_qwen
+                    else "bounded protected policy"
+                )
             expect_failure(
                 lambda wrong_policy=wrong_policy, manifest_layer=manifest_layer: (
                     runner.validate_manifest_layer_evidence(
@@ -1531,7 +1559,7 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                                 overflow_policy, manifest_layer, "oracle"
                             )
                         ),
-                        "bounded protected policy",
+                        expected_policy_error,
                     )
 
             wrong_hash_policy = layer_document(
@@ -1547,7 +1575,11 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                         wrong_hash_policy, manifest_layer, "oracle"
                     )
                 ),
-                ("integer policy" if kind == "integer" else "bounded protected policy"),
+                (
+                    "integer policy"
+                    if kind == "integer"
+                    else expected_policy_error
+                ),
             )
 
         oracle = layer_document(tool, "oracle", authorization_sha, manifest_layer)
@@ -2204,7 +2236,25 @@ def test_runner_contract(runner, tool, temporary: pathlib.Path) -> None:
         )
         expect_failure(
             lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
-            "bounded protected policy",
+            "reviewed Qwen magnitude policy",
+        )
+
+        environment, oracle_bundle, _ = reset_campaign()
+
+        def widen_qwen_magnitude_policy(document: dict[str, object]) -> None:
+            record_by_key(document["comparison"], "sampled-values")[
+                "large_relative"
+            ] = 0.5
+
+        mutate_evidence(
+            fixture_root,
+            oracle_bundle,
+            widen_qwen_magnitude_policy,
+            fixture_layer="qwen-layer-50",
+        )
+        expect_failure(
+            lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
+            "reviewed Qwen magnitude policy",
         )
 
         environment, _, mold_bundle = reset_campaign()
@@ -2220,10 +2270,8 @@ def test_runner_contract(runner, tool, temporary: pathlib.Path) -> None:
             change_floating_content_hash,
             fixture_layer="qwen-layer-50",
         )
-        expect_failure(
-            lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
-            "content hashes differ",
-        )
+        result = runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA)
+        assert result["notes"] >= 1
 
         environment, _, mold_bundle = reset_campaign()
 

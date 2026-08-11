@@ -140,6 +140,41 @@ class ProducerContractTests(unittest.TestCase):
             self.contract["required_measurements"],
         )
 
+    def test_magnitude_policy_is_exact_and_piecewise(self) -> None:
+        oracle = self.layer_document("oracle")
+        policies = {record["key"]: record for record in oracle["comparison"]}
+        for key in ("statistics", "sampled-values"):
+            self.assertEqual(
+                policies[key],
+                {
+                    "key": key,
+                    "absolute": PRODUCER.ORDINARY_ABSOLUTE_TOLERANCE,
+                    "relative": PRODUCER.ORDINARY_RELATIVE_TOLERANCE,
+                    "metric": "piecewise-magnitude-atol-plus-rtol",
+                    "magnitude_threshold": PRODUCER.LARGE_MAGNITUDE_THRESHOLD,
+                    "large_absolute": PRODUCER.LARGE_ABSOLUTE_TOLERANCE,
+                    "large_relative": PRODUCER.LARGE_RELATIVE_TOLERANCE,
+                    "hash_policy": "record-only",
+                },
+            )
+        policy = policies["sampled-values"]
+        self.assertIsNone(CONFORMANCE.tolerance_issue("ordinary", 100.0, 149.0, policy))
+        self.assertIsNotNone(
+            CONFORMANCE.tolerance_issue("ordinary", 100.0, 150.0, policy)
+        )
+        self.assertIsNone(CONFORMANCE.tolerance_issue("large", 2048.0, 2864.0, policy))
+        self.assertIsNotNone(
+            CONFORMANCE.tolerance_issue("large", 2048.0, 2865.0, policy)
+        )
+
+        tolerance = next(
+            record for record in oracle["outputs"] if record["key"] == "tolerance"
+        )
+        self.assertEqual(
+            [sample["value"] for sample in tolerance["samples"]],
+            [48.0, 1.0 / 64.0, 1024.0, 48.0, 3.0 / 8.0],
+        )
+
     def test_role_invariant_provenance_matches(self) -> None:
         oracle = self.layer_document("oracle")
         mold = self.layer_document("mold")
