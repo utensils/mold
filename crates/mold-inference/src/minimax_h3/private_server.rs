@@ -40,7 +40,9 @@ use sha2::{Digest, Sha256};
 #[cfg(feature = "mp4")]
 use super::backend::{H3BackendArtifactLease, H3BackendExecutionLease, H3CandleBackendDevice};
 #[cfg(feature = "mp4")]
-use super::pipeline::{H3PipelineCheckpoint, H3PipelineEvent, NoopH3PipelineObserver};
+use super::engine::H3EngineProgressObserver;
+#[cfg(feature = "mp4")]
+use super::pipeline::{H3PipelineCheckpoint, H3PipelineEvent};
 #[cfg(feature = "mp4")]
 use super::private_fl2va_runtime::{
     bind_private_comfy_fl2va_phase_owner, issue_private_fl2va_memory_overlap,
@@ -863,7 +865,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let opened_vae = open_h3_comfy_vae_authority(&vae_plan, &mut vae_observer);
     let opened_vae = vae_observer.finish(opened_vae)?;
 
-    let mut prepare_observer = NoopH3PipelineObserver;
+    let mut prepare_observer = H3EngineProgressObserver::new(progress);
     let admission_request = prepare_private_fl2va_admission_request(
         request,
         &qwen_support,
@@ -1934,7 +1936,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     )?;
     progress.checkpoint()?;
 
-    let mut prepare_observer = NoopH3PipelineObserver;
+    let mut prepare_observer = H3EngineProgressObserver::new(progress);
     let prepared_attempt = H3PrivatePreparedFl2VaAttempt::prepare(
         request,
         frozen_factory.execution_fingerprint(),
@@ -2737,7 +2739,7 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
                 memory_overlap,
                 allocation_commit,
             )?;
-            let mut observer = NoopH3PipelineObserver;
+            let mut observer = H3EngineProgressObserver::new(progress);
             let output = run_private_comfy_fl2va_attempt(phase_owner, progress, &mut observer)?;
             completion_device
                 .synchronize()

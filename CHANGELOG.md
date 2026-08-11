@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Private H3 CUDA qualification can observe the real server phase lifecycle.** The authenticated private server stream now exposes the runtime's existing phase progress so external host/device memory samples can be correlated with VAE, Qwen, transformer, decode, and mux work. This remains behind `h3-private-uat` and does not activate a public H3 loader or approve runtime bounds.
+
 - **Private H3 campaign servers retain their measured runtime identity.** The private server now records the exact 64-byte runtime-code identity at startup, ensuring release LTO cannot remove the marker that the content-addressed qualification producer must authenticate in the measured server ELF. This changes no public capability or reviewed runtime allowlist.
 
 - **Private H3 Qwen qualification now uses a reviewed magnitude-aware BF16 policy.** After the production precision-boundary fixes, a complete 686,080-coordinate L40S comparison measured no ordinary-value violations under `48 + abs(oracle) / 64`; only seven multimodal coordinates reached an oracle magnitude of 1,024 or greater, with a worst observed relative difference of `5/13`. The protected comparison therefore uses that ordinary bound below 1,024 and `48 + 3 * abs(oracle) / 8` at or above it, retains both full-stream hashes as record evidence, requires every row-major coordinate, and rejects any policy widening. A clean paired CUDA campaign remains required before the Qwen qualification box can close.
