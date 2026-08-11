@@ -281,6 +281,16 @@ struct Attention {
     scale: f64,
 }
 
+fn matmul_with_cpu_bf16_fallback(left: &Tensor, right: &Tensor) -> Result<Tensor> {
+    if left.device().is_cpu() && left.dtype() == DType::BF16 && right.dtype() == DType::BF16 {
+        left.to_dtype(DType::F32)?
+            .matmul(&right.to_dtype(DType::F32)?)?
+            .to_dtype(DType::BF16)
+    } else {
+        left.matmul(right)
+    }
+}
+
 impl Attention {
     fn new(config: &Qwen3VlTextDimensions, vb: VarBuilder) -> Result<Self> {
         let q_width = config.num_attention_heads * config.head_dim;
@@ -373,11 +383,11 @@ impl Attention {
         let k = apply_rotary(&k, cos, sin)?.contiguous()?;
         let k = candle_transformers::utils::repeat_kv(k, self.kv_groups)?.contiguous()?;
         let v = candle_transformers::utils::repeat_kv(v, self.kv_groups)?.contiguous()?;
-        let scores = (q.matmul(&k.transpose(2, 3)?)? * self.scale)?.to_dtype(DType::F32)?;
+        let scores = (matmul_with_cpu_bf16_fallback(&q, &k.transpose(2, 3)?)? * self.scale)?
+            .to_dtype(DType::F32)?;
         let scores = scores.broadcast_add(causal_mask)?;
         let probabilities = candle_nn::ops::softmax_last_dim(&scores)?.to_dtype(v.dtype())?;
-        let output = probabilities
-            .matmul(&v)?
+        let output = matmul_with_cpu_bf16_fallback(&probabilities, &v)?
             .transpose(1, 2)?
             .reshape((batch, sequence, self.num_heads * self.head_dim))?
             .to_dtype(dtype)?;
@@ -984,6 +994,43 @@ mod tests {
                 .fold(0_f32, f32::max);
             assert!(max_difference <= 2e-5, "{role} drifted by {max_difference}");
         }
+    }
+
+    #[test]
+    fn mixed_nvfp4_bf16_stack_executes_on_cpu_with_rounded_matmul_boundaries() {
+        let config = Qwen3VlTextDimensions::tiny();
+        let encoder = Qwen3VlTextEncoder::new_nvfp4(
+            &config,
+            VarBuilder::zeros(DType::BF16, &Device::Cpu),
+            synthetic_nvfp4_weights(&config),
+        )
+        .unwrap();
+        let ids = Tensor::new(&[[1_u32, 2, 3]], &Device::Cpu).unwrap();
+        let positions = Tensor::new(
+            &[[[0_u32, 1, 2]], [[0_u32, 1, 2]], [[0_u32, 1, 2]]],
+            &Device::Cpu,
+        )
+        .unwrap();
+        let output = encoder
+            .forward_embeds(
+                encoder.embed_tokens(&ids).unwrap(),
+                &positions,
+                &[],
+                None,
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(output.dims(), [1, 3, 12]);
+        assert_eq!(output.dtype(), DType::BF16);
+        assert!(output
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .iter()
+            .all(|value| value.is_finite()));
     }
 
     #[test]
