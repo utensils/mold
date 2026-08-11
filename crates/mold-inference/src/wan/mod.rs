@@ -12,4 +12,5 @@ pub(crate) mod lora;
 pub(crate) mod model;
 pub mod pipeline;
 pub(crate) mod sampler;
+pub(crate) mod step_cache;
 pub(crate) mod text;

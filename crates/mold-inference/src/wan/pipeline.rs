@@ -902,6 +902,10 @@ struct DenoiseInputs<'a> {
     /// Live denoise previews. `None` when the checkpoint's latent channel
     /// count has no factor table.
     previewer: Option<&'a crate::latent_preview::LatentPreviewer>,
+    /// First-block residual reuse (#801). `Off` runs every block on every
+    /// step, which is the default and is bit-identical to the pre-cache
+    /// engine.
+    step_cache: crate::wan::step_cache::WanStepCachePolicy,
 }
 
 /// The sampling loop for all three conditioning modes.
@@ -924,7 +928,20 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
         device,
         progress,
         previewer,
+        step_cache,
     } = inputs;
+
+    // Two caches, never one: the conditional and unconditional forwards are
+    // different trajectories, and replaying one's residual into the other
+    // would blend them.
+    let (mut cond_cache, mut uncond_cache) = match step_cache {
+        crate::wan::step_cache::WanStepCachePolicy::Off => (None, None),
+        crate::wan::step_cache::WanStepCachePolicy::Threshold(threshold) => (
+            Some(crate::wan::step_cache::WanStepCache::new(threshold)),
+            Some(crate::wan::step_cache::WanStepCache::new(threshold)),
+        ),
+    };
+    let mut cached_expert: Option<crate::wan::experts::WanExpertRole> = None;
 
     // #775 A/B switch: `MOLD_WAN_FORCE_DMMV=1` forces candle's quantized
     // matmuls onto the dequantize-per-forward fallback, so a normal run vs a
@@ -950,6 +967,21 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
         // Resolved before the transformer borrow: per-expert guidance follows
         // the same boundary the swap below is about to consult.
         let step_guidance = guidance.for_timestep(*timestep);
+        // The expert swap changes the network, so nothing recorded against
+        // the previous one describes it. Reset both caches on the transition
+        // rather than trusting a residual across it.
+        if let Some(role) = experts.current_role(*timestep) {
+            if cached_expert.is_some_and(|previous| previous != role) {
+                if let Some(cache) = cond_cache.as_mut() {
+                    cache.reset();
+                }
+                if let Some(cache) = uncond_cache.as_mut() {
+                    cache.reset();
+                }
+            }
+            cached_expert = Some(role);
+        }
+
         // A14B switches experts here, once, when the schedule crosses the
         // boundary. Every other checkpoint hands back the same transformer.
         let transformer = experts.transformer_for(*timestep, progress)?;
@@ -973,17 +1005,23 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
             ),
         };
 
-        let cond =
-            transformer.forward_with_rope(&model_input, &timestep_tensor, cond_embeds, rope)?;
+        let cond = transformer.forward_with_rope_cached(
+            &model_input,
+            &timestep_tensor,
+            cond_embeds,
+            rope,
+            cond_cache.as_mut(),
+        )?;
         // A step whose own scale is <= 1 skips its uncond forward even when
         // the uncond embedding was encoded for other steps' sake.
         let velocity = match uncond_embeds {
             Some(uncond_embeds) if needs_cfg_pass(step_guidance) => {
-                let uncond = transformer.forward_with_rope(
+                let uncond = transformer.forward_with_rope_cached(
                     &model_input,
                     &timestep_tensor,
                     uncond_embeds,
                     rope,
+                    uncond_cache.as_mut(),
                 )?;
                 apply_cfg(&cond, &uncond, step_guidance)?
             }
@@ -1731,6 +1769,29 @@ impl WanEngine {
         // Live previews project the working latent through the checkpoint
         // generation's own factor table, selected by latent channel count.
         let previewer = crate::latent_preview::LatentPreviewer::wan(vae_config.z_dim);
+        // First-block residual reuse (#801). Off unless asked for, and refused
+        // outright on the schedules where it cannot help -- a distill adapter
+        // active, or too few steps to have redundant ones. A refusal is
+        // disclosed: a silently ignored knob reads as "the feature does not
+        // work".
+        // A shipped distill adapter is the signal: the `:q5` fast tiers carry
+        // one, the quality tiers do not. That is exactly the split where
+        // residual reuse has something to reuse.
+        let distill_is_active = self.base.paths.distilled_lora.is_some()
+            || self.base.paths.low_noise_distilled_lora.is_some();
+        let (step_cache, refusal) = crate::wan::step_cache::WanStepCachePolicy::resolve(
+            crate::wan::step_cache::requested_threshold()?,
+            steps,
+            distill_is_active,
+        );
+        if let Some(refusal) = refusal {
+            progress.info(refusal.message());
+        }
+        if let crate::wan::step_cache::WanStepCachePolicy::Threshold(threshold) = step_cache {
+            progress.info(&format!(
+                "Step cache on at relative-L1 threshold {threshold}"
+            ));
+        }
         let latents = run_denoise_loop(DenoiseInputs {
             experts: &mut experts,
             conditioning: &conditioning,
@@ -1745,6 +1806,7 @@ impl WanEngine {
             device: &device,
             progress,
             previewer: previewer.as_ref(),
+            step_cache,
         })?;
         progress.checkpoint()?;
         drop(experts);
@@ -3635,6 +3697,106 @@ mod tests {
     /// first (order-1) and terminal steps coincide with the naive identity by
     /// construction, so the fixture must discriminate on a corrector step in
     /// between — a zero preview interval makes the loop emit all of them.
+    /// The step cache must be invisible when off and real when on.
+    ///
+    /// Both halves matter. "Off is bit-identical" is the determinism contract
+    /// the family advertises, and it would be easy to break by restructuring
+    /// the block loop. "On actually skips" is the part a threshold check can
+    /// silently fail at — a cache that never fires looks exactly like a cache
+    /// that is working, since the output is then also unchanged.
+    #[test]
+    fn the_step_cache_is_invisible_when_off_and_skips_blocks_when_on() {
+        use crate::wan::step_cache::WanStepCachePolicy;
+
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let z = 16usize;
+        let config = WanTransformerConfig::tiny(z, 2, 4);
+        let map = VarMap::new();
+        let transformer = WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&map, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+        for (index, var) in map.all_vars().iter().enumerate() {
+            let noise = seeded_randn(4242 + index as u64, var.dims(), &device, dtype)
+                .unwrap()
+                .affine(0.2, 0.0)
+                .unwrap();
+            var.set(&noise).unwrap();
+        }
+
+        let (latent_frames, latent_h, latent_w) = (2usize, 4usize, 4usize);
+        let total = 16usize;
+        let schedule = WanSchedule::new(WanScheduleConfig::new(total, 8.0)).unwrap();
+        let latents0 = seeded_randn(
+            11,
+            &[1, z, latent_frames, latent_h, latent_w],
+            &device,
+            dtype,
+        )
+        .unwrap();
+        let context = Tensor::zeros((1, 6, config.text_dim), dtype, &device).unwrap();
+        let quiet = crate::progress::ProgressReporter::default();
+
+        let run = |policy: WanStepCachePolicy| {
+            let mut experts = WanExperts::single(transformer.clone());
+            let rope = experts
+                .transformer_for(schedule.timesteps[0], &quiet)
+                .unwrap()
+                .rope_freqs_for(
+                    &Tensor::zeros((1, z, latent_frames, latent_h, latent_w), dtype, &device)
+                        .unwrap(),
+                )
+                .unwrap();
+            let mut solver = WanSolver::UniPc(FlowUniPc::new(schedule.clone()));
+            run_denoise_loop(DenoiseInputs {
+                experts: &mut experts,
+                conditioning: &WanImageConditioning::None,
+                schedule: &schedule,
+                solver: &mut solver,
+                latents: latents0.clone(),
+                cond_embeds: &context,
+                uncond_embeds: None,
+                guidance: WanGuidancePlan::Uniform(1.0),
+                patch: config.patch_size.1,
+                rope: &rope,
+                device: &device,
+                progress: &quiet,
+                previewer: None,
+                step_cache: policy,
+            })
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+        };
+
+        let baseline = run(WanStepCachePolicy::Off);
+        // Off twice is the same run: the loop is deterministic, so any
+        // difference below is the cache and not sampling noise.
+        assert_eq!(baseline, run(WanStepCachePolicy::Off));
+
+        // A threshold this large accepts every step after the first full one,
+        // so the tail residual is replayed and the result must diverge. If it
+        // does not, the cache never fired and the "off is identical" half of
+        // this test would be passing vacuously.
+        let cached = run(WanStepCachePolicy::Threshold(f64::MAX));
+        assert_eq!(baseline.len(), cached.len());
+        assert!(
+            baseline
+                .iter()
+                .zip(cached.iter())
+                .any(|(a, b)| (a - b).abs() > 1e-6),
+            "an always-accept threshold must skip blocks and change the result",
+        );
+
+        // A threshold of zero can never accept a step, so it must reproduce
+        // the uncached run exactly — the cache path itself adds no drift.
+        assert_eq!(baseline, run(WanStepCachePolicy::Threshold(0.0)));
+    }
+
     #[test]
     fn preview_projects_the_solvers_own_x0() {
         let device = Device::Cpu;
@@ -3703,6 +3865,7 @@ mod tests {
             device: &device,
             progress: &progress,
             previewer: Some(&previewer),
+            step_cache: crate::wan::step_cache::WanStepCachePolicy::Off,
         })
         .unwrap();
         let loop_pngs: Vec<(usize, Vec<u8>)> = {
@@ -3835,6 +3998,7 @@ mod tests {
             device: &device,
             progress: &progress,
             previewer: Some(&previewer),
+            step_cache: crate::wan::step_cache::WanStepCachePolicy::Off,
         })
         .unwrap();
 
@@ -4005,6 +4169,7 @@ mod tests {
                 device: &device,
                 progress: &progress,
                 previewer: None,
+                step_cache: crate::wan::step_cache::WanStepCachePolicy::Off,
             })
             .unwrap();
 

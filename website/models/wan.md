@@ -58,6 +58,8 @@ second checkpoint it was not fitted to. A rejection names frames first, because
 that is the most effective lever, and suggests the next quantized tier down
 rather than the one that just failed.
 
+The swap itself is a cold read: the outgoing expert is still in the page cache, but the incoming 10.8-15.4 GB file has not been read this run and on a 32-64 GB host has been evicted behind UMT5 and the resident expert. mold warms it in the background while the first expert denoises — host I/O only, so no VRAM is touched and the max-of-pair invariant holds. Measured on an RTX 4090 with a cold cache (`wan22-t2v-a14b:q5`, 33f): the swap load falls from 8.7-22.2 s, varying with what survived in cache, to a consistent 5.6 s. `MOLD_WAN_PREFETCH=0` turns it off.
+
 Community A14B adapters are published the same way: a high-noise file and a
 low-noise file, distilled together and explicitly not interchangeable. Bind one
 to its expert with `--lora file.safetensors@high` (or `@low`), or the additive
