@@ -141,12 +141,12 @@ On the 4-step Turbo tier the denoise is short enough that the causal 3-D VAE
 decode, not the transformer, is the largest single phase. Measured on an RTX
 4090 with `wan22-ti2v-5b:turbo`, reading the `Decoding video frames [Xs]` line:
 
-| Shape | Frames | Decode | Total | Decode share |
-| ------------- | -----: | -----: | -----: | -----------: |
-| 480x288       |     81 |  6.8 s | 13.4 s |          51% |
-| 832x480       |     81 | 19.8 s | 38.0 s |          52% |
-| 1280x704      |     81 | 44.9 s | 101.8 s |         44% |
-| 1280x704      |    121 | 66.9 s | 170.0 s |         39% |
+| Shape    | Frames | Decode |   Total | Decode share |
+| -------- | -----: | -----: | ------: | -----------: |
+| 480x288  |     81 |  6.8 s |  13.4 s |          51% |
+| 832x480  |     81 | 19.8 s |  38.0 s |          52% |
+| 1280x704 |     81 | 44.9 s | 101.8 s |          44% |
+| 1280x704 |    121 | 66.9 s | 170.0 s |          39% |
 
 That cost is **compute**, not overhead: decode time tracks pixels x frames
 almost exactly (2.9x the pixels costs 2.9x the time, 6.5x costs 6.6x), while
@@ -158,7 +158,7 @@ added an OOM at 8 latent frames, so neither shipped. There is no knob that
 makes this phase cheaper — the levers that matter are resolution and frame
 count.
 
-The decode is also *not* where this family runs out of memory. Its transient is
+The decode is also _not_ where this family runs out of memory. Its transient is
 bounded to one latent frame at a time by construction, so `1280x704 x 121`
 decodes on a 24 GB card; the denoise is the memory wall.
 
