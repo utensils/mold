@@ -5099,9 +5099,11 @@ fn wan_manifests() -> Vec<ModelManifest> {
                 });
                 files
             },
-            defaults: defaults_480p,
+            defaults: defaults_480p.clone(),
             hidden: false,
         },
+        wan21_t2v_14b_manifest(Wan21T2v14bTier::Compact, defaults_480p.clone()),
+        wan21_t2v_14b_manifest(Wan21T2v14bTier::Quality, defaults_480p),
         ModelManifest {
             name: "wan22-ti2v-5b:fp16".to_string(),
             family: "wan".to_string(),
@@ -5181,6 +5183,98 @@ fn wan_manifests() -> Vec<ModelManifest> {
         a14b_manifest(A14bTier::Compact, A14bTask::I2v),
         a14b_manifest(A14bTier::Fp8, A14bTask::I2v),
     ]
+}
+
+/// Which Wan 2.1 T2V-14B tier a manifest is built for.
+///
+/// The 14B is the dense single-expert 2.1 checkpoint — `dim` 5120, 40 layers,
+/// `in_dim` 16 — which the engine already shape-detects, so these tiers add no
+/// architecture. What they add is the checkpoint itself: 2.1 shipped in mold
+/// only at 1.3B, while the 14B carries the CausVid/lightx2v-era LoRA ecosystem
+/// and city96 publishes the canonical GGUFs (#797).
+///
+/// Only two of city96's fifteen tiers ship. Q8_0 is the quality tier and
+/// Q5_K_M the one that leaves room for the encoder on a 16 GB card; the
+/// intermediate tiers buy nothing a user cannot get by picking one of these
+/// two, and every additional tier is another SHA to keep honest.
+#[derive(Clone, Copy)]
+enum Wan21T2v14bTier {
+    /// Q5_K_M — 11.3 GB.
+    Compact,
+    /// Q8_0 — 15.9 GB.
+    Quality,
+}
+
+impl Wan21T2v14bTier {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Compact => "q5",
+            Self::Quality => "q8",
+        }
+    }
+
+    /// `(filename, size_bytes, sha256)` — read from the repository's own blob
+    /// listing, not from the survey that prompted the work.
+    fn file(self) -> (&'static str, u64, &'static str) {
+        match self {
+            Self::Compact => (
+                "wan2.1-t2v-14b-Q5_K_M.gguf",
+                11_264_907_904,
+                "5a4a0973e661603920633729c4a929a85e20e4107c5e7b4d9f103888f5a38178",
+            ),
+            Self::Quality => (
+                "wan2.1-t2v-14b-Q8_0.gguf",
+                15_879_461_504,
+                "cd4f1cc5cd4b63f25898340e997d6299984114e8755be5407bc585a1e0ec9f38",
+            ),
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Compact => "Wan 2.1 T2V 14B Q5_K_M — 480p text-to-video (smaller-card GGUF)",
+            Self::Quality => "Wan 2.1 T2V 14B Q8_0 — 480p text-to-video",
+        }
+    }
+}
+
+/// One Wan 2.1 T2V-14B tier.
+///
+/// The VAE is the same 2.1 VAE the 1.3B pins, and the encoder and tokenizer
+/// come from `shared_wan_files()`, so a user who already has the 1.3B pulls
+/// only the transformer. The recipe is the 1.3B's — ComfyUI's Wan 2.1 template
+/// — because it is the same family at the same resolution; the flow shift the
+/// template pairs with it is already the engine's single-expert default of 8.0
+/// (`wan/pipeline.rs`), so no per-tier shift is needed.
+fn wan21_t2v_14b_manifest(tier: Wan21T2v14bTier, defaults: ManifestDefaults) -> ModelManifest {
+    let (filename, size_bytes, sha256) = tier.file();
+    ModelManifest {
+        name: format!("wan21-t2v-14b:{}", tier.tag()),
+        family: "wan".to_string(),
+        description: tier.description().to_string(),
+        files: {
+            let mut files = shared_wan_files();
+            files.push(ModelFile {
+                hf_repo: "city96/Wan2.1-T2V-14B-gguf".to_string(),
+                hf_filename: filename.to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes,
+                gated: false,
+                sha256: Some(sha256),
+            });
+            files.push(ModelFile {
+                hf_repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged".to_string(),
+                hf_filename: "split_files/vae/wan_2.1_vae.safetensors".to_string(),
+                component: ModelComponent::Vae,
+                size_bytes: 253_815_318,
+                gated: false,
+                sha256: Some("2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b"),
+            });
+            files
+        },
+        defaults,
+        hidden: false,
+    }
 }
 
 /// Which A14B task a manifest is built for. The two differ only in the GGUF
@@ -6837,7 +6931,7 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 11 Wan + 4 compliance-hidden MiniMax H3 contracts + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 149
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 13 Wan + 4 compliance-hidden MiniMax H3 contracts + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 151
         // Wan fp8 bump (#777): +wan22-{t2v,i2v}-a14b:fp8 — the Comfy-Org
         // fp8-scaled expert pairs.
         // Wan bump: +wan22-{t2v,i2v}-a14b:{q5,q8} — the two-expert A14B tiers.
@@ -6849,7 +6943,9 @@ mod tests {
         // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
         // Gemma 3 12B text encoder); +wan-umt5, +wan21-vae, +wan22-vae for
         // single-file Wan checkpoints.
-        assert_eq!(known_manifests().len(), 149);
+        // Wan 2.1 14B bump (#797): +wan21-t2v-14b:{q5,q8} — city96's canonical
+        // GGUFs for the dense 2.1 14B, which the engine already shape-detects.
+        assert_eq!(known_manifests().len(), 151);
     }
 
     #[test]
@@ -6885,9 +6981,16 @@ mod tests {
             "wan22-ti2v-5b:fp16"
         );
         assert_eq!(resolve_model_name("wan22-ti2v-5b-q8"), "wan22-ti2v-5b:q8");
+        // The 2.1 14B ships only GGUF tiers, so the bare name takes the
+        // generic loop's first hit — `:q8`, the quality tier — rather than
+        // needing a pin. Both tags stay addressable, dash form included.
+        assert_eq!(resolve_model_name("wan21-t2v-14b"), "wan21-t2v-14b:q8");
+        assert_eq!(resolve_model_name("wan21-t2v-14b-q5"), "wan21-t2v-14b:q5");
 
         for name in [
             "wan21-t2v-1.3b:bf16",
+            "wan21-t2v-14b:q5",
+            "wan21-t2v-14b:q8",
             "wan22-ti2v-5b:fp16",
             "wan22-ti2v-5b:q8",
         ] {

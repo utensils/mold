@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { computed } from "vue";
+
+import { familyLabel } from "@studio/lib/modelFamily";
+
 import SourceGlyph from "../generate/SourceGlyph.vue";
 import { openExternal } from "../../lib/openExternal";
 import type { ModelSource } from "../../lib/modelSource";
@@ -49,6 +53,14 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{ (e: "open"): void }>();
+
+/**
+ * The chip shows the family's name, not its wire slug (#806) — a Wan row read
+ * "wan" here while web read "Wan Video". No width concern: the longest label
+ * ("Qwen Image Edit") is exactly as long as the slug it replaces, and every
+ * other label is the same length or shorter. Only wan grows.
+ */
+const familyChip = computed(() => (props.family ? familyLabel(props.family) : ""));
 
 /**
  * Enter/Space on a clickable row opens it, but keydown bubbles — a keypress
@@ -112,7 +124,9 @@ function onRowKeydown(event: KeyboardEvent): void {
     >
       {{ quant }}
     </span>
-    <span v-if="family" class="edge-code shrink-0" data-test="row-family">{{ family }}</span>
+    <span v-if="familyChip" class="edge-code shrink-0" data-test="row-family">{{
+      familyChip
+    }}</span>
     <button
       v-if="pageUrl"
       type="button"

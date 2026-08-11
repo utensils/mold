@@ -21,6 +21,8 @@ the family natively in Rust.
 | Model                 | Steps | Approx total pull | Notes                                        |
 | --------------------- | ----- | ----------------- | -------------------------------------------- |
 | `wan21-t2v-1.3b:bf16` | 30    | ~14.5 GB          | 480p text-to-video; smallest, fastest pull   |
+| `wan21-t2v-14b:q5`    | 30    | ~23 GB            | Q5_K_M 2.1 14B; 480p text-to-video           |
+| `wan21-t2v-14b:q8`    | 30    | ~27.5 GB          | Q8_0 2.1 14B; the 2.1 quality tier           |
 | `wan22-ti2v-5b:fp16`  | 20    | ~22.8 GB          | 720p24 text- and image-to-video              |
 | `wan22-ti2v-5b:q8`    | 20    | ~18 GB            | Q8_0 5B; 8-12 GB cards at reduced settings   |
 | `wan22-t2v-a14b:q5`   | 4     | ~36 GB            | 480p16 text-to-video, 4-step Lightning tier  |
@@ -161,8 +163,8 @@ Wan checkpoints split three ways, and `/api/models` advertises which through
 the additive per-model `source_image` field so every surface offers exactly
 what the checkpoint accepts:
 
-- **`unsupported`** — `wan21-t2v-1.3b`, `wan22-t2v-a14b:*`: pure
-  text-to-video; a supplied image is rejected at admission.
+- **`unsupported`** — `wan21-t2v-1.3b`, `wan21-t2v-14b:*`, `wan22-t2v-a14b:*`:
+  pure text-to-video; a supplied image is rejected at admission.
 - **`optional`** — `wan22-ti2v-5b:*`: text-to-video, or the source pinned as
   frame 0 through latent inpainting.
 - **`required`** — `wan22-i2v-a14b:*`: the image is half the model input;
@@ -183,14 +185,14 @@ mid-clip keyframe path.
 
 ## Defaults and limits
 
-| Property   | `wan21-t2v-1.3b`  | `wan22-ti2v-5b`     | `wan22-*-a14b:q5` | `wan22-*-a14b:q8` |
-| ---------- | ----------------- | ------------------- | ----------------- | ----------------- |
-| Resolution | 832x480 / 480x832 | 1280x704 / 704x1280 | 832x480           | 832x480           |
-| Frames     | 81 @ 16 fps       | 121 @ 24 fps        | 53 @ 16 fps       | 33 @ 16 fps       |
-| Steps      | 30                | 20                  | 4                 | 20                |
-| Guidance   | 6.0               | 5.0                 | 1.0 (no CFG pass) | per-expert¹       |
-| Flow shift | 8.0               | 8.0                 | 5.0               | 5.0               |
-| Sampler    | FlowUniPC (bh2)   | FlowUniPC (bh2)     | FlowUniPC (bh2)   | FlowUniPC (bh2)   |
+| Property   | `wan21-t2v-1.3b`  | `wan21-t2v-14b:*` | `wan22-ti2v-5b`     | `wan22-*-a14b:q5` | `wan22-*-a14b:q8` |
+| ---------- | ----------------- | ----------------- | ------------------- | ----------------- | ----------------- |
+| Resolution | 832x480 / 480x832 | 832x480 / 480x832 | 1280x704 / 704x1280 | 832x480           | 832x480           |
+| Frames     | 81 @ 16 fps       | 81 @ 16 fps       | 121 @ 24 fps        | 53 @ 16 fps       | 33 @ 16 fps       |
+| Steps      | 30                | 30                | 20                  | 4                 | 20                |
+| Guidance   | 6.0               | 6.0               | 5.0                 | 1.0 (no CFG pass) | per-expert¹       |
+| Flow shift | 8.0               | 8.0               | 8.0                 | 5.0               | 5.0               |
+| Sampler    | FlowUniPC (bh2)   | FlowUniPC (bh2)   | FlowUniPC (bh2)     | FlowUniPC (bh2)   | FlowUniPC (bh2)   |
 
 ¹ The `:q8` quality tier advertises guidance 3.5, but by default mold applies
 upstream's **per-expert** scales, switching at the same boundary as the expert
