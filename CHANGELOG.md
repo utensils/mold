@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Private H3 runtime records now bind the scheduler's stable CUDA route.** Memory-gated smoke testing exposed that the candidate producer required an ordinal-shaped `cuda:N` identifier while runtime admission required the UUID-backed scheduler device ID, making every record impossible to authorize. Capture and runtime validation now require the exact lowercase 128-bit CUDA identity while retaining the process-local ordinal as a separate crossed-route check.
+
 - **Authorized private H3 ingress no longer re-enters the public compliance rejection.** The server now applies the ordinary field and family validation through a validation-only `h3-private-uat` edge after its authenticated private grant. Shipping requests still fail at the unchanged public authorization gate, and this adds no artifact or loader access.
 
 - **Private H3 CUDA qualification can observe the real server phase lifecycle.** The authenticated private server stream now exposes the runtime's existing phase progress so external host/device memory samples can be correlated with VAE, Qwen, transformer, decode, and mux work. This remains behind `h3-private-uat` and does not activate a public H3 loader or approve runtime bounds.
