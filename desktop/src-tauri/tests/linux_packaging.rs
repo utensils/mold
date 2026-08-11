@@ -56,12 +56,27 @@ fn appimage_excludes_the_host_cuda_driver() {
         workflow.contains("../scripts/prepare-desktop-linuxdeploy.sh"),
         "Linux CI must install the linuxdeploy CUDA-driver exclusion wrapper"
     );
-    assert_eq!(
-        workflow
-            .matches("- \"scripts/prepare-desktop-linuxdeploy.sh\"")
-            .count(),
-        2,
-        "wrapper changes must trigger desktop CI for pushes and pull requests"
+    // The wrapper has to trigger the CI that actually exercises it, which is
+    // the main push that builds the AppImage. It deliberately does NOT trigger
+    // pull requests: #947 made desktop PR feedback format-only on Linux, so a
+    // PR run builds no AppImage and a wrapper-only PR trigger would start a
+    // job that cannot exercise the change. Asserted per trigger block rather
+    // than as a whole-file count, which said "twice" without saying where.
+    let (push_filters, rest) = workflow
+        .split_once("\n  pull_request:")
+        .expect("desktop.yml must declare a pull_request trigger");
+    let (pull_request_filters, _) = rest
+        .split_once("\n  workflow_dispatch:")
+        .expect("desktop.yml must declare a workflow_dispatch trigger");
+    const WRAPPER_FILTER: &str = "- \"scripts/prepare-desktop-linuxdeploy.sh\"";
+    assert!(
+        push_filters.contains(WRAPPER_FILTER),
+        "wrapper changes must trigger the main push that builds the AppImage"
+    );
+    assert!(
+        !pull_request_filters.contains(WRAPPER_FILTER),
+        "desktop pull requests are format-only and build no AppImage, so the wrapper \
+         must not trigger one"
     );
     assert!(
         workflow.contains("XDG_CACHE_HOME: /tmp/mold-desktop-cache-${{ github.run_id }}"),

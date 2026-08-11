@@ -18,15 +18,23 @@ workflow_concurrency="$(sed -n '/^concurrency:/,/^permissions:/p' "$workflow")"
 grep -Fq "cancel-in-progress: \${{ github.event_name == 'pull_request' }}" <<< "$workflow_concurrency" \
   || fail "workflow-level concurrency does not cancel only superseded PR runs"
 
-rust_job="$(sed -n '/^  desktop-rust:/,/^  desktop-nightly:/p' "$workflow")"
-grep -Fq 'run: bunx tauri build --debug --bundles app --ci' <<< "$rust_job" \
-  || fail "bundle-sensitive macOS PRs have no packaging proof"
-grep -Fq "if: github.event_name == 'pull_request' && needs.changes.outputs.bundle == 'true'" <<< "$rust_job" \
-  || fail "debug bundle is not restricted to bundle-sensitive PRs"
+# Packaging proof used to be a per-PR macOS debug bundle. #947 made desktop
+# pull-request feedback format-only and moved every build to main, so the proof
+# is asserted where it now lives — one job per platform, both gated to pushes —
+# rather than deleted along with the step that used to carry it.
+rust_job="$(sed -n '/^  desktop-rust:/,/^  desktop-linux:/p' "$workflow")"
 grep -Fq 'run: cargo test --manifest-path src-tauri/Cargo.toml' <<< "$rust_job" \
-  || fail "macOS PR gate no longer runs the native test suite"
+  || fail "the native desktop gate no longer runs the test suite"
+
+linux_job="$(sed -n '/^  desktop-linux:/,/^  desktop-nightly:/p' "$workflow")"
+grep -Fq 'bunx tauri build --features cuda --bundles appimage --ci -v' <<< "$linux_job" \
+  || fail "main pushes have no Linux packaging proof"
+grep -Fq "if: github.event_name != 'pull_request'" <<< "$linux_job" \
+  || fail "Linux packaging is not reserved for main pushes"
 
 nightly_header="$(sed -n '/^  desktop-nightly:/,/^  publish-desktop-nightly:/p' "$workflow")"
+grep -Fq 'uses: ./.github/workflows/desktop-distribution.yml' <<< "$nightly_header" \
+  || fail "main pushes have no macOS packaging proof"
 grep -Fq 'needs: [desktop-frontend, desktop-rust]' <<< "$nightly_header" \
   || fail "macOS Nightly distribution does not start after its own frontend and Rust gates"
 if grep -Fq 'desktop-linux' <<< "$nightly_header"; then
