@@ -14,6 +14,7 @@ private_runtime_record_marker='mold.minimax-h3.private-runtime-record-producer.v
 private_qwen_capture_marker='mold.minimax-h3.private-uat-exact-bf16-qwen-layer50-capture.v1'
 private_visual_vae_capture_marker='mold.minimax-h3.private-uat-visual-vae-f32-fp16-capture.v1'
 private_audio_capture_marker='mold.minimax-h3.private-uat-exact-fp32-audio-vae-capture.v1'
+private_transformer_capture_marker='mold.minimax-h3.private-uat-transformer-capture.v1'
 omitted_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=omitted'
 compiled_markers=(
   'mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=omitted'
@@ -74,6 +75,11 @@ fi
 
 if grep -aFq "$private_audio_capture_marker" "$binary"; then
   echo "published binary contains the forbidden MiniMax H3 exact-FP32 AudioVAE capture adapter" >&2
+  exit 1
+fi
+
+if grep -aFq "$private_transformer_capture_marker" "$binary"; then
+  echo "published binary contains the forbidden MiniMax H3 transformer capture adapter" >&2
   exit 1
 fi
 

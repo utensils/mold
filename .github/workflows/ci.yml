@@ -140,6 +140,7 @@ jobs:
               - 'crates/mold-inference/src/bin/h3_qwen_layer50_capture.rs'
               - 'crates/mold-inference/src/bin/h3_visual_vae_capture.rs'
               - 'crates/mold-inference/src/bin/h3_audio_vae_capture.rs'
+              - 'crates/mold-inference/src/bin/h3_transformer_capture.rs'
               - 'crates/mold-inference/src/minimax_h3/mod.rs'
               - 'crates/mold-inference/src/minimax_h3/private_*.rs'
               - 'crates/mold-server/src/lib.rs'
@@ -489,6 +490,9 @@ jobs:
       - name: Clippy the private exact-BF16 Qwen capture adapter
         if: env.RUN_RUST_SUITE == 'true'
         run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_qwen_layer50_capture -- -D warnings
+      - name: Clippy the private H3 transformer capture adapter
+        if: env.RUN_RUST_SUITE == 'true'
+        run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_transformer_capture -- -D warnings
       - name: Test private MiniMax H3 foundations
         if: env.RUN_RUST_SUITE == 'true'
         run: cargo test -p mold-ai-inference --lib --features h3-private-uat minimax_h3
@@ -543,6 +547,8 @@ jobs:
         run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_visual_vae_capture -- -D warnings
       - name: Clippy private exact-FP32 AudioVAE capture adapter
         run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_audio_vae_capture -- -D warnings
+      - name: Clippy private H3 transformer capture adapter
+        run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_transformer_capture -- -D warnings
 
   # The `flash-attn` feature was decorative for months (issue #598) precisely
   # because nothing ever compiled it: the cfg-stripped fallback in

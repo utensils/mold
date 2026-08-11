@@ -141,6 +141,20 @@ require_text crates/mold-inference/src/bin/h3_audio_vae_capture.rs \
 require_text crates/mold-inference/src/bin/h3_audio_vae_capture.rs \
   'mold.minimax-h3.private-uat-exact-fp32-audio-vae-capture.v1' \
   "the exact-FP32 AudioVAE capture adapter has no release-rejectable claim marker"
+transformer_capture_bin=$(sed -n \
+  '/name = "h3_transformer_capture"/,/^$/p' \
+  crates/mold-inference/Cargo.toml)
+if ! grep -Fq 'path = "src/bin/h3_transformer_capture.rs"' <<<"$transformer_capture_bin" \
+  || ! grep -Fq 'required-features = ["dev-bins", "h3-private-uat"]' \
+    <<<"$transformer_capture_bin"; then
+  fail "the transformer capture adapter is reachable outside private development builds"
+fi
+require_text crates/mold-inference/src/bin/h3_transformer_capture.rs \
+  'capture_h3_private_transformer_primitives(' \
+  "the transformer capture adapter bypasses the production observer seam"
+require_text crates/mold-inference/src/bin/h3_transformer_capture.rs \
+  'mold.minimax-h3.private-uat-transformer-capture.v1' \
+  "the transformer capture adapter has no release-rejectable claim marker"
 require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
   '"mold.minimax-h3.private-uat-artifact-reader.v1"' \
   "the private H3 artifact reader has no release-rejectable claim marker"
@@ -664,6 +678,9 @@ require_text scripts/verify-h3-release-exclusion.sh \
 require_text scripts/verify-h3-release-exclusion.sh \
   "private_audio_capture_marker='mold.minimax-h3.private-uat-exact-fp32-audio-vae-capture.v1'" \
   "published binary verification does not reject the exact-FP32 AudioVAE capture marker"
+require_text scripts/verify-h3-release-exclusion.sh \
+  "private_transformer_capture_marker='mold.minimax-h3.private-uat-transformer-capture.v1'" \
+  "published binary verification does not reject the transformer capture marker"
 require_text .github/workflows/ci.yml \
   'cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_artifact_qualification -- -D warnings' \
   "CI does not compile the authorization-bound artifact qualifier"
@@ -682,6 +699,9 @@ require_text .github/workflows/ci.yml \
 require_text .github/workflows/ci.yml \
   'cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_audio_vae_capture -- -D warnings' \
   "CUDA CI does not compile the exact-FP32 AudioVAE capture adapter"
+require_text .github/workflows/ci.yml \
+  'cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_transformer_capture -- -D warnings' \
+  "CUDA CI does not compile the transformer capture adapter"
 require_text .github/workflows/ci.yml \
   'python3 scripts/tests/minimax-h3-audio-vae-capture-contract.py' \
   "CI does not run the exact-FP32 AudioVAE capture contract"
@@ -750,6 +770,7 @@ private_runtime_record_marker='mold.minimax-h3.private-runtime-record-producer.v
 private_qwen_capture_marker='mold.minimax-h3.private-uat-exact-bf16-qwen-layer50-capture.v1'
 private_visual_vae_capture_marker='mold.minimax-h3.private-uat-visual-vae-f32-fp16-capture.v1'
 private_audio_capture_marker='mold.minimax-h3.private-uat-exact-fp32-audio-vae-capture.v1'
+private_transformer_capture_marker='mold.minimax-h3.private-uat-transformer-capture.v1'
 printf '%s\n' "$ordinary_marker" >"$scratch_dir/ordinary"
 scripts/verify-h3-release-exclusion.sh "$scratch_dir/ordinary" >/dev/null
 printf '%s\n%s\n' "$ordinary_marker" "$private_marker" >"$scratch_dir/private"
@@ -780,6 +801,11 @@ printf '%s\n%s\n' "$ordinary_marker" "$private_audio_capture_marker" \
   >"$scratch_dir/private-audio-capture"
 if scripts/verify-h3-release-exclusion.sh "$scratch_dir/private-audio-capture" >/dev/null 2>&1; then
   fail "release exclusion verifier accepted the exact-FP32 AudioVAE capture adapter"
+fi
+printf '%s\n%s\n' "$ordinary_marker" "$private_transformer_capture_marker" \
+  >"$scratch_dir/private-transformer-capture"
+if scripts/verify-h3-release-exclusion.sh "$scratch_dir/private-transformer-capture" >/dev/null 2>&1; then
+  fail "release exclusion verifier accepted the transformer capture adapter"
 fi
 
 echo "PASS: MiniMax H3 private-UAT release contract"
