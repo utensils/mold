@@ -446,6 +446,27 @@ fn zimage_gguf_dense_forced() -> bool {
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
 }
 
+/// Largest latent axis candle's GPU VAE decode is measured to handle whole.
+///
+/// Determined by bisection against a CPU reference on an M4 Max: the Z-Image
+/// VAE decode is exact at latent 96, 104, 112 and 120 (relative error ~2e-5)
+/// and wrong at 128 — the 1024x1024 render — returning partial data or all
+/// zeros. Every constituent op is exact at those shapes in isolation (conv2d
+/// including its 4.5 GiB im2col, group_norm, silu, upsample, residual add, and
+/// the 16384-token mid-block attention), so it is the composition that fails.
+const MAX_WHOLE_VAE_DECODE_LATENT_AXIS: usize = 120;
+
+/// Whether this decode has to be tiled rather than run whole.
+///
+/// The reactive ladder in [`crate::vae_tiling::decode_with_oom_fallback`] tiles
+/// after catching an OOM, which cannot help here: the failure is silent. candle
+/// returns a wrong tensor instead of an error, even across a device
+/// synchronization, so the only defence is to not ask it for a decode that
+/// large in the first place.
+fn requires_tiled_vae_decode(on_cpu: bool, latent_h: usize, latent_w: usize) -> bool {
+    !on_cpu && latent_h.max(latent_w) > MAX_WHOLE_VAE_DECODE_LATENT_AXIS
+}
+
 fn zimage_debug_enabled() -> bool {
     std::env::var_os("MOLD_ZIMAGE_DEBUG").is_some()
 }
@@ -1920,33 +1941,61 @@ impl ZImageEngine {
                     loaded.vae_dtype
                 },
             )?;
-            match loaded.vae.decode(&decode_latents) {
-                Ok(img) => img,
-                // Any GPU backend, not just CUDA. This retry was gated on
-                // `is_cuda()` and keyed off the CUDA-only OOM spellings, so on
-                // Metal — where the message is `Insufficient Memory
-                // (…kIOGPUCommandBufferCallbackErrorOutOfMemory)` — a decode
-                // that had already paid for the whole denoise died outright
-                // instead of finishing on the CPU.
-                Err(e)
-                    if !loaded.vae_device.is_cpu()
-                        && crate::vae_tiling::is_out_of_memory_error(&e) =>
-                {
-                    tracing::warn!("VAE decode OOM on GPU, falling back to CPU");
-                    progress.info("VAE decode OOM on GPU — retrying on CPU");
-                    loaded.device.synchronize()?;
-                    // Load a fresh VAE on CPU (can't call self.load_vae_cpu() due to borrow)
-                    let cpu_vae = load_zimage_vae(
-                        loaded.vae_path.as_path(),
-                        DType::F32,
-                        &Device::Cpu,
-                        progress,
-                        None,
-                    )?;
-                    let cpu_latents = latents_4d.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
-                    cpu_vae.decode(&cpu_latents)?
+            let (_, _, latent_h, latent_w) = decode_latents.dims4()?;
+            if requires_tiled_vae_decode(loaded.vae_device.is_cpu(), latent_h, latent_w) {
+                // Past the span candle's GPU decode handles whole. Tiling is
+                // proactive rather than a reaction to an OOM because the
+                // failure is silent — a whole decode here returns a wrong
+                // tensor, not an error, so there is nothing to catch. Every
+                // other image family already routes through this helper.
+                let cfg = crate::vae_tiling::shrink_tile_for_latent(
+                    crate::vae_tiling::TileConfig::default(),
+                    latent_h,
+                    latent_w,
+                );
+                tracing::info!(
+                    latent_h,
+                    latent_w,
+                    tile_size = cfg.tile_size,
+                    overlap = cfg.overlap,
+                    "Z-Image latent exceeds the whole-decode span; tiling VAE decode"
+                );
+                progress.info("VAE decode tiled (latent exceeds whole-decode span)");
+                crate::vae_tiling::decode_tiled(
+                    &decode_latents,
+                    |tile| loaded.vae.decode(tile).map_err(Into::into),
+                    &cfg,
+                )?
+            } else {
+                match loaded.vae.decode(&decode_latents) {
+                    Ok(img) => img,
+                    // Any GPU backend, not just CUDA. This retry was gated on
+                    // `is_cuda()` and keyed off the CUDA-only OOM spellings, so on
+                    // Metal — where the message is `Insufficient Memory
+                    // (…kIOGPUCommandBufferCallbackErrorOutOfMemory)` — a decode
+                    // that had already paid for the whole denoise died outright
+                    // instead of finishing on the CPU.
+                    Err(e)
+                        if !loaded.vae_device.is_cpu()
+                            && crate::vae_tiling::is_out_of_memory_error(&e) =>
+                    {
+                        tracing::warn!("VAE decode OOM on GPU, falling back to CPU");
+                        progress.info("VAE decode OOM on GPU — retrying on CPU");
+                        loaded.device.synchronize()?;
+                        // Load a fresh VAE on CPU (can't call self.load_vae_cpu() due to borrow)
+                        let cpu_vae = load_zimage_vae(
+                            loaded.vae_path.as_path(),
+                            DType::F32,
+                            &Device::Cpu,
+                            progress,
+                            None,
+                        )?;
+                        let cpu_latents =
+                            latents_4d.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+                        cpu_vae.decode(&cpu_latents)?
+                    }
+                    Err(e) => return Err(e.into()),
                 }
-                Err(e) => return Err(e.into()),
             }
         };
 
@@ -3025,5 +3074,44 @@ mod tests {
 
         assert!(Arc::ptr_eq(&pooled, &loaded));
         fs::remove_dir_all(dir).ok();
+    }
+
+    // ── Tiled VAE decode threshold ─────────────────────────────────────────
+
+    #[test]
+    fn large_latents_are_decoded_in_tiles_on_gpu() {
+        // Measured on an M4 Max against a CPU reference: candle's Metal decode
+        // of this VAE is exact at latent 96, 104, 112 and 120, and returns
+        // partial or all-zero data at 128 — silently, with no error to catch,
+        // which is why the reactive OOM ladder cannot help here.
+        for latent in [64usize, 96, 112, 120] {
+            assert!(
+                !requires_tiled_vae_decode(false, latent, latent),
+                "latent {latent} decodes correctly whole; tiling would only cost time"
+            );
+        }
+        for latent in [128usize, 160, 256] {
+            assert!(
+                requires_tiled_vae_decode(false, latent, latent),
+                "latent {latent} is past the measured-safe span and must be tiled"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_square_latent_is_judged_by_its_longest_axis() {
+        // 1024x768 is a supported Z-Image shape and puts one axis past the
+        // span while the other stays inside it.
+        assert!(requires_tiled_vae_decode(false, 96, 128));
+        assert!(requires_tiled_vae_decode(false, 128, 96));
+    }
+
+    #[test]
+    fn a_cpu_decode_is_never_tiled() {
+        // The CPU path has no such limit, and tiling it would only add seams
+        // and work. Tiling exists here for the GPU backends.
+        for latent in [128usize, 256, 512] {
+            assert!(!requires_tiled_vae_decode(true, latent, latent));
+        }
     }
 }
