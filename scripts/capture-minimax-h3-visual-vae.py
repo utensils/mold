@@ -37,7 +37,7 @@ BASE_PRODUCER_SHA256 = (
     "006c761d6217430c78dcfc0b6c3a6a7d714924584a8fa79ea25407f82a876eda"
 )
 QWEN_PRODUCER_SHA256 = (
-    "9ac3b9828edbd18c0db9c44e53981757fd6ca3619c6096fc052d78ecd8153510"
+    "bc85f8497219e4d7159ccf4e9e478cab28ba02b66db245afc78e603149440410"
 )
 
 DIFFUSERS_REVISION = "9c6a68c32b3b2a64db91800b624d33cec6e25ab8"
@@ -1159,8 +1159,9 @@ def run_capture(
     ) as staged_value:
         staged_root = pathlib.Path(staged_value).resolve(strict=True)
         os.chmod(staged_root, 0o700)
-        staged_diffusers = staged_root / "sources" / "diffusers"
-        staged_transformers = staged_root / "sources" / "transformers"
+        source_root = QWEN.private_source_root(staged_root)
+        staged_diffusers = source_root / "diffusers"
+        staged_transformers = source_root / "transformers"
         staged_mold = staged_root / "mold-source"
         QWEN.extract_package_snapshot(
             "Diffusers",
