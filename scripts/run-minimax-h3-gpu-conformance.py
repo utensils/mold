@@ -51,6 +51,11 @@ IDENTITY_INPUT_KIND = "identity-sha256-v1"
 COMPONENT_AUTHORITY_SET_SCHEMA = "mold.minimax-h3.component-authority-set.v1"
 MAX_EXACT_ABSOLUTE_TOLERANCE = 1.0 / 64.0
 MAX_EXACT_RELATIVE_TOLERANCE = 1.0 / 64.0
+QWEN_ORDINARY_ABSOLUTE_TOLERANCE = 48.0
+QWEN_ORDINARY_RELATIVE_TOLERANCE = 1.0 / 64.0
+QWEN_LARGE_MAGNITUDE_THRESHOLD = 1024.0
+QWEN_LARGE_ABSOLUTE_TOLERANCE = 48.0
+QWEN_LARGE_RELATIVE_TOLERANCE = 3.0 / 8.0
 REVIEWED_ABSOLUTE_TOLERANCE_CAPS = {
     ("token-refiner", "sampled-values"): 8.0,
     ("transformer-block", "partial-mm-rope"): 1.0 / 16.0,
@@ -179,6 +184,7 @@ REQUIRED_STRUCTURED_HASH_PROVENANCE = frozenset(
     }
 )
 RECORD_ONLY_FLOAT_MEASUREMENTS = {
+    "qwen-layer-50": frozenset({"statistics", "sampled-values"}),
     "visual-vae": frozenset(
         {
             "pixel-normalization",
@@ -800,11 +806,15 @@ def expected_tensor_summary(output: dict[str, Any]) -> dict[str, Any]:
 
 
 def expected_tolerance_summary(policy: dict[str, Any]) -> dict[str, Any]:
-    return {
+    summary = {
         "absolute": policy["absolute"],
         "relative": policy["relative"],
         "metric": policy["metric"],
     }
+    for key in ("magnitude_threshold", "large_absolute", "large_relative"):
+        if key in policy:
+            summary[key] = policy[key]
+    return summary
 
 
 def keyed_evidence_records(
@@ -1265,7 +1275,17 @@ def validate_manifest_layer_evidence(
         if role != "oracle":
             continue
         policy = policies[key]
-        if policy.get("metric") != "elementwise-atol-plus-rtol":
+        metric = policy.get("metric")
+        piecewise_qwen = layer == "qwen-layer-50" and key in {
+            "statistics",
+            "sampled-values",
+        }
+        expected_metric = (
+            "piecewise-magnitude-atol-plus-rtol"
+            if piecewise_qwen
+            else "elementwise-atol-plus-rtol"
+        )
+        if metric != expected_metric:
             fail(f"oracle layer {layer} output {key!r} policy metric is invalid")
         if expected_dtype == CANONICAL_INTEGER_DTYPE:
             if (
@@ -1282,6 +1302,24 @@ def validate_manifest_layer_evidence(
             record_only_allowed = key in RECORD_ONLY_FLOAT_MEASUREMENTS.get(
                 layer, frozenset()
             )
+            if piecewise_qwen:
+                if (
+                    policy.get("absolute") != QWEN_ORDINARY_ABSOLUTE_TOLERANCE
+                    or policy.get("relative")
+                    != QWEN_ORDINARY_RELATIVE_TOLERANCE
+                    or policy.get("magnitude_threshold")
+                    != QWEN_LARGE_MAGNITUDE_THRESHOLD
+                    or policy.get("large_absolute")
+                    != QWEN_LARGE_ABSOLUTE_TOLERANCE
+                    or policy.get("large_relative")
+                    != QWEN_LARGE_RELATIVE_TOLERANCE
+                    or hash_policy != "record-only"
+                ):
+                    fail(
+                        f"oracle layer {layer} output {key!r} floating policy "
+                        "is not the reviewed Qwen magnitude policy"
+                    )
+                continue
             absolute_cap = REVIEWED_ABSOLUTE_TOLERANCE_CAPS.get(
                 (layer, key), MAX_EXACT_ABSOLUTE_TOLERANCE
             )

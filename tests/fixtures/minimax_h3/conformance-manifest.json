@@ -738,7 +738,7 @@
         "id": "minimax-h3-token-refiner-oracle-v1",
         "command_prefix": "python3 scripts/capture-minimax-h3-transformer.py capture --role oracle",
         "implementation_path": "scripts/capture-minimax-h3-transformer.py",
-        "implementation_sha256": "039687b39a5c1c5ec4b92cda9f4e2600037f6309a03807f75d45f499fbd48d56"
+        "implementation_sha256": "8e5b7d2ae030270f712cb45cbb6fd8203a98e40ea4b201dc75f7511ca5d92b38"
       },
       "required_measurements": ["shape", "statistics", "sampled-values", "tolerance"]
     },
@@ -797,7 +797,7 @@
         "id": "minimax-h3-transformer-block-oracle-v1",
         "command_prefix": "python3 scripts/capture-minimax-h3-transformer.py capture --role oracle",
         "implementation_path": "scripts/capture-minimax-h3-transformer.py",
-        "implementation_sha256": "039687b39a5c1c5ec4b92cda9f4e2600037f6309a03807f75d45f499fbd48d56"
+        "implementation_sha256": "8e5b7d2ae030270f712cb45cbb6fd8203a98e40ea4b201dc75f7511ca5d92b38"
       },
       "required_measurements": [
         "qk-rms",

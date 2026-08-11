@@ -899,6 +899,18 @@ def validate_layer_output(value: Any, label: str) -> dict[str, Any]:
                 f"{label} comparison policy key mismatch: "
                 f"missing={missing}, extra={extra}"
             )
+        piecewise_keys = {
+            "magnitude_threshold",
+            "large_absolute",
+            "large_relative",
+        }
+        for key, policy in policies.items():
+            has_piecewise_fields = piecewise_keys & set(policy)
+            if policy["metric"] == "piecewise-magnitude-atol-plus-rtol":
+                if has_piecewise_fields != piecewise_keys:
+                    fail(f"{label} comparison policy {key!r} is incomplete")
+            elif has_piecewise_fields:
+                fail(f"{label} comparison policy {key!r} has unexpected fields")
     elif comparison is not None:
         fail(f"{label} Mold producer must not declare oracle comparison policies")
     return value
@@ -912,6 +924,12 @@ def tolerance_issue(
 ) -> str | None:
     absolute = policy["absolute"]
     relative = policy["relative"]
+    if (
+        policy["metric"] == "piecewise-magnitude-atol-plus-rtol"
+        and abs(oracle_value) >= policy["magnitude_threshold"]
+    ):
+        absolute = policy["large_absolute"]
+        relative = policy["large_relative"]
     try:
         error = abs(mold_value - oracle_value)
         allowed = absolute + relative * abs(oracle_value)
@@ -922,7 +940,7 @@ def tolerance_issue(
     return (
         f"{context} tolerance exceeded: oracle={oracle_value!r}, mold={mold_value!r}, "
         f"abs_error={error!r}, allowed={allowed!r}, atol={absolute!r}, "
-        f"rtol={relative!r}"
+        f"rtol={relative!r}, metric={policy['metric']!r}"
     )
 
 

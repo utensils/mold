@@ -57,6 +57,11 @@ TEXT_CASE_ID = "qwen-layer-50-text-v1"
 MULTIMODAL_CASE_ID = "qwen-layer-50-multimodal-v1"
 CASE_IDS = (TEXT_CASE_ID, MULTIMODAL_CASE_ID)
 COMPONENT_ID = "official-text-encoder-index"
+ORDINARY_ABSOLUTE_TOLERANCE = 48.0
+ORDINARY_RELATIVE_TOLERANCE = 1.0 / 64.0
+LARGE_MAGNITUDE_THRESHOLD = 1024.0
+LARGE_ABSOLUTE_TOLERANCE = 48.0
+LARGE_RELATIVE_TOLERANCE = 3.0 / 8.0
 TEXT_ENCODER_SHARD_AUTHORITIES = (
     (
         "official-text-encoder-shard-00001-of-00014",
@@ -1656,7 +1661,16 @@ def measurement_outputs(
             ],
         ),
         activation_tensor_record(shape, bits, values),
-        float64_tensor_record("tolerance", [0.0, 0.0]),
+        float64_tensor_record(
+            "tolerance",
+            [
+                ORDINARY_ABSOLUTE_TOLERANCE,
+                ORDINARY_RELATIVE_TOLERANCE,
+                LARGE_MAGNITUDE_THRESHOLD,
+                LARGE_ABSOLUTE_TOLERANCE,
+                LARGE_RELATIVE_TOLERANCE,
+            ],
+        ),
     ]
 
 
@@ -1791,16 +1805,28 @@ def build_layer_document(
             for key in contract["required_provenance"]
         ]
     if role == "oracle":
-        document["comparison"] = [
-            {
+        document["comparison"] = []
+        for key in contract["required_measurements"]:
+            policy = {
                 "key": key,
                 "absolute": 0,
                 "relative": 0,
                 "metric": "elementwise-atol-plus-rtol",
                 "hash_policy": "exact",
             }
-            for key in contract["required_measurements"]
-        ]
+            if key in {"statistics", "sampled-values"}:
+                policy.update(
+                    {
+                        "absolute": ORDINARY_ABSOLUTE_TOLERANCE,
+                        "relative": ORDINARY_RELATIVE_TOLERANCE,
+                        "metric": "piecewise-magnitude-atol-plus-rtol",
+                        "magnitude_threshold": LARGE_MAGNITUDE_THRESHOLD,
+                        "large_absolute": LARGE_ABSOLUTE_TOLERANCE,
+                        "large_relative": LARGE_RELATIVE_TOLERANCE,
+                        "hash_policy": "record-only",
+                    }
+                )
+            document["comparison"].append(policy)
     return document
 
 

@@ -316,10 +316,17 @@ create-new semantics and refuse replacement; request and response files are
 sealed read-only before they become evidence, and raw output is capped at 128
 MiB. The documents include shape, dtype, a full-activation content hash and
 statistics, every activation coordinate/value in canonical row-major order,
-and the strict zero-tolerance/hash-exact policy required by the protected runner. A real
-capture has not passed merely because these producer contracts and CUDA
-typechecks pass; only the protected external campaign may establish numerical
-parity.
+and the reviewed magnitude-aware BF16 policy. After the released precision
+boundaries were matched, the complete 102,400-element text and 583,680-element
+multimodal L40S evidence measured no ordinary-value violation under
+`48 + abs(oracle) / 64`. Seven multimodal values had oracle magnitude at least
+1,024; their worst observed relative difference was `5/13`, and the tightest
+reviewed high-magnitude envelope is `48 + 3 * abs(oracle) / 8`. Protected
+validation requires those exact two piecewise bounds, the 1,024 threshold,
+complete ordered coordinates, and record-only retention of both content
+hashes; neither producer can widen the policy. A real capture has not passed
+merely because these producer contracts and CUDA typechecks pass; only a clean
+paired protected external campaign may establish numerical parity.
 
 ### FP32/FP16 visual-VAE capture
 
