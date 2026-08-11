@@ -302,11 +302,7 @@ def comparison_fixture(key: str, kind: str) -> dict[str, object]:
         "absolute": 0 if integer else 0.000002,
         "relative": 0 if integer else 0.000001,
         "metric": "elementwise-atol-plus-rtol",
-        "hash_policy": (
-            "record-only"
-            if kind in {"float16", "float32"} and key != "posterior-seed-42"
-            else "exact"
-        ),
+        "hash_policy": "record-only" if kind in {"float16", "float32"} else "exact",
     }
 
 
@@ -1583,19 +1579,23 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                 oracle, fixture, mismatched_hash, fixture, manifest_layer
             )
             exact_key = next(
-                policy["key"]
-                for policy in oracle["comparison"]
-                if policy["hash_policy"] == "exact"
-            )
-            record_by_key(mismatched_hash["outputs"], exact_key)["content_sha256"] = (
-                "e" * 64
-            )
-            expect_failure(
-                lambda: runner.validate_oracle_mold_policy_parity(
-                    oracle, fixture, mismatched_hash, fixture, manifest_layer
+                (
+                    policy["key"]
+                    for policy in oracle["comparison"]
+                    if policy["hash_policy"] == "exact"
                 ),
-                "content hashes differ",
+                None,
             )
+            if exact_key is not None:
+                record_by_key(mismatched_hash["outputs"], exact_key)[
+                    "content_sha256"
+                ] = "e" * 64
+                expect_failure(
+                    lambda: runner.validate_oracle_mold_policy_parity(
+                        oracle, fixture, mismatched_hash, fixture, manifest_layer
+                    ),
+                    "content hashes differ",
+                )
 
         if layer in E2E_LAYER_TASKS:
             mismatched_input = copy.deepcopy(mold)

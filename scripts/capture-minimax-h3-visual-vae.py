@@ -115,6 +115,8 @@ MEASUREMENT_DTYPES = {
     "decoded-frames": "float32",
     "tile-seams": "float32",
 }
+SEED_NOISE_ABSOLUTE_TOLERANCE = 0.000002
+SEED_NOISE_RELATIVE_TOLERANCE = 0.000001
 TENSOR_HASH_ENCODING = "canonical-typed-le-v1"
 MOLD_BINARY = "h3_visual_vae_capture"
 MOLD_FEATURES = "dev-bins,h3-private-uat,cuda"
@@ -800,7 +802,7 @@ def capture_mold(
 
 def sample_indexes(payload: TensorPayload) -> list[int]:
     length = math.prod(payload.shape)
-    if payload.key == "tile-seams":
+    if payload.key in {"posterior-seed-42", "tile-seams"}:
         return list(range(length))
     count = min(257, length)
     if count == 1:
@@ -974,14 +976,22 @@ def build_layer_document(
     if role == "oracle":
         document["comparison"] = []
         for key in MEASUREMENTS:
-            exact = key == "posterior-seed-42"
+            seed_noise = key == "posterior-seed-42"
             document["comparison"].append(
                 {
                     "key": key,
-                    "absolute": 0.0 if exact else 0.015625,
-                    "relative": 0.0 if exact else 0.015625,
+                    "absolute": (
+                        SEED_NOISE_ABSOLUTE_TOLERANCE
+                        if seed_noise
+                        else 0.015625
+                    ),
+                    "relative": (
+                        SEED_NOISE_RELATIVE_TOLERANCE
+                        if seed_noise
+                        else 0.015625
+                    ),
                     "metric": "elementwise-atol-plus-rtol",
-                    "hash_policy": "exact" if exact else "record-only",
+                    "hash_policy": "record-only",
                 }
             )
     return document

@@ -329,9 +329,11 @@ official three-shard FP32 checkpoint. The Mold role compiles the isolated
 in manifest order, FP32 ImageNet-normalized pixels, FP32 posterior moments, the
 fresh CPU seed-42 FP32 noise, the FP32 posterior sample, the actual FP16
 round-trip tensor, FP32 normalized latents, FP32 decoded unit-RGB frames, and
-the complete bounded FP32 seam-probe vector. Only the seed-42 noise stream is
-hash-exact across implementations; numerical model records use the checked
-1/64 elementwise tolerance and retain their hashes as record evidence.
+the complete bounded FP32 seam-probe vector. The independently generated
+seed-42 noise streams use the same PyTorch MT19937 recipe but permit the
+reviewed 2e-6 absolute plus 1e-6 relative FP32 scalar-math bound; their hashes
+remain record evidence. Numerical model records use the checked 1/64
+elementwise tolerance and likewise retain their hashes as record evidence.
 
 Use the same five external environment paths as the conditioner captures and
 run each role separately:
