@@ -183,6 +183,101 @@ endpoint latent frames through the same inpaint path diffusers' `last_image`
 uses. Any other keyframe layout is refused at admission — the family has no
 mid-clip keyframe path.
 
+## Sequences
+
+Wan renders multi-clip sequences, and `mold run --frames N` past the per-clip
+envelope auto-chains rather than failing. What crosses a clip boundary depends
+on the **checkpoint**, never the family, because wan has no latent motion tail:
+its smooth handoff is last-frame image conditioning, which only an
+image-conditioned checkpoint accepts.
+
+| Checkpoint                        | Seam                   | Why                                               |
+| --------------------------------- | ---------------------- | ------------------------------------------------- |
+| `wan22-ti2v-5b:*`                 | Continues              | The latent inpaint pins the seeded frame          |
+| `wan22-i2v-a14b:*`                | Continues              | The 36-channel mask+latent concat takes the frame |
+| `wan21-t2v-*`, `wan22-t2v-a14b:*` | Join / Cut / Crossfade | No conditioning channel at all                    |
+
+That classification is exactly the `source_image` contract `/api/models`
+already advertises, so a picker can never offer a seam the checkpoint would
+reject. A text-to-video checkpoint is still sequence-capable — it simply
+concatenates independent clips, the same honest behaviour LTX-Video has.
+
+The continuation is seeded with the previous clip's final frame, so it
+re-renders exactly that one frame and the stitch trims exactly one. This is
+deliberately **not** LTX-2's 17-frame motion tail, which is the pixel window
+its VAE turns into three latent slots of carryover — wan has no equivalent,
+and reusing the number would discard sixteen good frames at every seam.
+
+Clip lengths sit on wan's `4k+1` grid. The auto-chaining default is a VRAM
+envelope rather than a ceiling: 53 frames for the two-expert A14B, 121 for the
+single-expert 5B. `--clip-frames` overrides it, clamped to the real 257-frame
+request cap.
+
+```bash
+# Auto-chains into three 49-frame clips and stitches one MP4
+mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" \
+  --frames 100 --clip-frames 49
+```
+
+Authored sequences work through the same `mold.chain.v1` script the LTX
+families use — per-stage prompts, frames, and transitions — with `mold chain
+validate shot.toml` reporting the normalized stage list and stitched length
+before anything is submitted:
+
+```toml
+schema = "mold.chain.v1"
+
+[chain]
+model = "wan22-ti2v-5b:q8"
+width = 704
+height = 384
+fps = 24
+steps = 20
+guidance = 5.0
+strength = 1.0
+motion_tail_frames = 1
+output_format = "mp4"
+
+[[stage]]
+prompt = "a paper boat drifting down a rain gutter"
+frames = 49
+
+[[stage]]
+prompt = "the boat passes a storm drain"
+frames = 49
+transition = "smooth"
+```
+
+`motion_tail_frames` is normalized to what the checkpoint can carry, so a value
+carried over from an LTX script does not silently trim frames.
+
+Measured on an RTX 4090: 145 frames at 704x384, three stages, 141 s. The boat,
+gutter, and railing persist across both seams.
+
+### Extending a clip
+
+`--extend` continues an existing video in one request. It is the same seam as
+a sequence boundary with the carryover coming from a file: the source clip's
+final frame becomes the continuation's conditioning, so `--extend-overlap` is
+always **1** on wan — the multi-frame overlap LTX-2 accepts is a latent motion
+tail wan does not have, and a larger value is refused rather than silently
+trimming good frames.
+
+Resolution and fps are locked to the source clip; a mismatch is refused rather
+than rescaled, because the stitched result is one video. `/api/models`
+advertises `supports_extend` per checkpoint, from the same `source_image`
+contract the seam reads — a text-to-video checkpoint cannot extend.
+
+```bash
+mold run wan22-ti2v-5b:q8 "the paper boat drifts on past a storm drain" \
+  --extend clip.mp4 --extend-overlap 1 --frames 49 \
+  --width 704 --height 384 --fps 24
+```
+
+Measured on an RTX 4090: a 48-frame source plus a 49-frame continuation minus
+the 1-frame overlap = 96 frames, in 53 s, with the boat and gutter continuous
+across the join.
+
 ## Defaults and limits
 
 | Property   | `wan21-t2v-1.3b`  | `wan21-t2v-14b:*` | `wan22-ti2v-5b`     | `wan22-*-a14b:q5` | `wan22-*-a14b:q8` |

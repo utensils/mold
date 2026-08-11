@@ -262,6 +262,11 @@ mold run wan21-t2v-1.3b "a red fox trotting through snow" --frames 81 --fps 16
 # Wan 2.1 14B — the dense 2.1 quality tier (bare name resolves :q8)
 mold run wan21-t2v-14b "a red fox trotting through snow"
 
+# Wan sequences: past the per-clip envelope this auto-chains and stitches one MP4.
+# The seam continues only on an image-conditioned checkpoint (TI2V-5B, A14B I2V);
+# a T2V checkpoint concatenates independent clips. Clips are 4k+1.
+mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" --frames 100 --clip-frames 49
+
 # Wan 2.2 5B at 720p24
 mold run wan22-ti2v-5b "waves on a black sand beach" --width 1280 --height 704 --frames 121 --fps 24
 

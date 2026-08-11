@@ -13,6 +13,40 @@ use mold_core::OutputFormat;
 use crate::audio::NativeAudioTrack;
 use crate::ltx_video::video_enc;
 
+/// Decode an APNG byte stream back to raw RGB frames.
+///
+/// Stage renderers that drive a family's ordinary generation path get video
+/// bytes back, not frames. APNG is the round-trip container because it is
+/// lossless — every pixel survives — and the encode/decode costs tens of
+/// milliseconds against a multi-second denoise.
+///
+/// Shared rather than duplicated: `ltx-video` and `wan` both render stages
+/// this way, and two copies of an image round-trip is two places for a
+/// channel-order or alpha-handling bug to differ.
+pub fn decode_apng_to_rgb_frames(apng_bytes: &[u8]) -> Result<Vec<RgbImage>> {
+    use image::AnimationDecoder;
+    let cursor = std::io::Cursor::new(apng_bytes);
+    let decoder = image::codecs::png::PngDecoder::new(cursor)
+        .map_err(|e| anyhow::anyhow!("failed to open APNG bytes: {e}"))?;
+    let apng = decoder
+        .apng()
+        .map_err(|e| anyhow::anyhow!("decoded PNG is not animated: {e}"))?;
+    let mut out = Vec::new();
+    for frame in apng.into_frames() {
+        let frame = frame.map_err(|e| anyhow::anyhow!("APNG frame decode failed: {e}"))?;
+        let rgba = frame.into_buffer();
+        let (w, h) = rgba.dimensions();
+        let mut rgb_data = Vec::with_capacity((w as usize) * (h as usize) * 3);
+        for px in rgba.pixels() {
+            rgb_data.extend_from_slice(&px.0[..3]);
+        }
+        let rgb = RgbImage::from_raw(w, h, rgb_data)
+            .ok_or_else(|| anyhow::anyhow!("failed to construct RgbImage from APNG frame"))?;
+        out.push(rgb);
+    }
+    Ok(out)
+}
+
 /// Non-fatal conditions surfaced while encoding chain output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainEncodeWarning {

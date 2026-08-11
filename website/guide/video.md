@@ -5,11 +5,25 @@ title: Video Generation
 # Video Generation
 
 mold supports generating video clips using the LTX Video, LTX-2, and Wan
-2.1/2.2 model families. Every LTX-2 checkpoint can chain multiple clips
+2.1/2.2 model families. Every LTX-2 and Wan checkpoint can chain multiple clips
 together for longer videos with scene-by-scene direction. A dev checkpoint
 renders its clips through the two-stage pipeline, so expect roughly twice the
 wall time per clip as a distilled one — stage 1 runs classifier-free guidance
 as two sequential forward passes.
+
+### Wan sequences
+
+What crosses a wan clip boundary depends on the checkpoint, not the family:
+wan has no latent motion tail, so its smooth handoff is last-frame image
+conditioning. `wan22-ti2v-5b` and `wan22-i2v-a14b` continue across the seam;
+a text-to-video checkpoint concatenates independent clips (Join / Cut /
+Crossfade). Clip lengths sit on wan's `4k+1` grid, and `--frames` past the
+per-clip envelope auto-chains instead of failing.
+
+```bash
+mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" \
+  --frames 100 --clip-frames 49
+```
 
 ## Single-clip generation
 
@@ -19,8 +33,7 @@ mold run ltx-2-19b-distilled:fp8 "a cat walks through autumn leaves" --frames 97
 
 ## Wan Video
 
-Wan renders single clips (multi-prompt sequences remain LTX-only today) and
-defaults to MP4:
+Wan renders single clips and multi-clip sequences, and defaults to MP4:
 
 ```bash
 # 480p16 text-to-video (defaults: 81 frames @ 16 fps)

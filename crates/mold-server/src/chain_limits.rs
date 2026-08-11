@@ -114,20 +114,28 @@ pub fn compute_limits(
     let fps = fps.filter(|value| *value > 0).unwrap_or(DEFAULT_CHAIN_FPS);
     let cap = family_cap_at_fps(family, fps).unwrap_or(97);
     // Recommend the model's own default frame count (LTX-Video ships 25,
-    // LTX-2 ships 97) so new clips start at what the model actually runs;
-    // clamp to the family cap and snap down onto the 8n+1 grid. Without a
-    // model default, fall back to the cap (old behavior).
+    // LTX-2 ships 97, wan 81 or 121) so new clips start at what the model
+    // actually runs; clamp to the family cap and snap down onto the family's
+    // own grid. Without a model default, fall back to the cap (old behavior).
+    //
+    // The grid comes from the family, never a constant: wan is `4k+1` where
+    // the LTX families are `8k+1`, so a hardcoded 8 recommended an off-grid
+    // clip count that the validator then rejected with a 422.
+    let step = mold_core::validation::frame_step_for_family(family).unwrap_or(8);
+    let offset = mold_core::validation::frame_offset_for_family(family).unwrap_or(1);
+    let snap_down = |frames: u32| {
+        if frames <= offset {
+            return frames;
+        }
+        frames - ((frames - offset) % step)
+    };
+    // The floor is the first on-grid clip at or above one step — 9 on the LTX
+    // grid, 5 on wan's — so it cannot itself be off-grid.
+    let floor = step + offset;
     let recommended = default_frames
-        .map(|frames| {
-            let clamped = frames.min(cap);
-            if clamped > 1 {
-                clamped - ((clamped - 1) % 8)
-            } else {
-                clamped
-            }
-        })
+        .map(|frames| snap_down(frames.min(cap)))
         .unwrap_or(cap)
-        .max(9)
+        .max(floor)
         .min(cap);
 
     const MAX_STAGES: u32 = 16;
@@ -230,6 +238,56 @@ mod tests {
         let oversized = compute_limits("cv:789", "ltx2", "", Some(500), Some(12));
         assert_eq!(oversized.frames_per_clip_cap, 241);
         assert_eq!(oversized.frames_per_clip_recommended, 241);
+    }
+
+    /// The recommendation must land on the family's own grid (#783).
+    ///
+    /// Wan is `4k+1` where the LTX families are `8k+1`. The snap was a
+    /// hardcoded 8, so wan's shipped defaults came back off-grid and a client
+    /// that started a clip at the recommendation got a 422 from the validator
+    /// that owns the real rule.
+    #[test]
+    fn recommended_clip_frames_land_on_the_family_grid() {
+        let step = mold_core::validation::frame_step_for_family("wan").unwrap();
+        let offset = mold_core::validation::frame_offset_for_family("wan").unwrap();
+        assert_eq!((step, offset), (4, 1));
+
+        for (model, default_frames) in [
+            ("wan21-t2v-1.3b:bf16", 81u32),
+            ("wan22-ti2v-5b:fp16", 121),
+            ("wan22-t2v-a14b:q5", 53),
+        ] {
+            let limits = compute_limits(model, "wan", "q5", Some(default_frames), Some(16));
+            assert_eq!(
+                limits.frames_per_clip_recommended, default_frames,
+                "{model}: an on-grid default must survive untouched",
+            );
+        }
+
+        // Off-grid defaults snap DOWN onto 4k+1, not onto 8k+1: 80 -> 77 here,
+        // where the old hardcoded step produced 73.
+        let off_grid = compute_limits("cv:900", "wan", "", Some(80), Some(16));
+        assert_eq!(off_grid.frames_per_clip_recommended, 77);
+
+        // Every recommendation is submittable, at every grid this covers.
+        for (family, fps, default_frames) in [
+            ("wan", 16, Some(80u32)),
+            ("wan", 24, Some(121)),
+            ("wan", 16, None),
+            ("ltx-video", 24, Some(30)),
+            ("ltx2", 24, None),
+        ] {
+            let limits = compute_limits("m", family, "", default_frames, Some(fps));
+            let step = mold_core::validation::frame_step_for_family(family).unwrap();
+            let offset = mold_core::validation::frame_offset_for_family(family).unwrap();
+            assert_eq!(
+                (limits.frames_per_clip_recommended - offset) % step,
+                0,
+                "{family} @ {fps}fps recommended {} off the {step}k+{offset} grid",
+                limits.frames_per_clip_recommended,
+            );
+            assert!(limits.frames_per_clip_recommended <= limits.frames_per_clip_cap);
+        }
     }
 
     /// The advertised cap must move with the fps the clips will render at, and

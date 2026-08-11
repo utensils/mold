@@ -947,32 +947,8 @@ impl LtxVideoEngine {
         let video = response
             .video
             .ok_or_else(|| anyhow::anyhow!("LtxVideoEngine.generate returned no video data"))?;
-        decode_apng_to_rgb_frames(&video.data)
+        crate::chain::decode_apng_to_rgb_frames(&video.data)
     }
-}
-
-fn decode_apng_to_rgb_frames(apng_bytes: &[u8]) -> Result<Vec<image::RgbImage>> {
-    use image::AnimationDecoder;
-    let cursor = std::io::Cursor::new(apng_bytes);
-    let decoder = image::codecs::png::PngDecoder::new(cursor)
-        .map_err(|e| anyhow::anyhow!("failed to open APNG bytes: {e}"))?;
-    let apng = decoder
-        .apng()
-        .map_err(|e| anyhow::anyhow!("decoded PNG is not animated: {e}"))?;
-    let mut out = Vec::new();
-    for frame in apng.into_frames() {
-        let frame = frame.map_err(|e| anyhow::anyhow!("APNG frame decode failed: {e}"))?;
-        let rgba = frame.into_buffer();
-        let (w, h) = rgba.dimensions();
-        let mut rgb_data = Vec::with_capacity((w as usize) * (h as usize) * 3);
-        for px in rgba.pixels() {
-            rgb_data.extend_from_slice(&px.0[..3]);
-        }
-        let rgb = image::RgbImage::from_raw(w, h, rgb_data)
-            .ok_or_else(|| anyhow::anyhow!("failed to construct RgbImage from APNG frame"))?;
-        out.push(rgb);
-    }
-    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1939,7 +1915,7 @@ mod tests {
         let inputs = vec![make(255, 0, 0), make(0, 255, 0), make(0, 0, 255)];
 
         let bytes = encode_apng(&inputs, 12, None).expect("encode");
-        let decoded = super::decode_apng_to_rgb_frames(&bytes).expect("decode");
+        let decoded = crate::chain::decode_apng_to_rgb_frames(&bytes).expect("decode");
 
         assert_eq!(decoded.len(), inputs.len());
         for (i, (a, b)) in inputs.iter().zip(decoded.iter()).enumerate() {

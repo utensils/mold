@@ -519,10 +519,8 @@ fn reject_unsupported_conditioning(req: &GenerateRequest) -> Result<()> {
             req.source_video.is_some() || req.source_video_path.is_some(),
             "source_video",
         ),
-        (
-            req.extend_video.is_some() || req.extend_video_path.is_some(),
-            "extend_video",
-        ),
+        // `extend_video` is handled before this guard (`extend_inner`), so
+        // reaching here with one set would mean the route was missed.
         // Core validation accepts source_image + mask_image as generic
         // inpainting, but Wan's conditioning never reads the mask — the
         // render would succeed while repainting everything, which reads as
@@ -1890,7 +1888,11 @@ impl crate::engine::InferenceEngine for WanEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
-        let result = self.generate_inner(req);
+        let result = if req.is_extend() {
+            self.extend_inner(req)
+        } else {
+            self.generate_inner(req)
+        };
         self.pending_placement = None;
         result
     }
@@ -1942,6 +1944,228 @@ impl crate::engine::InferenceEngine for WanEngine {
     fn model_paths(&self) -> Option<&ModelPaths> {
         Some(&self.base.paths)
     }
+
+    fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::chain::ChainStageRenderer> {
+        Some(self)
+    }
+}
+
+/// The pixel frames a wan continuation duplicates from the clip before it.
+///
+/// Wan has no latent motion tail. Its handoff is last-frame *image*
+/// conditioning: the continuation is seeded with the previous clip's final
+/// frame, so it re-renders exactly that one frame and the stitch trims exactly
+/// one. This is deliberately not LTX-2's 17 — that number is the pixel window
+/// its VAE turns into three latent slots of carryover, which wan has no
+/// equivalent of, and copying it would discard sixteen good frames per seam.
+pub const WAN_HANDOFF_DUPLICATED_FRAMES: u32 = 1;
+
+impl WanEngine {
+    /// Continue an existing clip in one request.
+    ///
+    /// This is the chain seam with the carryover coming from a file rather
+    /// than from the previous stage: the source's final frame becomes the
+    /// continuation's image conditioning, the continuation re-renders exactly
+    /// that frame, and the stitch drops it before appending. `overlap` is
+    /// therefore always [`WAN_HANDOFF_DUPLICATED_FRAMES`] in effect — a larger
+    /// value is accepted by validation for grid symmetry with LTX-2 but wan
+    /// has only ever one frame of real carryover, so anything above one is
+    /// refused here rather than silently trimming good frames.
+    ///
+    /// Resolution and fps are locked to the source: the stitched output is one
+    /// video, and rescaling or retiming mid-clip is always a surprise.
+    fn extend_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        let overlap = req.effective_extend_overlap_frames();
+        if overlap != WAN_HANDOFF_DUPLICATED_FRAMES {
+            bail!(
+                "Wan continuations carry exactly {WAN_HANDOFF_DUPLICATED_FRAMES} frame of \
+                 context — the source's final frame becomes the continuation's conditioning — \
+                 so extend_overlap_frames must be {WAN_HANDOFF_DUPLICATED_FRAMES}, not {overlap}. \
+                 (LTX-2's multi-frame overlap is a latent motion tail wan does not have.)"
+            );
+        }
+
+        let work_dir = tempfile::tempdir().context("Wan: creating the continuation temp dir")?;
+        let path = match (&req.extend_video, &req.extend_video_path) {
+            (Some(bytes), _) => {
+                let staged = work_dir.path().join("extend-source.mp4");
+                std::fs::write(&staged, bytes).context("Wan: staging the video to extend")?;
+                staged
+            }
+            (None, Some(path)) => PathBuf::from(path),
+            (None, None) => {
+                bail!("Wan: extend requested without extend_video or extend_video_path")
+            }
+        };
+        let (probe, source_frames) = crate::ltx2::media::decode_video_frames_from_path(&path)
+            .with_context(|| format!("Wan: decoding the video to extend ({})", path.display()))?;
+        let Some(last) = source_frames.last() else {
+            bail!(
+                "Wan: the video to extend ({}) decoded to zero frames",
+                path.display()
+            );
+        };
+
+        // Reject rather than rescale: the stitched result is one video.
+        if req.width != probe.width || req.height != probe.height {
+            bail!(
+                "the video to extend is {}x{} but this request renders {width}x{height}; \
+                 continuations must render at the source's resolution",
+                probe.width,
+                probe.height,
+                width = req.width,
+                height = req.height,
+            );
+        }
+        let fps = req.fps.unwrap_or(probe.fps);
+        if fps != probe.fps {
+            bail!(
+                "the video to extend runs at {} fps but this request renders {fps} fps; \
+                 continuations must render at the source's frame rate (pass --fps {} to match)",
+                probe.fps,
+                probe.fps,
+            );
+        }
+
+        let mut png = std::io::Cursor::new(Vec::new());
+        last.write_to(&mut png, image::ImageFormat::Png)
+            .context("Wan: encoding the continuation's seed frame")?;
+
+        let mut continuation_req = req.clone();
+        continuation_req.extend_video = None;
+        continuation_req.extend_video_path = None;
+        continuation_req.extend_overlap_frames = None;
+        continuation_req.source_image = Some(png.into_inner());
+        continuation_req.width = probe.width;
+        continuation_req.height = probe.height;
+        continuation_req.fps = Some(probe.fps);
+        continuation_req.output_format = Some(mold_core::OutputFormat::Apng);
+        continuation_req.gif_preview = false;
+
+        let response = self.generate_inner(&continuation_req)?;
+        let video = response
+            .video
+            .ok_or_else(|| anyhow::anyhow!("Wan: the continuation returned no video data"))?;
+        let continuation = crate::chain::decode_apng_to_rgb_frames(&video.data)?;
+        let stitched = crate::ltx2::stitch_extend_frames(source_frames, &continuation, overlap)?;
+
+        let requested_format = req.output_format.unwrap_or(mold_core::OutputFormat::Mp4);
+        let encoded =
+            crate::chain::encode_chain_frames(&stitched, probe.fps, requested_format, None)?;
+        for warning in &encoded.warnings {
+            self.base.progress.info(&warning.message());
+        }
+        Ok(GenerateResponse {
+            video: Some(mold_core::VideoData {
+                data: encoded.bytes,
+                format: encoded.format,
+                frames: stitched.len() as u32,
+                fps: probe.fps,
+                gif_preview: encoded.gif_preview,
+                ..video
+            }),
+            ..response
+        })
+    }
+
+    /// Seed a continuation stage from the previous clip's last frame.
+    ///
+    /// Returns `false` when the carryover cannot be applied, which is not an
+    /// error: a text-to-video checkpoint has no conditioning channel, so its
+    /// stages render independently and the stitch concatenates them.
+    ///
+    /// A stage that already carries its own source image keeps it — an
+    /// authored sequence may pin a specific still for a clip, and silently
+    /// replacing it with the previous clip's tail would discard the user's
+    /// input.
+    fn seed_stage_from_carry(
+        &self,
+        stage_req: &mut GenerateRequest,
+        carry: Option<&crate::chain::ChainTail>,
+    ) -> Result<bool> {
+        let Some(carry) = carry else { return Ok(false) };
+        if stage_req.source_image.is_some() {
+            return Ok(false);
+        }
+        let Some(last) = carry.tail_rgb_frames.last() else {
+            return Ok(false);
+        };
+        // Ask the checkpoint, not the model name: this is the same
+        // classification `/api/models` advertises and the chain capability
+        // derives its carryover from, so the three cannot disagree.
+        let conditions_on_image = matches!(
+            source_image_capability(&self.base.paths.transformer, &self.base.paths.vae),
+            Some(mold_core::SourceImageCapability::Required)
+                | Some(mold_core::SourceImageCapability::Optional)
+        );
+        if !conditions_on_image {
+            return Ok(false);
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        last.write_to(&mut png, image::ImageFormat::Png)
+            .context("Wan: encoding the chain carryover frame as PNG")?;
+        stage_req.source_image = Some(png.into_inner());
+        Ok(true)
+    }
+}
+
+impl crate::chain::ChainStageRenderer for WanEngine {
+    fn render_stage(
+        &mut self,
+        stage_req: &GenerateRequest,
+        carry: Option<&crate::chain::ChainTail>,
+        motion_tail_pixel_frames: u32,
+        hdr_sidecar: Option<&crate::chain::StageSidecar>,
+        _stage_progress: Option<&mut dyn FnMut(crate::chain::StageProgressEvent)>,
+    ) -> Result<crate::chain::StageOutcome> {
+        if hdr_sidecar.is_some() {
+            bail!(
+                "WanEngine.render_stage: the HDR EXR sidecar is an LTX-2 feature; \
+                 wan stages cannot honour it"
+            );
+        }
+        let mut stage_req = stage_req.clone();
+        self.seed_stage_from_carry(&mut stage_req, carry)?;
+
+        let start = Instant::now();
+        // APNG is lossless, so the encode/decode round-trip preserves every
+        // pixel; it costs tens of milliseconds against a multi-second denoise.
+        // Same approach as the ltx-video stage renderer.
+        stage_req.output_format = Some(mold_core::OutputFormat::Apng);
+        stage_req.gif_preview = false;
+        let response = self.generate_inner(&stage_req)?;
+        let generation_time_ms = start.elapsed().as_millis() as u64;
+        let video = response
+            .video
+            .ok_or_else(|| anyhow::anyhow!("WanEngine.render_stage: no video data"))?;
+        let frames = crate::chain::decode_apng_to_rgb_frames(&video.data)?;
+        if frames.is_empty() {
+            bail!("WanEngine.render_stage: pipeline produced zero frames");
+        }
+
+        // Hand back the trailing frames so the next stage can be seeded. The
+        // orchestrator threads this through whether or not the carryover is
+        // used, and `ChainTail` consumers require a non-empty window.
+        let tail_count = (motion_tail_pixel_frames as usize).clamp(1, frames.len());
+        let tail_frames: Vec<image::RgbImage> = frames
+            .iter()
+            .skip(frames.len() - tail_count)
+            .cloned()
+            .collect();
+
+        Ok(crate::chain::StageOutcome {
+            frames,
+            tail: crate::chain::ChainTail {
+                frames: tail_frames.len() as u32,
+                tail_rgb_frames: tail_frames,
+            },
+            // The family has no audio decode path; chain validation rejects
+            // `enable_audio: true` for wan upstream of here.
+            audio: None,
+            hdr_frames_written: None,
+            generation_time_ms,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1956,6 +2180,49 @@ mod tests {
             path: path.to_string(),
             scale: 1.0,
             expert,
+        }
+    }
+
+    /// The engine must actually be a chain renderer.
+    ///
+    /// This is the defect the capability arm shipped without: `/api/models`
+    /// advertised `supports_sequence` for wan while `as_chain_renderer()`
+    /// returned the trait's default `None`, so every wan sequence would have
+    /// failed at worker dispatch — an advertised capability the engine could
+    /// not execute.
+    #[test]
+    fn the_wan_engine_is_registered_as_a_chain_renderer() {
+        let mut engine = WanEngine::new(
+            "wan22-ti2v-5b:fp16".to_string(),
+            dummy_paths(),
+            LoadStrategy::default(),
+            0,
+            None,
+        );
+        assert!(
+            crate::engine::InferenceEngine::as_chain_renderer(&mut engine).is_some(),
+            "wan advertises sequence support, so it must provide a stage renderer",
+        );
+    }
+
+    /// The seam duplicates one frame, not LTX-2's seventeen.
+    ///
+    /// LTX-2's 17 is the pixel window its VAE turns into three latent slots of
+    /// carryover. Wan has no latent motion tail: its continuation is seeded
+    /// with the previous clip's final frame and re-renders exactly that one
+    /// frame. Carrying 17 over would discard sixteen good frames at every
+    /// boundary while looking entirely plausible.
+    #[test]
+    fn the_wan_handoff_duplicates_exactly_the_seeded_frame() {
+        assert_eq!(WAN_HANDOFF_DUPLICATED_FRAMES, 1);
+        assert_ne!(
+            WAN_HANDOFF_DUPLICATED_FRAMES,
+            crate::chain::capability::LTX_VIDEO_FRAMES_PER_CLIP_CAP,
+        );
+        // It must stay strictly below any clip length wan can route to, or a
+        // continuation would emit no new frames at all.
+        for clip in [5u32, 53, 121, 257] {
+            assert!(WAN_HANDOFF_DUPLICATED_FRAMES < clip, "clip {clip}");
         }
     }
 
@@ -2315,11 +2582,13 @@ mod tests {
         assert!(engine.is_loaded());
     }
 
+    /// `extend_video` is deliberately absent from this list now (#783): it
+    /// routes to `extend_inner` before the guard, so rejecting it here would
+    /// refuse a continuation the engine can render.
     #[test]
     fn video_conditioning_is_rejected_but_images_are_accepted() {
         for mutate in [
             (|req: &mut GenerateRequest| req.source_video = Some(vec![1, 2, 3])) as fn(&mut _),
-            |req: &mut GenerateRequest| req.extend_video = Some(vec![1, 2, 3]),
             |req: &mut GenerateRequest| req.source_video_path = Some("clip.mp4".into()),
         ] {
             let mut req = request();

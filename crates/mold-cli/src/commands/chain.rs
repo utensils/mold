@@ -62,12 +62,55 @@ pub enum ChainRoutingDecision {
     Rejected { reason: String },
 }
 
+/// Whether a wan checkpoint carries context across a clip boundary.
+///
+/// Mirrors `mold_inference::chain::wan_carryover`, which the CLI cannot call
+/// (it does not depend on the inference crate). `Required` is the A14B I2V
+/// 36-channel concat, `Optional` the TI2V-5B latent inpaint; both can be
+/// seeded from the previous clip. `Unsupported` is text-to-video only, and an
+/// unclassified checkpoint is "unknown" — never an assumed handoff.
+fn wan_carries_context(source_image: Option<mold_core::SourceImageCapability>) -> bool {
+    matches!(
+        source_image,
+        Some(mold_core::SourceImageCapability::Required)
+            | Some(mold_core::SourceImageCapability::Optional)
+    )
+}
+
+/// Auto-chaining clip length for a wan render, in pixel frames.
+///
+/// The two-expert A14B pair measures near the 24 GB envelope well before wan's
+/// 257-frame request cap; the single-expert 5B has room for its own shipped
+/// 121. Both values sit on wan's `4k+1` grid, so a clip started at the default
+/// is submittable.
+fn wan_default_clip_frames(model: &str) -> u32 {
+    if model.to_ascii_lowercase().contains("a14b") {
+        53
+    } else {
+        121
+    }
+}
+
+/// Pixel frames a wan continuation duplicates from the clip before it.
+///
+/// The handoff seeds the continuation with the previous clip's final frame, so
+/// it re-renders exactly that one frame and the stitch trims exactly one. This
+/// is not LTX-2's 17: that is the pixel window its VAE turns into three latent
+/// slots of carryover, which wan has no equivalent of. Mirrors
+/// `mold_inference::wan::WAN_HANDOFF_DUPLICATED_FRAMES`.
+const WAN_HANDOFF_DUPLICATED_FRAMES: u32 = 1;
+
 /// Pure decision function — given a model family, the user's requested
 /// `frames`, and the optional `--clip-frames` override, decide whether to
 /// chain, stay single-clip, or reject.
 ///
 /// The clamp-to-cap behaviour surfaces through the returned `clip_frames`
 /// field; callers warn the user via stderr when they had to clamp.
+///
+/// Deliberately a flat argument list rather than a struct: every argument is
+/// an independent fact the caller already has in hand, and the two call sites
+/// (`generate.rs` and the tests) read better spelled out than assembled.
+#[allow(clippy::too_many_arguments)]
 pub fn decide_chain_routing(
     frames: Option<u32>,
     family: Option<&str>,
@@ -76,6 +119,11 @@ pub fn decide_chain_routing(
     motion_tail: u32,
     fps: u32,
     pipeline: Option<mold_core::Ltx2PipelineMode>,
+    // `source_image` is the model's advertised source-image contract. Only wan
+    // reads it, and only to size the seam (#783); `None` keeps the
+    // conservative independent-clip behaviour, which is what a model with no
+    // advertised contract must get.
+    source_image: Option<mold_core::SourceImageCapability>,
 ) -> ChainRoutingDecision {
     let Some(total_frames) = frames else {
         return ChainRoutingDecision::SingleClip;
@@ -91,12 +139,15 @@ pub fn decide_chain_routing(
         return ChainRoutingDecision::SingleClip;
     }
 
-    // Auto-chaining is an LTX-2 routing behaviour. Every LTX-2 pipeline now
-    // renders sequence clips, so the old `model.contains("distilled")` test is
-    // gone — it also rejected opaque `cv:` / `hf:` catalog IDs the server and
-    // the Studio surfaces both accept. ltx-video stays deliberately excluded:
-    // it has a chain capability but is not auto-chained here.
-    let is_chain_capable = family == Some("ltx2");
+    // Auto-chaining is a routing behaviour, not the whole chain capability.
+    // Every LTX-2 pipeline renders sequence clips, so the old
+    // `model.contains("distilled")` test is gone — it also rejected opaque
+    // `cv:` / `hf:` catalog IDs the server and the Studio surfaces both
+    // accept. Wan joins it (#783): a wan request past the cap used to be
+    // rejected outright rather than chained. ltx-video stays deliberately
+    // excluded: it has a chain capability but is not auto-chained here.
+    let is_wan = family == Some("wan");
+    let is_chain_capable = family == Some("ltx2") || is_wan;
 
     // The model's real single-request ceiling. LTX-2's is a runtime duration,
     // so it depends on fps; other families report a flat frame count.
@@ -120,18 +171,43 @@ pub fn decide_chain_routing(
         };
     }
 
-    // Auto-chaining uses 97-frame clips by default, but an explicit
-    // --clip-frames may go all the way to the model's real budget so a user
-    // can ask for one long coherent clip instead of a stitched sequence.
+    // Auto-chaining uses a default clip length, but an explicit --clip-frames
+    // may go all the way to the model's real budget so a user can ask for one
+    // long coherent clip instead of a stitched sequence.
+    //
+    // Wan's default is a VRAM envelope rather than a ceiling: the two-expert
+    // A14B measures near the 24 GB limit well before its 257-frame request
+    // cap, while the single-expert 5B has room for its own shipped 121. Both
+    // sit on wan's `4k+1` grid.
+    let routing_default = if is_wan {
+        wan_default_clip_frames(model)
+    } else {
+        LTX2_DEFAULT_CLIP_FRAMES
+    };
     let effective_clip_frames = clip_frames_flag
-        .unwrap_or(LTX2_DEFAULT_CLIP_FRAMES)
+        .unwrap_or(routing_default)
         .min(single_clip_cap);
 
     if total_frames <= effective_clip_frames {
         return ChainRoutingDecision::SingleClip;
     }
 
-    if motion_tail >= effective_clip_frames {
+    // Wan has no latent motion tail, so `--motion-tail` (an LTX-2 pixel window
+    // sized for its VAE's 8x carryover) does not apply. Its handoff seeds the
+    // continuation with the previous clip's final frame, so exactly one frame
+    // is duplicated; a text-to-video checkpoint carries nothing and trims
+    // nothing.
+    let motion_tail = if is_wan {
+        if wan_carries_context(source_image) {
+            WAN_HANDOFF_DUPLICATED_FRAMES
+        } else {
+            0
+        }
+    } else {
+        motion_tail
+    };
+
+    if motion_tail > 0 && motion_tail >= effective_clip_frames {
         return ChainRoutingDecision::Rejected {
             reason: format!(
                 "--motion-tail ({motion_tail}) must be strictly less than \
@@ -1175,6 +1251,126 @@ fn print_dry_run_summary(req: &ChainRequest) {
 mod tests {
     use super::*;
 
+    /// Wan auto-chains instead of being rejected, on its own grid and with a
+    /// seam its checkpoint can actually honour (#783).
+    #[test]
+    fn wan_auto_chains_with_a_checkpoint_shaped_seam() {
+        use mold_core::SourceImageCapability::{Optional, Required, Unsupported};
+
+        // Before this, any wan request past the cap was Rejected: the family
+        // was not chain-capable here at all.
+        let five_b = decide_chain_routing(
+            Some(300),
+            Some("wan"),
+            "wan22-ti2v-5b:fp16",
+            None,
+            24,
+            24,
+            None,
+            Some(Optional),
+        );
+        // The seam duplicates exactly the one frame the continuation was
+        // seeded with -- NOT the caller's LTX-shaped 24.
+        assert_eq!(
+            five_b,
+            ChainRoutingDecision::Chain {
+                clip_frames: 121,
+                motion_tail: WAN_HANDOFF_DUPLICATED_FRAMES,
+            },
+        );
+
+        // The two-expert pair gets the tighter 24 GB envelope.
+        let a14b = decide_chain_routing(
+            Some(300),
+            Some("wan"),
+            "wan22-i2v-a14b:q5",
+            None,
+            24,
+            16,
+            None,
+            Some(Required),
+        );
+        assert_eq!(
+            a14b,
+            ChainRoutingDecision::Chain {
+                clip_frames: 53,
+                motion_tail: WAN_HANDOFF_DUPLICATED_FRAMES,
+            },
+        );
+
+        // A text-to-video checkpoint has no conditioning channel at all, so
+        // the seam carries nothing however large a tail was requested.
+        let t2v = decide_chain_routing(
+            Some(300),
+            Some("wan"),
+            "wan22-t2v-a14b:q5",
+            None,
+            24,
+            16,
+            None,
+            Some(Unsupported),
+        );
+        assert_eq!(
+            t2v,
+            ChainRoutingDecision::Chain {
+                clip_frames: 53,
+                motion_tail: 0,
+            },
+        );
+        // An unclassified checkpoint is "unknown", not an assumed handoff.
+        assert_eq!(
+            decide_chain_routing(Some(300), Some("wan"), "cv:12345", None, 24, 16, None, None,),
+            ChainRoutingDecision::Chain {
+                clip_frames: 121,
+                motion_tail: 0,
+            },
+        );
+
+        // Every routed clip length is on wan's 4k+1 grid, so a clip started at
+        // the default is submittable.
+        for model in ["wan22-ti2v-5b:fp16", "wan22-t2v-a14b:q5", "cv:12345"] {
+            let decision =
+                decide_chain_routing(Some(300), Some("wan"), model, None, 4, 16, None, None);
+            let ChainRoutingDecision::Chain { clip_frames, .. } = decision else {
+                panic!("{model} must auto-chain");
+            };
+            assert_eq!((clip_frames - 1) % 4, 0, "{model} clip {clip_frames}");
+        }
+
+        // Under the envelope it still stays on the single-clip path.
+        assert_eq!(
+            decide_chain_routing(
+                Some(53),
+                Some("wan"),
+                "wan22-t2v-a14b:q5",
+                None,
+                0,
+                16,
+                None,
+                Some(Unsupported),
+            ),
+            ChainRoutingDecision::SingleClip,
+        );
+
+        // An explicit --clip-frames still wins, clamped to the real cap.
+        assert_eq!(
+            decide_chain_routing(
+                Some(600),
+                Some("wan"),
+                "wan22-ti2v-5b:fp16",
+                Some(999),
+                0,
+                24,
+                None,
+                Some(Optional),
+            ),
+            ChainRoutingDecision::Chain {
+                clip_frames: mold_core::validation::MAX_FRAMES_GLOBAL,
+                motion_tail: WAN_HANDOFF_DUPLICATED_FRAMES,
+            },
+        );
+    }
+
     #[test]
     fn routing_single_clip_under_cap() {
         let d = decide_chain_routing(
@@ -1184,6 +1380,7 @@ mod tests {
             None,
             4,
             24,
+            None,
             None,
         );
         assert_eq!(d, ChainRoutingDecision::SingleClip);
@@ -1204,6 +1401,7 @@ mod tests {
                 17,
                 24,
                 Some(mold_core::Ltx2PipelineMode::T2a),
+                None,
             );
             assert_eq!(
                 d,
@@ -1222,6 +1420,7 @@ mod tests {
             17,
             24,
             Some(mold_core::Ltx2PipelineMode::TwoStage),
+            None,
         );
         assert!(matches!(video, ChainRoutingDecision::Chain { .. }));
     }
@@ -1235,6 +1434,7 @@ mod tests {
             None,
             4,
             24,
+            None,
             None,
         );
         assert_eq!(d, ChainRoutingDecision::SingleClip);
@@ -1250,6 +1450,7 @@ mod tests {
             4,
             24,
             None,
+            None,
         );
         assert_eq!(
             d,
@@ -1262,7 +1463,16 @@ mod tests {
 
     #[test]
     fn routing_rejects_non_distilled_over_cap() {
-        let d = decide_chain_routing(Some(200), Some("flux"), "flux-dev:q4", None, 4, 24, None);
+        let d = decide_chain_routing(
+            Some(200),
+            Some("flux"),
+            "flux-dev:q4",
+            None,
+            4,
+            24,
+            None,
+            None,
+        );
         match d {
             ChainRoutingDecision::Rejected { reason } => {
                 assert!(
@@ -1285,7 +1495,8 @@ mod tests {
             "ltx-2-19b-distilled:fp8",
             "cv:3143864",
         ] {
-            let decision = decide_chain_routing(Some(400), Some("ltx2"), model, None, 17, 24, None);
+            let decision =
+                decide_chain_routing(Some(400), Some("ltx2"), model, None, 17, 24, None, None);
             assert!(
                 matches!(decision, ChainRoutingDecision::Chain { .. }),
                 "{model} must auto-chain, got {decision:?}"
@@ -1305,6 +1516,7 @@ mod tests {
             4,
             24,
             None,
+            None,
         );
         assert!(matches!(d, ChainRoutingDecision::Rejected { .. }));
     }
@@ -1320,6 +1532,7 @@ mod tests {
             None,
             4,
             24,
+            None,
             None,
         );
         assert_eq!(d, ChainRoutingDecision::SingleClip);
@@ -1337,6 +1550,7 @@ mod tests {
             Some(201),
             4,
             24,
+            None,
             None,
         );
         assert_eq!(
@@ -1361,6 +1575,7 @@ mod tests {
             4,
             12,
             None,
+            None,
         );
         assert_eq!(
             d,
@@ -1384,6 +1599,7 @@ mod tests {
             4,
             24,
             None,
+            None,
         );
         assert_eq!(
             d,
@@ -1404,6 +1620,7 @@ mod tests {
             4,
             24,
             None,
+            None,
         );
         assert_eq!(
             d,
@@ -1423,6 +1640,7 @@ mod tests {
             Some(49),
             49,
             24,
+            None,
             None,
         );
         match d {
@@ -1445,6 +1663,7 @@ mod tests {
             None,
             97,
             24,
+            None,
             None,
         );
         assert!(matches!(d, ChainRoutingDecision::Rejected { .. }));
