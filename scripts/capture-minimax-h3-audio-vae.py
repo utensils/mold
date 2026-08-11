@@ -38,7 +38,7 @@ MANIFEST_PATH = (
     REPO_ROOT / "tests" / "fixtures" / "minimax_h3" / "conformance-manifest.json"
 )
 QWEN_PRODUCER_SHA256 = (
-    "b19f32eafa2ad27044e7ffcdfc624efb9839fc18bff7b68e4c2c9631440c9900"
+    "5df8f9291260319e3b41044109013a51795fb551201d6007b9e2e0848af38d3b"
 )
 
 DIFFUSERS_REVISION = "9c6a68c32b3b2a64db91800b624d33cec6e25ab8"

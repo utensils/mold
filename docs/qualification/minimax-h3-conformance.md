@@ -315,8 +315,8 @@ retains its exact request and raw BF16 response there. All writes use
 create-new semantics and refuse replacement; request and response files are
 sealed read-only before they become evidence, and raw output is capped at 128
 MiB. The documents include shape, dtype, a full-activation content hash and
-statistics, 257 deterministic coordinate/value samples, and the strict
-zero-tolerance/hash-exact policy required by the protected runner. A real
+statistics, every activation coordinate/value in canonical row-major order,
+and the strict zero-tolerance/hash-exact policy required by the protected runner. A real
 capture has not passed merely because these producer contracts and CUDA
 typechecks pass; only the protected external campaign may establish numerical
 parity.

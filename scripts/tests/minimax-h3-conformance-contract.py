@@ -225,7 +225,8 @@ def test_comparison_diagnostics(tool) -> None:
     sampled_output["samples"][0]["index"] = [4]
     expect_failure(
         lambda: tool.compare_layer_outputs(oracle, samples_mold),
-        "sample key mismatch: missing Mold indexes=[[0]], extra Mold indexes=[[4]]",
+        "sample key mismatch: missing Mold indexes (first 1 of 1)=[[0]], "
+        "extra Mold indexes (first 1 of 1)=[[4]]",
     )
 
     hash_mold = copy.deepcopy(mold)
@@ -240,6 +241,19 @@ def test_comparison_diagnostics(tool) -> None:
     expect_failure(
         lambda: tool.compare_layer_outputs(oracle, tolerance_mold),
         "sample=[0] tolerance exceeded",
+    )
+
+    many_oracle = copy.deepcopy(oracle)
+    many_mold = copy.deepcopy(mold)
+    for document, value in ((many_oracle, 0.0), (many_mold, 10.0)):
+        output = output_with_key(document, "audio_next")
+        output["shape"] = [256]
+        output["samples"] = [
+            {"index": [index], "value": value} for index in range(256)
+        ]
+    expect_failure(
+        lambda: tool.compare_layer_outputs(many_oracle, many_mold),
+        "128 additional comparison issues omitted",
     )
 
     overflow_oracle = copy.deepcopy(oracle)

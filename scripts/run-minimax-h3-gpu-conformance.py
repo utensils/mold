@@ -205,6 +205,7 @@ RECORD_ONLY_FLOAT_MEASUREMENTS = {
     ),
 }
 COMPLETE_SAMPLE_MEASUREMENTS = {
+    "qwen-layer-50": frozenset({"sampled-values"}),
     "visual-vae": frozenset({"posterior-seed-42"}),
     "token-refiner": RECORD_ONLY_FLOAT_MEASUREMENTS["token-refiner"],
     "transformer-block": RECORD_ONLY_FLOAT_MEASUREMENTS["transformer-block"],
