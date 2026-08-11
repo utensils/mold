@@ -48,6 +48,10 @@ IDENTITY_INPUT_KIND = "identity-sha256-v1"
 COMPONENT_AUTHORITY_SET_SCHEMA = "mold.minimax-h3.component-authority-set.v1"
 MAX_EXACT_ABSOLUTE_TOLERANCE = 1.0 / 64.0
 MAX_EXACT_RELATIVE_TOLERANCE = 1.0 / 64.0
+AUDIO_VAE_CHECKPOINT_SHA256_BY_ROLE = {
+    "oracle": "52c59e67ba8de5477c81bfbced0327aabf500f1bfdeefd5ee754529241cb26cb",
+    "mold": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+}
 SIGNED_INT64_MIN = -(2**63)
 SIGNED_INT64_MAX = 2**63 - 1
 UNSIGNED_INT64_MAX = 2**64 - 1
@@ -1116,6 +1120,10 @@ def validate_manifest_layer_evidence(
         fail(
             f"{role} layer {layer} component authority summary differs from the manifest"
         )
+    if layer == "audio-vae" and document["input"].get("checkpoint_sha256") != (
+        AUDIO_VAE_CHECKPOINT_SHA256_BY_ROLE[role]
+    ):
+        fail(f"{role} layer audio-vae checkpoint authority is not exact")
 
     validate_acceleration_policy(
         document["environment"],

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Private H3 AudioVAE comparison binds its two reviewed checkpoints by role.** Real CUDA capture exposed that the generic input-equality gate rejected the intentionally different official oracle and Comfy folded Mold checkpoint hashes before comparing their record-only numerical evidence. The comparator and protected runner now require each exact role-specific hash, compare the shared input authority separately, and reject any substituted checkpoint.
+
 - **Private H3 visual-VAE seed evidence is bounded across scalar math backends.** The independently generated PyTorch and Mold seed-42 MT19937 streams now retain both hashes and every scalar while enforcing the reviewed `2e-6 + 1e-6 * abs(oracle)` FP32 bound, instead of incorrectly requiring byte identity from different normal-transform implementations. The real 67,200-element CUDA pair measured a maximum absolute difference of `4.7683716e-7` with no violations.
 
 - **Private H3 visual-VAE qualification uses the official shortest round-trip temporal case.** Real CUDA capture showed that the former five-frame case encodes to two latent frames but cannot enter the pinned official decoder's temporal loop. The paired oracle and Mold case now uses 22 frames, the documented shortest `17n+5` input that produces seven latent frames and round-trips exactly; its full tensor shapes, seam probes, request identity, and external raw-evidence bound are enforced before evidence publication.

@@ -173,6 +173,18 @@ class AudioVaeCaptureContractTests(unittest.TestCase):
                 "sampled-values": "float32",
             },
         )
+        expected_checkpoints = {
+            "oracle": PRODUCER.OFFICIAL_AUDIO_CHECKPOINT_SHA256,
+            "mold": PRODUCER.COMFY_AUDIO_CHECKPOINT_SHA256,
+        }
+        self.assertEqual(
+            CONFORMANCE.AUDIO_VAE_CHECKPOINT_SHA256_BY_ROLE,
+            expected_checkpoints,
+        )
+        self.assertEqual(
+            GPU.AUDIO_VAE_CHECKPOINT_SHA256_BY_ROLE,
+            expected_checkpoints,
+        )
 
     def test_oracle_and_mold_documents_satisfy_strict_schema(self) -> None:
         for role in ("oracle", "mold"):
@@ -315,7 +327,8 @@ class AudioVaeCaptureContractTests(unittest.TestCase):
         mutations.append(empty_runtime)
         for mutation in mutations:
             with self.assertRaisesRegex(
-                GPU.GpuConformanceFailure, "lacks canonical structured evidence"
+                GPU.GpuConformanceFailure,
+                "lacks canonical structured evidence|checkpoint authority is not exact",
             ):
                 GPU.validate_manifest_layer_evidence(mutation, self.contract, "oracle")
 
@@ -350,6 +363,31 @@ class AudioVaeCaptureContractTests(unittest.TestCase):
         ):
             GPU.validate_manifest_layer_evidence(
                 weakened_timeline, self.contract, "oracle"
+            )
+
+    def test_role_specific_checkpoint_authorities_compare_and_fail_closed(self) -> None:
+        oracle = self.layer_document("oracle")
+        mold = self.layer_document("mold")
+        CONFORMANCE.compare_layer_outputs(oracle, mold)
+
+        wrong_checkpoint = copy.deepcopy(mold)
+        wrong_checkpoint["input"]["checkpoint_sha256"] = "0" * 64
+        next(
+            item
+            for item in wrong_checkpoint["provenance"]
+            if item["key"] == "checkpoint-sha256"
+        )["value"] = "0" * 64
+        with self.assertRaisesRegex(
+            CONFORMANCE.ConformanceFailure,
+            "checkpoint authority differs",
+        ):
+            CONFORMANCE.compare_layer_outputs(oracle, wrong_checkpoint)
+        with self.assertRaisesRegex(
+            GPU.GpuConformanceFailure,
+            "checkpoint authority is not exact",
+        ):
+            GPU.validate_manifest_layer_evidence(
+                wrong_checkpoint, self.contract, "mold"
             )
 
     def test_environment_and_repository_local_fixture_fail_closed(self) -> None:
