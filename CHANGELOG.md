@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Authorized private H3 ingress no longer re-enters the public compliance rejection.** The server now applies the ordinary field and family validation through a validation-only `h3-private-uat` edge after its authenticated private grant. Shipping requests still fail at the unchanged public authorization gate, and this adds no artifact or loader access.
+
 - **Private H3 CUDA qualification can observe the real server phase lifecycle.** The authenticated private server stream now exposes the runtime's existing phase progress so external host/device memory samples can be correlated with VAE, Qwen, transformer, decode, and mux work. This remains behind `h3-private-uat` and does not activate a public H3 loader or approve runtime bounds.
 
 - **Private H3 campaign servers retain their measured runtime identity.** The private server now records the exact 64-byte runtime-code identity at startup, ensuring release LTO cannot remove the marker that the content-addressed qualification producer must authenticate in the measured server ELF. This changes no public capability or reviewed runtime allowlist.
