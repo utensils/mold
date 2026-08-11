@@ -36,6 +36,20 @@
 //! `WanBlock::load` path rebuild the block from them. That path is the one the
 //! initial load uses, so the quantized source and the LoRA branch compose here
 //! exactly as they already do.
+//!
+//! ## What the driver still needs
+//!
+//! One gap is known and is deliberately not closed here, because it changes
+//! `WanTransformer`'s shape rather than this module's: **the transformer does
+//! not retain the checkpoint's tensor map.** `from_gguf_with_loras` builds a
+//! `VarBuilder`, hands it to `from_weights`, and drops it at the end of the
+//! statement — after which only the tensors the blocks themselves hold survive,
+//! via `Arc`. So [`WanBlockParking::park`] cannot be called after construction
+//! as things stand; the driver will have to either park during construction or
+//! give the transformer a retained map. Note the map cannot simply be kept
+//! alive to rebuild from later: `VarBuilder::from_gguf` uploads *every* tensor
+//! to the device eagerly (`mold-candle/src/quantized.rs`), so holding it would
+//! pin the whole expert on the GPU and defeat the purpose.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -57,27 +71,30 @@ pub(crate) fn block_prefix(index: usize) -> String {
 /// A tensor already on the target device is returned as a cheap `Arc` clone
 /// rather than copied through host memory.
 pub(crate) fn qtensor_to_device(src: &Arc<QTensor>, device: &Device) -> Result<Arc<QTensor>> {
-    if same_device(&src.device(), device) {
+    // `Device` has no `PartialEq`; `same_device` is candle's own comparison —
+    // location and ordinal, so two handles to the same GPU compare equal and
+    // two ordinals do not.
+    if src.device().same_device(device) {
         return Ok(src.clone());
     }
+    rebuild_on(src, device)
+}
+
+/// [`qtensor_to_device`] with the same-device short circuit removed.
+///
+/// Split out because the short circuit makes a same-device call untestable:
+/// it hands back the input `Arc`, so asserting the result equals the input
+/// proves nothing about the byte path — which is the entire correctness claim
+/// of this module. CI has no GPU, so this is what lets a CPU-only test drive
+/// exactly the serialization a CUDA park/unpark runs. Production callers want
+/// the short circuit and should use [`qtensor_to_device`].
+pub(crate) fn rebuild_on(src: &QTensor, device: &Device) -> Result<Arc<QTensor>> {
     let dims = src.shape().dims().to_vec();
     let dtype = src.dtype();
     let bytes = src.data()?;
     Ok(Arc::new(ggml_file::qtensor_from_ggml(
         dtype, &bytes, dims, device,
     )?))
-}
-
-/// `Device` has no `PartialEq`, and `same_device` is the comparison candle
-/// itself uses — location and ordinal, not identity.
-fn same_device(a: &Device, b: &Device) -> bool {
-    match (a, b) {
-        (Device::Cpu, Device::Cpu) => true,
-        (Device::Cuda(_), Device::Cuda(_)) | (Device::Metal(_), Device::Metal(_)) => {
-            a.same_device(b)
-        }
-        _ => false,
-    }
 }
 
 /// One block's weights, held wherever [`WanBlockParking::park`] put them.
@@ -108,9 +125,23 @@ impl ParkedBlock {
 
     /// Move every tensor in this block to `device`.
     pub(crate) fn to_device(&self, device: &Device) -> Result<Self> {
+        self.move_each(|tensor| qtensor_to_device(tensor, device))
+    }
+
+    /// [`Self::to_device`] with the same-device short circuit removed — see
+    /// [`rebuild_on`] for why that distinction has to be reachable.
+    #[cfg(test)]
+    fn rebuilt_on(&self, device: &Device) -> Result<Self> {
+        self.move_each(|tensor| rebuild_on(tensor, device))
+    }
+
+    fn move_each<F>(&self, mut move_one: F) -> Result<Self>
+    where
+        F: FnMut(&Arc<QTensor>) -> Result<Arc<QTensor>>,
+    {
         let mut tensors = HashMap::with_capacity(self.tensors.len());
         for (name, tensor) in &self.tensors {
-            tensors.insert(name.clone(), qtensor_to_device(tensor, device)?);
+            tensors.insert(name.clone(), move_one(tensor)?);
         }
         Ok(Self {
             index: self.index,
@@ -200,11 +231,16 @@ mod tests {
     /// given. A dequantize/re-quantize round trip would pass a loose tolerance
     /// check and still make the render depend on how many blocks were parked,
     /// so this asserts raw storage equality rather than closeness.
+    ///
+    /// Deliberately drives `rebuilt_on`, not `to_device`: CI has no GPU, and a
+    /// same-device `to_device` returns the input `Arc` untouched, so this test
+    /// would compare a tensor with itself and pass no matter how broken the
+    /// byte path was. `rebuilt_on` runs the real serialization.
     #[test]
     fn parking_a_block_is_byte_identical() {
         let all = checkpoint();
         let parked = WanBlockParking::park(&all, 1).expect("block 1 exists");
-        let moved = parked.to_device(&Device::Cpu).unwrap();
+        let moved = parked.rebuilt_on(&Device::Cpu).unwrap();
 
         for name in parked.tensor_names() {
             let before = all.get(name).expect("original tensor");
@@ -218,6 +254,63 @@ mod tests {
                 before.data().unwrap().as_ref(),
                 after.data().unwrap().as_ref(),
                 "{name} is not byte-identical after a park/unpark cycle"
+            );
+        }
+    }
+
+    /// The fast path must be a genuine short circuit — the same allocation
+    /// back, not a copy. Pinned because it is what makes an unpark of an
+    /// already-resident block free, and because its existence is exactly what
+    /// made the byte-identity test above vacuous until it was split out.
+    #[test]
+    fn a_same_device_move_returns_the_same_allocation() {
+        let (_, tensor) = quantized("blocks.0.ffn.0.weight", 32, 256);
+        let moved = qtensor_to_device(&tensor, &Device::Cpu).unwrap();
+        assert!(
+            Arc::ptr_eq(&tensor, &moved),
+            "a same-device move must not copy"
+        );
+
+        // And the rebuild path must NOT short circuit, or the test above is
+        // testing nothing.
+        let rebuilt = rebuild_on(&tensor, &Device::Cpu).unwrap();
+        assert!(
+            !Arc::ptr_eq(&tensor, &rebuilt),
+            "rebuild_on must actually round trip through bytes"
+        );
+        assert_eq!(
+            tensor.data().unwrap().as_ref(),
+            rebuilt.data().unwrap().as_ref(),
+            "the rebuilt tensor must still be byte-identical"
+        );
+    }
+
+    /// Every quantization the shipped Wan checkpoints use has to survive the
+    /// round trip, not just the one the other tests happen to build with.
+    #[test]
+    fn every_shipped_quantization_survives_the_round_trip() {
+        let device = Device::Cpu;
+        for dtype in [
+            GgmlDType::Q4K,
+            GgmlDType::Q5K,
+            GgmlDType::Q8_0,
+            GgmlDType::F16,
+            GgmlDType::F32,
+        ] {
+            let src = Tensor::randn(0f32, 1.0, (32, 256), &device).unwrap();
+            let quantized = Arc::new(QTensor::quantize(&src, dtype).unwrap());
+            let rebuilt = rebuild_on(&quantized, &device)
+                .unwrap_or_else(|err| panic!("{dtype:?} failed to rebuild: {err}"));
+            assert_eq!(rebuilt.dtype(), dtype, "{dtype:?} changed quantization");
+            assert_eq!(
+                rebuilt.shape(),
+                quantized.shape(),
+                "{dtype:?} changed shape"
+            );
+            assert_eq!(
+                quantized.data().unwrap().as_ref(),
+                rebuilt.data().unwrap().as_ref(),
+                "{dtype:?} is not byte-identical after a round trip"
             );
         }
     }
@@ -248,6 +341,46 @@ mod tests {
         let parked = WanBlockParking::park(&all, 1).expect("block 1 exists");
         let names: Vec<&str> = parked.tensor_names().map(String::as_str).collect();
         assert_eq!(names, vec!["blocks.1.ffn.0.weight"]);
+    }
+
+    /// The contract a driver depends on: the map `into_tensors` hands back has
+    /// to be directly loadable by the var builder `WanBlock::load` already
+    /// takes, at the path the block lives at.
+    ///
+    /// This is why `park` keeps FULL checkpoint names rather than stripping the
+    /// `blocks.{i}.` prefix. `VarBuilder::path` joins its `pp` segments with
+    /// `.` and looks the result up verbatim (`mold-candle/src/quantized.rs`),
+    /// so a stripped key would need the driver to navigate to the root and a
+    /// full key needs `.pp("blocks").pp(i)` — and getting that backwards fails
+    /// at runtime with `cannot find tensor`, not at compile time.
+    #[test]
+    fn a_parked_block_reloads_through_the_var_builder() {
+        let all = checkpoint();
+        let parked = WanBlockParking::park(&all, 1).expect("block 1 exists");
+        let index = parked.index();
+        let moved = parked.rebuilt_on(&Device::Cpu).unwrap();
+
+        let vb =
+            mold_candle::quantized::VarBuilder::from_qtensors(moved.into_tensors(), &Device::Cpu);
+        let block_vb = vb.pp("blocks").pp(index.to_string());
+
+        let weight = block_vb
+            .pp("self_attn")
+            .pp("q")
+            .get((32, 256), "weight")
+            .expect("the parked block must be reachable at blocks.{i}.self_attn.q.weight");
+        assert_eq!(weight.shape().dims(), &[32, 256]);
+
+        // A sibling block's weights must NOT be reachable from this set.
+        assert!(
+            vb.pp("blocks")
+                .pp("0")
+                .pp("self_attn")
+                .pp("q")
+                .get((32, 256), "weight")
+                .is_err(),
+            "parking block 1 must not carry block 0's weights"
+        );
     }
 
     #[test]
