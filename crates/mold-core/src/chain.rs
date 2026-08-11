@@ -791,9 +791,19 @@ impl ChainRequest {
                     "chain clip_frames must be > 0".into(),
                 ));
             }
-            if !is_ltx2_frame_count(clip_frames) {
+            // The grid is the family's, not a constant: wan's VAE compresses
+            // time by 4 where the LTX families compress by 8. A hardcoded 8
+            // rejected every wan auto-chain, including the 53-frame routing
+            // default the CLI itself picks.
+            let step = family
+                .as_deref()
+                .and_then(crate::validation::frame_step_for_family)
+                .unwrap_or(8);
+            if clip_frames % step != 1 {
+                let examples: Vec<String> = (1..5).map(|k| (k * step + 1).to_string()).collect();
                 return Err(MoldError::Validation(format!(
-                    "chain clip_frames ({clip_frames}) must be 8k+1 (9, 17, 25, …, 97)",
+                    "chain clip_frames ({clip_frames}) must be {step}k+1 ({}, …)",
+                    examples.join(", "),
                 )));
             }
             let motion_tail = self.motion_tail_frames;
@@ -823,10 +833,17 @@ impl ChainRequest {
                 MAX_CHAIN_STAGES,
             )));
         }
-        if self.motion_tail_frames != 0 && !is_ltx2_frame_count(self.motion_tail_frames) {
+        // The carryover frames re-encode through the family's own video VAE,
+        // so the tail sits on that VAE's temporal grid — 8x causal for LTX-2,
+        // 4x for wan.
+        let grid_step = family
+            .as_deref()
+            .and_then(crate::validation::frame_step_for_family)
+            .unwrap_or(8);
+        if self.motion_tail_frames != 0 && self.motion_tail_frames % grid_step != 1 {
             return Err(MoldError::Validation(format!(
-                "motion_tail_frames ({}) must be 0 or 8k+1 (1, 9, 17, 25, …) so the carryover \
-                 RGB frames re-encode cleanly through the LTX-2 video VAE's 8× causal grid",
+                "motion_tail_frames ({}) must be 0 or {grid_step}k+1 so the carryover RGB frames \
+                 re-encode cleanly through this family's video VAE temporal grid",
                 self.motion_tail_frames,
             )));
         }
@@ -834,9 +851,9 @@ impl ChainRequest {
             if stage.frames == 0 {
                 return Err(MoldError::Validation(format!("stage {idx} has 0 frames",)));
             }
-            if !is_ltx2_frame_count(stage.frames) {
+            if stage.frames % grid_step != 1 {
                 return Err(MoldError::Validation(format!(
-                    "stage {idx} has {} frames; LTX-2 requires 8k+1 (9, 17, 25, …, 97)",
+                    "stage {idx} has {} frames; this family requires {grid_step}k+1",
                     stage.frames,
                 )));
             }
@@ -977,6 +994,12 @@ pub fn stage_contributed_frames(
 /// `k` (1, 9, 17, 25, …). The LTX-2 pipeline has this constraint on pixel
 /// frame counts due to the VAE's 8× temporal compression with a causal first
 /// frame.
+///
+/// Test-only since the Wan wave (#783): production grid checks are family-
+/// derived through [`crate::validation::frame_step_for_family`], because Wan's
+/// grid is `4k + 1`. This stays as the literal spelling of LTX-2's own
+/// constraint so the tests below assert it independently of that lookup.
+#[cfg(test)]
 fn is_ltx2_frame_count(n: u32) -> bool {
     n % 8 == 1
 }

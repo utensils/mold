@@ -724,7 +724,10 @@ Examples:
         extend: Option<String>,
 
         /// Pixel frames of the source tail used as motion context for --extend.
-        /// Must be 8k+1 and strictly less than --frames.
+        /// Must sit on the family's VAE temporal grid — 8k+1 for LTX-2, 4k+1
+        /// for Wan — and be strictly less than --frames. Wan carries exactly
+        /// one frame (its seam is image conditioning, not a latent tail), so 1
+        /// is the only value it accepts.
         #[arg(long, help_heading = "Video", value_name = "N", requires = "extend")]
         extend_overlap: Option<u32>,
 

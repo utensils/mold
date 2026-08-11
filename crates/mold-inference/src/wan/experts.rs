@@ -21,6 +21,8 @@
 //! partner. Disk is the sum.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device};
@@ -53,6 +55,14 @@ impl WanExpertRole {
         match self {
             Self::HighNoise => "high-noise",
             Self::LowNoise => "low-noise",
+        }
+    }
+
+    /// The other half of the pair.
+    pub fn partner(self) -> Self {
+        match self {
+            Self::HighNoise => Self::LowNoise,
+            Self::LowNoise => Self::HighNoise,
         }
     }
 
@@ -165,30 +175,103 @@ impl WanExpertPair {
 /// GGUF is chosen by extension, which is how the whole ecosystem labels these
 /// files; there is no in-band marker to prefer. The two containers apply
 /// adapters differently — see [`crate::wan::lora`] — but that is invisible here.
+/// `files` is every file the DiT's weights span. A diffusers export shards
+/// the transformer, so passing only the first would fail on whichever tensor
+/// landed in a later shard — `Wan2.2-TI2V-5B-Turbo-Diffusers` puts
+/// `blocks.29.ffn.net.2.weight` and the output projection in a second file.
+/// GGUF is always one file by construction.
 pub(crate) fn load_transformer(
-    path: &Path,
+    files: &[PathBuf],
     config: WanTransformerConfig,
     device: &Device,
     dtype: DType,
     loras: &WanLoraRegistry,
 ) -> Result<WanTransformer> {
-    let transformer = if is_gguf(path) {
-        WanTransformer::from_gguf_with_loras(path, config, device, loras)
+    let first = files
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Wan: no transformer weight files supplied"))?;
+    let transformer = if is_gguf(first) {
+        WanTransformer::from_gguf_with_loras(first, config, device, loras)
     } else {
-        WanTransformer::from_safetensors_with_loras(
-            std::slice::from_ref(&path.to_path_buf()),
-            config,
-            device,
-            dtype,
-            loras,
-        )
+        WanTransformer::from_safetensors_with_loras(files, config, device, dtype, loras)
     };
-    transformer.with_context(|| format!("loading Wan transformer {}", path.display()))
+    transformer.with_context(|| format!("loading Wan transformer {}", first.display()))
 }
 
 pub(crate) fn is_gguf(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+}
+
+/// Warms the operating system's page cache for the expert that has not run
+/// yet (#802 item 3).
+///
+/// The A14B swap is a cold read in the middle of the denoise loop. The
+/// existing "the file was just read, so the page cache still holds it"
+/// rationale covers the *outgoing* expert; the incoming 10.8-15.4 GB file has
+/// not been read this run and, on a 32-64 GB host, has been evicted behind
+/// UMT5 (11.4 GB) and the resident expert. On the 4-step fast tier that cold
+/// read is a visible slice of a ~90-120 s render.
+///
+/// This is pure host I/O: the bytes are read sequentially and discarded, so
+/// **no VRAM is touched and the max-of-pair invariant is untouched**. The work
+/// runs on a background thread while the first expert denoises, and the stop
+/// flag is checked per chunk so a cancelled render does not leave a thread
+/// grinding through fifteen gigabytes.
+struct ExpertPrefetch {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ExpertPrefetch {
+    /// Begin warming `path`. Returns `None` when there is nothing to do.
+    ///
+    /// `MOLD_WAN_PREFETCH=0` turns it off. That exists so the effect can be
+    /// measured at all — the mechanism is the page cache, so an A/B needs a
+    /// way to run the same render without it — and as an escape hatch on a
+    /// host where the extra sequential read competes for I/O.
+    fn start(path: PathBuf) -> Option<Self> {
+        if crate::runtime_env::value("MOLD_WAN_PREFETCH").as_deref() == Some("0") {
+            return None;
+        }
+        if !path.is_file() {
+            return None;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let handle = std::thread::Builder::new()
+            .name("wan-expert-prefetch".to_string())
+            .spawn(move || {
+                use std::io::Read;
+                let Ok(mut file) = std::fs::File::open(&path) else {
+                    return;
+                };
+                // 8 MiB keeps the syscall count low without holding a large
+                // buffer; the bytes themselves are thrown away, the point is
+                // the page cache they leave behind.
+                let mut buffer = vec![0u8; 8 * 1024 * 1024];
+                while !flag.load(Ordering::Relaxed) {
+                    match file.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self {
+            stop,
+            handle: Some(handle),
+        })
+    }
+}
+
+impl Drop for ExpertPrefetch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 /// The denoise loop's weight source.
@@ -213,6 +296,9 @@ pub(crate) struct WanExpertState {
     device: Device,
     dtype: DType,
     resident: Option<(WanExpertRole, WanTransformer)>,
+    /// Background page-cache warm for the expert that has not run yet. Dropped
+    /// (and joined) when the swap happens or the render ends.
+    prefetch: Option<ExpertPrefetch>,
 }
 
 impl WanExperts {
@@ -254,6 +340,7 @@ impl WanExperts {
             device: device.clone(),
             dtype,
             resident: None,
+            prefetch: None,
         })))
     }
 
@@ -268,11 +355,29 @@ impl WanExperts {
     /// The transformer for `timestep`, loading and swapping experts if the
     /// schedule has crossed the boundary since the last call.
     ///
+    /// Which expert this timestep belongs to, or `None` for a single-expert
+    /// checkpoint where the question does not arise.
+    ///
+    /// Read-only: consulted by the step cache (#801), which must invalidate on
+    /// the swap and so needs the role without forcing a load.
+    pub fn current_role(&self, timestep: i64) -> Option<WanExpertRole> {
+        match self {
+            Self::Single(_) => None,
+            Self::Pair(state) => Some(state.pair.role_for(timestep)),
+        }
+    }
+
+    /// The transformer for `timestep`, loading and swapping experts if the
+    /// schedule has crossed the boundary since the last call.
+    ///
     /// The outgoing expert is dropped and the device synchronized *before* the
     /// incoming one is read, so peak VRAM stays at one expert. It is a reload
     /// from disk rather than a park to host RAM: the file was just read, so the
     /// page cache usually still holds it, and a 10.8 GB round trip over PCIe
     /// costs more than re-reading it does.
+    ///
+    /// After the first expert lands, a background thread warms the page cache
+    /// for its partner so the mid-loop swap is not a cold read (#802 item 3).
     pub fn transformer_for(
         &mut self,
         timestep: i64,
@@ -287,11 +392,16 @@ impl WanExperts {
                     device,
                     dtype,
                     resident,
+                    prefetch,
                 } = state.as_mut();
                 let role = pair.role_for(timestep);
                 if resident.as_ref().map(|(current, _)| *current) != Some(role) {
                     let swapping = resident.is_some();
                     if swapping {
+                        // The warm is either finished or pointless now; join it
+                        // before the load so it cannot compete for I/O with the
+                        // read it exists to accelerate.
+                        *prefetch = None;
                         // Drop first: the incoming expert must not have to fit
                         // beside the outgoing one.
                         *resident = None;
@@ -302,7 +412,15 @@ impl WanExperts {
                     let started = std::time::Instant::now();
                     let slot = pair.slot(role);
                     let transformer =
-                        load_transformer(&slot.path, config.clone(), device, *dtype, &slot.loras)?;
+                        // A14B experts are always one file each; a sharded
+                        // pair is not something the ecosystem publishes.
+                        load_transformer(
+                            std::slice::from_ref(&slot.path),
+                            config.clone(),
+                            device,
+                            *dtype,
+                            &slot.loras,
+                        )?;
                     progress.phase_done(ProgressPhase::ModelLoad, &stage, started.elapsed());
                     if swapping {
                         progress.info(&format!(
@@ -312,6 +430,12 @@ impl WanExperts {
                         ));
                     }
                     *resident = Some((role, transformer));
+                    if !swapping {
+                        // Host I/O only -- this never allocates on the device,
+                        // so both experts are still never GPU-resident.
+                        let partner = pair.slot(role.partner()).path.clone();
+                        *prefetch = ExpertPrefetch::start(partner);
+                    }
                 }
                 Ok(&resident.as_ref().expect("just loaded").1)
             }
@@ -530,6 +654,97 @@ mod tests {
         assert_eq!(at(&mut experts, boundary), want_high, "the boundary itself");
         assert_eq!(at(&mut experts, boundary - 1), want_low, "one step past it");
         assert_eq!(at(&mut experts, 0), want_low);
+    }
+
+    /// The prefetch must never make both experts resident.
+    ///
+    /// The family's whole VRAM story is "max of the pair, not the sum". A warm
+    /// that allocated on the device — or that constructed a transformer to get
+    /// the bytes read — would quietly double the envelope and turn every
+    /// admission estimate into an under-count. It reads the file and throws
+    /// the bytes away; `resident` must stay a single entry throughout.
+    #[test]
+    fn the_partner_prefetch_never_makes_both_experts_resident() {
+        let device = Device::Cpu;
+        let dir = tempfile::tempdir().unwrap();
+        let config = tiny_config();
+        let high_path = dir.path().join("high.gguf");
+        let low_path = dir.path().join("low.gguf");
+        write_expert(&high_path, &config, 0.0);
+        write_expert(&low_path, &config, 0.25);
+
+        let mut experts = WanExperts::pair(
+            WanExpertPair {
+                high_noise: WanExpertSlot {
+                    path: high_path,
+                    loras: WanLoraRegistry::default(),
+                },
+                low_noise: WanExpertSlot {
+                    path: low_path,
+                    loras: WanLoraRegistry::default(),
+                },
+                boundary_timestep: WanExpertPair::boundary_for(false),
+            },
+            config.clone(),
+            &device,
+            DType::F32,
+            config,
+        )
+        .unwrap();
+
+        let progress = ProgressReporter::default();
+        let resident_count = |experts: &WanExperts| match experts {
+            WanExperts::Single(_) => 1,
+            WanExperts::Pair(state) => usize::from(state.resident.is_some()),
+        };
+
+        // High-noise resident; the warm for its partner is running or done.
+        experts.transformer_for(1000, &progress).unwrap();
+        assert_eq!(resident_count(&experts), 1);
+        match &experts {
+            WanExperts::Pair(state) => {
+                assert!(
+                    state.prefetch.is_some(),
+                    "the partner warm must start once the first expert lands",
+                );
+                assert_eq!(
+                    state.resident.as_ref().map(|(role, _)| *role),
+                    Some(WanExpertRole::HighNoise),
+                );
+            }
+            WanExperts::Single(_) => panic!("constructed as a pair"),
+        }
+
+        // Cross the boundary: still exactly one resident, and the warm is
+        // joined rather than left competing with the load it exists to help.
+        experts.transformer_for(0, &progress).unwrap();
+        assert_eq!(resident_count(&experts), 1);
+        match &experts {
+            WanExperts::Pair(state) => {
+                assert_eq!(
+                    state.resident.as_ref().map(|(role, _)| *role),
+                    Some(WanExpertRole::LowNoise),
+                );
+                assert!(
+                    state.prefetch.is_none(),
+                    "the warm must be joined at the swap, not left running",
+                );
+            }
+            WanExperts::Single(_) => panic!("constructed as a pair"),
+        }
+    }
+
+    /// A role's partner is the other one, and never itself — the prefetch
+    /// target depends on this, and warming the expert that is already resident
+    /// would be pure waste.
+    #[test]
+    fn a_roles_partner_is_the_other_half() {
+        assert_eq!(WanExpertRole::HighNoise.partner(), WanExpertRole::LowNoise);
+        assert_eq!(WanExpertRole::LowNoise.partner(), WanExpertRole::HighNoise);
+        for role in [WanExpertRole::HighNoise, WanExpertRole::LowNoise] {
+            assert_ne!(role.partner(), role);
+            assert_eq!(role.partner().partner(), role);
+        }
     }
 
     /// Reloading the same expert must not re-read it from disk: the swap is

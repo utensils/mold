@@ -47,7 +47,8 @@ describe("CatalogTableRow", () => {
     expect(wrapper.find('[data-test="family-placeholder"]').exists()).toBe(false);
     expect(wrapper.find("svg[data-source='civitai']").exists()).toBe(true);
     expect(wrapper.get("[data-test='row-title']").text()).toBe("Test Flux LoRA");
-    expect(wrapper.get("[data-test='row-family']").text()).toBe("flux");
+    // The chip shows the family's name, not its wire slug (#806).
+    expect(wrapper.get("[data-test='row-family']").text()).toBe("FLUX");
     expect(wrapper.text()).toContain("alice");
     expect(wrapper.text()).toContain("↓ 4.2k · ♥ 88");
   });

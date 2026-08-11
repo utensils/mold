@@ -19,14 +19,14 @@ async fn autocomplete_sequence_model(ctx: Context<'_>, partial: &str) -> Vec<Str
     let models = ctx.data().cached_models().await;
     let mut names = if models.is_empty() {
         mold_core::manifest::visible_manifests()
-            .filter(|manifest| manifest.family == "ltx2")
+            .filter(|manifest| mold_core::catalog::chain_capable_family(&manifest.family))
             .map(|manifest| manifest.name.clone())
             .collect::<Vec<_>>()
     } else {
         models
             .into_iter()
             .filter(|model| {
-                model.info.family == "ltx2"
+                mold_core::catalog::chain_capable_family(&model.info.family)
                     && model.downloaded
                     && model.supports_sequence != Some(false)
             })
@@ -60,7 +60,7 @@ fn resolve_default_sequence_model(models: &[ModelInfoExtended]) -> String {
     models
         .iter()
         .filter(|model| {
-            model.info.family == "ltx2"
+            mold_core::catalog::chain_capable_family(&model.info.family)
                 && model.downloaded
                 && model.supports_sequence != Some(false)
         })
@@ -267,13 +267,15 @@ pub async fn sequence(
     let models = ctx.data().cached_models().await;
     let model = model.unwrap_or_else(|| resolve_default_sequence_model(&models));
     let model_entry = models.iter().find(|entry| entry.info.name == model);
-    if model_entry
-        .is_some_and(|entry| entry.info.family != "ltx2" || entry.supports_sequence == Some(false))
-    {
+    if model_entry.is_some_and(|entry| {
+        !mold_core::catalog::chain_capable_family(&entry.info.family)
+            || entry.supports_sequence == Some(false)
+    }) {
         ctx.data().quotas.refund(user_id);
         handler::send_error(
             ctx,
-            "Sequence requires an LTX-2 model with sequence support.",
+            "Sequence requires a model whose family renders sequence clips \
+             (LTX-2, LTX Video, or Wan Video) with sequence support advertised.",
         )
         .await?;
         return Ok(());

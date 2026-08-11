@@ -259,6 +259,14 @@ mold run ltx-video-0.9.6-distilled:bf16 "a sunset" --format gif | mpv -
 # Wan 2.1 text-to-video (frames must be 4n+1: 77, 81, 121, ...; MP4 default)
 mold run wan21-t2v-1.3b "a red fox trotting through snow" --frames 81 --fps 16
 
+# Wan 2.1 14B — the dense 2.1 quality tier (bare name resolves :q8)
+mold run wan21-t2v-14b "a red fox trotting through snow"
+
+# Wan sequences: past the per-clip envelope this auto-chains and stitches one MP4.
+# The seam continues only on an image-conditioned checkpoint (TI2V-5B, A14B I2V);
+# a T2V checkpoint concatenates independent clips. Clips are 4k+1.
+mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" --frames 100 --clip-frames 49
+
 # Wan 2.2 5B at 720p24
 mold run wan22-ti2v-5b "waves on a black sand beach" --width 1280 --height 704 --frames 121 --fps 24
 
@@ -1070,6 +1078,8 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_LTX2_VAE_DECODE_CONTEXT_FRAMES` | auto                              | Positive integer latent-frame overlap/context around each LTX-2 decode chunk. Default derives from the decoder causal-conv receptive field.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `MOLD_WAN_SHIFT`                      | per tier (`8.0`; A14B `5.0`)      | Wan flow shift (upstream `--sample_shift`). Process-wide fallback; the request-level `sample_shift` / `--sample-shift` always wins. Finite and positive.
 | `MOLD_WAN_SOLVER`                     | `unipc`                           | Wan sample solver fallback: `unipc`, `euler` (the Lightning-tuned solver), or `dpm++` (upstream's alternative grid). The request-level `scheduler` / `--sample-solver` always wins.
+| `MOLD_WAN_PREFETCH`                   | `1`                               | `0` disables the background page-cache warm for the A14B partner expert (#802). Host I/O only; never touches VRAM. Swap load 8.7-22.2 s cold vs 5.6 s warm on a 4090. |
+| `MOLD_WAN_STEP_CACHE`                 | `off`                             | Wan first-block residual reuse (#801) on the non-distilled tiers: `off`, `auto` (threshold 0.10, measured 1.85x on the A14B `:q8` tier), or an explicit positive relative-L1 threshold. Refused with a message on distilled or sub-12-step schedules. `off` is bit-identical to denoising every block. |
 | `MOLD_WAN_STEP_PROFILE`               | off                               | Diagnostic (#775): `1` prints one per-phase, device-synced timing line per Wan denoise step (self/cross attention, ffn, quantized matmuls, casts). Syncs inflate wall time — never leave on in production.
 | `MOLD_WAN_FORCE_DMMV`                 | off                               | Diagnostic (#775): `1` forces candle's quantized matmuls onto the dequantize-per-forward fallback for A/B against the MMQ fast path. Changes numerics, runtime, and transient memory; fingerprint-registered so learned estimates never mix with normal runs.
 | `MOLD_MAX_CACHED_MODELS`              | `3`                               | Maximum cached engines, including the GPU-resident model and parked entries. Range: `1`-`16`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |

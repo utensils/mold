@@ -3624,7 +3624,13 @@ pub fn resolve_model_name(input: &str) -> String {
             && suffix.len() <= 3
             && suffix[1..].chars().all(|c| c.is_ascii_digit()))
             || matches!(suffix, "fp8" | "fp16" | "bf16");
-        if legacy_quant {
+        // A dashed spelling of a shipped non-quant tag resolves too
+        // (`wan22-ti2v-5b-turbo` -> `wan22-ti2v-5b:turbo`), but only when the
+        // colon form is a real manifest. Without that guard every bare name
+        // ending in a dash segment — `flux-dev`, `wan21-t2v-1.3b` — would be
+        // rewritten into a tag that does not exist. The exact bare-name match
+        // above already wins for models whose own name ends that way.
+        if legacy_quant || find_manifest_exact(&format!("{base}:{suffix}")).is_some() {
             return format!("{base}:{suffix}");
         }
     }
@@ -5068,6 +5074,16 @@ fn wan_manifests() -> Vec<ModelManifest> {
         // pins it as frame 0 through the latent-inpaint path (#772).
         source_image: Some(crate::types::SourceImageCapability::Optional),
     };
+    // The Turbo distill differs from the quality tier only in the denoise
+    // budget: 4 steps, and guidance 1.0 so `needs_cfg_pass` drops the
+    // unconditional forward. That is (20 x 2) / 4 = 10x fewer transformer
+    // forwards for the same clip. Everything else — the 2.2 VAE grid, the
+    // 121-frame 24 fps default, the shift — is the base checkpoint's.
+    let defaults_ti2v_turbo = ManifestDefaults {
+        steps: 4,
+        guidance: 1.0,
+        ..defaults_ti2v.clone()
+    };
 
     vec![
         ModelManifest {
@@ -5099,9 +5115,11 @@ fn wan_manifests() -> Vec<ModelManifest> {
                 });
                 files
             },
-            defaults: defaults_480p,
+            defaults: defaults_480p.clone(),
             hidden: false,
         },
+        wan21_t2v_14b_manifest(Wan21T2v14bTier::Compact, defaults_480p.clone()),
+        wan21_t2v_14b_manifest(Wan21T2v14bTier::Quality, defaults_480p),
         ModelManifest {
             name: "wan22-ti2v-5b:fp16".to_string(),
             family: "wan".to_string(),
@@ -5172,6 +5190,63 @@ fn wan_manifests() -> Vec<ModelManifest> {
             defaults: defaults_ti2v,
             hidden: false,
         },
+        ModelManifest {
+            name: "wan22-ti2v-5b:turbo".to_string(),
+            family: "wan".to_string(),
+            description: "Wan 2.2 TI2V 5B Turbo — 4-step 720p24 text- and image-to-video"
+                .to_string(),
+            files: {
+                let mut files = shared_wan_files();
+                // Self-Forcing step+CFG distillation of the same 5B
+                // transformer (`quanhaol/Wan2.2-TI2V-5B-Turbo`). We ship the
+                // diffusers repack rather than the original, which publishes
+                // only a 20 GB `model.pt` pickle mold cannot load.
+                //
+                // Its `transformer/config.json` is the base checkpoint's
+                // geometry exactly — in_channels 48, 30 layers, 24 heads x
+                // 128, ffn 14336, patch [1,2,2] — so mold's shape-driven
+                // detection needs no new arm, and its `scheduler_config.json`
+                // is UniPC at `flow_shift 5.0`, which is already the family
+                // default. The distill is the whole delta: 4 steps at
+                // guidance 1.0, where `needs_cfg_pass` skips the
+                // unconditional forward entirely.
+                files.push(ModelFile {
+                    hf_repo: "yetter-ai/Wan2.2-TI2V-5B-Turbo-Diffusers".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model-00001-of-00002.safetensors"
+                        .to_string(),
+                    component: ModelComponent::TransformerShard,
+                    size_bytes: 9_932_338_872,
+                    gated: false,
+                    sha256: Some(
+                        "941f10781e7abbc53644557165cbe086e9672170475c27f8e34cb11a98617232",
+                    ),
+                });
+                files.push(ModelFile {
+                    hf_repo: "yetter-ai/Wan2.2-TI2V-5B-Turbo-Diffusers".to_string(),
+                    hf_filename: "transformer/diffusion_pytorch_model-00002-of-00002.safetensors"
+                        .to_string(),
+                    component: ModelComponent::TransformerShard,
+                    size_bytes: 89_266_952,
+                    gated: false,
+                    sha256: Some(
+                        "4e375f2441c3abb07cf3fb190eb88b23a5c44e01bc4a47569c6e778d49e7b5e6",
+                    ),
+                });
+                files.push(ModelFile {
+                    hf_repo: "Comfy-Org/Wan_2.2_ComfyUI_Repackaged".to_string(),
+                    hf_filename: "split_files/vae/wan2.2_vae.safetensors".to_string(),
+                    component: ModelComponent::Vae,
+                    size_bytes: 1_409_400_960,
+                    gated: false,
+                    sha256: Some(
+                        "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156",
+                    ),
+                });
+                files
+            },
+            defaults: defaults_ti2v_turbo,
+            hidden: false,
+        },
         a14b_manifest(A14bTier::Fast, A14bTask::T2v),
         a14b_manifest(A14bTier::Quality, A14bTask::T2v),
         a14b_manifest(A14bTier::Compact, A14bTask::T2v),
@@ -5181,6 +5256,98 @@ fn wan_manifests() -> Vec<ModelManifest> {
         a14b_manifest(A14bTier::Compact, A14bTask::I2v),
         a14b_manifest(A14bTier::Fp8, A14bTask::I2v),
     ]
+}
+
+/// Which Wan 2.1 T2V-14B tier a manifest is built for.
+///
+/// The 14B is the dense single-expert 2.1 checkpoint — `dim` 5120, 40 layers,
+/// `in_dim` 16 — which the engine already shape-detects, so these tiers add no
+/// architecture. What they add is the checkpoint itself: 2.1 shipped in mold
+/// only at 1.3B, while the 14B carries the CausVid/lightx2v-era LoRA ecosystem
+/// and city96 publishes the canonical GGUFs (#797).
+///
+/// Only two of city96's fifteen tiers ship. Q8_0 is the quality tier and
+/// Q5_K_M the one that leaves room for the encoder on a 16 GB card; the
+/// intermediate tiers buy nothing a user cannot get by picking one of these
+/// two, and every additional tier is another SHA to keep honest.
+#[derive(Clone, Copy)]
+enum Wan21T2v14bTier {
+    /// Q5_K_M — 11.3 GB.
+    Compact,
+    /// Q8_0 — 15.9 GB.
+    Quality,
+}
+
+impl Wan21T2v14bTier {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Compact => "q5",
+            Self::Quality => "q8",
+        }
+    }
+
+    /// `(filename, size_bytes, sha256)` — read from the repository's own blob
+    /// listing, not from the survey that prompted the work.
+    fn file(self) -> (&'static str, u64, &'static str) {
+        match self {
+            Self::Compact => (
+                "wan2.1-t2v-14b-Q5_K_M.gguf",
+                11_264_907_904,
+                "5a4a0973e661603920633729c4a929a85e20e4107c5e7b4d9f103888f5a38178",
+            ),
+            Self::Quality => (
+                "wan2.1-t2v-14b-Q8_0.gguf",
+                15_879_461_504,
+                "cd4f1cc5cd4b63f25898340e997d6299984114e8755be5407bc585a1e0ec9f38",
+            ),
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Compact => "Wan 2.1 T2V 14B Q5_K_M — 480p text-to-video (smaller-card GGUF)",
+            Self::Quality => "Wan 2.1 T2V 14B Q8_0 — 480p text-to-video",
+        }
+    }
+}
+
+/// One Wan 2.1 T2V-14B tier.
+///
+/// The VAE is the same 2.1 VAE the 1.3B pins, and the encoder and tokenizer
+/// come from `shared_wan_files()`, so a user who already has the 1.3B pulls
+/// only the transformer. The recipe is the 1.3B's — ComfyUI's Wan 2.1 template
+/// — because it is the same family at the same resolution; the flow shift the
+/// template pairs with it is already the engine's single-expert default of 8.0
+/// (`wan/pipeline.rs`), so no per-tier shift is needed.
+fn wan21_t2v_14b_manifest(tier: Wan21T2v14bTier, defaults: ManifestDefaults) -> ModelManifest {
+    let (filename, size_bytes, sha256) = tier.file();
+    ModelManifest {
+        name: format!("wan21-t2v-14b:{}", tier.tag()),
+        family: "wan".to_string(),
+        description: tier.description().to_string(),
+        files: {
+            let mut files = shared_wan_files();
+            files.push(ModelFile {
+                hf_repo: "city96/Wan2.1-T2V-14B-gguf".to_string(),
+                hf_filename: filename.to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes,
+                gated: false,
+                sha256: Some(sha256),
+            });
+            files.push(ModelFile {
+                hf_repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged".to_string(),
+                hf_filename: "split_files/vae/wan_2.1_vae.safetensors".to_string(),
+                component: ModelComponent::Vae,
+                size_bytes: 253_815_318,
+                gated: false,
+                sha256: Some("2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b"),
+            });
+            files
+        },
+        defaults,
+        hidden: false,
+    }
 }
 
 /// Which A14B task a manifest is built for. The two differ only in the GGUF
@@ -6837,19 +7004,23 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 11 Wan + 4 compliance-hidden MiniMax H3 contracts + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 149
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 14 Wan + 4 compliance-hidden MiniMax H3 contracts + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 152
         // Wan fp8 bump (#777): +wan22-{t2v,i2v}-a14b:fp8 — the Comfy-Org
         // fp8-scaled expert pairs.
         // Wan bump: +wan22-{t2v,i2v}-a14b:{q5,q8} — the two-expert A14B tiers.
         // Wan low-VRAM bump (#794): +wan22-{t2v,i2v}-a14b:q4 and
         // +wan22-ti2v-5b:q8.
+        // Wan fast-tier bump (#793): +wan22-ti2v-5b:turbo — the Self-Forcing
+        // 4-step distill of the same 5B transformer.
         // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
         // catalog bridge (single-file Civitai Flux.2 fine-tunes); +z-image-te
         // for single-file Civitai Z-Image checkpoints; +ltx2-te for the
         // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
         // Gemma 3 12B text encoder); +wan-umt5, +wan21-vae, +wan22-vae for
         // single-file Wan checkpoints.
-        assert_eq!(known_manifests().len(), 149);
+        // Wan 2.1 14B bump (#797): +wan21-t2v-14b:{q5,q8} — city96's canonical
+        // GGUFs for the dense 2.1 14B, which the engine already shape-detects.
+        assert_eq!(known_manifests().len(), 152);
     }
 
     #[test]
@@ -6871,6 +7042,69 @@ mod tests {
     /// bare names resolve to the shipped tags, the component set is complete
     /// (transformer + VAE + UMT5 + tokenizer), every payload carries a
     /// SHA-256, and the entries stay hidden until the engine's factory arm
+    /// The Turbo tier's whole reason to exist is the denoise budget: 4 steps
+    /// at guidance 1.0, where `needs_cfg_pass` skips the unconditional
+    /// forward, against the quality tier's 20 steps with CFG. That is a 10x
+    /// reduction in transformer forwards, and it is the only thing that may
+    /// differ — the clip shape, timing, and conditioning capability are the
+    /// base checkpoint's, because it *is* the base checkpoint distilled.
+    #[test]
+    fn the_ti2v_turbo_tier_changes_only_the_denoise_budget() {
+        let quality = find_manifest("wan22-ti2v-5b:fp16").expect("quality tier ships");
+        let turbo = find_manifest("wan22-ti2v-5b:turbo").expect("turbo tier ships");
+
+        assert_eq!(turbo.defaults.steps, 4);
+        assert_eq!(turbo.defaults.guidance, 1.0);
+        assert!(
+            turbo.defaults.guidance <= 1.0,
+            "guidance above 1.0 would reinstate the unconditional forward the distill removes",
+        );
+        let forwards = |d: &ManifestDefaults| d.steps * if d.guidance > 1.0 { 2 } else { 1 };
+        assert_eq!(
+            forwards(&quality.defaults) / forwards(&turbo.defaults),
+            10,
+            "the tier exists for a 10x forward-count reduction",
+        );
+
+        // Everything else is the base checkpoint's.
+        assert_eq!(turbo.family, quality.family);
+        assert_eq!(turbo.defaults.width, quality.defaults.width);
+        assert_eq!(turbo.defaults.height, quality.defaults.height);
+        assert_eq!(turbo.defaults.frames, quality.defaults.frames);
+        assert_eq!(turbo.defaults.fps, quality.defaults.fps);
+        assert_eq!(turbo.defaults.source_image, quality.defaults.source_image);
+        assert_eq!(
+            turbo.defaults.negative_prompt,
+            quality.defaults.negative_prompt
+        );
+
+        // The distill ships as diffusers shards, so it carries
+        // `TransformerShard` rather than a single `Transformer`; the rest of
+        // the component set and the SHA-256 pinning are unchanged.
+        assert!(turbo
+            .files
+            .iter()
+            .any(|f| f.component == ModelComponent::TransformerShard));
+        for component in [
+            ModelComponent::Vae,
+            ModelComponent::TextEncoder,
+            ModelComponent::TextTokenizer,
+        ] {
+            assert!(
+                turbo.files.iter().any(|f| f.component == component),
+                "turbo missing {component:?}"
+            );
+        }
+        for file in &turbo.files {
+            assert!(
+                file.sha256.is_some(),
+                "turbo: {} must carry a SHA-256",
+                file.hf_filename
+            );
+        }
+        assert!(!turbo.hidden);
+    }
+
     /// exists — a listed model that cannot load is worse than none.
     #[test]
     fn wan_manifests_resolve_and_carry_full_component_sets() {
@@ -6885,9 +7119,28 @@ mod tests {
             "wan22-ti2v-5b:fp16"
         );
         assert_eq!(resolve_model_name("wan22-ti2v-5b-q8"), "wan22-ti2v-5b:q8");
+        // The 2.1 14B ships only GGUF tiers, so the bare name takes the
+        // generic loop's first hit — `:q8`, the quality tier — rather than
+        // needing a pin. Both tags stay addressable, dash form included.
+        assert_eq!(resolve_model_name("wan21-t2v-14b"), "wan21-t2v-14b:q8");
+        assert_eq!(resolve_model_name("wan21-t2v-14b-q5"), "wan21-t2v-14b:q5");
+        // The Turbo distill is reachable only by its own tag. The bare-name
+        // ladder is `:q8 -> :fp16 -> :bf16 -> :fp8`, so adding it cannot
+        // silently re-point anyone's existing `wan22-ti2v-5b` at a 4-step
+        // checkpoint (#793).
+        assert_eq!(
+            resolve_model_name("wan22-ti2v-5b:turbo"),
+            "wan22-ti2v-5b:turbo"
+        );
+        assert_eq!(
+            resolve_model_name("wan22-ti2v-5b-turbo"),
+            "wan22-ti2v-5b:turbo"
+        );
 
         for name in [
             "wan21-t2v-1.3b:bf16",
+            "wan21-t2v-14b:q5",
+            "wan21-t2v-14b:q8",
             "wan22-ti2v-5b:fp16",
             "wan22-ti2v-5b:q8",
         ] {

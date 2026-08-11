@@ -4,6 +4,10 @@ import {
 } from "@ui/lib/seam";
 import { FALLBACK_VIDEO_FPS } from "@ui/lib/duration";
 
+// One owner for the wan seam size; `./chainRouting` computes the routing that
+// applies it, so the constant lives there and authoring reads it.
+import { WAN_HANDOFF_DUPLICATED_FRAMES } from "./chainRouting";
+
 // The seam vocabulary is presentational and lives beside the SeamPill /
 // SeamEditor primitives in ui/; re-exported here so studio consumers keep
 // one import surface for sequence logic.
@@ -19,6 +23,18 @@ export interface SequenceModel {
   name: string;
   family: string;
   supports_sequence?: boolean | null;
+  /**
+   * The checkpoint's advertised source-image contract. Wan reads it to decide
+   * whether the seam can carry context at all (#783): it has no latent motion
+   * tail, so its smooth handoff is last-frame image conditioning, which only
+   * an image-conditioned checkpoint accepts. Absent reads as "unknown" and
+   * takes the conservative independent-clip path.
+   *
+   * Typed as the raw wire string, matching `ModelInfoExtended`: an
+   * unrecognized value is not a handoff, which is what the conservative branch
+   * already yields.
+   */
+  source_image?: string | null;
 }
 
 export interface SequenceStage {
@@ -47,19 +63,45 @@ export interface SequenceLimits {
 export const DEFAULT_SEQUENCE_CLIP_FRAMES = 25;
 
 export function sequenceMotionTailFrames(
-  model: Pick<SequenceModel, "name" | "family"> | null | undefined,
+  model:
+    Pick<SequenceModel, "name" | "family" | "source_image"> | null | undefined,
 ): number {
-  return model?.family.trim().toLowerCase() === "ltx-video"
-    ? 0
-    : DEFAULT_SEQUENCE_MOTION_TAIL_FRAMES;
+  const family = model?.family.trim().toLowerCase();
+  // LTX-Video renders independent clips: nothing crosses the seam, so there is
+  // no tail to trim.
+  if (family === "ltx-video") return 0;
+  // Wan's answer is per checkpoint, not per family. A text-to-video checkpoint
+  // has no conditioning channel at all, so offering it a tail would promise
+  // continuity it cannot produce; an unclassified checkpoint is "unknown" and
+  // takes the same conservative path.
+  if (family === "wan") {
+    const source = model?.source_image;
+    return source === "required" || source === "optional"
+      ? WAN_HANDOFF_DUPLICATED_FRAMES
+      : 0;
+  }
+  return DEFAULT_SEQUENCE_MOTION_TAIL_FRAMES;
+}
+
+/**
+ * The frame-count grid a family's clips must sit on.
+ *
+ * Wan's VAE compresses time by 4 where the LTX families compress by 8, so its
+ * valid counts are `4k+1`, not `8k+1`. Offering an off-grid option sends the
+ * request straight into a 422 from the validator that owns the real rule.
+ */
+export function sequenceFrameStep(family: string | null | undefined): number {
+  return family?.trim().toLowerCase() === "wan" ? 4 : 8;
 }
 
 export function sequenceFrameOptions(
   framesPerClipCap: number,
   motionTailFrames: number,
+  family?: string | null,
 ): number[] {
+  const step = sequenceFrameStep(family);
   const options: number[] = [];
-  for (let frames = 9; frames <= framesPerClipCap; frames += 8) {
+  for (let frames = step + 1; frames <= framesPerClipCap; frames += step) {
     if (frames > motionTailFrames) options.push(frames);
   }
   return options;
@@ -71,7 +113,10 @@ export function modelSupportsSequence(
   if (!model) return false;
   if (typeof model.supports_sequence === "boolean")
     return model.supports_sequence;
-  if (model.family === "ltx-video") return true;
+  // Fallback for a server that does not advertise the field. Wan and
+  // LTX-Video chain for every checkpoint in the family; what varies for wan is
+  // the carryover, not whether it can render clips at all.
+  if (model.family === "ltx-video" || model.family === "wan") return true;
   if (model.family !== "ltx2" && model.family !== "ltx-2") return false;
 
   const name = model.name.toLowerCase();

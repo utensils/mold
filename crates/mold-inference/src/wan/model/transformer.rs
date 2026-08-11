@@ -1405,6 +1405,24 @@ impl WanTransformer {
         context: &Tensor,
         rope: &(Tensor, Tensor),
     ) -> Result<Tensor> {
+        self.forward_with_rope_cached(x, timestep, context, rope, None)
+    }
+
+    /// [`Self::forward_with_rope`] with an optional first-block residual cache
+    /// (#801).
+    ///
+    /// With `cache` absent this is the untouched forward, block for block, so
+    /// the default path stays bit-identical. With a cache, block 0 always
+    /// runs and its residual decides whether blocks 1..N run or their previous
+    /// contribution is replayed — see `wan::step_cache`.
+    pub fn forward_with_rope_cached(
+        &self,
+        x: &Tensor,
+        timestep: &Tensor,
+        context: &Tensor,
+        rope: &(Tensor, Tensor),
+        cache: Option<&mut crate::wan::step_cache::WanStepCache>,
+    ) -> Result<Tensor> {
         let batch = x.dim(0)?;
         let grid = self.patch_grid(x)?;
         let (cos, sin) = (&rope.0, &rope.1);
@@ -1425,8 +1443,32 @@ impl WanTransformer {
                 .gelu()?,
         )?;
 
-        for block in &self.blocks {
-            hidden = block.forward(&hidden, &context, &timestep, cos, sin)?;
+        match cache {
+            None => {
+                for block in &self.blocks {
+                    hidden = block.forward(&hidden, &context, &timestep, cos, sin)?;
+                }
+            }
+            Some(cache) => {
+                let Some((first, rest)) = self.blocks.split_first() else {
+                    bail!("Wan DiT: a transformer with no blocks cannot run");
+                };
+                let entry = hidden.clone();
+                hidden = first.forward(&hidden, &context, &timestep, cos, sin)?;
+                let first_block_residual = (&hidden - &entry)?;
+                match cache.decide(&first_block_residual)? {
+                    // The trajectory barely moved: replay what blocks 1..N
+                    // contributed last time instead of recomputing them.
+                    Some(tail) => hidden = (&hidden + &tail)?,
+                    None => {
+                        let after_first = hidden.clone();
+                        for block in rest {
+                            hidden = block.forward(&hidden, &context, &timestep, cos, sin)?;
+                        }
+                        cache.record_tail((&hidden - &after_first)?);
+                    }
+                }
+            }
         }
 
         // Head: a 2-entry modulation table over the *unprojected* time

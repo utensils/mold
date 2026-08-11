@@ -298,6 +298,8 @@ pub enum RuntimeSemanticVariable {
     VaeDtype,
     VaeTiled,
     WanForceDmmv,
+    WanPrefetch,
+    WanStepCache,
     WanStepProfile,
     WuerstchenDecoderGuidance,
 }
@@ -640,6 +642,12 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         // runtime. Distinct classes keep their fingerprints and learned
         // timings out of normal buckets.
         "MOLD_WAN_FORCE_DMMV" => RuntimeSemanticVariable::WanForceDmmv,
+        // #802 item 3: changes wall-clock only, but that is enough to keep it
+        // out of another run's learned-timing bucket.
+        "MOLD_WAN_PREFETCH" => RuntimeSemanticVariable::WanPrefetch,
+        // #801: residual reuse changes the rendered output and the step
+        // count that actually runs, so it is its own equivalence class.
+        "MOLD_WAN_STEP_CACHE" => RuntimeSemanticVariable::WanStepCache,
         "MOLD_WAN_STEP_PROFILE" => RuntimeSemanticVariable::WanStepProfile,
         "MOLD_WUERSTCHEN_DECODER_GUIDANCE" => RuntimeSemanticVariable::WuerstchenDecoderGuidance,
         // A new engine-shaping input must never silently collapse into an old
@@ -1656,7 +1664,7 @@ pub(crate) fn warm_execution_equivalence_cache(
     // checkpoint header, which is the same blocking work for the same reason.
     if family == "wan" {
         for inputs in prepared.by_device.values() {
-            crate::wan_admission::warm_checkpoint_geometry(&inputs.engine_paths.transformer);
+            crate::wan_admission::warm_checkpoint_geometry(&inputs.engine_paths);
         }
     }
 }

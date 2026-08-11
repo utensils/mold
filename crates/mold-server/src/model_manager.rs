@@ -263,6 +263,17 @@ fn annotate_source_image_capabilities(catalog: &mut [ModelInfoExtended], config:
             mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
         });
         entry.source_image = probed.or(entry.source_image);
+        // Extend continues a clip by seeding it with the source's final frame,
+        // so it is available exactly when the checkpoint conditions on an
+        // image (#783). Re-derive it from the contract we just resolved rather
+        // than leaving the manifest's cold guess in place: a config path
+        // override can point the same manifest name at a different checkpoint,
+        // and advertising extend on a text-to-video one promises a
+        // continuation it has no channel to accept.
+        entry.supports_extend = Some(mold_core::catalog::extend_capable_model(
+            &entry.info.family,
+            entry.source_image,
+        ));
     }
 }
 

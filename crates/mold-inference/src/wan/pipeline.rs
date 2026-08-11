@@ -134,7 +134,34 @@ fn header_shapes(path: &Path) -> Result<Vec<(String, Vec<usize>)>> {
 /// recognizes; the caller keeps its conservative fallback rather than
 /// inventing a shape.
 pub fn activation_geometry(path: &Path) -> Option<crate::device::WanActivationGeometry> {
-    let config = detect_transformer_config(path).ok()?;
+    activation_geometry_across(std::slice::from_ref(&path.to_path_buf()))
+}
+
+/// Every file the DiT's weights live in: the primary plus any shards.
+///
+/// A diffusers export splits the transformer, and the split does not respect
+/// the detection probe set, so anything reading the architecture out of the
+/// header has to see the whole set rather than the first file. Deduped and
+/// existence-filtered because a config may name the primary and the shards
+/// with overlap, or name a file that is not on disk yet.
+pub fn transformer_files(paths: &mold_core::ModelPaths) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = Vec::with_capacity(1 + paths.transformer_shards.len());
+    for candidate in std::iter::once(&paths.transformer).chain(paths.transformer_shards.iter()) {
+        if candidate.is_file() && !files.contains(candidate) {
+            files.push(candidate.clone());
+        }
+    }
+    if files.is_empty() {
+        files.push(paths.transformer.clone());
+    }
+    files
+}
+
+/// [`activation_geometry`] over a checkpoint that may span shard files.
+pub fn activation_geometry_across(
+    paths: &[PathBuf],
+) -> Option<crate::device::WanActivationGeometry> {
+    let config = detect_transformer_config_across(paths).ok()?;
     let vae = match config.in_dim {
         48 => crate::device::WanVaeGeneration::V22,
         16 | 36 => crate::device::WanVaeGeneration::V21,
@@ -306,31 +333,79 @@ fn resolve_negative_prompt(requested: Option<&str>) -> &str {
 /// - `head.head.weight` `[out_dim * patch, dim]` gives the output channels.
 /// - The highest `blocks.{i}.` index gives the depth.
 pub(crate) fn detect_transformer_config(path: &Path) -> Result<WanTransformerConfig> {
+    detect_transformer_config_across(std::slice::from_ref(&path.to_path_buf()))
+}
+
+/// Detect the config from a checkpoint that may span several shard files and
+/// may be in any of the layouts [`classify_key_layout`] knows.
+///
+/// Two things force this over the single-file original-layout probe it
+/// replaces, and both are properties of real published checkpoints:
+///
+/// - **Shards.** A diffusers export splits the DiT across files, and the
+///   split does not respect the probe set: `Wan2.2-TI2V-5B-Turbo-Diffusers`
+///   puts `proj_out.weight` — the output-channel probe — alone in a second
+///   89 MB shard. Reading only the first file cannot see it.
+/// - **Layout.** #803 taught the *loader* to translate diffusers names, but
+///   detection runs first and still demanded the original spelling, so a
+///   diffusers checkpoint failed on `blocks.0.ffn.0.weight` before the
+///   translating loader was ever reached. Every probe is therefore resolved
+///   through the same rename table the loader uses.
+pub(crate) fn detect_transformer_config_across(paths: &[PathBuf]) -> Result<WanTransformerConfig> {
+    use crate::wan::model::transformer::{classify_key_layout, original_to_diffusers};
+
+    let first = paths
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Wan DiT: no transformer files supplied"))?;
+    let mut shapes: Vec<(String, Vec<usize>)> = Vec::new();
+    for path in paths {
+        shapes.extend(header_shapes(path)?);
+    }
+
+    // Classify from the merged names, so a checkpoint whose discriminating
+    // block lives in a later shard is still classified correctly.
+    let layout = classify_key_layout(|probe| shapes.iter().any(|(name, _)| name == probe))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} is not a Wan DiT checkpoint in any layout this build can address",
+                first.display()
+            )
+        })?;
+
     // The shipped Comfy-Org repacks store every DiT key under
-    // `model.diffusion_model.` (verified against the real
-    // wan2.1_t2v_1.3B_bf16.safetensors header) while the VAE and encoder
-    // files are bare. The loader already strips the prefix; detection must
-    // see the same names or the advertised checkpoint fails before the
-    // prefix-aware loader ever runs.
-    let shapes: Vec<(String, Vec<usize>)> = header_shapes(path)?
+    // `model.diffusion_model.` while the VAE and encoder files are bare. The
+    // loader strips that prefix; detection must see the same names.
+    let shapes: Vec<(String, Vec<usize>)> = shapes
         .into_iter()
-        .map(|(name, shape)| {
-            let bare = name
-                .strip_prefix("model.diffusion_model.")
-                .map(str::to_string)
-                .unwrap_or(name);
-            (bare, shape)
+        .filter_map(|(name, shape)| {
+            let bare = if layout.prefix.is_empty() {
+                Some(name)
+            } else {
+                name.strip_prefix(layout.prefix).map(str::to_string)
+            }?;
+            Some((bare, shape))
         })
         .collect();
+
     let find = |key: &str| -> Result<&Vec<usize>> {
+        // Probes are written in the original spelling; translate them into
+        // the checkpoint's own when it is a diffusers export. A key the table
+        // does not cover falls through unchanged, which fails by name below
+        // rather than silently matching something else.
+        let spelled = if layout.diffusers_names {
+            original_to_diffusers(key).unwrap_or_else(|| key.to_string())
+        } else {
+            key.to_string()
+        };
         shapes
             .iter()
-            .find(|(name, _)| name == key)
+            .find(|(name, _)| *name == spelled)
             .map(|(_, shape)| shape)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "{} is missing `{key}` — not a Wan DiT checkpoint in the original key layout",
-                    path.display()
+                    "{} is missing `{spelled}` — not a Wan DiT checkpoint in a layout this build \
+                     can address",
+                    first.display()
                 )
             })
     };
@@ -366,7 +441,7 @@ pub(crate) fn detect_transformer_config(path: &Path) -> Result<WanTransformerCon
         .filter_map(|index| index.parse::<usize>().ok())
         .max()
         .map(|highest| highest + 1)
-        .ok_or_else(|| anyhow::anyhow!("{} has no transformer blocks", path.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("{} has no transformer blocks", first.display()))?;
 
     // Every shipped Wan variant uses a 128-wide head; the checkpoint does not
     // record the head count directly, so derive it from that invariant.
@@ -519,10 +594,8 @@ fn reject_unsupported_conditioning(req: &GenerateRequest) -> Result<()> {
             req.source_video.is_some() || req.source_video_path.is_some(),
             "source_video",
         ),
-        (
-            req.extend_video.is_some() || req.extend_video_path.is_some(),
-            "extend_video",
-        ),
+        // `extend_video` is handled before this guard (`extend_inner`), so
+        // reaching here with one set would mean the route was missed.
         // Core validation accepts source_image + mask_image as generic
         // inpainting, but Wan's conditioning never reads the mask — the
         // render would succeed while repainting everything, which reads as
@@ -829,6 +902,10 @@ struct DenoiseInputs<'a> {
     /// Live denoise previews. `None` when the checkpoint's latent channel
     /// count has no factor table.
     previewer: Option<&'a crate::latent_preview::LatentPreviewer>,
+    /// First-block residual reuse (#801). `Off` runs every block on every
+    /// step, which is the default and is bit-identical to the pre-cache
+    /// engine.
+    step_cache: crate::wan::step_cache::WanStepCachePolicy,
 }
 
 /// The sampling loop for all three conditioning modes.
@@ -851,7 +928,20 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
         device,
         progress,
         previewer,
+        step_cache,
     } = inputs;
+
+    // Two caches, never one: the conditional and unconditional forwards are
+    // different trajectories, and replaying one's residual into the other
+    // would blend them.
+    let (mut cond_cache, mut uncond_cache) = match step_cache {
+        crate::wan::step_cache::WanStepCachePolicy::Off => (None, None),
+        crate::wan::step_cache::WanStepCachePolicy::Threshold(threshold) => (
+            Some(crate::wan::step_cache::WanStepCache::new(threshold)),
+            Some(crate::wan::step_cache::WanStepCache::new(threshold)),
+        ),
+    };
+    let mut cached_expert: Option<crate::wan::experts::WanExpertRole> = None;
 
     // #775 A/B switch: `MOLD_WAN_FORCE_DMMV=1` forces candle's quantized
     // matmuls onto the dequantize-per-forward fallback, so a normal run vs a
@@ -877,6 +967,21 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
         // Resolved before the transformer borrow: per-expert guidance follows
         // the same boundary the swap below is about to consult.
         let step_guidance = guidance.for_timestep(*timestep);
+        // The expert swap changes the network, so nothing recorded against
+        // the previous one describes it. Reset both caches on the transition
+        // rather than trusting a residual across it.
+        if let Some(role) = experts.current_role(*timestep) {
+            if cached_expert.is_some_and(|previous| previous != role) {
+                if let Some(cache) = cond_cache.as_mut() {
+                    cache.reset();
+                }
+                if let Some(cache) = uncond_cache.as_mut() {
+                    cache.reset();
+                }
+            }
+            cached_expert = Some(role);
+        }
+
         // A14B switches experts here, once, when the schedule crosses the
         // boundary. Every other checkpoint hands back the same transformer.
         let transformer = experts.transformer_for(*timestep, progress)?;
@@ -900,17 +1005,23 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
             ),
         };
 
-        let cond =
-            transformer.forward_with_rope(&model_input, &timestep_tensor, cond_embeds, rope)?;
+        let cond = transformer.forward_with_rope_cached(
+            &model_input,
+            &timestep_tensor,
+            cond_embeds,
+            rope,
+            cond_cache.as_mut(),
+        )?;
         // A step whose own scale is <= 1 skips its uncond forward even when
         // the uncond embedding was encoded for other steps' sake.
         let velocity = match uncond_embeds {
             Some(uncond_embeds) if needs_cfg_pass(step_guidance) => {
-                let uncond = transformer.forward_with_rope(
+                let uncond = transformer.forward_with_rope_cached(
                     &model_input,
                     &timestep_tensor,
                     uncond_embeds,
                     rope,
+                    uncond_cache.as_mut(),
                 )?;
                 apply_cfg(&cond, &uncond, step_guidance)?
             }
@@ -1337,7 +1448,7 @@ impl WanEngine {
             progress.stage_start("Loading Wan transformer");
             let started = Instant::now();
             let transformer = crate::wan::experts::load_transformer(
-                &paths.transformer,
+                &transformer_files(paths),
                 config.clone(),
                 device,
                 dtype,
@@ -1401,7 +1512,7 @@ impl WanEngine {
         // ------------------------------------------------------------------
         let vae_generation = detect_vae_generation(&paths.vae)?;
         let vae_config = vae_generation.config();
-        let transformer_config = detect_transformer_config(&paths.transformer)?;
+        let transformer_config = detect_transformer_config_across(&transformer_files(paths))?;
         let shape = conditioning_shape(transformer_config.in_dim, vae_config.z_dim)?;
         let low_noise_expert = paths.low_noise_transformer.as_deref();
         // Wan 2.1 I2V is refused outright — it needs a CLIP-vision branch the
@@ -1658,6 +1769,29 @@ impl WanEngine {
         // Live previews project the working latent through the checkpoint
         // generation's own factor table, selected by latent channel count.
         let previewer = crate::latent_preview::LatentPreviewer::wan(vae_config.z_dim);
+        // First-block residual reuse (#801). Off unless asked for, and refused
+        // outright on the schedules where it cannot help -- a distill adapter
+        // active, or too few steps to have redundant ones. A refusal is
+        // disclosed: a silently ignored knob reads as "the feature does not
+        // work".
+        // A shipped distill adapter is the signal: the `:q5` fast tiers carry
+        // one, the quality tiers do not. That is exactly the split where
+        // residual reuse has something to reuse.
+        let distill_is_active = self.base.paths.distilled_lora.is_some()
+            || self.base.paths.low_noise_distilled_lora.is_some();
+        let (step_cache, refusal) = crate::wan::step_cache::WanStepCachePolicy::resolve(
+            crate::wan::step_cache::requested_threshold()?,
+            steps,
+            distill_is_active,
+        );
+        if let Some(refusal) = refusal {
+            progress.info(refusal.message());
+        }
+        if let crate::wan::step_cache::WanStepCachePolicy::Threshold(threshold) = step_cache {
+            progress.info(&format!(
+                "Step cache on at relative-L1 threshold {threshold}"
+            ));
+        }
         let latents = run_denoise_loop(DenoiseInputs {
             experts: &mut experts,
             conditioning: &conditioning,
@@ -1672,6 +1806,7 @@ impl WanEngine {
             device: &device,
             progress,
             previewer: previewer.as_ref(),
+            step_cache,
         })?;
         progress.checkpoint()?;
         drop(experts);
@@ -1890,7 +2025,11 @@ impl crate::engine::InferenceEngine for WanEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
-        let result = self.generate_inner(req);
+        let result = if req.is_extend() {
+            self.extend_inner(req)
+        } else {
+            self.generate_inner(req)
+        };
         self.pending_placement = None;
         result
     }
@@ -1942,6 +2081,228 @@ impl crate::engine::InferenceEngine for WanEngine {
     fn model_paths(&self) -> Option<&ModelPaths> {
         Some(&self.base.paths)
     }
+
+    fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::chain::ChainStageRenderer> {
+        Some(self)
+    }
+}
+
+/// The pixel frames a wan continuation duplicates from the clip before it.
+///
+/// Wan has no latent motion tail. Its handoff is last-frame *image*
+/// conditioning: the continuation is seeded with the previous clip's final
+/// frame, so it re-renders exactly that one frame and the stitch trims exactly
+/// one. This is deliberately not LTX-2's 17 — that number is the pixel window
+/// its VAE turns into three latent slots of carryover, which wan has no
+/// equivalent of, and copying it would discard sixteen good frames per seam.
+pub const WAN_HANDOFF_DUPLICATED_FRAMES: u32 = 1;
+
+impl WanEngine {
+    /// Continue an existing clip in one request.
+    ///
+    /// This is the chain seam with the carryover coming from a file rather
+    /// than from the previous stage: the source's final frame becomes the
+    /// continuation's image conditioning, the continuation re-renders exactly
+    /// that frame, and the stitch drops it before appending. `overlap` is
+    /// therefore always [`WAN_HANDOFF_DUPLICATED_FRAMES`] in effect — a larger
+    /// value is accepted by validation for grid symmetry with LTX-2 but wan
+    /// has only ever one frame of real carryover, so anything above one is
+    /// refused here rather than silently trimming good frames.
+    ///
+    /// Resolution and fps are locked to the source: the stitched output is one
+    /// video, and rescaling or retiming mid-clip is always a surprise.
+    fn extend_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        let overlap = req.effective_extend_overlap_frames();
+        if overlap != WAN_HANDOFF_DUPLICATED_FRAMES {
+            bail!(
+                "Wan continuations carry exactly {WAN_HANDOFF_DUPLICATED_FRAMES} frame of \
+                 context — the source's final frame becomes the continuation's conditioning — \
+                 so extend_overlap_frames must be {WAN_HANDOFF_DUPLICATED_FRAMES}, not {overlap}. \
+                 (LTX-2's multi-frame overlap is a latent motion tail wan does not have.)"
+            );
+        }
+
+        let work_dir = tempfile::tempdir().context("Wan: creating the continuation temp dir")?;
+        let path = match (&req.extend_video, &req.extend_video_path) {
+            (Some(bytes), _) => {
+                let staged = work_dir.path().join("extend-source.mp4");
+                std::fs::write(&staged, bytes).context("Wan: staging the video to extend")?;
+                staged
+            }
+            (None, Some(path)) => PathBuf::from(path),
+            (None, None) => {
+                bail!("Wan: extend requested without extend_video or extend_video_path")
+            }
+        };
+        let (probe, source_frames) = crate::ltx2::media::decode_video_frames_from_path(&path)
+            .with_context(|| format!("Wan: decoding the video to extend ({})", path.display()))?;
+        let Some(last) = source_frames.last() else {
+            bail!(
+                "Wan: the video to extend ({}) decoded to zero frames",
+                path.display()
+            );
+        };
+
+        // Reject rather than rescale: the stitched result is one video.
+        if req.width != probe.width || req.height != probe.height {
+            bail!(
+                "the video to extend is {}x{} but this request renders {width}x{height}; \
+                 continuations must render at the source's resolution",
+                probe.width,
+                probe.height,
+                width = req.width,
+                height = req.height,
+            );
+        }
+        let fps = req.fps.unwrap_or(probe.fps);
+        if fps != probe.fps {
+            bail!(
+                "the video to extend runs at {} fps but this request renders {fps} fps; \
+                 continuations must render at the source's frame rate (pass --fps {} to match)",
+                probe.fps,
+                probe.fps,
+            );
+        }
+
+        let mut png = std::io::Cursor::new(Vec::new());
+        last.write_to(&mut png, image::ImageFormat::Png)
+            .context("Wan: encoding the continuation's seed frame")?;
+
+        let mut continuation_req = req.clone();
+        continuation_req.extend_video = None;
+        continuation_req.extend_video_path = None;
+        continuation_req.extend_overlap_frames = None;
+        continuation_req.source_image = Some(png.into_inner());
+        continuation_req.width = probe.width;
+        continuation_req.height = probe.height;
+        continuation_req.fps = Some(probe.fps);
+        continuation_req.output_format = Some(mold_core::OutputFormat::Apng);
+        continuation_req.gif_preview = false;
+
+        let response = self.generate_inner(&continuation_req)?;
+        let video = response
+            .video
+            .ok_or_else(|| anyhow::anyhow!("Wan: the continuation returned no video data"))?;
+        let continuation = crate::chain::decode_apng_to_rgb_frames(&video.data)?;
+        let stitched = crate::ltx2::stitch_extend_frames(source_frames, &continuation, overlap)?;
+
+        let requested_format = req.output_format.unwrap_or(mold_core::OutputFormat::Mp4);
+        let encoded =
+            crate::chain::encode_chain_frames(&stitched, probe.fps, requested_format, None)?;
+        for warning in &encoded.warnings {
+            self.base.progress.info(&warning.message());
+        }
+        Ok(GenerateResponse {
+            video: Some(mold_core::VideoData {
+                data: encoded.bytes,
+                format: encoded.format,
+                frames: stitched.len() as u32,
+                fps: probe.fps,
+                gif_preview: encoded.gif_preview,
+                ..video
+            }),
+            ..response
+        })
+    }
+
+    /// Seed a continuation stage from the previous clip's last frame.
+    ///
+    /// Returns `false` when the carryover cannot be applied, which is not an
+    /// error: a text-to-video checkpoint has no conditioning channel, so its
+    /// stages render independently and the stitch concatenates them.
+    ///
+    /// A stage that already carries its own source image keeps it — an
+    /// authored sequence may pin a specific still for a clip, and silently
+    /// replacing it with the previous clip's tail would discard the user's
+    /// input.
+    fn seed_stage_from_carry(
+        &self,
+        stage_req: &mut GenerateRequest,
+        carry: Option<&crate::chain::ChainTail>,
+    ) -> Result<bool> {
+        let Some(carry) = carry else { return Ok(false) };
+        if stage_req.source_image.is_some() {
+            return Ok(false);
+        }
+        let Some(last) = carry.tail_rgb_frames.last() else {
+            return Ok(false);
+        };
+        // Ask the checkpoint, not the model name: this is the same
+        // classification `/api/models` advertises and the chain capability
+        // derives its carryover from, so the three cannot disagree.
+        let conditions_on_image = matches!(
+            source_image_capability(&self.base.paths.transformer, &self.base.paths.vae),
+            Some(mold_core::SourceImageCapability::Required)
+                | Some(mold_core::SourceImageCapability::Optional)
+        );
+        if !conditions_on_image {
+            return Ok(false);
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        last.write_to(&mut png, image::ImageFormat::Png)
+            .context("Wan: encoding the chain carryover frame as PNG")?;
+        stage_req.source_image = Some(png.into_inner());
+        Ok(true)
+    }
+}
+
+impl crate::chain::ChainStageRenderer for WanEngine {
+    fn render_stage(
+        &mut self,
+        stage_req: &GenerateRequest,
+        carry: Option<&crate::chain::ChainTail>,
+        motion_tail_pixel_frames: u32,
+        hdr_sidecar: Option<&crate::chain::StageSidecar>,
+        _stage_progress: Option<&mut dyn FnMut(crate::chain::StageProgressEvent)>,
+    ) -> Result<crate::chain::StageOutcome> {
+        if hdr_sidecar.is_some() {
+            bail!(
+                "WanEngine.render_stage: the HDR EXR sidecar is an LTX-2 feature; \
+                 wan stages cannot honour it"
+            );
+        }
+        let mut stage_req = stage_req.clone();
+        self.seed_stage_from_carry(&mut stage_req, carry)?;
+
+        let start = Instant::now();
+        // APNG is lossless, so the encode/decode round-trip preserves every
+        // pixel; it costs tens of milliseconds against a multi-second denoise.
+        // Same approach as the ltx-video stage renderer.
+        stage_req.output_format = Some(mold_core::OutputFormat::Apng);
+        stage_req.gif_preview = false;
+        let response = self.generate_inner(&stage_req)?;
+        let generation_time_ms = start.elapsed().as_millis() as u64;
+        let video = response
+            .video
+            .ok_or_else(|| anyhow::anyhow!("WanEngine.render_stage: no video data"))?;
+        let frames = crate::chain::decode_apng_to_rgb_frames(&video.data)?;
+        if frames.is_empty() {
+            bail!("WanEngine.render_stage: pipeline produced zero frames");
+        }
+
+        // Hand back the trailing frames so the next stage can be seeded. The
+        // orchestrator threads this through whether or not the carryover is
+        // used, and `ChainTail` consumers require a non-empty window.
+        let tail_count = (motion_tail_pixel_frames as usize).clamp(1, frames.len());
+        let tail_frames: Vec<image::RgbImage> = frames
+            .iter()
+            .skip(frames.len() - tail_count)
+            .cloned()
+            .collect();
+
+        Ok(crate::chain::StageOutcome {
+            frames,
+            tail: crate::chain::ChainTail {
+                frames: tail_frames.len() as u32,
+                tail_rgb_frames: tail_frames,
+            },
+            // The family has no audio decode path; chain validation rejects
+            // `enable_audio: true` for wan upstream of here.
+            audio: None,
+            hdr_frames_written: None,
+            generation_time_ms,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1956,6 +2317,49 @@ mod tests {
             path: path.to_string(),
             scale: 1.0,
             expert,
+        }
+    }
+
+    /// The engine must actually be a chain renderer.
+    ///
+    /// This is the defect the capability arm shipped without: `/api/models`
+    /// advertised `supports_sequence` for wan while `as_chain_renderer()`
+    /// returned the trait's default `None`, so every wan sequence would have
+    /// failed at worker dispatch — an advertised capability the engine could
+    /// not execute.
+    #[test]
+    fn the_wan_engine_is_registered_as_a_chain_renderer() {
+        let mut engine = WanEngine::new(
+            "wan22-ti2v-5b:fp16".to_string(),
+            dummy_paths(),
+            LoadStrategy::default(),
+            0,
+            None,
+        );
+        assert!(
+            crate::engine::InferenceEngine::as_chain_renderer(&mut engine).is_some(),
+            "wan advertises sequence support, so it must provide a stage renderer",
+        );
+    }
+
+    /// The seam duplicates one frame, not LTX-2's seventeen.
+    ///
+    /// LTX-2's 17 is the pixel window its VAE turns into three latent slots of
+    /// carryover. Wan has no latent motion tail: its continuation is seeded
+    /// with the previous clip's final frame and re-renders exactly that one
+    /// frame. Carrying 17 over would discard sixteen good frames at every
+    /// boundary while looking entirely plausible.
+    #[test]
+    fn the_wan_handoff_duplicates_exactly_the_seeded_frame() {
+        assert_eq!(WAN_HANDOFF_DUPLICATED_FRAMES, 1);
+        assert_ne!(
+            WAN_HANDOFF_DUPLICATED_FRAMES,
+            crate::chain::capability::LTX_VIDEO_FRAMES_PER_CLIP_CAP,
+        );
+        // It must stay strictly below any clip length wan can route to, or a
+        // continuation would emit no new frames at all.
+        for clip in [5u32, 53, 121, 257] {
+            assert!(WAN_HANDOFF_DUPLICATED_FRAMES < clip, "clip {clip}");
         }
     }
 
@@ -2315,11 +2719,13 @@ mod tests {
         assert!(engine.is_loaded());
     }
 
+    /// `extend_video` is deliberately absent from this list now (#783): it
+    /// routes to `extend_inner` before the guard, so rejecting it here would
+    /// refuse a continuation the engine can render.
     #[test]
     fn video_conditioning_is_rejected_but_images_are_accepted() {
         for mutate in [
             (|req: &mut GenerateRequest| req.source_video = Some(vec![1, 2, 3])) as fn(&mut _),
-            |req: &mut GenerateRequest| req.extend_video = Some(vec![1, 2, 3]),
             |req: &mut GenerateRequest| req.source_video_path = Some("clip.mp4".into()),
         ] {
             let mut req = request();
@@ -2718,6 +3124,11 @@ mod tests {
             ("text_embedding.0.weight".into(), vec![1536, 4096]),
             ("time_embedding.0.weight".into(), vec![1536, 256]),
             ("head.head.weight".into(), vec![64, 1536]),
+            // The layout discriminator. Every real Wan DiT carries it; the
+            // probe set alone cannot tell the original layout from the
+            // diffusers one, because `patch_embedding.weight` is spelled
+            // identically in both.
+            ("blocks.0.self_attn.q.weight".into(), vec![1536, 1536]),
         ];
         for layer in 0..30 {
             shapes.push((format!("blocks.{layer}.modulation"), vec![1, 6, 1536]));
@@ -2755,6 +3166,7 @@ mod tests {
             ("text_embedding.0.weight".into(), vec![5120, 4096]),
             ("time_embedding.0.weight".into(), vec![5120, 256]),
             ("head.head.weight".into(), vec![64, 5120]),
+            ("blocks.0.self_attn.q.weight".into(), vec![5120, 5120]),
         ];
         for layer in 0..40 {
             shapes.push((format!("blocks.{layer}.modulation"), vec![1, 6, 8]));
@@ -2817,6 +3229,10 @@ mod tests {
             (
                 "model.diffusion_model.head.head.weight".into(),
                 vec![64, 1536],
+            ),
+            (
+                "model.diffusion_model.blocks.0.self_attn.q.weight".into(),
+                vec![1536, 1536],
             ),
         ];
         for layer in 0..30 {
@@ -2917,6 +3333,62 @@ mod tests {
         assert_eq!(resolve_negative_prompt(Some("blurry")), "blurry");
     }
 
+    /// A sharded diffusers export must detect exactly like the native
+    /// single-file checkpoint it was converted from.
+    ///
+    /// Both halves of this are real properties of
+    /// `yetter-ai/Wan2.2-TI2V-5B-Turbo-Diffusers`, verified against its own
+    /// safetensors headers: the names are diffusers spellings, and the
+    /// output-channel probe sits alone in an 89 MB second shard. Before this,
+    /// detection read one file in one spelling, so the checkpoint failed on
+    /// `blocks.0.ffn.0.weight` — and admission, left without a geometry, fell
+    /// back to the A14B shape and refused it at ~67 GB.
+    #[test]
+    fn a_sharded_diffusers_export_detects_like_its_native_twin() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp
+            .path()
+            .join("diffusion_pytorch_model-00001-of-00002.safetensors");
+        let second = temp
+            .path()
+            .join("diffusion_pytorch_model-00002-of-00002.safetensors");
+
+        let mut head: Vec<(String, Vec<usize>)> = vec![
+            ("patch_embedding.weight".into(), vec![3072, 48, 1, 2, 2]),
+            ("blocks.0.ffn.net.0.proj.weight".into(), vec![14336, 3072]),
+            (
+                "condition_embedder.text_embedder.linear_1.weight".into(),
+                vec![3072, 4096],
+            ),
+            (
+                "condition_embedder.time_embedder.linear_1.weight".into(),
+                vec![3072, 256],
+            ),
+            ("blocks.0.attn1.to_q.weight".into(), vec![3072, 3072]),
+        ];
+        for layer in 0..30 {
+            head.push((
+                format!("blocks.{layer}.scale_shift_table"),
+                vec![1, 6, 3072],
+            ));
+        }
+        let borrowed: Vec<(&str, &[usize])> = head
+            .iter()
+            .map(|(name, shape)| (name.as_str(), shape.as_slice()))
+            .collect();
+        write_header(&first, &borrowed);
+        // The output projection alone in the second shard, as published.
+        write_header(&second, &[("proj_out.weight", &[192, 3072][..])]);
+
+        let config = detect_transformer_config_across(&[first.clone(), second.clone()]).unwrap();
+        assert_eq!(config, WanTransformerConfig::ti2v_5b());
+
+        // The first shard on its own is not enough, and says so by naming the
+        // probe it could not find rather than guessing an output width.
+        let error = detect_transformer_config(&first).unwrap_err().to_string();
+        assert!(error.contains("proj_out.weight"), "{error}");
+    }
+
     #[test]
     fn transformer_detection_reads_ti2v_geometry() {
         let temp = tempfile::tempdir().unwrap();
@@ -2928,6 +3400,7 @@ mod tests {
             ("time_embedding.0.weight".into(), vec![3072, 256]),
             // out_dim 48 x patch 4.
             ("head.head.weight".into(), vec![192, 3072]),
+            ("blocks.0.self_attn.q.weight".into(), vec![3072, 3072]),
         ];
         for layer in 0..30 {
             shapes.push((format!("blocks.{layer}.modulation"), vec![1, 6, 3072]));
@@ -2950,6 +3423,17 @@ mod tests {
         let path = temp.path().join("not-wan.safetensors");
         write_header(&path, &[("some.other.weight", &[16, 16])]);
         let error = detect_transformer_config(&path).unwrap_err().to_string();
+        // A file carrying no Wan attention projection at all is refused at
+        // classification, before any shape probe runs.
+        assert!(error.contains("not a Wan DiT checkpoint"), "{error}");
+
+        // One that classifies but is missing a probe is named by the probe.
+        let partial = temp.path().join("partial.safetensors");
+        write_header(
+            &partial,
+            &[("blocks.0.self_attn.q.weight", &[1536, 1536][..])],
+        );
+        let error = detect_transformer_config(&partial).unwrap_err().to_string();
         assert!(error.contains("patch_embedding.weight"), "{error}");
     }
 
@@ -3213,6 +3697,106 @@ mod tests {
     /// first (order-1) and terminal steps coincide with the naive identity by
     /// construction, so the fixture must discriminate on a corrector step in
     /// between — a zero preview interval makes the loop emit all of them.
+    /// The step cache must be invisible when off and real when on.
+    ///
+    /// Both halves matter. "Off is bit-identical" is the determinism contract
+    /// the family advertises, and it would be easy to break by restructuring
+    /// the block loop. "On actually skips" is the part a threshold check can
+    /// silently fail at — a cache that never fires looks exactly like a cache
+    /// that is working, since the output is then also unchanged.
+    #[test]
+    fn the_step_cache_is_invisible_when_off_and_skips_blocks_when_on() {
+        use crate::wan::step_cache::WanStepCachePolicy;
+
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+        let z = 16usize;
+        let config = WanTransformerConfig::tiny(z, 2, 4);
+        let map = VarMap::new();
+        let transformer = WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&map, dtype, &device),
+            config.clone(),
+        )
+        .unwrap();
+        for (index, var) in map.all_vars().iter().enumerate() {
+            let noise = seeded_randn(4242 + index as u64, var.dims(), &device, dtype)
+                .unwrap()
+                .affine(0.2, 0.0)
+                .unwrap();
+            var.set(&noise).unwrap();
+        }
+
+        let (latent_frames, latent_h, latent_w) = (2usize, 4usize, 4usize);
+        let total = 16usize;
+        let schedule = WanSchedule::new(WanScheduleConfig::new(total, 8.0)).unwrap();
+        let latents0 = seeded_randn(
+            11,
+            &[1, z, latent_frames, latent_h, latent_w],
+            &device,
+            dtype,
+        )
+        .unwrap();
+        let context = Tensor::zeros((1, 6, config.text_dim), dtype, &device).unwrap();
+        let quiet = crate::progress::ProgressReporter::default();
+
+        let run = |policy: WanStepCachePolicy| {
+            let mut experts = WanExperts::single(transformer.clone());
+            let rope = experts
+                .transformer_for(schedule.timesteps[0], &quiet)
+                .unwrap()
+                .rope_freqs_for(
+                    &Tensor::zeros((1, z, latent_frames, latent_h, latent_w), dtype, &device)
+                        .unwrap(),
+                )
+                .unwrap();
+            let mut solver = WanSolver::UniPc(FlowUniPc::new(schedule.clone()));
+            run_denoise_loop(DenoiseInputs {
+                experts: &mut experts,
+                conditioning: &WanImageConditioning::None,
+                schedule: &schedule,
+                solver: &mut solver,
+                latents: latents0.clone(),
+                cond_embeds: &context,
+                uncond_embeds: None,
+                guidance: WanGuidancePlan::Uniform(1.0),
+                patch: config.patch_size.1,
+                rope: &rope,
+                device: &device,
+                progress: &quiet,
+                previewer: None,
+                step_cache: policy,
+            })
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+        };
+
+        let baseline = run(WanStepCachePolicy::Off);
+        // Off twice is the same run: the loop is deterministic, so any
+        // difference below is the cache and not sampling noise.
+        assert_eq!(baseline, run(WanStepCachePolicy::Off));
+
+        // A threshold this large accepts every step after the first full one,
+        // so the tail residual is replayed and the result must diverge. If it
+        // does not, the cache never fired and the "off is identical" half of
+        // this test would be passing vacuously.
+        let cached = run(WanStepCachePolicy::Threshold(f64::MAX));
+        assert_eq!(baseline.len(), cached.len());
+        assert!(
+            baseline
+                .iter()
+                .zip(cached.iter())
+                .any(|(a, b)| (a - b).abs() > 1e-6),
+            "an always-accept threshold must skip blocks and change the result",
+        );
+
+        // A threshold of zero can never accept a step, so it must reproduce
+        // the uncached run exactly — the cache path itself adds no drift.
+        assert_eq!(baseline, run(WanStepCachePolicy::Threshold(0.0)));
+    }
+
     #[test]
     fn preview_projects_the_solvers_own_x0() {
         let device = Device::Cpu;
@@ -3281,6 +3865,7 @@ mod tests {
             device: &device,
             progress: &progress,
             previewer: Some(&previewer),
+            step_cache: crate::wan::step_cache::WanStepCachePolicy::Off,
         })
         .unwrap();
         let loop_pngs: Vec<(usize, Vec<u8>)> = {
@@ -3413,6 +3998,7 @@ mod tests {
             device: &device,
             progress: &progress,
             previewer: Some(&previewer),
+            step_cache: crate::wan::step_cache::WanStepCachePolicy::Off,
         })
         .unwrap();
 
@@ -3583,6 +4169,7 @@ mod tests {
                 device: &device,
                 progress: &progress,
                 previewer: None,
+                step_cache: crate::wan::step_cache::WanStepCachePolicy::Off,
             })
             .unwrap();
 

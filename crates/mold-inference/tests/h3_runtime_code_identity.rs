@@ -55,6 +55,25 @@ fn runtime_identity_changes_for_a_build_axis() {
 }
 
 #[test]
+fn runtime_identity_captures_the_resolved_linker_axis() {
+    assert!(
+        h3_runtime_code_identity::build_environment_rerun_keys()
+            .iter()
+            .any(|key| key == "RUSTC_LINKER"),
+        "Cargo's resolved linker must invalidate and rebind the runtime identity"
+    );
+
+    let entries = [("crates/mold-server/src/lib.rs".into(), b"runtime".to_vec())];
+    let system = [("RUSTC_LINKER".into(), "/usr/bin/ld".into())];
+    let lld = [("RUSTC_LINKER".into(), "/usr/bin/ld.lld".into())];
+    let system_identity =
+        h3_runtime_code_identity::identity_for_entries_and_environment(&entries, &system).unwrap();
+    let lld_identity =
+        h3_runtime_code_identity::identity_for_entries_and_environment(&entries, &lld).unwrap();
+    assert_ne!(system_identity, lld_identity);
+}
+
+#[test]
 fn canonical_private_server_features_reject_an_extra_axis() {
     let canonical = h3_runtime_code_identity::CANONICAL_H3_SERVER_FEATURES
         .iter()

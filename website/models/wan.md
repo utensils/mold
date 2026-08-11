@@ -21,8 +21,11 @@ the family natively in Rust.
 | Model                 | Steps | Approx total pull | Notes                                        |
 | --------------------- | ----- | ----------------- | -------------------------------------------- |
 | `wan21-t2v-1.3b:bf16` | 30    | ~14.5 GB          | 480p text-to-video; smallest, fastest pull   |
+| `wan21-t2v-14b:q5`    | 30    | ~23 GB            | Q5_K_M 2.1 14B; 480p text-to-video           |
+| `wan21-t2v-14b:q8`    | 30    | ~27.5 GB          | Q8_0 2.1 14B; the 2.1 quality tier           |
 | `wan22-ti2v-5b:fp16`  | 20    | ~22.8 GB          | 720p24 text- and image-to-video              |
 | `wan22-ti2v-5b:q8`    | 20    | ~18 GB            | Q8_0 5B; 8-12 GB cards at reduced settings   |
+| `wan22-ti2v-5b:turbo` | 4     | ~22.8 GB          | Self-Forcing 4-step distill, no CFG          |
 | `wan22-t2v-a14b:q5`   | 4     | ~36 GB            | 480p16 text-to-video, 4-step Lightning tier  |
 | `wan22-t2v-a14b:q8`   | 20    | ~42 GB            | Same weights at Q8_0, no distill             |
 | `wan22-t2v-a14b:q4`   | 4     | ~33 GB            | Q4_K_M Lightning; 12-16 GB needs reduced use |
@@ -55,6 +58,8 @@ second checkpoint it was not fitted to. A rejection names frames first, because
 that is the most effective lever, and suggests the next quantized tier down
 rather than the one that just failed.
 
+The swap itself is a cold read: the outgoing expert is still in the page cache, but the incoming 10.8-15.4 GB file has not been read this run and on a 32-64 GB host has been evicted behind UMT5 and the resident expert. mold warms it in the background while the first expert denoises — host I/O only, so no VRAM is touched and the max-of-pair invariant holds. Measured on an RTX 4090 with a cold cache (`wan22-t2v-a14b:q5`, 33f): the swap load falls from 8.7-22.2 s, varying with what survived in cache, to a consistent 5.6 s. `MOLD_WAN_PREFETCH=0` turns it off.
+
 Community A14B adapters are published the same way: a high-noise file and a
 low-noise file, distilled together and explicitly not interchangeable. Bind one
 to its expert with `--lora file.safetensors@high` (or `@low`), or the additive
@@ -79,6 +84,10 @@ mold run wan21-t2v-1.3b "a red fox trotting through fresh snow, golden hour"
 # 720p24, 121 frames — Wan 2.2 5B
 mold run wan22-ti2v-5b "aerial view of waves breaking on a black sand beach" \
   --width 1280 --height 704 --frames 121 --fps 24
+
+# The same clip on the 4-step distill: 4 steps at guidance 1.0, so 4 forwards
+# instead of 20 x 2. Image-to-video works the same way.
+mold run wan22-ti2v-5b:turbo "aerial view of waves breaking on a black sand beach"
 
 # Wan 2.2 A14B, 4-step Lightning tier
 mold run wan22-t2v-a14b:q5 "a paper boat drifting down a rain gutter"
@@ -161,8 +170,8 @@ Wan checkpoints split three ways, and `/api/models` advertises which through
 the additive per-model `source_image` field so every surface offers exactly
 what the checkpoint accepts:
 
-- **`unsupported`** — `wan21-t2v-1.3b`, `wan22-t2v-a14b:*`: pure
-  text-to-video; a supplied image is rejected at admission.
+- **`unsupported`** — `wan21-t2v-1.3b`, `wan21-t2v-14b:*`, `wan22-t2v-a14b:*`:
+  pure text-to-video; a supplied image is rejected at admission.
 - **`optional`** — `wan22-ti2v-5b:*`: text-to-video, or the source pinned as
   frame 0 through latent inpainting.
 - **`required`** — `wan22-i2v-a14b:*`: the image is half the model input;
@@ -181,16 +190,111 @@ endpoint latent frames through the same inpaint path diffusers' `last_image`
 uses. Any other keyframe layout is refused at admission — the family has no
 mid-clip keyframe path.
 
+## Sequences
+
+Wan renders multi-clip sequences, and `mold run --frames N` past the per-clip
+envelope auto-chains rather than failing. What crosses a clip boundary depends
+on the **checkpoint**, never the family, because wan has no latent motion tail:
+its smooth handoff is last-frame image conditioning, which only an
+image-conditioned checkpoint accepts.
+
+| Checkpoint                        | Seam                   | Why                                               |
+| --------------------------------- | ---------------------- | ------------------------------------------------- |
+| `wan22-ti2v-5b:*`                 | Continues              | The latent inpaint pins the seeded frame          |
+| `wan22-i2v-a14b:*`                | Continues              | The 36-channel mask+latent concat takes the frame |
+| `wan21-t2v-*`, `wan22-t2v-a14b:*` | Join / Cut / Crossfade | No conditioning channel at all                    |
+
+That classification is exactly the `source_image` contract `/api/models`
+already advertises, so a picker can never offer a seam the checkpoint would
+reject. A text-to-video checkpoint is still sequence-capable — it simply
+concatenates independent clips, the same honest behaviour LTX-Video has.
+
+The continuation is seeded with the previous clip's final frame, so it
+re-renders exactly that one frame and the stitch trims exactly one. This is
+deliberately **not** LTX-2's 17-frame motion tail, which is the pixel window
+its VAE turns into three latent slots of carryover — wan has no equivalent,
+and reusing the number would discard sixteen good frames at every seam.
+
+Clip lengths sit on wan's `4k+1` grid. The auto-chaining default is a VRAM
+envelope rather than a ceiling: 53 frames for the two-expert A14B, 121 for the
+single-expert 5B. `--clip-frames` overrides it, clamped to the real 257-frame
+request cap.
+
+```bash
+# Auto-chains into three 49-frame clips and stitches one MP4
+mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" \
+  --frames 100 --clip-frames 49
+```
+
+Authored sequences work through the same `mold.chain.v1` script the LTX
+families use — per-stage prompts, frames, and transitions — with `mold chain
+validate shot.toml` reporting the normalized stage list and stitched length
+before anything is submitted:
+
+```toml
+schema = "mold.chain.v1"
+
+[chain]
+model = "wan22-ti2v-5b:q8"
+width = 704
+height = 384
+fps = 24
+steps = 20
+guidance = 5.0
+strength = 1.0
+motion_tail_frames = 1
+output_format = "mp4"
+
+[[stage]]
+prompt = "a paper boat drifting down a rain gutter"
+frames = 49
+
+[[stage]]
+prompt = "the boat passes a storm drain"
+frames = 49
+transition = "smooth"
+```
+
+`motion_tail_frames` is normalized to what the checkpoint can carry, so a value
+carried over from an LTX script does not silently trim frames.
+
+Measured on an RTX 4090: 145 frames at 704x384, three stages, 141 s. The boat,
+gutter, and railing persist across both seams.
+
+### Extending a clip
+
+`--extend` continues an existing video in one request. It is the same seam as
+a sequence boundary with the carryover coming from a file: the source clip's
+final frame becomes the continuation's conditioning, so `--extend-overlap` is
+always **1** on wan — the multi-frame overlap LTX-2 accepts is a latent motion
+tail wan does not have, and a larger value is refused rather than silently
+trimming good frames.
+
+Resolution and fps are locked to the source clip; a mismatch is refused rather
+than rescaled, because the stitched result is one video. `/api/models`
+advertises `supports_extend` per checkpoint, from the same `source_image`
+contract the seam reads — a text-to-video checkpoint cannot extend.
+
+```bash
+mold run wan22-ti2v-5b:q8 "the paper boat drifts on past a storm drain" \
+  --extend clip.mp4 --extend-overlap 1 --frames 49 \
+  --width 704 --height 384 --fps 24
+```
+
+Measured on an RTX 4090: a 48-frame source plus a 49-frame continuation minus
+the 1-frame overlap = 96 frames, in 53 s, with the boat and gutter continuous
+across the join.
+
 ## Defaults and limits
 
-| Property   | `wan21-t2v-1.3b`  | `wan22-ti2v-5b`     | `wan22-*-a14b:q5` | `wan22-*-a14b:q8` |
-| ---------- | ----------------- | ------------------- | ----------------- | ----------------- |
-| Resolution | 832x480 / 480x832 | 1280x704 / 704x1280 | 832x480           | 832x480           |
-| Frames     | 81 @ 16 fps       | 121 @ 24 fps        | 53 @ 16 fps       | 33 @ 16 fps       |
-| Steps      | 30                | 20                  | 4                 | 20                |
-| Guidance   | 6.0               | 5.0                 | 1.0 (no CFG pass) | per-expert¹       |
-| Flow shift | 8.0               | 8.0                 | 5.0               | 5.0               |
-| Sampler    | FlowUniPC (bh2)   | FlowUniPC (bh2)     | FlowUniPC (bh2)   | FlowUniPC (bh2)   |
+| Property   | `wan21-t2v-1.3b`  | `wan21-t2v-14b:*` | `wan22-ti2v-5b`     | `wan22-*-a14b:q5` | `wan22-*-a14b:q8` |
+| ---------- | ----------------- | ----------------- | ------------------- | ----------------- | ----------------- |
+| Resolution | 832x480 / 480x832 | 832x480 / 480x832 | 1280x704 / 704x1280 | 832x480           | 832x480           |
+| Frames     | 81 @ 16 fps       | 81 @ 16 fps       | 121 @ 24 fps        | 53 @ 16 fps       | 33 @ 16 fps       |
+| Steps      | 30                | 30                | 20                  | 4                 | 20                |
+| Guidance   | 6.0               | 6.0               | 5.0                 | 1.0 (no CFG pass) | per-expert¹       |
+| Flow shift | 8.0               | 8.0               | 8.0                 | 5.0               | 5.0               |
+| Sampler    | FlowUniPC (bh2)   | FlowUniPC (bh2)   | FlowUniPC (bh2)     | FlowUniPC (bh2)   | FlowUniPC (bh2)   |
 
 ¹ The `:q8` quality tier advertises guidance 3.5, but by default mold applies
 upstream's **per-expert** scales, switching at the same boundary as the expert
@@ -201,6 +305,22 @@ for the whole schedule — except an explicit 3.5 on the quality tier, which is
 indistinguishable from the default on the wire and selects the per-expert
 pair. The Lightning tiers (default 1.0) treat every value, 3.5 included, as
 an explicit uniform choice.
+
+### The Turbo tier on 24 GB
+
+Measured on an RTX 4090 at the tier's own defaults (1280x704, 24 fps,
+4 steps, guidance 1.0):
+
+| Run                  | Time    | Peak VRAM                                  |
+| -------------------- | ------- | ------------------------------------------ |
+| Text-to-video, 121f  | 160.7 s | 18,986 MiB                                 |
+| Image-to-video, 81f  | 92.0 s  | fits                                       |
+| Image-to-video, 121f | refused | ~24.9 GB estimated against ~24.8 GB usable |
+
+Image-to-video at the full 121-frame default does not fit a 24 GB card at this
+weight class — `wan22-ti2v-5b:fp16` is refused at the identical estimate, so
+this is the fp16-weight envelope rather than anything the distill changes. Use
+`--frames 81`, or the `:q8` tier, which carries ~4.5 GB less of transformer.
 
 The A14B frame defaults are the measured 24 GB envelope, not the checkpoint's
 trained 81-frame clip length: on an RTX 4090 the `:q5` pair peaks at
