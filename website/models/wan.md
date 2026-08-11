@@ -166,6 +166,37 @@ above, because each is rebuilt on the device once per step. The Q8 and fp8
 tiers still default to 33 frames: their resident expert is several GB larger
 than Q5's, and those envelopes have not been measured.
 
+The auto-chain routing default follows the tier's own default, so running one
+of these models with no `--frames` renders a single clip rather than a stitched
+sequence. Ask for more than the tier's default and the CLI still chains, as it
+always has.
+
+### The LoRA branch runs at the activation dtype
+
+The Q5/Q4 tiers are Lightning distills, and a quantized checkpoint cannot take
+a LoRA merge — that means dequantize, add, requantize, which is minutes per
+expert with most of the delta rounded away. Mold hangs the adapter off each
+projection as a parallel branch instead, ~400 of them per expert.
+
+Where that branch sits decides what it costs. A quantized projection computes
+in F32 while the model carries BF16 between ops, so each one casts on both
+sides. Running the branch on the activation the model already holds — rather
+than on the projection's F32 interior — lets the adapter be staged at BF16 for
+no extra casts at all.
+
+Measured on an RTX 4090, `wan22-t2v-a14b:q5` at 832x480 x 53 frames:
+
+| Adapter staging | Wall clock | Peak |
+| --------------- | ---------: | ---: |
+| F32, inside the cast | 163.0 s | 20,778 MiB |
+| BF16, outside it | 160.4 s | 19,050 MiB |
+
+The saving is larger than the adapter's own ~0.6 GB because the branch's
+intermediates are BF16 now too. Renders are deterministic per build but not
+identical across this change — the same seed returns the same shot, not the
+same bytes. BF16 keeps 8 mantissa bits against Q5_K's ~5 per 32-value block, so
+the adapter stays well inside the accuracy of the checkpoint it patches.
+
 ### The VAE decode is 40-50% of a fast-tier render
 
 On the 4-step Turbo tier the denoise is short enough that the causal 3-D VAE
@@ -202,7 +233,7 @@ A `--features cuda,flash-attn` build routes the Wan DiT's self- and cross-attent
 | `flash` | 21,354 MiB | 75.3 s     |
 | `math`  | 22,250 MiB | 158.4 s    |
 
-So flash is worth **2.1x on speed** and only ~900 MiB on peak. That is the opposite of the usual expectation, and it is why longer clips are not unlocked by switching backends: at 81 frames the estimate is ~27.7 GB against ~24.8 GB usable, and flash's measured per-token saving extrapolates to about 1.3 GB — not the ~3 GB that would be needed. Reaching 81 frames on a 24 GB card needs partial block offload, which is not wired for this family yet. Note also that `flash-attn` ships in no release artifact, so this is a source-build configuration.
+So flash is worth **2.1x on speed** and only ~900 MiB on peak. That is the opposite of the usual expectation, and it is why longer clips are not unlocked by switching backends: at 81 frames the estimate is ~27.7 GB against ~24.8 GB usable, and flash's measured per-token saving extrapolates to about 1.3 GB — not the ~3 GB that would be needed. Reaching 81 frames on a 24 GB card needs partial block offload, which is now wired for this family (see above). Note also that `flash-attn` ships in no release artifact, so this is a source-build configuration.
 
 At `--frames 1` Wan renders a still: png/jpeg output is admitted (and png is
 the default there), the image embeds the same `mold:parameters` provenance as
