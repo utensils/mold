@@ -123,10 +123,190 @@
       "sha256": "ac30a3b58963f2e735d493475fbb81853a5735ec947619648b3e045acda6783e"
     },
     {
-      "id": "official-ref2va-transformer-index",
+     "id": "official-ref2va-transformer-index",
+     "source_id": "minimax-official-model",
+     "relative_path": "transformer_ref/diffusion_pytorch_model.safetensors.index.json",
+     "sha256": "ac30a3b58963f2e735d493475fbb81853a5735ec947619648b3e045acda6783e"
+   },
+    {
+      "id": "official-fl2va-transformer-config",
       "source_id": "minimax-official-model",
-      "relative_path": "transformer_ref/diffusion_pytorch_model.safetensors.index.json",
-      "sha256": "ac30a3b58963f2e735d493475fbb81853a5735ec947619648b3e045acda6783e"
+      "relative_path": "transformer/config.json",
+      "sha256": "74c11bff524336576096993cbfcdcdc2ef4fa2fa4409df693bdcbc6c666282ae"
+    },
+    {
+      "id": "official-ref2va-transformer-config",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/config.json",
+      "sha256": "74c11bff524336576096993cbfcdcdc2ef4fa2fa4409df693bdcbc6c666282ae"
+    },
+    {
+      "id": "official-fl2va-transformer-shard-00001-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer/diffusion_pytorch_model-00001-of-00014.safetensors",
+      "sha256": "2d847200c45c09dd7f973c1b096663068408ef851ee0b3711d059b6dc5dcd028"
+    },
+    {
+      "id": "official-fl2va-transformer-shard-00002-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer/diffusion_pytorch_model-00002-of-00014.safetensors",
+      "sha256": "2c4d362eddd2802180ac9c744849eb9ba8d9c8b984bdf9822cb02ed004b29184"
+    },
+    {
+      "id": "official-fl2va-transformer-shard-00003-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer/diffusion_pytorch_model-00003-of-00014.safetensors",
+      "sha256": "949c5aafbbfa5654da730a6a7fafd75adb164d0857b095a30e8bb6d390887d69"
+    },
+    {
+      "id": "official-fl2va-transformer-shard-00004-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer/diffusion_pytorch_model-00004-of-00014.safetensors",
+      "sha256": "eef7616790105ee839766bb2027203bf2c0d87c6aa038dca84145a8675f5ce28"
+    },
+    {
+      "id": "official-fl2va-transformer-shard-00005-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer/diffusion_pytorch_model-00005-of-00014.safetensors",
+      "sha256": "43fdf42d638e8bc6745f713fae80c93bb301807a1a5ae7249344ce28e202a494"
+    },
+    {
+      "id": "official-fl2va-transformer-shard-00006-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer/diffusion_pytorch_model-00006-of-00014.safetensors",
+      "sha256": "6442510b34d173653f0cce5c964b935395a8f7accf0b9cc0aa31aec59805239d"
+    },
+    {
+      "id": "official-fl2va-transformer-shard-00007-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer/diffusion_pytorch_model-00007-of-00014.safetensors",
+      "sha256": "29f48f535c91dac76496ca821eeb16ca24bc4caf3f0cae8b920a89b1f966da6d"
+    },
+    {
+      "id": "official-fl2va-transformer-shard-00008-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer/diffusion_pytorch_model-00008-of-00014.safetensors",
+      "sha256": "c711b096c764bd60f0b8b6ad49518bfab6d614fb788c725add8741c0674a4cd8"
+    },
+    {
+      "id": "official-fl2va-transformer-shard-00009-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer/diffusion_pytorch_model-00009-of-00014.safetensors",
+      "sha256": "44428defe3976cbb87635ad200b958199e739986697cd29fdf27aeb7294b5944"
+    },
+    {
+      "id": "official-fl2va-transformer-shard-00010-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer/diffusion_pytorch_model-00010-of-00014.safetensors",
+      "sha256": "3d44939c374c9da382e9c6877e1946adf7b84e08c7a881c068f228d6849411c9"
+    },
+    {
+      "id": "official-fl2va-transformer-shard-00011-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer/diffusion_pytorch_model-00011-of-00014.safetensors",
+      "sha256": "224d24430b58127a5577721084e0e704a0e74ec96dd7c35bc6fc0994ebd87c33"
+    },
+    {
+      "id": "official-fl2va-transformer-shard-00012-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer/diffusion_pytorch_model-00012-of-00014.safetensors",
+      "sha256": "48fa2bd8fe134eef565ab2464f1c2589a6657cba0d14283dfc06b532f8961f3c"
+    },
+    {
+      "id": "official-fl2va-transformer-shard-00013-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer/diffusion_pytorch_model-00013-of-00014.safetensors",
+      "sha256": "be5b4b1809f9d546ffd4b3fcf41e5c1e02b819125caa6bc105c109b04c051bd3"
+    },
+    {
+      "id": "official-fl2va-transformer-shard-00014-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer/diffusion_pytorch_model-00014-of-00014.safetensors",
+      "sha256": "8fbd5e6c1fb1df7ce988ca90f3d59e7610e465c7517e4b344eda4a214ba4b97d"
+    },
+    {
+      "id": "official-ref2va-transformer-shard-00001-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/diffusion_pytorch_model-00001-of-00014.safetensors",
+      "sha256": "7a3fcad885f51560e550b2e84c9a8d8b35e62996cfd9076937e992bd23478df9"
+    },
+    {
+      "id": "official-ref2va-transformer-shard-00002-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/diffusion_pytorch_model-00002-of-00014.safetensors",
+      "sha256": "1638ae1dc8ae26c4ba43ad28a6d851ad8983847324bb2b468719c7c81f219706"
+    },
+    {
+      "id": "official-ref2va-transformer-shard-00003-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/diffusion_pytorch_model-00003-of-00014.safetensors",
+      "sha256": "1ef3c4954ffe5a664c2e3028e2a3241190d9c159dce6ba1136002c6af1db5353"
+    },
+    {
+      "id": "official-ref2va-transformer-shard-00004-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/diffusion_pytorch_model-00004-of-00014.safetensors",
+      "sha256": "12d92f2975cfd5c5b786126385c52e5bf64884d4b4d6e60c3ef5d857c3f7469f"
+    },
+    {
+      "id": "official-ref2va-transformer-shard-00005-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/diffusion_pytorch_model-00005-of-00014.safetensors",
+      "sha256": "304d41ce03d59ac94bceb055935bf4e034df0badf8b0df4ded327c08a288a4cc"
+    },
+    {
+      "id": "official-ref2va-transformer-shard-00006-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/diffusion_pytorch_model-00006-of-00014.safetensors",
+      "sha256": "12a134b7c76d86edbe8fa2dc315f6cdaf4e1aca1b6ea4dfe4cad92df03d42eeb"
+    },
+    {
+      "id": "official-ref2va-transformer-shard-00007-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/diffusion_pytorch_model-00007-of-00014.safetensors",
+      "sha256": "b96395261359937c00fb42f4eb29306dc59b1a3368eeba52af4fb66e3e142c69"
+    },
+    {
+      "id": "official-ref2va-transformer-shard-00008-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/diffusion_pytorch_model-00008-of-00014.safetensors",
+      "sha256": "1897a6bf3b4fc834bb82d73ca02a7afc7d38c07f50ec5382cd54cd2f91b604d1"
+    },
+    {
+      "id": "official-ref2va-transformer-shard-00009-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/diffusion_pytorch_model-00009-of-00014.safetensors",
+      "sha256": "edfb38235adc96b99f55a401849befce59075a745e99c2d8c63ff358dd36443d"
+    },
+    {
+      "id": "official-ref2va-transformer-shard-00010-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/diffusion_pytorch_model-00010-of-00014.safetensors",
+      "sha256": "f8710775cf3413670edd7e23861b650a3431a71a6cc14cb1080623ab6b052385"
+    },
+    {
+      "id": "official-ref2va-transformer-shard-00011-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/diffusion_pytorch_model-00011-of-00014.safetensors",
+      "sha256": "9e18acc09f84edb5b34df9628efa15cfcab8bb76e8e20c1c2e979a107a0f7215"
+    },
+    {
+      "id": "official-ref2va-transformer-shard-00012-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/diffusion_pytorch_model-00012-of-00014.safetensors",
+      "sha256": "ea2e18228f8bdba1a4e0f32b155e4586df055997c45356213d05b971ba13e2f4"
+    },
+    {
+      "id": "official-ref2va-transformer-shard-00013-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/diffusion_pytorch_model-00013-of-00014.safetensors",
+      "sha256": "1e12083b1875678f7414ff55b09cd8bb1c30b861243f9bb7ff1e75b6ad3f1bdc"
+    },
+    {
+      "id": "official-ref2va-transformer-shard-00014-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "transformer_ref/diffusion_pytorch_model-00014-of-00014.safetensors",
+      "sha256": "b340f44b5690cc745d48ae399381ec15b26a4fe25d483f677ccb4960dadb50d4"
     },
     {
       "id": "official-text-encoder-index",
@@ -509,8 +689,38 @@
       "authority_tier": "exact-full-bf16",
       "input_contract": { "kind": "identity-sha256-v1" },
       "required_component_indexes": [
+        "official-fl2va-transformer-config",
         "official-fl2va-transformer-index",
-        "official-ref2va-transformer-index"
+        "official-fl2va-transformer-shard-00001-of-00014",
+        "official-fl2va-transformer-shard-00002-of-00014",
+        "official-fl2va-transformer-shard-00003-of-00014",
+        "official-fl2va-transformer-shard-00004-of-00014",
+        "official-fl2va-transformer-shard-00005-of-00014",
+        "official-fl2va-transformer-shard-00006-of-00014",
+        "official-fl2va-transformer-shard-00007-of-00014",
+        "official-fl2va-transformer-shard-00008-of-00014",
+        "official-fl2va-transformer-shard-00009-of-00014",
+        "official-fl2va-transformer-shard-00010-of-00014",
+        "official-fl2va-transformer-shard-00011-of-00014",
+        "official-fl2va-transformer-shard-00012-of-00014",
+        "official-fl2va-transformer-shard-00013-of-00014",
+        "official-fl2va-transformer-shard-00014-of-00014",
+        "official-ref2va-transformer-config",
+        "official-ref2va-transformer-index",
+        "official-ref2va-transformer-shard-00001-of-00014",
+        "official-ref2va-transformer-shard-00002-of-00014",
+        "official-ref2va-transformer-shard-00003-of-00014",
+        "official-ref2va-transformer-shard-00004-of-00014",
+        "official-ref2va-transformer-shard-00005-of-00014",
+        "official-ref2va-transformer-shard-00006-of-00014",
+        "official-ref2va-transformer-shard-00007-of-00014",
+        "official-ref2va-transformer-shard-00008-of-00014",
+        "official-ref2va-transformer-shard-00009-of-00014",
+        "official-ref2va-transformer-shard-00010-of-00014",
+        "official-ref2va-transformer-shard-00011-of-00014",
+        "official-ref2va-transformer-shard-00012-of-00014",
+        "official-ref2va-transformer-shard-00013-of-00014",
+        "official-ref2va-transformer-shard-00014-of-00014"
       ],
       "required_provenance": [
         "source-revision",
@@ -528,8 +738,38 @@
       "authority_tier": "exact-full-bf16",
       "input_contract": { "kind": "identity-sha256-v1" },
       "required_component_indexes": [
+        "official-fl2va-transformer-config",
         "official-fl2va-transformer-index",
-        "official-ref2va-transformer-index"
+        "official-fl2va-transformer-shard-00001-of-00014",
+        "official-fl2va-transformer-shard-00002-of-00014",
+        "official-fl2va-transformer-shard-00003-of-00014",
+        "official-fl2va-transformer-shard-00004-of-00014",
+        "official-fl2va-transformer-shard-00005-of-00014",
+        "official-fl2va-transformer-shard-00006-of-00014",
+        "official-fl2va-transformer-shard-00007-of-00014",
+        "official-fl2va-transformer-shard-00008-of-00014",
+        "official-fl2va-transformer-shard-00009-of-00014",
+        "official-fl2va-transformer-shard-00010-of-00014",
+        "official-fl2va-transformer-shard-00011-of-00014",
+        "official-fl2va-transformer-shard-00012-of-00014",
+        "official-fl2va-transformer-shard-00013-of-00014",
+        "official-fl2va-transformer-shard-00014-of-00014",
+        "official-ref2va-transformer-config",
+        "official-ref2va-transformer-index",
+        "official-ref2va-transformer-shard-00001-of-00014",
+        "official-ref2va-transformer-shard-00002-of-00014",
+        "official-ref2va-transformer-shard-00003-of-00014",
+        "official-ref2va-transformer-shard-00004-of-00014",
+        "official-ref2va-transformer-shard-00005-of-00014",
+        "official-ref2va-transformer-shard-00006-of-00014",
+        "official-ref2va-transformer-shard-00007-of-00014",
+        "official-ref2va-transformer-shard-00008-of-00014",
+        "official-ref2va-transformer-shard-00009-of-00014",
+        "official-ref2va-transformer-shard-00010-of-00014",
+        "official-ref2va-transformer-shard-00011-of-00014",
+        "official-ref2va-transformer-shard-00012-of-00014",
+        "official-ref2va-transformer-shard-00013-of-00014",
+        "official-ref2va-transformer-shard-00014-of-00014"
       ],
       "required_provenance": [
         "source-revision",

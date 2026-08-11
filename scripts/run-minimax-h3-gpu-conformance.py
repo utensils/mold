@@ -112,8 +112,8 @@ MEASUREMENT_DTYPES = {
         "qk-rms": CANONICAL_METRIC_DTYPE,
         "partial-mm-rope": CANONICAL_BF16_DTYPE,
         "adaln": CANONICAL_BF16_DTYPE,
-        "video-head": CANONICAL_BF16_DTYPE,
-        "audio-head": CANONICAL_BF16_DTYPE,
+        "video-head": CANONICAL_F32_DTYPE,
+        "audio-head": CANONICAL_F32_DTYPE,
         "tolerance": CANONICAL_METRIC_DTYPE,
     },
     "packed-layout": {
@@ -185,6 +185,7 @@ RECORD_ONLY_FLOAT_MEASUREMENTS = {
             "sampled-values",
         }
     ),
+    "transformer-block": frozenset({"video-head", "audio-head"}),
 }
 CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 REVIEWED_AUTHORIZATION_EVIDENCE_SHA256 = (

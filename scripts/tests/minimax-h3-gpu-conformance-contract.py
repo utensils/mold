@@ -80,8 +80,8 @@ TEST_MEASUREMENT_KINDS = {
         "qk-rms": "metric",
         "partial-mm-rope": "activation",
         "adaln": "activation",
-        "video-head": "activation",
-        "audio-head": "activation",
+        "video-head": "float32",
+        "audio-head": "float32",
         "tolerance": "metric",
     },
     "packed-layout": {

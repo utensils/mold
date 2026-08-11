@@ -1265,6 +1265,18 @@ impl H3Attention {
         rotary: Option<(&Tensor, &Tensor, usize)>,
         attention_plan: &H3FrozenAttentionPlan,
     ) -> Result<Tensor> {
+        Ok(self
+            .forward_impl(hidden, rotary, attention_plan, false)?
+            .output)
+    }
+
+    fn forward_impl(
+        &self,
+        hidden: &Tensor,
+        rotary: Option<(&Tensor, &Tensor, usize)>,
+        attention_plan: &H3FrozenAttentionPlan,
+        capture: bool,
+    ) -> Result<H3AttentionMaybeCapture> {
         let (batch, seq_len, _) = hidden.dims3()?;
         let qkv = self.qkv.forward(hidden)?;
         let q = qkv.narrow(2, 0, self.inner_dim)?;
@@ -1282,6 +1294,8 @@ impl H3Attention {
             .contiguous()?;
         q = self.q_norm.forward(&q)?;
         k = self.k_norm.forward(&k)?;
+        let normalized_q = capture.then(|| q.clone());
+        let normalized_k = capture.then(|| k.clone());
         if let Some((cos, sin, rotary_dim)) = rotary {
             q = apply_h3_rotary(&q, cos, sin, rotary_dim)?;
             k = apply_h3_rotary(&k, cos, sin, rotary_dim)?;
@@ -1290,8 +1304,22 @@ impl H3Attention {
         let output = execute_h3_attention(attention_plan, &q, &k, &v)
             .map_err(|error| candle::Error::Msg(error.to_string()))?
             .reshape((batch, seq_len, self.inner_dim))?;
-        self.out.forward(&output)
+        Ok(H3AttentionMaybeCapture {
+            output: self.out.forward(&output)?,
+            normalized_q,
+            normalized_k,
+            rotated_q: capture.then_some(q),
+            rotated_k: capture.then_some(k),
+        })
     }
+}
+
+struct H3AttentionMaybeCapture {
+    output: Tensor,
+    normalized_q: Option<Tensor>,
+    normalized_k: Option<Tensor>,
+    rotated_q: Option<Tensor>,
+    rotated_k: Option<Tensor>,
 }
 
 #[derive(Clone, Debug)]
@@ -1689,6 +1717,65 @@ impl H3TransformerBlockWeights {
         rotary: (&Tensor, &Tensor, usize),
         attention_plan: &H3FrozenAttentionPlan,
     ) -> Result<Tensor> {
+        Ok(self
+            .forward_impl(
+                hidden,
+                adaln_input,
+                adaln_indices,
+                rotary,
+                attention_plan,
+                false,
+            )?
+            .output)
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    fn forward_with_capture(
+        &self,
+        hidden: &Tensor,
+        adaln_input: &Tensor,
+        adaln_indices: &Tensor,
+        rotary: (&Tensor, &Tensor, usize),
+        attention_plan: &H3FrozenAttentionPlan,
+    ) -> Result<H3TransformerBlockCapture> {
+        let capture = self.forward_impl(
+            hidden,
+            adaln_input,
+            adaln_indices,
+            rotary,
+            attention_plan,
+            true,
+        )?;
+        Ok(H3TransformerBlockCapture {
+            output: capture.output,
+            normalized_q: capture.normalized_q.ok_or_else(|| {
+                candle::Error::Msg("MiniMax H3 block capture omitted normalized Q".into())
+            })?,
+            normalized_k: capture.normalized_k.ok_or_else(|| {
+                candle::Error::Msg("MiniMax H3 block capture omitted normalized K".into())
+            })?,
+            rotated_q: capture.rotated_q.ok_or_else(|| {
+                candle::Error::Msg("MiniMax H3 block capture omitted rotated Q".into())
+            })?,
+            rotated_k: capture.rotated_k.ok_or_else(|| {
+                candle::Error::Msg("MiniMax H3 block capture omitted rotated K".into())
+            })?,
+            adaln: capture.adaln.ok_or_else(|| {
+                candle::Error::Msg("MiniMax H3 block capture omitted AdaLN".into())
+            })?,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_impl(
+        &self,
+        hidden: &Tensor,
+        adaln_input: &Tensor,
+        adaln_indices: &Tensor,
+        rotary: (&Tensor, &Tensor, usize),
+        attention_plan: &H3FrozenAttentionPlan,
+        capture: bool,
+    ) -> Result<H3TransformerBlockMaybeCapture> {
         let parameters = self.adaln.forward(adaln_input)?;
         let [shift_attention, scale_attention, gate_attention, shift_mlp, scale_mlp, gate_mlp]:
             [Tensor; 6] = parameters.try_into().map_err(|_| {
@@ -1700,10 +1787,10 @@ impl H3TransformerBlockWeights {
             &scale_attention,
             adaln_indices,
         )?;
-        let update = self
-            .attention
-            .forward(&normalized, Some(rotary), attention_plan)?;
-        let hidden = gated_residual(hidden, &update, &gate_attention, adaln_indices)?;
+        let attention =
+            self.attention
+                .forward_impl(&normalized, Some(rotary), attention_plan, capture)?;
+        let hidden = gated_residual(hidden, &attention.output, &gate_attention, adaln_indices)?;
         let normalized = modulate(
             &self.norm2.forward(&hidden)?,
             &shift_mlp,
@@ -1711,8 +1798,52 @@ impl H3TransformerBlockWeights {
             adaln_indices,
         )?;
         let update = self.mlp.forward(&normalized)?;
-        gated_residual(&hidden, &update, &gate_mlp, adaln_indices)
+        let output = gated_residual(&hidden, &update, &gate_mlp, adaln_indices)?;
+        let adaln = if capture {
+            Some(Tensor::cat(
+                &[
+                    shift_attention,
+                    scale_attention,
+                    gate_attention,
+                    shift_mlp,
+                    scale_mlp,
+                    gate_mlp,
+                ],
+                1,
+            )?)
+        } else {
+            None
+        };
+        Ok(H3TransformerBlockMaybeCapture {
+            output,
+            normalized_q: attention.normalized_q,
+            normalized_k: attention.normalized_k,
+            rotated_q: attention.rotated_q,
+            rotated_k: attention.rotated_k,
+            adaln,
+        })
     }
+}
+
+#[cfg(feature = "h3-private-uat")]
+#[derive(Clone, Debug)]
+struct H3TransformerBlockCapture {
+    output: Tensor,
+    normalized_q: Tensor,
+    normalized_k: Tensor,
+    rotated_q: Tensor,
+    rotated_k: Tensor,
+    adaln: Tensor,
+}
+
+#[cfg_attr(not(feature = "h3-private-uat"), allow(dead_code))]
+struct H3TransformerBlockMaybeCapture {
+    output: Tensor,
+    normalized_q: Option<Tensor>,
+    normalized_k: Option<Tensor>,
+    rotated_q: Option<Tensor>,
+    rotated_k: Option<Tensor>,
+    adaln: Option<Tensor>,
 }
 
 /// Private execution representation behind the public streamed block handle.
@@ -1961,6 +2092,170 @@ pub struct H3ForwardInput<'a> {
 pub struct H3TransformerOutput {
     pub video: Tensor,
     pub audio: Tensor,
+}
+
+/// Private-UAT observations from the production token-refiner, first DiT
+/// block, MM-RoPE, AdaLN, and output-head implementations.
+///
+/// This surface is deliberately absent from shipping builds. It exists only
+/// so the authorization-bound capture adapter can compare exact intermediate
+/// tensors without reimplementing the production equations.
+#[cfg(feature = "h3-private-uat")]
+#[derive(Clone, Debug)]
+pub struct H3PrivateTransformerCapture {
+    pub task: H3TransformerTask,
+    pub component: H3CheckpointComponent,
+    pub token_refiner: Tensor,
+    pub normalized_q: Tensor,
+    pub normalized_k: Tensor,
+    pub rotated_q: Tensor,
+    pub rotated_k: Tensor,
+    pub adaln: Tensor,
+    pub block_output: Tensor,
+    pub video_output: Tensor,
+    pub audio_output: Tensor,
+}
+
+#[cfg(feature = "h3-private-uat")]
+pub struct H3PrivateTransformerCaptureInput<'a> {
+    pub token_hidden: &'a Tensor,
+    pub packed_hidden: &'a Tensor,
+    pub adaln_input: &'a Tensor,
+    pub positions: &'a Tensor,
+    pub adaln_indices: &'a Tensor,
+    pub timestep_indices: &'a Tensor,
+    pub video_indices: &'a Tensor,
+    pub audio_indices: &'a Tensor,
+}
+
+/// Execute the exact production primitives used by the paired transformer
+/// capture. The caller must provide one canonical token-refiner block, one
+/// canonical main block, MM-RoPE, and the final heads. Requiring the one-block
+/// config prevents a qualification adapter from silently observing a
+/// different layer than the reviewed fixture.
+#[cfg(feature = "h3-private-uat")]
+pub fn capture_h3_private_transformer_primitives(
+    config: &H3TransformerConfig,
+    task: H3TransformerTask,
+    source: H3CheckpointSource<'_>,
+    input: H3PrivateTransformerCaptureInput<'_>,
+) -> Result<H3PrivateTransformerCapture> {
+    capture_h3_private_transformer_primitives_with_precision(
+        config,
+        task,
+        source,
+        H3PrecisionProfile::OfficialMixedBf16F32,
+        input,
+    )
+}
+
+#[cfg(feature = "h3-private-uat")]
+fn capture_h3_private_transformer_primitives_with_precision(
+    config: &H3TransformerConfig,
+    task: H3TransformerTask,
+    source: H3CheckpointSource<'_>,
+    precision: H3PrecisionProfile,
+    input: H3PrivateTransformerCaptureInput<'_>,
+) -> Result<H3PrivateTransformerCapture> {
+    if config.num_layers != 1 || config.token_refiner_num_layers != 1 {
+        candle::bail!(
+            "MiniMax H3 private transformer capture requires exactly one refiner and one main block"
+        )
+    }
+    config.validate()?;
+    let component = source.inventory.component;
+    if component != task.checkpoint_component() {
+        candle::bail!(
+            "MiniMax H3 private transformer capture task {:?} requires component {}, received {}",
+            task,
+            task.checkpoint_component(),
+            component
+        )
+    }
+    let device = input.packed_hidden.device();
+    for tensor in [
+        input.token_hidden,
+        input.adaln_input,
+        input.positions,
+        input.adaln_indices,
+        input.timestep_indices,
+        input.video_indices,
+        input.audio_indices,
+    ] {
+        if !device.same_device(tensor.device()) {
+            candle::bail!("MiniMax H3 private transformer capture tensors must share one device")
+        }
+    }
+    let (batch, packed_rows, hidden_size) = input.packed_hidden.dims3()?;
+    let (token_batch, token_rows, token_hidden_size) = input.token_hidden.dims3()?;
+    if batch == 0
+        || token_batch != batch
+        || hidden_size != config.hidden_size
+        || token_hidden_size != config.hidden_size
+    {
+        candle::bail!("MiniMax H3 private transformer capture input shape is invalid")
+    }
+
+    if !device.same_device(source.vb.device()) {
+        candle::bail!("MiniMax H3 private transformer capture source must share the input device")
+    }
+    let compute_dtype = precision.compute_dtype();
+    let vb = source.vb;
+    let token_refiner = H3TokenRefinerBlock::load(
+        config,
+        H3QkvLayout::GroupedPerHead,
+        compute_dtype,
+        vb.pp("token_refiner.blocks.0"),
+    )?;
+    let main_block =
+        H3TransformerBlockWeights::load(config, H3AdaLnMode::Full, precision, vb.pp("blocks.0"))?;
+    let rope = H3Rope::load(config, vb.pp("rope"))?;
+    let final_layer =
+        H3FinalLayer::load(config, H3AdaLnMode::Full, precision, vb.pp("final_layer"))?;
+    let contract = H3AttentionModelContract {
+        heads: config.num_attention_heads,
+        head_dim: config.attention_head_dim,
+        dtype: H3AttentionDType::from_candle(compute_dtype)
+            .map_err(|error| candle::Error::Msg(error.to_string()))?,
+    };
+    let authority = H3AttentionRuntimeAuthority::bounded_synthetic_math(
+        H3AttentionDevice::from_candle(device),
+        contract,
+    )
+    .map_err(|error| candle::Error::Msg(error.to_string()))?;
+    let attention = authority
+        .freeze_execution(batch, token_rows, packed_rows)
+        .map_err(|error| candle::Error::Msg(error.to_string()))?;
+
+    let token_refiner = token_refiner.forward(input.token_hidden, &attention.token_refiner)?;
+    let (cos, sin) = rope.forward(input.positions)?;
+    let block = main_block.forward_with_capture(
+        input.packed_hidden,
+        input.adaln_input,
+        input.adaln_indices,
+        (&cos, &sin, 6 * config.rope_inv_freq_len),
+        &attention.packed_transformer,
+    )?;
+    let (video_output, audio_output) = final_layer.forward(
+        &block.output,
+        input.adaln_input,
+        input.timestep_indices,
+        input.video_indices,
+        input.audio_indices,
+    )?;
+    Ok(H3PrivateTransformerCapture {
+        task,
+        component,
+        token_refiner,
+        normalized_q: block.normalized_q,
+        normalized_k: block.normalized_k,
+        rotated_q: block.rotated_q,
+        rotated_k: block.rotated_k,
+        adaln: block.adaln,
+        block_output: block.output,
+        video_output,
+        audio_output,
+    })
 }
 
 #[derive(Debug)]
@@ -3208,6 +3503,138 @@ mod tests {
             reordered.into_iter().flatten().collect::<Vec<_>>(),
             vec![0., 1., 6., 7., 2., 3., 8., 9., 4., 5., 10., 11.]
         );
+        Ok(())
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    #[test]
+    fn private_capture_observes_production_primitives_on_cpu() -> Result<()> {
+        let device = Device::Cpu;
+        let mut config = H3TransformerConfig::tiny();
+        config.num_layers = 1;
+        config.token_refiner_num_layers = 1;
+        let tensors = tensor_map(
+            &expected_h3_weight_specs(
+                &config,
+                H3AdaLnMode::Full,
+                H3PrecisionProfile::SyntheticF32,
+            )?,
+            &device,
+        )?;
+        let source =
+            H3CheckpointSource::from_tensors(H3CheckpointComponent::Transformer, tensors, &device)?;
+        let token_hidden = Tensor::from_vec(
+            (0..16).map(|value| value as f32 / 32.0 - 0.25).collect(),
+            (1, 2, config.hidden_size),
+            &device,
+        )?
+        .to_dtype(DType::F32)?;
+        let packed_hidden = Tensor::from_vec(
+            (0..48).map(|value| value as f32 / 64.0 - 0.25).collect(),
+            (1, 6, config.hidden_size),
+            &device,
+        )?
+        .to_dtype(DType::F32)?;
+        let adaln_input = Tensor::from_vec(
+            (0..8).map(|value| value as f32 / 16.0 - 0.25).collect(),
+            (2, config.time_embed_dim),
+            &device,
+        )?
+        .to_dtype(DType::F32)?;
+        let positions = Tensor::new(
+            &[
+                [0f32, 0., 0.],
+                [0., 1., 0.],
+                [0., 0., 1.],
+                [1., 0., 0.],
+                [1., 1., 0.],
+                [1., 0., 1.],
+            ],
+            &device,
+        )?;
+        let adaln_indices = Tensor::new(&[1u32, 0, 2, 3, 5, 3], &device)?;
+        let timestep_indices = Tensor::new(&[0u32, 0, 0, 1, 1, 1], &device)?;
+        let video_indices = Tensor::new(&[1u32, 3], &device)?;
+        let audio_indices = Tensor::new(&[2u32, 4], &device)?;
+
+        let capture = capture_h3_private_transformer_primitives_with_precision(
+            &config,
+            H3TransformerTask::T2VaFl2Va,
+            source,
+            H3PrecisionProfile::SyntheticF32,
+            H3PrivateTransformerCaptureInput {
+                token_hidden: &token_hidden,
+                packed_hidden: &packed_hidden,
+                adaln_input: &adaln_input,
+                positions: &positions,
+                adaln_indices: &adaln_indices,
+                timestep_indices: &timestep_indices,
+                video_indices: &video_indices,
+                audio_indices: &audio_indices,
+            },
+        )?;
+        assert_eq!(capture.task, H3TransformerTask::T2VaFl2Va);
+        assert_eq!(capture.component, H3CheckpointComponent::Transformer);
+        assert_eq!(capture.token_refiner.dims(), &[1, 2, config.hidden_size]);
+        assert_eq!(capture.normalized_q.dtype(), DType::F32);
+        assert_eq!(capture.rotated_k.dtype(), DType::F32);
+        assert_eq!(capture.adaln.dtype(), DType::F32);
+        assert_eq!(capture.block_output.dtype(), DType::F32);
+        assert_eq!(capture.video_output.dtype(), DType::F32);
+        assert_eq!(capture.audio_output.dtype(), DType::F32);
+        assert_eq!(
+            capture.video_output.dims(),
+            &[1, 2, config.video_patch_dim()]
+        );
+        assert_eq!(
+            capture.audio_output.dims(),
+            &[1, 2, config.audio_latent_channels]
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    #[test]
+    fn private_capture_rejects_crossed_task_component_before_execution() -> Result<()> {
+        let device = Device::Cpu;
+        let mut config = H3TransformerConfig::tiny();
+        config.num_layers = 1;
+        config.token_refiner_num_layers = 1;
+        let tensors = tensor_map(
+            &expected_h3_weight_specs(
+                &config,
+                H3AdaLnMode::Full,
+                H3PrecisionProfile::SyntheticF32,
+            )?,
+            &device,
+        )?;
+        let source = H3CheckpointSource::from_tensors(
+            H3CheckpointComponent::TransformerRef,
+            tensors,
+            &device,
+        )?;
+        let hidden = Tensor::zeros((1, 1, config.hidden_size), DType::F32, &device)?;
+        let adaln = Tensor::zeros((1, config.time_embed_dim), DType::F32, &device)?;
+        let positions = Tensor::zeros((1, 3), DType::F32, &device)?;
+        let index = Tensor::new(&[0u32], &device)?;
+        let error = capture_h3_private_transformer_primitives_with_precision(
+            &config,
+            H3TransformerTask::T2VaFl2Va,
+            source,
+            H3PrecisionProfile::SyntheticF32,
+            H3PrivateTransformerCaptureInput {
+                token_hidden: &hidden,
+                packed_hidden: &hidden,
+                adaln_input: &adaln,
+                positions: &positions,
+                adaln_indices: &index,
+                timestep_indices: &index,
+                video_indices: &index,
+                audio_indices: &index,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("requires component transformer"));
         Ok(())
     }
 
