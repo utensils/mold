@@ -69,8 +69,12 @@ function percentage(done: number, total: number): number {
         <div>
           <h3>{{ host.hostLabel }}</h3>
           <p>
-            Both tasks · {{ formatMiniMaxH3Bytes(host.bothTasksDiskBytes) }} on
-            disk
+            {{
+              host.tasks.length === 1
+                ? host.tasks[0]?.taskLabel
+                : "Advertised tasks"
+            }}
+            · {{ formatMiniMaxH3Bytes(host.advertisedTasksDiskBytes) }} on disk
             <template v-if="host.remainingBytes">
               · {{ formatMiniMaxH3Bytes(host.remainingBytes) }} not ready
             </template>
