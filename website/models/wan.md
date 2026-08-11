@@ -126,6 +126,17 @@ device-synced timing line per denoise step, and `MOLD_WAN_FORCE_DMMV=1`
 forces the quantized-matmul fallback for A/B comparison — neither belongs in
 production use.
 
+### FlashAttention on Wan
+
+A `--features cuda,flash-attn` build routes the Wan DiT's self- and cross-attention through candle-flash-attn v2 and defaults `MOLD_ATTN` to `flash`. Measured on an RTX 4090 with the same binary, only the backend varying (`wan22-t2v-a14b:q5`, 53 frames at 832x480):
+
+| Backend | Peak VRAM  | Wall clock |
+| ------- | ---------- | ---------- |
+| `flash` | 21,354 MiB | 75.3 s     |
+| `math`  | 22,250 MiB | 158.4 s    |
+
+So flash is worth **2.1x on speed** and only ~900 MiB on peak. That is the opposite of the usual expectation, and it is why longer clips are not unlocked by switching backends: at 81 frames the estimate is ~27.7 GB against ~24.8 GB usable, and flash's measured per-token saving extrapolates to about 1.3 GB — not the ~3 GB that would be needed. Reaching 81 frames on a 24 GB card needs partial block offload, which is not wired for this family yet. Note also that `flash-attn` ships in no release artifact, so this is a source-build configuration.
+
 At `--frames 1` Wan renders a still: png/jpeg output is admitted (and png is
 the default there), the image embeds the same `mold:parameters` provenance as
 every image family, and the gallery treats it as an upscale-eligible still.
