@@ -375,7 +375,9 @@ waveform statistics, lagged phase/polarity correlations, the exact packing
 map, and the complete typed content hashes. The two checkpoints have different
 reviewed hashes, so continuous AudioVAE records use bounded numerical
 tolerances with `record-only` hashes; packing and timeline records remain
-zero-tolerance and hash-exact.
+zero-tolerance and hash-exact. Pair comparison requires the official checkpoint
+hash for the oracle role and the reviewed Comfy folded checkpoint hash for the
+Mold role; any other role/checkpoint pairing fails before numerical comparison.
 
 Prepare the five external paths and run each role in a fresh process so GPU
 memory from one implementation cannot affect the other:

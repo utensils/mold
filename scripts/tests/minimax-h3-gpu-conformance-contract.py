@@ -374,7 +374,9 @@ def layer_document(
         "component_indexes": component_indexes,
     }
     if layer == "audio-vae":
-        input_evidence["checkpoint_sha256"] = "4" * 64
+        input_evidence["checkpoint_sha256"] = (
+            tool.AUDIO_VAE_CHECKPOINT_SHA256_BY_ROLE[role]
+        )
     task = E2E_LAYER_TASKS.get(layer)
     if task is not None:
         conditioning = []

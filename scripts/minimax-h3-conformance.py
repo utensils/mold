@@ -388,6 +388,11 @@ EXPECTED_LAYERS = {
     "end-to-end-ref2va",
 }
 
+AUDIO_VAE_CHECKPOINT_SHA256_BY_ROLE = {
+    "oracle": "52c59e67ba8de5477c81bfbced0327aabf500f1bfdeefd5ee754529241cb26cb",
+    "mold": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+}
+
 FORBIDDEN_FIXTURE_SUFFIXES = {
     ".bin",
     ".ckpt",
@@ -926,12 +931,26 @@ def compare_layer_outputs(oracle: Any, mold: Any) -> list[str]:
         fail("--mold document producer role is not mold")
 
     issues: list[str] = []
-    for field in ("case_id", "layer", "authority_tier", "input"):
+    for field in ("case_id", "layer", "authority_tier"):
         if oracle[field] != mold[field]:
             issues.append(
                 f"comparison {field} mismatch: oracle={oracle[field]!r}, "
                 f"mold={mold[field]!r}"
             )
+    oracle_input = dict(oracle["input"])
+    mold_input = dict(mold["input"])
+    if oracle["layer"] == "audio-vae" and mold["layer"] == "audio-vae":
+        for role, evidence in (("oracle", oracle_input), ("mold", mold_input)):
+            expected_checkpoint = AUDIO_VAE_CHECKPOINT_SHA256_BY_ROLE[role]
+            if evidence.pop("checkpoint_sha256", None) != expected_checkpoint:
+                issues.append(
+                    f"audio-vae {role} checkpoint authority differs from the "
+                    "reviewed role-specific checkpoint"
+                )
+    if oracle_input != mold_input:
+        issues.append(
+            f"comparison input mismatch: oracle={oracle_input!r}, mold={mold_input!r}"
+        )
     if (
         oracle["adapter"]["tensor_hash_encoding"]
         != mold["adapter"]["tensor_hash_encoding"]
