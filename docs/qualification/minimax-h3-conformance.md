@@ -403,6 +403,48 @@ Create-new owner-only writes refuse overwrite and keep raw request, response,
 weights, and evidence outside the repository. Passing contract tests or CUDA
 typechecks alone is not evidence that this real-checkpoint capture ran.
 
+### Paired token-refiner and transformer-block capture
+
+`scripts/capture-minimax-h3-transformer.py` produces the remaining paired
+evidence for `token-refiner` and `transformer-block`. Run FL2VA and Ref2VA as
+distinct cases: their deterministic tensor geometry is intentionally equal,
+but their input identities, task labels, selected checkpoint directories, and
+raw adapter receipts are not interchangeable. Both layer documents bind the
+complete reviewed 32-record authority set: config, index, and all fourteen
+official shards for each task checkpoint.
+
+The oracle imports the first official Diffusers token-refiner block, first
+main block, final normalization, and both output heads from the selected task.
+It reads only the tensors those modules need rather than materializing complete
+multi-gigabyte shards. The Mold role builds the private
+`h3_transformer_capture` adapter from an owner-only archive of the exact clean
+checkout and passes the manifest from that same archive. The adapter retains
+authenticated descriptors for all 32 artifacts, loads the selected task only,
+converts grouped QKV and the official value/gate fused FFN order into Mold's
+production layout, observes the production equations, and rehashes every
+descriptor after synchronized CUDA execution.
+
+Use the same five external paths as the conditioner capture. The official
+model root must contain both complete `transformer/` and `transformer_ref/`
+directories at the pinned model revision. Preflight free host RAM and device
+memory before each command. Run one role per process; each command captures the
+FL2VA task first, releases its model, then captures Ref2VA:
+
+    python3 scripts/capture-minimax-h3-transformer.py \
+      capture --role oracle --device cuda:0
+    python3 scripts/capture-minimax-h3-transformer.py \
+      capture --role mold --device cuda:0
+
+The deterministic record covers token-refiner output shape/statistics/samples,
+Q/K RMS, both Q and K leading multimodal RoPE axes, AdaLN parameters, and the
+FP32 video and audio heads. Integer shape evidence is zero-tolerance; BF16
+records use the protected 1/64 comparison bound; FP32 heads retain their hashes
+as record-only evidence. TF32, approximate attention, compilation, FP8, and
+non-deterministic algorithms remain disabled. Raw adapter output and evidence
+use create-new owner-only files below the external fixture root, and raw output
+is parsed from the exact descriptor-retained bytes before revalidation. This
+producer and its CI contract do not claim that the real CUDA campaign has run.
+
 ### Opt-in protected GPU validation
 
 The manual `MiniMax H3 private conformance` workflow validates an approved,

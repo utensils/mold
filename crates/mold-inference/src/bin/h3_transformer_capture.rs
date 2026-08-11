@@ -37,7 +37,7 @@ const AUTHORIZATION_SOURCE_SHA256: &str =
 const CLAIM_MARKER: &str = "mold.minimax-h3.private-uat-transformer-capture.v1";
 const MODEL_REVISION: &str = "bfc8ed0353f5a9733be73e6b2c98ec0948195b86";
 const LICENSE_SHA256: &str = "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44";
-const MANIFEST_SHA256: &str = "47fcfec416f53bc42806ff3f57f62e0a1ddc6a4d38093bb304e5d2aa61397017";
+const MANIFEST_SHA256: &str = "eb36c637ec88aa9d8470e29a5510a6b21f685f466965190b2ad46b1edc4fba18";
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_AUTHORIZATION_BYTES: u64 = 64 * 1024;
 
@@ -52,6 +52,8 @@ struct Arguments {
     component_dir: &'static str,
     device_index: usize,
     device_label: String,
+    source_revision: String,
+    input_sha256: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +97,9 @@ struct RawOutput {
     task: &'static str,
     component: &'static str,
     device: String,
+    source_revision: String,
+    authorization_source_sha256: &'static str,
+    input_sha256: &'static str,
     authority_set_sha256: &'static str,
     tensors: Vec<RawTensor>,
 }
@@ -110,7 +115,8 @@ struct RawTensor {
 fn usage() -> &'static str {
     "usage: h3_transformer_capture --model-root <absolute-model-root> \
      --manifest <absolute-manifest.json> --authorization-record <absolute-record.json> \
-     --task <fl2va|ref2va> --device <cuda:index> --raw-output <absolute-new.json>"
+     --source-revision <40-lower-hex> --task <fl2va|ref2va> --device <cuda:index> \
+     --raw-output <absolute-new.json>"
 }
 
 fn absolute(value: String, label: &str) -> Result<PathBuf> {
@@ -136,22 +142,32 @@ fn parse_args() -> Result<Arguments> {
             .cloned()
             .ok_or_else(|| anyhow!("missing {name}; {}", usage()))
     };
-    if named.len() != 6 {
+    if named.len() != 7 {
         bail!(usage())
     }
-    let (task, component, component_dir) = match required("--task")?.as_str() {
+    let (task, component, component_dir, input_sha256) = match required("--task")?.as_str() {
         "fl2va" => (
             H3TransformerTask::T2VaFl2Va,
             H3CheckpointComponent::Transformer,
             "transformer",
+            "f139e36713bb2d0a843cf944db59a832eb31f561fc5a33e3877683564183f91f",
         ),
         "ref2va" => (
             H3TransformerTask::Ref2Va,
             H3CheckpointComponent::TransformerRef,
             "transformer_ref",
+            "af7f4983e006ea6426719a6dccfbfaa0415abe526dc91d9525f5f431ff0c614f",
         ),
         _ => bail!("task must be fl2va or ref2va"),
     };
+    let source_revision = required("--source-revision")?;
+    if source_revision.len() != 40
+        || !source_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("source revision must be 40 lowercase hexadecimal characters")
+    }
     let device_label = required("--device")?;
     let device_index = device_label
         .strip_prefix("cuda:")
@@ -171,6 +187,8 @@ fn parse_args() -> Result<Arguments> {
         component_dir,
         device_index,
         device_label,
+        source_revision,
+        input_sha256,
     })
 }
 
@@ -668,6 +686,9 @@ fn execute(args: &Arguments) -> Result<RawOutput> {
         task,
         component,
         device: args.device_label.clone(),
+        source_revision: args.source_revision.clone(),
+        authorization_source_sha256: AUTHORIZATION_SOURCE_SHA256,
+        input_sha256: args.input_sha256,
         authority_set_sha256: AUTHORITY_SET_SHA256,
         tensors: vec![
             raw_tensor("token-refiner", &capture.token_refiner)?,

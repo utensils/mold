@@ -706,6 +706,9 @@ require_text .github/workflows/ci.yml \
   'python3 scripts/tests/minimax-h3-audio-vae-capture-contract.py' \
   "CI does not run the exact-FP32 AudioVAE capture contract"
 require_text .github/workflows/ci.yml \
+  'python3 scripts/tests/minimax-h3-transformer-capture-contract.py' \
+  "CI does not run the paired transformer capture contract"
+require_text .github/workflows/ci.yml \
   'cargo test -p mold-ai-inference --lib --features h3-private-uat minimax_h3' \
   "CI does not execute the private H3 foundation tests"
 require_text .github/workflows/ci.yml \
@@ -735,6 +738,9 @@ require_text docs/qualification/minimax-h3-conformance.md \
 require_text docs/qualification/minimax-h3-conformance.md \
   'capture-minimax-h3-audio-vae.py' \
   "the exact-FP32 AudioVAE capture adapter has no operator runbook"
+require_text docs/qualification/minimax-h3-conformance.md \
+  'capture-minimax-h3-transformer.py' \
+  "the paired transformer capture producer has no operator runbook"
 
 # Ref2VA may share the one-shot owner protocol, but it must retain a distinct
 # runtime qualification, ordered-reference authority, and publication fence.
