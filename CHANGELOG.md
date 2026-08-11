@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The smaller MiniMax H3 route now completes Qwen3-VL vision conditioning on the host CPU.** A real conditioned FL2VA attempt with the reviewed Comfy INT8 deployment reached the vision tower and exposed that Candle's CPU backend also rejects native BF16 convolution and linear/attention matrix multiplication there. Mold now widens only those CPU BF16 operations to F32 and rounds each result back to BF16 at the released output boundaries; CUDA execution is unchanged. This removes the observed conditioner blocker but does not claim a successful render or runtime qualification.
+
 - **Private MiniMax H3 runtime qualification now measures its thirteen memory bounds inside the real smaller-variant attempt.** The private server records the attempt-entry host/device baseline and CUDA pool high-water growth at the VAE, Qwen, condition, visual-decode, and audio-decode boundaries; the exact production attention and FFN operators report their shape-derived workspaces; and the live encoded-video, thumbnail, F32 AAC staging, and final mux capacities are retained in one release-rejectable structured observation. A successful record requires a conditioned FL2VA render and remains evidence only: it neither authorizes itself nor exposes a public loader.
 
 - **MiniMax H3 inventory presentation now accepts the exact qualified task subset a host advertises.** A private host can expose FL2VA without manufacturing Ref2VA availability, while empty partitions, incomplete shared components, crossed task scope, unreferenced components, access denial, and disabled runtimes still fail closed. Multi-task hosts retain deduplicated shared-component accounting.

@@ -117,9 +117,27 @@ impl TemporalTwoConv3d {
     }
 
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        let first = self.first.forward(&input.i((.., .., 0, .., ..))?)?;
-        let second = self.second.forward(&input.i((.., .., 1, .., ..))?)?;
+        let first = conv2d_with_cpu_bf16_fallback(&self.first, &input.i((.., .., 0, .., ..))?)?;
+        let second = conv2d_with_cpu_bf16_fallback(&self.second, &input.i((.., .., 1, .., ..))?)?;
         (first + second)?.unsqueeze(2)
+    }
+}
+
+fn conv2d_with_cpu_bf16_fallback(conv: &Conv2d, input: &Tensor) -> Result<Tensor> {
+    if input.device().is_cpu()
+        && input.dtype() == DType::BF16
+        && conv.weight().dtype() == DType::BF16
+    {
+        let weight = conv.weight().to_dtype(DType::F32)?;
+        let bias = conv
+            .bias()
+            .map(|bias| bias.to_dtype(DType::F32))
+            .transpose()?;
+        Conv2d::new(weight, bias, *conv.config())
+            .forward(&input.to_dtype(DType::F32)?)?
+            .to_dtype(DType::BF16)
+    } else {
+        conv.forward(input)
     }
 }
 
@@ -198,8 +216,38 @@ impl VisionMlp {
     }
 
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        self.second
-            .forward(&self.first.forward(input)?.apply(&self.activation)?)
+        linear_with_cpu_bf16_fallback(
+            &self.second,
+            &linear_with_cpu_bf16_fallback(&self.first, input)?.apply(&self.activation)?,
+        )
+    }
+}
+
+fn linear_with_cpu_bf16_fallback(linear: &Linear, input: &Tensor) -> Result<Tensor> {
+    if input.device().is_cpu()
+        && input.dtype() == DType::BF16
+        && linear.weight().dtype() == DType::BF16
+    {
+        let weight = linear.weight().to_dtype(DType::F32)?;
+        let bias = linear
+            .bias()
+            .map(|bias| bias.to_dtype(DType::F32))
+            .transpose()?;
+        Linear::new(weight, bias)
+            .forward(&input.to_dtype(DType::F32)?)?
+            .to_dtype(DType::BF16)
+    } else {
+        linear.forward(input)
+    }
+}
+
+fn matmul_with_cpu_bf16_fallback(left: &Tensor, right: &Tensor) -> Result<Tensor> {
+    if left.device().is_cpu() && left.dtype() == DType::BF16 && right.dtype() == DType::BF16 {
+        left.to_dtype(DType::F32)?
+            .matmul(&right.to_dtype(DType::F32)?)?
+            .to_dtype(DType::BF16)
+    } else {
+        left.matmul(right)
     }
 }
 
@@ -235,9 +283,7 @@ impl VisionAttention {
         sin: &Tensor,
     ) -> Result<Tensor> {
         let sequence = input.dim(0)?;
-        let qkv = self
-            .qkv
-            .forward(input)?
+        let qkv = linear_with_cpu_bf16_fallback(&self.qkv, input)?
             .reshape((sequence, 3, self.num_heads, self.head_dimension))?
             .permute((1, 0, 2, 3))?;
         let cos = cos.unsqueeze(1)?;
@@ -274,12 +320,12 @@ impl VisionAttention {
                 .unsqueeze(0)?
                 .contiguous()?;
             let key_transposed = key.transpose(2, 3)?.contiguous()?;
-            let scores = (query.matmul(&key_transposed)? / (self.head_dimension as f64).sqrt())?;
+            let scores = (matmul_with_cpu_bf16_fallback(&query, &key_transposed)?
+                / (self.head_dimension as f64).sqrt())?;
             let probabilities = candle_nn::ops::softmax_last_dim(&scores.to_dtype(DType::F32)?)?
                 .to_dtype(value.dtype())?;
             outputs.push(
-                probabilities
-                    .matmul(&value)?
+                matmul_with_cpu_bf16_fallback(&probabilities, &value)?
                     .squeeze(0)?
                     .transpose(0, 1)?
                     .reshape((length, self.num_heads * self.head_dimension))?
@@ -287,7 +333,7 @@ impl VisionAttention {
             );
         }
         let refs = outputs.iter().collect::<Vec<_>>();
-        self.projection.forward(&Tensor::cat(&refs, 0)?)
+        linear_with_cpu_bf16_fallback(&self.projection, &Tensor::cat(&refs, 0)?)
     }
 }
 
@@ -394,7 +440,10 @@ impl PatchMerger {
         } else {
             normalized.reshape((groups, self.merged_hidden_size))?
         };
-        self.second.forward(&self.first.forward(&merged)?.gelu()?)
+        linear_with_cpu_bf16_fallback(
+            &self.second,
+            &linear_with_cpu_bf16_fallback(&self.first, &merged)?.gelu()?,
+        )
     }
 }
 
@@ -761,6 +810,23 @@ mod tests {
                 total: 3
             })
         );
+    }
+
+    #[test]
+    fn tiny_bf16_vision_tower_executes_on_cpu_with_rounded_matmul_boundaries() {
+        let config = Qwen3VlVisionDimensions::tiny();
+        let vars = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vars, DType::BF16, &Device::Cpu);
+        let model = Qwen3VlVisionModel::new(&config, vb).unwrap();
+        let pixels = Tensor::zeros((4, 24), DType::BF16, &Device::Cpu).unwrap();
+        let grid = Tensor::new(&[[1_u32, 2, 2]], &Device::Cpu).unwrap();
+        let (main, deepstack) = model.forward(&pixels, &grid, &mut |_| Ok(())).unwrap();
+        assert_eq!(main.dims(), [1, 12]);
+        assert_eq!(main.dtype(), DType::BF16);
+        assert_eq!(deepstack.len(), 3);
+        assert!(deepstack
+            .iter()
+            .all(|tensor| tensor.dims() == [1, 12] && tensor.dtype() == DType::BF16));
     }
 
     #[test]
