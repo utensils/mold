@@ -292,7 +292,7 @@ The capture manifest uses
 [`mold.minimax-h3.private-runtime-bound-capture.v1`](./minimax-h3-private-runtime-capture.schema.json).
 It binds the exact 40-character Mold source SHA, the stable runtime-code
 identity, the measured server executable, artifact/authorization identities,
-`cuda:<ordinal>` route, compute capability, attention
+stable `cuda:<32 lowercase UUID hex>` route plus its process-local ordinal, compute capability, attention
 runtime/kernel/qualification identities, and a sorted list of relative
 evidence paths. The candidate producer requires its own embedded source SHA and
 runtime-code identity to equal the capture and proves that both exact values

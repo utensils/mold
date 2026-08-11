@@ -37,7 +37,7 @@
     "authorization_record_sha256": { "$ref": "#/$defs/sha256" },
     "authorization_source_document_sha256": { "$ref": "#/$defs/sha256" },
     "artifact_qualification_identity_sha256": { "$ref": "#/$defs/sha256" },
-    "device_id": { "type": "string", "pattern": "^cuda:[0-9]+$" },
+    "device_id": { "type": "string", "pattern": "^cuda:[0-9a-f]{32}$" },
     "device_ordinal": { "type": "integer", "minimum": 0 },
     "compute_capability": {
       "type": "array",

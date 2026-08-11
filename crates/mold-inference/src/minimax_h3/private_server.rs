@@ -97,6 +97,16 @@ pub(crate) const RUNTIME_QUALIFICATION_SCHEMA: &str =
 pub(crate) const RUNTIME_QUALIFICATION_DECISION: &str = "qualified-private-fl2va-runtime";
 pub(crate) const MAX_RUNTIME_QUALIFICATION_BYTES: u64 = 128 * 1024;
 
+pub(crate) fn valid_stable_cuda_device_id(value: &str) -> bool {
+    let Some(uuid) = value.strip_prefix("cuda:") else {
+        return false;
+    };
+    uuid.len() == 32
+        && uuid
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// Exact reviewed runtime-qualification record hashes.
 ///
 /// This is intentionally empty. Artifact qualification and the payload-free
@@ -3727,7 +3737,7 @@ pub(crate) fn validate_runtime_qualification_record_shape(
             .windows(2)
             .any(|pair| pair[0].relative_path >= pair[1].relative_path)
         || record.artifact_total_bytes == 0
-        || record.device_id != format!("cuda:{}", record.device_ordinal)
+        || !valid_stable_cuda_device_id(&record.device_id)
         || !(1..=99).contains(&record.compute_capability[0])
         || record.compute_capability[1] > 99
         || !valid_runtime_evidence_relative_path(&record.measured_server_executable_relative_path)
@@ -3852,12 +3862,30 @@ mod tests {
         H3FactoryComponentRole, H3FactoryConditionerPlacement, H3FactoryQuantizationAuthority,
     };
 
+    const DEVICE_0: &str = "cuda:00000000000000000000000000000000";
+    const DEVICE_1: &str = "cuda:00000000000000000000000000000001";
+
     fn sha(byte: char) -> String {
         std::iter::repeat_n(byte, 64).collect()
     }
 
     fn source_sha(byte: char) -> String {
         std::iter::repeat_n(byte, 40).collect()
+    }
+
+    #[test]
+    fn runtime_record_requires_scheduler_stable_cuda_identity() {
+        assert!(valid_stable_cuda_device_id(DEVICE_0));
+        assert!(!valid_stable_cuda_device_id("cuda:0"));
+        assert!(!valid_stable_cuda_device_id(
+            "cuda:0000000000000000000000000000000A"
+        ));
+        assert!(!valid_stable_cuda_device_id(
+            "cuda:0000000000000000000000000000000"
+        ));
+        assert!(!valid_stable_cuda_device_id(
+            "runtime:gpu:00000000000000000000000000000000"
+        ));
     }
 
     fn media() -> H3PrivateFl2VaMediaContract {
@@ -3914,7 +3942,7 @@ mod tests {
             authorization_source_document_sha256: sha('b'),
             artifact_qualification_identity_sha256: sha('c'),
             artifact_total_bytes: 42,
-            device_id: "cuda:0".into(),
+            device_id: DEVICE_0.into(),
             device_ordinal: 0,
             compute_capability: [8, 9],
             attention_runtime_identity_sha256: sha('1'),
@@ -3965,7 +3993,7 @@ mod tests {
     fn base_factory() -> FrozenH3FactoryAuthority {
         FrozenH3FactoryAuthority::new_contract_only(H3FactoryAuthorityInput {
             model: contract::FL2VA_COMFY.into(),
-            device_id: "cuda:0".into(),
+            device_id: DEVICE_0.into(),
             device_ordinal: 0,
             compute_capability: (8, 9),
             execution_fingerprint: sha('4'),
@@ -4046,7 +4074,7 @@ mod tests {
             canonical_model: contract::FL2VA_COMFY.into(),
             task: Task::Fl2va,
             mode: Mode::TextToAudioVideo,
-            device_id: "cuda:0".into(),
+            device_id: DEVICE_0.into(),
             device_ordinal: 0,
             compute_capability: (8, 9),
             admitted_available_device_bytes: 10,
@@ -4089,7 +4117,7 @@ mod tests {
             admission_evidence_identity_sha256: sha('3'),
             artifact_qualification_identity_sha256: sha('4'),
             runtime_qualification_identity_sha256: sha('5'),
-            device_id: "cuda:0".into(),
+            device_id: DEVICE_0.into(),
             device_ordinal: 0,
             execution_fingerprint: sha('6'),
             prepared_attempt_identity_sha256: sha('7'),
@@ -4149,7 +4177,7 @@ mod tests {
                 owner_fence: H3PrivateFl2VaOwnerFenceFacts {
                     work_identity_sha256: sha('9'),
                     cancellation_scope_identity_sha256: sha('a'),
-                    device_id: "cuda:0".into(),
+                    device_id: DEVICE_0.into(),
                     device_ordinal: 0,
                     compute_capability: (8, 9),
                     memory_ledger_sequence: 1,
@@ -4184,7 +4212,7 @@ mod tests {
                     authorization_record: missing,
                     runtime_qualification_record: missing,
                 },
-                device_id: "cuda:0",
+                device_id: DEVICE_0,
                 device_ordinal: 0,
                 compute_capability: (8, 9),
                 available_device_bytes: 1,
@@ -4205,7 +4233,7 @@ mod tests {
         let error = authenticate_h3_private_runtime_qualification(
             &path,
             &artifact_report(),
-            "cuda:0",
+            DEVICE_0,
             0,
             (8, 9),
             &sha('1'),
@@ -4226,7 +4254,7 @@ mod tests {
         let authority = authenticate_h3_private_runtime_qualification_for_source(
             &path,
             &artifact_report(),
-            "cuda:0",
+            DEVICE_0,
             0,
             (8, 9),
             &sha('1'),
@@ -4277,7 +4305,7 @@ mod tests {
         let error = authenticate_h3_private_runtime_qualification_for_source(
             &path,
             &artifact_report(),
-            "cuda:1",
+            DEVICE_1,
             1,
             (8, 9),
             &sha('1'),
@@ -4301,9 +4329,9 @@ mod tests {
         let digest = sha256_open_file(&file).unwrap();
         let reviewed_records = [digest.as_str()];
         for (device_id, device_ordinal, compute_capability) in [
-            ("cuda:1", 0, (8, 9)),
-            ("cuda:0", 1, (8, 9)),
-            ("cuda:0", 0, (9, 0)),
+            (DEVICE_1, 0, (8, 9)),
+            (DEVICE_0, 1, (8, 9)),
+            (DEVICE_0, 0, (9, 0)),
         ] {
             let reviewed = open_reviewed_h3_private_runtime_qualification_for_source(
                 &path,

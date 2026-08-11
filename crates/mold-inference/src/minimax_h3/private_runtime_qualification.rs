@@ -21,10 +21,10 @@ use super::private_qualification::{
     qualify_private_artifacts, H3ArtifactHashProgress, H3PrivateArtifactQualificationReport,
 };
 use super::private_server::{
-    runtime_qualification_identity, validate_runtime_qualification_record_shape,
-    H3PrivateRuntimeBoundRecord, H3PrivateRuntimeEvidenceArtifact,
-    H3PrivateRuntimeQualificationRecord, MAX_RUNTIME_QUALIFICATION_BYTES,
-    RUNTIME_QUALIFICATION_DECISION, RUNTIME_QUALIFICATION_SCHEMA,
+    runtime_qualification_identity, valid_stable_cuda_device_id,
+    validate_runtime_qualification_record_shape, H3PrivateRuntimeBoundRecord,
+    H3PrivateRuntimeEvidenceArtifact, H3PrivateRuntimeQualificationRecord,
+    MAX_RUNTIME_QUALIFICATION_BYTES, RUNTIME_QUALIFICATION_DECISION, RUNTIME_QUALIFICATION_SCHEMA,
 };
 
 pub const H3_PRIVATE_RUNTIME_RECORD_PRODUCER_MARKER: &str =
@@ -209,7 +209,7 @@ impl H3PrivateRuntimeBoundCaptureManifest {
         {
             bail!("private H3 runtime capture differs from the embedded campaign build")
         }
-        if self.device_id != format!("cuda:{}", self.device_ordinal)
+        if !valid_stable_cuda_device_id(&self.device_id)
             || self.compute_capability[0] == 0
             || self.compute_capability[0] > 99
             || self.compute_capability[1] > 99
@@ -756,6 +756,8 @@ mod tests {
 
     use super::*;
 
+    const DEVICE_0: &str = "cuda:00000000000000000000000000000000";
+
     fn sha(byte: char) -> String {
         std::iter::repeat_n(byte, 64).collect()
     }
@@ -814,7 +816,7 @@ mod tests {
             authorization_record_sha256: sha('a'),
             authorization_source_document_sha256: sha('b'),
             artifact_qualification_identity_sha256: sha('c'),
-            device_id: "cuda:0".into(),
+            device_id: DEVICE_0.into(),
             device_ordinal: 0,
             compute_capability: [8, 9],
             attention_runtime_identity_sha256: sha('d'),
@@ -975,7 +977,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn capture_rejects_unembedded_source_or_out_of_schema_compute_capability() {
+    fn capture_rejects_unembedded_source_or_invalid_cuda_authority() {
         let mut manifest = capture("logs/runtime.log");
         assert!(manifest
             .validate(
@@ -988,6 +990,14 @@ mod tests {
             .contains("embedded campaign build"));
 
         manifest.compute_capability = [100, 0];
+        assert!(manifest
+            .validate(&artifact_report(), &source_sha(), &runtime_code_identity())
+            .unwrap_err()
+            .to_string()
+            .contains("CUDA attention authority"));
+
+        manifest.compute_capability = [8, 9];
+        manifest.device_id = "cuda:0".into();
         assert!(manifest
             .validate(&artifact_report(), &source_sha(), &runtime_code_identity())
             .unwrap_err()
