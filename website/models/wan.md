@@ -145,15 +145,14 @@ of its own forward, so at most one parked block is resident at a time.
 
 Measured on an RTX 4090, `wan22-t2v-a14b:q5` at 832x480:
 
-| Frames | Offload | Wall clock | Peak |
-| -----: | ------- | ---------: | ---: |
-| 53 | none | 163 s | 21,354 MiB |
-| 81 | none | — | **OOM** |
-| 81 | automatic | 316.3 s | 17,322 MiB |
+| Frames | Offload   | Wall clock |       Peak |
+| -----: | --------- | ---------: | ---------: |
+|     53 | none      |      163 s | 21,354 MiB |
+|     81 | none      |          — |    **OOM** |
+|     81 | automatic |    316.3 s | 17,322 MiB |
 
 The Q4 tier is measured at the same shape rather than inferred from Q5's
 smaller resident: 317.5 s at a 15,722 MiB peak.
-
 
 It engages by itself and a render that already fits parks nothing, so shorter
 clips are unchanged. `MOLD_WAN_OFFLOAD_BLOCKS=N` pins the block count and `0`
@@ -186,10 +185,10 @@ no extra casts at all.
 
 Measured on an RTX 4090, `wan22-t2v-a14b:q5` at 832x480 x 53 frames:
 
-| Adapter staging | Wall clock | Peak |
-| --------------- | ---------: | ---: |
-| F32, inside the cast | 163.0 s | 20,778 MiB |
-| BF16, outside it | 160.4 s | 19,050 MiB |
+| Adapter staging      | Wall clock |       Peak |
+| -------------------- | ---------: | ---------: |
+| F32, inside the cast |    163.0 s | 20,778 MiB |
+| BF16, outside it     |    160.4 s | 19,050 MiB |
 
 The saving is larger than the adapter's own ~0.6 GB because the branch's
 intermediates are BF16 now too. Renders are deterministic per build but not
