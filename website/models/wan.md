@@ -25,6 +25,7 @@ the family natively in Rust.
 | `wan21-t2v-14b:q8`    | 30    | ~27.5 GB          | Q8_0 2.1 14B; the 2.1 quality tier           |
 | `wan22-ti2v-5b:fp16`  | 20    | ~22.8 GB          | 720p24 text- and image-to-video              |
 | `wan22-ti2v-5b:q8`    | 20    | ~18 GB            | Q8_0 5B; 8-12 GB cards at reduced settings   |
+| `wan22-ti2v-5b:turbo` | 4     | ~22.8 GB          | Self-Forcing 4-step distill, no CFG          |
 | `wan22-t2v-a14b:q5`   | 4     | ~36 GB            | 480p16 text-to-video, 4-step Lightning tier  |
 | `wan22-t2v-a14b:q8`   | 20    | ~42 GB            | Same weights at Q8_0, no distill             |
 | `wan22-t2v-a14b:q4`   | 4     | ~33 GB            | Q4_K_M Lightning; 12-16 GB needs reduced use |
@@ -81,6 +82,10 @@ mold run wan21-t2v-1.3b "a red fox trotting through fresh snow, golden hour"
 # 720p24, 121 frames — Wan 2.2 5B
 mold run wan22-ti2v-5b "aerial view of waves breaking on a black sand beach" \
   --width 1280 --height 704 --frames 121 --fps 24
+
+# The same clip on the 4-step distill: 4 steps at guidance 1.0, so 4 forwards
+# instead of 20 x 2. Image-to-video works the same way.
+mold run wan22-ti2v-5b:turbo "aerial view of waves breaking on a black sand beach"
 
 # Wan 2.2 A14B, 4-step Lightning tier
 mold run wan22-t2v-a14b:q5 "a paper boat drifting down a rain gutter"
@@ -298,6 +303,22 @@ for the whole schedule — except an explicit 3.5 on the quality tier, which is
 indistinguishable from the default on the wire and selects the per-expert
 pair. The Lightning tiers (default 1.0) treat every value, 3.5 included, as
 an explicit uniform choice.
+
+### The Turbo tier on 24 GB
+
+Measured on an RTX 4090 at the tier's own defaults (1280x704, 24 fps,
+4 steps, guidance 1.0):
+
+| Run                  | Time    | Peak VRAM                                  |
+| -------------------- | ------- | ------------------------------------------ |
+| Text-to-video, 121f  | 160.7 s | 18,986 MiB                                 |
+| Image-to-video, 81f  | 92.0 s  | fits                                       |
+| Image-to-video, 121f | refused | ~24.9 GB estimated against ~24.8 GB usable |
+
+Image-to-video at the full 121-frame default does not fit a 24 GB card at this
+weight class — `wan22-ti2v-5b:fp16` is refused at the identical estimate, so
+this is the fp16-weight envelope rather than anything the distill changes. Use
+`--frames 81`, or the `:q8` tier, which carries ~4.5 GB less of transformer.
 
 The A14B frame defaults are the measured 24 GB envelope, not the checkpoint's
 trained 81-frame clip length: on an RTX 4090 the `:q5` pair peaks at

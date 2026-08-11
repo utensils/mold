@@ -165,25 +165,27 @@ impl WanExpertPair {
 /// GGUF is chosen by extension, which is how the whole ecosystem labels these
 /// files; there is no in-band marker to prefer. The two containers apply
 /// adapters differently — see [`crate::wan::lora`] — but that is invisible here.
+/// `files` is every file the DiT's weights span. A diffusers export shards
+/// the transformer, so passing only the first would fail on whichever tensor
+/// landed in a later shard — `Wan2.2-TI2V-5B-Turbo-Diffusers` puts
+/// `blocks.29.ffn.net.2.weight` and the output projection in a second file.
+/// GGUF is always one file by construction.
 pub(crate) fn load_transformer(
-    path: &Path,
+    files: &[PathBuf],
     config: WanTransformerConfig,
     device: &Device,
     dtype: DType,
     loras: &WanLoraRegistry,
 ) -> Result<WanTransformer> {
-    let transformer = if is_gguf(path) {
-        WanTransformer::from_gguf_with_loras(path, config, device, loras)
+    let first = files
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Wan: no transformer weight files supplied"))?;
+    let transformer = if is_gguf(first) {
+        WanTransformer::from_gguf_with_loras(first, config, device, loras)
     } else {
-        WanTransformer::from_safetensors_with_loras(
-            std::slice::from_ref(&path.to_path_buf()),
-            config,
-            device,
-            dtype,
-            loras,
-        )
+        WanTransformer::from_safetensors_with_loras(files, config, device, dtype, loras)
     };
-    transformer.with_context(|| format!("loading Wan transformer {}", path.display()))
+    transformer.with_context(|| format!("loading Wan transformer {}", first.display()))
 }
 
 pub(crate) fn is_gguf(path: &Path) -> bool {
@@ -302,7 +304,15 @@ impl WanExperts {
                     let started = std::time::Instant::now();
                     let slot = pair.slot(role);
                     let transformer =
-                        load_transformer(&slot.path, config.clone(), device, *dtype, &slot.loras)?;
+                        // A14B experts are always one file each; a sharded
+                        // pair is not something the ecosystem publishes.
+                        load_transformer(
+                            std::slice::from_ref(&slot.path),
+                            config.clone(),
+                            device,
+                            *dtype,
+                            &slot.loras,
+                        )?;
                     progress.phase_done(ProgressPhase::ModelLoad, &stage, started.elapsed());
                     if swapping {
                         progress.info(&format!(

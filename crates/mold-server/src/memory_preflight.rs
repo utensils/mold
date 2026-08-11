@@ -1191,7 +1191,7 @@ pub(crate) fn estimate_generation_memory_for_request(
     // conservative A14B fallback.
     let wan_geometry = hint
         .filter(|h| h.family == ActivationFamily::WanVideo)
-        .and_then(|_| crate::wan_admission::checkpoint_geometry_cached(&paths.transformer));
+        .and_then(|_| crate::wan_admission::checkpoint_geometry_cached(paths));
     let activation = request_sensitive_activation_memory_with_wan_geometry(
         req,
         hint,

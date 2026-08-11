@@ -134,7 +134,34 @@ fn header_shapes(path: &Path) -> Result<Vec<(String, Vec<usize>)>> {
 /// recognizes; the caller keeps its conservative fallback rather than
 /// inventing a shape.
 pub fn activation_geometry(path: &Path) -> Option<crate::device::WanActivationGeometry> {
-    let config = detect_transformer_config(path).ok()?;
+    activation_geometry_across(std::slice::from_ref(&path.to_path_buf()))
+}
+
+/// Every file the DiT's weights live in: the primary plus any shards.
+///
+/// A diffusers export splits the transformer, and the split does not respect
+/// the detection probe set, so anything reading the architecture out of the
+/// header has to see the whole set rather than the first file. Deduped and
+/// existence-filtered because a config may name the primary and the shards
+/// with overlap, or name a file that is not on disk yet.
+pub fn transformer_files(paths: &mold_core::ModelPaths) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = Vec::with_capacity(1 + paths.transformer_shards.len());
+    for candidate in std::iter::once(&paths.transformer).chain(paths.transformer_shards.iter()) {
+        if candidate.is_file() && !files.contains(candidate) {
+            files.push(candidate.clone());
+        }
+    }
+    if files.is_empty() {
+        files.push(paths.transformer.clone());
+    }
+    files
+}
+
+/// [`activation_geometry`] over a checkpoint that may span shard files.
+pub fn activation_geometry_across(
+    paths: &[PathBuf],
+) -> Option<crate::device::WanActivationGeometry> {
+    let config = detect_transformer_config_across(paths).ok()?;
     let vae = match config.in_dim {
         48 => crate::device::WanVaeGeneration::V22,
         16 | 36 => crate::device::WanVaeGeneration::V21,
@@ -306,31 +333,79 @@ fn resolve_negative_prompt(requested: Option<&str>) -> &str {
 /// - `head.head.weight` `[out_dim * patch, dim]` gives the output channels.
 /// - The highest `blocks.{i}.` index gives the depth.
 pub(crate) fn detect_transformer_config(path: &Path) -> Result<WanTransformerConfig> {
+    detect_transformer_config_across(std::slice::from_ref(&path.to_path_buf()))
+}
+
+/// Detect the config from a checkpoint that may span several shard files and
+/// may be in any of the layouts [`classify_key_layout`] knows.
+///
+/// Two things force this over the single-file original-layout probe it
+/// replaces, and both are properties of real published checkpoints:
+///
+/// - **Shards.** A diffusers export splits the DiT across files, and the
+///   split does not respect the probe set: `Wan2.2-TI2V-5B-Turbo-Diffusers`
+///   puts `proj_out.weight` — the output-channel probe — alone in a second
+///   89 MB shard. Reading only the first file cannot see it.
+/// - **Layout.** #803 taught the *loader* to translate diffusers names, but
+///   detection runs first and still demanded the original spelling, so a
+///   diffusers checkpoint failed on `blocks.0.ffn.0.weight` before the
+///   translating loader was ever reached. Every probe is therefore resolved
+///   through the same rename table the loader uses.
+pub(crate) fn detect_transformer_config_across(paths: &[PathBuf]) -> Result<WanTransformerConfig> {
+    use crate::wan::model::transformer::{classify_key_layout, original_to_diffusers};
+
+    let first = paths
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Wan DiT: no transformer files supplied"))?;
+    let mut shapes: Vec<(String, Vec<usize>)> = Vec::new();
+    for path in paths {
+        shapes.extend(header_shapes(path)?);
+    }
+
+    // Classify from the merged names, so a checkpoint whose discriminating
+    // block lives in a later shard is still classified correctly.
+    let layout = classify_key_layout(|probe| shapes.iter().any(|(name, _)| name == probe))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} is not a Wan DiT checkpoint in any layout this build can address",
+                first.display()
+            )
+        })?;
+
     // The shipped Comfy-Org repacks store every DiT key under
-    // `model.diffusion_model.` (verified against the real
-    // wan2.1_t2v_1.3B_bf16.safetensors header) while the VAE and encoder
-    // files are bare. The loader already strips the prefix; detection must
-    // see the same names or the advertised checkpoint fails before the
-    // prefix-aware loader ever runs.
-    let shapes: Vec<(String, Vec<usize>)> = header_shapes(path)?
+    // `model.diffusion_model.` while the VAE and encoder files are bare. The
+    // loader strips that prefix; detection must see the same names.
+    let shapes: Vec<(String, Vec<usize>)> = shapes
         .into_iter()
-        .map(|(name, shape)| {
-            let bare = name
-                .strip_prefix("model.diffusion_model.")
-                .map(str::to_string)
-                .unwrap_or(name);
-            (bare, shape)
+        .filter_map(|(name, shape)| {
+            let bare = if layout.prefix.is_empty() {
+                Some(name)
+            } else {
+                name.strip_prefix(layout.prefix).map(str::to_string)
+            }?;
+            Some((bare, shape))
         })
         .collect();
+
     let find = |key: &str| -> Result<&Vec<usize>> {
+        // Probes are written in the original spelling; translate them into
+        // the checkpoint's own when it is a diffusers export. A key the table
+        // does not cover falls through unchanged, which fails by name below
+        // rather than silently matching something else.
+        let spelled = if layout.diffusers_names {
+            original_to_diffusers(key).unwrap_or_else(|| key.to_string())
+        } else {
+            key.to_string()
+        };
         shapes
             .iter()
-            .find(|(name, _)| name == key)
+            .find(|(name, _)| *name == spelled)
             .map(|(_, shape)| shape)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "{} is missing `{key}` — not a Wan DiT checkpoint in the original key layout",
-                    path.display()
+                    "{} is missing `{spelled}` — not a Wan DiT checkpoint in a layout this build \
+                     can address",
+                    first.display()
                 )
             })
     };
@@ -366,7 +441,7 @@ pub(crate) fn detect_transformer_config(path: &Path) -> Result<WanTransformerCon
         .filter_map(|index| index.parse::<usize>().ok())
         .max()
         .map(|highest| highest + 1)
-        .ok_or_else(|| anyhow::anyhow!("{} has no transformer blocks", path.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("{} has no transformer blocks", first.display()))?;
 
     // Every shipped Wan variant uses a 128-wide head; the checkpoint does not
     // record the head count directly, so derive it from that invariant.
@@ -1335,7 +1410,7 @@ impl WanEngine {
             progress.stage_start("Loading Wan transformer");
             let started = Instant::now();
             let transformer = crate::wan::experts::load_transformer(
-                &paths.transformer,
+                &transformer_files(paths),
                 config.clone(),
                 device,
                 dtype,
@@ -1399,7 +1474,7 @@ impl WanEngine {
         // ------------------------------------------------------------------
         let vae_generation = detect_vae_generation(&paths.vae)?;
         let vae_config = vae_generation.config();
-        let transformer_config = detect_transformer_config(&paths.transformer)?;
+        let transformer_config = detect_transformer_config_across(&transformer_files(paths))?;
         let shape = conditioning_shape(transformer_config.in_dim, vae_config.z_dim)?;
         let low_noise_expert = paths.low_noise_transformer.as_deref();
         // Wan 2.1 I2V is refused outright — it needs a CLIP-vision branch the
@@ -2987,6 +3062,11 @@ mod tests {
             ("text_embedding.0.weight".into(), vec![1536, 4096]),
             ("time_embedding.0.weight".into(), vec![1536, 256]),
             ("head.head.weight".into(), vec![64, 1536]),
+            // The layout discriminator. Every real Wan DiT carries it; the
+            // probe set alone cannot tell the original layout from the
+            // diffusers one, because `patch_embedding.weight` is spelled
+            // identically in both.
+            ("blocks.0.self_attn.q.weight".into(), vec![1536, 1536]),
         ];
         for layer in 0..30 {
             shapes.push((format!("blocks.{layer}.modulation"), vec![1, 6, 1536]));
@@ -3024,6 +3104,7 @@ mod tests {
             ("text_embedding.0.weight".into(), vec![5120, 4096]),
             ("time_embedding.0.weight".into(), vec![5120, 256]),
             ("head.head.weight".into(), vec![64, 5120]),
+            ("blocks.0.self_attn.q.weight".into(), vec![5120, 5120]),
         ];
         for layer in 0..40 {
             shapes.push((format!("blocks.{layer}.modulation"), vec![1, 6, 8]));
@@ -3086,6 +3167,10 @@ mod tests {
             (
                 "model.diffusion_model.head.head.weight".into(),
                 vec![64, 1536],
+            ),
+            (
+                "model.diffusion_model.blocks.0.self_attn.q.weight".into(),
+                vec![1536, 1536],
             ),
         ];
         for layer in 0..30 {
@@ -3186,6 +3271,62 @@ mod tests {
         assert_eq!(resolve_negative_prompt(Some("blurry")), "blurry");
     }
 
+    /// A sharded diffusers export must detect exactly like the native
+    /// single-file checkpoint it was converted from.
+    ///
+    /// Both halves of this are real properties of
+    /// `yetter-ai/Wan2.2-TI2V-5B-Turbo-Diffusers`, verified against its own
+    /// safetensors headers: the names are diffusers spellings, and the
+    /// output-channel probe sits alone in an 89 MB second shard. Before this,
+    /// detection read one file in one spelling, so the checkpoint failed on
+    /// `blocks.0.ffn.0.weight` — and admission, left without a geometry, fell
+    /// back to the A14B shape and refused it at ~67 GB.
+    #[test]
+    fn a_sharded_diffusers_export_detects_like_its_native_twin() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp
+            .path()
+            .join("diffusion_pytorch_model-00001-of-00002.safetensors");
+        let second = temp
+            .path()
+            .join("diffusion_pytorch_model-00002-of-00002.safetensors");
+
+        let mut head: Vec<(String, Vec<usize>)> = vec![
+            ("patch_embedding.weight".into(), vec![3072, 48, 1, 2, 2]),
+            ("blocks.0.ffn.net.0.proj.weight".into(), vec![14336, 3072]),
+            (
+                "condition_embedder.text_embedder.linear_1.weight".into(),
+                vec![3072, 4096],
+            ),
+            (
+                "condition_embedder.time_embedder.linear_1.weight".into(),
+                vec![3072, 256],
+            ),
+            ("blocks.0.attn1.to_q.weight".into(), vec![3072, 3072]),
+        ];
+        for layer in 0..30 {
+            head.push((
+                format!("blocks.{layer}.scale_shift_table"),
+                vec![1, 6, 3072],
+            ));
+        }
+        let borrowed: Vec<(&str, &[usize])> = head
+            .iter()
+            .map(|(name, shape)| (name.as_str(), shape.as_slice()))
+            .collect();
+        write_header(&first, &borrowed);
+        // The output projection alone in the second shard, as published.
+        write_header(&second, &[("proj_out.weight", &[192, 3072][..])]);
+
+        let config = detect_transformer_config_across(&[first.clone(), second.clone()]).unwrap();
+        assert_eq!(config, WanTransformerConfig::ti2v_5b());
+
+        // The first shard on its own is not enough, and says so by naming the
+        // probe it could not find rather than guessing an output width.
+        let error = detect_transformer_config(&first).unwrap_err().to_string();
+        assert!(error.contains("proj_out.weight"), "{error}");
+    }
+
     #[test]
     fn transformer_detection_reads_ti2v_geometry() {
         let temp = tempfile::tempdir().unwrap();
@@ -3197,6 +3338,7 @@ mod tests {
             ("time_embedding.0.weight".into(), vec![3072, 256]),
             // out_dim 48 x patch 4.
             ("head.head.weight".into(), vec![192, 3072]),
+            ("blocks.0.self_attn.q.weight".into(), vec![3072, 3072]),
         ];
         for layer in 0..30 {
             shapes.push((format!("blocks.{layer}.modulation"), vec![1, 6, 3072]));
@@ -3219,6 +3361,17 @@ mod tests {
         let path = temp.path().join("not-wan.safetensors");
         write_header(&path, &[("some.other.weight", &[16, 16])]);
         let error = detect_transformer_config(&path).unwrap_err().to_string();
+        // A file carrying no Wan attention projection at all is refused at
+        // classification, before any shape probe runs.
+        assert!(error.contains("not a Wan DiT checkpoint"), "{error}");
+
+        // One that classifies but is missing a probe is named by the probe.
+        let partial = temp.path().join("partial.safetensors");
+        write_header(
+            &partial,
+            &[("blocks.0.self_attn.q.weight", &[1536, 1536][..])],
+        );
+        let error = detect_transformer_config(&partial).unwrap_err().to_string();
         assert!(error.contains("patch_embedding.weight"), "{error}");
     }
 

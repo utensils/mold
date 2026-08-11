@@ -1656,7 +1656,7 @@ pub(crate) fn warm_execution_equivalence_cache(
     // checkpoint header, which is the same blocking work for the same reason.
     if family == "wan" {
         for inputs in prepared.by_device.values() {
-            crate::wan_admission::warm_checkpoint_geometry(&inputs.engine_paths.transformer);
+            crate::wan_admission::warm_checkpoint_geometry(&inputs.engine_paths);
         }
     }
 }
