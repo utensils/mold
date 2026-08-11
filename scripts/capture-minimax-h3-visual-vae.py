@@ -78,15 +78,18 @@ RAW_OUTPUT_SCHEMA = "mold.minimax-h3.visual-vae-raw-output.v1"
 CAPTURE_MARKER = "mold.minimax-h3.private-uat-visual-vae-f32-fp16-capture.v1"
 INPUT_IDENTITY_DOMAIN = b"mold.minimax-h3.visual-vae-input.v1\0"
 LAYER_ID = "visual-vae"
-CASE_ID = "visual-vae-320x320x5-seed42-v1"
+CASE_ID = "visual-vae-320x320x22-seed42-v1"
 PATTERN_ID = "rgb-affine-uint8-v1"
-CASE_FRAMES = 5
+CASE_FRAMES = 22
 CASE_HEIGHT = 320
 CASE_WIDTH = 320
+LATENT_FRAMES = 7
+LATENT_HEIGHT = 20
+LATENT_WIDTH = 20
 TILE_SIZE = 256
 TILE_OVERLAP = 64
 SEAMS = (64, 256)
-SEAM_FRAMES = (0, 2, 4)
+SEAM_FRAMES = (0, 10, 21)
 COMPONENT_IDS = (
     "official-video-vae-config",
     "official-video-vae-index",
@@ -115,7 +118,7 @@ MEASUREMENT_DTYPES = {
 TENSOR_HASH_ENCODING = "canonical-typed-le-v1"
 MOLD_BINARY = "h3_visual_vae_capture"
 MOLD_FEATURES = "dev-bins,h3-private-uat,cuda"
-MAXIMUM_RAW_OUTPUT_BYTES = 64 * 1024 * 1024
+MAXIMUM_RAW_OUTPUT_BYTES = 128 * 1024 * 1024
 MAXIMUM_REQUEST_BYTES = 64 * 1024
 REQUIRED_ENVIRONMENT = (
     "MOLD_H3_FIXTURE_ROOT",
@@ -466,7 +469,7 @@ def tensor_payload(torch: Any, key: str, tensor: Any, dtype: str) -> TensorPaylo
 
 
 def seam_probe(torch: Any, decoded: Any) -> Any:
-    if tuple(decoded.shape) != (1, 3, 5, 320, 320):
+    if tuple(decoded.shape) != (1, 3, CASE_FRAMES, CASE_HEIGHT, CASE_WIDTH):
         fail("decoded visual evidence has the wrong seam canvas")
     probes = (0, 63, 64, 255, 256, 319)
     values = []
@@ -483,6 +486,29 @@ def seam_probe(torch: Any, decoded: Any) -> Any:
                         )
                     )
     return torch.stack(values).to(device="cpu", dtype=torch.float32)
+
+
+def reviewed_payload_shapes() -> dict[str, tuple[int, ...]]:
+    latent = (1, 24, LATENT_FRAMES, LATENT_HEIGHT, LATENT_WIDTH)
+    return {
+        "pixel-normalization": (1, 3, CASE_FRAMES, CASE_HEIGHT, CASE_WIDTH),
+        "posterior-moments": (1, 48, LATENT_FRAMES, LATENT_HEIGHT, LATENT_WIDTH),
+        "posterior-seed-42": latent,
+        "posterior-sample": latent,
+        "posterior-fp16-roundtrip": latent,
+        "latent-normalization": latent,
+        "decoded-frames": (1, 3, CASE_FRAMES, CASE_HEIGHT, CASE_WIDTH),
+        "tile-seams": (len(SEAM_FRAMES) * 3 * len(SEAMS) * 6 * 4,),
+    }
+
+
+def validate_payload_shapes(payloads: Sequence[TensorPayload]) -> None:
+    expected = reviewed_payload_shapes()
+    if tuple(payload.key for payload in payloads) != MEASUREMENTS:
+        fail("visual capture tensor order drifted")
+    for payload in payloads:
+        if payload.shape != expected[payload.key]:
+            fail(f"{payload.key} shape differs from the reviewed visual case")
 
 
 def capture_oracle(
@@ -555,6 +581,7 @@ def capture_oracle(
         tensor_payload(torch, "decoded-frames", decoded, "float32"),
         tensor_payload(torch, "tile-seams", seams, "float32"),
     )
+    validate_payload_shapes(payloads)
     del vae
     torch.cuda.empty_cache()
     return payloads
@@ -680,8 +707,7 @@ def read_raw_output_bytes(
     ):
         fail("Mold raw visual capture case differs from its request")
     payloads = tuple(decode_raw_tensor(item) for item in raw_case["tensors"])
-    if tuple(payload.key for payload in payloads) != MEASUREMENTS:
-        fail("Mold raw visual capture tensor order drifted")
+    validate_payload_shapes(payloads)
     return payloads
 
 

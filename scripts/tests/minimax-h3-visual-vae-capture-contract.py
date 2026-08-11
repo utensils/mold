@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+import math
 import pathlib
 import stat
 import struct
@@ -93,7 +94,11 @@ class VisualCaptureContract(unittest.TestCase):
     def test_case_identity_binds_geometry_tiling_and_seam_plan(self) -> None:
         case = producer.build_case()
         self.assertEqual(case["case_id"], producer.CASE_ID)
-        self.assertEqual((case["frames"], case["height"], case["width"]), (5, 320, 320))
+        self.assertEqual((case["frames"], case["height"], case["width"]), (22, 320, 320))
+        self.assertEqual(
+            (case["frames"] - 5) // 17 * 5 + 2,
+            producer.LATENT_FRAMES,
+        )
         self.assertRegex(case["input_sha256"], r"^[0-9a-f]{64}$")
         original = producer.TILE_OVERLAP
         try:
@@ -192,12 +197,40 @@ class VisualCaptureContract(unittest.TestCase):
             path = pathlib.Path(directory) / "raw.json"
             path.write_text(json.dumps(raw_document(case)), encoding="utf-8")
             path.chmod(0o600)
-            observed = producer.read_raw_output_bytes(
-                path.read_bytes(), "a" * 64, "b" * 40, "cuda:0", case
-            )
+            with mock.patch.object(producer, "validate_payload_shapes") as validate:
+                observed = producer.read_raw_output_bytes(
+                    path.read_bytes(), "a" * 64, "b" * 40, "cuda:0", case
+                )
+            validate.assert_called_once_with(observed)
             self.assertEqual(
                 tuple(item.key for item in observed), producer.MEASUREMENTS
             )
+
+    def test_reviewed_tensor_shapes_bind_the_22_to_7_round_trip(self) -> None:
+        expected = producer.reviewed_payload_shapes()
+        payloads = tuple(
+            producer.TensorPayload(key, expected[key], dtype, b"")
+            for key, dtype in producer.MEASUREMENT_DTYPES.items()
+        )
+        producer.validate_payload_shapes(payloads)
+        def base64_size(item: producer.TensorPayload) -> int:
+            raw_bytes = math.prod(item.shape) * (
+                2 if item.dtype == "float16" else 4
+            )
+            return 4 * ((raw_bytes + 2) // 3)
+
+        base64_bytes = sum(base64_size(item) for item in payloads)
+        self.assertGreater(base64_bytes, 64 * 1024 * 1024)
+        self.assertLess(base64_bytes + 1024 * 1024, producer.MAXIMUM_RAW_OUTPUT_BYTES)
+        changed = list(payloads)
+        changed[1] = producer.TensorPayload(
+            changed[1].key,
+            (1, 48, 2, 20, 20),
+            changed[1].dtype,
+            b"",
+        )
+        with self.assertRaisesRegex(producer.CaptureFailure, "reviewed visual case"):
+            producer.validate_payload_shapes(changed)
 
     def test_raw_output_rejects_bf16_visual_evidence(self) -> None:
         case = producer.build_case()
@@ -238,9 +271,10 @@ class VisualCaptureContract(unittest.TestCase):
             path.unlink()
             path.write_text('{"replaced":true}', encoding="utf-8")
             path.chmod(0o400)
-            observed = producer.read_raw_output_bytes(
-                retained, "a" * 64, "b" * 40, "cuda:0", case
-            )
+            with mock.patch.object(producer, "validate_payload_shapes"):
+                observed = producer.read_raw_output_bytes(
+                    retained, "a" * 64, "b" * 40, "cuda:0", case
+                )
             self.assertEqual(tuple(item.key for item in observed), producer.MEASUREMENTS)
             with self.assertRaises(Exception):
                 snapshot.revalidate()
@@ -353,7 +387,7 @@ class VisualCaptureContract(unittest.TestCase):
 
     def test_seam_probe_is_complete_and_bounded(self) -> None:
         source = RUST_ADAPTER_PATH.read_text(encoding="utf-8")
-        self.assertIn("for frame in [0usize, 2, 4]", source)
+        self.assertIn("for frame in SEAM_FRAMES", source)
         self.assertIn("for seam in [64usize, 256]", source)
         self.assertIn("let probe_axis = [0usize, 63, 64, 255, 256, 319]", source)
         expected = len(producer.SEAM_FRAMES) * 3 * len(producer.SEAMS) * 6 * 4
