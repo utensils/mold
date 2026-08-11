@@ -269,9 +269,16 @@ positions, processor grids, and BF16 processor values. The oracle calls the
 pinned Diffusers `get_qwen3vl_prompt_embeds` adapter at
 `text_encoder_layer=50`; the Mold role compiles and invokes the isolated
 `h3_qwen_layer50_capture` binary from the exact clean checkout. That binary
-uses only `load_bf16_conditioner` over the complete official checkpoint and
-returns the unnormalized state after language layer 49. It rejects any model
-that is not BF16 or does not retain exactly 50 resident language layers. The
+uses only the private exact-BF16 streamed loader over the complete official
+checkpoint and returns the unnormalized state after language layer 49. The
+oracle retains the full BF16 state in host RAM and moves one official language
+layer at a time to CUDA through pinned Transformers module hooks. Mold keeps
+the embedding and vision modules resident, mmap-loads exactly one of the 50
+selected language layers for each production forward step, synchronizes before
+dropping it, and records a peak of one resident language layer. The streamed
+design is intended to fit a 46 GiB device without changing BF16 equations or
+using a quantized checkpoint; only real paired CUDA capture establishes the
+total peak including resident modules, activations, and allocator state. The
 deployment quantized conditioner is not an oracle and is not reachable from
 this adapter.
 
@@ -283,7 +290,9 @@ separately so each full model is released before the other is loaded:
     python3 scripts/capture-minimax-h3-qwen-layer50.py \
       capture --role mold --device cuda:0
 
-Before the oracle loads, the producer authenticates all 14 official text
+Preflight at least 96 GiB of available host RAM and 12 GiB of free device
+memory; do not start capture when either bound fails. Before the oracle loads,
+the producer authenticates all 14 official text
 encoder shards against revision-bound Hugging Face metadata and their LFS
 SHA-256 values. The Mold loader independently hashes and structurally accounts
 for the same full checkpoint. Both roles import Diffusers and Transformers only

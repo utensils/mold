@@ -3,6 +3,8 @@ use candle_nn::VarBuilder;
 
 use super::artifacts::ConditionerWeightLayout;
 use super::config::{H3ConditionerConfig, H3_SELECTED_LANGUAGE_LAYERS};
+#[cfg(feature = "h3-private-uat")]
+use super::text::Qwen3VlStreamingTextEncoder;
 use super::text::{Qwen3VlNvfp4Weights, Qwen3VlTextDimensions, Qwen3VlTextEncoder};
 use super::vision::{Qwen3VlVisionDimensions, Qwen3VlVisionModel};
 
@@ -51,6 +53,53 @@ pub struct H3Layer50Conditioner {
     dtype_profile: H3DTypeProfile,
 }
 
+trait H3TextBackend {
+    fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor>;
+    fn forward_embeds(
+        &self,
+        hidden: Tensor,
+        position_ids: &Tensor,
+        visual_indices: &[usize],
+        deepstack: Option<&[Tensor]>,
+        checkpoint: &mut dyn FnMut(ConditionerCheckpoint) -> Result<()>,
+    ) -> Result<Tensor>;
+}
+
+impl H3TextBackend for Qwen3VlTextEncoder {
+    fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
+        self.embed_tokens(input_ids)
+    }
+
+    fn forward_embeds(
+        &self,
+        hidden: Tensor,
+        position_ids: &Tensor,
+        visual_indices: &[usize],
+        deepstack: Option<&[Tensor]>,
+        checkpoint: &mut dyn FnMut(ConditionerCheckpoint) -> Result<()>,
+    ) -> Result<Tensor> {
+        self.forward_embeds(hidden, position_ids, visual_indices, deepstack, checkpoint)
+    }
+}
+
+#[cfg(feature = "h3-private-uat")]
+impl H3TextBackend for Qwen3VlStreamingTextEncoder {
+    fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
+        self.embed_tokens(input_ids)
+    }
+
+    fn forward_embeds(
+        &self,
+        hidden: Tensor,
+        position_ids: &Tensor,
+        visual_indices: &[usize],
+        deepstack: Option<&[Tensor]>,
+        checkpoint: &mut dyn FnMut(ConditionerCheckpoint) -> Result<()>,
+    ) -> Result<Tensor> {
+        self.forward_embeds(hidden, position_ids, visual_indices, deepstack, checkpoint)
+    }
+}
+
 impl H3Layer50Conditioner {
     pub fn new(config: &H3ConditionerConfig, vb: VarBuilder) -> Result<Self> {
         Self::new_with_weight_layout(config, vb, ConditionerWeightLayout::Official)
@@ -97,6 +146,68 @@ impl H3Layer50Conditioner {
 
     pub fn resident_language_layers(&self) -> usize {
         self.text.layer_count()
+    }
+
+    pub fn encode(
+        &self,
+        input: &H3ConditionerInput,
+        checkpoint: &mut dyn FnMut(ConditionerCheckpoint) -> Result<()>,
+    ) -> Result<Tensor> {
+        encode_conditioner(&self.text, &self.vision, input, checkpoint)
+    }
+}
+
+#[cfg(feature = "h3-private-uat")]
+pub struct H3Layer50StreamingConditioner {
+    text: Qwen3VlStreamingTextEncoder,
+    vision: Qwen3VlVisionModel,
+    dtype_profile: H3DTypeProfile,
+}
+
+#[cfg(feature = "h3-private-uat")]
+impl H3Layer50StreamingConditioner {
+    pub(super) fn new(
+        config: &H3ConditionerConfig,
+        vb: VarBuilder,
+        checkpoint_paths: Vec<std::path::PathBuf>,
+    ) -> Result<Self> {
+        config
+            .validate()
+            .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        let vision_dimensions = Qwen3VlVisionDimensions::from_h3(config);
+        let text_dimensions = Qwen3VlTextDimensions::from_h3(config);
+        let vision = Qwen3VlVisionModel::new(&vision_dimensions, vb.pp("model").pp("visual"))?;
+        let text = Qwen3VlStreamingTextEncoder::new(
+            &text_dimensions,
+            vb.pp("model").pp("language_model"),
+            checkpoint_paths,
+        )?;
+        let parameter_dtype = vb.dtype();
+        Ok(Self {
+            text,
+            vision,
+            dtype_profile: H3DTypeProfile {
+                parameter_dtype,
+                vision_input_dtype: DType::F32,
+                rotary_compute_dtype: DType::F32,
+                vision_attention_dtype: parameter_dtype,
+                language_attention_dtype: parameter_dtype,
+                attention_softmax_dtype: DType::F32,
+                output_dtype: parameter_dtype,
+            },
+        })
+    }
+
+    pub fn dtype_profile(&self) -> H3DTypeProfile {
+        self.dtype_profile
+    }
+
+    pub fn language_layer_count(&self) -> usize {
+        self.text.layer_count()
+    }
+
+    pub const fn peak_resident_language_layers(&self) -> usize {
+        1
     }
 
     pub fn encode(
@@ -170,7 +281,7 @@ impl H3QwenNvfp4Layer50Conditioner {
 }
 
 fn encode_conditioner(
-    text: &Qwen3VlTextEncoder,
+    text: &impl H3TextBackend,
     vision: &Qwen3VlVisionModel,
     input: &H3ConditionerInput,
     checkpoint: &mut dyn FnMut(ConditionerCheckpoint) -> Result<()>,

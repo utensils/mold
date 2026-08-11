@@ -19,6 +19,8 @@ use super::config::{
     ConfigError, H3ConditionerConfig, H3_BF16_PARAMETER_BYTES, H3_FULL_CHECKPOINT_BYTES,
 };
 use super::model::H3Layer50Conditioner;
+#[cfg(feature = "h3-private-uat")]
+use super::model::H3Layer50StreamingConditioner;
 use super::presentation::{
     H3_IMAGE_PAD_TOKEN_ID, H3_VIDEO_PAD_TOKEN_ID, H3_VISION_END_TOKEN_ID, H3_VISION_START_TOKEN_ID,
 };
@@ -47,6 +49,13 @@ pub enum H3LoadError {
 
 pub struct LoadedH3Conditioner {
     pub model: H3Layer50Conditioner,
+    pub tokenizer: Arc<Tokenizer>,
+    pub key_report: CheckpointKeyReport,
+}
+
+#[cfg(feature = "h3-private-uat")]
+pub struct LoadedH3StreamingConditioner {
+    pub model: H3Layer50StreamingConditioner,
     pub tokenizer: Arc<Tokenizer>,
     pub key_report: CheckpointKeyReport,
 }
@@ -160,6 +169,40 @@ pub unsafe fn load_bf16_conditioner(
     // SAFETY: forwarded from this function's caller.
     let model = unsafe { load_prepared_bf16_conditioner(&prepared, device)? };
     Ok(LoadedH3Conditioner {
+        model,
+        tokenizer: Arc::clone(&prepared.tokenizer),
+        key_report: prepared.key_report.clone(),
+    })
+}
+
+/// Load the private qualification conditioner with only one language layer
+/// resident on the execution device at a time.
+///
+/// # Safety
+///
+/// Every checkpoint path must remain bound to the same authenticated file for
+/// the returned conditioner's complete lifetime because each layer is mmaped
+/// again immediately before use. The private adapter supplies retained
+/// descriptor paths and holds those descriptors through final revalidation.
+#[cfg(feature = "h3-private-uat")]
+pub unsafe fn load_streamed_bf16_conditioner(
+    artifacts: &ConditionerArtifacts,
+    device: &Device,
+) -> Result<LoadedH3StreamingConditioner, H3LoadError> {
+    let prepared = prepare_conditioner_assets(artifacts)?;
+    prepared
+        .artifacts
+        .verify_metadata(&prepared.verified_metadata)?;
+    let checkpoint_paths = prepared
+        .artifacts
+        .checkpoint_shards()
+        .map(|artifact| artifact.path().to_path_buf())
+        .collect::<Vec<_>>();
+    let references = checkpoint_paths.iter().collect::<Vec<_>>();
+    // SAFETY: forwarded from the caller after the identities were rechecked.
+    let builder = unsafe { VarBuilder::from_mmaped_safetensors(&references, DType::BF16, device)? };
+    let model = H3Layer50StreamingConditioner::new(&prepared.config, builder, checkpoint_paths)?;
+    Ok(LoadedH3StreamingConditioner {
         model,
         tokenizer: Arc::clone(&prepared.tokenizer),
         key_report: prepared.key_report.clone(),

@@ -106,6 +106,10 @@ pub use loader::{
     prepare_conditioner_assets_with_progress, validate_processor_assets, H3LoadError,
     LoadedH3Conditioner, PreparedH3ConditionerAssets,
 };
+#[cfg(feature = "h3-private-uat")]
+pub use loader::{load_streamed_bf16_conditioner, LoadedH3StreamingConditioner};
+#[cfg(feature = "h3-private-uat")]
+pub use model::H3Layer50StreamingConditioner;
 pub use model::{
     ConditionerCheckpoint, H3ConditionerInput, H3DTypeProfile, H3Layer50Conditioner, H3VisionInput,
 };

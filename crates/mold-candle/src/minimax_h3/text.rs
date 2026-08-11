@@ -2,6 +2,8 @@ use candle::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::{
     embedding, linear_b, rms_norm, Activation, Embedding, Linear, Module, RmsNorm, VarBuilder,
 };
+#[cfg(feature = "h3-private-uat")]
+use std::path::PathBuf;
 
 use super::comfy_quant::{H3ComfyInt8TensorwiseEmbedding, H3ComfyNvfp4AwqLinear};
 use super::config::{H3ConditionerConfig, H3_SELECTED_LANGUAGE_LAYERS};
@@ -564,6 +566,102 @@ impl Qwen3VlTextEncoder {
         }
         // Intentionally no final RMS norm: H3 consumes hidden_states[50], the
         // unnormalized state immediately after decoder layer 49.
+        Ok(hidden)
+    }
+}
+
+#[cfg(feature = "h3-private-uat")]
+pub(super) struct Qwen3VlStreamingTextEncoder {
+    embed_tokens: Qwen3VlEmbedding,
+    rotary: MultimodalRotaryEmbedding,
+    dimensions: Qwen3VlTextDimensions,
+    checkpoint_paths: Vec<PathBuf>,
+    device: Device,
+}
+
+#[cfg(feature = "h3-private-uat")]
+impl Qwen3VlStreamingTextEncoder {
+    pub(super) fn new(
+        config: &Qwen3VlTextDimensions,
+        vb: VarBuilder,
+        checkpoint_paths: Vec<PathBuf>,
+    ) -> Result<Self> {
+        config.validate()?;
+        if checkpoint_paths.is_empty() {
+            candle::bail!("H3 streamed Qwen capture requires checkpoint shards");
+        }
+        Ok(Self {
+            embed_tokens: Qwen3VlEmbedding::Dense(embedding(
+                config.vocab_size,
+                config.hidden_size,
+                vb.pp("embed_tokens"),
+            )?),
+            rotary: MultimodalRotaryEmbedding::new(config, &vb)?,
+            dimensions: config.clone(),
+            checkpoint_paths,
+            device: vb.device().clone(),
+        })
+    }
+
+    pub(super) fn layer_count(&self) -> usize {
+        self.dimensions.num_layers
+    }
+
+    pub(super) fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
+        self.embed_tokens.forward(input_ids)
+    }
+
+    fn load_layer(&self, index: usize) -> Result<DecoderLayer> {
+        let paths = self.checkpoint_paths.iter().collect::<Vec<_>>();
+        // SAFETY: the private capture loader authenticates and retains the
+        // immutable checkpoint identity for this conditioner's lifetime.
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&paths, DType::BF16, &self.device)? }
+            .pp("model")
+            .pp("language_model")
+            .pp("layers")
+            .pp(index);
+        DecoderLayer::new(&self.dimensions, vb)
+    }
+
+    pub(super) fn forward_embeds(
+        &self,
+        mut hidden: Tensor,
+        position_ids: &Tensor,
+        visual_indices: &[usize],
+        deepstack: Option<&[Tensor]>,
+        checkpoint: &mut dyn FnMut(ConditionerCheckpoint) -> Result<()>,
+    ) -> Result<Tensor> {
+        let (batch, sequence, width) = hidden.dims3()?;
+        if width != self.dimensions.hidden_size || batch != 1 {
+            candle::bail!(
+                "H3 streamed text embeddings have shape {:?}, expected (1, sequence, {})",
+                hidden.dims(),
+                self.dimensions.hidden_size
+            );
+        }
+        if deepstack.is_some_and(|features| features.len() > self.layer_count()) {
+            candle::bail!("H3 DeepStack has more feature layers than language layers");
+        }
+        let (cos, sin) = self.rotary.cos_sin(position_ids)?;
+        let causal = causal_mask(sequence, hidden.device())?;
+        for index in 0..self.layer_count() {
+            let layer = self.load_layer(index)?;
+            hidden = layer.forward(&hidden, &cos, &sin, &causal)?;
+            if let Some(features) = deepstack.and_then(|features| features.get(index)) {
+                hidden = inject_deepstack(
+                    hidden,
+                    visual_indices,
+                    features,
+                    self.dimensions.hidden_size,
+                )?;
+            }
+            self.device.synchronize()?;
+            drop(layer);
+            checkpoint(ConditionerCheckpoint::LanguageLayer {
+                completed: index + 1,
+                total: self.layer_count(),
+            })?;
+        }
         Ok(hidden)
     }
 }

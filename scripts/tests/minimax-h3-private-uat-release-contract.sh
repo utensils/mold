@@ -79,8 +79,8 @@ if ! grep -Fq 'path = "src/bin/h3_qwen_layer50_capture.rs"' <<<"$qwen_capture_bi
   fail "the exact-BF16 Qwen capture adapter is reachable outside private development builds"
 fi
 require_text crates/mold-inference/src/bin/h3_qwen_layer50_capture.rs \
-  'load_bf16_conditioner' \
-  "the Qwen layer-50 capture adapter does not use the official dense BF16 loader"
+  'load_streamed_bf16_conditioner' \
+  "the Qwen layer-50 capture adapter does not use the official streamed BF16 loader"
 require_text crates/mold-inference/src/bin/h3_qwen_layer50_capture.rs \
   'Device::new_cuda' \
   "the exact-BF16 Qwen capture adapter does not fail closed to CUDA execution"
