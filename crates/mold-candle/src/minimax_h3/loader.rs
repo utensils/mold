@@ -237,7 +237,7 @@ pub fn prepare_conditioner_assets_with_progress(
     let tokenizer = Tokenizer::from_file(tokenizer_artifact.path())
         .map(Arc::new)
         .map_err(|error| H3LoadError::Tokenizer(error.to_string()))?;
-    validate_tokenizer(&tokenizer)?;
+    validate_tokenizer(&tokenizer, config.text_config.vocab_size)?;
 
     let checkpoint_paths = artifacts
         .checkpoint_shards()
@@ -369,13 +369,18 @@ fn validate_tokenizer_config(bytes: &[u8]) -> Result<(), H3LoadError> {
     Ok(())
 }
 
-fn validate_tokenizer(tokenizer: &Tokenizer) -> Result<(), H3LoadError> {
-    if tokenizer.get_vocab_size(true) != 151_936 {
-        return Err(H3LoadError::Tokenizer(format!(
-            "vocabulary has {} entries, expected 151936",
-            tokenizer.get_vocab_size(true)
-        )));
-    }
+fn validate_tokenizer(
+    tokenizer: &Tokenizer,
+    model_embedding_capacity: usize,
+) -> Result<(), H3LoadError> {
+    let vocabulary = tokenizer.get_vocab(true);
+    let maximum_token_id = vocabulary.values().copied().max();
+    validate_tokenizer_capacity(
+        tokenizer.get_vocab_size(false),
+        tokenizer.get_vocab_size(true),
+        maximum_token_id,
+        model_embedding_capacity,
+    )?;
     for (token, expected) in [
         ("<|vision_start|>", H3_VISION_START_TOKEN_ID),
         ("<|vision_end|>", H3_VISION_END_TOKEN_ID),
@@ -388,6 +393,32 @@ fn validate_tokenizer(tokenizer: &Tokenizer) -> Result<(), H3LoadError> {
                 "{token} resolves to {found:?}, expected {expected}"
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_tokenizer_capacity(
+    base_vocabulary_size: usize,
+    vocabulary_size_with_added_tokens: usize,
+    maximum_token_id: Option<u32>,
+    model_embedding_capacity: usize,
+) -> Result<(), H3LoadError> {
+    const BASE_VOCABULARY_SIZE: usize = 151_643;
+    const VOCABULARY_SIZE_WITH_ADDED_TOKENS: usize = 151_669;
+    if base_vocabulary_size != BASE_VOCABULARY_SIZE
+        || vocabulary_size_with_added_tokens != VOCABULARY_SIZE_WITH_ADDED_TOKENS
+    {
+        return Err(H3LoadError::Tokenizer(format!(
+            "vocabulary has {base_vocabulary_size} base and {vocabulary_size_with_added_tokens} total entries, expected {BASE_VOCABULARY_SIZE} and {VOCABULARY_SIZE_WITH_ADDED_TOKENS}"
+        )));
+    }
+    if maximum_token_id.map(|value| value as usize) != Some(VOCABULARY_SIZE_WITH_ADDED_TOKENS - 1)
+        || model_embedding_capacity != 151_936
+        || vocabulary_size_with_added_tokens > model_embedding_capacity
+    {
+        return Err(H3LoadError::Tokenizer(format!(
+            "token IDs end at {maximum_token_id:?} and must remain dense below model embedding capacity {model_embedding_capacity}"
+        )));
     }
     Ok(())
 }
@@ -697,6 +728,22 @@ mod tests {
         let wrong = IMAGE.replace("\"patch_size\":16", "\"patch_size\":14");
         let error = validate_processor_assets(wrong.as_bytes(), VIDEO.as_bytes()).unwrap_err();
         assert!(error.to_string().contains("patch-16"));
+    }
+
+    #[test]
+    fn official_tokenizer_vocabulary_is_distinct_from_embedding_capacity() {
+        validate_tokenizer_capacity(151_643, 151_669, Some(151_668), 151_936).unwrap();
+        for invalid in [
+            (151_642, 151_669, Some(151_668), 151_936),
+            (151_643, 151_670, Some(151_669), 151_936),
+            (151_643, 151_669, Some(151_936), 151_936),
+            (151_643, 151_669, Some(151_668), 151_935),
+            (151_643, 151_669, None, 151_936),
+        ] {
+            assert!(
+                validate_tokenizer_capacity(invalid.0, invalid.1, invalid.2, invalid.3).is_err()
+            );
+        }
     }
 
     #[test]
