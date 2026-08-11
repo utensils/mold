@@ -1842,7 +1842,9 @@ def build_bundle(
                 "authority_tier": "exact-full-bf16",
                 "relative_path": path.relative_to(fixture_root).as_posix(),
                 "sha256": sha256_bytes(encoded),
-                "component_index_sha256": TEXT_ENCODER_INDEX_SHA256,
+                "component_index_sha256": document["input"][
+                    "component_index_sha256"
+                ],
                 "component_indexes": document["input"]["component_indexes"],
                 "tensor": expected_tensor_summary(first),
                 "tolerance": {

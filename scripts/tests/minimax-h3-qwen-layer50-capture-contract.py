@@ -248,6 +248,19 @@ class ProducerContractTests(unittest.TestCase):
                 [fixture["layer"] for fixture in bundle["fixtures"]],
                 [PRODUCER.LAYER_ID, PRODUCER.LAYER_ID],
             )
+            for fixture, (_, document, _) in zip(
+                bundle["fixtures"], documents, strict=True
+            ):
+                self.assertEqual(
+                    fixture["component_index_sha256"],
+                    document["input"]["component_index_sha256"],
+                )
+                self.assertEqual(
+                    fixture["component_index_sha256"],
+                    CONFORMANCE.component_authority_set_sha256(
+                        fixture["component_indexes"]
+                    ),
+                )
 
     def test_raw_output_rejects_authority_and_input_drift(self) -> None:
         case = synthetic_case(PRODUCER.TEXT_CASE_ID)
