@@ -101,6 +101,11 @@ name = "h3_visual_vae_capture"
 path = "src/bin/h3_visual_vae_capture.rs"
 required-features = ["dev-bins", "h3-private-uat", "cuda"]
 
+[[bin]]
+name = "h3_audio_vae_capture"
+path = "src/bin/h3_audio_vae_capture.rs"
+required-features = ["dev-bins", "h3-private-uat"]
+
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.21.0" }
 mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.21.0" }

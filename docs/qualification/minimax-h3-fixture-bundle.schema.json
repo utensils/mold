@@ -115,7 +115,12 @@
         "id": { "type": "string", "minLength": 1 },
         "layer": { "type": "string", "minLength": 1 },
         "authority_tier": {
-          "enum": ["exact-full-bf16", "quantized-structural", "synthetic"]
+          "enum": [
+            "exact-full-bf16",
+            "exact-full-fp32",
+            "quantized-structural",
+            "synthetic"
+          ]
         },
         "relative_path": { "type": "string", "minLength": 1 },
         "sha256": { "$ref": "#/$defs/sha256" },

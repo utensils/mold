@@ -229,7 +229,12 @@
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "authority_tier": {
-          "enum": ["exact-full-bf16", "quantized-structural", "synthetic"]
+          "enum": [
+            "exact-full-bf16",
+            "exact-full-fp32",
+            "quantized-structural",
+            "synthetic"
+          ]
         },
         "input_contract": { "$ref": "#/$defs/input_contract" },
         "oracle_adapter": { "$ref": "#/$defs/oracle_adapter" },

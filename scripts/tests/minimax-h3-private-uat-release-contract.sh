@@ -115,6 +115,32 @@ if grep -Eq 'validate_comfy_weight_file|OfficialComfySource' \
   crates/mold-inference/src/bin/h3_visual_vae_capture.rs; then
   fail "the exact visual-VAE capture adapter references the Comfy deployment authority"
 fi
+audio_capture_bin=$(sed -n \
+  '/name = "h3_audio_vae_capture"/,/^$/p' \
+  crates/mold-inference/Cargo.toml)
+if ! grep -Fq 'path = "src/bin/h3_audio_vae_capture.rs"' <<<"$audio_capture_bin" \
+  || ! grep -Fq 'required-features = ["dev-bins", "h3-private-uat"]' \
+    <<<"$audio_capture_bin"; then
+  fail "the exact-FP32 AudioVAE capture adapter is reachable outside private development builds"
+fi
+require_text crates/mold-inference/src/bin/h3_audio_vae_capture.rs \
+  'load_validated_audio_vae(' \
+  "the AudioVAE capture adapter does not use the validated production loader"
+require_text crates/mold-inference/src/bin/h3_audio_vae_capture.rs \
+  'DType::F32' \
+  "the exact-FP32 AudioVAE capture adapter does not fail closed to FP32 execution"
+require_text crates/mold-inference/src/bin/h3_audio_vae_capture.rs \
+  'Device::new_cuda' \
+  "the exact-FP32 AudioVAE capture adapter does not fail closed to CUDA execution"
+require_text crates/mold-inference/src/bin/h3_audio_vae_capture.rs \
+  'encode_with_phase_checkpoint' \
+  "the AudioVAE capture adapter bypasses the typed encode phase checkpoints"
+require_text crates/mold-inference/src/bin/h3_audio_vae_capture.rs \
+  'decode_with_phase_checkpoint' \
+  "the AudioVAE capture adapter bypasses the typed decode phase checkpoints"
+require_text crates/mold-inference/src/bin/h3_audio_vae_capture.rs \
+  'mold.minimax-h3.private-uat-exact-fp32-audio-vae-capture.v1' \
+  "the exact-FP32 AudioVAE capture adapter has no release-rejectable claim marker"
 require_text crates/mold-inference/src/minimax_h3/private_qualification.rs \
   '"mold.minimax-h3.private-uat-artifact-reader.v1"' \
   "the private H3 artifact reader has no release-rejectable claim marker"
@@ -635,6 +661,9 @@ require_text scripts/verify-h3-release-exclusion.sh \
 require_text scripts/verify-h3-release-exclusion.sh \
   "private_visual_vae_capture_marker='mold.minimax-h3.private-uat-visual-vae-f32-fp16-capture.v1'" \
   "published binary verification does not reject the visual-VAE capture marker"
+require_text scripts/verify-h3-release-exclusion.sh \
+  "private_audio_capture_marker='mold.minimax-h3.private-uat-exact-fp32-audio-vae-capture.v1'" \
+  "published binary verification does not reject the exact-FP32 AudioVAE capture marker"
 require_text .github/workflows/ci.yml \
   'cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_artifact_qualification -- -D warnings' \
   "CI does not compile the authorization-bound artifact qualifier"
@@ -650,6 +679,12 @@ require_text .github/workflows/ci.yml \
 require_text .github/workflows/ci.yml \
   'python3 scripts/tests/minimax-h3-visual-vae-capture-contract.py' \
   "CI does not run the visual-VAE capture contract"
+require_text .github/workflows/ci.yml \
+  'cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_audio_vae_capture -- -D warnings' \
+  "CUDA CI does not compile the exact-FP32 AudioVAE capture adapter"
+require_text .github/workflows/ci.yml \
+  'python3 scripts/tests/minimax-h3-audio-vae-capture-contract.py' \
+  "CI does not run the exact-FP32 AudioVAE capture contract"
 require_text .github/workflows/ci.yml \
   'cargo test -p mold-ai-inference --lib --features h3-private-uat minimax_h3' \
   "CI does not execute the private H3 foundation tests"
@@ -677,6 +712,9 @@ require_text docs/qualification/minimax-h3-conformance.md \
 require_text docs/qualification/minimax-h3-conformance.md \
   'capture-minimax-h3-visual-vae.py' \
   "the visual-VAE capture adapter has no operator runbook"
+require_text docs/qualification/minimax-h3-conformance.md \
+  'capture-minimax-h3-audio-vae.py' \
+  "the exact-FP32 AudioVAE capture adapter has no operator runbook"
 
 # Ref2VA may share the one-shot owner protocol, but it must retain a distinct
 # runtime qualification, ordered-reference authority, and publication fence.
@@ -711,6 +749,7 @@ private_qwen_support_marker='mold.minimax-h3.private-uat-qwen-support-loader.v1'
 private_runtime_record_marker='mold.minimax-h3.private-runtime-record-producer.v1'
 private_qwen_capture_marker='mold.minimax-h3.private-uat-exact-bf16-qwen-layer50-capture.v1'
 private_visual_vae_capture_marker='mold.minimax-h3.private-uat-visual-vae-f32-fp16-capture.v1'
+private_audio_capture_marker='mold.minimax-h3.private-uat-exact-fp32-audio-vae-capture.v1'
 printf '%s\n' "$ordinary_marker" >"$scratch_dir/ordinary"
 scripts/verify-h3-release-exclusion.sh "$scratch_dir/ordinary" >/dev/null
 printf '%s\n%s\n' "$ordinary_marker" "$private_marker" >"$scratch_dir/private"
@@ -736,6 +775,11 @@ printf '%s\n%s\n' "$ordinary_marker" "$private_visual_vae_capture_marker" \
   >"$scratch_dir/private-visual-vae-capture"
 if scripts/verify-h3-release-exclusion.sh "$scratch_dir/private-visual-vae-capture" >/dev/null 2>&1; then
   fail "release exclusion verifier accepted the visual-VAE capture adapter"
+fi
+printf '%s\n%s\n' "$ordinary_marker" "$private_audio_capture_marker" \
+  >"$scratch_dir/private-audio-capture"
+if scripts/verify-h3-release-exclusion.sh "$scratch_dir/private-audio-capture" >/dev/null 2>&1; then
+  fail "release exclusion verifier accepted the exact-FP32 AudioVAE capture adapter"
 fi
 
 echo "PASS: MiniMax H3 private-UAT release contract"
