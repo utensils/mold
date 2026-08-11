@@ -358,6 +358,25 @@ class AudioVaeCaptureContractTests(unittest.TestCase):
         with self.assertRaises(PRODUCER.BASE.CaptureFailure):
             PRODUCER.BASE.external_directory("fixture root", str(REPO_ROOT))
 
+    def test_shared_capture_dependency_is_hash_bound_and_in_adapter_identity(
+        self,
+    ) -> None:
+        self.assertEqual(
+            PRODUCER.BASE.sha256_file(PRODUCER.QWEN_PRODUCER_PATH),
+            PRODUCER.QWEN_PRODUCER_SHA256,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            changed = pathlib.Path(temporary) / "changed.py"
+            changed.write_text("CHANGED = True\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "reviewed capture dependency"):
+                PRODUCER.load_bound_module(
+                    "minimax_h3_audio_changed_dependency",
+                    changed,
+                    PRODUCER.QWEN_PRODUCER_SHA256,
+                )
+        source = PRODUCER_PATH.read_text(encoding="utf-8")
+        self.assertIn('"qwen_capture_dependency_sha256": QWEN_PRODUCER_SHA256', source)
+
     def test_exclusive_evidence_write_refuses_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = pathlib.Path(temporary) / "evidence.json"

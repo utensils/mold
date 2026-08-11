@@ -37,6 +37,9 @@ GPU_CONFORMANCE_TOOL_PATH = REPO_ROOT / "scripts" / "run-minimax-h3-gpu-conforma
 MANIFEST_PATH = (
     REPO_ROOT / "tests" / "fixtures" / "minimax_h3" / "conformance-manifest.json"
 )
+QWEN_PRODUCER_SHA256 = (
+    "bc85f8497219e4d7159ccf4e9e478cab28ba02b66db245afc78e603149440410"
+)
 
 DIFFUSERS_REVISION = "9c6a68c32b3b2a64db91800b624d33cec6e25ab8"
 MODEL_REVISION = "bfc8ed0353f5a9733be73e6b2c98ec0948195b86"
@@ -123,7 +126,23 @@ def load_module(name: str, path: pathlib.Path) -> Any:
     return module
 
 
-QWEN = load_module("minimax_h3_audio_capture_qwen_base", QWEN_PRODUCER_PATH)
+def load_bound_module(name: str, path: pathlib.Path, expected_sha256: str) -> Any:
+    try:
+        observed_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise RuntimeError(f"cannot read repository module {name}: {error}") from error
+    if observed_sha256 != expected_sha256:
+        raise RuntimeError(
+            f"repository module {name} differs from the reviewed capture dependency"
+        )
+    return load_module(name, path)
+
+
+QWEN = load_bound_module(
+    "minimax_h3_audio_capture_qwen_base",
+    QWEN_PRODUCER_PATH,
+    QWEN_PRODUCER_SHA256,
+)
 BASE = QWEN.BASE
 CaptureFailure = QWEN.CaptureFailure
 ExternalFileIdentity = QWEN.ExternalFileIdentity
@@ -1109,6 +1128,7 @@ def adapter_implementation_sha256(role: str) -> str:
     values = {
         "schema_version": f"mold.minimax-h3.audio-vae-{role}-adapter.v1",
         "producer_sha256": BASE.sha256_file(pathlib.Path(__file__).resolve()),
+        "qwen_capture_dependency_sha256": QWEN_PRODUCER_SHA256,
     }
     if role == "oracle":
         values["diffusers_audio_vae_sha256"] = BASE.sha256_file(
@@ -1472,7 +1492,8 @@ def run_capture(
     ) as staged_value:
         staged_root = pathlib.Path(staged_value).resolve(strict=True)
         os.chmod(staged_root, 0o700)
-        staged_diffusers = staged_root / "sources" / "diffusers"
+        source_root = QWEN.private_source_root(staged_root)
+        staged_diffusers = source_root / "diffusers"
         staged_mold = staged_root / "mold-source"
         QWEN.extract_package_snapshot(
             "Diffusers",

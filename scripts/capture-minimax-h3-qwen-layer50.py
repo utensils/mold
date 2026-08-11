@@ -328,6 +328,13 @@ def private_directory(path: pathlib.Path) -> None:
         fail(f"cannot secure private Qwen capture staging: {error}")
 
 
+def private_source_root(staged_root: pathlib.Path) -> pathlib.Path:
+    """Create the shared source parent without inheriting a permissive umask."""
+    source_root = staged_root / "sources"
+    private_directory(source_root)
+    return source_root
+
+
 def write_private_file(path: pathlib.Path, encoded: bytes) -> None:
     private_directory(path.parent)
     try:
@@ -1988,8 +1995,9 @@ def run_capture(
     ) as staged_value:
         staged_root = pathlib.Path(staged_value).resolve(strict=True)
         os.chmod(staged_root, 0o700)
-        staged_diffusers = staged_root / "sources" / "diffusers"
-        staged_transformers = staged_root / "sources" / "transformers"
+        source_root = private_source_root(staged_root)
+        staged_diffusers = source_root / "diffusers"
+        staged_transformers = source_root / "transformers"
         staged_model = staged_root / "model"
         staged_mold = staged_root / "mold-source"
         extract_package_snapshot(

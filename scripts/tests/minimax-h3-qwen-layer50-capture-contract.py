@@ -308,6 +308,17 @@ class ProducerContractTests(unittest.TestCase):
             with self.assertRaises(PRODUCER.CaptureFailure):
                 snapshot.revalidate()
 
+    def test_shared_source_parent_is_owner_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            source_root = PRODUCER.private_source_root(root)
+            package = source_root / "diffusers"
+            PRODUCER.write_private_file(package / "source.py", b"source\n")
+
+            self.assertEqual(stat.S_IMODE(source_root.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(package.stat().st_mode), 0o700)
+            PRODUCER.snapshot_files(root)
+
     def test_coordinated_shard_and_sidecar_tamper_fails_against_manifest_pin(
         self,
     ) -> None:
