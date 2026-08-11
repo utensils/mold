@@ -1981,7 +1981,20 @@ where
                 completed: 1,
                 total: 1,
             })?;
+            checkpoint.checkpoint(H3PipelineEvent {
+                phase: H3PipelinePhase::QwenEncode,
+                completed: 0,
+                total: 1,
+            })?;
             let text = qwen.encode_fl2va(prompt, endpoints, checkpoint);
+            let text = text.and_then(|text| {
+                checkpoint.checkpoint(H3PipelineEvent {
+                    phase: H3PipelinePhase::QwenEncode,
+                    completed: 1,
+                    total: 1,
+                })?;
+                Ok(text)
+            });
             let continuing = qwen.validate_continuing_authorities();
             text.and_then(|text| continuing.map(|()| text))
         })();

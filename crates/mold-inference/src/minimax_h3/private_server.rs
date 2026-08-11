@@ -70,6 +70,8 @@ use super::private_qwen::{
 #[cfg(feature = "mp4")]
 use super::private_qwen_support::{load_qualified_private_qwen_support, H3PrivateQwenSupport};
 #[cfg(feature = "mp4")]
+use super::private_runtime_observer::H3PrivateRuntimeBoundCapture;
+#[cfg(feature = "mp4")]
 use super::vae_runtime::{
     open_h3_comfy_vae_authority, H3AuthenticatedComfyVaeAuthority, H3ComfyVaeLoadError,
     H3ComfyVaeLoadEvent, H3ComfyVaeLoadObserver,
@@ -2706,6 +2708,12 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
                 Device::new_cuda(owner.device_ordinal)
                     .context("failed to construct the reviewed private H3 CUDA route")
             })?;
+            let qwen_on_cpu = matches!(
+                authority.conditioner_placement(),
+                H3FactoryConditionerPlacement::HostCpuThenDrop
+            );
+            let runtime_bound_capture =
+                H3PrivateRuntimeBoundCapture::begin(&cuda_device, qwen_on_cpu)?;
             // Keep one completion fence alive outside the concrete owner graph.
             // It runs only after a successful pipeline result and before any
             // CUDA-bearing local leaves the execution-attempt boundary.
@@ -2756,7 +2764,14 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
                 .context("private H3 completion synchronization failed")?;
             cancellation.checkpoint()?;
             progress.checkpoint()?;
-            private_run_output(output, owner, &consumption_binding, started)
+            let output = private_run_output(output, owner, &consumption_binding, started)?;
+            let runtime_bound_observation = runtime_bound_capture.finish()?;
+            tracing::info!(
+                target: "mold::minimax_h3::private_runtime_bound",
+                observation = %serde_json::to_string(&runtime_bound_observation)?,
+                "captured private MiniMax H3 runtime bounds"
+            );
+            Ok(output)
         })
     }
 }

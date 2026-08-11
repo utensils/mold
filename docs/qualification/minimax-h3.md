@@ -318,6 +318,39 @@ file. The live campaign must therefore retain process/executable attestation
 alongside each sample, and the independent review must verify that binding
 before accepting any measured bound.
 
+The private campaign server emits one structured
+`mold.minimax-h3.private-uat-runtime-bound-observation.v1` record only after a
+successful terminal attempt. It samples Mold's CUDA allocation-pool high-water
+marks synchronously at the VAE construction, Qwen encode, condition VAE,
+visual decode, audio decode, and whole-attempt boundaries. Attention and FFN
+workspaces are counted by the exact production operators from their actual
+shapes and chunk policy. Encoded-video, thumbnail, interleaved-F32 AAC staging,
+and final-mux capacities are recorded while their owning buffers are live. The
+fixed host observation is the process's resident set at capture entry, and the
+fixed device observation is the device-global used-byte baseline immediately
+after the attempt constructs its CUDA context. The campaign host must therefore
+be quiescent and retain independent per-process GPU attestation; unrelated
+device allocations conservatively increase the proposed bound. CPU-offloaded
+Qwen uses its process high-water growth over the exact Qwen encode boundary;
+an accelerated Qwen uses the CUDA-pool phase growth instead. Every one of
+the thirteen values must be nonzero, so the campaign fixture must exercise a real FL2VA
+visual condition rather than an unconditioned T2VA request. The observer is
+diagnostic evidence only: it cannot update admission bounds or authorize its
+own record, and shipping verification rejects its private marker.
+
+Every CUDA phase boundary is synchronized before the observer resets or reads
+the allocation-pool high-water mark. Construction and condition/decode
+workspaces subtract allocations still live at phase exit because the admission
+model accounts those retained weights and outputs separately; Qwen retains its
+complete activation peak under the route-specific host/device policy required
+by its lower-bound validator.
+
+External SSE collection must use a non-buffering read such as Python
+`HTTPResponse.read1`; a fixed-size blocking `read` can delay low-volume phase
+events until the terminal base64 payload and destroy their timestamps. Retain
+the response thumbnail and MP4 as separate hashed evidence files, and bind the
+candidate to the SHA-256 of the executable that actually served the request.
+
 The stable runtime-code identity hashes `Cargo.toml`, `Cargo.lock`, Cargo build
 configuration, and every regular manifest, build script, Rust source, and
 non-Rust compiled input in the complete local `mold-server` dependency closure:

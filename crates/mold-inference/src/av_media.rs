@@ -103,6 +103,10 @@ pub struct AacMuxReport {
     pub trimmed_samples_per_channel: u64,
     pub video_duration_ticks: u64,
     pub video_timescale: u32,
+    /// Peak AAC-only host staging that coexists with the caller-owned F32
+    /// input and MP4 output: aligned I16 PCM, one padded frame, codec output,
+    /// and the copied packet handed to the container writer.
+    pub peak_aac_staging_host_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -210,7 +214,7 @@ pub fn mux_aac_track_to_mp4_bytes(
     if output_samples_per_channel == 0 {
         bail!("A/V mux audio timeline resolved to zero samples");
     }
-    let report = AacMuxReport {
+    let mut report = AacMuxReport {
         sample_rate,
         channels,
         source_samples_per_channel,
@@ -221,6 +225,7 @@ pub fn mux_aac_track_to_mp4_bytes(
             .saturating_sub(output_samples_per_channel),
         video_duration_ticks: video.duration_ticks,
         video_timescale: video.timescale,
+        peak_aac_staging_host_bytes: 0,
     };
 
     tracing::debug!(
@@ -293,6 +298,20 @@ pub fn mux_aac_track_to_mp4_bytes(
         bail!("AAC encoder returned an empty input frame size");
     }
     let mut out_buf = vec![0u8; encoder_info.maxOutBufBytes as usize];
+    report.peak_aac_staging_host_bytes = [
+        pcm.capacity()
+            .checked_mul(std::mem::size_of::<i16>())
+            .context("aligned AAC PCM capacity overflowed")?,
+        frame_samples
+            .checked_mul(std::mem::size_of::<i16>())
+            .context("AAC frame capacity overflowed")?,
+        out_buf.capacity(),
+        out_buf.capacity(),
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, bytes| total.checked_add(bytes))
+    .and_then(|bytes| u64::try_from(bytes).ok())
+    .context("AAC staging byte count overflowed")?;
     let mut start_time = 0u64;
     let mut remaining = output_samples_per_channel;
     let mut offset = 0usize;

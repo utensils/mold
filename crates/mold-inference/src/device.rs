@@ -2097,6 +2097,9 @@ pub struct PhaseVramReport {
     pub peak_pool_used: Option<u64>,
     /// Peak pool bytes reserved from the driver during the phase.
     pub peak_pool_reserved: Option<u64>,
+    /// Pool bytes live when the phase probe opened. This lets qualification
+    /// distinguish a phase's incremental workspace from resident weights.
+    pub entry_pool_used: Option<u64>,
     /// Signed change in live pool bytes across the phase. Negative means the
     /// phase released more than it retained — a real and useful outcome that
     /// a saturating unsigned delta would hide.
@@ -2118,6 +2121,21 @@ impl PhaseVramReport {
     /// process-local peak and must not be presented (or reasoned about) as one.
     pub fn has_authoritative_peak(&self) -> bool {
         matches!(self.attribution, VramAttribution::Pool) && self.peak_pool_used.is_some()
+    }
+
+    /// Peak pool growth above the phase-entry residency.
+    pub fn incremental_peak_pool_used(&self) -> Option<u64> {
+        self.peak_pool_used
+            .zip(self.entry_pool_used)
+            .map(|(peak, entry)| peak.saturating_sub(entry))
+    }
+
+    /// Peak temporary growth after removing allocations still live at exit.
+    /// Admission accounts retained weights/outputs separately from workspace.
+    pub fn incremental_transient_pool_used(&self) -> Option<u64> {
+        let growth = self.incremental_peak_pool_used()?;
+        let retained = self.delta_pool_used?.max(0) as u64;
+        Some(growth.saturating_sub(retained))
     }
 
     /// How far device-global free VRAM fell across the phase, saturating at
@@ -2184,6 +2202,9 @@ pub fn phase_vram_report_from(
             .flatten(),
         peak_pool_reserved: pool_authoritative
             .then_some(exit.pool_reserved_high_bytes)
+            .flatten(),
+        entry_pool_used: pool_authoritative
+            .then_some(entry.pool_used_bytes)
             .flatten(),
         delta_pool_used,
         global_free_entry: entry.global_free_bytes,
@@ -4653,6 +4674,9 @@ mod tests {
         // not a free-VRAM delta.
         assert_eq!(report.peak_pool_used, Some(11 * GB));
         assert_eq!(report.peak_pool_reserved, Some(12 * GB));
+        assert_eq!(report.entry_pool_used, Some(2 * GB));
+        assert_eq!(report.incremental_peak_pool_used(), Some(9 * GB));
+        assert_eq!(report.incremental_transient_pool_used(), Some(2 * GB));
         assert_eq!(report.delta_pool_used, Some(7 * GB as i64));
         assert_eq!(report.global_free_entry, Some(20 * GB));
         assert_eq!(report.global_free_exit, Some(12 * GB));
@@ -4681,6 +4705,9 @@ mod tests {
         assert_eq!(report.attribution, VramAttribution::GlobalOnly);
         assert_eq!(report.peak_pool_used, None);
         assert_eq!(report.peak_pool_reserved, None);
+        assert_eq!(report.entry_pool_used, None);
+        assert_eq!(report.incremental_peak_pool_used(), None);
+        assert_eq!(report.incremental_transient_pool_used(), None);
         assert_eq!(report.delta_pool_used, None);
         assert!(
             !report.has_authoritative_peak(),
