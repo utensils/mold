@@ -170,6 +170,7 @@ RECORD_ONLY_FLOAT_MEASUREMENTS = {
         {
             "pixel-normalization",
             "posterior-moments",
+            "posterior-seed-42",
             "posterior-sample",
             "posterior-fp16-roundtrip",
             "latent-normalization",

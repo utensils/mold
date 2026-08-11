@@ -37,6 +37,10 @@ def load_module(name: str, path: pathlib.Path):
 
 
 producer = load_module("minimax_h3_visual_vae_capture_contract", PRODUCER_PATH)
+conformance = load_module(
+    "minimax_h3_visual_vae_conformance_contract",
+    REPO_ROOT / "scripts" / "minimax-h3-conformance.py",
+)
 
 
 def manifest() -> dict:
@@ -169,10 +173,80 @@ class VisualCaptureContract(unittest.TestCase):
             [producer.MEASUREMENT_DTYPES[key] for key in producer.MEASUREMENTS],
         )
         policies = {item["key"]: item for item in document["comparison"]}
-        self.assertEqual(policies["posterior-seed-42"]["hash_policy"], "exact")
+        seed_policy = policies["posterior-seed-42"]
+        self.assertEqual(seed_policy["hash_policy"], "record-only")
+        self.assertEqual(
+            seed_policy["absolute"], producer.SEED_NOISE_ABSOLUTE_TOLERANCE
+        )
+        self.assertEqual(
+            seed_policy["relative"], producer.SEED_NOISE_RELATIVE_TOLERANCE
+        )
         for key in set(producer.MEASUREMENTS) - {"posterior-seed-42"}:
             self.assertEqual(policies[key]["hash_policy"], "record-only")
             self.assertLessEqual(policies[key]["absolute"], 1 / 64)
+
+    def test_seed_policy_checks_every_value_including_formerly_unsampled_indexes(
+        self,
+    ) -> None:
+        length = 300
+        former_samples = {
+            index * (length - 1) // 256 for index in range(257)
+        }
+        formerly_unsampled = next(index for index in range(length) if index not in former_samples)
+
+        oracle_payloads = []
+        mold_payloads = []
+        for key, dtype in producer.MEASUREMENT_DTYPES.items():
+            oracle_values = [0.0] * length
+            mold_values = list(oracle_values)
+            if key == "posterior-seed-42":
+                mold_values[formerly_unsampled] = 0.001
+            oracle_payloads.append(payload(key, dtype, oracle_values))
+            mold_payloads.append(payload(key, dtype, mold_values))
+
+        common = (
+            manifest(),
+            "a" * 64,
+            "cuda:0",
+            "d" * 64,
+            producer.build_case(),
+        )
+        oracle = producer.build_layer_document(
+            common[0],
+            "oracle",
+            producer.DIFFUSERS_REVISION,
+            *common[1:],
+            tuple(oracle_payloads),
+            {
+                "python": "test",
+                "torch": "test",
+                "numpy": "test",
+                "cuda": "test",
+                "transformers_revision": producer.TRANSFORMERS_REVISION,
+            },
+        )
+        mold = producer.build_layer_document(
+            common[0],
+            "mold",
+            "b" * 40,
+            *common[1:],
+            tuple(mold_payloads),
+            {"unavailable": "contract-test"},
+        )
+
+        seed_record = next(
+            item for item in oracle["outputs"] if item["key"] == "posterior-seed-42"
+        )
+        self.assertEqual(len(seed_record["samples"]), length)
+        self.assertEqual(
+            [sample["index"] for sample in seed_record["samples"]],
+            [[index] for index in range(length)],
+        )
+        with self.assertRaisesRegex(
+            conformance.ConformanceFailure,
+            "posterior-seed-42.*tolerance exceeded",
+        ):
+            conformance.compare_layer_outputs(oracle, mold)
 
     def test_mold_document_cannot_claim_oracle_comparison_policy(self) -> None:
         document = producer.build_layer_document(
