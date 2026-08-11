@@ -68,6 +68,13 @@ async fn main() -> anyhow::Result<()> {
                 log_dir,
             );
 
+            #[cfg(feature = "h3-private-uat")]
+            tracing::info!(
+                h3_runtime_code_identity_sha256 =
+                    mold_inference::h3_private_runtime_code_identity_sha256(),
+                "bound private H3 server to its measured runtime-code identity"
+            );
+
             let models_path = models_dir
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
