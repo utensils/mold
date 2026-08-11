@@ -96,6 +96,11 @@ pub use dit::{
     H3TransformerConfig, H3TransformerOutput, H3TransformerStep, H3TransformerTask,
     H3WeightAuditError, H3WeightAuditIssue, H3_MODALITY_COUNT,
 };
+#[cfg(feature = "h3-private-uat")]
+pub use dit::{
+    capture_h3_private_transformer_primitives, H3PrivateTransformerCapture,
+    H3PrivateTransformerCaptureInput,
+};
 pub use loader::{
     load_bf16_conditioner, load_prepared_bf16_conditioner, prepare_conditioner_assets,
     prepare_conditioner_assets_with_progress, validate_processor_assets, H3LoadError,
