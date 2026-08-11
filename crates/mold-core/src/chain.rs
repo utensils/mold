@@ -994,6 +994,12 @@ pub fn stage_contributed_frames(
 /// `k` (1, 9, 17, 25, …). The LTX-2 pipeline has this constraint on pixel
 /// frame counts due to the VAE's 8× temporal compression with a causal first
 /// frame.
+///
+/// Test-only since the Wan wave (#783): production grid checks are family-
+/// derived through [`crate::validation::frame_step_for_family`], because Wan's
+/// grid is `4k + 1`. This stays as the literal spelling of LTX-2's own
+/// constraint so the tests below assert it independently of that lookup.
+#[cfg(test)]
 fn is_ltx2_frame_count(n: u32) -> bool {
     n % 8 == 1
 }
