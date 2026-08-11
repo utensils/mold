@@ -889,10 +889,7 @@ impl WanBlock {
             .broadcast_add(&m.shift_attn)?
             .to_dtype(dtype)?;
         let attn = self.self_attn.forward(&normed, None, Some((cos, sin)))?;
-        let x = x
-            .to_dtype(DType::F32)?
-            .add(&attn.to_dtype(DType::F32)?.broadcast_mul(&m.gate_attn)?)?
-            .to_dtype(dtype)?;
+        let x = gated_residual(x, &attn, &m.gate_attn, dtype)?;
 
         // 2. Cross-attention on the text embedding — no modulation, no gate,
         //    plain residual (`model.py:307-310`).
@@ -908,10 +905,60 @@ impl WanBlock {
             .broadcast_add(&m.shift_ffn)?
             .to_dtype(dtype)?;
         let ff = self.ffn.forward(&normed)?;
-        x.to_dtype(DType::F32)?
-            .add(&ff.to_dtype(DType::F32)?.broadcast_mul(&m.gate_ffn)?)?
-            .to_dtype(dtype)
+        gated_residual(&x, &ff, &m.gate_ffn, dtype)
     }
+}
+
+/// Tokens per slice of the gated residual's F32 arithmetic (#776 item 2).
+///
+/// 4096 tokens x 5120 channels x 4 B is 84 MiB per F32 transient, so the four
+/// the expression holds at once come to ~335 MiB regardless of clip length.
+/// The unsliced form scaled with the clip: at 81 frames / 832x480 the hidden
+/// state is `[1, 32760, 5120]`, 671 MiB per F32 copy and ~2.7 GiB for the four.
+const RESIDUAL_TOKEN_CHUNK: usize = 4096;
+
+/// `(x + y * gate)` evaluated in F32 and returned in `out_dtype`, in token
+/// slices so the F32 transients never scale with clip length.
+///
+/// Upstream runs this add under `amp.autocast(dtype=torch.float32)`
+/// (`model.py:301-311`), so the precision is load-bearing and cannot simply be
+/// dropped to BF16. What can go is holding the whole clip in F32 four times
+/// over: the op is elementwise, so slicing the token axis is exact — the
+/// arithmetic per element is unchanged and [`tests::gated_residual_matches_the_unsliced_form`]
+/// pins that against the whole-tensor expression this replaced.
+fn gated_residual(x: &Tensor, y: &Tensor, gate: &Tensor, out_dtype: DType) -> Result<Tensor> {
+    let whole = |x: &Tensor, y: &Tensor, gate: &Tensor| -> Result<Tensor> {
+        x.to_dtype(DType::F32)?
+            .add(&y.to_dtype(DType::F32)?.broadcast_mul(gate)?)?
+            .to_dtype(out_dtype)
+    };
+
+    let tokens = x.dim(1)?;
+    if tokens <= RESIDUAL_TOKEN_CHUNK {
+        return whole(x, y, gate);
+    }
+
+    // A scalar-timestep gate is `[batch, 1, dim]` and broadcasts against every
+    // slice; TI2V's per-token gate has to be sliced alongside the tokens.
+    let gate_is_per_token = gate.dim(1)? == tokens;
+
+    let mut parts = Vec::with_capacity(tokens.div_ceil(RESIDUAL_TOKEN_CHUNK));
+    let mut start = 0usize;
+    while start < tokens {
+        let len = RESIDUAL_TOKEN_CHUNK.min(tokens - start);
+        let gate_slice = if gate_is_per_token {
+            gate.narrow(1, start, len)?
+        } else {
+            gate.clone()
+        };
+        parts.push(whole(
+            &x.narrow(1, start, len)?,
+            &y.narrow(1, start, len)?,
+            &gate_slice,
+        )?);
+        start += len;
+    }
+    Tensor::cat(&parts, 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -1509,6 +1556,48 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("propagated"));
         step_profile::report(1);
+    }
+
+    /// Slicing the gated residual is only legitimate if it is exact, so this
+    /// pins it against the whole-tensor expression it replaced — at token
+    /// counts either side of the slice width, with both gate shapes.
+    #[test]
+    fn gated_residual_matches_the_unsliced_form() {
+        let device = Device::Cpu;
+        let dim = 8usize;
+        for tokens in [1usize, 7, RESIDUAL_TOKEN_CHUNK, RESIDUAL_TOKEN_CHUNK + 1] {
+            let x = Tensor::randn(0f32, 1.0, (1, tokens, dim), &device).unwrap();
+            let y = Tensor::randn(0f32, 1.0, (1, tokens, dim), &device).unwrap();
+            for gate_tokens in [1usize, tokens] {
+                let gate = Tensor::randn(0f32, 1.0, (1, gate_tokens, dim), &device).unwrap();
+                let reference = x
+                    .to_dtype(DType::F32)
+                    .unwrap()
+                    .add(
+                        &y.to_dtype(DType::F32)
+                            .unwrap()
+                            .broadcast_mul(&gate)
+                            .unwrap(),
+                    )
+                    .unwrap()
+                    .to_dtype(DType::F32)
+                    .unwrap();
+                let sliced = gated_residual(&x, &y, &gate, DType::F32).unwrap();
+                assert_eq!(sliced.dims(), reference.dims());
+                let diff = (sliced - &reference)
+                    .unwrap()
+                    .abs()
+                    .unwrap()
+                    .max_all()
+                    .unwrap()
+                    .to_scalar::<f32>()
+                    .unwrap();
+                assert_eq!(
+                    diff, 0.0,
+                    "tokens={tokens} gate_tokens={gate_tokens} diverged by {diff}"
+                );
+            }
+        }
     }
 
     /// Every diffusers `WanTransformer3DModel` parameter in the fixture, with
