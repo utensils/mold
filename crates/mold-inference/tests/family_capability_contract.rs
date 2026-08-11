@@ -271,7 +271,9 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
                 vae_cpu: false,
                 audio_components_cpu: false,
             },
-            false,
+            // Partial block offload: trailing DiT blocks park in host RAM and
+            // each returns for the duration of its own forward (#776 item 3).
+            true,
             MediaKind::Video,
             WorkflowCapabilities {
                 source: true,
