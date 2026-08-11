@@ -724,6 +724,9 @@
       ],
       "required_provenance": [
         "source-revision",
+        "diffusers-revision",
+        "adapter-implementation-sha256",
+        "oracle-runtime-sha256",
         "component-index-hashes",
         "device",
         "dtype",
@@ -731,6 +734,12 @@
       ],
       "pinned_provenance": [],
       "role_invariant_provenance": ["component-index-hashes", "dtype"],
+      "oracle_adapter": {
+        "id": "minimax-h3-token-refiner-oracle-v1",
+        "command_prefix": "python3 scripts/capture-minimax-h3-transformer.py capture --role oracle",
+        "implementation_path": "scripts/capture-minimax-h3-transformer.py",
+        "implementation_sha256": "b1b01116491b652c7cab1386ac9858e46af0730effb5e3fc522113852ecb0e4c"
+      },
       "required_measurements": ["shape", "statistics", "sampled-values", "tolerance"]
     },
     {
@@ -773,6 +782,9 @@
       ],
       "required_provenance": [
         "source-revision",
+        "diffusers-revision",
+        "adapter-implementation-sha256",
+        "oracle-runtime-sha256",
         "component-index-hashes",
         "device",
         "dtype",
@@ -781,6 +793,12 @@
       ],
       "pinned_provenance": [],
       "role_invariant_provenance": ["component-index-hashes", "dtype"],
+      "oracle_adapter": {
+        "id": "minimax-h3-transformer-block-oracle-v1",
+        "command_prefix": "python3 scripts/capture-minimax-h3-transformer.py capture --role oracle",
+        "implementation_path": "scripts/capture-minimax-h3-transformer.py",
+        "implementation_sha256": "b1b01116491b652c7cab1386ac9858e46af0730effb5e3fc522113852ecb0e4c"
+      },
       "required_measurements": [
         "qk-rms",
         "partial-mm-rope",

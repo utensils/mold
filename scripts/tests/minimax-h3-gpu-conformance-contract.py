@@ -322,6 +322,7 @@ def provenance_fixture(
     )
     values = {
         "source-revision": document["producer"]["revision"],
+        "diffusers-revision": tool.EXPECTED_REVISIONS["diffusers"],
         "transformers-revision": tool.EXPECTED_REVISIONS["transformers"],
         "adapter-implementation-sha256": document["adapter"].get(
             "implementation_sha256", "0" * 64
@@ -1710,9 +1711,12 @@ def test_runner_contract(runner, tool, temporary: pathlib.Path) -> None:
 
         environment, oracle_bundle, _ = reset_campaign()
         oracle_adapter = json.loads(oracle_bundle.read_text(encoding="utf-8"))
-        oracle_adapter["capture_environment"]["oracle_adapters"][0][
-            "implementation_sha256"
-        ] = "0" * 64
+        tokenizer_adapter = next(
+            record
+            for record in oracle_adapter["capture_environment"]["oracle_adapters"]
+            if record["layer"] == "tokenizer-processor"
+        )
+        tokenizer_adapter["implementation_sha256"] = "0" * 64
         write_json(oracle_bundle, oracle_adapter)
         expect_failure(
             lambda: runner.run_campaign(environment, lambda: None, lambda: SOURCE_SHA),
@@ -1777,9 +1781,12 @@ def test_runner_contract(runner, tool, temporary: pathlib.Path) -> None:
         )
 
         mixed_adapter = copy.deepcopy(valid_oracle)
-        mixed_adapter["capture_environment"]["oracle_adapters"][0]["id"] = (
-            "different-layer-adapter"
+        mixed_tokenizer_adapter = next(
+            record
+            for record in mixed_adapter["capture_environment"]["oracle_adapters"]
+            if record["layer"] == "tokenizer-processor"
         )
+        mixed_tokenizer_adapter["id"] = "different-layer-adapter"
         expect_failure(
             lambda: runner.validate_capture_environment(
                 tool,

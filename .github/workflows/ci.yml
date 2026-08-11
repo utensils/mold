@@ -79,6 +79,8 @@ jobs:
               - 'scripts/tests/minimax-h3-visual-vae-capture-contract.py'
               - 'scripts/capture-minimax-h3-audio-vae.py'
               - 'scripts/tests/minimax-h3-audio-vae-capture-contract.py'
+              - 'scripts/capture-minimax-h3-transformer.py'
+              - 'scripts/tests/minimax-h3-transformer-capture-contract.py'
               - 'scripts/tests/minimax-h3-private-uat-release-contract.sh'
               - '.github/workflows/minimax-h3-private-conformance.yml'
               - 'tests/fixtures/minimax_h3/**'
@@ -166,6 +168,8 @@ jobs:
               - 'scripts/tests/minimax-h3-visual-vae-capture-contract.py'
               - 'scripts/capture-minimax-h3-audio-vae.py'
               - 'scripts/tests/minimax-h3-audio-vae-capture-contract.py'
+              - 'scripts/capture-minimax-h3-transformer.py'
+              - 'scripts/tests/minimax-h3-transformer-capture-contract.py'
               - 'scripts/probe-cuda-embedded-ptx.py'
               - 'scripts/seal-cuda-ptx-manifest.py'
               - 'scripts/create-release-provenance.sh'
@@ -481,6 +485,9 @@ jobs:
       - name: Test MiniMax H3 AudioVAE capture contract
         if: env.RUN_RUST_SUITE == 'true'
         run: python3 scripts/tests/minimax-h3-audio-vae-capture-contract.py
+      - name: Test MiniMax H3 paired transformer capture contract
+        if: env.RUN_RUST_SUITE == 'true'
+        run: python3 scripts/tests/minimax-h3-transformer-capture-contract.py
       - name: Clippy the private MiniMax H3 artifact qualifier
         if: env.RUN_RUST_SUITE == 'true'
         run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_artifact_qualification -- -D warnings
