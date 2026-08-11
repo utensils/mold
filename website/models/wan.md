@@ -135,6 +135,33 @@ device-synced timing line per denoise step, and `MOLD_WAN_FORCE_DMMV=1`
 forces the quantized-matmul fallback for A/B comparison — neither belongs in
 production use.
 
+### The VAE decode is 40-50% of a fast-tier render
+
+On the 4-step Turbo tier the denoise is short enough that the causal 3-D VAE
+decode, not the transformer, is the largest single phase. Measured on an RTX
+4090 with `wan22-ti2v-5b:turbo`, reading the `Decoding video frames [Xs]` line:
+
+| Shape | Frames | Decode | Total | Decode share |
+| ------------- | -----: | -----: | -----: | -----------: |
+| 480x288       |     81 |  6.8 s | 13.4 s |          51% |
+| 832x480       |     81 | 19.8 s | 38.0 s |          52% |
+| 1280x704      |     81 | 44.9 s | 101.8 s |         44% |
+| 1280x704      |    121 | 66.9 s | 170.0 s |         39% |
+
+That cost is **compute**, not overhead: decode time tracks pixels x frames
+almost exactly (2.9x the pixels costs 2.9x the time, 6.5x costs 6.6x), while
+the number of kernel launches is identical across the first three rows. The
+decoder's convolutions are doing real work at full output resolution. Batching
+the per-frame 2-D stages into one launch and widening the decode chunk were
+both built and measured; neither moved the number, and the wider chunk only
+added an OOM at 8 latent frames, so neither shipped. There is no knob that
+makes this phase cheaper — the levers that matter are resolution and frame
+count.
+
+The decode is also *not* where this family runs out of memory. Its transient is
+bounded to one latent frame at a time by construction, so `1280x704 x 121`
+decodes on a 24 GB card; the denoise is the memory wall.
+
 ### FlashAttention on Wan
 
 A `--features cuda,flash-attn` build routes the Wan DiT's self- and cross-attention through candle-flash-attn v2 and defaults `MOLD_ATTN` to `flash`. Measured on an RTX 4090 with the same binary, only the backend varying (`wan22-t2v-a14b:q5`, 53 frames at 832x480):
