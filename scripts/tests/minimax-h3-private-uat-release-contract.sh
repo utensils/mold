@@ -179,6 +179,12 @@ require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.
 require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
   'hash_measured_server_executable(' \
   "the private H3 runtime-record producer does not authenticate its measured server"
+require_text crates/mold-inference/src/lib.rs \
+  'h3_private_runtime_code_identity_sha256' \
+  "the private H3 inference facade does not expose its measured code identity"
+require_text crates/mold-server/src/main.rs \
+  'mold_inference::h3_private_runtime_code_identity_sha256()' \
+  "the private H3 server ELF does not retain its measured code identity"
 require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
   'MAX_RUNTIME_QUALIFICATION_BYTES' \
   "the private H3 runtime-record producer does not share the activation record limit"

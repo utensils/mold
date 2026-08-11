@@ -49,6 +49,11 @@ pub use minimax_h3::private_runtime_qualification::{
 };
 #[cfg(feature = "h3-private-uat")]
 #[doc(hidden)]
+pub const fn h3_private_runtime_code_identity_sha256() -> &'static str {
+    minimax_h3::PRIVATE_RUNTIME_CODE_IDENTITY_SHA256
+}
+#[cfg(feature = "h3-private-uat")]
+#[doc(hidden)]
 pub use minimax_h3::private_server::{
     authenticate_h3_private_runtime_qualification, prepare_h3_private_fl2va_admission,
     prepare_h3_private_fl2va_attempt, reviewed_h3_private_runtime_available,
