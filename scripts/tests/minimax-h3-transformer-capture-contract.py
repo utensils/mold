@@ -228,6 +228,70 @@ class TransformerCaptureContract(unittest.TestCase):
         self.assertEqual(partial.shape, (2, 1, 1, 1, 96))
         self.assertEqual(partial.encoded, q[:192] + k[:192])
 
+    def test_record_only_evidence_retains_every_coordinate_and_reviewed_caps(self) -> None:
+        reviewed = manifest()
+        contracts = gpu.exact_layer_contracts(reviewed)
+        for layer in producer.LAYERS:
+            document = producer.build_layer_document(
+                reviewed, "oracle", "fl2va", layer, producer.DIFFUSERS_REVISION,
+                producer.AUTHORIZATION_SHA256, "cuda:0", raw_payloads(),
+            )
+            outputs = {item["key"]: item for item in document["outputs"]}
+            policies = {item["key"]: item for item in document["comparison"]}
+            for key in producer.RECORD_ONLY_MEASUREMENTS[layer]:
+                output = outputs[key]
+                self.assertEqual(len(output["samples"]), math.prod(output["shape"]))
+                self.assertEqual(output["samples"][0]["index"], [0] * len(output["shape"]))
+                self.assertEqual(
+                    policies[key]["absolute"], producer.ABSOLUTE_TOLERANCE[layer][key]
+                )
+                self.assertEqual(policies[key]["relative"], producer.RELATIVE_TOLERANCE)
+                self.assertEqual(policies[key]["hash_policy"], "record-only")
+
+            incomplete = copy.deepcopy(document)
+            next(
+                item for item in incomplete["outputs"]
+                if item["key"] in producer.RECORD_ONLY_MEASUREMENTS[layer]
+            )["samples"].pop()
+            with self.assertRaisesRegex(
+                gpu.GpuConformanceFailure, "retain every tensor coordinate"
+            ):
+                gpu.validate_manifest_layer_evidence(
+                    incomplete, contracts[layer], "oracle"
+                )
+
+        excessive = producer.build_layer_document(
+            reviewed, "oracle", "fl2va", "transformer-block",
+            producer.DIFFUSERS_REVISION, producer.AUTHORIZATION_SHA256,
+            "cuda:0", raw_payloads(),
+        )
+        next(
+            item for item in excessive["comparison"] if item["key"] == "video-head"
+        )["absolute"] = 1.2500001
+        with self.assertRaisesRegex(
+            gpu.GpuConformanceFailure, "bounded protected policy"
+        ):
+            gpu.validate_manifest_layer_evidence(
+                excessive, contracts["transformer-block"], "oracle"
+            )
+
+        oracle = producer.build_layer_document(
+            reviewed, "oracle", "fl2va", "token-refiner",
+            producer.DIFFUSERS_REVISION, producer.AUTHORIZATION_SHA256,
+            "cuda:0", raw_payloads(),
+        )
+        mold = producer.build_layer_document(
+            reviewed, "mold", "fl2va", "token-refiner", "b" * 40,
+            producer.AUTHORIZATION_SHA256, "cuda:0", raw_payloads(),
+        )
+        next(
+            item for item in mold["outputs"] if item["key"] == "sampled-values"
+        )["samples"][9000]["value"] = 16.0
+        with self.assertRaisesRegex(
+            conformance.ConformanceFailure, "tolerance exceeded"
+        ):
+            conformance.compare_layer_outputs(oracle, mold)
+
     def test_documents_pass_the_protected_validator_for_both_roles_and_tasks(self) -> None:
         reviewed = manifest()
         contracts = gpu.exact_layer_contracts(reviewed)

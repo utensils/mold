@@ -65,6 +65,23 @@ MEASUREMENTS = {
         "qk-rms", "partial-mm-rope", "adaln", "video-head", "audio-head", "tolerance"
     ),
 }
+RELATIVE_TOLERANCE = 1.0 / 64.0
+ABSOLUTE_TOLERANCE = {
+    "token-refiner": {
+        "statistics": 1.0 / 64.0,
+        "sampled-values": 8.0,
+    },
+    "transformer-block": {
+        "qk-rms": 1.0 / 64.0,
+        "partial-mm-rope": 1.0 / 16.0,
+        "adaln": 1.0 / 64.0,
+        "video-head": 1.25,
+        "audio-head": 0.5,
+    },
+}
+RECORD_ONLY_MEASUREMENTS = {
+    layer: frozenset(measurements) for layer, measurements in ABSOLUTE_TOLERANCE.items()
+}
 MEASUREMENT_DTYPES = {
     "token-refiner": {
         "shape": "int64", "statistics": "float64", "sampled-values": "bfloat16", "tolerance": "float64"
@@ -559,10 +576,10 @@ def metric_payload(key: str, values: Sequence[float], dtype: str = "float64") ->
     return TensorPayload(key, (len(values),), dtype, b"".join(struct.pack(encoding, value) for value in values))
 
 
-def sample_bf16(payload: TensorPayload, key: str, count: int = 257) -> TensorPayload:
-    total = math.prod(payload.shape)
-    indexes = [index * (total - 1) // (min(count, total) - 1) for index in range(min(count, total))] if total > 1 else [0]
-    return TensorPayload(key, (len(indexes),), "bfloat16", b"".join(payload.encoded[index * 2:index * 2 + 2] for index in indexes))
+def complete_bf16(payload: TensorPayload, key: str) -> TensorPayload:
+    if payload.dtype != "bfloat16":
+        fail(f"{key} complete evidence source must be bfloat16")
+    return TensorPayload(key, (math.prod(payload.shape),), "bfloat16", payload.encoded)
 
 
 def leading_bf16(payload: TensorPayload, width: int) -> bytes:
@@ -579,7 +596,9 @@ def leading_bf16(payload: TensorPayload, width: int) -> bytes:
 
 def measurement_payloads(raw: Sequence[TensorPayload], layer: str) -> tuple[TensorPayload, ...]:
     values = {item.key: item for item in raw}
-    tolerance = metric_payload("tolerance", (0.015625, 0.015625))
+    tolerance = metric_payload(
+        "tolerance", (max(ABSOLUTE_TOLERANCE[layer].values()), RELATIVE_TOLERANCE)
+    )
     if layer == "token-refiner":
         token = values["token-refiner"]
         numbers = [float(value) for value in token.values()]
@@ -588,7 +607,7 @@ def measurement_payloads(raw: Sequence[TensorPayload], layer: str) -> tuple[Tens
         return (
             metric_payload("shape", token.shape, "int64"),
             metric_payload("statistics", (min(numbers), max(numbers), mean, std)),
-            sample_bf16(token, "sampled-values"), tolerance,
+            complete_bf16(token, "sampled-values"), tolerance,
         )
     normalized = [values["normalized-q"], values["normalized-k"]]
     rms = [math.sqrt(sum(float(value) ** 2 for value in item.values()) / math.prod(item.shape)) for item in normalized]
@@ -613,9 +632,7 @@ def measurement_payloads(raw: Sequence[TensorPayload], layer: str) -> tuple[Tens
 
 
 def sample_indexes(payload: TensorPayload) -> list[int]:
-    total = math.prod(payload.shape)
-    count = min(257, total)
-    return [index * (total - 1) // (count - 1) for index in range(count)] if count > 1 else [0]
+    return list(range(math.prod(payload.shape)))
 
 
 def unravel(index: int, shape: Sequence[int]) -> list[int]:
@@ -678,10 +695,18 @@ def build_layer_document(manifest: Mapping[str, Any], role: str, task: str, laye
         document["comparison"] = [
             {
                 "key": item.key,
-                "absolute": 0 if item.dtype == "int64" else 0.015625,
-                "relative": 0 if item.dtype == "int64" else 0.015625,
+                "absolute": ABSOLUTE_TOLERANCE[layer].get(item.key, 0.0),
+                "relative": (
+                    RELATIVE_TOLERANCE
+                    if item.key in RECORD_ONLY_MEASUREMENTS[layer]
+                    else 0.0
+                ),
                 "metric": "elementwise-atol-plus-rtol",
-                "hash_policy": "record-only" if item.dtype == "float32" else "exact",
+                "hash_policy": (
+                    "record-only"
+                    if item.key in RECORD_ONLY_MEASUREMENTS[layer]
+                    else "exact"
+                ),
             }
             for item in measurement_payloads(raw, layer)
         ]

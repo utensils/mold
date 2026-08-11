@@ -441,18 +441,32 @@ FL2VA task first, releases its model, then captures Ref2VA:
     python3 scripts/capture-minimax-h3-transformer.py \
       capture --role mold --device cuda:0
 
-The deterministic record covers token-refiner output shape/statistics/samples,
-Q/K RMS, both Q and K leading multimodal RoPE axes, AdaLN parameters, and the
-FP32 video and audio heads. Integer shape evidence is zero-tolerance; BF16
-records use the protected 1/64 comparison bound; FP32 heads retain their hashes
-as record-only evidence. TF32, approximate attention, compilation, FP8, and
-non-deterministic algorithms remain disabled. Raw adapter output and evidence
-use create-new owner-only files below the external fixture root, and raw output
-is parsed from the exact descriptor-retained bytes before revalidation. Every
-published layer and bundle binds the reviewed authorization source-evidence
-hash carried by the validated wrapper record, never the wrapper file's own
-hash. The producer and its CI contract do not claim that the real CUDA campaign
-has passed.
+The deterministic record covers token-refiner output shape/statistics, Q/K RMS,
+both Q and K leading multimodal RoPE axes, AdaLN parameters, and the FP32 video
+and audio heads. Every compared transformer coordinate is retained in canonical
+order; both producer hashes remain evidence, but floating hashes are record-only
+because the pinned PyTorch and Candle CUDA math paths do not promise byte-identical
+BF16 accumulation. Integer and policy records remain exact.
+
+The reviewed elementwise policies add `1/64 * abs(oracle)` to these absolute
+caps: 8 for the high-magnitude token-refiner output, `1/16` for partial MM-RoPE,
+the existing `1/64` for Q/K RMS, token statistics, and AdaLN, 1.25 for the FP32
+video head, and 0.5 for the FP32 audio head. The real two-task L40S comparison
+that established those bounds measured normalized RMSE of 0.23–0.39% across
+the BF16 records and 0.82–1.09% across the derived FP32 heads. Protected
+validation independently caps each named policy, requires complete ordered
+coordinate coverage for both roles, and rejects any out-of-bound scalar. The
+protected reader admits layer documents only as no-follow regular files up to
+64 MiB; the complete transformer-block records are approximately 32.7 MiB.
+
+TF32, approximate attention, compilation, FP8, and non-deterministic algorithms
+remain disabled. Raw adapter output and evidence use create-new owner-only files
+below the external fixture root, and raw output is parsed from the exact
+descriptor-retained bytes before revalidation. Every published layer and bundle
+binds the reviewed authorization source-evidence hash carried by the validated
+wrapper record, never the wrapper file's own hash. The producer and its CI
+contract do not claim that the real CUDA campaign has passed until a protected
+pair using these reviewed policies succeeds.
 
 ### Opt-in protected GPU validation
 
