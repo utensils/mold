@@ -201,7 +201,7 @@ impl MultimodalRotaryEmbedding {
         })
     }
 
-    fn cos_sin(&self, position_ids: &Tensor) -> Result<(Tensor, Tensor)> {
+    fn cos_sin(&self, position_ids: &Tensor, dtype: DType) -> Result<(Tensor, Tensor)> {
         let (axes, _batch, sequence) = position_ids.dims3()?;
         if axes != 3 {
             candle::bail!("Qwen multimodal RoPE needs three position axes, got {axes}");
@@ -239,7 +239,10 @@ impl MultimodalRotaryEmbedding {
         let interleaved = Tensor::cat(&refs, D::Minus1)?;
         debug_assert_eq!(interleaved.dim(1)?, sequence);
         let doubled = Tensor::cat(&[&interleaved, &interleaved], D::Minus1)?;
-        Ok((doubled.cos()?, doubled.sin()?))
+        Ok((
+            doubled.cos()?.to_dtype(dtype)?,
+            doubled.sin()?.to_dtype(dtype)?,
+        ))
     }
 }
 
@@ -251,11 +254,17 @@ fn rotate_half(input: &Tensor) -> Result<Tensor> {
 }
 
 fn apply_rotary(input: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
-    let dtype = input.dtype();
-    let input = input.to_dtype(DType::F32)?;
+    if cos.dtype() != input.dtype() || sin.dtype() != input.dtype() {
+        candle::bail!(
+            "Qwen text rotary inputs must share one dtype, got {:?}, {:?}, and {:?}",
+            input.dtype(),
+            cos.dtype(),
+            sin.dtype()
+        );
+    }
     let cos = cos.unsqueeze(1)?;
     let sin = sin.unsqueeze(1)?;
-    (input.broadcast_mul(&cos)? + rotate_half(&input)?.broadcast_mul(&sin)?)?.to_dtype(dtype)
+    input.broadcast_mul(&cos)? + rotate_half(input)?.broadcast_mul(&sin)?
 }
 
 struct Attention {
@@ -552,7 +561,7 @@ impl Qwen3VlTextEncoder {
         if deepstack.is_some_and(|features| features.len() > self.layers.len()) {
             candle::bail!("H3 DeepStack has more feature layers than language layers");
         }
-        let (cos, sin) = self.rotary.cos_sin(position_ids)?;
+        let (cos, sin) = self.rotary.cos_sin(position_ids, hidden.dtype())?;
         let causal = causal_mask(sequence, hidden.device())?;
         for (index, layer) in self.layers.iter().enumerate() {
             hidden = layer.forward(&hidden, &cos, &sin, &causal)?;
@@ -642,7 +651,7 @@ impl Qwen3VlStreamingTextEncoder {
         if deepstack.is_some_and(|features| features.len() > self.layer_count()) {
             candle::bail!("H3 DeepStack has more feature layers than language layers");
         }
-        let (cos, sin) = self.rotary.cos_sin(position_ids)?;
+        let (cos, sin) = self.rotary.cos_sin(position_ids, hidden.dtype())?;
         let causal = causal_mask(sequence, hidden.device())?;
         for index in 0..self.layer_count() {
             let layer = self.load_layer(index)?;
@@ -912,13 +921,17 @@ mod tests {
         let vb = VarBuilder::zeros(DType::F32, &Device::Cpu);
         let rotary = MultimodalRotaryEmbedding::new(&config, &vb).unwrap();
         let positions = Tensor::new(&[[[2_u32]], [[3_u32]], [[4_u32]]], &Device::Cpu).unwrap();
-        let (cos, sin) = rotary.cos_sin(&positions).unwrap();
+        let (cos, sin) = rotary.cos_sin(&positions, DType::F32).unwrap();
         assert_eq!(cos.dtype(), DType::F32);
         assert_eq!(sin.dtype(), DType::F32);
         assert_eq!(cos.dims(), [1, 1, 4]);
         let values = cos.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         assert!((values[0] - 2.0_f32.cos()).abs() < 1e-6);
         assert!((values[1] - (3.0_f32 / 100.0).cos()).abs() < 1e-6);
+
+        let (cos, sin) = rotary.cos_sin(&positions, DType::BF16).unwrap();
+        assert_eq!(cos.dtype(), DType::BF16);
+        assert_eq!(sin.dtype(), DType::BF16);
     }
 
     #[test]

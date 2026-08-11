@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **MiniMax H3 Qwen now matches the released BF16 precision boundaries.** The text conditioner casts multimodal rotary cosine and sine values to the hidden-state dtype before the products and residual sum, while the vision tower accumulates learned-position interpolation with FP32 weights in the released multiply/divide order before casting once to BF16. Real CUDA qualification showed the corrections reduce text layer-50 drift and restore the official massive-activation direction for the representative multimodal state; the complete pair still requires a separately reviewed magnitude-aware policy before qualification can pass.
+
 - **Private H3 Qwen qualification now retains every compared activation coordinate.** Real paired CUDA evidence exposed cross-backend differences after the 50-layer text and multimodal paths. The producer now emits the complete ordered BF16 activation in each role's layer document, and protected validation rejects any missing, extra, or reordered coordinate. Rejection diagnostics are bounded even when a complete tensor differs, while still reporting the total omitted issue count. The exact-hash policy remains unchanged until complete evidence justifies a narrower reviewed policy.
 
 - **Private H3 Qwen bundles retain the complete component authority.** The paired producer now copies each layer document's canonical 15-record text-encoder authority-set hash into its bundle fixture instead of reverting to the single index-file hash. Protected validation therefore sees the same reviewed index and shard authority at both evidence boundaries.
