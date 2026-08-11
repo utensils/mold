@@ -33,7 +33,7 @@ REQUIRED_ENVIRONMENT = (
     "MOLD_H3_SOURCE_SHA",
 )
 COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
-EXACT_AUTHORITY_TIER = "exact-full-bf16"
+EXACT_AUTHORITY_TIERS = frozenset({"exact-full-bf16", "exact-full-fp32"})
 CANONICAL_BF16_DTYPE = "bfloat16"
 CANONICAL_F16_DTYPE = "float16"
 CANONICAL_F32_DTYPE = "float32"
@@ -98,8 +98,9 @@ MEASUREMENT_DTYPES = {
         "stereo-packing": CANONICAL_INTEGER_DTYPE,
         "latent-rate": CANONICAL_METRIC_DTYPE,
         "waveform-statistics": CANONICAL_METRIC_DTYPE,
-        "phase-polarity": CANONICAL_INTEGER_DTYPE,
-        "sampled-values": CANONICAL_BF16_DTYPE,
+        "phase-polarity": CANONICAL_METRIC_DTYPE,
+        "decoded-pcm": CANONICAL_F32_DTYPE,
+        "sampled-values": CANONICAL_F32_DTYPE,
     },
     "token-refiner": {
         "shape": CANONICAL_INTEGER_DTYPE,
@@ -150,10 +151,40 @@ MEASUREMENT_DTYPES = {
 }
 PROVENANCE_HASH_KEYS = {
     "adapter-implementation-sha256",
+    "checkpoint-sha256",
     "oracle-runtime-sha256",
+    "runtime-sha256",
     "tokenizer-hash",
     "processor-hash",
     "artifact-set-sha256",
+}
+REQUIRED_STRUCTURED_HASH_PROVENANCE = frozenset(
+    {
+        "adapter-implementation-sha256",
+        "checkpoint-sha256",
+        "runtime-sha256",
+    }
+)
+RECORD_ONLY_FLOAT_MEASUREMENTS = {
+    "visual-vae": frozenset(
+        {
+            "pixel-normalization",
+            "posterior-moments",
+            "posterior-sample",
+            "posterior-fp16-roundtrip",
+            "latent-normalization",
+            "decoded-frames",
+            "tile-seams",
+        }
+    ),
+    "audio-vae": frozenset(
+        {
+            "waveform-statistics",
+            "phase-polarity",
+            "decoded-pcm",
+            "sampled-values",
+        }
+    ),
 }
 CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 REVIEWED_AUTHORIZATION_EVIDENCE_SHA256 = (
@@ -424,7 +455,7 @@ def exact_layer_contracts(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]
         fail("checked manifest contains invalid oracle runtime authority")
     contracts: dict[str, dict[str, Any]] = {}
     for layer in manifest["fixture_layers"]:
-        if layer["authority_tier"] != EXACT_AUTHORITY_TIER:
+        if layer["authority_tier"] not in EXACT_AUTHORITY_TIERS:
             continue
         identifier = layer["id"]
         if identifier in contracts:
@@ -532,7 +563,8 @@ def exact_layer_contracts(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]
                     "oracle-runtime-sha256": canonical_json_sha256(oracle_runtime),
                 }
             )
-        contract["_oracle_runtime"] = dict(oracle_runtime)
+        if layer["authority_tier"] == "exact-full-bf16":
+            contract["_oracle_runtime"] = dict(oracle_runtime)
         contract["_excluded_accelerations"] = excluded_accelerations
         contracts[identifier] = contract
 
@@ -660,18 +692,44 @@ def validate_capture_environment(
     capture = bundle["capture_environment"]
     if not is_cuda_environment(capture["device"]):
         fail(f"{role} bundle does not declare a CUDA capture environment")
-    if capture["dtype"] not in {
-        CANONICAL_BF16_DTYPE,
-        CANONICAL_MIXED_CAPTURE_DTYPE,
-        VISUAL_VAE_ENVIRONMENT_DTYPE,
-    }:
-        fail(f"{role} bundle capture environment dtype is not a reviewed profile")
+    fixture_profiles = set()
+    for fixture in bundle["fixtures"]:
+        contract = layer_contracts.get(fixture["layer"])
+        if contract is None:
+            fail(
+                f"{role} bundle layer {fixture['layer']} lacks an exact "
+                "manifest authority tier"
+            )
+        fixture_profiles.add(
+            layer_environment_dtype(fixture["layer"], contract["authority_tier"])
+        )
+    expected_capture_dtype = (
+        next(iter(fixture_profiles))
+        if len(fixture_profiles) == 1
+        else CANONICAL_MIXED_CAPTURE_DTYPE
+    )
+    if capture["dtype"] != expected_capture_dtype:
+        fail(
+            f"{role} bundle capture environment dtype must be "
+            f"{expected_capture_dtype}"
+        )
     validate_acceleration_policy(capture, excluded_accelerations, f"{role} bundle")
     if role == "oracle":
         expected_framework = "diffusers"
         expected_revision = tool.EXPECTED_REVISIONS["diffusers"]
-        if capture.get("oracle_runtime") != expected_oracle_runtime(layer_contracts):
-            fail("oracle bundle runtime identity is not exact")
+        fixture_layers = {fixture["layer"] for fixture in bundle["fixtures"]}
+        runtime_contracts = {
+            layer: contract
+            for layer, contract in layer_contracts.items()
+            if layer in fixture_layers and "_oracle_runtime" in contract
+        }
+        if runtime_contracts:
+            if capture.get("oracle_runtime") != expected_oracle_runtime(
+                runtime_contracts
+            ):
+                fail("oracle bundle runtime identity is not exact")
+        elif "oracle_runtime" in capture:
+            fail("oracle bundle claims an unreviewed runtime identity")
         validate_bundle_oracle_adapters(bundle, layer_contracts, capture["device"])
     else:
         expected_framework = "mold"
@@ -749,6 +807,8 @@ def structured_provenance_value(document: dict[str, Any], key: str) -> str | Non
         return None
     if key == "adapter-implementation-sha256":
         return document["adapter"].get("implementation_sha256")
+    if key == "checkpoint-sha256":
+        return document["input"].get("checkpoint_sha256")
     if key == "oracle-runtime-sha256":
         runtime = document["environment"].get("oracle_runtime")
         if isinstance(runtime, dict):
@@ -775,7 +835,38 @@ def structured_provenance_value(document: dict[str, Any], key: str) -> str | Non
         return document["environment"]["attention_backend"]
     if key == "capture-command":
         return document["adapter"]["command"]
+    if key == "runtime-sha256":
+        runtime = document["environment"].get("runtime")
+        if (
+            not isinstance(runtime, dict)
+            or not runtime
+            or any(
+                not isinstance(runtime_key, str)
+                or not runtime_key
+                or runtime_key != runtime_key.strip()
+                or len(runtime_key) > 256
+                or CONTROL_CHARACTER_PATTERN.search(runtime_key) is not None
+                or not isinstance(runtime_value, str)
+                or not runtime_value
+                or runtime_value != runtime_value.strip()
+                or len(runtime_value) > 4096
+                or CONTROL_CHARACTER_PATTERN.search(runtime_value) is not None
+                for runtime_key, runtime_value in runtime.items()
+            )
+        ):
+            return None
+        return canonical_json_sha256(runtime)
     return None
+
+
+def layer_environment_dtype(layer: str, authority_tier: str) -> str:
+    if layer == "visual-vae":
+        return VISUAL_VAE_ENVIRONMENT_DTYPE
+    if authority_tier == "exact-full-bf16":
+        return CANONICAL_BF16_DTYPE
+    if authority_tier == "exact-full-fp32":
+        return CANONICAL_F32_DTYPE
+    fail(f"unsupported exact authority tier {authority_tier!r}")
 
 
 def is_json_integer(value: Any) -> bool:
@@ -969,13 +1060,22 @@ def validate_manifest_layer_evidence(
     if document["adapter"]["tensor_hash_encoding"] != CANONICAL_TENSOR_HASH_ENCODING:
         fail(f"{role} layer {layer} tensor hash encoding is not canonical")
     expected_runtime = manifest_layer.get("_oracle_runtime")
-    if not isinstance(expected_runtime, dict):
-        fail(f"protected manifest layer {layer} lacks oracle runtime authority")
-    if role == "oracle":
-        if document["environment"].get("oracle_runtime") != expected_runtime:
-            fail(f"oracle layer {layer} runtime identity is not exact")
+    if isinstance(expected_runtime, dict):
+        if role == "oracle":
+            if document["environment"].get("oracle_runtime") != expected_runtime:
+                fail(f"oracle layer {layer} runtime identity is not exact")
+        elif "oracle_runtime" in document["environment"]:
+            fail(f"Mold layer {layer} must not claim oracle runtime identity")
     elif "oracle_runtime" in document["environment"]:
-        fail(f"Mold layer {layer} must not claim oracle runtime identity")
+        fail(f"{role} layer {layer} claims an unreviewed oracle runtime identity")
+    expected_execution_dtype = layer_environment_dtype(
+        layer, manifest_layer["authority_tier"]
+    )
+    if document["environment"]["dtype"] != expected_execution_dtype:
+        fail(
+            f"{role} layer {layer} environment dtype must be "
+            f"{expected_execution_dtype}"
+        )
 
     adapter_authority = manifest_layer.get("oracle_adapter")
     if role == "oracle" and adapter_authority is not None:
@@ -990,13 +1090,6 @@ def validate_manifest_layer_evidence(
             != adapter_authority["implementation_sha256"]
         ):
             fail(f"oracle layer {layer} adapter identity is not exact")
-    if "adapter-implementation-sha256" in manifest_layer["required_provenance"]:
-        implementation_sha256 = document["adapter"].get("implementation_sha256")
-        if re.fullmatch(r"[0-9a-f]{64}", implementation_sha256 or "") is None:
-            fail(
-                f"{role} layer {layer} adapter implementation is not content-addressed"
-            )
-
     required_components = manifest_layer.get("_required_component_authorities")
     if not isinstance(required_components, list) or not required_components:
         fail(f"protected manifest layer {layer} lacks component authority")
@@ -1057,6 +1150,11 @@ def validate_manifest_layer_evidence(
         if pinned_value is not None and value != pinned_value:
             fail(f"{role} layer {layer} provenance {key!r} is not authority-pinned")
         structured = structured_provenance_value(document, key)
+        if key in REQUIRED_STRUCTURED_HASH_PROVENANCE and structured is None:
+            fail(
+                f"{role} layer {layer} provenance {key!r} "
+                "lacks canonical structured evidence"
+            )
         if structured is not None and value != structured:
             fail(
                 f"{role} layer {layer} provenance {key!r} "
@@ -1111,19 +1209,25 @@ def validate_manifest_layer_evidence(
                     f"oracle layer {layer} output {key!r} integer policy "
                     "must use zero tolerances and exact hashes"
                 )
-        elif (
-            not is_finite_float64(policy.get("absolute"))
-            or not is_finite_float64(policy.get("relative"))
-            or policy["absolute"] > MAX_EXACT_ABSOLUTE_TOLERANCE
-            or policy["relative"] > MAX_EXACT_RELATIVE_TOLERANCE
-            or policy["absolute"] < 0
-            or policy["relative"] < 0
-            or policy.get("hash_policy") not in {"exact", "record-only"}
-        ):
-            fail(
-                f"oracle layer {layer} output {key!r} floating policy "
-                "is not the bounded protected policy"
+        else:
+            hash_policy = policy.get("hash_policy")
+            record_only_allowed = key in RECORD_ONLY_FLOAT_MEASUREMENTS.get(
+                layer, frozenset()
             )
+            if (
+                not is_finite_float64(policy.get("absolute"))
+                or not is_finite_float64(policy.get("relative"))
+                or policy["absolute"] > MAX_EXACT_ABSOLUTE_TOLERANCE
+                or policy["relative"] > MAX_EXACT_RELATIVE_TOLERANCE
+                or policy["absolute"] < 0
+                or policy["relative"] < 0
+                or hash_policy not in {"exact", "record-only"}
+                or (hash_policy == "record-only" and not record_only_allowed)
+            ):
+                fail(
+                    f"oracle layer {layer} output {key!r} floating policy "
+                    "is not the bounded protected policy"
+                )
 
 
 def validate_exact_outputs(
@@ -1163,10 +1267,10 @@ def load_layer_documents(
     documents: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
     for position, fixture in enumerate(bundle["fixtures"], start=1):
         manifest_tier = layer_tiers.get(fixture["layer"])
-        if manifest_tier != EXACT_AUTHORITY_TIER:
+        if manifest_tier not in EXACT_AUTHORITY_TIERS:
             fail(
                 f"{role} bundle layer {fixture['layer']} has manifest authority tier "
-                f"{manifest_tier!r}, not {EXACT_AUTHORITY_TIER}"
+                f"{manifest_tier!r}, not an exact authority tier"
             )
         if fixture["authority_tier"] != manifest_tier:
             fail(f"{role} bundle authority tier drifts from the manifest")
@@ -1204,10 +1308,10 @@ def load_layer_documents(
         elif producer["source_id"] != "mold" or producer["revision"] != source_sha:
             fail("Mold evidence is not from the exact requested source SHA")
         document_manifest_tier = layer_tiers.get(document["layer"])
-        if document_manifest_tier != EXACT_AUTHORITY_TIER:
+        if document_manifest_tier not in EXACT_AUTHORITY_TIERS:
             fail(
                 f"{role} layer {document['layer']} has manifest authority tier "
-                f"{document_manifest_tier!r}, not {EXACT_AUTHORITY_TIER}"
+                f"{document_manifest_tier!r}, not an exact authority tier"
             )
         if document["authority_tier"] != document_manifest_tier:
             fail(f"{role} layer authority tier drifts from the manifest")
@@ -1218,10 +1322,8 @@ def load_layer_documents(
             fail(f"{role} layer is not bound to the authorization evidence")
         if not is_cuda_environment(document["environment"]["device"]):
             fail(f"{role} layer does not declare a CUDA execution environment")
-        expected_environment_dtype = (
-            VISUAL_VAE_ENVIRONMENT_DTYPE
-            if document["layer"] == "visual-vae"
-            else CANONICAL_BF16_DTYPE
+        expected_environment_dtype = layer_environment_dtype(
+            document["layer"], document_manifest_tier
         )
         if document["environment"]["dtype"] != expected_environment_dtype:
             fail(f"{role} layer environment dtype must be {expected_environment_dtype}")
@@ -1244,8 +1346,10 @@ def load_layer_documents(
             != capture_environment.get("dtype")
         ):
             fail(f"{role} layer dtype differs from its bundle")
-        if document["environment"].get("oracle_runtime") != capture_environment.get(
-            "oracle_runtime"
+        if (
+            "_oracle_runtime" in manifest_layer
+            and document["environment"].get("oracle_runtime")
+            != capture_environment.get("oracle_runtime")
         ):
             fail(f"{role} layer oracle runtime differs from its bundle")
         if role == "oracle" and manifest_layer.get("oracle_adapter") is not None:
@@ -1302,7 +1406,7 @@ def require_complete_exact_coverage(
     required = {
         layer
         for layer, authority_tier in layer_tiers.items()
-        if authority_tier == EXACT_AUTHORITY_TIER
+        if authority_tier in EXACT_AUTHORITY_TIERS
     }
     observed = {layer for _, layer in documents}
     if observed != required:

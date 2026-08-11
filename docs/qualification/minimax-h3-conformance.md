@@ -351,6 +351,58 @@ Its Cargo target and all retained request/raw/layer/bundle evidence remain
 under the owner-only external fixture root. No checkpoint, raw tensor, or
 decoded media is committed to the repository.
 
+### Exact-FP32 AudioVAE capture
+
+`scripts/capture-minimax-h3-audio-vae.py` captures the manifest's `audio-vae`
+boundary as paired authorization-bound evidence. The oracle loads the official
+Diffusers AudioVAE checkpoint; the Mold role builds the isolated
+`h3_audio_vae_capture` binary from an owner-only archive of the exact clean
+checkout and loads the reviewed Comfy folded FP32 checkpoint through Mold's
+validated AudioVAE loader. Both paths are CUDA-only and FP32-only. The binary
+requires `dev-bins,h3-private-uat,cuda`, is absent from every shipping feature
+set, and retains a marker that published-binary verification rejects.
+
+The deterministic case is a two-item stereo batch with four distinct channels
+and 2,401 samples per channel. It binds channel-major packing into the official
+`[batch * 2, 1, samples]` mono contract, padding to 3,200 samples, four latent
+rows at 40 Hz, and restoration to `[batch, 2, samples]`. Evidence retains the
+complete decoded FP32 PCM and normalized latent payloads, input and decoded
+waveform statistics, lagged phase/polarity correlations, the exact packing
+map, and the complete typed content hashes. The two checkpoints have different
+reviewed hashes, so continuous AudioVAE records use bounded numerical
+tolerances with `record-only` hashes; packing and timeline records remain
+zero-tolerance and hash-exact.
+
+Prepare the five external paths and run each role in a fresh process so GPU
+memory from one implementation cannot affect the other:
+
+    export MOLD_H3_FIXTURE_ROOT=/external/h3/evidence
+    export MOLD_H3_AUTHORIZATION_RECORD=/external/h3/compliance/authorization.json
+    export MOLD_H3_OFFICIAL_MODEL=/external/h3/models/MiniMax-H3
+    export MOLD_H3_DIFFUSERS_CHECKOUT=/external/h3/src/diffusers
+    export MOLD_H3_COMFY_MODEL=/external/h3/models/Comfy-H3
+    python3 scripts/capture-minimax-h3-audio-vae.py \
+      capture --role oracle --device cuda:0
+    python3 scripts/capture-minimax-h3-audio-vae.py \
+      capture --role mold --device cuda:0
+
+The oracle environment must provide Python 3, NumPy, PyTorch with CUDA,
+Safetensors, Hugging Face Hub, Accelerate, and the pinned Diffusers checkout on
+its import path; the producer imports Diffusers only from its sealed Git archive
+snapshot. The Mold role additionally requires the Rust 1.93 toolchain, Cargo,
+a CUDA toolkit, and the native build dependencies already used by Mold's CUDA
+CI. Its Cargo target directory is created below `MOLD_H3_FIXTURE_ROOT`.
+
+Before inference, the producer authenticates the official config and checkpoint
+and the Comfy checkpoint by exact revision, size, and SHA-256, validates the
+external authorization record and clean source checkouts, disables every
+manifest-excluded acceleration, and seals source snapshots read-only. After
+inference it revalidates every protected input. Runtime, checkpoint, and adapter
+implementation hashes are bound into structured evidence and provenance.
+Create-new owner-only writes refuse overwrite and keep raw request, response,
+weights, and evidence outside the repository. Passing contract tests or CUDA
+typechecks alone is not evidence that this real-checkpoint capture ran.
+
 ### Opt-in protected GPU validation
 
 The manual `MiniMax H3 private conformance` workflow validates an approved,

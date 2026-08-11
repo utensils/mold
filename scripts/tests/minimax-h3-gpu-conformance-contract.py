@@ -66,8 +66,9 @@ TEST_MEASUREMENT_KINDS = {
         "stereo-packing": "integer",
         "latent-rate": "metric",
         "waveform-statistics": "metric",
-        "phase-polarity": "integer",
-        "sampled-values": "activation",
+        "phase-polarity": "metric",
+        "decoded-pcm": "float32",
+        "sampled-values": "float32",
     },
     "token-refiner": {
         "shape": "integer",
@@ -227,7 +228,10 @@ def exact_manifest_layers(tool) -> dict[str, dict[str, object]]:
     }
     layers = {}
     for raw_layer in manifest["fixture_layers"]:
-        if raw_layer["authority_tier"] != "exact-full-bf16":
+        if raw_layer["authority_tier"] not in {
+            "exact-full-bf16",
+            "exact-full-fp32",
+        }:
             continue
         layer = copy.deepcopy(raw_layer)
         layer["_required_component_authorities"] = [
@@ -249,7 +253,8 @@ def exact_manifest_layers(tool) -> dict[str, dict[str, object]]:
                     ),
                 }
             )
-        layer["_oracle_runtime"] = copy.deepcopy(tool.EXPECTED_ORACLE_RUNTIME)
+        if layer["authority_tier"] == "exact-full-bf16":
+            layer["_oracle_runtime"] = copy.deepcopy(tool.EXPECTED_ORACLE_RUNTIME)
         layer["_excluded_accelerations"] = frozenset(
             manifest["numerical_authority"]["excluded_accelerations"]
         )
@@ -321,7 +326,11 @@ def provenance_fixture(
         "adapter-implementation-sha256": document["adapter"].get(
             "implementation_sha256", "0" * 64
         ),
+        "checkpoint-sha256": document["input"].get("checkpoint_sha256", "0" * 64),
         "oracle-runtime-sha256": canonical_json_sha256(tool.EXPECTED_ORACLE_RUNTIME),
+        "runtime-sha256": canonical_json_sha256(
+            document["environment"].get("runtime", {})
+        ),
         "tokenizer-hash": "0" * 64,
         "processor-hash": "0" * 64,
         "component-index-hash": document["input"]["component_index_sha256"],
@@ -367,6 +376,8 @@ def layer_document(
         "component_index_sha256": component_summary_sha256,
         "component_indexes": component_indexes,
     }
+    if layer == "audio-vae":
+        input_evidence["checkpoint_sha256"] = "4" * 64
     task = E2E_LAYER_TASKS.get(layer)
     if task is not None:
         conditioning = []
@@ -449,7 +460,11 @@ def layer_document(
         "dtype": (
             VISUAL_VAE_ENVIRONMENT_DTYPE
             if layer == "visual-vae"
-            else CANONICAL_BF16_DTYPE
+            else (
+                CANONICAL_F32_DTYPE
+                if manifest_layer["authority_tier"] == "exact-full-fp32"
+                else CANONICAL_BF16_DTYPE
+            )
         ),
         "attention_backend": "math",
         "acceleration_policy": {
@@ -458,14 +473,16 @@ def layer_document(
         },
         "forbidden_accelerations_disabled": True,
     }
-    if role == "oracle":
+    if layer == "audio-vae":
+        environment["runtime"] = {"python": "3.contract"}
+    if role == "oracle" and manifest_layer["authority_tier"] == "exact-full-bf16":
         environment["oracle_runtime"] = copy.deepcopy(tool.EXPECTED_ORACLE_RUNTIME)
     document: dict[str, object] = {
         "schema_version": tool.LAYER_OUTPUT_SCHEMA_VERSION,
         "family": "minimax-h3",
         "case_id": "gpu-contract-case",
         "layer": layer,
-        "authority_tier": "exact-full-bf16",
+        "authority_tier": manifest_layer["authority_tier"],
         "authorization_document_sha256": authorization_sha,
         "input": input_evidence,
         "producer": {
@@ -1071,11 +1088,20 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
             "dtype": "float32",
             "attention-backend": "flash",
             "capture-command": "different capture command",
+            "checkpoint-sha256": "b" * 64,
+            "adapter-implementation-sha256": "b" * 64,
+            "runtime-sha256": "b" * 64,
         }
         for provenance_key, value in structured_drifts.items():
             if provenance_key not in manifest_layer["required_provenance"]:
                 continue
             drifted = layer_document(tool, "oracle", authorization_sha, manifest_layer)
+            if provenance_key == "dtype":
+                value = (
+                    CANONICAL_BF16_DTYPE
+                    if drifted["environment"]["dtype"] == CANONICAL_F32_DTYPE
+                    else CANONICAL_F32_DTYPE
+                )
             record_by_key(drifted["provenance"], provenance_key)["value"] = value
             expect_failure(
                 lambda drifted=drifted, manifest_layer=manifest_layer: (

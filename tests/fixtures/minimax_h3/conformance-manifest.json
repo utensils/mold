@@ -480,11 +480,14 @@
     },
     {
       "id": "audio-vae",
-      "authority_tier": "exact-full-bf16",
+      "authority_tier": "exact-full-fp32",
       "input_contract": { "kind": "identity-sha256-v1" },
       "required_component_indexes": ["official-audio-vae-config"],
       "required_provenance": [
         "source-revision",
+        "checkpoint-sha256",
+        "adapter-implementation-sha256",
+        "runtime-sha256",
         "component-index-hash",
         "device",
         "dtype",
@@ -497,6 +500,7 @@
         "latent-rate",
         "waveform-statistics",
         "phase-polarity",
+        "decoded-pcm",
         "sampled-values"
       ]
     },

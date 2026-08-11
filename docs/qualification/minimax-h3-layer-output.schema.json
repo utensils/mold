@@ -23,7 +23,12 @@
     "case_id": { "$ref": "#/$defs/key" },
     "layer": { "$ref": "#/$defs/key" },
     "authority_tier": {
-      "enum": ["exact-full-bf16", "quantized-structural", "synthetic"]
+      "enum": [
+        "exact-full-bf16",
+        "exact-full-fp32",
+        "quantized-structural",
+        "synthetic"
+      ]
     },
     "authorization_document_sha256": {
       "type": ["string", "null"],
@@ -76,6 +81,7 @@
           "minItems": 1,
           "items": { "$ref": "#/$defs/component_index_authority" }
         },
+        "checkpoint_sha256": { "$ref": "#/$defs/sha256" },
         "conformance": { "$ref": "#/$defs/e2e_input" }
       }
     },
@@ -126,6 +132,13 @@
         "attention_backend": { "type": "string", "minLength": 1 },
         "acceleration_policy": { "$ref": "#/$defs/acceleration_policy" },
         "oracle_runtime": { "$ref": "#/$defs/oracle_runtime" },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
         "forbidden_accelerations_disabled": { "const": true }
       }
     },
