@@ -133,6 +133,63 @@ fn header_shapes(path: &Path) -> Result<Vec<(String, Vec<usize>)>> {
 /// Returns `None` when the file is not a Wan DiT in a layout this engine
 /// recognizes; the caller keeps its conservative fallback rather than
 /// inventing a shape.
+/// Frames the engine renders when the request omits them, mirroring
+/// `WanVaeGeneration::default_timing`.
+fn default_frames_for_vae(vae: crate::device::WanVaeGeneration) -> u32 {
+    match vae {
+        crate::device::WanVaeGeneration::V22 => 121,
+        crate::device::WanVaeGeneration::V21 => 81,
+    }
+}
+
+/// Device memory this render's denoise activations will need, for the block
+/// offload policy (#776 item 3).
+///
+/// `None` when the checkpoint's geometry cannot be read, which leaves the
+/// policy to its explicit-request-only path rather than guessing a budget:
+/// under-estimating here would park too few blocks and OOM anyway, and
+/// over-estimating would park blocks a render did not need.
+fn denoise_activation_bytes(
+    req: &GenerateRequest,
+    files: &[PathBuf],
+    config: &WanTransformerConfig,
+) -> Option<u64> {
+    // Prefer the config the caller already resolved over re-probing the files:
+    // the probe can fail on an unfamiliar export, and a `None` here silently
+    // disables the whole offload policy rather than failing loudly.
+    let geometry = activation_geometry_across(files).or_else(|| {
+        let vae = match config.in_dim {
+            48 => crate::device::WanVaeGeneration::V22,
+            16 | 36 => crate::device::WanVaeGeneration::V21,
+            _ => return None,
+        };
+        Some(crate::device::WanActivationGeometry {
+            dim: config.dim as u64,
+            ffn_dim: config.ffn_dim as u64,
+            num_heads: config.num_heads as u64,
+            vae,
+            patch_spatial: config.patch_size.1.max(1) as u64,
+            per_token_timesteps: false,
+        })
+    })?;
+    // An absent frame count is the engine's own default, not "no video" — and
+    // pricing it as zero would size the budget for a single latent frame and
+    // disable offload exactly where it is needed most.
+    let frames = req
+        .frames
+        .unwrap_or_else(|| default_frames_for_vae(geometry.vae));
+    // The CALIBRATED budget, not the raw derived one. Using the raw sum here
+    // under-estimated by 2.14x, so the policy parked nothing and the render
+    // OOM'd at a shape admission had just accepted.
+    Some(crate::device::wan_calibrated_activation_bytes(
+        req.width,
+        req.height,
+        frames,
+        geometry,
+        needs_cfg_pass(req.guidance),
+    ))
+}
+
 pub fn activation_geometry(path: &Path) -> Option<crate::device::WanActivationGeometry> {
     activation_geometry_across(std::slice::from_ref(&path.to_path_buf()))
 }
@@ -1447,12 +1504,14 @@ impl WanEngine {
             }
             progress.stage_start("Loading Wan transformer");
             let started = Instant::now();
-            let transformer = crate::wan::experts::load_transformer(
-                &transformer_files(paths),
+            let files = transformer_files(paths);
+            let transformer = crate::wan::experts::load_transformer_with_offload(
+                &files,
                 config.clone(),
                 device,
                 dtype,
                 &loras,
+                denoise_activation_bytes(req, &files, config),
             )?;
             progress.phase_done(
                 ProgressPhase::ModelLoad,
@@ -1497,7 +1556,14 @@ impl WanEngine {
             pair.high_noise.loras.patch_count(),
             pair.low_noise.loras.patch_count(),
         ));
-        WanExperts::pair(pair, config.clone(), device, dtype, low_noise_config)
+        WanExperts::pair(
+            pair,
+            config.clone(),
+            device,
+            dtype,
+            low_noise_config,
+            denoise_activation_bytes(req, &transformer_files(paths), config),
+        )
     }
 
     fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {

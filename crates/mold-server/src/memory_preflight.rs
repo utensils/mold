@@ -1249,6 +1249,11 @@ pub(crate) fn estimate_generation_memory_for_request(
             );
             if hint.is_some_and(|h| h.family == ActivationFamily::WanVideo) {
                 base_peak = base_peak.saturating_sub(WAN_REQUEST_AWARE_HEADROOM_BYTES);
+                // Block offload (#776 item 3) can park trailing transformer
+                // blocks in host RAM, so a shape that does not fit resident
+                // may still be feasible. Charging the full weight term would
+                // refuse it before the engine ever got the chance.
+                base_peak = base_peak.saturating_sub(wan_block_offload_relief(paths));
             }
             // Carry the wan checkpoint geometry in here too. Wan is never
             // streaming, so this arm is the only one it takes — recomputing
@@ -1328,6 +1333,27 @@ fn request_sensitive_activation_memory(
 /// checkpoint pairs with, and the per-token slope on its width. Callers
 /// without a path pass `None` and get the A14B shape, which is the largest
 /// shipped tier and therefore the conservative choice for admission.
+/// Weight bytes block offload can be relied on to free for a wan render.
+///
+/// Zero unless the transformer is a GGUF checkpoint: parking is a raw-byte
+/// round trip through `QTensor::data`, which the plain and fp8 weight sources
+/// have no equivalent of, so promising relief for them would admit a shape the
+/// engine cannot then fit.
+///
+/// The fraction is measured and deliberately smaller than what parking
+/// achieved at its best - see `mold_inference::wan::block_offload`.
+fn wan_block_offload_relief(paths: &ModelPaths) -> u64 {
+    let transformer = &paths.transformer;
+    if !transformer
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+    {
+        return 0;
+    }
+    let bytes = std::fs::metadata(transformer).map(|m| m.len()).unwrap_or(0);
+    mold_inference::wan::block_offload::max_block_offload_relief_bytes(bytes)
+}
+
 fn request_sensitive_activation_memory_with_wan_geometry(
     req: &GenerateRequest,
     hint: Option<ActivationHint>,

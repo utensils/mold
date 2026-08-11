@@ -70,6 +70,10 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     // purpose), so a run with it off must not share a learned-timing bucket
     // with one that had it on.
     "MOLD_WAN_PREFETCH",
+    // #776 item 3: parking transformer blocks in host RAM changes device
+    // residency, peak VRAM, and step latency, so a run with blocks parked must
+    // not share a learned-timing bucket with one that kept them resident.
+    "MOLD_WAN_OFFLOAD_BLOCKS",
     // #801: residual reuse changes the rendered output, so it can never share
     // an execution-equivalence class or a learned-timing bucket with a run
     // that denoised every block.

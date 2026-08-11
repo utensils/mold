@@ -419,11 +419,15 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
             vae_cpu: false,
             audio_components_cpu: false,
         },
-        // Block streaming is not wired for the Wan DiT. The 1.3B and 5B
-        // checkpoints fit a 24 GB card whole once the encoder is gone, and A14B
-        // fits because only one expert is resident at a time — the pair's VRAM
-        // demand is the max over the two, not their sum.
-        block_offload: false,
+        // Partial block offload (#776 item 3): trailing blocks park in host RAM
+        // when a render's activation budget will not fit what is free after the
+        // weights land, and each comes back for the duration of its own forward.
+        // This is not the stream-everything FLUX mode — the 1.3B and 5B
+        // checkpoints still fit a 24 GB card whole, and A14B fits because only
+        // one expert is resident at a time, so a render that fits parks nothing.
+        // Quantized checkpoints only: the park is a raw-byte round trip through
+        // `QTensor::data`, which the plain and fp8 sources have no equivalent of.
+        block_offload: true,
         tiled_vae: TiledVaeCapability::Unsupported,
         execution: SINGLETON,
         determinism: EXACT,

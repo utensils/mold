@@ -23,6 +23,7 @@ use candle_nn::{ops, Module, VarBuilder};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::wan::block_offload::{ParkedBlock, WanBlockParking};
 use crate::wan::model::fp8;
 use crate::wan::model::rope::{apply_rope, WanRope, WAN_ROPE_THETA};
 
@@ -773,6 +774,33 @@ impl WanAttention {
     }
 }
 
+/// The CUDA ordinal of `device`, or `None` for a device with no VRAM reading.
+fn device_ordinal(device: &Device) -> Option<usize> {
+    match device.location() {
+        candle_core::DeviceLocation::Cuda { gpu_id } => Some(gpu_id),
+        _ => None,
+    }
+}
+
+/// Average bytes per transformer block in a checkpoint's tensor map.
+///
+/// Averaged rather than measured per block because Wan's blocks are uniform,
+/// and because the policy only needs a size to divide a shortfall by.
+fn block_bytes(
+    tensors: &std::collections::HashMap<String, Arc<candle_core::quantized::QTensor>>,
+    total_blocks: usize,
+) -> u64 {
+    if total_blocks == 0 {
+        return 0;
+    }
+    let block_total: usize = tensors
+        .iter()
+        .filter(|(name, _)| name.starts_with("blocks."))
+        .map(|(_, tensor)| tensor.storage_size_in_bytes())
+        .sum();
+    (block_total / total_blocks) as u64
+}
+
 /// `Linear -> GELU(tanh) -> Linear` (`model.py:271-273`).
 #[derive(Clone)]
 struct WanFeedForward {
@@ -1046,7 +1074,7 @@ pub(crate) struct WanTransformer {
     time_projection: WanLinear,
     text_embedding_in: WanLinear,
     text_embedding_out: WanLinear,
-    blocks: Vec<WanBlock>,
+    blocks: Vec<WanBlockSlot>,
     head_norm: WanLayerNorm,
     /// `[1, 2, dim]`.
     head_modulation: Tensor,
@@ -1056,9 +1084,99 @@ pub(crate) struct WanTransformer {
     /// Set when the weights came from an fp8-scaled checkpoint, so the engine
     /// can report which precision path a run is actually on.
     quantization: Option<fp8::ScaledFp8Marker>,
+    /// What a parked block needs to come back. `None` when nothing is parked.
+    offload: Option<WanOffloadContext>,
+}
+
+/// Where one block's weights currently live (#776 item 3).
+#[derive(Clone)]
+enum WanBlockSlot {
+    /// On the compute device, ready to run. Boxed because a `WanBlock` is far
+    /// larger than a parked block's tensor map, and every slot in the vector
+    /// would otherwise be padded to it.
+    Resident(Box<WanBlock>),
+    /// In host RAM. Rebuilt onto the device for the duration of its forward
+    /// and dropped again immediately after, so at most one parked block is
+    /// resident at a time.
+    Parked(ParkedBlock),
+}
+
+/// Everything [`WanTransformer::materialize_block`] needs to rebuild a parked
+/// block, captured at load time because the checkpoint's tensor map does not
+/// outlive construction.
+#[derive(Clone)]
+struct WanOffloadContext {
+    device: Device,
+    loras: Arc<crate::wan::lora::WanLoraRegistry>,
 }
 
 impl WanTransformer {
+    /// The block about to run, brought back from host RAM if it was parked.
+    ///
+    /// A resident block is an `Arc` clone — the weights are shared, not
+    /// copied. A parked one is rebuilt on the device from its raw quantized
+    /// bytes and returned by value, so it is freed the moment the caller's
+    /// binding drops: that is what bounds the offloaded run to **one** extra
+    /// block resident at a time rather than all of them.
+    fn materialize_block(&self, index: usize) -> Result<WanBlock> {
+        match &self.blocks[index] {
+            WanBlockSlot::Resident(block) => Ok((**block).clone()),
+            WanBlockSlot::Parked(parked) => {
+                let Some(offload) = &self.offload else {
+                    bail!(
+                        "Wan DiT: block {index} is parked but the transformer kept no way to \
+                         rebuild it"
+                    );
+                };
+                let resident = parked.to_device(&offload.device)?;
+                let vb = mold_candle::quantized::VarBuilder::from_qtensors(
+                    resident.into_tensors(),
+                    &offload.device,
+                );
+                let weights = WanWeights::quantized_with_loras(vb, Arc::clone(&offload.loras));
+                WanBlock::load(&weights.pp(format!("blocks.{index}")), &self.config)
+            }
+        }
+    }
+
+    /// How many of this transformer's blocks are currently in host RAM.
+    pub fn parked_block_count(&self) -> usize {
+        self.blocks
+            .iter()
+            .filter(|slot| matches!(slot, WanBlockSlot::Parked(_)))
+            .count()
+    }
+
+    /// Move the last `count` blocks to host RAM, releasing their device copy.
+    ///
+    /// The *last* blocks deliberately: block 0 runs first every step and is
+    /// also the one the step cache reads (`wan/step_cache.rs`), so parking from
+    /// the tail leaves the hot block resident and gives the later ones the most
+    /// time to be brought back.
+    ///
+    /// Returns the bytes released. Parking is only possible for a quantized
+    /// checkpoint — the plain and fp8 sources build their weights through paths
+    /// with no raw-byte round trip — so this is a no-op for those, reported as
+    /// zero rather than as an error.
+    fn park_trailing_blocks(
+        &mut self,
+        count: usize,
+        all: &std::collections::HashMap<String, Arc<candle_core::quantized::QTensor>>,
+    ) -> Result<u64> {
+        let total = self.blocks.len();
+        let count = count.min(total);
+        let mut released = 0u64;
+        for index in (total - count)..total {
+            let Some(parked) = WanBlockParking::park(all, index) else {
+                continue;
+            };
+            let host = parked.to_device(&Device::Cpu)?;
+            released += host.size_in_bytes() as u64;
+            self.blocks[index] = WanBlockSlot::Parked(host);
+        }
+        Ok(released)
+    }
+
     /// Load from safetensors carrying the original key layout. A
     /// `model.diffusion_model.` prefix (full-pipeline checkpoints) is stripped.
     pub fn from_safetensors(
@@ -1198,17 +1316,112 @@ impl WanTransformer {
         device: &Device,
         loras: &crate::wan::lora::WanLoraRegistry,
     ) -> Result<Self> {
+        Self::from_gguf_with_offload(path, config, device, loras, None)
+    }
+
+    /// [`Self::from_gguf_with_loras`] that may park blocks to fit this render.
+    ///
+    /// `activation_bytes` is the denoise activation budget the caller expects
+    /// to need after the weights land. Passing `None` keeps every block
+    /// resident unless `MOLD_WAN_OFFLOAD_BLOCKS` forces otherwise, which is why
+    /// the plain constructor above is unchanged for tests and for callers with
+    /// no shape in hand.
+    pub fn from_gguf_with_offload(
+        path: &Path,
+        config: WanTransformerConfig,
+        device: &Device,
+        loras: &crate::wan::lora::WanLoraRegistry,
+        activation_bytes: Option<u64>,
+    ) -> Result<Self> {
         let vb = mold_candle::quantized::VarBuilder::from_gguf(path, device)?;
-        if loras.is_empty() {
-            return Self::from_weights(&WanWeights::quantized(vb), config);
+        if !loras.is_empty() {
+            loras
+                .ensure_targets_present(|name| vb.contains_key(name), path)
+                .map_err(|err| candle_core::Error::Msg(format!("{err:#}")))?;
         }
-        loras
-            .ensure_targets_present(|name| vb.contains_key(name), path)
-            .map_err(|err| candle_core::Error::Msg(format!("{err:#}")))?;
-        Self::from_weights(
-            &WanWeights::quantized_with_loras(vb, Arc::new(loras.clone())),
+        let registry = Arc::new(loras.clone());
+        // The offload policy needs the checkpoint's tensor map, and
+        // `from_weights` consumes the builder — so take a handle to the map
+        // first. Cloning the map clones `Arc`s, not weights.
+        let tensors = vb.tensors().clone();
+        let mut model = Self::from_weights(
+            &WanWeights::quantized_with_loras(vb, Arc::clone(&registry)),
             config,
-        )
+        )?;
+        model.apply_offload_policy(device, registry, &tensors, activation_bytes)?;
+        Ok(model)
+    }
+
+    /// Park trailing blocks in host RAM if this render will not otherwise fit
+    /// (#776 item 3).
+    ///
+    /// Runs after the weights are already resident, which is deliberate: the
+    /// load peak is one expert (~10.8 GB at Q5) and the *denoise* peak is what
+    /// exceeds the card, so freeing blocks once here costs nothing at the point
+    /// where memory is not yet tight.
+    ///
+    /// A render that already fits takes the `None` arm and keeps exactly the
+    /// execution it had before this existed.
+    fn apply_offload_policy(
+        &mut self,
+        device: &Device,
+        loras: Arc<crate::wan::lora::WanLoraRegistry>,
+        tensors: &std::collections::HashMap<String, Arc<candle_core::quantized::QTensor>>,
+        activation_bytes: Option<u64>,
+    ) -> Result<()> {
+        use crate::wan::block_offload::{plan_offload, WanOffloadPlan};
+
+        let total = self.blocks.len();
+        if total == 0 {
+            return Ok(());
+        }
+
+        let forced = crate::wan::block_offload::forced_block_count();
+        // What still has to fit is the activation budget: the weights are
+        // already resident by the time this runs, so free VRAM measured here
+        // is exactly what the denoise has left to work in.
+        let (need, free) = match (forced, activation_bytes, device_ordinal(device)) {
+            (Some(_), _, _) => (0, 0),
+            (None, Some(need), Some(ordinal)) => (
+                need,
+                crate::device::usable_free_vram_bytes(ordinal).unwrap_or(u64::MAX),
+            ),
+            // No budget supplied or no reading available: there is no
+            // shortfall to compute, so only an explicit request may engage.
+            _ => return Ok(()),
+        };
+
+        let bytes_per_block = block_bytes(tensors, total);
+        let plan = plan_offload(need, free, bytes_per_block, total, forced);
+        tracing::info!(
+            need_mib = need / (1024 * 1024),
+            free_mib = free / (1024 * 1024),
+            bytes_per_block_mib = bytes_per_block / (1024 * 1024),
+            total_blocks = total,
+            parking = plan.blocks(),
+            "Wan block-offload policy"
+        );
+        if plan == WanOffloadPlan::None {
+            return Ok(());
+        }
+
+        self.offload = Some(WanOffloadContext {
+            device: device.clone(),
+            loras,
+        });
+        let released = self.park_trailing_blocks(plan.blocks(), tensors)?;
+        if self.parked_block_count() == 0 {
+            // Nothing actually moved (a non-`blocks.` namespace, say), so drop
+            // the context rather than leave a claim the forward cannot honour.
+            self.offload = None;
+            return Ok(());
+        }
+        tracing::info!(
+            parked_blocks = self.parked_block_count(),
+            released_mib = released / (1024 * 1024),
+            "Wan: parked transformer blocks in host RAM to fit this render"
+        );
+        Ok(())
     }
 
     /// Convenience for a single-file checkpoint.
@@ -1248,7 +1461,10 @@ impl WanTransformer {
 
         let mut blocks = Vec::with_capacity(config.num_layers);
         for i in 0..config.num_layers {
-            blocks.push(WanBlock::load(&vb.pp(format!("blocks.{i}")), &config)?);
+            blocks.push(WanBlockSlot::Resident(Box::new(WanBlock::load(
+                &vb.pp(format!("blocks.{i}")),
+                &config,
+            )?)));
         }
 
         let head_modulation = vb
@@ -1277,6 +1493,7 @@ impl WanTransformer {
             rope: WanRope::new(config.head_dim(), config.rope_max_seq_len, WAN_ROPE_THETA)?,
             patch_weight,
             patch_bias,
+            offload: None,
             config,
             dtype,
             quantization: vb.quantization(),
@@ -1492,16 +1709,19 @@ impl WanTransformer {
 
         match cache {
             None => {
-                for block in &self.blocks {
+                for index in 0..self.blocks.len() {
+                    let block = self.materialize_block(index)?;
                     hidden = block.forward(&hidden, &context, &timestep, cos, sin)?;
                 }
             }
             Some(cache) => {
-                let Some((first, rest)) = self.blocks.split_first() else {
+                if self.blocks.is_empty() {
                     bail!("Wan DiT: a transformer with no blocks cannot run");
-                };
+                }
                 let entry = hidden.clone();
+                let first = self.materialize_block(0)?;
                 hidden = first.forward(&hidden, &context, &timestep, cos, sin)?;
+                drop(first);
                 let first_block_residual = (&hidden - &entry)?;
                 match cache.decide(&first_block_residual)? {
                     // The trajectory barely moved: replay what blocks 1..N
@@ -1509,7 +1729,8 @@ impl WanTransformer {
                     Some(tail) => hidden = (&hidden + &tail)?,
                     None => {
                         let after_first = hidden.clone();
-                        for block in rest {
+                        for index in 1..self.blocks.len() {
+                            let block = self.materialize_block(index)?;
                             hidden = block.forward(&hidden, &context, &timestep, cos, sin)?;
                         }
                         cache.record_tail((&hidden - &after_first)?);
@@ -2707,11 +2928,12 @@ mod tests {
             .unwrap();
 
         let mut worst = 0.0f64;
-        for (i, block) in model.blocks.iter().enumerate() {
+        for (i, expected) in GOLDEN_BLOCK_OUTPUTS.iter().enumerate() {
+            let block = model.materialize_block(i).unwrap();
             hidden = block
                 .forward(&hidden, &ctx, &timestep_embedding, &cos, &sin)
                 .unwrap();
-            let err = max_abs_diff(&values(&hidden), GOLDEN_BLOCK_OUTPUTS[i]);
+            let err = max_abs_diff(&values(&hidden), expected);
             assert!(err < GOLDEN_TOLERANCE, "block {i} max error {err:e}");
             worst = worst.max(err);
         }

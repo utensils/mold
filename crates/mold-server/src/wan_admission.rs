@@ -32,92 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
 use mold_core::ModelPaths;
-use mold_inference::device::{
-    wan_activation_budget_bytes, WanActivationGeometry, WanVaeGeneration,
-};
-
-/// Extra device memory a CFG step holds beyond a single forward.
-///
-/// The two forwards are sequential, so this is not the working set doubling.
-/// Re-measured after #776 item 2 sliced the gated residual, which is what the
-/// old figures were mostly charging for — the uncond pass used to leave
-/// full-clip F32 transients alive, and now it cannot. Same protocol, one
-/// render with and one without the uncond pass:
-///
-/// | Tier | CFG off | CFG on | Delta |
-/// | --- | ---: | ---: | ---: |
-/// | 1.3B bf16, 81f/832x480 | 12,114 MiB | 12,370 MiB | +256 MiB |
-/// | A14B q5, 53f/832x480 | 21,354 MiB | 21,322 MiB | -32 MiB |
-///
-/// Was +512 and +945 MiB respectively. A14B's delta is now negative, i.e. gone
-/// into the noise, so the policy of carrying the larger of the two now carries
-/// the *small* model's figure — which is the safe direction, since it
-/// over-charges the tier that sits nowhere near a 24 GB ceiling and charges the
-/// tier that does exactly what it was measured to cost.
-const WAN_CFG_RESIDENT_BYTES: u64 = 256 * 1024 * 1024;
-
-/// Token-independent denoise workspace: RoPE tables held across the loop, the
-/// latent and noise tensors, the text embeddings, the VAE decode working set,
-/// and allocator/cuDNN scratch.
-///
-/// This was 0, with the whole cost folded into the measured slope. That is only
-/// self-consistent while the slope is fitted at the shape it is used at: a
-/// difference-based fit cancels the intercept, so applying it against total
-/// tokens silently re-charges the intercept once per token. The old 2.26 slope
-/// was steep enough to hide it; re-fitting to the real per-token cost (2.14)
-/// exposed it as a ~2.3 GB shortfall that would have made admission accept an
-/// 81-frame A14B render and OOM mid-denoise.
-///
-/// Fitted, not guessed: the CFG-off A14B pair gives 0.37607 MiB/token, so
-/// extrapolating the 17-frame point back to zero tokens leaves a 13,141 MiB
-/// intercept, of which 10,840 MiB is the UMT5 weight floor this module already
-/// charges. The remainder is here.
-const WAN_FIXED_WORKSPACE_BYTES: u64 = 2301 * 1024 * 1024;
-
-/// Measured multiplier on the derived per-token tensor sum.
-///
-/// `device::wan_activation_budget_bytes` counts the tensors `WanBlock::forward`
-/// visibly materializes; a real forward holds about 2.26x that. The residual is
-/// intermediates candle keeps live that a hand-count of the obvious buffers
-/// misses — the LayerNorm's internal F32 copies, RoPE application, the q/k RMS
-/// norms over the full inner dimension, and expression temporaries that are not
-/// freed until the enclosing statement ends.
-///
-/// The derived formula supplies the *shape* of the cost (it scales with `dim`,
-/// `ffn_dim`, heads, and tokens); this supplies the *scale*, from hardware.
-/// Naming it as one measured factor is honest about which half is which —
-/// folding it into the flat term instead would make the slope silently wrong
-/// and only look right at the shape it was fitted to, which is the defect this
-/// calibration replaced.
-///
-/// Derived from two renders differing only in frame count, so every fixed cost
-/// — weights, the encoder pool, allocator scratch — cancels.
-///
-/// Re-fitted for #776 item 2, which sliced the gated residual's F32 arithmetic
-/// so it no longer scales with the clip. That changed both halves: the derived
-/// per-token sum fell from 225,280 B to 184,320 B (three per-token F32 buffers
-/// became two BF16 ones in `device::wan_activation_budget_bytes`), and the
-/// measured per-token cost fell with it. Same protocol and same hardware as the
-/// original fit — RTX 4090, `wan22-t2v-a14b:q5`, 832x480, CFG off, sampling
-/// `nvidia-smi` through the run:
-///
-/// | Frames | Tokens | Peak |
-/// | -----: | -----: | ---: |
-/// | 17 | 7,800 | 16,074 MiB |
-/// | 53 | 21,840 | 21,354 MiB |
-///
-/// 5,280 MiB over 14,040 tokens is 394,336 B/token against the derived
-/// 184,320, i.e. 2.14. Both points are denoise-dominated rather than pinned by
-/// the UMT5 pool, which was checked directly: forcing the encoder to CPU moves
-/// the 17-frame peak by 32 MiB (16,074 -> 16,042).
-///
-/// For reference the pre-slicing fit was 509,052 B/token against 225,280, i.e.
-/// 2.26 — so the ratio barely moved while the absolute per-token cost fell 23%.
-/// That is the expected shape of the result: slicing removed buffers the
-/// derived formula was already counting, rather than changing how much candle
-/// holds beyond what a hand-count sees.
-const WAN_MEASURED_SLOPE_NUMERATOR: u64 = 214;
-const WAN_MEASURED_SLOPE_DENOMINATOR: u64 = 100;
+use mold_inference::device::{WanActivationGeometry, WanVaeGeneration};
 
 /// Request shape driving the wan activation budget. `ActivationHint` stays as
 /// it is — it is constructed by name across the server and carries no
@@ -178,6 +93,86 @@ impl WanShapeHint {
 }
 
 /// Peak activation bytes for one wan request against one checkpoint.
+/// The measured calibration behind this estimate. The constants themselves
+/// now live in `mold_inference::device` so the engine's block-offload policy
+/// reads the same numbers; the fit that produced them is recorded here.
+///
+/// Extra device memory a CFG step holds beyond a single forward.
+///
+/// The two forwards are sequential, so this is not the working set doubling.
+/// Re-measured after #776 item 2 sliced the gated residual, which is what the
+/// old figures were mostly charging for — the uncond pass used to leave
+/// full-clip F32 transients alive, and now it cannot. Same protocol, one
+/// render with and one without the uncond pass:
+///
+/// | Tier | CFG off | CFG on | Delta |
+/// | --- | ---: | ---: | ---: |
+/// | 1.3B bf16, 81f/832x480 | 12,114 MiB | 12,370 MiB | +256 MiB |
+/// | A14B q5, 53f/832x480 | 21,354 MiB | 21,322 MiB | -32 MiB |
+///
+/// Was +512 and +945 MiB respectively. A14B's delta is now negative, i.e. gone
+/// into the noise, so the policy of carrying the larger of the two now carries
+/// the *small* model's figure — which is the safe direction, since it
+/// over-charges the tier that sits nowhere near a 24 GB ceiling and charges the
+/// tier that does exactly what it was measured to cost.
+/// Token-independent denoise workspace: RoPE tables held across the loop, the
+/// latent and noise tensors, the text embeddings, the VAE decode working set,
+/// and allocator/cuDNN scratch.
+///
+/// This was 0, with the whole cost folded into the measured slope. That is only
+/// self-consistent while the slope is fitted at the shape it is used at: a
+/// difference-based fit cancels the intercept, so applying it against total
+/// tokens silently re-charges the intercept once per token. The old 2.26 slope
+/// was steep enough to hide it; re-fitting to the real per-token cost (2.14)
+/// exposed it as a ~2.3 GB shortfall that would have made admission accept an
+/// 81-frame A14B render and OOM mid-denoise.
+///
+/// Fitted, not guessed: the CFG-off A14B pair gives 0.37607 MiB/token, so
+/// extrapolating the 17-frame point back to zero tokens leaves a 13,141 MiB
+/// intercept, of which 10,840 MiB is the UMT5 weight floor this module already
+/// charges. The remainder is here.
+/// Measured multiplier on the derived per-token tensor sum.
+///
+/// `device::wan_activation_budget_bytes` counts the tensors `WanBlock::forward`
+/// visibly materializes; a real forward holds about 2.26x that. The residual is
+/// intermediates candle keeps live that a hand-count of the obvious buffers
+/// misses — the LayerNorm's internal F32 copies, RoPE application, the q/k RMS
+/// norms over the full inner dimension, and expression temporaries that are not
+/// freed until the enclosing statement ends.
+///
+/// The derived formula supplies the *shape* of the cost (it scales with `dim`,
+/// `ffn_dim`, heads, and tokens); this supplies the *scale*, from hardware.
+/// Naming it as one measured factor is honest about which half is which —
+/// folding it into the flat term instead would make the slope silently wrong
+/// and only look right at the shape it was fitted to, which is the defect this
+/// calibration replaced.
+///
+/// Derived from two renders differing only in frame count, so every fixed cost
+/// — weights, the encoder pool, allocator scratch — cancels.
+///
+/// Re-fitted for #776 item 2, which sliced the gated residual's F32 arithmetic
+/// so it no longer scales with the clip. That changed both halves: the derived
+/// per-token sum fell from 225,280 B to 184,320 B (three per-token F32 buffers
+/// became two BF16 ones in `device::wan_activation_budget_bytes`), and the
+/// measured per-token cost fell with it. Same protocol and same hardware as the
+/// original fit — RTX 4090, `wan22-t2v-a14b:q5`, 832x480, CFG off, sampling
+/// `nvidia-smi` through the run:
+///
+/// | Frames | Tokens | Peak |
+/// | -----: | -----: | ---: |
+/// | 17 | 7,800 | 16,074 MiB |
+/// | 53 | 21,840 | 21,354 MiB |
+///
+/// 5,280 MiB over 14,040 tokens is 394,336 B/token against the derived
+/// 184,320, i.e. 2.14. Both points are denoise-dominated rather than pinned by
+/// the UMT5 pool, which was checked directly: forcing the encoder to CPU moves
+/// the 17-frame peak by 32 MiB (16,074 -> 16,042).
+///
+/// For reference the pre-slicing fit was 509,052 B/token against 225,280, i.e.
+/// 2.26 — so the ratio barely moved while the absolute per-token cost fell 23%.
+/// That is the expected shape of the result: slicing removed buffers the
+/// derived formula was already counting, rather than changing how much candle
+/// holds beyond what a hand-count sees.
 pub(crate) fn wan_activation_bytes(shape: WanShapeHint, geometry: WanActivationGeometry) -> u64 {
     // The checkpoint says whether per-token timesteps are *possible*; the
     // request says whether they happen.
@@ -190,13 +185,16 @@ pub(crate) fn wan_activation_bytes(shape: WanShapeHint, geometry: WanActivationG
     } else {
         shape.frames
     };
-    let derived = wan_activation_budget_bytes(shape.width, shape.height, frames, geometry);
-    let transformer =
-        derived.saturating_mul(WAN_MEASURED_SLOPE_NUMERATOR) / WAN_MEASURED_SLOPE_DENOMINATOR;
-    let cfg = if shape.cfg { WAN_CFG_RESIDENT_BYTES } else { 0 };
-    transformer
-        .saturating_add(cfg)
-        .saturating_add(WAN_FIXED_WORKSPACE_BYTES)
+    // Delegates to the shared authority in `mold_inference::device` so the
+    // engine's block-offload policy and this estimate cannot drift apart; the
+    // constants and their fit are documented there and above.
+    mold_inference::device::wan_calibrated_activation_bytes(
+        shape.width,
+        shape.height,
+        frames,
+        geometry,
+        shape.cfg,
+    )
 }
 
 /// Shared UMT5-XXL fp16 encoder.
@@ -378,7 +376,10 @@ mod tests {
             WanShapeHint::from_request(&request(832, 480, 53, 3.5)),
             geometry,
         );
-        assert_eq!(with - without, WAN_CFG_RESIDENT_BYTES);
+        assert_eq!(
+            with - without,
+            mold_inference::device::WAN_CFG_RESIDENT_BYTES
+        );
         assert!(
             with < without * 2,
             "CFG must not be priced as a doubling: {without} -> {with}"
