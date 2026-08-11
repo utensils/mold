@@ -135,6 +135,33 @@ device-synced timing line per denoise step, and `MOLD_WAN_FORCE_DMMV=1`
 forces the quantized-matmul fallback for A/B comparison — neither belongs in
 production use.
 
+### 81 frames on a 24 GB card
+
+The A14B pair's trained clip length is 81 frames, and the Q5-backed tiers now
+default to it. What makes it fit a 24 GB card is partial block offload: when a
+render's activation budget will not fit what is free once the weights land,
+trailing transformer blocks park in host RAM and each returns for the duration
+of its own forward, so at most one parked block is resident at a time.
+
+Measured on an RTX 4090, `wan22-t2v-a14b:q5` at 832x480:
+
+| Frames | Offload | Wall clock | Peak |
+| -----: | ------- | ---------: | ---: |
+| 53 | none | 163 s | 21,354 MiB |
+| 81 | none | — | **OOM** |
+| 81 | automatic | 316.3 s | 17,322 MiB |
+
+It engages by itself and a render that already fits parks nothing, so shorter
+clips are unchanged. `MOLD_WAN_OFFLOAD_BLOCKS=N` pins the block count and `0`
+disables it.
+
+Two caveats worth knowing. Parking is only available for **GGUF** checkpoints —
+the move is a raw-byte round trip that the plain and fp8 weight sources have no
+equivalent of — and parked blocks cost wall clock, roughly doubling the render
+above, because each is rebuilt on the device once per step. The Q8 and fp8
+tiers still default to 33 frames: their resident expert is several GB larger
+than Q5's, and those envelopes have not been measured.
+
 ### The VAE decode is 40-50% of a fast-tier render
 
 On the 4-step Turbo tier the denoise is short enough that the causal 3-D VAE

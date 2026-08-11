@@ -5673,21 +5673,24 @@ fn a14b_manifest(tier: A14bTier, task: A14bTask) -> ModelManifest {
             is_schnell: false,
             scheduler: None,
             negative_prompt: Some(WAN_DEFAULT_NEGATIVE_PROMPT.to_string()),
-            // Default clip lengths are the measured 24 GB envelope, not the
-            // checkpoint's trained 81: on an RTX 4090 the Q5 pair peaks at
-            // 23,975 MiB rendering 53 frames at 832x480 (81 frames peaked at
-            // 23.0 GB and then OOM'd), and the Q8 pair's ~4.6 GB larger
-            // resident expert moves its edge to ~33 frames by the same
-            // activation arithmetic. 53 is also the reference space's own
-            // default duration. Larger cards can simply pass --frames 81.
-            // The Q4 pair's resident expert is ~1.1 GB smaller than Q5's, so
-            // 53 fits wherever Q5's does — confirmed: the Q4 T2V default
-            // measured 21,372 MiB at 832x480 x 53f on an RTX 4090 (#794).
+            // The Q5-backed tiers now default to the checkpoint's trained 81
+            // frames, which #776 item 3's block offload made reachable on a
+            // 24 GB card: measured on an RTX 4090, 81f at 832x480 renders in
+            // 316.3 s at a 17,322 MiB peak with the offload policy engaging by
+            // itself. Before it, the same shape OOM'd — the old 53 was the
+            // no-offload envelope, recorded here when 23,975 MiB at 53 frames
+            // was the most the pair could hold.
+            //
+            // The Q8 and fp8 tiers stay at 33. Their resident expert is ~4.6
+            // and ~3.5 GB larger than Q5's, so their shortfall is bigger than
+            // parking can be relied on to cover, and raising a default on
+            // arithmetic rather than a measurement is what produced the
+            // 81-frame OOM this replaces. Those move when they are measured.
+            //
+            // Q4's resident expert is ~1.1 GB smaller than Q5's, so 81 fits
+            // wherever Q5's does.
             frames: Some(match tier {
-                A14bTier::Fast | A14bTier::Compact => 53,
-                // The fp8 resident expert (~14.3 GB) sits between Q8's
-                // 15.4 GB and Q5's 10.8 GB, so it inherits the quality tier's
-                // conservative default until its own envelope is measured.
+                A14bTier::Fast | A14bTier::Compact => 81,
                 A14bTier::Quality | A14bTier::Fp8 => 33,
             }),
             fps: Some(16),
@@ -7269,7 +7272,7 @@ mod tests {
             // ~1.1 GB smaller than Q5's, so 53 fits wherever Q5's does — its
             // measured T2V peak is 21,372 MiB (#794). All stay on the 4n+1
             // grid; bigger cards pass --frames 81 explicitly.
-            let expected_frames = if name.ends_with(":q8") { 33 } else { 53 };
+            let expected_frames = if name.ends_with(":q8") { 33 } else { 81 };
             assert_eq!(defaults.frames, Some(expected_frames), "{name}");
             assert_eq!(
                 (expected_frames - 1) % 4,

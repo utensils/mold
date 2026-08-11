@@ -550,7 +550,10 @@ mod tests {
             assert_eq!(q4.family, "wan");
             assert_eq!(q4.defaults.default_steps, 4);
             assert_eq!(q4.defaults.default_guidance, 1.0);
-            assert_eq!(q4.defaults.default_frames, Some(53));
+            // 81 since #776 item 3: block offload reaches the checkpoint's
+            // trained clip length on a 24 GB card, and Q4's resident expert is
+            // smaller than the Q5 the measurement was taken on.
+            assert_eq!(q4.defaults.default_frames, Some(81));
             assert_eq!(q4.defaults.default_fps, Some(16));
 
             // Quality order within the base name: q8 > q5 > q4.

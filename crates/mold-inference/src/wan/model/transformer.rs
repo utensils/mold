@@ -1393,6 +1393,14 @@ impl WanTransformer {
 
         let bytes_per_block = block_bytes(tensors, total);
         let plan = plan_offload(need, free, bytes_per_block, total, forced);
+        tracing::info!(
+            need_mib = need / (1024 * 1024),
+            free_mib = free / (1024 * 1024),
+            bytes_per_block_mib = bytes_per_block / (1024 * 1024),
+            total_blocks = total,
+            parking = plan.blocks(),
+            "Wan block-offload policy"
+        );
         if plan == WanOffloadPlan::None {
             return Ok(());
         }

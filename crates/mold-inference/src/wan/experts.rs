@@ -316,6 +316,15 @@ pub(crate) struct WanExpertState {
     /// Background page-cache warm for the expert that has not run yet. Dropped
     /// (and joined) when the swap happens or the render ends.
     prefetch: Option<ExpertPrefetch>,
+    /// Denoise activation budget for the render in flight, so each expert
+    /// can park blocks as it loads (#776 item 3).
+    ///
+    /// A14B loads its experts lazily on the role switch rather than up
+    /// front, so the budget has to travel with the state — resolving it at
+    /// construction and forgetting it is how the offload policy came to be
+    /// wired for single-expert checkpoints only, and silently skipped for
+    /// the pair that actually needs it.
+    activation_bytes: Option<u64>,
 }
 
 impl WanExperts {
@@ -336,6 +345,7 @@ impl WanExperts {
         device: &Device,
         dtype: DType,
         low_noise_config: WanTransformerConfig,
+        activation_bytes: Option<u64>,
     ) -> Result<Self> {
         if low_noise_config != config {
             bail!(
@@ -358,6 +368,7 @@ impl WanExperts {
             dtype,
             resident: None,
             prefetch: None,
+            activation_bytes,
         })))
     }
 
@@ -410,6 +421,7 @@ impl WanExperts {
                     dtype,
                     resident,
                     prefetch,
+                    activation_bytes,
                 } = state.as_mut();
                 let role = pair.role_for(timestep);
                 if resident.as_ref().map(|(current, _)| *current) != Some(role) {
@@ -431,12 +443,13 @@ impl WanExperts {
                     let transformer =
                         // A14B experts are always one file each; a sharded
                         // pair is not something the ecosystem publishes.
-                        load_transformer(
+                        load_transformer_with_offload(
                             std::slice::from_ref(&slot.path),
                             config.clone(),
                             device,
                             *dtype,
                             &slot.loras,
+                            *activation_bytes,
                         )?;
                     progress.phase_done(ProgressPhase::ModelLoad, &stage, started.elapsed());
                     if swapping {
@@ -545,7 +558,7 @@ mod tests {
         let device = Device::Cpu;
         let high = WanTransformerConfig::t2v_14b();
         let low = WanTransformerConfig::i2v_14b();
-        let error = WanExperts::pair(pair(false), high.clone(), &device, DType::F32, low)
+        let error = WanExperts::pair(pair(false), high.clone(), &device, DType::F32, low, None)
             .err()
             .expect("a 16-channel expert does not pair with a 36-channel one")
             .to_string();
@@ -553,7 +566,9 @@ mod tests {
         assert!(error.contains("low.gguf"), "{error}");
         assert!(error.contains("different architectures"), "{error}");
 
-        assert!(WanExperts::pair(pair(false), high.clone(), &device, DType::F32, high).is_ok());
+        assert!(
+            WanExperts::pair(pair(false), high.clone(), &device, DType::F32, high, None).is_ok()
+        );
     }
 
     fn tiny_config() -> WanTransformerConfig {
@@ -643,6 +658,7 @@ mod tests {
             &device,
             DType::F32,
             config.clone(),
+            None,
         )
         .unwrap();
 
@@ -706,6 +722,7 @@ mod tests {
             &device,
             DType::F32,
             config,
+            None,
         )
         .unwrap();
 
@@ -792,6 +809,7 @@ mod tests {
             &device,
             DType::F32,
             config,
+            None,
         )
         .unwrap();
 
