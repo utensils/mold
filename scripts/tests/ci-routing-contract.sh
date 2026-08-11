@@ -112,13 +112,21 @@ if rust is None:
 rust_text = rust.group(1)
 
 run_suite = (
-    "needs.changes.outputs.trusted_release_pr != 'true' && "
+    "github.event_name == 'push' && "
     "(needs.changes.outputs.rust == 'true' || "
-    "(github.event_name == 'push' && needs.changes.outputs.workflow == 'true'))"
+    "needs.changes.outputs.workflow == 'true')"
 )
 match = re.search(r"RUN_RUST_SUITE:\s*\$\{\{\s*(.*?)\s*\}\}", rust_text, re.S)
 if match is None or normalize(match.group(1)) != run_suite:
     raise SystemExit("FAIL: protected Rust suite selector does not match the complete policy")
+
+run_format = (
+    "needs.changes.outputs.trusted_release_pr != 'true' && "
+    "needs.changes.outputs.rust_format == 'true'"
+)
+match = re.search(r"RUN_RUST_FORMAT:\s*\$\{\{\s*(.*?)\s*\}\}", rust_text, re.S)
+if match is None or normalize(match.group(1)) != run_format:
+    raise SystemExit("FAIL: protected Rust formatter selector does not match the complete policy")
 
 
 def step_condition(name: str) -> str:
@@ -140,16 +148,28 @@ expected_step_conditions = {
     "Validate trusted release-plz file scope": (
         "needs.changes.outputs.trusted_release_pr == 'true'"
     ),
-    "Validate all locked Cargo graphs": "needs.changes.outputs.release == 'true'",
-    "Run protected release contracts": "needs.changes.outputs.release == 'true'",
+    "Validate workflow syntax": (
+        "github.event_name == 'pull_request' && "
+        "needs.changes.outputs.workflow == 'true'"
+    ),
+    "Validate CI routing policy": (
+        "github.event_name == 'pull_request' && "
+        "needs.changes.outputs.workflow == 'true'"
+    ),
+    "Run protected release contracts": (
+        "github.event_name == 'push' && needs.changes.outputs.release == 'true'"
+    ),
     "Test MiniMax H3 private-UAT release contract": (
-        "needs.changes.outputs.release == 'true'"
+        "github.event_name == 'push' && needs.changes.outputs.release == 'true'"
     ),
     "Clippy the private MiniMax H3 artifact qualifier": (
         "env.RUN_RUST_SUITE == 'true'"
     ),
     "Test private MiniMax H3 foundations": "env.RUN_RUST_SUITE == 'true'",
 }
+expected_step_conditions["Validate all locked Cargo graphs"] = (
+    "github.event_name == 'push' && needs.changes.outputs.release == 'true'"
+)
 for name, expected in expected_step_conditions.items():
     actual = step_condition(name)
     if actual != expected:
@@ -169,10 +189,19 @@ for step in (candidate for candidate in heavy_steps if candidate.strip()):
     if condition is None:
         raise SystemExit(f"FAIL: heavy Rust step is not suite-gated: {label}")
     actual = normalize(condition.group(1))
-    if not (
-        actual == "env.RUN_RUST_SUITE == 'true'"
-        or actual.startswith("env.RUN_RUST_SUITE == 'true' && ")
-    ):
+    if label == "- uses: dtolnay/rust-toolchain@stable":
+        allowed = actual in {
+            "github.event_name == 'pull_request' && env.RUN_RUST_FORMAT == 'true'",
+            "env.RUN_RUST_SUITE == 'true'",
+        }
+    elif label == "- name: Format":
+        allowed = actual == "env.RUN_RUST_FORMAT == 'true'"
+    else:
+        allowed = (
+            actual == "env.RUN_RUST_SUITE == 'true'"
+            or actual.startswith("env.RUN_RUST_SUITE == 'true' && ")
+        )
+    if not allowed:
         raise SystemExit(f"FAIL: heavy Rust step bypasses suite routing: {label}: {actual}")
 PY
 
@@ -228,11 +257,13 @@ require_text "$ci" \
   "Metal-gated production code is not linted"
 require_text "$ci" \
   "nix run nixpkgs#actionlint -- .github/workflows/*.yml" \
-  "workflow-only PRs have no protected actionlint proof"
+  "main release validation has no protected actionlint proof"
 [[ "$(grep -Fc "needs.changes.outputs.gpu == 'true' ||" "$ci")" -eq 2 ]] \
-  || fail "CUDA and Metal are not retained for relevant PRs with workflow-only main proof"
+  || fail "CUDA and Metal are not retained for relevant main/workflow changes"
 for backend_job in cuda-check metal-check; do
   backend_block="$(extract_job "$ci" "$backend_job")"
+  grep -Fq "github.event_name == 'push'" <<< "$backend_block" \
+    || fail "$backend_job still runs on pull requests"
   grep -Fq "needs.changes.outputs.trusted_release_pr != 'true'" <<< "$backend_block" \
     || fail "$backend_job still runs on generated release PRs"
 done
@@ -256,6 +287,25 @@ for required_job in rust coverage docs web; do
     || fail "required $required_job classifier sentinel does not fail"
 done
 
+for spec in \
+  "docs|Verify docs references" \
+  "docs|Build docs" \
+  "web|Check frontend architecture and dead code" \
+  "web|Run shared Studio tests" \
+  "web|Run web tests" \
+  "web|Build web SPA (includes vue-tsc typecheck)"; do
+  job=${spec%%|*}
+  step=${spec#*|}
+  block="$(extract_job "$ci" "$job")"
+  grep -A1 -F -- "- name: $step" <<< "$block" \
+    | grep -Fq "if: github.event_name == 'push'" \
+    || fail "$job substantive step still runs on pull requests: $step"
+done
+
+coverage_gate="$(extract_job "$ci" coverage)"
+grep -Fq "github.event_name == 'push'" <<< "$coverage_gate" \
+  || fail "coverage still compiles the workspace on pull requests"
+
 rust_gate="$(extract_job "$ci" rust)"
 grep -Fq 'RUN_RUST_SUITE:' <<< "$rust_gate" \
   || fail "protected Rust status does not select its full suite"
@@ -264,19 +314,19 @@ grep -Fq 'Require trusted release routing' <<< "$rust_gate" \
 grep -Fq 'Run protected release contracts' <<< "$rust_gate" \
   || fail "protected Rust status does not own release-contract failures"
 
-grep -Fq 'Check declared MSRV' <<< "$rust_gate" \
-  || fail "PR Rust suite no longer checks the declared MSRV"
+grep -Fq 'RUN_RUST_FORMAT:' <<< "$rust_gate" \
+  || fail "protected Rust status does not select PR formatting"
+grep -Fq "if: env.RUN_RUST_FORMAT == 'true'" <<< "$rust_gate" \
+  || fail "PR Rust formatting is not isolated from the main suite"
 grep -Fq 'Clippy the private MiniMax H3 artifact qualifier' <<< "$rust_gate" \
-  || fail "PR Rust suite no longer checks the private qualifier"
+  || fail "main Rust suite no longer checks the private qualifier"
 grep -Fq 'Check with all optional features' <<< "$rust_gate" \
-  || fail "PR Rust suite no longer checks the optional feature combination"
-grep -Fq -- '--skip catalog_api::catalog_live_test::live_search_free_text_can_find_manual_clip_components' <<< "$rust_gate" \
-  || fail "PR Rust suite still runs the flaky external catalog monitor"
+  || fail "main Rust suite no longer checks the optional feature combination"
+if grep -Fq 'name: Test (PR suite)' <<< "$rust_gate"; then
+  fail "protected Rust status still runs tests on pull requests"
+fi
 grep -Fq 'name: Test (full main suite)' <<< "$rust_gate" \
   || fail "main Rust suite does not retain the complete workspace tests"
-if grep -Fq -- '--skip batch_transaction::tests::' <<< "$rust_gate"; then
-  fail "PR Rust suite skips the high-signal gallery scale regression"
-fi
 if grep -Fq 'run: cargo check --workspace' "$ci"; then
   fail "root Rust CI still runs cargo check immediately before all-target Clippy"
 fi
@@ -291,8 +341,16 @@ for classifier in rust gpu website web nix; do
   fi
 done
 workflow_filter="$(extract_filter "$ci" workflow)"
-grep -Fxq "              - '.github/workflows/ci.yml'" <<< "$workflow_filter" \
-  || fail "workflow-only changes have no dedicated post-merge classifier"
+for path in .github/actionlint.yaml .github/workflows/\*\* scripts/tests/ci-routing-contract.sh; do
+  grep -Fxq "              - '$path'" <<< "$workflow_filter" \
+    || fail "workflow policy classifier omits $path"
+done
+require_text "$ci" 'name: Validate workflow syntax' \
+  "workflow-only PRs have no lightweight static validation"
+require_text "$ci" 'uses: docker://rhysd/actionlint:1.7.12' \
+  "workflow-only PRs do not use the pinned lightweight actionlint image"
+require_text "$ci" 'name: Validate CI routing policy' \
+  "workflow-only PRs do not run the routing contract"
 
 release_filter="$(extract_filter "$ci" release)"
 for manifest in Cargo.toml Cargo.lock desktop/src-tauri/Cargo.toml desktop/src-tauri/Cargo.lock; do
@@ -310,9 +368,9 @@ if grep -Fq 'desktop/**' <<< "$nix_filter"; then
   fail "desktop-only changes still start the mold-web Nix build"
 fi
 nix_job="$(extract_job "$ci" nix-web)"
-grep -Fq "needs.changes.outputs.nix == 'true' ||" <<< "$nix_job" \
-  || fail "the sandboxed Nix web build no longer protects relevant PRs"
-grep -Fq "github.event_name == 'push' && needs.changes.outputs.workflow == 'true'" <<< "$nix_job" \
+grep -Fq "github.event_name == 'push' &&" <<< "$nix_job" \
+  || fail "the sandboxed Nix web build still runs on pull requests"
+grep -Fq "needs.changes.outputs.workflow == 'true'" <<< "$nix_job" \
   || fail "workflow-only changes do not exercise the Nix build after merge"
 
 desktop_classifier="$(extract_job "$desktop" changes)"
@@ -322,39 +380,40 @@ require_text "$desktop" \
   "if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true'" \
   "desktop frontend job is not path-gated on PRs"
 desktop_rust="$(extract_job "$desktop" desktop-rust)"
-grep -Fq "needs.changes.outputs.rust == 'true' ||" <<< "$desktop_rust" \
-  || fail "the macOS native job is not path-gated on PRs"
-grep -Fq "needs.changes.outputs.bundle == 'true'" <<< "$desktop_rust" \
-  || fail "macOS bundle-sensitive changes do not reach the native job"
-grep -Fq 'name: Bundle macOS packaging inputs (debug .app)' <<< "$desktop_rust" \
-  || fail "macOS packaging inputs have no focused bundle proof"
-grep -Fq "github.event_name == 'pull_request' && needs.changes.outputs.bundle == 'true'" <<< "$desktop_rust" \
-  || fail "macOS debug bundle is not restricted to bundle-sensitive PRs"
-bundle_filter="$(extract_filter "$desktop" bundle)"
-for path in desktop/src-tauri/tauri.macos.conf.json scripts/fix-desktop-macos-linkage.sh; do
-  grep -Fq "$path" <<< "$bundle_filter" \
-    || fail "desktop bundle classifier omits $path"
-done
+grep -Fq "needs.changes.outputs.rust_format == 'true'" <<< "$desktop_rust" \
+  || fail "desktop Rust formatting is not path-gated on PRs"
+grep -Fq "runs-on: \${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'macos-14' }}" <<< "$desktop_rust" \
+  || fail "desktop Rust PR formatting still consumes a macOS runner"
+grep -Fq 'cargo fmt --manifest-path src-tauri/Cargo.toml -- --check' <<< "$desktop_rust" \
+  || fail "desktop native PRs have no Rust formatting check"
+[[ "$(grep -Fc "if: github.event_name == 'push'" <<< "$desktop_rust")" -ge 3 ]] \
+  || fail "desktop native compilation and tests are not main-only"
+if grep -Fq 'Bundle macOS packaging inputs (debug .app)' <<< "$desktop_rust"; then
+  fail "desktop PRs still build a macOS app bundle"
+fi
 desktop_linux="$(extract_job "$desktop" desktop-linux)"
 grep -Fq "if: github.event_name != 'pull_request'" <<< "$desktop_linux" \
   || fail "Desktop Linux still runs on pull requests"
 if grep -Fq 'bunx vue-tsc -b' "$desktop"; then
   fail "desktop frontend still typechecks once explicitly and again during build"
 fi
-[[ "$(grep -Fc "if: github.event_name != 'pull_request' || needs.changes.outputs.updater == 'true'" "$desktop")" -eq 2 ]] \
-  || fail "updater tooling and contract tests are not restricted to updater changes on PRs"
+desktop_frontend="$(extract_job "$desktop" desktop-frontend)"
+grep -Fq 'run: bun run fmt:check' <<< "$desktop_frontend" \
+  || fail "desktop frontend PRs have no formatting check"
+[[ "$(grep -Fc "if: github.event_name == 'push'" <<< "$desktop_frontend")" -eq 4 ]] \
+  || fail "desktop frontend builds, tests, and updater contracts are not main-only"
 if grep -Fq 'desktop/**' <<< "$desktop_classifier"; then
   fail "desktop frontend classifier is broad enough to include native/mobile files"
 fi
 [[ "$(grep -Fc 'desktop/src/components/**' "$desktop")" -eq 3 ]] \
   || fail "desktop frontend trigger/classifier does not track desktop components"
-[[ "$(grep -Fc 'desktop/src-tauri/**' "$desktop")" -eq 3 ]] \
+[[ "$(grep -Fc 'desktop/src-tauri/**' "$desktop")" -eq 4 ]] \
   || fail "desktop native trigger/classifier does not track the Tauri crate"
 if grep -Fq 'desktop/src/mobile/**' "$desktop"; then
   fail "mobile-only changes are not owned exclusively by the iOS workflow"
 fi
-[[ "$(grep -Fc 'crates/mold-scheduler/**' "$desktop")" -eq 3 ]] \
-  || fail "desktop trigger/classifier does not track its scheduler dependency"
+[[ "$(grep -Fc 'crates/mold-scheduler/**' "$desktop")" -eq 2 ]] \
+  || fail "desktop main trigger/classifier does not track its scheduler dependency"
 
 require_text "$ios" \
   "cancel-in-progress: \${{ github.event_name == 'pull_request' }}" \
@@ -363,17 +422,26 @@ require_text "$ios" 'name: Classify iOS changes' \
   "iOS workflow has no path classifier"
 ios_frontend_filter="$(extract_filter "$ios" frontend)"
 if grep -Fq "'apps/mobile/**'" <<< "$ios_frontend_filter"; then
-  fail "native-only iOS changes still run the mobile frontend suite"
+  fail "native-only iOS changes still run mobile formatting"
 fi
-grep -Fq "apps/mobile/src-tauri/gen/apple/Assets.xcassets/**" <<< "$ios_frontend_filter" \
-  || fail "iOS frontend classifier omits release icon assets"
+grep -Fq "desktop/src/mobile/**" <<< "$ios_frontend_filter" \
+  || fail "iOS frontend classifier omits mobile source formatting"
 require_text "$ios" \
-  "if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'" \
-  "iOS simulator Clippy is not retained for native PR changes"
+  "runs-on: \${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'macos-14' }}" \
+  "iOS Rust PR formatting still consumes a macOS runner"
 require_text "$ios" 'run: ../scripts/tests/ios-release-assets.sh' \
   "iOS frontend job does not validate the built mobile entry"
 require_text "$ios" 'run: bunx vitest run src/mobile' \
   "iOS frontend job does not retain its mobile-specific tests"
+ios_frontend="$(extract_job "$ios" frontend)"
+[[ "$(grep -Fc "if: github.event_name == 'push'" <<< "$ios_frontend")" -eq 4 ]] \
+  || fail "iOS frontend builds and tests are not main-only"
+ios_rust="$(extract_job "$ios" simulator-rust)"
+grep -Fq 'run: cargo fmt -- --check' <<< "$ios_rust" \
+  || fail "iOS native PRs have no Rust formatting check"
+grep -A1 -F 'run: cargo clippy --target aarch64-apple-ios-sim -- -D warnings' <<< "$ios_rust" \
+  | grep -Fq "if: github.event_name == 'push'" \
+  || fail "iOS simulator compilation still runs on pull requests"
 if grep -Fq 'run: cargo check --target aarch64-apple-ios-sim' "$ios"; then
   fail "iOS simulator still runs cargo check immediately before Clippy"
 fi

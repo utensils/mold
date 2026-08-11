@@ -36,33 +36,14 @@ on:
   pull_request:
     paths:
       [
-        "apps/mobile/**",
-        "studio/**",
-        "ui/**",
+        "apps/mobile/src-tauri/**/*.rs",
         "package.json",
         "bun.lock",
         "bun.nix",
         "desktop/src/mobile/**",
-        "desktop/src/components/**",
-        "desktop/src/lib/**",
-        "desktop/src/stores/**",
-        "desktop/src/styles/**",
-        "desktop/src/assets/**",
         "desktop/package.json",
-        "desktop/icon-master.png",
         "desktop/vite.mobile.config.ts",
         "desktop/index.mobile.html",
-        "scripts/ios.sh",
-        "scripts/generate-ios-icons.sh",
-        "scripts/tests/ios-release-assets.sh",
-        "scripts/tests/ios-testflight-distribution.sh",
-        "scripts/ios-sim.sh",
-        "scripts/tests/ios-sim-pick.sh",
-        "scripts/ensure-testflight-tester.rb",
-        "scripts/wait-for-testflight.rb",
-        "flake.nix",
-        ".github/workflows/ios.yml",
-        ".github/workflows/testflight-ios.yml",
       ]
   workflow_dispatch:
 
@@ -93,6 +74,7 @@ jobs:
     outputs:
       frontend: ${{ steps.filter.outputs.frontend }}
       rust: ${{ steps.filter.outputs.rust }}
+      rust_format: ${{ steps.filter.outputs.rust_format }}
     steps:
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v3
@@ -100,39 +82,20 @@ jobs:
         with:
           filters: |
             frontend:
-              - 'apps/mobile/src-tauri/app-icon.png'
-              - 'apps/mobile/src-tauri/app-icon-source.sha256'
-              - 'apps/mobile/src-tauri/gen/apple/Assets.xcassets/**'
-              - 'studio/**'
-              - 'ui/**'
               - 'package.json'
               - 'bun.lock'
               - 'bun.nix'
               - 'desktop/src/mobile/**'
-              - 'desktop/src/components/**'
-              - 'desktop/src/lib/**'
-              - 'desktop/src/stores/**'
-              - 'desktop/src/styles/**'
-              - 'desktop/src/assets/**'
               - 'desktop/package.json'
-              - 'desktop/icon-master.png'
               - 'desktop/vite.mobile.config.ts'
               - 'desktop/index.mobile.html'
-              - 'scripts/ios.sh'
-              - 'scripts/generate-ios-icons.sh'
-              - 'scripts/tests/ios-release-assets.sh'
-              - 'scripts/tests/ios-testflight-distribution.sh'
-              - 'scripts/ios-sim.sh'
-              - 'scripts/tests/ios-sim-pick.sh'
-              - 'scripts/ensure-testflight-tester.rb'
-              - 'scripts/wait-for-testflight.rb'
-              - '.github/workflows/ios.yml'
-              - '.github/workflows/testflight-ios.yml'
             rust:
               - 'apps/mobile/src-tauri/**'
               - 'flake.nix'
               - '.github/workflows/ios.yml'
               - '.github/workflows/testflight-ios.yml'
+            rust_format:
+              - 'apps/mobile/src-tauri/**/*.rs'
 
   frontend:
     name: Mobile frontend
@@ -148,33 +111,43 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: .
       - run: ../scripts/tests/ios-release-assets.sh
+        if: github.event_name == 'push'
       - run: ../scripts/tests/ios-testflight-distribution.sh
+        if: github.event_name == 'push'
       - run: ../scripts/tests/ios-sim-pick.sh
+        if: github.event_name == 'push'
       # The full desktop + Studio suite runs in Desktop CI. Keep iOS focused on
       # its 29 mobile tests and mobile-only formatting; the release-assets
       # contract above already performs the authoritative mobile typecheck/build.
       - run: bunx vitest run src/mobile
+        if: github.event_name == 'push'
       - run: bunx prettier --check "src/mobile/**/*.{ts,vue,css}" vite.mobile.config.ts index.mobile.html
 
   simulator-rust:
     name: iOS simulator Rust
     needs: changes
-    # This is the only compiler for the standalone mobile crate and has caught
-    # native-only PR failures. Keep Clippy, but drop the redundant cargo check
-    # because Clippy compiles the same target before linting it.
-    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
-    runs-on: macos-14
+    # PRs only need rustfmt and stay on Linux. Main retains the simulator Clippy
+    # compiler gate on macOS for the standalone mobile crate.
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust_format == 'true'
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'macos-14' }}
     defaults:
       run:
         working-directory: apps/mobile/src-tauri
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        if: github.event_name == 'pull_request'
+        with:
+          components: rustfmt
+      - uses: dtolnay/rust-toolchain@stable
+        if: github.event_name == 'push'
         with:
           targets: aarch64-apple-ios-sim
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
+        if: github.event_name == 'push'
         with:
           workspaces: apps/mobile/src-tauri
       - run: cargo fmt -- --check
       - run: cargo clippy --target aarch64-apple-ios-sim -- -D warnings
+        if: github.event_name == 'push'
