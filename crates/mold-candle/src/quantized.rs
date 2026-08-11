@@ -128,6 +128,17 @@ impl VarBuilder {
     pub fn contains_key(&self, key: &str) -> bool {
         self.data.contains_key(&self.path(key))
     }
+
+    /// Every tensor this builder holds, keyed by its full checkpoint name.
+    ///
+    /// Ignores the current `pp` path deliberately: the one caller is Wan's
+    /// block offload, which selects a block's weights by name prefix and hands
+    /// the result straight back to [`Self::from_qtensors`], so it needs the
+    /// same absolute keys `get` resolves against rather than a view relative
+    /// to wherever the builder happens to be positioned.
+    pub fn tensors(&self) -> &HashMap<String, Arc<QTensor>> {
+        &self.data
+    }
 }
 
 #[cfg(test)]

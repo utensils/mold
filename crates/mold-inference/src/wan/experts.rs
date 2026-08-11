@@ -187,11 +187,28 @@ pub(crate) fn load_transformer(
     dtype: DType,
     loras: &WanLoraRegistry,
 ) -> Result<WanTransformer> {
+    load_transformer_with_offload(files, config, device, dtype, loras, None)
+}
+
+/// [`load_transformer`] that may park blocks in host RAM to fit the render
+/// (#776 item 3).
+///
+/// `activation_bytes` is the denoise activation budget this render needs after
+/// the weights land. `None` keeps every block resident unless
+/// `MOLD_WAN_OFFLOAD_BLOCKS` forces otherwise.
+pub(crate) fn load_transformer_with_offload(
+    files: &[PathBuf],
+    config: WanTransformerConfig,
+    device: &Device,
+    dtype: DType,
+    loras: &WanLoraRegistry,
+    activation_bytes: Option<u64>,
+) -> Result<WanTransformer> {
     let first = files
         .first()
         .ok_or_else(|| anyhow::anyhow!("Wan: no transformer weight files supplied"))?;
     let transformer = if is_gguf(first) {
-        WanTransformer::from_gguf_with_loras(first, config, device, loras)
+        WanTransformer::from_gguf_with_offload(first, config, device, loras, activation_bytes)
     } else {
         WanTransformer::from_safetensors_with_loras(files, config, device, dtype, loras)
     };

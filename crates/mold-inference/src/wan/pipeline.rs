@@ -133,6 +133,21 @@ fn header_shapes(path: &Path) -> Result<Vec<(String, Vec<usize>)>> {
 /// Returns `None` when the file is not a Wan DiT in a layout this engine
 /// recognizes; the caller keeps its conservative fallback rather than
 /// inventing a shape.
+/// Device memory this render's denoise activations will need, for the block
+/// offload policy (#776 item 3).
+///
+/// `None` when the checkpoint's geometry cannot be read, which leaves the
+/// policy to its explicit-request-only path rather than guessing a budget:
+/// under-estimating here would park too few blocks and OOM anyway, and
+/// over-estimating would park blocks a render did not need.
+fn denoise_activation_bytes(req: &GenerateRequest, files: &[PathBuf]) -> Option<u64> {
+    let geometry = activation_geometry_across(files)?;
+    let frames = req.frames?;
+    Some(crate::device::wan_activation_budget_bytes(
+        req.width, req.height, frames, geometry,
+    ))
+}
+
 pub fn activation_geometry(path: &Path) -> Option<crate::device::WanActivationGeometry> {
     activation_geometry_across(std::slice::from_ref(&path.to_path_buf()))
 }
@@ -1447,12 +1462,14 @@ impl WanEngine {
             }
             progress.stage_start("Loading Wan transformer");
             let started = Instant::now();
-            let transformer = crate::wan::experts::load_transformer(
-                &transformer_files(paths),
+            let files = transformer_files(paths);
+            let transformer = crate::wan::experts::load_transformer_with_offload(
+                &files,
                 config.clone(),
                 device,
                 dtype,
                 &loras,
+                denoise_activation_bytes(req, &files),
             )?;
             progress.phase_done(
                 ProgressPhase::ModelLoad,

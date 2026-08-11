@@ -37,19 +37,23 @@
 //! initial load uses, so the quantized source and the LoRA branch compose here
 //! exactly as they already do.
 //!
-//! ## What the driver still needs
+//! ## When parking happens
 //!
-//! One gap is known and is deliberately not closed here, because it changes
-//! `WanTransformer`'s shape rather than this module's: **the transformer does
-//! not retain the checkpoint's tensor map.** `from_gguf_with_loras` builds a
-//! `VarBuilder`, hands it to `from_weights`, and drops it at the end of the
-//! statement — after which only the tensors the blocks themselves hold survive,
-//! via `Arc`. So [`WanBlockParking::park`] cannot be called after construction
-//! as things stand; the driver will have to either park during construction or
-//! give the transformer a retained map. Note the map cannot simply be kept
-//! alive to rebuild from later: `VarBuilder::from_gguf` uploads *every* tensor
-//! to the device eagerly (`mold-candle/src/quantized.rs`), so holding it would
-//! pin the whole expert on the GPU and defeat the purpose.
+//! At construction, not later, and that is forced by how the weights load:
+//! `VarBuilder::from_gguf` uploads *every* tensor to the device eagerly
+//! (`mold-candle/src/quantized.rs`), and `from_weights` consumes the builder —
+//! after which only the tensors the blocks themselves hold survive, via `Arc`.
+//! So the transformer cannot retain the map to park from later without pinning
+//! the whole expert on the GPU, which is the opposite of the point.
+//! `WanTransformer::from_gguf_with_offload` therefore parks while the map is
+//! still in scope.
+//!
+//! Doing it after the weights are resident costs nothing: the *load* peak is
+//! one expert (~10.8 GB at Q5) and the peak that exceeds the card is the
+//! denoise, so there is room to free blocks at the point parking runs. What
+//! must still fit afterwards is the activation budget, which is why
+//! [`plan_offload`] compares that against free VRAM rather than comparing
+//! weights against capacity.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -152,6 +156,75 @@ impl ParkedBlock {
     /// The tensor map, ready for `mold_candle::quantized::VarBuilder::from_qtensors`.
     pub(crate) fn into_tensors(self) -> HashMap<String, Arc<QTensor>> {
         self.tensors
+    }
+}
+
+/// Explicit block count from `MOLD_WAN_OFFLOAD_BLOCKS`, or `MOLD_OFFLOAD`.
+///
+/// `MOLD_WAN_OFFLOAD_BLOCKS=N` pins the count exactly, including `0` to force
+/// the policy off. `MOLD_OFFLOAD=1` engages without naming a count, which the
+/// caller resolves against the real shortfall — the family-wide flag means
+/// "stream if you must", not a specific number of blocks.
+pub(crate) fn forced_block_count() -> Option<usize> {
+    if let Some(raw) = crate::runtime_env::value("MOLD_WAN_OFFLOAD_BLOCKS") {
+        return raw.trim().parse::<usize>().ok();
+    }
+    None
+}
+
+/// What the offload policy decided for one load.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WanOffloadPlan {
+    /// Everything fits; keep every block resident. The no-offload path must
+    /// stay byte-for-byte the behaviour it had before this existed.
+    None,
+    /// Park this many trailing blocks in host RAM.
+    Park { blocks: usize },
+}
+
+impl WanOffloadPlan {
+    pub(crate) fn blocks(self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Park { blocks } => blocks,
+        }
+    }
+}
+
+/// Decide how many blocks to park for a render.
+///
+/// `MOLD_WAN_OFFLOAD_BLOCKS=N` pins the count and `MOLD_OFFLOAD=1` forces the
+/// policy on; otherwise this engages only when the predicted peak does not fit,
+/// so a render that already fits keeps exactly the execution it had before.
+///
+/// `headroom_bytes` is subtracted from what is free before the comparison —
+/// the denoise needs room for its own activations after the weights land, and
+/// parking blocks until the *weights* fit while leaving nothing for activations
+/// would trade one OOM for another.
+pub(crate) fn plan_offload(
+    predicted_peak_bytes: u64,
+    available_bytes: u64,
+    bytes_per_block: u64,
+    total_blocks: usize,
+    forced_blocks: Option<usize>,
+) -> WanOffloadPlan {
+    if let Some(blocks) = forced_blocks {
+        let blocks = blocks.min(total_blocks);
+        return if blocks == 0 {
+            WanOffloadPlan::None
+        } else {
+            WanOffloadPlan::Park { blocks }
+        };
+    }
+    if predicted_peak_bytes <= available_bytes {
+        return WanOffloadPlan::None;
+    }
+    let shortfall = predicted_peak_bytes - available_bytes;
+    let blocks = WanBlockParking::blocks_to_park(shortfall, bytes_per_block, total_blocks);
+    if blocks == 0 {
+        WanOffloadPlan::None
+    } else {
+        WanOffloadPlan::Park { blocks }
     }
 }
 
@@ -387,6 +460,52 @@ mod tests {
     fn an_absent_block_parks_nothing() {
         let all = checkpoint();
         assert!(WanBlockParking::park(&all, 99).is_none());
+    }
+
+    #[test]
+    fn a_render_that_fits_parks_nothing() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        // Fits with room to spare, and fits exactly: both keep every block
+        // resident, because the no-offload path must stay untouched.
+        assert_eq!(
+            plan_offload(20 * GIB, 24 * GIB, 270 * 1024 * 1024, 40, None),
+            WanOffloadPlan::None
+        );
+        assert_eq!(
+            plan_offload(24 * GIB, 24 * GIB, 270 * 1024 * 1024, 40, None),
+            WanOffloadPlan::None
+        );
+    }
+
+    #[test]
+    fn a_render_that_does_not_fit_parks_the_shortfall() {
+        const MIB: u64 = 1024 * 1024;
+        // The real shape: 25,461 MiB predicted against 24,564 MiB usable is a
+        // 897 MiB shortfall, and a Q5 block is ~270 MiB.
+        assert_eq!(
+            plan_offload(25_461 * MIB, 24_564 * MIB, 270 * MIB, 40, None),
+            WanOffloadPlan::Park { blocks: 4 }
+        );
+    }
+
+    #[test]
+    fn a_forced_count_overrides_the_fit_check() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        // Forced on even though it fits.
+        assert_eq!(
+            plan_offload(GIB, 24 * GIB, 270 * 1024 * 1024, 40, Some(8)),
+            WanOffloadPlan::Park { blocks: 8 }
+        );
+        // Forced off even though it does not fit.
+        assert_eq!(
+            plan_offload(99 * GIB, 24 * GIB, 270 * 1024 * 1024, 40, Some(0)),
+            WanOffloadPlan::None
+        );
+        // Never more blocks than exist.
+        assert_eq!(
+            plan_offload(99 * GIB, 24 * GIB, 270 * 1024 * 1024, 40, Some(999)),
+            WanOffloadPlan::Park { blocks: 40 }
+        );
     }
 
     #[test]

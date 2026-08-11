@@ -299,6 +299,7 @@ pub enum RuntimeSemanticVariable {
     VaeTiled,
     WanForceDmmv,
     WanPrefetch,
+    WanOffloadBlocks,
     WanStepCache,
     WanStepProfile,
     WuerstchenDecoderGuidance,
@@ -648,6 +649,9 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         // #801: residual reuse changes the rendered output and the step
         // count that actually runs, so it is its own equivalence class.
         "MOLD_WAN_STEP_CACHE" => RuntimeSemanticVariable::WanStepCache,
+        // #776 item 3: block parking changes device residency and step
+        // latency, so it is its own timing class.
+        "MOLD_WAN_OFFLOAD_BLOCKS" => RuntimeSemanticVariable::WanOffloadBlocks,
         "MOLD_WAN_STEP_PROFILE" => RuntimeSemanticVariable::WanStepProfile,
         "MOLD_WUERSTCHEN_DECODER_GUIDANCE" => RuntimeSemanticVariable::WuerstchenDecoderGuidance,
         // A new engine-shaping input must never silently collapse into an old
