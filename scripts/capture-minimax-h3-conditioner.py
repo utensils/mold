@@ -740,6 +740,9 @@ def build_layer_document(
         {"id": identifier, "sha256": component_map[identifier]["sha256"]}
         for identifier in REQUIRED_COMPONENT_IDS
     ]
+    component_summary_sha256 = component_authority_set_sha256(
+        REQUIRED_COMPONENT_IDS, component_map
+    )
     tokenizer_ids = (
         "official-tokenizer-json",
         "official-tokenizer-config",
@@ -789,7 +792,7 @@ def build_layer_document(
         "input": {
             "id": CASE_ID,
             "sha256": sha256_bytes(canonical_json_bytes(input_descriptor)),
-            "component_index_sha256": components[0]["sha256"],
+            "component_index_sha256": component_summary_sha256,
             "component_indexes": components,
         },
         "producer": {

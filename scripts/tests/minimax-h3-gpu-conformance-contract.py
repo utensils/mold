@@ -159,6 +159,18 @@ def component_authority_set_sha256(
     )
 
 
+def refresh_component_summary(document: dict[str, object]) -> None:
+    components = document["input"]["component_indexes"]
+    document["input"]["component_index_sha256"] = (
+        components[0]["sha256"]
+        if len(components) == 1
+        else component_authority_set_sha256(
+            [component["id"] for component in components],
+            {component["id"]: component["sha256"] for component in components},
+        )
+    )
+
+
 def expect_failure(action: Callable[[], object], fragment: str) -> None:
     try:
         action()
@@ -330,10 +342,15 @@ def layer_document(
 ) -> dict[str, object]:
     layer = manifest_layer["id"]
     component_indexes = copy.deepcopy(manifest_layer["_required_component_authorities"])
+    component_summary_sha256 = (
+        component_indexes[0]["sha256"]
+        if len(component_indexes) == 1
+        else tool.component_authority_set_sha256(component_indexes)
+    )
     input_evidence: dict[str, object] = {
         "id": f"gpu-contract-{layer}",
         "sha256": hashlib.sha256(f"input:{layer}".encode()).hexdigest(),
-        "component_index_sha256": component_indexes[0]["sha256"],
+        "component_index_sha256": component_summary_sha256,
         "component_indexes": component_indexes,
     }
     task = E2E_LAYER_TASKS.get(layer)
@@ -721,9 +738,7 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
             "id": unrelated_component_id,
             "sha256": component_authorities[unrelated_component_id],
         }
-        unrelated["input"]["component_index_sha256"] = component_authorities[
-            unrelated_component_id
-        ]
+        refresh_component_summary(unrelated)
         for provenance_key in ("component-index-hash", "component-index-hashes"):
             if provenance_key not in manifest_layer["required_provenance"]:
                 continue
@@ -749,6 +764,7 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                 "sha256": component_authorities[unrelated_component_id],
             }
         )
+        refresh_component_summary(extra_component)
         tool.validate_layer_output(extra_component, f"extra component {layer}")
         expect_failure(
             lambda extra_component=extra_component, manifest_layer=manifest_layer: (
@@ -764,6 +780,7 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                 tool, "oracle", authorization_sha, manifest_layer
             )
             missing_one_component["input"]["component_indexes"].pop()
+            refresh_component_summary(missing_one_component)
             tool.validate_layer_output(
                 missing_one_component, f"missing one component {layer}"
             )
@@ -780,6 +797,9 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
             tool, "oracle", authorization_sha, manifest_layer
         )
         del missing_components["input"]["component_indexes"]
+        missing_components["input"]["component_index_sha256"] = manifest_layer[
+            "_required_component_authorities"
+        ][0]["sha256"]
         tool.validate_layer_output(
             missing_components, f"legacy component summary {layer}"
         )
@@ -2196,8 +2216,8 @@ def test_runner_contract(runner, tool, temporary: pathlib.Path) -> None:
         def use_unrelated_component(document: dict[str, object]) -> None:
             document["input"]["component_indexes"] = [unrelated_component]
             document["input"]["component_index_sha256"] = unrelated_component["sha256"]
-            record_by_key(document["provenance"], "component-index-hash")["value"] = (
-                unrelated_component["sha256"]
+            record_by_key(document["provenance"], "component-index-hashes")["value"] = (
+                f"{unrelated_component['id']}={unrelated_component['sha256']}"
             )
 
         def bundle_unrelated_component(fixture: dict[str, object]) -> None:

@@ -42,6 +42,7 @@ BUNDLE_SCHEMA_VERSION = "mold.minimax-h3.fixture-bundle.v1"
 AUTHORIZATION_SCHEMA_VERSION = "mold.minimax-h3.authorization.v1"
 LAYER_OUTPUT_SCHEMA_VERSION = "mold.minimax-h3.layer-output.v1"
 LAYER_ADAPTER_SCHEMA_VERSION = "mold.minimax-h3.layer-adapter.v1"
+COMPONENT_AUTHORITY_SET_SCHEMA = "mold.minimax-h3.component-authority-set.v1"
 
 # The checked synthetic candidate records the Mold tree from which the original
 # H3 contract was extended. Real captures record their exact candidate commit.
@@ -117,6 +118,62 @@ EXPECTED_COMPONENT_INDEXES = {
     "official-text-encoder-index": (
         "text_encoder/model.safetensors.index.json",
         "06c952c569285870b811989b794b9766493e280fb77fbcb957fc4e5fcf25403a",
+    ),
+    "official-text-encoder-shard-00001-of-00014": (
+        "text_encoder/model-00001-of-00014.safetensors",
+        "6b9dfbc930e505402ae9d7e5091a9d7d656cda5f34614f01cfe70bfb0cca27cb",
+    ),
+    "official-text-encoder-shard-00002-of-00014": (
+        "text_encoder/model-00002-of-00014.safetensors",
+        "d8bb44b4ff303fe76fe9e894022fb3dc71b15a2e716592790fe0e3c3e60478fa",
+    ),
+    "official-text-encoder-shard-00003-of-00014": (
+        "text_encoder/model-00003-of-00014.safetensors",
+        "54f22e8b3168f8dc962fac0d313607ebf52a12b433d4cf3098a0d82d9f042940",
+    ),
+    "official-text-encoder-shard-00004-of-00014": (
+        "text_encoder/model-00004-of-00014.safetensors",
+        "ad09c74d3c13ee29b5d0d84548fd8a3424a651564eaccd519946c296e59c557f",
+    ),
+    "official-text-encoder-shard-00005-of-00014": (
+        "text_encoder/model-00005-of-00014.safetensors",
+        "fc993c8a0e2a5b0570f383e1a95dc3a1281d1b224b6f3ee908f4827941e1dfc2",
+    ),
+    "official-text-encoder-shard-00006-of-00014": (
+        "text_encoder/model-00006-of-00014.safetensors",
+        "82f05620d1f718a90c362b221d6a184ff1a0f53301d706882d3df49695fa1974",
+    ),
+    "official-text-encoder-shard-00007-of-00014": (
+        "text_encoder/model-00007-of-00014.safetensors",
+        "fb91da8cb01ff4de3eef0eab1c3e769a734b3a1aafc61734068638a0d6c86934",
+    ),
+    "official-text-encoder-shard-00008-of-00014": (
+        "text_encoder/model-00008-of-00014.safetensors",
+        "431ca56535c8781944ce3801f5eb61c45531e853ecc5846d936ebaf4761b764f",
+    ),
+    "official-text-encoder-shard-00009-of-00014": (
+        "text_encoder/model-00009-of-00014.safetensors",
+        "3825e3f4302f4d2f7d76aa7430d2ce0864fde6b9e540a5806bf0d8e38e4d9f47",
+    ),
+    "official-text-encoder-shard-00010-of-00014": (
+        "text_encoder/model-00010-of-00014.safetensors",
+        "aded5a4d1d5e22dbd8b6f79266b6eb88c840411b09527c53917a1419ace22e2f",
+    ),
+    "official-text-encoder-shard-00011-of-00014": (
+        "text_encoder/model-00011-of-00014.safetensors",
+        "3820ffe8d8d6477f6fe8d614ef3c87abb264ee39accebf43a1507b970d80946f",
+    ),
+    "official-text-encoder-shard-00012-of-00014": (
+        "text_encoder/model-00012-of-00014.safetensors",
+        "05ad2d08ce71963121c9b03f1d9ec5d7641052f4b23c6c12b80d71065eb8e98e",
+    ),
+    "official-text-encoder-shard-00013-of-00014": (
+        "text_encoder/model-00013-of-00014.safetensors",
+        "b64f2289871261fdd1abbd3b78bcd66011b341de3dc8eeb2ed1a473ee7c8d95c",
+    ),
+    "official-text-encoder-shard-00014-of-00014": (
+        "text_encoder/model-00014-of-00014.safetensors",
+        "e45b6c9998c77ee5a6577f9f47bc76416c1d4d387169e50c4c9d3134ea51b13b",
     ),
     "official-video-vae-index": (
         "vae/diffusion_pytorch_model.safetensors.index.json",
@@ -437,6 +494,26 @@ def tensor_content_sha256(dtype: str, shape: list[int], values: list[float]) -> 
     return hashlib.sha256(canonical_bytes(payload)).hexdigest()
 
 
+def component_authority_set_sha256(
+    component_indexes: list[dict[str, str]],
+) -> str:
+    payload = {
+        "schema_version": COMPONENT_AUTHORITY_SET_SCHEMA,
+        "components": [
+            {"id": component["id"], "sha256": component["sha256"]}
+            for component in sorted(component_indexes, key=lambda value: value["id"])
+        ],
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def tensor_statistics(values: list[float]) -> dict[str, float]:
     mean = sum(values) / len(values)
     variance = sum((value - mean) ** 2 for value in values) / len(values)
@@ -614,13 +691,14 @@ def validate_layer_output(value: Any, label: str) -> dict[str, Any]:
     if value["layer"] not in EXPECTED_LAYERS:
         fail(f"{label} names unknown layer {value['layer']!r}")
 
-    component_hashes = {
-        component_sha for _, component_sha in EXPECTED_COMPONENT_INDEXES.values()
-    }
-    if value["input"]["component_index_sha256"] not in component_hashes:
-        fail(f"{label} component index hash is not in the pinned authority set")
     component_indexes = value["input"].get("component_indexes")
-    if component_indexes is not None:
+    if component_indexes is None:
+        component_hashes = {
+            component_sha for _, component_sha in EXPECTED_COMPONENT_INDEXES.values()
+        }
+        if value["input"]["component_index_sha256"] not in component_hashes:
+            fail(f"{label} component index hash is not in the pinned authority set")
+    else:
         component_ids: set[str] = set()
         for component in component_indexes:
             identifier = component["id"]
@@ -630,10 +708,13 @@ def validate_layer_output(value: Any, label: str) -> dict[str, Any]:
             expected = EXPECTED_COMPONENT_INDEXES.get(identifier)
             if expected is None or component["sha256"] != expected[1]:
                 fail(f"{label} component index authority is not pinned")
-        if value["input"]["component_index_sha256"] not in {
-            component["sha256"] for component in component_indexes
-        }:
-            fail(f"{label} component index summary is absent from its authority list")
+        expected_summary = (
+            component_indexes[0]["sha256"]
+            if len(component_indexes) == 1
+            else component_authority_set_sha256(component_indexes)
+        )
+        if value["input"]["component_index_sha256"] != expected_summary:
+            fail(f"{label} component index summary does not match its authority list")
 
     producer = value["producer"]
     if producer["role"] == "oracle":

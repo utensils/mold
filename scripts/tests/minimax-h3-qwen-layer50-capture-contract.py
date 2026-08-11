@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -106,7 +107,10 @@ class ProducerContractTests(unittest.TestCase):
     def test_manifest_boundary_is_exact_and_ordered(self) -> None:
         layer = PRODUCER.layer_contract(self.manifest)
         self.assertEqual(layer["authority_tier"], "exact-full-bf16")
-        self.assertEqual(layer["required_component_indexes"], [PRODUCER.COMPONENT_ID])
+        self.assertEqual(
+            layer["required_component_indexes"],
+            list(PRODUCER.TEXT_ENCODER_COMPONENT_IDS),
+        )
         self.assertEqual(
             layer["required_measurements"],
             ["shape", "dtype", "statistics", "sampled-values", "tolerance"],
@@ -119,6 +123,14 @@ class ProducerContractTests(unittest.TestCase):
         GPU.validate_manifest_layer_evidence(mold, self.contract, "mold")
         CONFORMANCE.validate_schema(oracle, CONFORMANCE.LAYER_OUTPUT_SCHEMA_PATH)
         CONFORMANCE.validate_schema(mold, CONFORMANCE.LAYER_OUTPUT_SCHEMA_PATH)
+        CONFORMANCE.validate_layer_output(oracle, "oracle")
+        CONFORMANCE.validate_layer_output(mold, "mold")
+        self.assertEqual(
+            oracle["input"]["component_index_sha256"],
+            CONFORMANCE.component_authority_set_sha256(
+                oracle["input"]["component_indexes"]
+            ),
+        )
         self.assertIn("comparison", oracle)
         self.assertNotIn("comparison", mold)
         self.assertEqual(
@@ -259,17 +271,14 @@ class ProducerContractTests(unittest.TestCase):
                 }
             ],
         }
-        with tempfile.TemporaryDirectory() as temporary:
-            path = pathlib.Path(temporary) / "raw.json"
-            path.write_text(json.dumps(output), encoding="utf-8")
-            with self.assertRaises(PRODUCER.CaptureFailure):
-                PRODUCER.read_raw_output(
-                    path,
-                    PRODUCER.REVIEWED_AUTHORIZATION_EVIDENCE_SHA256,
-                    "a" * 40,
-                    "cuda:0",
-                    [case],
-                )
+        with self.assertRaises(PRODUCER.CaptureFailure):
+            PRODUCER.read_raw_output_bytes(
+                json.dumps(output).encode("utf-8"),
+                PRODUCER.REVIEWED_AUTHORIZATION_EVIDENCE_SHA256,
+                "a" * 40,
+                "cuda:0",
+                [case],
+            )
 
     def test_environment_and_repository_local_fixture_fail_closed(self) -> None:
         with self.assertRaises(PRODUCER.CaptureFailure):
@@ -299,6 +308,87 @@ class ProducerContractTests(unittest.TestCase):
             with self.assertRaises(PRODUCER.CaptureFailure):
                 snapshot.revalidate()
 
+    def test_coordinated_shard_and_sidecar_tamper_fails_against_manifest_pin(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model_root = pathlib.Path(temporary)
+            identifier, relative, reviewed_sha256 = (
+                PRODUCER.TEXT_ENCODER_SHARD_AUTHORITIES[0]
+            )
+            shard = model_root / relative
+            shard.parent.mkdir(parents=True)
+            tampered = b"coordinated replacement"
+            shard.write_bytes(tampered)
+            metadata = (
+                model_root
+                / ".cache"
+                / "huggingface"
+                / "download"
+                / f"{relative}.metadata"
+            )
+            metadata.parent.mkdir(parents=True)
+            metadata.write_text(
+                f"{PRODUCER.MODEL_REVISION}\n{hashlib.sha256(tampered).hexdigest()}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(PRODUCER.CaptureFailure):
+                PRODUCER.authenticate_text_encoder_shard(
+                    model_root,
+                    {
+                        "id": identifier,
+                        "relative_path": relative,
+                        "sha256": reviewed_sha256,
+                    },
+                )
+
+    def test_raw_output_parses_only_the_fd_sealed_bytes(self) -> None:
+        case = synthetic_case(PRODUCER.TEXT_CASE_ID)
+        shape, bits = activation()
+        payload = base64.b64encode(
+            b"".join(int(value).to_bytes(2, "little") for value in bits)
+        ).decode("ascii")
+        original = {
+            "schema_version": PRODUCER.RAW_OUTPUT_SCHEMA,
+            "claim_marker": PRODUCER.CAPTURE_MARKER,
+            "authorization_document_sha256": PRODUCER.REVIEWED_AUTHORIZATION_EVIDENCE_SHA256,
+            "source_revision": "a" * 40,
+            "model_revision": PRODUCER.MODEL_REVISION,
+            "device": "cuda:0",
+            "dtype": PRODUCER.CANONICAL_DTYPE,
+            "resident_language_layers": 50,
+            "cases": [
+                {
+                    "case_id": case["case_id"],
+                    "input_sha256": case["input_sha256"],
+                    "shape": shape,
+                    "bfloat16_le_base64": payload,
+                }
+            ],
+        }
+        forged = copy.deepcopy(original)
+        forged["cases"][0]["input_sha256"] = "0" * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            path = root / "raw.json"
+            saved = root / "sealed.json"
+            path.write_bytes(PRODUCER.document_bytes(original))
+            snapshot, sealed_bytes = PRODUCER.SealedFileSnapshot.seal_and_read(
+                path, PRODUCER.MAXIMUM_RAW_OUTPUT_BYTES
+            )
+            path.rename(saved)
+            path.write_bytes(PRODUCER.document_bytes(forged))
+            captured = PRODUCER.read_raw_output_bytes(
+                sealed_bytes,
+                PRODUCER.REVIEWED_AUTHORIZATION_EVIDENCE_SHA256,
+                "a" * 40,
+                "cuda:0",
+                [case],
+            )
+            self.assertEqual(captured[case["case_id"]][0], shape)
+            with self.assertRaises(PRODUCER.CaptureFailure):
+                snapshot.revalidate()
+
     def test_rust_adapter_is_dense_private_cuda_only(self) -> None:
         source = RUST_PATH.read_text(encoding="utf-8")
         cargo = CARGO_PATH.read_text(encoding="utf-8")
@@ -312,6 +402,9 @@ class ProducerContractTests(unittest.TestCase):
         self.assertIn("OpenedInputSnapshot", source)
         self.assertIn('request_snapshot.revalidate("capture request")', source)
         self.assertIn("MAX_RAW_OUTPUT_BYTES", source)
+        self.assertIn("OFFICIAL_TEXT_ENCODER_SHARDS", source)
+        self.assertIn("checkpoint_components", source)
+        self.assertIn("metadata_sha256 != expected_sha256", source)
 
     def test_release_verifier_rejects_capture_marker(self) -> None:
         verifier = RELEASE_VERIFIER_PATH.read_text(encoding="utf-8")

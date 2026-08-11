@@ -57,6 +57,81 @@ TEXT_CASE_ID = "qwen-layer-50-text-v1"
 MULTIMODAL_CASE_ID = "qwen-layer-50-multimodal-v1"
 CASE_IDS = (TEXT_CASE_ID, MULTIMODAL_CASE_ID)
 COMPONENT_ID = "official-text-encoder-index"
+TEXT_ENCODER_SHARD_AUTHORITIES = (
+    (
+        "official-text-encoder-shard-00001-of-00014",
+        "text_encoder/model-00001-of-00014.safetensors",
+        "6b9dfbc930e505402ae9d7e5091a9d7d656cda5f34614f01cfe70bfb0cca27cb",
+    ),
+    (
+        "official-text-encoder-shard-00002-of-00014",
+        "text_encoder/model-00002-of-00014.safetensors",
+        "d8bb44b4ff303fe76fe9e894022fb3dc71b15a2e716592790fe0e3c3e60478fa",
+    ),
+    (
+        "official-text-encoder-shard-00003-of-00014",
+        "text_encoder/model-00003-of-00014.safetensors",
+        "54f22e8b3168f8dc962fac0d313607ebf52a12b433d4cf3098a0d82d9f042940",
+    ),
+    (
+        "official-text-encoder-shard-00004-of-00014",
+        "text_encoder/model-00004-of-00014.safetensors",
+        "ad09c74d3c13ee29b5d0d84548fd8a3424a651564eaccd519946c296e59c557f",
+    ),
+    (
+        "official-text-encoder-shard-00005-of-00014",
+        "text_encoder/model-00005-of-00014.safetensors",
+        "fc993c8a0e2a5b0570f383e1a95dc3a1281d1b224b6f3ee908f4827941e1dfc2",
+    ),
+    (
+        "official-text-encoder-shard-00006-of-00014",
+        "text_encoder/model-00006-of-00014.safetensors",
+        "82f05620d1f718a90c362b221d6a184ff1a0f53301d706882d3df49695fa1974",
+    ),
+    (
+        "official-text-encoder-shard-00007-of-00014",
+        "text_encoder/model-00007-of-00014.safetensors",
+        "fb91da8cb01ff4de3eef0eab1c3e769a734b3a1aafc61734068638a0d6c86934",
+    ),
+    (
+        "official-text-encoder-shard-00008-of-00014",
+        "text_encoder/model-00008-of-00014.safetensors",
+        "431ca56535c8781944ce3801f5eb61c45531e853ecc5846d936ebaf4761b764f",
+    ),
+    (
+        "official-text-encoder-shard-00009-of-00014",
+        "text_encoder/model-00009-of-00014.safetensors",
+        "3825e3f4302f4d2f7d76aa7430d2ce0864fde6b9e540a5806bf0d8e38e4d9f47",
+    ),
+    (
+        "official-text-encoder-shard-00010-of-00014",
+        "text_encoder/model-00010-of-00014.safetensors",
+        "aded5a4d1d5e22dbd8b6f79266b6eb88c840411b09527c53917a1419ace22e2f",
+    ),
+    (
+        "official-text-encoder-shard-00011-of-00014",
+        "text_encoder/model-00011-of-00014.safetensors",
+        "3820ffe8d8d6477f6fe8d614ef3c87abb264ee39accebf43a1507b970d80946f",
+    ),
+    (
+        "official-text-encoder-shard-00012-of-00014",
+        "text_encoder/model-00012-of-00014.safetensors",
+        "05ad2d08ce71963121c9b03f1d9ec5d7641052f4b23c6c12b80d71065eb8e98e",
+    ),
+    (
+        "official-text-encoder-shard-00013-of-00014",
+        "text_encoder/model-00013-of-00014.safetensors",
+        "b64f2289871261fdd1abbd3b78bcd66011b341de3dc8eeb2ed1a473ee7c8d95c",
+    ),
+    (
+        "official-text-encoder-shard-00014-of-00014",
+        "text_encoder/model-00014-of-00014.safetensors",
+        "e45b6c9998c77ee5a6577f9f47bc76416c1d4d387169e50c4c9d3134ea51b13b",
+    ),
+)
+TEXT_ENCODER_COMPONENT_IDS = (COMPONENT_ID,) + tuple(
+    identifier for identifier, _, _ in TEXT_ENCODER_SHARD_AUTHORITIES
+)
 CANONICAL_DTYPE = "bfloat16"
 TENSOR_HASH_ENCODING = "canonical-typed-le-v1"
 MOLD_BINARY = "h3_qwen_layer50_capture"
@@ -132,13 +207,11 @@ class ExternalFileIdentity:
     changed_ns: int
 
     @classmethod
-    def capture(cls, path: pathlib.Path) -> "ExternalFileIdentity":
-        try:
-            metadata = path.lstat()
-        except OSError:
-            fail("protected Qwen capture input became unavailable")
-        if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-            fail("protected Qwen capture input is not a direct regular file")
+    def from_metadata(
+        cls, path: pathlib.Path, metadata: os.stat_result
+    ) -> "ExternalFileIdentity":
+        if not stat.S_ISREG(metadata.st_mode):
+            fail("protected Qwen capture input is not a regular file")
         return cls(
             path=path,
             device=metadata.st_dev,
@@ -147,6 +220,16 @@ class ExternalFileIdentity:
             modified_ns=metadata.st_mtime_ns,
             changed_ns=metadata.st_ctime_ns,
         )
+
+    @classmethod
+    def capture(cls, path: pathlib.Path) -> "ExternalFileIdentity":
+        try:
+            metadata = path.lstat()
+        except OSError:
+            fail("protected Qwen capture input became unavailable")
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            fail("protected Qwen capture input is not a direct regular file")
+        return cls.from_metadata(path, metadata)
 
     def revalidate(self) -> None:
         if ExternalFileIdentity.capture(self.path) != self:
@@ -159,28 +242,82 @@ class SealedFileSnapshot:
     sha256: str
 
     @classmethod
-    def seal(cls, path: pathlib.Path) -> "SealedFileSnapshot":
+    def seal_and_read(
+        cls, path: pathlib.Path, maximum_bytes: int
+    ) -> tuple["SealedFileSnapshot", bytes]:
         try:
             os.chmod(path, 0o400, follow_symlinks=False)
         except OSError as error:
             fail(f"cannot seal staged Qwen capture input: {error}")
-        before = ExternalFileIdentity.capture(path)
         metadata = path.lstat()
         if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o400:
             fail("staged Qwen capture input is not immutable and owner-only")
-        digest = BASE.sha256_file(path)
-        after = ExternalFileIdentity.capture(path)
-        if before != after:
-            fail("staged Qwen capture input changed while it was sealed")
-        return cls(after, digest)
+        identity, digest, encoded = authenticate_regular_file(
+            path,
+            "staged Qwen capture input",
+            maximum_bytes=maximum_bytes,
+            retain_bytes=True,
+        )
+        return cls(identity, digest), encoded
+
+    @classmethod
+    def seal(cls, path: pathlib.Path) -> "SealedFileSnapshot":
+        snapshot, _ = cls.seal_and_read(path, MAXIMUM_REQUEST_BYTES)
+        return snapshot
 
     def revalidate(self) -> None:
-        self.identity.revalidate()
+        identity, digest, _ = authenticate_regular_file(
+            self.identity.path,
+            "staged Qwen capture input",
+            maximum_bytes=MAXIMUM_RAW_OUTPUT_BYTES,
+            retain_bytes=False,
+        )
         metadata = self.identity.path.lstat()
         if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o400:
             fail("staged Qwen capture input permissions changed during execution")
-        if BASE.sha256_file(self.identity.path) != self.sha256:
+        if identity != self.identity or digest != self.sha256:
             fail("staged Qwen capture input bytes changed during execution")
+
+
+def authenticate_regular_file(
+    path: pathlib.Path,
+    label: str,
+    *,
+    maximum_bytes: int | None = None,
+    retain_bytes: bool = False,
+) -> tuple[ExternalFileIdentity, str, bytes | None]:
+    before = ExternalFileIdentity.capture(path)
+    if maximum_bytes is not None and before.size > maximum_bytes:
+        fail(f"{label} exceeds its bounded size")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | nofollow)
+    except OSError:
+        fail(f"{label} is unavailable or unsafe")
+    try:
+        opened = ExternalFileIdentity.from_metadata(path, os.fstat(descriptor))
+        if opened != before:
+            fail(f"{label} changed while it was opened")
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        observed = 0
+        while chunk := os.read(descriptor, 8 * 1024 * 1024):
+            digest.update(chunk)
+            observed += len(chunk)
+            if retain_bytes:
+                chunks.append(chunk)
+        after_descriptor = ExternalFileIdentity.from_metadata(path, os.fstat(descriptor))
+    finally:
+        os.close(descriptor)
+    after_path = ExternalFileIdentity.capture(path)
+    if (
+        opened != after_descriptor
+        or opened != after_path
+        or observed != opened.size
+    ):
+        fail(f"{label} changed while it was authenticated")
+    encoded = b"".join(chunks) if retain_bytes else None
+    return after_path, digest.hexdigest(), encoded
 
 
 def private_directory(path: pathlib.Path) -> None:
@@ -538,12 +675,29 @@ def component_map(manifest: Mapping[str, Any]) -> dict[str, dict[str, str]]:
     return BASE.manifest_component_map(manifest)
 
 
+def reviewed_text_encoder_shards(
+    manifest: Mapping[str, Any],
+) -> tuple[dict[str, str], ...]:
+    components = component_map(manifest)
+    reviewed: list[dict[str, str]] = []
+    for identifier, relative_path, sha256 in TEXT_ENCODER_SHARD_AUTHORITIES:
+        component = components.get(identifier)
+        if component != {
+            "id": identifier,
+            "relative_path": relative_path,
+            "sha256": sha256,
+        }:
+            fail("checked manifest lacks an exact official text encoder shard pin")
+        reviewed.append(component)
+    return tuple(reviewed)
+
+
 def layer_contract(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
     matches = [layer for layer in manifest["fixture_layers"] if layer["id"] == LAYER_ID]
     if len(matches) != 1:
         fail("checked manifest does not contain one Qwen layer-50 contract")
     layer = matches[0]
-    if tuple(layer["required_component_indexes"]) != (COMPONENT_ID,):
+    if tuple(layer["required_component_indexes"]) != TEXT_ENCODER_COMPONENT_IDS:
         fail("Qwen layer-50 component authority drifted")
     if tuple(layer["required_measurements"]) != (
         "shape",
@@ -555,7 +709,7 @@ def layer_contract(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
         fail("Qwen layer-50 measurement contract drifted")
     legacy_provenance = (
         "source-revision",
-        "component-index-hash",
+        "component-index-hashes",
         "device",
         "dtype",
         "capture-command",
@@ -565,7 +719,7 @@ def layer_contract(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
         "transformers-revision",
         "adapter-implementation-sha256",
         "oracle-runtime-sha256",
-        "component-index-hash",
+        "component-index-hashes",
         "device",
         "dtype",
         "capture-command",
@@ -630,20 +784,58 @@ def model_metadata_lines(
         metadata_path, model_root
     ):
         fail("official model component metadata escapes its snapshot")
-    before = ExternalFileIdentity.capture(metadata_path)
-    encoded = read_regular_file_once(model_root, metadata_relative)
-    after = ExternalFileIdentity.capture(metadata_path)
-    if before != after:
-        fail("official model component metadata changed while it was read")
+    identity, _, encoded = authenticate_regular_file(
+        metadata_path,
+        "official model component metadata",
+        maximum_bytes=4096,
+        retain_bytes=True,
+    )
+    if encoded is None:
+        fail("official model component metadata was not retained")
     try:
         lines = encoded.decode("utf-8").splitlines()
     except UnicodeError:
         fail("official model component metadata is not UTF-8")
-    return lines, after
+    return lines, identity
+
+
+def authenticate_text_encoder_shard(
+    model_root: pathlib.Path, component: Mapping[str, str]
+) -> tuple[ExternalFileIdentity, ExternalFileIdentity]:
+    relative = component["relative_path"]
+    relative_path = pathlib.PurePosixPath(relative)
+    if (
+        relative_path.parent != pathlib.PurePosixPath("text_encoder")
+        or relative_path.name != relative.removeprefix("text_encoder/")
+        or not relative_path.name.endswith(".safetensors")
+    ):
+        fail("reviewed text encoder shard authority has a non-canonical path")
+    candidate = model_root / relative
+    if candidate.is_symlink():
+        fail("official text encoder shard may not be a symbolic link")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        fail("official text encoder shard is unavailable")
+    if not resolved.is_file() or not BASE.is_relative_to(resolved, model_root):
+        fail("official text encoder shard escapes its snapshot")
+    lines, metadata_identity = model_metadata_lines(model_root, relative)
+    if (
+        len(lines) < 2
+        or lines[0] != MODEL_REVISION
+        or lines[1] != component["sha256"]
+    ):
+        fail("official text encoder shard metadata differs from the reviewed pin")
+    identity, sha256, _ = authenticate_regular_file(
+        resolved, "official text encoder shard"
+    )
+    if sha256 != component["sha256"]:
+        fail("official text encoder shard bytes differ from the reviewed pin")
+    return identity, metadata_identity
 
 
 def verify_text_encoder_snapshot(
-    model_root: pathlib.Path, hash_shards: bool
+    model_root: pathlib.Path, manifest: Mapping[str, Any]
 ) -> tuple[ExternalFileIdentity, ...]:
     relative_index = "text_encoder/model.safetensors.index.json"
     index_path = model_root / relative_index
@@ -655,23 +847,26 @@ def verify_text_encoder_snapshot(
         fail("official text encoder index is unavailable")
     if not index_path.is_file() or not BASE.is_relative_to(index_path, model_root):
         fail("official text encoder index escapes its snapshot")
-    index_before = ExternalFileIdentity.capture(index_path)
-    if BASE.sha256_file(index_path) != TEXT_ENCODER_INDEX_SHA256:
+    index_after, index_sha256, index_bytes = authenticate_regular_file(
+        index_path,
+        "official text encoder index",
+        maximum_bytes=16 * 1024 * 1024,
+        retain_bytes=True,
+    )
+    if index_sha256 != TEXT_ENCODER_INDEX_SHA256:
         fail("official text encoder index differs from the reviewed manifest")
-    index_after = ExternalFileIdentity.capture(index_path)
-    if index_before != index_after:
-        fail("official text encoder index changed while it was authenticated")
+    if index_bytes is None:
+        fail("official text encoder index was not retained")
     index_metadata, index_metadata_identity = model_metadata_lines(
         model_root, relative_index
     )
     if not index_metadata or index_metadata[0] != MODEL_REVISION:
         fail("official text encoder index revision drifted")
     try:
-        index = json.loads(index_path.read_text(encoding="utf-8"))
+        index = json.loads(index_bytes.decode("utf-8"))
         weight_map = index["weight_map"]
         total_size = int(index["metadata"]["total_size"])
     except (
-        OSError,
         UnicodeError,
         KeyError,
         TypeError,
@@ -679,51 +874,35 @@ def verify_text_encoder_snapshot(
         json.JSONDecodeError,
     ):
         fail("official text encoder index is malformed")
+    reviewed_shards = reviewed_text_encoder_shards(manifest)
     shard_names = sorted(set(weight_map.values()))
-    if len(shard_names) != 14 or total_size != TEXT_ENCODER_PAYLOAD_BYTES:
+    expected_names = [
+        pathlib.PurePosixPath(component["relative_path"]).name
+        for component in reviewed_shards
+    ]
+    if shard_names != expected_names or total_size != TEXT_ENCODER_PAYLOAD_BYTES:
         fail("official text encoder index payload geometry drifted")
     observed_payload = 0
     identities = [index_after, index_metadata_identity]
-    for name in shard_names:
-        if pathlib.Path(name).name != name or not name.endswith(".safetensors"):
-            fail("official text encoder index contains a non-canonical shard path")
-        relative = f"text_encoder/{name}"
-        candidate = model_root / relative
-        if candidate.is_symlink():
-            fail("official text encoder shard may not be a symbolic link")
-        try:
-            resolved = candidate.resolve(strict=True)
-        except OSError:
-            fail("official text encoder shard is unavailable")
-        if not resolved.is_file() or not BASE.is_relative_to(resolved, model_root):
-            fail("official text encoder shard escapes its snapshot")
-        before = ExternalFileIdentity.capture(resolved)
-        observed_payload += safetensors_payload_length(resolved, before.size)
-        lines, metadata_identity = model_metadata_lines(model_root, relative)
-        if len(lines) < 2 or lines[0] != MODEL_REVISION or not lower_hex(lines[1], 64):
-            fail(
-                "official text encoder shard metadata is not an exact revision authority"
-            )
-        if hash_shards:
-            if BASE.sha256_file(resolved) != lines[1]:
-                fail("official text encoder shard differs from its pinned LFS identity")
-            after = ExternalFileIdentity.capture(resolved)
-            if before != after:
-                fail("official text encoder shard changed while it was authenticated")
-            identities.append(after)
-        else:
-            identities.append(before)
-        identities.append(metadata_identity)
+    for component in reviewed_shards:
+        identity, metadata_identity = authenticate_text_encoder_shard(
+            model_root, component
+        )
+        observed_payload += safetensors_payload_length(
+            model_root / component["relative_path"], identity.size
+        )
+        identities.extend((identity, metadata_identity))
     if observed_payload != TEXT_ENCODER_PAYLOAD_BYTES:
         fail("official text encoder shard payloads differ from the reviewed index")
     config_relative = "text_encoder/config.json"
     config_path = (model_root / config_relative).resolve(strict=True)
-    config_before = ExternalFileIdentity.capture(config_path)
-    if BASE.sha256_file(config_path) != TEXT_ENCODER_CONFIG_SHA256:
+    config_after, config_sha256, _ = authenticate_regular_file(
+        config_path,
+        "official text encoder config",
+        maximum_bytes=16 * 1024 * 1024,
+    )
+    if config_sha256 != TEXT_ENCODER_CONFIG_SHA256:
         fail("official text encoder config differs from the reviewed authority")
-    config_after = ExternalFileIdentity.capture(config_path)
-    if config_before != config_after:
-        fail("official text encoder config changed while it was authenticated")
     config_metadata, config_metadata_identity = model_metadata_lines(
         model_root, config_relative
     )
@@ -1150,12 +1329,14 @@ def write_request(
     authorization_sha256: str,
     source_revision: str,
     cases: Sequence[Mapping[str, Any]],
+    manifest: Mapping[str, Any],
 ) -> SealedFileSnapshot:
     request = {
         "schema_version": REQUEST_SCHEMA,
         "authorization_document_sha256": authorization_sha256,
         "source_revision": source_revision,
         "model_revision": MODEL_REVISION,
+        "checkpoint_components": list(reviewed_text_encoder_shards(manifest)),
         "cases": list(cases),
     }
     encoded = document_bytes(request)
@@ -1165,26 +1346,18 @@ def write_request(
     return SealedFileSnapshot.seal(path)
 
 
-def read_raw_output(
-    path: pathlib.Path,
+def read_raw_output_bytes(
+    encoded: bytes,
     authorization_sha256: str,
     source_revision: str,
     device: str,
     cases: Sequence[Mapping[str, Any]],
 ) -> dict[str, tuple[list[int], list[int]]]:
     try:
-        metadata = path.lstat()
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or stat.S_ISLNK(metadata.st_mode)
-            or metadata.st_uid != os.geteuid()
-            or stat.S_IMODE(metadata.st_mode) & 0o077
-        ):
-            fail("Mold raw layer capture is not an owner-only regular file")
-        if metadata.st_size > MAXIMUM_RAW_OUTPUT_BYTES:
+        if len(encoded) > MAXIMUM_RAW_OUTPUT_BYTES:
             fail("Mold raw layer capture exceeds its bounded output size")
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        raw = json.loads(encoded.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
         fail("Mold raw layer capture is unavailable or malformed")
     expected_keys = {
         "schema_version",
@@ -1247,6 +1420,7 @@ def capture_mold(
     device: str,
     source_revision: str,
     staged_mold_root: pathlib.Path,
+    manifest: Mapping[str, Any],
 ) -> tuple[str, dict[str, tuple[list[int], list[int]]]]:
     if not lower_hex(source_revision, 40):
         fail("Mold checkout does not have a canonical source revision")
@@ -1255,7 +1429,7 @@ def capture_mold(
     if raw_output_path.exists():
         fail("Mold raw layer capture already exists; refusing to overwrite evidence")
     request_snapshot = write_request(
-        request_path, authorization_sha256, source_revision, cases
+        request_path, authorization_sha256, source_revision, cases, manifest
     )
     target_dir = fixture_root / "build" / LAYER_ID / source_revision
     target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1311,9 +1485,11 @@ def capture_mold(
         fail("Mold exact-BF16 capture adapter failed; inspect the protected runner log")
     try:
         request_snapshot.revalidate()
-        raw_output_snapshot = SealedFileSnapshot.seal(raw_output_path)
-        captured = read_raw_output(
-            raw_output_path,
+        raw_output_snapshot, raw_output_bytes = SealedFileSnapshot.seal_and_read(
+            raw_output_path, MAXIMUM_RAW_OUTPUT_BYTES
+        )
+        captured = read_raw_output_bytes(
+            raw_output_bytes,
             authorization_sha256,
             source_revision,
             device,
@@ -1459,6 +1635,14 @@ def build_layer_document(
     component = components.get(COMPONENT_ID)
     if component is None or component["sha256"] != TEXT_ENCODER_INDEX_SHA256:
         fail("checked manifest lacks the exact official text encoder authority")
+    component_authorities = [component, *reviewed_text_encoder_shards(manifest)]
+    component_summary_sha256 = BASE.component_authority_set_sha256(
+        [authority["id"] for authority in component_authorities], components
+    )
+    component_hashes = ",".join(
+        f"{authority['id']}={authority['sha256']}"
+        for authority in sorted(component_authorities, key=lambda item: item["id"])
+    )
     command = capture_command(role, device)
     outputs = measurement_outputs(*activation)
     adapter_sha256 = adapter_implementation_sha256(role)
@@ -1485,8 +1669,11 @@ def build_layer_document(
         "input": {
             "id": case["case_id"],
             "sha256": case["input_sha256"],
-            "component_index_sha256": component["sha256"],
-            "component_indexes": [{"id": COMPONENT_ID, "sha256": component["sha256"]}],
+            "component_index_sha256": component_summary_sha256,
+            "component_indexes": [
+                {"id": authority["id"], "sha256": authority["sha256"]}
+                for authority in component_authorities
+            ],
         },
         "producer": {
             "role": role,
@@ -1513,7 +1700,7 @@ def build_layer_document(
         },
         "provenance": [
             {"key": "source-revision", "value": source_revision},
-            {"key": "component-index-hash", "value": component["sha256"]},
+            {"key": "component-index-hashes", "value": component_hashes},
             {"key": "device", "value": device},
             {"key": "dtype", "value": CANONICAL_DTYPE},
             {"key": "capture-command", "value": command},
@@ -1530,7 +1717,7 @@ def build_layer_document(
             "transformers-revision": TRANSFORMERS_REVISION,
             "adapter-implementation-sha256": adapter_sha256,
             "oracle-runtime-sha256": runtime_sha256,
-            "component-index-hash": component["sha256"],
+            "component-index-hashes": component_hashes,
             "device": device,
             "dtype": CANONICAL_DTYPE,
             "capture-command": command,
@@ -1834,9 +2021,7 @@ def run_capture(
         cases = build_cases(runtime, staged_model)
         if tuple(case["case_id"] for case in cases) != CASE_IDS:
             fail("Qwen capture cases are not in their reviewed order")
-        checkpoint_inputs = verify_text_encoder_snapshot(
-            model_root, hash_shards=role == "oracle"
-        )
+        checkpoint_inputs = verify_text_encoder_snapshot(model_root, manifest)
         capture_dir = capture_directory(fixture_root, cases)
         if role == "oracle":
             source_revision = DIFFUSERS_REVISION
@@ -1855,6 +2040,7 @@ def run_capture(
                 device,
                 mold_revision,
                 staged_mold,
+                manifest,
             )
 
         staged_snapshot.revalidate()

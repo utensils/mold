@@ -975,7 +975,15 @@ def validate_manifest_layer_evidence(
     )
     if actual_component_map != expected_component_map:
         fail(f"{role} layer {layer} component authorities differ from the manifest")
-    if document["input"]["component_index_sha256"] != required_components[0]["sha256"]:
+    expected_summary = (
+        required_components[0]["sha256"]
+        if len(required_components) == 1
+        else component_authority_set_sha256(
+            [component["id"] for component in required_components],
+            expected_component_map,
+        )
+    )
+    if document["input"]["component_index_sha256"] != expected_summary:
         fail(
             f"{role} layer {layer} component authority summary differs from the manifest"
         )
