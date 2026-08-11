@@ -31,6 +31,78 @@ const AUTHORIZATION_SCHEMA: &str = "mold.minimax-h3.authorization.v1";
 const OFFICIAL_MODEL_REVISION: &str = "bfc8ed0353f5a9733be73e6b2c98ec0948195b86";
 const OFFICIAL_TEXT_ENCODER_INDEX_SHA256: &str =
     "06c952c569285870b811989b794b9766493e280fb77fbcb957fc4e5fcf25403a";
+const OFFICIAL_TEXT_ENCODER_SHARDS: [(&str, &str, &str); 14] = [
+    (
+        "official-text-encoder-shard-00001-of-00014",
+        "text_encoder/model-00001-of-00014.safetensors",
+        "6b9dfbc930e505402ae9d7e5091a9d7d656cda5f34614f01cfe70bfb0cca27cb",
+    ),
+    (
+        "official-text-encoder-shard-00002-of-00014",
+        "text_encoder/model-00002-of-00014.safetensors",
+        "d8bb44b4ff303fe76fe9e894022fb3dc71b15a2e716592790fe0e3c3e60478fa",
+    ),
+    (
+        "official-text-encoder-shard-00003-of-00014",
+        "text_encoder/model-00003-of-00014.safetensors",
+        "54f22e8b3168f8dc962fac0d313607ebf52a12b433d4cf3098a0d82d9f042940",
+    ),
+    (
+        "official-text-encoder-shard-00004-of-00014",
+        "text_encoder/model-00004-of-00014.safetensors",
+        "ad09c74d3c13ee29b5d0d84548fd8a3424a651564eaccd519946c296e59c557f",
+    ),
+    (
+        "official-text-encoder-shard-00005-of-00014",
+        "text_encoder/model-00005-of-00014.safetensors",
+        "fc993c8a0e2a5b0570f383e1a95dc3a1281d1b224b6f3ee908f4827941e1dfc2",
+    ),
+    (
+        "official-text-encoder-shard-00006-of-00014",
+        "text_encoder/model-00006-of-00014.safetensors",
+        "82f05620d1f718a90c362b221d6a184ff1a0f53301d706882d3df49695fa1974",
+    ),
+    (
+        "official-text-encoder-shard-00007-of-00014",
+        "text_encoder/model-00007-of-00014.safetensors",
+        "fb91da8cb01ff4de3eef0eab1c3e769a734b3a1aafc61734068638a0d6c86934",
+    ),
+    (
+        "official-text-encoder-shard-00008-of-00014",
+        "text_encoder/model-00008-of-00014.safetensors",
+        "431ca56535c8781944ce3801f5eb61c45531e853ecc5846d936ebaf4761b764f",
+    ),
+    (
+        "official-text-encoder-shard-00009-of-00014",
+        "text_encoder/model-00009-of-00014.safetensors",
+        "3825e3f4302f4d2f7d76aa7430d2ce0864fde6b9e540a5806bf0d8e38e4d9f47",
+    ),
+    (
+        "official-text-encoder-shard-00010-of-00014",
+        "text_encoder/model-00010-of-00014.safetensors",
+        "aded5a4d1d5e22dbd8b6f79266b6eb88c840411b09527c53917a1419ace22e2f",
+    ),
+    (
+        "official-text-encoder-shard-00011-of-00014",
+        "text_encoder/model-00011-of-00014.safetensors",
+        "3820ffe8d8d6477f6fe8d614ef3c87abb264ee39accebf43a1507b970d80946f",
+    ),
+    (
+        "official-text-encoder-shard-00012-of-00014",
+        "text_encoder/model-00012-of-00014.safetensors",
+        "05ad2d08ce71963121c9b03f1d9ec5d7641052f4b23c6c12b80d71065eb8e98e",
+    ),
+    (
+        "official-text-encoder-shard-00013-of-00014",
+        "text_encoder/model-00013-of-00014.safetensors",
+        "b64f2289871261fdd1abbd3b78bcd66011b341de3dc8eeb2ed1a473ee7c8d95c",
+    ),
+    (
+        "official-text-encoder-shard-00014-of-00014",
+        "text_encoder/model-00014-of-00014.safetensors",
+        "e45b6c9998c77ee5a6577f9f47bc76416c1d4d387169e50c4c9d3134ea51b13b",
+    ),
+];
 const OFFICIAL_LICENSE_SHA256: &str =
     "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44";
 const REVIEWED_AUTHORIZATION_SHA256: &str =
@@ -250,7 +322,16 @@ struct CaptureRequest {
     authorization_document_sha256: String,
     source_revision: String,
     model_revision: String,
+    checkpoint_components: Vec<CheckpointComponent>,
     cases: Vec<CaptureCase>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointComponent {
+    id: String,
+    relative_path: String,
+    sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -508,6 +589,7 @@ fn frozen(
 
 fn conditioner_artifacts(
     model_root: &Path,
+    checkpoint_components: &[CheckpointComponent],
 ) -> Result<(
     ConditionerArtifacts,
     Vec<OpenedInputSnapshot>,
@@ -569,8 +651,36 @@ fn conditioner_artifacts(
     let index: CheckpointIndex =
         serde_json::from_slice(&index_bytes).context("text encoder index is malformed")?;
     let shard_names = index.weight_map.into_values().collect::<BTreeSet<_>>();
-    if shard_names.len() != 14 {
-        bail!("official text encoder index must name exactly 14 checkpoint shards")
+    let expected_names = OFFICIAL_TEXT_ENCODER_SHARDS
+        .iter()
+        .map(|(_, relative, _)| {
+            Path::new(relative)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("reviewed shard paths are canonical")
+        })
+        .collect::<BTreeSet<_>>();
+    if shard_names
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        != expected_names
+    {
+        bail!("official text encoder index differs from the reviewed shard set")
+    }
+    if checkpoint_components.len() != OFFICIAL_TEXT_ENCODER_SHARDS.len() {
+        bail!("capture request lacks the complete reviewed shard authority")
+    }
+    for (component, (expected_id, expected_relative, expected_sha256)) in checkpoint_components
+        .iter()
+        .zip(OFFICIAL_TEXT_ENCODER_SHARDS)
+    {
+        if component.id != expected_id
+            || component.relative_path != expected_relative
+            || component.sha256 != expected_sha256
+        {
+            bail!("capture request checkpoint authority differs from the reviewed shard pins")
+        }
     }
     artifacts.push(frozen(
         ArtifactRole::CheckpointIndex,
@@ -582,22 +692,26 @@ fn conditioner_artifacts(
     )?);
     opened_inputs.push(index_snapshot);
     opened_inputs.push(index_metadata_snapshot);
-    for (index, name) in shard_names.into_iter().enumerate() {
-        if Path::new(&name).components().count() != 1 || !name.ends_with(".safetensors") {
-            bail!("text encoder index contains a non-canonical shard path")
-        }
-        let relative = format!("text_encoder/{name}");
-        let path = canonical_existing(&model_root.join(&relative), "text encoder shard")?;
+    for (index, (_, relative, expected_sha256)) in
+        OFFICIAL_TEXT_ENCODER_SHARDS.into_iter().enumerate()
+    {
+        let path = canonical_existing(&model_root.join(relative), "text encoder shard")?;
         if !path.starts_with(model_root) {
             bail!("text encoder shard escapes its snapshot")
         }
         let path_snapshot = PathSnapshot::capture(&path, "text encoder shard")?;
         let size_bytes = path_snapshot.identity.size_bytes;
-        let (sha256, metadata_snapshot) = metadata_sha256(model_root, &relative)?;
+        let (metadata_sha256, metadata_snapshot) = metadata_sha256(model_root, relative)?;
+        if metadata_sha256 != expected_sha256 {
+            bail!("text encoder shard metadata differs from the reviewed pin")
+        }
         artifacts.push(frozen(
             ArtifactRole::CheckpointShard(index),
             path,
-            ArtifactFingerprint { sha256, size_bytes },
+            ArtifactFingerprint {
+                sha256: expected_sha256.to_owned(),
+                size_bytes,
+            },
         )?);
         checkpoint_inputs.push(path_snapshot);
         opened_inputs.push(metadata_snapshot);
@@ -837,7 +951,8 @@ fn run() -> Result<()> {
             arguments.device_label
         )
     })?;
-    let (artifacts, model_inputs, checkpoint_inputs) = conditioner_artifacts(&model_root)?;
+    let (artifacts, model_inputs, checkpoint_inputs) =
+        conditioner_artifacts(&model_root, &request.checkpoint_components)?;
     eprintln!("authenticating and loading the official exact-BF16 Qwen conditioner");
     // SAFETY: every path is canonical, the loader authenticates the complete
     // frozen artifact set, and this capture process never mutates model files.

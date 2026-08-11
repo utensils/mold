@@ -135,6 +135,90 @@
       "sha256": "06c952c569285870b811989b794b9766493e280fb77fbcb957fc4e5fcf25403a"
     },
     {
+      "id": "official-text-encoder-shard-00001-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "text_encoder/model-00001-of-00014.safetensors",
+      "sha256": "6b9dfbc930e505402ae9d7e5091a9d7d656cda5f34614f01cfe70bfb0cca27cb"
+    },
+    {
+      "id": "official-text-encoder-shard-00002-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "text_encoder/model-00002-of-00014.safetensors",
+      "sha256": "d8bb44b4ff303fe76fe9e894022fb3dc71b15a2e716592790fe0e3c3e60478fa"
+    },
+    {
+      "id": "official-text-encoder-shard-00003-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "text_encoder/model-00003-of-00014.safetensors",
+      "sha256": "54f22e8b3168f8dc962fac0d313607ebf52a12b433d4cf3098a0d82d9f042940"
+    },
+    {
+      "id": "official-text-encoder-shard-00004-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "text_encoder/model-00004-of-00014.safetensors",
+      "sha256": "ad09c74d3c13ee29b5d0d84548fd8a3424a651564eaccd519946c296e59c557f"
+    },
+    {
+      "id": "official-text-encoder-shard-00005-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "text_encoder/model-00005-of-00014.safetensors",
+      "sha256": "fc993c8a0e2a5b0570f383e1a95dc3a1281d1b224b6f3ee908f4827941e1dfc2"
+    },
+    {
+      "id": "official-text-encoder-shard-00006-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "text_encoder/model-00006-of-00014.safetensors",
+      "sha256": "82f05620d1f718a90c362b221d6a184ff1a0f53301d706882d3df49695fa1974"
+    },
+    {
+      "id": "official-text-encoder-shard-00007-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "text_encoder/model-00007-of-00014.safetensors",
+      "sha256": "fb91da8cb01ff4de3eef0eab1c3e769a734b3a1aafc61734068638a0d6c86934"
+    },
+    {
+      "id": "official-text-encoder-shard-00008-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "text_encoder/model-00008-of-00014.safetensors",
+      "sha256": "431ca56535c8781944ce3801f5eb61c45531e853ecc5846d936ebaf4761b764f"
+    },
+    {
+      "id": "official-text-encoder-shard-00009-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "text_encoder/model-00009-of-00014.safetensors",
+      "sha256": "3825e3f4302f4d2f7d76aa7430d2ce0864fde6b9e540a5806bf0d8e38e4d9f47"
+    },
+    {
+      "id": "official-text-encoder-shard-00010-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "text_encoder/model-00010-of-00014.safetensors",
+      "sha256": "aded5a4d1d5e22dbd8b6f79266b6eb88c840411b09527c53917a1419ace22e2f"
+    },
+    {
+      "id": "official-text-encoder-shard-00011-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "text_encoder/model-00011-of-00014.safetensors",
+      "sha256": "3820ffe8d8d6477f6fe8d614ef3c87abb264ee39accebf43a1507b970d80946f"
+    },
+    {
+      "id": "official-text-encoder-shard-00012-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "text_encoder/model-00012-of-00014.safetensors",
+      "sha256": "05ad2d08ce71963121c9b03f1d9ec5d7641052f4b23c6c12b80d71065eb8e98e"
+    },
+    {
+      "id": "official-text-encoder-shard-00013-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "text_encoder/model-00013-of-00014.safetensors",
+      "sha256": "b64f2289871261fdd1abbd3b78bcd66011b341de3dc8eeb2ed1a473ee7c8d95c"
+    },
+    {
+      "id": "official-text-encoder-shard-00014-of-00014",
+      "source_id": "minimax-official-model",
+      "relative_path": "text_encoder/model-00014-of-00014.safetensors",
+      "sha256": "e45b6c9998c77ee5a6577f9f47bc76416c1d4d387169e50c4c9d3134ea51b13b"
+    },
+    {
       "id": "official-video-vae-index",
       "source_id": "minimax-official-model",
       "relative_path": "vae/diffusion_pytorch_model.safetensors.index.json",
@@ -292,7 +376,7 @@
         "id": "minimax-h3-tokenizer-processor-capture-v1",
         "command_prefix": "python3 scripts/capture-minimax-h3-conditioner.py tokenizer-processor",
         "implementation_path": "scripts/capture-minimax-h3-conditioner.py",
-        "implementation_sha256": "d3f9ec17fa877587821ebc55344e35ce11cae19525685185f1c4cc192655f1c3"
+        "implementation_sha256": "006c761d6217430c78dcfc0b6c3a6a7d714924584a8fa79ea25407f82a876eda"
       },
       "required_measurements": [
         "token-ids",
@@ -306,16 +390,32 @@
       "id": "qwen-layer-50",
       "authority_tier": "exact-full-bf16",
       "input_contract": { "kind": "identity-sha256-v1" },
-      "required_component_indexes": ["official-text-encoder-index"],
+      "required_component_indexes": [
+        "official-text-encoder-index",
+        "official-text-encoder-shard-00001-of-00014",
+        "official-text-encoder-shard-00002-of-00014",
+        "official-text-encoder-shard-00003-of-00014",
+        "official-text-encoder-shard-00004-of-00014",
+        "official-text-encoder-shard-00005-of-00014",
+        "official-text-encoder-shard-00006-of-00014",
+        "official-text-encoder-shard-00007-of-00014",
+        "official-text-encoder-shard-00008-of-00014",
+        "official-text-encoder-shard-00009-of-00014",
+        "official-text-encoder-shard-00010-of-00014",
+        "official-text-encoder-shard-00011-of-00014",
+        "official-text-encoder-shard-00012-of-00014",
+        "official-text-encoder-shard-00013-of-00014",
+        "official-text-encoder-shard-00014-of-00014"
+      ],
       "required_provenance": [
         "source-revision",
-        "component-index-hash",
+        "component-index-hashes",
         "device",
         "dtype",
         "capture-command"
       ],
       "pinned_provenance": [],
-      "role_invariant_provenance": ["component-index-hash", "dtype"],
+      "role_invariant_provenance": ["component-index-hashes", "dtype"],
       "required_measurements": ["shape", "dtype", "statistics", "sampled-values", "tolerance"]
     },
     {
