@@ -1052,10 +1052,20 @@ const WAN_ATTENTION_QUERY_CHUNK: u64 = 512;
 /// (`wan/model/transformer.rs:866-906`).
 const WAN_RESIDUAL_LIVE_BUFFERS: u64 = 3;
 
-/// Live `[1, T, dim]` F32 buffers at a gated residual: the upcast hidden
-/// state, the upcast branch output, and their sum (`transformer.rs:885-888`
-/// and `:902-905`).
-const WAN_GATED_RESIDUAL_F32_BUFFERS: u64 = 3;
+/// Live `[1, T, dim]` buffers at a gated residual, in the *output* dtype.
+///
+/// This used to be three F32 buffers scaling with the clip — the upcast hidden
+/// state, the upcast branch output, and their sum. `gated_residual` now
+/// evaluates the add in fixed 4096-token slices (#776 item 2), so the F32
+/// arithmetic no longer scales with tokens at all; what does is the BF16
+/// staging around it, which is the accumulated slice list plus the `Tensor::cat`
+/// that joins it — two buffers, live together at the seam.
+///
+/// The slice-sized F32 transients that replaced the per-token ones are a flat
+/// ~335 MiB at `dim = 5120` and are absorbed by the measured slope below,
+/// which is fitted as a *difference* between two frame counts and therefore
+/// prices only what actually varies with tokens.
+const WAN_GATED_RESIDUAL_LIVE_BUFFERS: u64 = 2;
 
 /// Modulation components a block slices out of its timestep table —
 /// shift/scale/gate for attention and for the feed-forward
@@ -1207,7 +1217,7 @@ pub fn wan_activation_budget_bytes(
 ) -> u64 {
     let dim = geometry.dim;
     let residual = WAN_RESIDUAL_LIVE_BUFFERS * dim * BF16_BYTES;
-    let gated = WAN_GATED_RESIDUAL_F32_BUFFERS * dim * F32_BYTES;
+    let gated = WAN_GATED_RESIDUAL_LIVE_BUFFERS * dim * BF16_BYTES;
     let qkv = 3 * dim * BF16_BYTES;
     let attention_phase = residual + gated + qkv;
     let feed_forward_phase = residual + gated + geometry.ffn_dim * BF16_BYTES;
