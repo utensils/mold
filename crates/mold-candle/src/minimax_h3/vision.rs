@@ -566,13 +566,11 @@ impl Qwen3VlVisionModel {
         let gathered = self
             .position_embedding
             .forward(&Tensor::stack(&index_refs, 0)?)?;
-        let interpolated = gathered
-            .broadcast_mul(
-                &Tensor::stack(&weight_refs, 0)?
-                    .to_dtype(dtype)?
-                    .unsqueeze(D::Minus1)?,
-            )?
-            .sum(0)?;
+        let interpolated = weighted_position_sum(
+            &gathered,
+            &Tensor::stack(&weight_refs, 0)?.unsqueeze(D::Minus1)?,
+            dtype,
+        )?;
         let mut outputs = Vec::with_capacity(grid.len());
         let mut offset = 0;
         for (&[temporal, height, width], area) in grid.iter().zip(areas) {
@@ -639,6 +637,14 @@ impl Qwen3VlVisionModel {
     }
 }
 
+fn weighted_position_sum(gathered: &Tensor, weights: &Tensor, dtype: DType) -> Result<Tensor> {
+    gathered
+        .to_dtype(DType::F32)?
+        .broadcast_mul(weights)?
+        .sum(0)?
+        .to_dtype(dtype)
+}
+
 fn parse_grid(grid: &Tensor, merge: usize) -> Result<Vec<[usize; 3]>> {
     let rows = grid
         .to_device(&Device::Cpu)?
@@ -670,8 +676,9 @@ fn linspace(steps: usize, position_grid_side: usize) -> Vec<f32> {
     if steps == 1 {
         return vec![0.0];
     }
-    let stride = (position_grid_side - 1) as f32 / (steps - 1) as f32;
-    (0..steps).map(|index| index as f32 * stride).collect()
+    (0..steps)
+        .map(|index| index as f32 * (position_grid_side - 1) as f32 / (steps - 1) as f32)
+        .collect()
 }
 
 fn cumulative_sequence_lengths(grid: &[[usize; 3]]) -> Vec<usize> {
@@ -690,6 +697,44 @@ fn cumulative_sequence_lengths(grid: &[[usize; 3]]) -> Vec<usize> {
 mod tests {
     use super::*;
     use candle_nn::VarMap;
+
+    #[test]
+    fn interpolation_points_match_the_released_fp32_operation_order() {
+        let points = linspace(16, 48);
+        assert_eq!(points[3].to_bits(), 0x4116_6666);
+        assert_eq!(points[7].to_bits(), 0x41af_7777);
+        assert_eq!(points[14].to_bits(), 0x422f_7777);
+    }
+
+    #[test]
+    fn bf16_position_interpolation_accumulates_with_fp32_weights() {
+        let gathered = Tensor::new(
+            &[[[4.09375_f32]], [[3.9375]], [[-4.875]], [[1.171875]]],
+            &Device::Cpu,
+        )
+        .unwrap()
+        .to_dtype(DType::BF16)
+        .unwrap();
+        let weights = Tensor::new(
+            &[
+                [[0.15096787_f32]],
+                [[0.21469931]],
+                [[0.31650212]],
+                [[0.31783068]],
+            ],
+            &Device::Cpu,
+        )
+        .unwrap();
+        let value = weighted_position_sum(&gathered, &weights, DType::BF16)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert_eq!(value, vec![0.29296875]);
+    }
 
     #[test]
     fn tiny_vision_tower_returns_main_and_three_deepstack_rows() {
