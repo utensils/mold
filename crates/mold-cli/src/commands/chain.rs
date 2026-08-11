@@ -83,12 +83,28 @@ fn wan_carries_context(source_image: Option<mold_core::SourceImageCapability>) -
 /// 257-frame request cap; the single-expert 5B has room for its own shipped
 /// 121. Both values sit on wan's `4k+1` grid, so a clip started at the default
 /// is submittable.
+///
+/// Those two numbers are a **floor**, not the answer. A tier whose manifest
+/// default was raised past its family floor on a measurement has to be able to
+/// render that default as one clip — otherwise running the model with no
+/// `--frames` at all silently produces a stitched sequence instead of the clip
+/// the default advertises. That is exactly what shipped: #776 item 4 raised the
+/// Q5/Q4 A14B tiers to the checkpoint's trained 81 frames once block offload
+/// made them fit, while this routing default stayed at the pre-offload 53, so
+/// `mold run wan22-t2v-a14b:q5` rendered 2 clips and 106 frames in 351.6 s
+/// rather than one 81-frame clip. Reading the tier's own recorded default
+/// keeps the two from drifting again; the floor still covers models whose
+/// manifest records a smaller default (Q8 and fp8 A14B stay at 33) and opaque
+/// catalog IDs with no manifest at all.
 fn wan_default_clip_frames(model: &str) -> u32 {
-    if model.to_ascii_lowercase().contains("a14b") {
+    let floor = if model.to_ascii_lowercase().contains("a14b") {
         53
     } else {
         121
-    }
+    };
+    mold_core::manifest::find_manifest(&mold_core::manifest::resolve_model_name(model))
+        .and_then(|manifest| manifest.defaults.frames)
+        .map_or(floor, |tier_default| tier_default.max(floor))
 }
 
 /// Pixel frames a wan continuation duplicates from the clip before it.
@@ -1279,7 +1295,9 @@ mod tests {
             },
         );
 
-        // The two-expert pair gets the tighter 24 GB envelope.
+        // The two-expert pair gets the tighter 24 GB envelope — 81 on the
+        // Q5-backed tiers, which is what their manifest default records once
+        // block offload made the checkpoint's trained clip length fit (#776).
         let a14b = decide_chain_routing(
             Some(300),
             Some("wan"),
@@ -1293,7 +1311,7 @@ mod tests {
         assert_eq!(
             a14b,
             ChainRoutingDecision::Chain {
-                clip_frames: 53,
+                clip_frames: 81,
                 motion_tail: WAN_HANDOFF_DUPLICATED_FRAMES,
             },
         );
@@ -1313,7 +1331,7 @@ mod tests {
         assert_eq!(
             t2v,
             ChainRoutingDecision::Chain {
-                clip_frames: 53,
+                clip_frames: 81,
                 motion_tail: 0,
             },
         );
@@ -1324,6 +1342,47 @@ mod tests {
                 clip_frames: 121,
                 motion_tail: 0,
             },
+        );
+
+        // Regression (#776 item 4): a tier's manifest default must render as
+        // ONE clip. It shipped otherwise — the Q5/Q4 A14B default was raised
+        // to the checkpoint's trained 81 frames while this routing default
+        // stayed at the pre-offload 53, so `mold run wan22-t2v-a14b:q5` with
+        // no `--frames` produced a 2-stage 106-frame chain in 351.6 s instead
+        // of the 81-frame clip its default advertises. Asserted for every wan
+        // model the manifest knows, so the next raised default cannot drift
+        // away from the routing again.
+        let mut checked = 0;
+        for manifest in mold_core::manifest::known_manifests()
+            .iter()
+            .filter(|manifest| manifest.family == "wan")
+        {
+            let Some(default_frames) = manifest.defaults.frames else {
+                continue;
+            };
+            checked += 1;
+            let decision = decide_chain_routing(
+                Some(default_frames),
+                Some("wan"),
+                &manifest.name,
+                None,
+                0,
+                16,
+                None,
+                manifest.defaults.source_image,
+            );
+            assert_eq!(
+                decision,
+                ChainRoutingDecision::SingleClip,
+                "{} defaults to {default_frames} frames, which must render as one clip \
+                 rather than routing to a stitched sequence",
+                manifest.name,
+            );
+        }
+        assert!(
+            checked >= 4,
+            "only {checked} wan manifests carried a default frame count — the loop above \
+             would pass vacuously"
         );
 
         // Every routed clip length is on wan's 4k+1 grid, so a clip started at
