@@ -158,8 +158,14 @@ impl<'a> WanWeights<'a> {
         match self {
             Self::Plain(vb) => Ok(Arc::new(candle_nn::linear(in_dim, out_dim, vb.clone())?)),
             Self::Quantized { vb, loras } => {
-                let inner = crate::wan::lora::quantized_linear(loras, vb, in_dim, out_dim)?;
-                Ok(CastBoundary::wrap(inner, self.dtype()))
+                // The boundary goes *inside* the LoRA wrap: the adapter branch
+                // runs on the activation the model already holds, at the
+                // model's own dtype, so it costs no cast of its own. See
+                // `WanQuantizedLoraLinear`.
+                let io = self.dtype();
+                crate::wan::lora::quantized_linear(loras, vb, in_dim, out_dim, io, |inner| {
+                    CastBoundary::wrap(inner, io)
+                })
             }
             Self::Fp8 { vb, .. } => fp8::load_linear(vb, in_dim, out_dim, self.dtype()),
         }

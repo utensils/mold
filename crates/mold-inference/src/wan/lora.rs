@@ -56,6 +56,7 @@ use candle_core::{safetensors::MmapedSafetensors, DType, Device, Tensor};
 use mold_core::LoraWeight;
 
 use crate::flux::lora::{classify_lora_key, LoraDirection};
+use crate::wan::model::transformer::WanLinear;
 
 /// Prefix every shipped Wan LoRA puts on its keys.
 const WAN_LORA_PREFIX: &str = "diffusion_model.";
@@ -385,6 +386,10 @@ fn canonical_stem(stem: &str) -> Option<String> {
 /// Kept separate from [`WanLoraPatch`], whose tensors stay on the host: the
 /// registry is built once per request and the branch is built once per module
 /// that the checkpoint actually has.
+///
+/// Both variants are staged at the model's **activation** dtype, not at F32.
+/// See [`WanQuantizedLoraLinear`] for why that is the free choice rather than
+/// the lossy one.
 enum WanLoraBranch {
     /// `y += (x @ A^T) @ B'^T`, where `B' = scale * B`.
     ///
@@ -405,8 +410,8 @@ enum WanLoraBranch {
     /// [`WanQuantizedLoraLinear`] applies with the same force here: merging
     /// would requantize the whole tensor, and ComfyUI-GGUF likewise patches
     /// the per-forward dequantized copy rather than the stored weight
-    /// (`city96/ComfyUI-GGUF ops.py:176-190`). Cost: the delta resident in
-    /// F32 and one extra dense matmul on the patched projection.
+    /// (`city96/ComfyUI-GGUF ops.py:176-190`). Cost: the delta resident at the
+    /// activation dtype and one extra dense matmul on the patched projection.
     Dense {
         /// `[in_features, out_features]` — pre-transposed and pre-scaled once
         /// at build, for the same reason as [`WanLoraBranch::LowRank`].
@@ -441,11 +446,44 @@ enum WanLoraBranch {
 /// kernel, so the patch cannot be intercepted there; adding it as a parallel
 /// branch is the same arithmetic in the other order.
 ///
-/// The costs it does have, on an A14B expert with the rank-64 distill: ~1.2 GB
-/// of F32 adapter weights beside a ~10 GB Q5_K expert, and `rank/in + rank/out`
+/// The costs it does have, on an A14B expert with the rank-64 distill: ~0.6 GB
+/// of adapter weights beside a ~10 GB Q5_K expert, and `rank/in + rank/out`
 /// extra FLOPs — 2.5 % of the projection's own matmul at 5120 wide.
+///
+/// **Why the branch sits outside the cast boundary.** `QMatMul` dequantizes
+/// into F32, so the quantized projection computes in F32 while the model
+/// carries BF16 activations between ops; `CastBoundary` converts on each side
+/// of the projection to keep that F32 transient (see
+/// `wan::model::transformer`). The branch could be placed on either side of
+/// that boundary, and the side decides the adapter's dtype:
+///
+/// - *Inside*, on the F32 input, the adapter has to be staged at F32 to match:
+///   ~1.2 GB of the 24 GB envelope for the A14B rank-64 distill.
+/// - *Outside*, on the activation the model already holds, the adapter is
+///   staged at the activation dtype — half the residency for **no extra
+///   casts**, because the base projection's own boundary casts are the ones it
+///   was already paying.
+///
+/// Outside is what this type does, so `base` here is the already-cast-bounded
+/// projection rather than the raw quantized linear. Staging at BF16 while
+/// running the branch on the F32 input would be the worst of both: it buys the
+/// residency back by adding a cast per branch per forward, hundreds of extra
+/// launches per step across ~400 patched projections doubled under CFG, on a
+/// tier whose branch GEMMs are launch-bound rather than FLOP-bound.
+///
+/// The precision this gives up is bounded by what the family already accepts.
+/// BF16 keeps 8 mantissa bits; Q5_K resolves roughly 5 bits against each
+/// 32-value block's peak, so the adapter still lands well inside the base
+/// weight's own quantization floor. It is also exactly the precision the
+/// safetensors path runs at, where the same distill is merged into BF16
+/// weights — this makes the two weight sources agree on adapter precision
+/// instead of holding GGUF to a higher standard than the checkpoint it
+/// patches.
 pub(crate) struct WanQuantizedLoraLinear {
-    base: mold_candle::quantized_nn::Linear,
+    /// The quantized projection **with its cast boundary already applied**, so
+    /// its IO dtype is the model's activation dtype and the branches below can
+    /// share the activation without converting it.
+    base: WanLinear,
     branches: Vec<WanLoraBranch>,
 }
 
@@ -476,36 +514,76 @@ impl candle_core::Module for WanQuantizedLoraLinear {
 /// weight deltas become parallel branches on the quantized `QMatMul` (see
 /// [`WanLoraBranch`]), while `.diff_b` merges straight into the bias here —
 /// GGUF biases are unquantized, so the merge is as lossless as on the
-/// safetensors path. Returns the bare quantized linear untouched when nothing
-/// patches this projection, which is the case for every tensor outside the
-/// 400 the distills target.
+/// safetensors path. Returns the cast-bounded quantized linear untouched when
+/// nothing patches this projection, which is the case for every tensor outside
+/// the 400 the distills target.
+///
+/// `cast_bound` is the caller's `CastBoundary` wrap and `io` is the dtype that
+/// boundary presents — the model's activation dtype. Taking the wrap as an
+/// argument rather than applying it at the call site is what keeps the ordering
+/// invariant in one place: the branch must sit **outside** the boundary so it
+/// shares the activation the model already holds, and the adapter must be
+/// staged at that same `io` dtype. See [`WanQuantizedLoraLinear`] for why.
 pub(crate) fn quantized_linear(
     registry: &WanLoraRegistry,
     vb: &mold_candle::quantized::VarBuilder,
     in_dim: usize,
     out_dim: usize,
-) -> candle_core::Result<std::sync::Arc<dyn candle_core::Module + Send + Sync>> {
+    io: DType,
+    cast_bound: impl FnOnce(WanLinear) -> WanLinear,
+) -> candle_core::Result<WanLinear> {
     let weight = vb.get((out_dim, in_dim), "weight")?;
     let bias = vb.get(out_dim, "bias")?.dequantize(vb.device())?;
     let bias = registry.merge_into(&vb.key("bias"), bias)?;
     let base = mold_candle::quantized_nn::Linear::from_arc(weight, Some(bias))?;
+    let base = cast_bound(std::sync::Arc::new(base));
 
-    let weight_key = vb.key("weight");
-    let Some(patches) = registry.patches.get(&weight_key) else {
-        return Ok(std::sync::Arc::new(base));
+    let branches = adapter_branches(
+        registry,
+        &vb.key("weight"),
+        vb.device(),
+        io,
+        in_dim,
+        out_dim,
+    )?;
+    if branches.is_empty() {
+        return Ok(base);
+    }
+    Ok(std::sync::Arc::new(WanQuantizedLoraLinear {
+        base,
+        branches,
+    }))
+}
+
+/// Stage this projection's adapters as device-resident branches at `io`.
+///
+/// Empty when nothing patches `weight_key`. Split out from
+/// [`quantized_linear`] so the staging dtype — the one thing that decides both
+/// the adapter's residency and its precision — is checkable without a forward
+/// pass, which matters because the dtype that ships (BF16) has no CPU matmul
+/// to test through.
+fn adapter_branches(
+    registry: &WanLoraRegistry,
+    weight_key: &str,
+    device: &Device,
+    io: DType,
+    in_dim: usize,
+    out_dim: usize,
+) -> candle_core::Result<Vec<WanLoraBranch>> {
+    let Some(patches) = registry.patches.get(weight_key) else {
+        return Ok(Vec::new());
     };
-    let device = vb.device();
     let mut branches = Vec::with_capacity(patches.len());
     for patch in patches {
-        // The GGUF path computes in F32 (`QMatMul` dequantizes into it), so
-        // the adapter is staged at F32 once rather than cast per step.
+        // Staged at the activation dtype, once, so the branch consumes the
+        // tensor the model already holds and adds no cast per forward.
         match patch {
             WanLoraPatch::LowRank { a, b, scale } => branches.push(WanLoraBranch::LowRank {
-                a: a.to_device(device)?.to_dtype(DType::F32)?,
-                // Fold the scale here, once, instead of on every forward.
-                b: b.to_device(device)?
-                    .to_dtype(DType::F32)?
-                    .affine(*scale, 0.0)?,
+                a: a.to_device(device)?.to_dtype(io)?,
+                // Fold the scale here, once, instead of on every forward. It
+                // is applied before the narrowing cast so the product rounds
+                // once rather than twice.
+                b: b.to_device(device)?.affine(*scale, 0.0)?.to_dtype(io)?,
             }),
             WanLoraPatch::Delta { diff, scale } => {
                 if diff.dims() != [out_dim, in_dim] {
@@ -519,18 +597,38 @@ pub(crate) fn quantized_linear(
                 branches.push(WanLoraBranch::Dense {
                     delta_t: diff
                         .to_device(device)?
-                        .to_dtype(DType::F32)?
                         .affine(*scale, 0.0)?
+                        .to_dtype(io)?
                         .t()?
                         .contiguous()?,
                 });
             }
         }
     }
-    Ok(std::sync::Arc::new(WanQuantizedLoraLinear {
-        base,
-        branches,
-    }))
+    Ok(branches)
+}
+
+#[cfg(test)]
+impl WanLoraBranch {
+    /// The dtype this branch is staged at — both halves of a pair always
+    /// agree, because they are staged in one place.
+    fn dtype(&self) -> DType {
+        match self {
+            Self::LowRank { a, b } => {
+                debug_assert_eq!(a.dtype(), b.dtype());
+                a.dtype()
+            }
+            Self::Dense { delta_t } => delta_t.dtype(),
+        }
+    }
+
+    /// The staged pair, for tests that reconstruct the delta this branch adds.
+    fn low_rank(&self) -> Option<(&Tensor, &Tensor)> {
+        match self {
+            Self::LowRank { a, b } => Some((a, b)),
+            Self::Dense { .. } => None,
+        }
+    }
 }
 
 /// A `SimpleBackend` over the base checkpoint that merges LoRA deltas as each
@@ -1907,6 +2005,218 @@ mod tests {
             "the adapter moved the quantized forward by {quantized_effect:e} against \
              {plain_effect:e} on the plain one (ratio {ratio}) — it is arriving attenuated \
              or not at all, with the base's own error at {base_error:e}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // GGUF: where the branch sits, and what dtype it is staged at
+    // -----------------------------------------------------------------------
+
+    /// One quantized projection plus a rank-`rank` adapter over it, keyed the
+    /// way the shipped distills key theirs.
+    fn one_patched_projection(
+        dir: &std::path::Path,
+        out_features: usize,
+        in_features: usize,
+        rank: usize,
+    ) -> (
+        mold_candle::quantized::VarBuilder,
+        WanLoraRegistry,
+        &'static str,
+    ) {
+        const STEM: &str = "blocks.0.self_attn.q";
+        let device = Device::Cpu;
+        let weight = Tensor::from_vec(
+            synth(31, out_features * in_features),
+            (out_features, in_features),
+            &device,
+        )
+        .unwrap();
+        let bias = Tensor::from_vec(synth(37, out_features), out_features, &device).unwrap();
+
+        let mut tensors = std::collections::HashMap::new();
+        tensors.insert(
+            format!("{STEM}.weight"),
+            std::sync::Arc::new(
+                candle_core::quantized::QTensor::quantize(&weight, GgmlDType::Q5K).unwrap(),
+            ),
+        );
+        tensors.insert(
+            format!("{STEM}.bias"),
+            std::sync::Arc::new(
+                candle_core::quantized::QTensor::quantize(&bias, GgmlDType::F32).unwrap(),
+            ),
+        );
+        let vb = mold_candle::quantized::VarBuilder::from_qtensors(tensors, &device)
+            .pp("blocks")
+            .pp("0")
+            .pp("self_attn")
+            .pp("q");
+
+        let adapter = dir.join("one.safetensors");
+        write_block_lora(
+            &adapter,
+            &[(STEM.to_string(), out_features, in_features)],
+            rank,
+            8,
+        );
+        let registry = WanLoraRegistry::load(&[lora(&adapter, 1.0)]).unwrap();
+        (vb, registry, STEM)
+    }
+
+    /// The adapter is staged at the model's **activation** dtype, not at the
+    /// F32 the quantized projection computes in.
+    ///
+    /// This is the whole residency claim: at BF16 the A14B rank-64 distill's
+    /// branches occupy ~0.6 GB rather than ~1.2 GB of a 24 GB envelope. It is
+    /// asserted structurally rather than through a forward because the dtype
+    /// that ships — BF16 — has no CPU matmul in candle, which is also why the
+    /// quantized transformer keeps F32 activations on CPU.
+    #[test]
+    fn the_adapter_is_staged_at_the_activation_dtype_not_at_f32() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, registry, stem) = one_patched_projection(dir.path(), 256, 256, 8);
+        let key = format!("{stem}.weight");
+
+        for io in [DType::F32, DType::BF16, DType::F16] {
+            let branches = adapter_branches(&registry, &key, &Device::Cpu, io, 256, 256).unwrap();
+            assert_eq!(
+                branches.len(),
+                1,
+                "the fixture patches this projection once"
+            );
+            assert_eq!(
+                branches[0].dtype(),
+                io,
+                "the branch must be staged at the activation dtype, not at the F32 \
+                 `QMatMul` dequantizes into"
+            );
+        }
+
+        // And nothing is staged for a projection the adapter does not name.
+        let unpatched = adapter_branches(
+            &registry,
+            "blocks.0.ffn.0.weight",
+            &Device::Cpu,
+            DType::BF16,
+            256,
+            256,
+        )
+        .unwrap();
+        assert!(unpatched.is_empty());
+    }
+
+    /// The cast boundary goes **inside** the LoRA wrap, so the branch runs on
+    /// the activation the model already holds rather than on the projection's
+    /// transient F32 interior.
+    ///
+    /// That ordering is what makes the BF16 staging above free: put the branch
+    /// inside the boundary instead and the adapter has to be cast on every
+    /// forward, hundreds of extra launches per step across the ~400 patched
+    /// projections, doubled under CFG.
+    #[test]
+    fn the_branch_wraps_the_cast_boundary_rather_than_sitting_inside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vb, registry, _) = one_patched_projection(dir.path(), 256, 256, 8);
+
+        // Stand-in for `CastBoundary::wrap`: whatever the caller returns is
+        // what the branch must be layered on top of.
+        let mut bounded: Option<WanLinear> = None;
+        let patched = quantized_linear(&registry, &vb, 256, 256, DType::BF16, |inner| {
+            let wrapped: WanLinear = std::sync::Arc::new(PassThrough { inner });
+            bounded = Some(wrapped.clone());
+            wrapped
+        })
+        .unwrap();
+        let bounded = bounded.expect("the boundary must be applied even when patched");
+        assert!(
+            !std::sync::Arc::ptr_eq(&patched, &bounded),
+            "a patched projection must be the boundary wrapped by the branch, not the \
+             boundary itself"
+        );
+
+        // An unpatched projection is the boundary and nothing else — no wrapper
+        // for the ~19 of every 20 tensors the distills never name.
+        let bare = WanLoraRegistry::default();
+        let mut bounded_bare: Option<WanLinear> = None;
+        let plain = quantized_linear(&bare, &vb, 256, 256, DType::BF16, |inner| {
+            let wrapped: WanLinear = std::sync::Arc::new(PassThrough { inner });
+            bounded_bare = Some(wrapped.clone());
+            wrapped
+        })
+        .unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&plain, &bounded_bare.unwrap()),
+            "an unpatched projection must not gain a branch wrapper"
+        );
+    }
+
+    struct PassThrough {
+        inner: WanLinear,
+    }
+
+    impl candle_core::Module for PassThrough {
+        fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
+            self.inner.forward(xs)
+        }
+    }
+
+    /// Staging the adapter at BF16 costs less accuracy than the base weight's
+    /// own quantization already does.
+    ///
+    /// The issue's condition for the swap was that the drift stay below the Q5
+    /// floor. It does, by a wide margin, and the reason is structural: BF16
+    /// keeps 8 mantissa bits while Q5_K resolves roughly 5 bits against each
+    /// super-block's peak. Only the *staging* is compared here — the branch's
+    /// own matmul rounding is the rounding the safetensors path already runs
+    /// the same distill at, where these deltas are merged straight into BF16
+    /// weights. Measured on this fixture: staging drift 4.06e-5 against a
+    /// 1.73e-3 Q5_K floor, 42x of headroom.
+    #[test]
+    fn bf16_staging_drifts_less_than_the_q5_k_weight_it_patches() {
+        let device = Device::Cpu;
+        let (out_features, in_features, rank) = (256, 256, 8);
+        let dir = tempfile::tempdir().unwrap();
+        let (vb, registry, stem) =
+            one_patched_projection(dir.path(), out_features, in_features, rank);
+        let key = format!("{stem}.weight");
+
+        // What the branch adds, reconstructed from each staging: `b @ a`, with
+        // both operands widened back to F32 so this measures the staging alone
+        // and not the CPU's lack of a BF16 matmul.
+        let delta = |io: DType| {
+            let branches =
+                adapter_branches(&registry, &key, &device, io, in_features, out_features).unwrap();
+            let (a, b) = branches[0].low_rank().unwrap();
+            b.to_dtype(DType::F32)
+                .unwrap()
+                .matmul(&a.to_dtype(DType::F32).unwrap())
+                .unwrap()
+        };
+        let exact = delta(DType::F32);
+        let staged = delta(DType::BF16);
+        let staging_drift = max_abs_diff(&exact, &staged);
+
+        // The floor it has to stay under: what Q5_K already did to the weight
+        // this adapter patches.
+        let weight = vb.get((out_features, in_features), "weight").unwrap();
+        let original = Tensor::from_vec(
+            synth(31, out_features * in_features),
+            (out_features, in_features),
+            &device,
+        )
+        .unwrap();
+        let quantization_floor = max_abs_diff(&weight.dequantize(&device).unwrap(), &original);
+
+        assert!(
+            staging_drift > 0.0,
+            "BF16 staging must actually round something, or this bound is vacuous"
+        );
+        assert!(
+            staging_drift < quantization_floor,
+            "BF16 adapter staging drifted by {staging_drift:e}, past the {quantization_floor:e} \
+             the Q5_K base weight already costs — the adapter would then be the accuracy limit \
+             rather than the checkpoint"
         );
     }
 
