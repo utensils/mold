@@ -158,6 +158,16 @@ pub(crate) struct DiagonalGaussianDistribution {
     logvar: Tensor,
 }
 
+struct OfficialSeed42Sample {
+    #[cfg(feature = "h3-private-uat")]
+    noise: Tensor,
+    #[cfg(feature = "h3-private-uat")]
+    sampled: Tensor,
+    #[cfg(feature = "h3-private-uat")]
+    rounded_f16: Tensor,
+    roundtrip_f32: Tensor,
+}
+
 impl DiagonalGaussianDistribution {
     pub(crate) fn from_moments(moments: &Tensor) -> Result<Self> {
         let (_, channels, _, _, _) = moments.dims5()?;
@@ -185,20 +195,44 @@ impl DiagonalGaussianDistribution {
     ) -> Result<Tensor> {
         let latent = match mode {
             ConditionEncodeMode::OfficialFreshSeed42 => {
-                let std = self.logvar.affine(0.5, 0.0)?.exp()?;
-                let noise = fresh_seed42_noise(self.mean.shape())?.to_device(self.mean.device())?;
-                // The official generator is CPU-owned and independent from
-                // request/denoiser noise. The sampled latent is then rounded
-                // through FP16 before normalization.
-                self.mean
-                    .add(&std.mul(&noise)?)?
-                    .to_dtype(DType::F16)?
-                    .to_dtype(DType::F32)?
-                    .to_device(&Device::Cpu)?
+                self.official_seed42_sample()?.roundtrip_f32
             }
             ConditionEncodeMode::ComfyMeanOnly => self.mean.to_device(&Device::Cpu)?,
         };
         normalize_latents(&latent, latents_mean, latents_std)
+    }
+
+    fn official_seed42_sample(&self) -> Result<OfficialSeed42Sample> {
+        let std = self.logvar.affine(0.5, 0.0)?.exp()?;
+        let noise = fresh_seed42_noise(self.mean.shape())?;
+        let sampled = self
+            .mean
+            .add(&std.mul(&noise.to_device(self.mean.device())?)?)?;
+        // The official generator is CPU-owned and independent from
+        // request/denoiser noise. The sampled latent is then rounded through
+        // FP16 before normalization.
+        let rounded_f16 = sampled.to_dtype(DType::F16)?.to_device(&Device::Cpu)?;
+        let roundtrip_f32 = rounded_f16.to_dtype(DType::F32)?;
+        Ok(OfficialSeed42Sample {
+            #[cfg(feature = "h3-private-uat")]
+            noise,
+            #[cfg(feature = "h3-private-uat")]
+            sampled: sampled.to_device(&Device::Cpu)?,
+            #[cfg(feature = "h3-private-uat")]
+            rounded_f16,
+            roundtrip_f32,
+        })
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn official_seed42_capture(
+        &self,
+        latents_mean: &[f32],
+        latents_std: &[f32],
+    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+        let sample = self.official_seed42_sample()?;
+        let normalized = normalize_latents(&sample.roundtrip_f32, latents_mean, latents_std)?;
+        Ok((sample.noise, sample.sampled, sample.rounded_f16, normalized))
     }
 }
 

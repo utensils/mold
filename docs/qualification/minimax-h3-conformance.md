@@ -312,6 +312,45 @@ capture has not passed merely because these producer contracts and CUDA
 typechecks pass; only the protected external campaign may establish numerical
 parity.
 
+### FP32/FP16 visual-VAE capture
+
+`scripts/capture-minimax-h3-visual-vae.py` is the paired producer for the
+`visual-vae` boundary. It uses one deterministic
+`visual-vae-320x320x5-seed42-v1` case. That geometry exercises the released
+five-frame temporal path and a real two-by-two spatial tile grid. The input
+identity binds the 256-pixel tile, 64-pixel minimum overlap, effective seam
+boundaries at pixels 64 and 256, and representative seam frames 0, 2, and 4.
+
+The oracle is the pinned Diffusers `AutoencoderKLMiniMaxH3` loaded from the
+official three-shard FP32 checkpoint. The Mold role compiles the isolated
+`h3_visual_vae_capture` binary from a sealed source archive. Both roles record,
+in manifest order, FP32 ImageNet-normalized pixels, FP32 posterior moments, the
+fresh CPU seed-42 FP32 noise, the FP32 posterior sample, the actual FP16
+round-trip tensor, FP32 normalized latents, FP32 decoded unit-RGB frames, and
+the complete bounded FP32 seam-probe vector. Only the seed-42 noise stream is
+hash-exact across implementations; numerical model records use the checked
+1/64 elementwise tolerance and retain their hashes as record evidence.
+
+Use the same five external environment paths as the conditioner captures and
+run each role separately:
+
+    python3 scripts/capture-minimax-h3-visual-vae.py \
+      capture --role oracle --device cuda:0
+    python3 scripts/capture-minimax-h3-visual-vae.py \
+      capture --role mold --device cuda:0
+
+Before either model executes, the producer authenticates the official VAE
+config, index, and all three shards against exact revision-bound hashes, plus
+revision metadata, aggregate payload size, and a canonical artifact-set hash. It pins the Python, PyTorch, NumPy, CUDA,
+Transformers, Diffusers, adapter, and source identities; disables TF32 and
+approximate attention; and revalidates every protected identity after capture.
+The Mold adapter independently rejects non-FP32 storage, non-FP32 encode,
+non-FP16 CUDA decode, non-math attention, Comfy weights, non-CUDA devices,
+permissive output directories, mutable requests, and in-repository evidence.
+Its Cargo target and all retained request/raw/layer/bundle evidence remain
+under the owner-only external fixture root. No checkpoint, raw tensor, or
+decoded media is committed to the repository.
+
 ### Opt-in protected GPU validation
 
 The manual `MiniMax H3 private conformance` workflow validates an approved,

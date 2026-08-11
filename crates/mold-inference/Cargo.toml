@@ -96,6 +96,11 @@ name = "h3_qwen_layer50_capture"
 path = "src/bin/h3_qwen_layer50_capture.rs"
 required-features = ["dev-bins", "h3-private-uat"]
 
+[[bin]]
+name = "h3_visual_vae_capture"
+path = "src/bin/h3_visual_vae_capture.rs"
+required-features = ["dev-bins", "h3-private-uat", "cuda"]
+
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.21.0" }
 mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.21.0" }
@@ -113,6 +118,7 @@ candle-flash-attn = { version = "0.11", optional = true }
 gif = "0.13"
 webp-animation = { version = "0.10", features = ["static"], optional = true }
 image = "0.25"
+half = "2"
 libc = "0.2"
 # Already vendored transitively via image's default features, so a direct
 # dependency adds no new crates to the Nix vendor set. Pure Rust: no system

@@ -150,6 +150,8 @@ pub use visual_geometry::{
     EndpointResizePlan, ReferenceImageResizePlan, SpatialTilePlan, TemporalDecodeChunk,
     TemporalDecodePlan, TemporalEncodeChunk, TemporalEncodePlan, VisualTemporalGeometry,
 };
+#[cfg(feature = "h3-private-uat")]
+pub use visual_vae::VisualVaeCaptureEvidence;
 pub use visual_vae::{
     DecodeComputePolicy, DecodeSink, MiniMaxH3VisualVae, MiniMaxH3VisualVaeConfig,
     NoopVisualVaeObserver, VisualAttentionBackend, VisualVaeEvent, VisualVaeObserver,

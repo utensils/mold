@@ -1663,6 +1663,20 @@ pub struct MiniMaxH3VisualVae {
     attention_backend: VisualAttentionBackend,
 }
 
+/// Exact visual-conditioning intermediates exposed only to the protected H3
+/// qualification adapter. No shipping surface enables `h3-private-uat`.
+#[cfg(feature = "h3-private-uat")]
+#[derive(Clone, Debug)]
+pub struct VisualVaeCaptureEvidence {
+    pub normalized_pixels: Tensor,
+    pub posterior_moments: Tensor,
+    pub posterior_seed42_noise: Tensor,
+    pub posterior_sample: Tensor,
+    pub posterior_fp16_roundtrip: Tensor,
+    pub normalized_latents: Tensor,
+    pub decoded_pixels: Tensor,
+}
+
 impl MiniMaxH3VisualVae {
     /// Construct from an opaque artifact proof. This is the only public model
     /// loader: callers cannot validate one path and mmap an unrelated builder.
@@ -1813,6 +1827,39 @@ impl MiniMaxH3VisualVae {
         observer: &mut dyn VisualVaeObserver,
     ) -> Result<Tensor> {
         self.encode_condition_imagenet(pixels.into_imagenet()?, mode, observer)
+    }
+
+    /// Execute the released conditioning recipe while retaining the exact
+    /// intermediates required by the authorization-bound visual-VAE oracle.
+    #[cfg(feature = "h3-private-uat")]
+    pub fn capture_condition_evidence_unit(
+        &self,
+        pixels: UnitRgbPixels,
+        observer: &mut dyn VisualVaeObserver,
+    ) -> Result<VisualVaeCaptureEvidence> {
+        let normalized_pixels = pixels.into_imagenet()?.into_tensor();
+        let posterior_moments = self.encode_moments(&normalized_pixels, observer)?;
+        let posterior = DiagonalGaussianDistribution::from_moments(&posterior_moments)?;
+        let (
+            posterior_seed42_noise,
+            posterior_sample,
+            posterior_fp16_roundtrip,
+            normalized_latents,
+        ) = posterior
+            .official_seed42_capture(&self.config.latents_mean, &self.config.latents_std)?;
+        let decoded_pixels = self.decode_normalized(
+            &normalized_latents.to_device(normalized_pixels.device())?,
+            observer,
+        )?;
+        Ok(VisualVaeCaptureEvidence {
+            normalized_pixels,
+            posterior_moments,
+            posterior_seed42_noise,
+            posterior_sample,
+            posterior_fp16_roundtrip,
+            normalized_latents,
+            decoded_pixels,
+        })
     }
 
     fn encode_condition_imagenet(
@@ -2372,6 +2419,74 @@ mod tests {
         assert_eq!(moments.dims5().unwrap(), (1, 4, 7, 8, 8));
         assert_eq!(model.stored_weight_dtype(), DType::F32);
         assert_eq!(model.decode_compute_dtype(), DType::F32);
+    }
+
+    #[test]
+    fn tiled_encoder_visits_each_spatial_row_and_column_once() {
+        #[derive(Default)]
+        struct CountTiles(usize);
+        impl VisualVaeObserver for CountTiles {
+            fn checkpoint(&mut self, event: VisualVaeEvent) -> Result<()> {
+                if event.phase == VisualVaePhase::EncodeTile && event.completed < event.total {
+                    self.0 += 1;
+                }
+                Ok(())
+            }
+        }
+
+        let (model, _) = build(MiniMaxH3VisualVaeConfig::tiny_for_tests());
+        let pixels = Tensor::zeros((1, 3, 1, 36, 36), DType::F32, &Device::Cpu).unwrap();
+        let mut observer = CountTiles::default();
+        let moments = model.encode_moments(&pixels, &mut observer).unwrap();
+        assert_eq!(moments.dims5().unwrap(), (1, 4, 1, 9, 9));
+        assert_eq!(observer.0, 4);
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    #[test]
+    fn private_capture_preserves_the_released_seed42_round_trip() {
+        let (model, _) = build(MiniMaxH3VisualVaeConfig::tiny_for_tests());
+        let pixels = Tensor::zeros((1, 3, 1, 32, 32), DType::F32, &Device::Cpu).unwrap();
+        let evidence = model
+            .capture_condition_evidence_unit(
+                UnitRgbPixels::new(pixels.clone()).unwrap(),
+                &mut NoopVisualVaeObserver,
+            )
+            .unwrap();
+        let ordinary = model
+            .encode_condition_unit(
+                UnitRgbPixels::new(pixels).unwrap(),
+                ConditionEncodeMode::OfficialFreshSeed42,
+                &mut NoopVisualVaeObserver,
+            )
+            .unwrap();
+        assert_eq!(
+            evidence
+                .normalized_latents
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            ordinary.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+        );
+        assert_eq!(evidence.posterior_moments.dims5().unwrap(), (1, 4, 1, 8, 8));
+        assert_eq!(evidence.posterior_seed42_noise.dtype(), DType::F32);
+        assert_eq!(evidence.posterior_sample.dtype(), DType::F32);
+        assert_eq!(evidence.posterior_fp16_roundtrip.dtype(), DType::F16);
+        assert_eq!(evidence.decoded_pixels.dims5().unwrap(), (1, 3, 1, 32, 32));
+        let normalized_black = evidence
+            .normalized_pixels
+            .i((0, 0, 0, 0, 0))
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(
+            (normalized_black
+                + super::super::visual_condition::H3_IMAGENET_MEAN[0]
+                    / super::super::visual_condition::H3_IMAGENET_STD[0])
+                .abs()
+                < 1e-6
+        );
     }
 
     #[test]

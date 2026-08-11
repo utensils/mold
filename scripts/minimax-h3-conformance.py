@@ -175,9 +175,25 @@ EXPECTED_COMPONENT_INDEXES = {
         "text_encoder/model-00014-of-00014.safetensors",
         "e45b6c9998c77ee5a6577f9f47bc76416c1d4d387169e50c4c9d3134ea51b13b",
     ),
+    "official-video-vae-config": (
+        "vae/config.json",
+        "78f67deec3d63aae807f2bfe7154bc1e26f6372cb20b63265fcbae1b62bb5745",
+    ),
     "official-video-vae-index": (
         "vae/diffusion_pytorch_model.safetensors.index.json",
         "15f6d44553c3c616b0dc999920aa784f92ecee7e4201f1f99ac405cfbf3061ca",
+    ),
+    "official-video-vae-shard-00001-of-00003": (
+        "vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+        "72f4c6be84ac0674f27398cde991dd9d719762f3952c4921aa66b2ce542f6374",
+    ),
+    "official-video-vae-shard-00002-of-00003": (
+        "vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+        "2e05e8bc23fa4071043e17fd242be8acd0685e781a43987432b2eae925be4198",
+    ),
+    "official-video-vae-shard-00003-of-00003": (
+        "vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+        "c05d6ac4b1a33de372799d708531da6320f6a3ce6d1ce6d895e770988e004a39",
     ),
     "official-audio-vae-config": (
         "audio_vae/config.json",
