@@ -79,7 +79,7 @@
         "fixed_runtime_host_bytes": { "$ref": "#/$defs/bound" },
         "fixed_runtime_device_bytes": { "$ref": "#/$defs/bound" },
         "qwen_activation_workspace_bytes": { "$ref": "#/$defs/bound" },
-        "vae_construction_device_workspace_bytes": { "$ref": "#/$defs/bound" },
+        "vae_construction_device_workspace_bytes": { "$ref": "#/$defs/zeroObservedBound" },
         "condition_vae_workspace_device_bytes": { "$ref": "#/$defs/bound" },
         "attention_workspace_device_bytes": { "$ref": "#/$defs/bound" },
         "ffn_workspace_device_bytes": { "$ref": "#/$defs/bound" },
@@ -112,6 +112,16 @@
       "required": ["observed_bytes", "bound_bytes", "evidence_artifact"],
       "properties": {
         "observed_bytes": { "type": "integer", "minimum": 1 },
+        "bound_bytes": { "type": "integer", "minimum": 1 },
+        "evidence_artifact": { "$ref": "#/$defs/relativePath" }
+      }
+    },
+    "zeroObservedBound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed_bytes", "bound_bytes", "evidence_artifact"],
+      "properties": {
+        "observed_bytes": { "type": "integer", "minimum": 0 },
         "bound_bytes": { "type": "integer", "minimum": 1 },
         "evidence_artifact": { "$ref": "#/$defs/relativePath" }
       }

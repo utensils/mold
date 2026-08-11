@@ -267,12 +267,11 @@ fn with_state(update: impl FnOnce(&mut ObservationState)) -> Result<()> {
     })
 }
 
-fn phase_bytes(state: &ObservationState, phase: H3PipelinePhase) -> Result<u64> {
+fn phase_transient_bytes(state: &ObservationState, phase: H3PipelinePhase) -> Result<u64> {
     state
         .reports
         .get(&phase)
         .and_then(PhaseVramReport::incremental_transient_pool_used)
-        .filter(|bytes| *bytes > 0)
         .ok_or_else(|| anyhow!("private H3 phase {phase:?} has no attributed workspace peak"))
 }
 
@@ -358,15 +357,24 @@ fn build_observation(
         fixed_runtime_host_bytes: state.fixed_runtime_host_bytes,
         fixed_runtime_device_bytes,
         qwen_activation_workspace_bytes,
-        vae_construction_device_workspace_bytes: phase_bytes(&state, H3PipelinePhase::VaeLoad)?,
-        condition_vae_workspace_device_bytes: phase_bytes(
+        vae_construction_device_workspace_bytes: phase_transient_bytes(
+            &state,
+            H3PipelinePhase::VaeLoad,
+        )?,
+        condition_vae_workspace_device_bytes: phase_transient_bytes(
             &state,
             H3PipelinePhase::VisualConditionEncode,
         )?,
         attention_workspace_device_bytes: workspace.attention_workspace_device_bytes,
         ffn_workspace_device_bytes: workspace.ffn_workspace_device_bytes,
-        decoder_tile_workspace_device_bytes: phase_bytes(&state, H3PipelinePhase::VisualDecode)?,
-        audio_decode_workspace_device_bytes: phase_bytes(&state, H3PipelinePhase::AudioDecode)?,
+        decoder_tile_workspace_device_bytes: phase_transient_bytes(
+            &state,
+            H3PipelinePhase::VisualDecode,
+        )?,
+        audio_decode_workspace_device_bytes: phase_transient_bytes(
+            &state,
+            H3PipelinePhase::AudioDecode,
+        )?,
         encoded_video_host_bytes_bound: state.encoded_video_host_bytes,
         thumbnail_host_bytes_bound: state.thumbnail_host_bytes,
         mux_output_host_bytes_bound: state.mux_output_host_bytes,
@@ -377,7 +385,12 @@ fn build_observation(
         .as_object()
         .into_iter()
         .flat_map(|object| object.iter())
-        .filter(|(key, _)| key.as_str() != "schema")
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "schema" | "vae_construction_device_workspace_bytes"
+            )
+        })
         .any(|(_, value)| value.as_u64() == Some(0))
     {
         bail!("private H3 runtime-bound observation contains a zero byte count")
@@ -416,5 +429,31 @@ mod tests {
         assert_eq!(routed_qwen_workspace(false, Some(19), Some(3)), Some(3));
         assert_eq!(routed_qwen_workspace(true, None, Some(3)), None);
         assert_eq!(routed_qwen_workspace(false, Some(19), None), None);
+    }
+
+    #[test]
+    fn vae_load_can_have_zero_transient_after_retained_allocations_are_removed() {
+        let mut state = ObservationState::default();
+        state.reports.insert(
+            H3PipelinePhase::VaeLoad,
+            PhaseVramReport {
+                phase: "h3.private.VaeLoad".into(),
+                peak_pool_used: Some(12),
+                peak_pool_reserved: Some(12),
+                entry_pool_used: Some(2),
+                delta_pool_used: Some(10),
+                global_free_entry: Some(100),
+                global_free_exit: Some(90),
+                global_total: Some(200),
+                predicted_bytes: None,
+                elapsed: std::time::Duration::from_millis(1),
+                attribution: crate::device::VramAttribution::Pool,
+            },
+        );
+        assert_eq!(
+            phase_transient_bytes(&state, H3PipelinePhase::VaeLoad).unwrap(),
+            0
+        );
+        assert!(phase_transient_bytes(&state, H3PipelinePhase::VisualDecode).is_err());
     }
 }

@@ -299,7 +299,9 @@ runtime-code identity to equal the capture and proves that both exact values
 occur in the retained ELF server executable before recording that executable's
 independently measured SHA-256. Each of these bounds has an
 independent `{observed_bytes,bound_bytes,evidence_artifact}` record, with a
-nonzero observation no larger than its proposed bound:
+nonzero proposed bound. Every observation is nonzero except the legitimately
+zero VAE-construction transient described below, and no observation may exceed
+its proposed bound:
 
 - fixed runtime host and device bytes;
 - Qwen activation and VAE-construction device workspaces;
@@ -332,9 +334,12 @@ after the attempt constructs its CUDA context. The campaign host must therefore
 be quiescent and retain independent per-process GPU attestation; unrelated
 device allocations conservatively increase the proposed bound. CPU-offloaded
 Qwen uses its process high-water growth over the exact Qwen encode boundary;
-an accelerated Qwen uses the CUDA-pool phase growth instead. Every one of
-the thirteen values must be nonzero, so the campaign fixture must exercise a real FL2VA
-visual condition rather than an unconditioned T2VA request. The observer is
+an accelerated Qwen uses the CUDA-pool phase growth instead. Every value except
+the VAE-construction transient must be nonzero, so the campaign fixture must
+exercise a real FL2VA visual condition rather than an unconditioned T2VA
+request. A VAE load may legitimately report zero transient bytes when its pool
+high-water growth is entirely retained weights that admission already counts
+separately; its reviewed bound must still be nonzero. The observer is
 diagnostic evidence only: it cannot update admission bounds or authorize its
 own record, and shipping verification rejects its private marker.
 
