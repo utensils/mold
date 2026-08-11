@@ -37,7 +37,7 @@ const AUTHORIZATION_SOURCE_SHA256: &str =
 const CLAIM_MARKER: &str = "mold.minimax-h3.private-uat-transformer-capture.v1";
 const MODEL_REVISION: &str = "bfc8ed0353f5a9733be73e6b2c98ec0948195b86";
 const LICENSE_SHA256: &str = "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44";
-const MANIFEST_SHA256: &str = "6ac542a90f18b9d8a34ae1e7949248ad8189a36b75ff51af112d08d686cbbe32";
+const MANIFEST_SHA256: &str = "f6fa8bbc78ca2ee1e4811aedb51413e176f71ca009595cebbd3ef23845d9d183";
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_AUTHORIZATION_BYTES: u64 = 64 * 1024;
 

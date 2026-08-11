@@ -49,7 +49,7 @@ REVIEWED_AUTHORIZATION_EVIDENCE_SHA256 = (
     "8cd4d6e52cff34d7d39721ebab13b8c1187aa87aafc1c4ae2a16609186f22f1d"
 )
 REQUEST_SCHEMA = "mold.minimax-h3.qwen-layer50-capture-request.v1"
-RAW_OUTPUT_SCHEMA = "mold.minimax-h3.qwen-layer50-raw-output.v1"
+RAW_OUTPUT_SCHEMA = "mold.minimax-h3.qwen-layer50-raw-output.v2"
 INPUT_IDENTITY_DOMAIN = b"mold.minimax-h3.qwen-layer50-input.v1\0"
 CAPTURE_MARKER = "mold.minimax-h3.private-uat-exact-bf16-qwen-layer50-capture.v1"
 LAYER_ID = "qwen-layer-50"
@@ -138,6 +138,8 @@ MOLD_BINARY = "h3_qwen_layer50_capture"
 MOLD_FEATURES = "dev-bins,h3-private-uat,cuda"
 MAXIMUM_RAW_OUTPUT_BYTES = 128 * 1024 * 1024
 MAXIMUM_REQUEST_BYTES = 32 * 1024 * 1024
+MINIMUM_HOST_AVAILABLE_BYTES = 96 * 1024**3
+MINIMUM_DEVICE_FREE_BYTES = 12 * 1024**3
 SAMPLED_ACTIVATION_VALUES = 257
 REQUIRED_ENVIRONMENT = (
     "MOLD_H3_FIXTURE_ROOT",
@@ -1247,6 +1249,66 @@ def torch_bits(torch: Any, tensor: Any, device: Any) -> tuple[list[int], list[in
     return shape, [int(value) & 0xFFFF for value in signed]
 
 
+def memory_preflight(
+    runtime: SimpleNamespace,
+    device_label: str,
+    meminfo_path: pathlib.Path = pathlib.Path("/proc/meminfo"),
+) -> None:
+    try:
+        available_line = next(
+            line
+            for line in meminfo_path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("MemAvailable:")
+        )
+        fields = available_line.split()
+        if len(fields) != 3 or fields[2] != "kB":
+            fail("host memory preflight returned an invalid MemAvailable value")
+        host_available = int(fields[1]) * 1024
+    except (OSError, StopIteration, ValueError):
+        fail("host memory preflight could not establish available memory")
+    if host_available < MINIMUM_HOST_AVAILABLE_BYTES:
+        fail("Qwen streaming capture requires at least 96 GiB available host memory")
+
+    try:
+        device = BASE.configure_torch(runtime, device_label)
+        device_free, _ = runtime.torch.cuda.mem_get_info(device)
+        device_free = int(device_free)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        fail("device memory preflight could not establish free CUDA memory")
+    if device_free < MINIMUM_DEVICE_FREE_BYTES:
+        fail("Qwen streaming capture requires at least 12 GiB free device memory")
+
+
+def configure_oracle_layer_streaming(
+    runtime: SimpleNamespace, model: Any, device: Any
+) -> list[Any]:
+    torch = runtime.torch
+    language = model.model.language_model
+    layers = list(language.layers)
+    if len(layers) != 64:
+        fail("Diffusers oracle language stack changed before streaming")
+    model.model.visual.to(device)
+    language.embed_tokens.to(device)
+    language.norm.to(device)
+    language.rotary_emb.to(device)
+    handles = []
+
+    def load_layer(module: Any, _inputs: Any) -> None:
+        module.to(device)
+
+    def release_layer(module: Any, _inputs: Any, output: Any) -> Any:
+        torch.cuda.synchronize(device)
+        module.to("cpu")
+        return output
+
+    for layer in layers:
+        if any(parameter.device.type != "cpu" for parameter in layer.parameters()):
+            fail("Diffusers oracle layer was resident before streamed execution")
+        handles.append(layer.register_forward_pre_hook(load_layer))
+        handles.append(layer.register_forward_hook(release_layer))
+    return handles
+
+
 def capture_oracle(
     runtime: SimpleNamespace,
     weight_model_root: pathlib.Path,
@@ -1265,7 +1327,7 @@ def capture_oracle(
             low_cpu_mem_usage=True,
         )
         model.eval()
-        model.to(device)
+        streaming_hooks = configure_oracle_layer_streaming(runtime, model, device)
     except (OSError, RuntimeError, TypeError, ValueError) as error:
         fail(f"pinned exact-BF16 Qwen model could not be loaded: {error}")
     BASE.verify_module_origin(
@@ -1326,6 +1388,8 @@ def capture_oracle(
             if shape != [1, len(case["token_ids"]), 5120]:
                 fail("Diffusers oracle emitted the wrong unnormalized layer-50 shape")
             results[case["case_id"]] = (shape, bits)
+    for handle in streaming_hooks:
+        handle.remove()
     del model
     torch.cuda.empty_cache()
     return results
@@ -1374,7 +1438,7 @@ def read_raw_output_bytes(
         "model_revision",
         "device",
         "dtype",
-        "resident_language_layers",
+        "peak_resident_language_layers",
         "cases",
     }
     if set(raw) != expected_keys or (
@@ -1385,7 +1449,7 @@ def read_raw_output_bytes(
         or raw["model_revision"] != MODEL_REVISION
         or raw["device"] != device
         or raw["dtype"] != CANONICAL_DTYPE
-        or raw["resident_language_layers"] != 50
+        or raw["peak_resident_language_layers"] != 1
     ):
         fail("Mold raw layer capture is not bound to the requested exact authority")
     expected = {case["case_id"]: case for case in cases}
@@ -2026,6 +2090,7 @@ def run_capture(
         expected_runtime = manifest["numerical_authority"]["oracle_runtime"]
         if runtime_identity != expected_runtime:
             fail("Qwen capture runtime identity differs from the reviewed oracle pin")
+        memory_preflight(runtime, device)
         cases = build_cases(runtime, staged_model)
         if tuple(case["case_id"] for case in cases) != CASE_IDS:
             fail("Qwen capture cases are not in their reviewed order")

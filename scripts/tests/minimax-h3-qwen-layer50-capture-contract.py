@@ -15,6 +15,8 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 
 sys.dont_write_bytecode = True
@@ -261,7 +263,7 @@ class ProducerContractTests(unittest.TestCase):
             "model_revision": PRODUCER.MODEL_REVISION,
             "device": "cuda:0",
             "dtype": PRODUCER.CANONICAL_DTYPE,
-            "resident_language_layers": 50,
+            "peak_resident_language_layers": 1,
             "cases": [
                 {
                     "case_id": case["case_id"],
@@ -285,6 +287,30 @@ class ProducerContractTests(unittest.TestCase):
             PRODUCER.required_environment({})
         with self.assertRaises(PRODUCER.BASE.CaptureFailure):
             PRODUCER.BASE.external_directory("fixture root", str(REPO_ROOT))
+
+    def test_memory_preflight_rejects_low_host_or_device_memory(self) -> None:
+        gib = 1024**3
+        runtime = SimpleNamespace(
+            torch=SimpleNamespace(
+                cuda=SimpleNamespace(mem_get_info=mock.Mock(return_value=(16 * gib, 48 * gib)))
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            meminfo = pathlib.Path(temporary) / "meminfo"
+            meminfo.write_text(f"MemAvailable: {95 * 1024**2} kB\n", encoding="utf-8")
+            with mock.patch.object(PRODUCER.BASE, "configure_torch", return_value="cuda:0"):
+                with self.assertRaises(PRODUCER.CaptureFailure):
+                    PRODUCER.memory_preflight(runtime, "cuda:0", meminfo)
+
+                meminfo.write_text(
+                    f"MemAvailable: {128 * 1024**2} kB\n", encoding="utf-8"
+                )
+                runtime.torch.cuda.mem_get_info.return_value = (11 * gib, 48 * gib)
+                with self.assertRaises(PRODUCER.CaptureFailure):
+                    PRODUCER.memory_preflight(runtime, "cuda:0", meminfo)
+
+                runtime.torch.cuda.mem_get_info.return_value = (16 * gib, 48 * gib)
+                PRODUCER.memory_preflight(runtime, "cuda:0", meminfo)
 
     def test_exclusive_evidence_write_refuses_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -367,7 +393,7 @@ class ProducerContractTests(unittest.TestCase):
             "model_revision": PRODUCER.MODEL_REVISION,
             "device": "cuda:0",
             "dtype": PRODUCER.CANONICAL_DTYPE,
-            "resident_language_layers": 50,
+            "peak_resident_language_layers": 1,
             "cases": [
                 {
                     "case_id": case["case_id"],
@@ -403,14 +429,17 @@ class ProducerContractTests(unittest.TestCase):
     def test_rust_adapter_is_dense_private_cuda_only(self) -> None:
         source = RUST_PATH.read_text(encoding="utf-8")
         cargo = CARGO_PATH.read_text(encoding="utf-8")
-        self.assertIn("load_bf16_conditioner", source)
+        self.assertIn("load_streamed_bf16_conditioner", source)
         self.assertNotIn("load_h3_qwen_nvfp4_conditioner", source)
         self.assertNotIn("private_qwen", source)
         self.assertIn("profile.parameter_dtype != DType::BF16", source)
-        self.assertIn("resident_language_layers() != 50", source)
+        self.assertIn("language_layer_count() != 50", source)
+        self.assertIn("peak_resident_language_layers() != 1", source)
         self.assertIn('required-features = ["dev-bins", "h3-private-uat"]', cargo)
         self.assertIn("Device::new_cuda", source)
         self.assertIn("OpenedInputSnapshot", source)
+        self.assertIn("path_snapshot.descriptor_path()", source)
+        self.assertIn("sha256_open_file(&self.file)? != self.expected_sha256", source)
         self.assertIn('request_snapshot.revalidate("capture request")', source)
         self.assertIn("MAX_RAW_OUTPUT_BYTES", source)
         self.assertIn("OFFICIAL_TEXT_ENCODER_SHARDS", source)

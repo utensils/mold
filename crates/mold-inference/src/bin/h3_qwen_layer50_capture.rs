@@ -2,8 +2,8 @@
 //!
 //! This binary is unreachable without `dev-bins,h3-private-uat` and refuses
 //! execution unless an indexed CUDA device opens successfully. It loads only
-//! the frozen official BF16 conditioner through `load_bf16_conditioner`; no
-//! quantized deployment loader or production engine is reachable here.
+//! the frozen official BF16 conditioner through a one-language-layer streamed
+//! loader; no quantized deployment loader or production engine is reachable.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -15,18 +15,20 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use candle_core::{DType, Device, Tensor};
 use mold_candle::minimax_h3::{
-    load_bf16_conditioner, ArtifactFingerprint, ArtifactRole, ConditionerArtifacts, FrozenArtifact,
-    H3ConditionerInput, H3VisionInput,
+    load_streamed_bf16_conditioner, ArtifactFingerprint, ArtifactRole, ConditionerArtifacts,
+    FrozenArtifact, H3ConditionerInput, H3VisionInput,
 };
 use mold_core::secure_file::{open_regular_file_no_follow, sha256_open_file};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 const REQUEST_SCHEMA: &str = "mold.minimax-h3.qwen-layer50-capture-request.v1";
-const RAW_OUTPUT_SCHEMA: &str = "mold.minimax-h3.qwen-layer50-raw-output.v1";
+const RAW_OUTPUT_SCHEMA: &str = "mold.minimax-h3.qwen-layer50-raw-output.v2";
 const AUTHORIZATION_SCHEMA: &str = "mold.minimax-h3.authorization.v1";
 const OFFICIAL_MODEL_REVISION: &str = "bfc8ed0353f5a9733be73e6b2c98ec0948195b86";
 const OFFICIAL_TEXT_ENCODER_INDEX_SHA256: &str =
@@ -266,14 +268,16 @@ impl OpenedInputSnapshot {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct PathSnapshot {
     path: PathBuf,
+    file: File,
     identity: FileIdentity,
+    expected_sha256: String,
 }
 
 impl PathSnapshot {
-    fn capture(path: &Path, label: &str) -> Result<Self> {
+    fn capture(path: &Path, expected_sha256: &str, label: &str) -> Result<Self> {
         let requested =
             fs::symlink_metadata(path).with_context(|| format!("failed to inspect {label}"))?;
         if requested.file_type().is_symlink() || !requested.file_type().is_file() {
@@ -287,14 +291,24 @@ impl PathSnapshot {
         }
         Ok(Self {
             path: path.to_path_buf(),
+            file,
             identity,
+            expected_sha256: expected_sha256.to_owned(),
         })
     }
 
+    #[cfg(unix)]
+    fn descriptor_path(&self) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
+    }
+
     fn revalidate(&self, label: &str) -> Result<()> {
-        let file = open_regular_file_no_follow(&self.path)
+        let current = open_regular_file_no_follow(&self.path)
             .with_context(|| format!("failed to reopen {label} without following links"))?;
-        if FileIdentity::from_metadata(&file.metadata()?) != self.identity {
+        if FileIdentity::from_metadata(&self.file.metadata()?) != self.identity
+            || FileIdentity::from_metadata(&current.metadata()?) != self.identity
+            || sha256_open_file(&self.file)? != self.expected_sha256
+        {
             bail!("{label} changed after authentication")
         }
         Ok(())
@@ -368,7 +382,7 @@ struct RawCaptureOutput<'a> {
     model_revision: &'static str,
     device: &'a str,
     dtype: &'static str,
-    resident_language_layers: usize,
+    peak_resident_language_layers: usize,
     cases: Vec<RawCaseOutput>,
 }
 
@@ -699,7 +713,7 @@ fn conditioner_artifacts(
         if !path.starts_with(model_root) {
             bail!("text encoder shard escapes its snapshot")
         }
-        let path_snapshot = PathSnapshot::capture(&path, "text encoder shard")?;
+        let path_snapshot = PathSnapshot::capture(&path, expected_sha256, "text encoder shard")?;
         let size_bytes = path_snapshot.identity.size_bytes;
         let (metadata_sha256, metadata_snapshot) = metadata_sha256(model_root, relative)?;
         if metadata_sha256 != expected_sha256 {
@@ -707,7 +721,7 @@ fn conditioner_artifacts(
         }
         artifacts.push(frozen(
             ArtifactRole::CheckpointShard(index),
-            path,
+            path_snapshot.descriptor_path(),
             ArtifactFingerprint {
                 sha256: expected_sha256.to_owned(),
                 size_bytes,
@@ -956,12 +970,13 @@ fn run() -> Result<()> {
     eprintln!("authenticating and loading the official exact-BF16 Qwen conditioner");
     // SAFETY: every path is canonical, the loader authenticates the complete
     // frozen artifact set, and this capture process never mutates model files.
-    let loaded = unsafe { load_bf16_conditioner(&artifacts, &device) }
+    let loaded = unsafe { load_streamed_bf16_conditioner(&artifacts, &device) }
         .context("failed to load the official exact-BF16 Qwen conditioner")?;
     let profile = loaded.model.dtype_profile();
     if profile.parameter_dtype != DType::BF16
         || profile.output_dtype != DType::BF16
-        || loaded.model.resident_language_layers() != 50
+        || loaded.model.language_layer_count() != 50
+        || loaded.model.peak_resident_language_layers() != 1
     {
         bail!("loaded conditioner is not the exact BF16 unnormalized layer-50 authority")
     }
@@ -1006,7 +1021,7 @@ fn run() -> Result<()> {
         model_revision: OFFICIAL_MODEL_REVISION,
         device: &arguments.device_label,
         dtype: "bfloat16",
-        resident_language_layers: loaded.model.resident_language_layers(),
+        peak_resident_language_layers: loaded.model.peak_resident_language_layers(),
         cases: outputs,
     };
     let mut encoded = serde_json::to_vec_pretty(&output)?;
