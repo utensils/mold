@@ -185,6 +185,10 @@ require_text crates/mold-inference/src/lib.rs \
 require_text crates/mold-server/src/main.rs \
   'mold_inference::h3_private_runtime_code_identity_sha256()' \
   "the private H3 server ELF does not retain its measured code identity"
+if grep -Fq 'NoopH3PipelineObserver' \
+  crates/mold-inference/src/minimax_h3/private_server.rs; then
+  fail "the private H3 server suppresses timestampable pipeline progress"
+fi
 require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
   'MAX_RUNTIME_QUALIFICATION_BYTES' \
   "the private H3 runtime-record producer does not share the activation record limit"

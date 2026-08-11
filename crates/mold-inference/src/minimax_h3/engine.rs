@@ -477,7 +477,7 @@ impl InferenceEngine for H3Fl2VaEngine {
     }
 }
 
-struct H3EngineProgressObserver<'a> {
+pub(crate) struct H3EngineProgressObserver<'a> {
     progress: &'a ProgressReporter,
     started: HashMap<H3PipelinePhase, Instant>,
     last_completed: HashMap<H3PipelinePhase, usize>,
@@ -485,7 +485,7 @@ struct H3EngineProgressObserver<'a> {
 }
 
 impl<'a> H3EngineProgressObserver<'a> {
-    fn new(progress: &'a ProgressReporter) -> Self {
+    pub(crate) fn new(progress: &'a ProgressReporter) -> Self {
         Self {
             progress,
             started: HashMap::new(),
