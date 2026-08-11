@@ -3245,6 +3245,7 @@ dependencies = [
  "fdk-aac",
  "fs2",
  "gif 0.13.3",
+ "half",
  "image",
  "libc",
  "mold-ai-candle",

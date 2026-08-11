@@ -35,8 +35,12 @@ REQUIRED_ENVIRONMENT = (
 COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 EXACT_AUTHORITY_TIER = "exact-full-bf16"
 CANONICAL_BF16_DTYPE = "bfloat16"
+CANONICAL_F16_DTYPE = "float16"
+CANONICAL_F32_DTYPE = "float32"
 CANONICAL_INTEGER_DTYPE = "int64"
 CANONICAL_METRIC_DTYPE = "float64"
+CANONICAL_MIXED_CAPTURE_DTYPE = "official-bf16-fp32-mixed"
+VISUAL_VAE_ENVIRONMENT_DTYPE = "official-f32-encode-fp16-decode"
 CANONICAL_TENSOR_HASH_ENCODING = "canonical-typed-le-v1"
 CANONICAL_E2E_INPUT_SCHEMA = "mold.minimax-h3.e2e-input.v1"
 CANONICAL_E2E_INPUT_KIND = "canonical-e2e-json-sha256-v1"
@@ -81,11 +85,14 @@ MEASUREMENT_DTYPES = {
         "tolerance": CANONICAL_METRIC_DTYPE,
     },
     "visual-vae": {
-        "pixel-normalization": CANONICAL_BF16_DTYPE,
-        "posterior-seed-42": CANONICAL_BF16_DTYPE,
-        "latent-statistics": CANONICAL_METRIC_DTYPE,
-        "sampled-values": CANONICAL_BF16_DTYPE,
-        "tile-seams": CANONICAL_METRIC_DTYPE,
+        "pixel-normalization": CANONICAL_F32_DTYPE,
+        "posterior-moments": CANONICAL_F32_DTYPE,
+        "posterior-seed-42": CANONICAL_F32_DTYPE,
+        "posterior-sample": CANONICAL_F32_DTYPE,
+        "posterior-fp16-roundtrip": CANONICAL_F16_DTYPE,
+        "latent-normalization": CANONICAL_F32_DTYPE,
+        "decoded-frames": CANONICAL_F32_DTYPE,
+        "tile-seams": CANONICAL_F32_DTYPE,
     },
     "audio-vae": {
         "stereo-packing": CANONICAL_INTEGER_DTYPE,
@@ -146,6 +153,7 @@ PROVENANCE_HASH_KEYS = {
     "oracle-runtime-sha256",
     "tokenizer-hash",
     "processor-hash",
+    "artifact-set-sha256",
 }
 CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 REVIEWED_AUTHORIZATION_EVIDENCE_SHA256 = (
@@ -652,8 +660,12 @@ def validate_capture_environment(
     capture = bundle["capture_environment"]
     if not is_cuda_environment(capture["device"]):
         fail(f"{role} bundle does not declare a CUDA capture environment")
-    if capture["dtype"] != CANONICAL_BF16_DTYPE:
-        fail(f"{role} bundle capture environment dtype must be {CANONICAL_BF16_DTYPE}")
+    if capture["dtype"] not in {
+        CANONICAL_BF16_DTYPE,
+        CANONICAL_MIXED_CAPTURE_DTYPE,
+        VISUAL_VAE_ENVIRONMENT_DTYPE,
+    }:
+        fail(f"{role} bundle capture environment dtype is not a reviewed profile")
     validate_acceleration_policy(capture, excluded_accelerations, f"{role} bundle")
     if role == "oracle":
         expected_framework = "diffusers"
@@ -806,6 +818,17 @@ def is_exact_bfloat16(value: Any) -> bool:
     return reconstructed == converted
 
 
+def is_exact_ieee_value(value: Any, encoding: str) -> bool:
+    if not is_finite_float64(value):
+        return False
+    converted = float(value)
+    try:
+        reconstructed = struct.unpack(encoding, struct.pack(encoding, converted))[0]
+    except (OverflowError, struct.error):
+        return False
+    return math.isfinite(reconstructed) and reconstructed == converted
+
+
 def validate_output_numeric_domain(
     output: dict[str, Any], expected_dtype: str, context: str
 ) -> None:
@@ -828,6 +851,17 @@ def validate_output_numeric_domain(
             or any(not is_exact_bfloat16(sample["value"]) for sample in samples)
         ):
             fail(f"{context} activation min/max and samples must be exact bfloat16")
+        return
+    if expected_dtype in {CANONICAL_F16_DTYPE, CANONICAL_F32_DTYPE}:
+        encoding = ">e" if expected_dtype == CANONICAL_F16_DTYPE else ">f"
+        if (
+            not is_exact_ieee_value(statistics["min"], encoding)
+            or not is_exact_ieee_value(statistics["max"], encoding)
+            or any(
+                not is_exact_ieee_value(sample["value"], encoding) for sample in samples
+            )
+        ):
+            fail(f"{context} min/max and samples must be exact {expected_dtype}")
         return
     if expected_dtype == CANONICAL_METRIC_DTYPE and (
         not is_finite_float64(statistics["min"])
@@ -1084,7 +1118,7 @@ def validate_manifest_layer_evidence(
             or policy["relative"] > MAX_EXACT_RELATIVE_TOLERANCE
             or policy["absolute"] < 0
             or policy["relative"] < 0
-            or policy.get("hash_policy") != "exact"
+            or policy.get("hash_policy") not in {"exact", "record-only"}
         ):
             fail(
                 f"oracle layer {layer} output {key!r} floating policy "
@@ -1184,8 +1218,13 @@ def load_layer_documents(
             fail(f"{role} layer is not bound to the authorization evidence")
         if not is_cuda_environment(document["environment"]["device"]):
             fail(f"{role} layer does not declare a CUDA execution environment")
-        if document["environment"]["dtype"] != CANONICAL_BF16_DTYPE:
-            fail(f"{role} layer environment dtype must be {CANONICAL_BF16_DTYPE}")
+        expected_environment_dtype = (
+            VISUAL_VAE_ENVIRONMENT_DTYPE
+            if document["layer"] == "visual-vae"
+            else CANONICAL_BF16_DTYPE
+        )
+        if document["environment"]["dtype"] != expected_environment_dtype:
+            fail(f"{role} layer environment dtype must be {expected_environment_dtype}")
         reject_excluded_attention_backend(
             document["environment"].get("attention_backend"),
             excluded_accelerations,
@@ -1196,9 +1235,15 @@ def load_layer_documents(
             "acceleration_policy"
         ) != capture_environment.get("acceleration_policy"):
             fail(f"{role} layer acceleration policy differs from its bundle")
-        for field in ("device", "dtype", "attention_backend"):
+        for field in ("device", "attention_backend"):
             if document["environment"].get(field) != capture_environment.get(field):
                 fail(f"{role} layer {field} differs from its bundle")
+        if (
+            capture_environment.get("dtype") != CANONICAL_MIXED_CAPTURE_DTYPE
+            and document["environment"].get("dtype")
+            != capture_environment.get("dtype")
+        ):
+            fail(f"{role} layer dtype differs from its bundle")
         if document["environment"].get("oracle_runtime") != capture_environment.get(
             "oracle_runtime"
         ):
@@ -1282,10 +1327,17 @@ def validate_oracle_mold_policy_parity(
     )
     if set(oracle_outputs) != set(mold_outputs):
         fail("oracle and Mold measurement sets differ")
+    policies = keyed_evidence_records(
+        oracle_document["comparison"], "oracle paired comparison policies"
+    )
     for key in oracle_outputs:
         if oracle_outputs[key]["dtype"] != mold_outputs[key]["dtype"]:
             fail(f"oracle and Mold output {key!r} dtypes differ")
-        if oracle_outputs[key]["content_sha256"] != mold_outputs[key]["content_sha256"]:
+        if (
+            policies[key]["hash_policy"] == "exact"
+            and oracle_outputs[key]["content_sha256"]
+            != mold_outputs[key]["content_sha256"]
+        ):
             fail(f"oracle and Mold output {key!r} content hashes differ")
     oracle_provenance = keyed_evidence_records(
         oracle_document["provenance"], "oracle paired provenance"

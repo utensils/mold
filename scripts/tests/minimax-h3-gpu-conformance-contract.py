@@ -24,8 +24,12 @@ REVIEWED_AUTHORIZATION_EVIDENCE_SHA256 = (
 )
 CHECKOUT_V6_SHA = "d23441a48e516b6c34aea4fa41551a30e30af803"
 CANONICAL_BF16_DTYPE = "bfloat16"
+CANONICAL_F16_DTYPE = "float16"
+CANONICAL_F32_DTYPE = "float32"
 CANONICAL_INTEGER_DTYPE = "int64"
 CANONICAL_METRIC_DTYPE = "float64"
+CANONICAL_MIXED_CAPTURE_DTYPE = "official-bf16-fp32-mixed"
+VISUAL_VAE_ENVIRONMENT_DTYPE = "official-f32-encode-fp16-decode"
 CANONICAL_E2E_INPUT_SCHEMA = "mold.minimax-h3.e2e-input.v1"
 COMPONENT_AUTHORITY_SET_SCHEMA = "mold.minimax-h3.component-authority-set.v1"
 E2E_LAYER_TASKS = {
@@ -49,11 +53,14 @@ TEST_MEASUREMENT_KINDS = {
         "tolerance": "metric",
     },
     "visual-vae": {
-        "pixel-normalization": "activation",
-        "posterior-seed-42": "activation",
-        "latent-statistics": "metric",
-        "sampled-values": "activation",
-        "tile-seams": "metric",
+        "pixel-normalization": "float32",
+        "posterior-moments": "float32",
+        "posterior-seed-42": "float32",
+        "posterior-sample": "float32",
+        "posterior-fp16-roundtrip": "float16",
+        "latent-normalization": "float32",
+        "decoded-frames": "float32",
+        "tile-seams": "float32",
     },
     "audio-vae": {
         "stereo-packing": "integer",
@@ -112,6 +119,8 @@ TEST_MEASUREMENT_KINDS = {
 DTYPE_BY_KIND = {
     "integer": CANONICAL_INTEGER_DTYPE,
     "activation": CANONICAL_BF16_DTYPE,
+    "float16": CANONICAL_F16_DTYPE,
+    "float32": CANONICAL_F32_DTYPE,
     "metric": CANONICAL_METRIC_DTYPE,
 }
 
@@ -288,7 +297,11 @@ def comparison_fixture(key: str, kind: str) -> dict[str, object]:
         "absolute": 0 if integer else 0.000002,
         "relative": 0 if integer else 0.000001,
         "metric": "elementwise-atol-plus-rtol",
-        "hash_policy": "exact",
+        "hash_policy": (
+            "record-only"
+            if kind in {"float16", "float32"} and key != "posterior-seed-42"
+            else "exact"
+        ),
     }
 
 
@@ -313,6 +326,7 @@ def provenance_fixture(
         "processor-hash": "0" * 64,
         "component-index-hash": document["input"]["component_index_sha256"],
         "component-index-hashes": component_index_hashes,
+        "artifact-set-sha256": "d" * 64,
         "device": document["environment"]["device"],
         "generator-device": document["environment"]["device"],
         "dtype": document["environment"]["dtype"],
@@ -432,7 +446,11 @@ def layer_document(
         )
     environment = {
         "device": "cuda:contract-test",
-        "dtype": CANONICAL_BF16_DTYPE,
+        "dtype": (
+            VISUAL_VAE_ENVIRONMENT_DTYPE
+            if layer == "visual-vae"
+            else CANONICAL_BF16_DTYPE
+        ),
         "attention_backend": "math",
         "acceleration_policy": {
             "enabled": ["math"],
@@ -539,7 +557,7 @@ def bundle_fixture(
                     else SOURCE_SHA
                 ),
                 "device": "cuda:contract-test",
-                "dtype": CANONICAL_BF16_DTYPE,
+                "dtype": CANONICAL_MIXED_CAPTURE_DTYPE,
                 "attention_backend": "math",
                 "acceleration_policy": {
                     "enabled": ["math"],
@@ -1245,9 +1263,13 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                 tool, "oracle", authorization_sha, manifest_layer
             )
             output = record_by_key(wrong_dtype["outputs"], measurement)
-            output["dtype"] = (
-                CANONICAL_METRIC_DTYPE if kind != "metric" else CANONICAL_BF16_DTYPE
-            )
+            output["dtype"] = {
+                "integer": CANONICAL_METRIC_DTYPE,
+                "activation": CANONICAL_METRIC_DTYPE,
+                "float16": CANONICAL_F32_DTYPE,
+                "float32": CANONICAL_F16_DTYPE,
+                "metric": CANONICAL_BF16_DTYPE,
+            }[kind]
             expect_failure(
                 lambda wrong_dtype=wrong_dtype, manifest_layer=manifest_layer: (
                     runner.validate_manifest_layer_evidence(
@@ -1296,6 +1318,27 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                                     )
                                 ),
                                 "must be exact bfloat16",
+                            )
+                elif kind in {"float16", "float32"}:
+                    for invalid_value in (0.1, 10**100):
+                        for location in ("min", "max", "sample"):
+                            invalid_float = layer_document(
+                                tool, role, authorization_sha, manifest_layer
+                            )
+                            float_output = record_by_key(
+                                invalid_float["outputs"], measurement
+                            )
+                            if location == "sample":
+                                float_output["samples"][0]["value"] = invalid_value
+                            else:
+                                float_output["statistics"][location] = invalid_value
+                            expect_failure(
+                                lambda invalid_float=invalid_float, manifest_layer=manifest_layer, role=role: (
+                                    runner.validate_manifest_layer_evidence(
+                                        invalid_float, manifest_layer, role
+                                    )
+                                ),
+                                f"must be exact {kind}",
                             )
                 elif kind == "metric":
                     for invalid_value in (10**400, 2**80 + 1):
@@ -1465,7 +1508,9 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
                 tool, "oracle", authorization_sha, manifest_layer
             )
             hash_policy = record_by_key(wrong_hash_policy["comparison"], measurement)
-            hash_policy["hash_policy"] = "record-only"
+            hash_policy["hash_policy"] = (
+                "record-only" if kind == "integer" else "not-reviewed"
+            )
             expect_failure(
                 lambda wrong_hash_policy=wrong_hash_policy, manifest_layer=manifest_layer: (
                     runner.validate_manifest_layer_evidence(
@@ -1489,7 +1534,7 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
             oracle, fixture, mold, fixture, manifest_layer
         )
         mismatched_mold = copy.deepcopy(mold)
-        mismatched_mold["outputs"][0]["dtype"] = "float32"
+        mismatched_mold["outputs"][0]["dtype"] = "uint8"
         expect_failure(
             lambda: runner.validate_oracle_mold_policy_parity(
                 oracle, fixture, mismatched_mold, fixture, manifest_layer
@@ -1499,12 +1544,31 @@ def test_manifest_layer_contract(runner, tool, authorization_sha: str) -> None:
 
         mismatched_hash = copy.deepcopy(mold)
         mismatched_hash["outputs"][0]["content_sha256"] = "f" * 64
-        expect_failure(
-            lambda: runner.validate_oracle_mold_policy_parity(
+        if first_policy["hash_policy"] == "exact":
+            expect_failure(
+                lambda: runner.validate_oracle_mold_policy_parity(
+                    oracle, fixture, mismatched_hash, fixture, manifest_layer
+                ),
+                "content hashes differ",
+            )
+        else:
+            runner.validate_oracle_mold_policy_parity(
                 oracle, fixture, mismatched_hash, fixture, manifest_layer
-            ),
-            "content hashes differ",
-        )
+            )
+            exact_key = next(
+                policy["key"]
+                for policy in oracle["comparison"]
+                if policy["hash_policy"] == "exact"
+            )
+            record_by_key(mismatched_hash["outputs"], exact_key)["content_sha256"] = (
+                "e" * 64
+            )
+            expect_failure(
+                lambda: runner.validate_oracle_mold_policy_parity(
+                    oracle, fixture, mismatched_hash, fixture, manifest_layer
+                ),
+                "content hashes differ",
+            )
 
         if layer in E2E_LAYER_TASKS:
             mismatched_input = copy.deepcopy(mold)

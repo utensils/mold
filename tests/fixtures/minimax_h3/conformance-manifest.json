@@ -219,10 +219,34 @@
       "sha256": "e45b6c9998c77ee5a6577f9f47bc76416c1d4d387169e50c4c9d3134ea51b13b"
     },
     {
+      "id": "official-video-vae-config",
+      "source_id": "minimax-official-model",
+      "relative_path": "vae/config.json",
+      "sha256": "78f67deec3d63aae807f2bfe7154bc1e26f6372cb20b63265fcbae1b62bb5745"
+    },
+    {
       "id": "official-video-vae-index",
       "source_id": "minimax-official-model",
       "relative_path": "vae/diffusion_pytorch_model.safetensors.index.json",
       "sha256": "15f6d44553c3c616b0dc999920aa784f92ecee7e4201f1f99ac405cfbf3061ca"
+    },
+    {
+      "id": "official-video-vae-shard-00001-of-00003",
+      "source_id": "minimax-official-model",
+      "relative_path": "vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+      "sha256": "72f4c6be84ac0674f27398cde991dd9d719762f3952c4921aa66b2ce542f6374"
+    },
+    {
+      "id": "official-video-vae-shard-00002-of-00003",
+      "source_id": "minimax-official-model",
+      "relative_path": "vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+      "sha256": "2e05e8bc23fa4071043e17fd242be8acd0685e781a43987432b2eae925be4198"
+    },
+    {
+      "id": "official-video-vae-shard-00003-of-00003",
+      "source_id": "minimax-official-model",
+      "relative_path": "vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+      "sha256": "c05d6ac4b1a33de372799d708531da6320f6a3ce6d1ce6d895e770988e004a39"
     },
     {
       "id": "official-audio-vae-config",
@@ -422,21 +446,35 @@
       "id": "visual-vae",
       "authority_tier": "exact-full-bf16",
       "input_contract": { "kind": "identity-sha256-v1" },
-      "required_component_indexes": ["official-video-vae-index"],
+      "required_component_indexes": [
+        "official-video-vae-config",
+        "official-video-vae-index",
+        "official-video-vae-shard-00001-of-00003",
+        "official-video-vae-shard-00002-of-00003",
+        "official-video-vae-shard-00003-of-00003"
+      ],
       "required_provenance": [
         "source-revision",
-        "component-index-hash",
+        "component-index-hashes",
+        "artifact-set-sha256",
         "device",
         "dtype",
         "capture-command"
       ],
       "pinned_provenance": [],
-      "role_invariant_provenance": ["component-index-hash", "dtype"],
+      "role_invariant_provenance": [
+        "component-index-hashes",
+        "artifact-set-sha256",
+        "dtype"
+      ],
       "required_measurements": [
         "pixel-normalization",
+        "posterior-moments",
         "posterior-seed-42",
-        "latent-statistics",
-        "sampled-values",
+        "posterior-sample",
+        "posterior-fp16-roundtrip",
+        "latent-normalization",
+        "decoded-frames",
         "tile-seams"
       ]
     },

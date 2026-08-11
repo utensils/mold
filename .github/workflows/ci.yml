@@ -74,6 +74,8 @@ jobs:
               - 'scripts/tests/minimax-h3-capture-producer-contract.py'
               - 'scripts/capture-minimax-h3-qwen-layer50.py'
               - 'scripts/tests/minimax-h3-qwen-layer50-capture-contract.py'
+              - 'scripts/capture-minimax-h3-visual-vae.py'
+              - 'scripts/tests/minimax-h3-visual-vae-capture-contract.py'
               - 'scripts/tests/minimax-h3-private-uat-release-contract.sh'
               - '.github/workflows/minimax-h3-private-conformance.yml'
               - 'tests/fixtures/minimax_h3/**'
@@ -131,6 +133,7 @@ jobs:
               - 'crates/mold-inference/src/bin/h3_attention_benchmark.rs'
               - 'crates/mold-inference/src/bin/h3_artifact_qualification.rs'
               - 'crates/mold-inference/src/bin/h3_qwen_layer50_capture.rs'
+              - 'crates/mold-inference/src/bin/h3_visual_vae_capture.rs'
               - 'crates/mold-inference/src/minimax_h3/mod.rs'
               - 'crates/mold-inference/src/minimax_h3/private_*.rs'
               - 'crates/mold-server/src/lib.rs'
@@ -152,6 +155,8 @@ jobs:
               - 'scripts/verify-h3-release-exclusion.sh'
               - 'scripts/capture-minimax-h3-qwen-layer50.py'
               - 'scripts/tests/minimax-h3-qwen-layer50-capture-contract.py'
+              - 'scripts/capture-minimax-h3-visual-vae.py'
+              - 'scripts/tests/minimax-h3-visual-vae-capture-contract.py'
               - 'scripts/probe-cuda-embedded-ptx.py'
               - 'scripts/seal-cuda-ptx-manifest.py'
               - 'scripts/create-release-provenance.sh'
@@ -446,6 +451,9 @@ jobs:
       - name: Test MiniMax H3 Qwen layer-50 capture contract
         if: env.RUN_RUST_SUITE == 'true'
         run: python3 scripts/tests/minimax-h3-qwen-layer50-capture-contract.py
+      - name: Test MiniMax H3 visual-VAE capture contract
+        if: env.RUN_RUST_SUITE == 'true'
+        run: python3 scripts/tests/minimax-h3-visual-vae-capture-contract.py
       - name: Clippy the private MiniMax H3 artifact qualifier
         if: env.RUN_RUST_SUITE == 'true'
         run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_artifact_qualification -- -D warnings
@@ -505,6 +513,8 @@ jobs:
         run: cargo clippy -p mold-ai-server --features h3-private-uat --all-targets -- -D warnings
       - name: Clippy private exact-BF16 Qwen capture adapter
         run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_qwen_layer50_capture -- -D warnings
+      - name: Clippy private visual-VAE capture adapter
+        run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_visual_vae_capture -- -D warnings
 
   # The `flash-attn` feature was decorative for months (issue #598) precisely
   # because nothing ever compiled it: the cfg-stripped fallback in
