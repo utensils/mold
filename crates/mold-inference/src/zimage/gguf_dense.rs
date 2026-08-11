@@ -344,6 +344,126 @@ pub(crate) fn load_gguf_dense_transformer(
 }
 
 #[cfg(test)]
+mod dense_map_diff {
+    //! Diff the dense parameter map built from the Q4_K GGUF against the BF16
+    //! checkpoint's own tensors.
+    //!
+    //! The GGUF path is the one that renders incorrectly, and it is also the
+    //! only path that performs structural transforms: a fused
+    //! `attention.qkv` split into `to_q`/`to_k`/`to_v`, and a `q_norm`/`k_norm`
+    //! -> `norm_q`/`norm_k` rename. Both are shape-invisible if wrong. This
+    //! compares every key by cosine similarity, which quantization barely moves
+    //! (~0.999) but a mis-mapped tensor destroys (~0).
+    //!
+    //! Opt-in; needs both checkpoints on disk:
+    //!   MOLD_DIFF_GGUF=/path/model.gguf MOLD_DIFF_BF16=/path/transformer \
+    //!     cargo test -p mold-ai-inference --features metal \
+    //!     zimage::gguf_dense::dense_map_diff -- --nocapture --ignored
+    use candle_core::{DType, Device, Tensor};
+    use candle_transformers::models::z_image::Config;
+
+    fn cosine(a: &Tensor, b: &Tensor) -> candle_core::Result<f32> {
+        let a = a.to_dtype(DType::F32)?.flatten_all()?;
+        let b = b.to_dtype(DType::F32)?.flatten_all()?;
+        let dot = (&a * &b)?.sum_all()?.to_scalar::<f32>()?;
+        let na = a.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt();
+        let nb = b.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt();
+        if na == 0.0 || nb == 0.0 {
+            return Ok(if na == nb { 1.0 } else { 0.0 });
+        }
+        Ok(dot / (na * nb))
+    }
+
+    #[test]
+    #[ignore = "needs both the GGUF and BF16 checkpoints on disk"]
+    fn gguf_dense_map_matches_the_bf16_checkpoint() {
+        let (Some(gguf), Some(bf16_dir)) = (
+            std::env::var_os("MOLD_DIFF_GGUF"),
+            std::env::var_os("MOLD_DIFF_BF16"),
+        ) else {
+            eprintln!("set MOLD_DIFF_GGUF and MOLD_DIFF_BF16");
+            return;
+        };
+        let device = Device::Cpu;
+        let cfg = Config::z_image_turbo();
+
+        let qvb = mold_candle::quantized::VarBuilder::from_gguf(&gguf, &device).expect("read gguf");
+        let (dense, _) = super::dequantize_gguf_dense_tensors(&cfg, DType::F32, &qvb)
+            .expect("build dense map from gguf");
+        eprintln!("gguf dense map: {} tensors", dense.len());
+
+        let shards = std::fs::read_dir(&bf16_dir)
+            .expect("read bf16 dir")
+            .filter_map(|e| {
+                let path = e.ok()?.path();
+                (path.extension()? == "safetensors").then_some(path)
+            })
+            .collect::<Vec<_>>();
+        let st = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&shards) }
+            .expect("mmap bf16 shards");
+        let reference = st.tensors().into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+        eprintln!("bf16 checkpoint: {} tensors", reference.len());
+
+        let mut missing = Vec::new();
+        let mut shape_mismatch = Vec::new();
+        let mut low_similarity = Vec::new();
+        let mut worst: (f32, String) = (1.0, String::new());
+
+        for name in &reference {
+            let Some(built) = dense.get(name.as_str()) else {
+                missing.push(name.clone());
+                continue;
+            };
+            let want = st.load(name, &device).expect("load bf16 tensor");
+            if want.dims() != built.dims() {
+                shape_mismatch.push(format!(
+                    "{name}: bf16 {:?} vs gguf {:?}",
+                    want.dims(),
+                    built.dims()
+                ));
+                continue;
+            }
+            let similarity = cosine(built, &want).expect("cosine");
+            if similarity < worst.0 {
+                worst = (similarity, name.clone());
+            }
+            if similarity < 0.95 {
+                low_similarity.push(format!("{name}: cos={similarity:.4}"));
+            }
+        }
+
+        let extra = dense
+            .keys()
+            .filter(|k| !reference.iter().any(|r| r == *k))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        eprintln!("worst cosine: {:.6} at {}", worst.0, worst.1);
+        for (label, list) in [
+            ("missing from gguf map", &missing),
+            ("shape mismatch", &shape_mismatch),
+            ("low similarity", &low_similarity),
+            ("extra in gguf map", &extra),
+        ] {
+            eprintln!("{label}: {}", list.len());
+            for item in list.iter().take(12) {
+                eprintln!("    {item}");
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "gguf map is missing keys the model needs"
+        );
+        assert!(shape_mismatch.is_empty(), "shape mismatches");
+        assert!(
+            low_similarity.is_empty(),
+            "tensors that do not correspond -- a mis-mapped or mis-sliced weight"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         insert_linear_weight, insert_pad_token, insert_scalar_or_norm, insert_transformer_block,

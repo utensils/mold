@@ -61,7 +61,7 @@ use crate::engine::seeded_randn;
 use crate::img_utils::{decode_source_image, NormalizeRange};
 use crate::ltx_video::latent_upsampler::LatentUpsampler;
 use crate::progress::{InferenceCancellationToken, ProgressCallback, ProgressEvent, ProgressPhase};
-use crate::vae_tiling::is_cuda_oom;
+use crate::vae_tiling::is_out_of_memory_error;
 use crate::weight_loader::{
     load_fp8_safetensors_with_callback, load_safetensors_with_progress_callback,
 };
@@ -6814,7 +6814,7 @@ fn load_ltx2_av_transformer_with_loras_inner(
                             if device.is_cuda()
                                 && residency_plan.resident_count() > 0
                                 && !ltx2_error_is_fatal_cuda(&err)
-                                && is_cuda_oom(&err) =>
+                                && is_out_of_memory_error(&err) =>
                         {
                             emit_info(
                                 progress,
@@ -6989,7 +6989,7 @@ fn ltx2_error_is_fatal_cuda(err: &impl std::fmt::Display) -> bool {
 /// surface alongside an allocation message, and retrying a dead context is the
 /// one thing we must never do.
 fn ltx2_denoise_error_is_recoverable_oom(err: &anyhow::Error) -> bool {
-    !ltx2_error_is_fatal_cuda(&format!("{err:#}")) && is_cuda_oom(&format!("{err:#}"))
+    !ltx2_error_is_fatal_cuda(&format!("{err:#}")) && is_out_of_memory_error(&format!("{err:#}"))
 }
 
 /// Maximum denoise-stage rebuild attempts after the first OOM.
@@ -7693,7 +7693,7 @@ fn log_ltx2_phase_vram_result<T>(
     detail: &str,
 ) {
     match result {
-        Err(error) if is_cuda_oom(&format!("{error:#}")) => {
+        Err(error) if is_out_of_memory_error(&format!("{error:#}")) => {
             tracing::error!(
                 target: LTX2_VRAM_TARGET,
                 "[ltx2-vram] {report}{detail} OUT-OF-MEMORY {} error={error:#}",

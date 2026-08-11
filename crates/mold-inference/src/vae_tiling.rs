@@ -106,19 +106,26 @@ fn parse_mode(value: Option<&str>) -> TiledMode {
     }
 }
 
-/// Detect CUDA out-of-memory errors by string-matching the underlying driver
-/// message.
+/// Detect an out-of-memory error from any GPU backend by string-matching the
+/// underlying driver message.
 ///
 /// candle today doesn't expose a typed OOM variant — every fallback ladder in
 /// the codebase keys off the error text. This helper consolidates the known
-/// substrings so we don't drift across engines.
-pub fn is_cuda_oom(err: &impl std::fmt::Display) -> bool {
+/// substrings so we don't drift across engines or backends.
+///
+/// Metal is the reason this is not CUDA-only. Its exhaustion arrives as
+/// `Insufficient Memory (…kIOGPUCommandBufferCallbackErrorOutOfMemory)`, which
+/// shares no substring with the CUDA spellings, so a ladder that only knew the
+/// CUDA strings silently turned a recoverable OOM into a hard failure on Apple
+/// silicon.
+pub fn is_out_of_memory_error(err: &impl std::fmt::Display) -> bool {
     let msg = err.to_string();
     msg.contains("OUT_OF_MEMORY")
         || msg.contains("out of memory")
         || msg.contains("OutOfMemory")
         || msg.contains("CUDA_ERROR_OUT_OF_MEMORY")
         || msg.contains("cudaErrorMemoryAllocation")
+        || msg.contains("Insufficient Memory")
 }
 
 /// Tile-decode a latent tensor with the default 8× VAE upscale.
@@ -291,7 +298,7 @@ where
     match decode_fn(latents) {
         Ok(t) => Ok(t),
         Err(e) if matches!(mode, TiledMode::Off) => Err(e),
-        Err(e) if is_cuda_oom(&e) => {
+        Err(e) if is_out_of_memory_error(&e) => {
             tracing::warn!(
                 error = %e,
                 tile_size = cfg.tile_size,
@@ -641,19 +648,28 @@ mod tests {
     }
 
     #[test]
-    fn test_is_cuda_oom_matches_known_strings() {
+    fn test_is_out_of_memory_error_matches_known_strings() {
         // Common driver strings the helper must recognize.
-        assert!(is_cuda_oom(&"CUDA out of memory"));
-        assert!(is_cuda_oom(&"CUDA_ERROR_OUT_OF_MEMORY"));
-        assert!(is_cuda_oom(&"cudaErrorMemoryAllocation"));
-        assert!(is_cuda_oom(&"OutOfMemory: ..."));
-        assert!(is_cuda_oom(&"some prefix: out of memory: ..."));
-        assert!(is_cuda_oom(&"OUT_OF_MEMORY: requested 5GB"));
+        assert!(is_out_of_memory_error(&"CUDA out of memory"));
+        assert!(is_out_of_memory_error(&"CUDA_ERROR_OUT_OF_MEMORY"));
+        assert!(is_out_of_memory_error(&"cudaErrorMemoryAllocation"));
+        assert!(is_out_of_memory_error(&"OutOfMemory: ..."));
+        assert!(is_out_of_memory_error(&"some prefix: out of memory: ..."));
+        assert!(is_out_of_memory_error(&"OUT_OF_MEMORY: requested 5GB"));
+
+        // Metal's exhaustion arrives with a different spelling entirely. It is
+        // the message a Z-Image VAE decode actually fails with on Apple
+        // silicon, and it has to reach the same CPU fallback ladder.
+        assert!(is_out_of_memory_error(
+            &"Metal error Command buffer had following error: Insufficient Memory \
+              (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)"
+        ));
+        assert!(is_out_of_memory_error(&"Insufficient Memory"));
 
         // Negative cases.
-        assert!(!is_cuda_oom(&"some other error"));
-        assert!(!is_cuda_oom(&"shape mismatch"));
-        assert!(!is_cuda_oom(&""));
+        assert!(!is_out_of_memory_error(&"some other error"));
+        assert!(!is_out_of_memory_error(&"shape mismatch"));
+        assert!(!is_out_of_memory_error(&""));
     }
 
     #[test]

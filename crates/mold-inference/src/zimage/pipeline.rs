@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokenizers::Tokenizer;
 
-use super::gguf_dense::load_gguf_dense_transformer;
 use super::transformer::{MoldZImageTransformer2DModel, ZImageTransformer};
 use crate::cache::{
     clear_cache, get_or_insert_cached_tensor, prompt_text_key, restore_cached_tensor, CachedTensor,
@@ -434,6 +433,19 @@ fn model_timestep(scheduler: &FlowMatchEulerDiscreteScheduler) -> f64 {
     1.0 - scheduler.current_sigma()
 }
 
+/// Opt back into dequantizing a GGUF checkpoint into a dense parameter map.
+///
+/// The quantized runtime is the default because the dense map inflates a
+/// 3.4 GB Q4_K file to ~24 GB on Metal (F32) and silently corrupted renders
+/// there. The dense path is retained because it may still be the faster choice
+/// on CUDA, where the map is BF16 (~12 GB) and VRAM is usually sufficient —
+/// that comparison has not been measured, so the escape hatch stays until it
+/// is.
+fn zimage_gguf_dense_forced() -> bool {
+    crate::runtime_env::value("MOLD_ZIMAGE_GGUF_DENSE")
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+}
+
 fn zimage_debug_enabled() -> bool {
     std::env::var_os("MOLD_ZIMAGE_DEBUG").is_some()
 }
@@ -711,8 +723,24 @@ impl ZImageEngine {
             }
             let qvb =
                 quantized_var_builder::VarBuilder::from_gguf(&self.base.paths.transformer, device)?;
-            Ok(ZImageTransformer::Dense(Box::new(
-                load_gguf_dense_transformer(cfg, dtype, qvb)?,
+            if zimage_gguf_dense_forced() {
+                return Ok(ZImageTransformer::Dense(Box::new(
+                    super::gguf_dense::load_gguf_dense_transformer(cfg, dtype, qvb)?,
+                )));
+            }
+            // Keep GGUF weights quantized at runtime instead of inflating them
+            // into a dense map. Dequantizing the whole checkpoint turns the
+            // 3.4 GB Q4_K file into ~24 GB resident on Metal (F32) — mold
+            // reported 15.3 GB free after load, against 30.0 GB quantized — and
+            // that pressure made Metal command buffers fail mid-denoise, which
+            // is silent: the render completed and produced a coherent image
+            // that had nothing to do with the prompt. Quantized is also what
+            // stable-diffusion.cpp does with these same files, and it is both
+            // correct and ~2x faster here (40 s vs 85 s at 768x768).
+            Ok(ZImageTransformer::Quantized(Box::new(
+                super::quantized_transformer::QuantizedZImageTransformer2DModel::new(
+                    cfg, dtype, qvb,
+                )?,
             )))
         } else if has_lora {
             // Build an mmap-backed SimpleBackend so we can layer a LoRA
@@ -1894,27 +1922,29 @@ impl ZImageEngine {
             )?;
             match loaded.vae.decode(&decode_latents) {
                 Ok(img) => img,
-                Err(e) if loaded.vae_device.is_cuda() => {
-                    // OOM on GPU — reload VAE on CPU and retry
-                    let err_msg = format!("{e}");
-                    if err_msg.contains("OUT_OF_MEMORY") || err_msg.contains("out of memory") {
-                        tracing::warn!("VAE decode OOM on GPU, falling back to CPU");
-                        progress.info("VAE decode OOM on GPU — retrying on CPU");
-                        loaded.device.synchronize()?;
-                        // Load a fresh VAE on CPU (can't call self.load_vae_cpu() due to borrow)
-                        let cpu_vae = load_zimage_vae(
-                            loaded.vae_path.as_path(),
-                            DType::F32,
-                            &Device::Cpu,
-                            progress,
-                            None,
-                        )?;
-                        let cpu_latents =
-                            latents_4d.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
-                        cpu_vae.decode(&cpu_latents)?
-                    } else {
-                        return Err(e.into());
-                    }
+                // Any GPU backend, not just CUDA. This retry was gated on
+                // `is_cuda()` and keyed off the CUDA-only OOM spellings, so on
+                // Metal — where the message is `Insufficient Memory
+                // (…kIOGPUCommandBufferCallbackErrorOutOfMemory)` — a decode
+                // that had already paid for the whole denoise died outright
+                // instead of finishing on the CPU.
+                Err(e)
+                    if !loaded.vae_device.is_cpu()
+                        && crate::vae_tiling::is_out_of_memory_error(&e) =>
+                {
+                    tracing::warn!("VAE decode OOM on GPU, falling back to CPU");
+                    progress.info("VAE decode OOM on GPU — retrying on CPU");
+                    loaded.device.synchronize()?;
+                    // Load a fresh VAE on CPU (can't call self.load_vae_cpu() due to borrow)
+                    let cpu_vae = load_zimage_vae(
+                        loaded.vae_path.as_path(),
+                        DType::F32,
+                        &Device::Cpu,
+                        progress,
+                        None,
+                    )?;
+                    let cpu_latents = latents_4d.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+                    cpu_vae.decode(&cpu_latents)?
                 }
                 Err(e) => return Err(e.into()),
             }
