@@ -185,6 +185,18 @@ require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.
 require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
   'H3PrivateRuntimeQualificationCandidate' \
   "the private H3 runtime-record producer does not emit a review-only candidate"
+require_text crates/mold-inference/src/minimax_h3/private_runtime_observer.rs \
+  'mold.minimax-h3.private-uat-runtime-bound-observation.v1' \
+  "the private H3 runtime-bound observer has no release-rejectable claim marker"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'H3PrivateRuntimeBoundCapture::begin(&cuda_device, qwen_on_cpu)' \
+  "the private H3 server does not synchronously own one runtime-bound capture"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'runtime_bound_capture.finish()' \
+  "the private H3 server does not validate runtime bounds before returning"
+require_text scripts/verify-h3-release-exclusion.sh \
+  'private_runtime_observation_marker=' \
+  "shipping verification does not reject the private H3 runtime-bound observer"
 require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
   'hash_measured_server_executable(' \
   "the private H3 runtime-record producer does not authenticate its measured server"

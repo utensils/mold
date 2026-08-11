@@ -1484,6 +1484,56 @@ impl H3ComfyInt8Attention {
         attention_plan: &H3FrozenAttentionPlan,
     ) -> Result<Tensor> {
         let (batch, seq_len, _) = hidden.dims3()?;
+        #[cfg(feature = "h3-private-uat")]
+        {
+            let rows = batch.checked_mul(seq_len).ok_or_else(|| {
+                candle::Error::Msg("MiniMax H3 attention row count overflows".into())
+            })?;
+            let dtype = hidden.dtype();
+            let qkv_workspace = self.qkv.reference_workspace_upper_bound(
+                rows,
+                dtype,
+                dtype,
+                H3_COMFY_PORTABLE_ROW_CHUNK,
+                false,
+            )?;
+            let out_workspace = self.out.reference_workspace_upper_bound(
+                rows,
+                dtype,
+                dtype,
+                H3_COMFY_PORTABLE_ROW_CHUNK,
+                false,
+            )?;
+            let qkv_width = self
+                .inner_dim
+                .checked_mul(3)
+                .ok_or_else(|| candle::Error::Msg("MiniMax H3 QKV width overflows".into()))?;
+            let qkv_output = u64::try_from(
+                rows.checked_mul(qkv_width)
+                    .and_then(|value| value.checked_mul(dtype.size_in_bytes()))
+                    .ok_or_else(|| {
+                        candle::Error::Msg("MiniMax H3 QKV output size overflows".into())
+                    })?,
+            )
+            .map_err(|_| candle::Error::Msg("MiniMax H3 QKV output exceeds u64".into()))?;
+            let plan = attention_plan.workspace();
+            let live_qkv = qkv_output
+                .checked_add(plan.input_output_tensor_bytes)
+                .ok_or_else(|| {
+                    candle::Error::Msg("MiniMax H3 live attention tensors overflow".into())
+                })?;
+            let kernel_peak = live_qkv
+                .checked_add(plan.peak_auxiliary_bytes_upper_bound)
+                .ok_or_else(|| {
+                    candle::Error::Msg("MiniMax H3 attention kernel workspace overflows".into())
+                })?;
+            let output_projection_peak = live_qkv.checked_add(out_workspace).ok_or_else(|| {
+                candle::Error::Msg("MiniMax H3 attention output workspace overflows".into())
+            })?;
+            super::private_runtime_observation::observe_attention(
+                qkv_workspace.max(kernel_peak).max(output_projection_peak),
+            );
+        }
         let qkv = self.qkv.forward_reference(
             hidden,
             None,
@@ -1523,6 +1573,47 @@ struct H3ComfyInt8Mlp {
 
 impl H3ComfyInt8Mlp {
     fn forward(&self, hidden: &Tensor) -> Result<Tensor> {
+        #[cfg(feature = "h3-private-uat")]
+        {
+            let input_rows = hidden.elem_count() / hidden.dim(D::Minus1)?;
+            let dtype = hidden.dtype();
+            let projected_width = self.width.checked_mul(2).ok_or_else(|| {
+                candle::Error::Msg("MiniMax H3 FFN projected width overflows".into())
+            })?;
+            let projected = u64::try_from(
+                input_rows
+                    .checked_mul(projected_width)
+                    .and_then(|value| value.checked_mul(dtype.size_in_bytes()))
+                    .ok_or_else(|| candle::Error::Msg("MiniMax H3 FFN size overflows".into()))?,
+            )
+            .map_err(|_| candle::Error::Msg("MiniMax H3 FFN size exceeds u64".into()))?;
+            let gated = u64::try_from(
+                input_rows
+                    .checked_mul(self.width)
+                    .and_then(|value| value.checked_mul(dtype.size_in_bytes()))
+                    .ok_or_else(|| candle::Error::Msg("MiniMax H3 FFN size overflows".into()))?,
+            )
+            .map_err(|_| candle::Error::Msg("MiniMax H3 FFN size exceeds u64".into()))?;
+            let fc1 = self.fc1.reference_workspace_upper_bound(
+                input_rows,
+                dtype,
+                dtype,
+                H3_COMFY_PORTABLE_ROW_CHUNK,
+                false,
+            )?;
+            let fc2 = self.fc2.reference_workspace_upper_bound(
+                input_rows,
+                dtype,
+                dtype,
+                H3_COMFY_PORTABLE_ROW_CHUNK,
+                false,
+            )?;
+            let retained_fc2 = projected
+                .checked_add(gated.saturating_mul(2))
+                .and_then(|value| value.checked_add(fc2))
+                .ok_or_else(|| candle::Error::Msg("MiniMax H3 FFN workspace overflows".into()))?;
+            super::private_runtime_observation::observe_ffn(fc1.max(retained_fc2));
+        }
         let projected = self.fc1.forward_reference(
             hidden,
             None,

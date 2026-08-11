@@ -439,6 +439,103 @@ impl H3ComfyInt8ConvRotLinear {
             .ok_or_else(|| candle::Error::Msg("MiniMax H3 INT8 staging size overflows".into()))
     }
 
+    /// Conservative peak bytes allocated by one production W8A8 reference
+    /// call, excluding its borrowed input. This mirrors the tensors and chunk
+    /// accumulation in `forward_reference` and is capture-only authority.
+    #[cfg(feature = "h3-private-uat")]
+    pub(crate) fn reference_workspace_upper_bound(
+        &self,
+        input_rows: usize,
+        input_dtype: DType,
+        output_dtype: DType,
+        rows_per_chunk: usize,
+        has_bias: bool,
+    ) -> Result<u64> {
+        if input_rows == 0 || rows_per_chunk == 0 {
+            candle::bail!("MiniMax H3 reference workspace requires positive rows and chunk size")
+        }
+        let input_bytes = input_dtype.size_in_bytes();
+        let output_bytes = output_dtype.size_in_bytes();
+        let chunk = rows_per_chunk.min(self.out_features);
+        let checked = |values: &[usize]| -> Result<u64> {
+            let bytes = values.iter().try_fold(1usize, |total, value| {
+                total.checked_mul(*value).ok_or_else(|| {
+                    candle::Error::Msg("MiniMax H3 reference workspace size overflows".into())
+                })
+            })?;
+            u64::try_from(bytes)
+                .map_err(|_| candle::Error::Msg("MiniMax H3 workspace exceeds u64".into()))
+        };
+        let activation_input = checked(&[input_rows, self.in_features, input_bytes])?;
+        let activation_f32 = checked(&[input_rows, self.in_features, std::mem::size_of::<f32>()])?;
+        let row_input = checked(&[input_rows, input_bytes])?;
+        let row_f32 = checked(&[input_rows, std::mem::size_of::<f32>()])?;
+        let hadamard_f32 = checked(&[
+            H3_COMFY_CONVROT_GROUP_SIZE,
+            H3_COMFY_CONVROT_GROUP_SIZE,
+            std::mem::size_of::<f32>(),
+        ])?;
+        let hadamard_input = checked(&[
+            H3_COMFY_CONVROT_GROUP_SIZE,
+            H3_COMFY_CONVROT_GROUP_SIZE,
+            input_bytes,
+        ])?;
+        let quantized_weight = checked(&[chunk, self.in_features, std::mem::size_of::<f32>()])?;
+        let weight_scale = checked(&[chunk, std::mem::size_of::<f32>()])?;
+        let chunk_f32 = checked(&[input_rows, chunk, std::mem::size_of::<f32>()])?;
+        let chunk_output = checked(&[input_rows, chunk, output_bytes])?;
+        let output_chunks = checked(&[input_rows, self.out_features, output_bytes])?;
+        let concatenated_output = output_chunks;
+        let bias_workspace = if has_bias {
+            checked(&[self.out_features, std::mem::size_of::<f32>(), 2])?
+                .checked_add(output_chunks)
+                .ok_or_else(|| {
+                    candle::Error::Msg("MiniMax H3 bias workspace sum overflows".into())
+                })?
+        } else {
+            0
+        };
+        [
+            // regular_hadamard F32 plus its input-dtype cast.
+            hadamard_f32,
+            hadamard_input,
+            // Rotated input; abs; max(input); max(F32); affine; clamp; the
+            // input-dtype scale cast; and broadcast division.
+            activation_input,
+            activation_input,
+            row_input,
+            row_f32,
+            row_f32,
+            row_f32,
+            row_input,
+            activation_input,
+            // round -> clamp -> F32 conversion can retain every chained
+            // full-activation result through the statement.
+            activation_input,
+            activation_input,
+            activation_f32,
+            // A chunk may retain original+contiguous weight, row scale,
+            // combined scale, matmul, scaled matmul, and cast output.
+            quantized_weight,
+            quantized_weight,
+            weight_scale,
+            chunk_f32,
+            chunk_f32,
+            chunk_f32,
+            chunk_output,
+            // Tensor::cat allocates a full result while every chunk lives.
+            output_chunks,
+            concatenated_output,
+            bias_workspace,
+        ]
+        .into_iter()
+        .try_fold(0u64, |total, bytes| {
+            total.checked_add(bytes).ok_or_else(|| {
+                candle::Error::Msg("MiniMax H3 reference workspace sum overflows".into())
+            })
+        })
+    }
+
     fn signed_rows(&self, start: usize, rows: usize, device: &Device) -> Result<Tensor> {
         let values = self
             .weight
