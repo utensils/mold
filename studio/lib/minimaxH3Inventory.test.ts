@@ -155,7 +155,7 @@ describe("MiniMax H3 inventory presentation", () => {
       "video-vae",
       "audio-vae",
     ]);
-    expect(presented?.bothTasksDiskBytes).toBe(70 * GB);
+    expect(presented?.advertisedTasksDiskBytes).toBe(70 * GB);
     expect(presented?.remainingBytes).toBe(38 * GB);
     expect(
       presented?.components.find((entry) => entry.role === "qwen")?.kindLabel,
@@ -190,6 +190,24 @@ describe("MiniMax H3 inventory presentation", () => {
     ]);
     expect(both?.bytesToDownload).toBe(35 * GB);
     expect(both?.downloads).toHaveLength(1);
+  });
+
+  it("presents only the nonempty task subset the host qualifies", () => {
+    const capability = h3Capability();
+    capability.partitions = capability.partitions.filter(
+      (partition) => partition.task === "fl2va",
+    );
+    capability.components = capability.components.filter(
+      (entry) => entry.scope !== "ref2va",
+    );
+
+    const presented = presentMiniMaxH3Host(host("render-a", capability));
+    expect(presented?.tasks.map((task) => task.task)).toEqual(["fl2va"]);
+    expect(presented?.advertisedTasksDiskBytes).toBe(40 * GB);
+    expect(planMiniMaxH3Install(presented!, ["ref2va"])).toBeNull();
+
+    capability.partitions = [];
+    expect(presentMiniMaxH3Host(host("render-a", capability))).toBeNull();
   });
 
   it("keeps mixed-fleet download ownership isolated through refresh and reconnect", () => {

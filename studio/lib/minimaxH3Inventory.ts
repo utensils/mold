@@ -118,7 +118,7 @@ export interface MiniMaxH3HostPresentation {
   tasks: MiniMaxH3TaskPresentation[];
   components: MiniMaxH3ComponentPresentation[];
   sharedComponents: MiniMaxH3ComponentPresentation[];
-  bothTasksDiskBytes: number;
+  advertisedTasksDiskBytes: number;
   remainingBytes: number;
 }
 
@@ -345,12 +345,7 @@ export function presentMiniMaxH3Host(
       component_ids: [...candidate.component_ids],
     });
   }
-  if (
-    TASKS.some((task) => !partitionsByTask.has(task)) ||
-    partitionsByTask.size !== TASKS.length
-  ) {
-    return null;
-  }
+  if (partitionsByTask.size === 0) return null;
 
   const sharedByRole = new Map<
     MiniMaxH3ComponentRole,
@@ -366,7 +361,8 @@ export function presentMiniMaxH3Host(
 
   const tasks: MiniMaxH3TaskPresentation[] = [];
   for (const task of TASKS) {
-    const partition = partitionsByTask.get(task)!;
+    const partition = partitionsByTask.get(task);
+    if (!partition) continue;
     const taskComponents = partition.component_ids.map((id) =>
       componentsById.get(id),
     );
@@ -420,7 +416,7 @@ export function presentMiniMaxH3Host(
     sharedComponents: components.filter(
       (component) => component.scope === "shared",
     ),
-    bothTasksDiskBytes: sumUnique(components),
+    advertisedTasksDiskBytes: sumUnique(components),
     remainingBytes: sumUnique(
       components,
       (component) => component.state !== "installed",

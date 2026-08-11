@@ -104,7 +104,7 @@ describe("MinimaxH3InventoryPanel", () => {
 
     expect(wrapper.text()).toContain("MiniMax H3 FL2VA");
     expect(wrapper.text()).toContain("MiniMax H3 Ref2VA");
-    expect(wrapper.text()).toContain("Both tasks · 70.0 GB on disk");
+    expect(wrapper.text()).toContain("Advertised tasks · 70.0 GB on disk");
     expect(wrapper.text()).toContain("128.0 GB minimum");
     expect(wrapper.text()).toContain("CUDA only");
     expect(wrapper.text()).toContain("Metal");
@@ -114,6 +114,30 @@ describe("MinimaxH3InventoryPanel", () => {
     expect(
       wrapper.findAll("[data-test^='h3-component-render-a-']"),
     ).toHaveLength(6);
+  });
+
+  it("labels a host that advertises only qualified FL2VA", () => {
+    const available = capability();
+    available.partitions = available.partitions.filter(
+      (partition) => partition.task === "fl2va",
+    );
+    available.components = available.components.filter(
+      (component) => component.scope !== "ref2va",
+    );
+    const wrapper = mount(MinimaxH3InventoryPanel, {
+      props: {
+        hosts: [
+          {
+            id: "render-a",
+            label: "Render A",
+            capabilities: { minimax_h3: available },
+          },
+        ],
+      },
+    });
+
+    expect(wrapper.text()).toContain("FL2VA · 40.0 GB on disk");
+    expect(wrapper.text()).not.toContain("Ref2VA");
   });
 
   it("renders nothing when model access denies H3 or runtime availability is false", async () => {
