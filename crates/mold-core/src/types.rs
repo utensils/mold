@@ -6959,6 +6959,11 @@ pub struct DispatchCapabilities {
 /// can add their own sub-structs without churning existing fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerCapabilities {
+    /// `/api/models` rows carry a complete version-1 generation profile.
+    /// Absent/false identifies a legacy host whose flattened fields require
+    /// the contained one-release client adapter.
+    #[serde(default)]
+    pub generation_profile_v1: bool,
     pub gallery: GalleryCapabilities,
     pub catalog: CatalogCapabilities,
     /// Explicit model-family restrictions enforced by this server. Absent on

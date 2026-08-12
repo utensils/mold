@@ -276,6 +276,22 @@ use crate::queue::clean_error_message;
         mold_core::ImageData,
         mold_core::OutputFormat,
         mold_core::ModelInfo,
+        mold_core::GenerationProfileSet,
+        mold_core::GenerationRecipeProfile,
+        mold_core::GenerationDefaultsProfile,
+        mold_core::GenerationCapabilitiesProfile,
+        mold_core::ResolutionProfile,
+        mold_core::ResolutionDomain,
+        mold_core::ResolutionPreset,
+        mold_core::AspectGroup,
+        mold_core::IntegerControl,
+        mold_core::FloatControl,
+        mold_core::ControlMode,
+        mold_core::TemporalProfile,
+        mold_core::FpsControl,
+        mold_core::RecipeSelector,
+        mold_core::ProfileProvenance,
+        mold_core::ProvenanceKind,
         mold_core::LoraInfo,
         mold_core::ServerStatus,
         PairingSessionResponse,
@@ -4822,6 +4838,7 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
     let server_batch =
         state.scheduled_work.v2_authoritative() && !state.is_output_disabled(&config);
     Json(mold_core::ServerCapabilities {
+        generation_profile_v1: true,
         gallery: mold_core::GalleryCapabilities { can_delete: true },
         catalog: mold_core::CatalogCapabilities {
             available: catalog_available,

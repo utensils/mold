@@ -9,6 +9,36 @@ pub struct ResolutionDefaults {
     pub dimension_alignment: Option<u32>,
 }
 
+/// One-release flattened compatibility view derived from the canonical
+/// profile. New code consumes `GenerationProfileSet` directly.
+pub fn resolution_defaults_from_profile(
+    profile: &crate::GenerationProfileSet,
+) -> ResolutionDefaults {
+    let Some(recipe) = profile.default_recipe() else {
+        return ResolutionDefaults {
+            max_pixels: None,
+            max_axis_pixels: None,
+            recommended_dimensions: Vec::new(),
+            dimension_alignment: None,
+        };
+    };
+    ResolutionDefaults {
+        max_pixels: Some(recipe.resolution.max_pixels),
+        max_axis_pixels: recipe.resolution.max_axis_pixels,
+        recommended_dimensions: recipe
+            .resolution
+            .aspect_groups
+            .iter()
+            .flat_map(|group| group.presets.iter())
+            .map(|preset| RecommendedDimensions {
+                width: preset.width,
+                height: preset.height,
+            })
+            .collect(),
+        dimension_alignment: Some(recipe.resolution.alignment),
+    }
+}
+
 /// Build the advertised resolution contract for a specific model.
 ///
 /// Per model, not per family: an LTX-2 checkpoint that ships the spatial
@@ -111,7 +141,6 @@ pub fn build_model_catalog(
                         .is_ok()
             })
     }) {
-        let resolution = resolution_defaults(&manifest.name, &manifest.family);
         let model_cfg = config.resolved_model_config(&manifest.name);
         let downloaded = config.manifest_model_is_downloaded(&manifest.name);
         let (_, remaining_download_bytes) = crate::manifest::compute_download_size(manifest);
@@ -147,6 +176,7 @@ pub fn build_model_catalog(
             supports_extend,
             supports_audio: manifest.family == "ltx2",
         });
+        let resolution = resolution_defaults_from_profile(&generation_profile);
 
         models.push(ModelInfoExtended {
             downloaded,
@@ -266,7 +296,6 @@ pub fn build_model_catalog(
             .family
             .clone()
             .unwrap_or_else(|| "flux".to_string());
-        let resolution = resolution_defaults(name, &family);
         let sequence_capable = chain_capable_family(&family);
         // Config-only models have local weights but no manifest task
         // structure, so mold-core cannot classify the conditioning contract:
@@ -306,6 +335,7 @@ pub fn build_model_catalog(
             supports_extend: extend_capable_model(&family, source_image_contract),
             supports_audio: family == "ltx2",
         });
+        let resolution = resolution_defaults_from_profile(&generation_profile);
 
         models.push(ModelInfoExtended {
             downloaded: true,

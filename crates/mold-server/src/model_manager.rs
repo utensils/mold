@@ -687,7 +687,6 @@ fn installed_catalog_models(
                 _ => sidecar.name.clone(),
             });
 
-        let resolution = mold_core::catalog::resolution_defaults(&sidecar.id, &sidecar.family);
         let supports_audio =
             mold_inference::audio::checkpoint_output_supported(&sidecar.family, &primary_path);
         let supports_extend = sidecar.family == "ltx2";
@@ -713,6 +712,7 @@ fn installed_catalog_models(
                 supports_extend,
                 supports_audio: supports_audio.unwrap_or(false),
             });
+        let resolution = mold_core::catalog::resolution_defaults_from_profile(&generation_profile);
         out.push(ModelInfoExtended {
             downloaded: true,
             defaults: ModelDefaults {
