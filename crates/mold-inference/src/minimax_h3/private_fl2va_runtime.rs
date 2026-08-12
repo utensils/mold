@@ -49,6 +49,7 @@ use super::private_server::{
     H3PrivateAllocationCommit, H3PrivateFactoryActivationEvidence, H3PrivateSchedulerLedgerIdentity,
 };
 use super::private_vae_adapter::H3PrivateVaeRuntime;
+use super::sampler::H3SamplerKind;
 #[cfg(test)]
 use super::vae_runtime::H3ComfyVaeLoadPhase;
 use super::vae_runtime::{
@@ -889,6 +890,10 @@ where
         self.execution_authority.device()
     }
 
+    fn sampler_kind(&self) -> H3SamplerKind {
+        H3SamplerKind::ComfyResMultistep
+    }
+
     fn encode_text(
         &mut self,
         prompt: &str,
@@ -1672,9 +1677,12 @@ where
         } = self;
         let (prepared, retention) = prepared.into_runtime_parts();
         retention.revalidate()?;
-        let expected_denoise_forwards = super::sampler::H3DualSchedule::new(prepared.grid_points)?
-            .counts()
-            .transformer_evaluations;
+        let expected_denoise_forwards = super::sampler::H3DualSchedule::new_for_sampler(
+            prepared.grid_points,
+            H3SamplerKind::ComfyResMultistep,
+        )?
+        .counts()
+        .transformer_evaluations;
         if expected_denoise_forwards != retention.denoise_forward_count()? {
             bail!("private H3 prepared denoise count differs from retained factory authority")
         }
@@ -1882,6 +1890,10 @@ where
 
     fn device(&self) -> &Device {
         self.continuing_execution.device()
+    }
+
+    fn sampler_kind(&self) -> H3SamplerKind {
+        H3SamplerKind::ComfyResMultistep
     }
 
     fn encode_text(

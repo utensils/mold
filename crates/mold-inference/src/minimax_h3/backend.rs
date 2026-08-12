@@ -36,6 +36,7 @@ use super::pipeline::{
     H3Fl2VaBackend, H3PipelineBackendIdentity, H3PipelineBackendKind, H3PipelineCheckpoint,
     H3PipelineEvent, H3PipelinePhase, H3PreparedEndpoint, H3TextConditioning, H3VideoEncodeSink,
 };
+use super::sampler::H3SamplerKind;
 use super::{
     FrozenH3ConditionerPlacement, H3ConditionerExecution, H3ConditionerLease,
     H3ConditionerLifecycle,
@@ -636,6 +637,13 @@ where
 
     fn device(&self) -> &Device {
         self.execution_lease.device()
+    }
+
+    fn sampler_kind(&self) -> H3SamplerKind {
+        match self.plan.layout() {
+            Layout::OfficialBf16 => H3SamplerKind::OfficialEuler,
+            Layout::ComfyPrunedInt8ConvrotNvfp4Awq => H3SamplerKind::ComfyResMultistep,
+        }
     }
 
     fn encode_text(

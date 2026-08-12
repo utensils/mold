@@ -39,6 +39,7 @@ use super::pipeline::{
     H3Fl2VaBackend, H3PipelineBackendIdentity, H3PipelineCheckpoint, H3PipelineEvent,
     H3PipelineObserver, H3PipelinePhase, H3PreparedEndpoint, H3TextConditioning, H3VideoEncodeSink,
 };
+use super::sampler::H3SamplerKind;
 use crate::engine::{
     BatchExecutionCapability, GenerationReferenceBinding, InferenceEngine, LoadStrategy,
 };
@@ -1033,6 +1034,10 @@ where
         self.components.device()
     }
 
+    fn sampler_kind(&self) -> H3SamplerKind {
+        self.components.sampler_kind()
+    }
+
     fn encode_text(
         &mut self,
         prompt: &str,
@@ -1140,6 +1145,10 @@ where
 
     fn device(&self) -> &Device {
         self.components.device()
+    }
+
+    fn sampler_kind(&self) -> H3SamplerKind {
+        self.components.sampler_kind()
     }
 
     fn maximum_packed_rows(&self) -> usize {

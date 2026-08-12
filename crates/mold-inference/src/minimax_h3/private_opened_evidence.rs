@@ -30,7 +30,7 @@ use super::pipeline::{
     H3PreparedFl2VaRequest,
 };
 use super::private_qwen_support::H3PrivateQwenSupport;
-use super::sampler::H3DualSchedule;
+use super::sampler::{H3DualSchedule, H3SamplerKind};
 use super::vae_runtime::{
     FrozenH3ComfyVaeLoadPlan, H3AuthenticatedComfyVaeAuthority, H3ComfyVaeArtifactRole,
 };
@@ -900,7 +900,9 @@ fn validate_prepared_runtime_request(
     frozen: &H3FactoryPreparedRequestInput,
 ) -> Result<()> {
     let geometry = &prepared.geometry;
-    let counts = H3DualSchedule::new(prepared.grid_points)?.counts();
+    let counts =
+        H3DualSchedule::new_for_sampler(prepared.grid_points, H3SamplerKind::ComfyResMultistep)?
+            .counts();
     let mut current_endpoints = Vec::with_capacity(prepared.endpoints.len());
     for (prepared_endpoint, frozen_endpoint) in
         prepared.endpoints.iter().zip(frozen.endpoints.iter())
@@ -1046,7 +1048,8 @@ fn prepared_request_input(
     .ok_or_else(|| anyhow!("private H3 packed row count overflow"))?;
     let conditioning_fingerprint = conditioning_fingerprint(&endpoints);
     let reference_fingerprint = sha256(b"mold.minimax-h3.fl2va-no-references.v1");
-    let schedule = H3DualSchedule::new(prepared.grid_points)?;
+    let schedule =
+        H3DualSchedule::new_for_sampler(prepared.grid_points, H3SamplerKind::ComfyResMultistep)?;
     let counts = schedule.counts();
     let mut input = H3FactoryPreparedRequestInput {
         identity_sha256: String::new(),
@@ -1279,7 +1282,7 @@ fn build_canonical_private_fl2va_target_budget(
         .ok_or_else(|| anyhow!("private H3 packed layout bytes overflow"))?;
     let denoise_tensor_copy_workspace_device_bytes = packed_video_state_device_bytes
         .checked_add(packed_audio_state_device_bytes)
-        .and_then(|bytes| bytes.checked_mul(6))
+        .and_then(|bytes| bytes.checked_mul(9))
         .ok_or_else(|| anyhow!("private H3 denoise copy bytes overflow"))?;
     let waveform_host_bytes = request
         .audio_samples_per_channel
@@ -1543,7 +1546,7 @@ fn build_canonical_private_fl2va_target_budget(
         packed_layout_device_bytes,
         packed_video_state_device_bytes,
         packed_audio_state_device_bytes,
-        denoise_copy_policy: H3FactoryTargetDenoiseCopyPolicy::CandleF32PairedEulerV1,
+        denoise_copy_policy: H3FactoryTargetDenoiseCopyPolicy::CandleF32PairedResMultistepV2,
         denoise_tensor_copy_workspace_device_bytes,
         audio_waveform_device_bytes: waveform_host_bytes,
         attention_workspace_device_bytes: bounds.attention_workspace_device_bytes,

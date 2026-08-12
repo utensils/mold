@@ -34,6 +34,7 @@ pub const REF2VA_COMFY: &str = "minimax-h3-ref2va:comfy-pruned-int8";
 pub const DEFAULT_WIDTH: u32 = 1344;
 pub const DEFAULT_HEIGHT: u32 = 768;
 pub const DEFAULT_STEPS: u32 = 50;
+pub const COMFY_DEFAULT_STEPS: u32 = 21;
 pub const FIXED_FPS: u32 = 24;
 pub const MIN_DURATION_SECONDS: u32 = 5;
 pub const MAX_DURATION_SECONDS: u32 = 15;
@@ -1733,12 +1734,12 @@ pub fn artifact_contract<'a>(
         ModelComponent::VideoScheduler => (
             ArtifactRole::VideoScheduler,
             "config",
-            "rectified-flow Euler; video shift=12",
+            "rectified-flow schedule config; video shift=12",
         ),
         ModelComponent::AudioScheduler => (
             ArtifactRole::AudioScheduler,
             "config",
-            "rectified-flow Euler; audio shift=3",
+            "rectified-flow schedule config; native audio shift=3",
         ),
         ModelComponent::ModelConfig => (
             ArtifactRole::SharedConfig,
@@ -2241,9 +2242,12 @@ fn comfy_files(task: Task) -> Vec<ModelFile> {
     files
 }
 
-fn defaults() -> ManifestDefaults {
+fn defaults(layout: Layout) -> ManifestDefaults {
     ManifestDefaults {
-        steps: DEFAULT_STEPS,
+        steps: match layout {
+            Layout::OfficialBf16 => DEFAULT_STEPS,
+            Layout::ComfyPrunedInt8ConvrotNvfp4Awq => COMFY_DEFAULT_STEPS,
+        },
         guidance: 0.0,
         width: DEFAULT_WIDTH,
         height: DEFAULT_HEIGHT,
@@ -2290,7 +2294,7 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
             Layout::OfficialBf16 => official_files(task),
             Layout::ComfyPrunedInt8ConvrotNvfp4Awq => comfy_files(task),
         },
-        defaults: defaults(),
+        defaults: defaults(layout),
         hidden: true,
     })
     .collect()
@@ -3330,6 +3334,19 @@ mod tests {
                     "{manifest_name} is missing {role:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn manifest_defaults_match_each_layouts_released_sampler_count() {
+        for name in [FL2VA_OFFICIAL, REF2VA_OFFICIAL] {
+            assert_eq!(find_manifest(name).unwrap().defaults.steps, DEFAULT_STEPS);
+        }
+        for name in [FL2VA_COMFY, REF2VA_COMFY] {
+            assert_eq!(
+                find_manifest(name).unwrap().defaults.steps,
+                COMFY_DEFAULT_STEPS
+            );
         }
     }
 

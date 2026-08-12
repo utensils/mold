@@ -10,7 +10,7 @@
 use super::*;
 use crate::engine::GenerationReferenceBinding;
 use crate::minimax_h3::reference_media::H3ReferenceMediaAdapter;
-use crate::minimax_h3::sampler::H3_VISUAL_CONDITION_TIMESTEP;
+use crate::minimax_h3::sampler::{H3DualSampler, H3SamplerKind, H3_VISUAL_CONDITION_TIMESTEP};
 use mold_candle::minimax_h3::{
     pack_h3_audio, sample_video_frames, AudioVaeConfig, RefPresentation, RefPresentationKind,
 };
@@ -75,6 +75,10 @@ pub(crate) enum H3AudioConditionEncodeMode {
 pub(crate) trait H3Ref2VaBackend {
     fn identity(&self) -> H3PipelineBackendIdentity;
     fn device(&self) -> &Device;
+
+    fn sampler_kind(&self) -> H3SamplerKind {
+        H3SamplerKind::OfficialEuler
+    }
 
     /// Hard admission bound for the complete packed sequence, including text,
     /// every reference block, and both generated suffixes.
@@ -488,7 +492,9 @@ pub(crate) fn execute_staged(
     let mut audio_rows = Tensor::cat(&audio_parts, 1)?;
     validate_packed_tensors(&video_rows, &audio_rows, &text.states, &packed)?;
 
-    let schedule = H3DualSchedule::new(prepared.grid_points)?;
+    let sampler_kind = backend.sampler_kind();
+    let schedule = H3DualSchedule::new_for_sampler(prepared.grid_points, sampler_kind)?;
+    let mut sampler = H3DualSampler::new(sampler_kind);
     let counts = schedule.counts();
     control.checkpoint(H3PipelineEvent {
         phase: H3PipelinePhase::Denoise,
@@ -533,7 +539,7 @@ pub(crate) fn execute_staged(
             output
                 .audio
                 .narrow(1, packed.condition_audio_rows, packed.generated_audio_rows)?;
-        let (next_video, next_audio) = euler_step_pair(
+        let (next_video, next_audio) = sampler.step_pair(
             &generated_video_rows,
             &generated_audio_rows,
             &generated_video_velocity,
@@ -549,6 +555,9 @@ pub(crate) fn execute_staged(
             total: after.total_evaluations,
         })?;
     }
+    // RES history is denoise-only workspace. Release previous clean estimates
+    // and the carried audio state before transformer teardown and VAE decode.
+    drop(sampler);
     // Ref2VA has the same text-state lifetime as FL2VA: all transformer
     // forwards borrow it, while visual/audio decode must begin only after it
     // has released its device allocation.
@@ -614,6 +623,7 @@ pub(crate) fn execute_staged(
             audio_channels: AUDIO_CHANNELS,
             requested_grid_points: counts.requested_grid_points,
             transformer_evaluations: counts.transformer_evaluations,
+            sampler: sampler_kind.as_str(),
             endpoint_anchors: Vec::new(),
             references: prepared
                 .references
