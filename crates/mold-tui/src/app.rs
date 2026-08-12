@@ -1895,9 +1895,9 @@ impl App {
             .join()
             .ok()
             .flatten()
-            .unwrap_or_else(|| mold_core::build_model_catalog(&config, None, false))
+            .unwrap_or_else(|| build_local_model_catalog(&config))
         } else {
-            mold_core::build_model_catalog(&config, None, false)
+            build_local_model_catalog(&config)
         };
 
         let (bg_tx, bg_rx) = mpsc::unbounded_channel();
@@ -7636,8 +7636,7 @@ impl App {
                         });
                     } else {
                         self.config = Config::load_or_default();
-                        self.models.catalog =
-                            mold_core::build_model_catalog(&self.config, None, false);
+                        self.models.catalog = build_local_model_catalog(&self.config);
                     }
                 }
                 BackgroundEvent::ModelRemoveComplete(model) => {
@@ -7647,7 +7646,7 @@ impl App {
                     });
                     // Refresh config and catalog
                     self.config = Config::load_or_default();
-                    self.models.catalog = mold_core::build_model_catalog(&self.config, None, false);
+                    self.models.catalog = build_local_model_catalog(&self.config);
                     // Clamp selected index
                     if !self.models.catalog.is_empty()
                         && self.models.selected >= self.models.catalog.len()
@@ -8031,9 +8030,29 @@ impl App {
         if refresh_catalog {
             // Refresh config and catalog after pull
             self.config = Config::load_or_default();
-            self.models.catalog = mold_core::build_model_catalog(&self.config, None, false);
+            self.models.catalog = build_local_model_catalog(&self.config);
         }
     }
+}
+
+fn build_local_model_catalog(config: &Config) -> Vec<mold_core::ModelInfoExtended> {
+    let mut catalog = mold_core::build_model_catalog(config, None, false);
+    mold_core::qualify_catalog_generation_delivery(
+        &mut catalog,
+        mold_core::GenerationDeliveryCapabilities::new(
+            cfg!(feature = "mp4"),
+            cfg!(feature = "webp"),
+        ),
+    );
+    // Empty profiles are deliberately unavailable. Keeping their rows would
+    // let a legacy fallback synthesize controls the local binary cannot serve.
+    catalog.retain(|entry| {
+        entry
+            .generation_profile
+            .as_ref()
+            .is_none_or(|profile| !profile.recipes.is_empty())
+    });
+    catalog
 }
 
 const MAX_LIVE_PREVIEW_ENCODED_BYTES: usize = 8 * 1024 * 1024;
@@ -11830,7 +11849,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn profile_size_row_cycles_only_exact_z_image_presets() {
+    async fn profile_size_row_cycles_only_qualified_z_image_presets() {
         let mut app = make_settings_test_app();
         app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
         app.generate.params.model = "z-image-turbo:q4".to_string();
@@ -11847,7 +11866,6 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
         assert!(expected.contains(&(1280, 720)));
         assert!(expected.contains(&(720, 1280)));
-
         for _ in 0..expected.len() {
             assert!(expected.contains(&(app.generate.params.width, app.generate.params.height)));
             app.adjust_field(ParamField::Size, 1);
@@ -11855,7 +11873,7 @@ mod tests {
         assert_eq!(
             (app.generate.params.width, app.generate.params.height),
             (1024, 1024),
-            "the exact profile ring must wrap without synthesizing a canvas"
+            "the exact qualified profile ring must wrap without synthesizing a canvas"
         );
     }
 

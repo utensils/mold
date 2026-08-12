@@ -425,6 +425,18 @@ pub fn build_model_catalog(
     models
 }
 
+/// Apply a concrete binary's delivery encoders to every catalog profile.
+pub fn qualify_catalog_generation_delivery(
+    catalog: &mut [ModelInfoExtended],
+    delivery: crate::GenerationDeliveryCapabilities,
+) {
+    for entry in catalog {
+        if let Some(profile) = &mut entry.generation_profile {
+            crate::qualify_generation_profile_delivery(profile, delivery);
+        }
+    }
+}
+
 /// Sort models so variants of the same base name are grouped together,
 /// ordered by quality rank (best first). Different base names keep their
 /// original relative order (stable sort).

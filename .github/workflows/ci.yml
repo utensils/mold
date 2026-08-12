@@ -91,6 +91,7 @@ jobs:
               - 'crates/**/*.rs'
               - 'docs/model-resolution-matrix.md'
               - 'docs/generated/generation-profiles-v1.json'
+              - 'studio/lib/generated/generationProfileV1.ts'
             # Forced-local checks exist to compile backend-specific code that
             # the ordinary workspace gate cannot see. Backend-neutral crates
             # (catalog, DB, Discord, scheduler) are already covered by `rust`.

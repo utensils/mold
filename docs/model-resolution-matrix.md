@@ -12,13 +12,13 @@ Regenerate with `cargo run -p mold-ai-core --bin generate_generation_profiles`. 
 - **Source driven** derives its canvas from the source; listed presets are guidance for source fitting.
 - Limits in this document are effective Mold admission limits. Provenance records whether their authored source is upstream or Mold policy.
 
-## Upstream candidates awaiting qualification
+## Upstream resolution qualification records
 
-These pinned upstream dimensions are **not supported presets** and are absent from the wire profile's `aspect_groups`. They become selectable only after an exact-size Mold generation smoke and decoded output-delivery check is recorded.
+Pinned upstream dimensions become supported presets only after an exact-size Mold generation smoke and decoded output-delivery check is recorded. Unqualified candidates remain absent from the wire profile aspect groups.
 
 ### `z-image`
 
-Status: qualified `false`. Evidence: `static-contract: upstream app.py RES_CHOICES[1024] oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.
+Status: qualified `true`. Evidence: `docs/qualification/z-image-1024-tier-metal-q4.json: exact-size Q4 Metal generation and decoded PNG delivery for every 1024-tier candidate`.
 
 Pinned source: [https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py](https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py) at `768cb50d847cdbba97c89533ae976be69cf5a5b8`.
 
@@ -2100,7 +2100,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### Profile `z-image.z-image-turbo`
 
-Schema 1 · hash `dd06318814fc5648f3250dcc9e715b5d02ca3eee2a7c16e336f62768cd28004f` · default recipe `default`
+Schema 1 · hash `ad23b358b6c93c9ce51dc4253d8368c768cf95b2ddc069f092e8069f1f079178` · default recipe `default`
 
 Models: `z-image-turbo:bf16`, `z-image-turbo:q4`, `z-image-turbo:q6`, `z-image-turbo:q8`.
 
@@ -2109,6 +2109,19 @@ Models: `z-image-turbo:bf16`, `z-image-turbo:q4`, `z-image-turbo:q6`, `z-image-t
 - Resolution: dynamic; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `1024x1024`, 9 steps, guidance 0.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Presets: none.
 
-Provenance: [Upstream](https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py) at `768cb50d847cdbba97c89533ae976be69cf5a5b8`, qualified: `false`, evidence: `static-contract: upstream app.py RES_CHOICES[1024] oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.
+| Exact ratio | Qualified presets |
+|---|---|
+| `1:1` | `1024x1024` (recommended) |
+| `9:7` | `1152x896` (recommended) |
+| `7:9` | `896x1152` (recommended) |
+| `4:3` | `1152x864` (recommended) |
+| `3:4` | `864x1152` (recommended) |
+| `3:2` | `1248x832` (recommended) |
+| `2:3` | `832x1248` (recommended) |
+| `16:9` | `1280x720` (recommended) |
+| `9:16` | `720x1280` (recommended) |
+| `7:3` | `1344x576` (recommended) |
+| `3:7` | `576x1344` (recommended) |
+
+Provenance: [Upstream](https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py) at `768cb50d847cdbba97c89533ae976be69cf5a5b8`, qualified: `true`, evidence: `docs/qualification/z-image-1024-tier-metal-q4.json: exact-size Q4 Metal generation and decoded PNG delivery for every 1024-tier candidate`.

@@ -69,23 +69,13 @@ describe("MobileResolutionPicker", () => {
     expect(state).toMatchObject({ width: 576, height: 1024 });
   });
 
-  it("offers the official Qwen square bucket without legacy SDXL tiers", async () => {
-    const { wrapper, state } = mountPicker(1328, 1328, "qwen-image");
-    const segments = tierSegments(wrapper);
+  it("withholds unqualified Qwen candidates and keeps custom dimensions", () => {
+    const { wrapper } = mountPicker(1328, 1328, "qwen-image");
 
-    expect(segments).toHaveLength(1);
-    expect(segments[0]?.get(".ms-seg__label").text()).toBe("1.8 MP");
-    expect(segments[0]?.get(".ms-seg__sub").text()).toBe("Recommended");
-    expect(segments[0]?.attributes("aria-checked")).toBe("true");
-
-    await wrapper.get("[data-orientation='portrait']").trigger("click");
-    expect(state).toMatchObject({ width: 1056, height: 1584 });
-    expect(wrapper.get("[data-test='mobile-resolution-announcement']").text()).toBe(
-      "Selected resolution: 1056 by 1584 pixels, 2:3, Portrait.",
-    );
-
-    await wrapper.get("[data-aspect='≈9:16']").trigger("click");
-    expect(state).toMatchObject({ width: 928, height: 1664 });
+    expect(wrapper.find("[data-test='mobile-resolution-tier']").exists()).toBe(false);
+    expect(wrapper.findAll(".mobile-resolution-aspect")).toHaveLength(0);
+    expect(wrapper.find("[data-test='mobile-resolution-custom']").exists()).toBe(true);
+    expect(wrapper.get("[data-orientation='portrait']").attributes("disabled")).toBeDefined();
   });
 
   it("projects the selected tier's exact pixel dimensions under the control", async () => {
@@ -126,27 +116,18 @@ describe("MobileResolutionPicker", () => {
     ]);
     expect(single[1]?.attributes("aria-checked")).toBe("true");
 
-    // LTX-2's 16:9 bucket now reaches upstream's shipped 1080p shape
-    // (1920x1088 = 2.1 MP) on top of the existing two tiers.
-    const trio = tierSegments(mountPicker(1024, 576, "ltx2").wrapper);
-    expect(trio.map((segment) => segment.get(".ms-seg__label").text())).toEqual([
-      "0.6 MP",
-      "0.9 MP",
-      "2.1 MP",
-    ]);
-    expect(trio.map((segment) => segment.get(".ms-seg__sub").text())).toEqual([
-      "Compact",
-      "Standard",
-      "High",
-    ]);
-    expect(trio[0]?.attributes("aria-checked")).toBe("true");
+    // Nearby-looking buckets stay separate when their reduced ratios differ.
+    const exact = tierSegments(mountPicker(1024, 576, "ltx2").wrapper);
+    expect(exact.map((segment) => segment.get(".ms-seg__label").text())).toEqual(["0.6 MP"]);
+    expect(exact[0]?.get(".ms-seg__sub").text()).toBe("Recommended");
+    expect(exact[0]?.attributes("aria-checked")).toBe("true");
   });
 
-  it("shows each aspect choice as a proportionally accurate frame", async () => {
-    const { wrapper } = mountPicker(928, 1664, "qwen-image");
+  it("shows each aspect choice as a proportionally accurate frame", () => {
+    const { wrapper } = mountPicker(704, 1216, "ltx2");
     const choices = wrapper.findAll(".mobile-resolution-aspect");
 
-    expect(choices.map((choice) => choice.text())).toEqual(["≈9:16", "3:4", "2:3"]);
+    expect(choices.map((choice) => choice.text())).toEqual(["11:19", "9:16", "2:3", "17:30"]);
     const frames = choices.map((choice) =>
       choice.get("[data-test='mobile-resolution-aspect-shape']"),
     );
@@ -160,9 +141,10 @@ describe("MobileResolutionPicker", () => {
     const widths = frames.map((frame) =>
       Number.parseFloat((frame.element as HTMLElement).style.width),
     );
+    expect(widths[1]).toBeLessThan(widths[3]!);
+    expect(widths[3]).toBeLessThan(widths[0]!);
     expect(widths[0]).toBeLessThan(widths[2]!);
-    expect(widths[2]).toBeLessThan(widths[1]!);
-    expect(choices[0]?.attributes("aria-label")).toBe("Approximately 9 by 16 aspect ratio");
+    expect(choices[0]?.attributes("aria-label")).toBe("11 by 19 aspect ratio");
   });
 
   it("falls back to iPhone-friendly custom fields and snaps values to 16", async () => {
@@ -242,6 +224,8 @@ describe("MobileResolutionPicker", () => {
       "22:15",
       "3:2",
       "16:9",
+      "19:11",
+      "30:17",
     ]);
 
     await wrapper.get("[data-orientation='portrait']").trigger("click");

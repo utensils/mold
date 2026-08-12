@@ -212,6 +212,7 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
         annotate_audio_capabilities(&mut catalog, &config);
         annotate_source_image_capabilities(&mut catalog, &config);
         synchronize_generation_profile_capabilities(&mut catalog);
+        retain_deliverable_generation_profiles(&mut catalog);
         return catalog;
     }
 
@@ -231,7 +232,17 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
     // a GPU.
     annotate_source_image_capabilities(&mut catalog, &config);
     synchronize_generation_profile_capabilities(&mut catalog);
+    retain_deliverable_generation_profiles(&mut catalog);
     catalog
+}
+
+fn retain_deliverable_generation_profiles(catalog: &mut Vec<ModelInfoExtended>) {
+    catalog.retain(|entry| {
+        entry
+            .generation_profile
+            .as_ref()
+            .is_none_or(|profile| !profile.recipes.is_empty())
+    });
 }
 
 fn annotate_audio_capabilities(catalog: &mut [ModelInfoExtended], config: &Config) {
@@ -317,61 +328,13 @@ fn synchronize_generation_profile_capabilities(catalog: &mut [ModelInfoExtended]
                 recipe.capabilities.supports_extend = supports_extend;
             }
         }
-        qualify_profile_delivery_for_build(profile, cfg!(feature = "mp4"), cfg!(feature = "webp"));
-        profile.refresh_hash();
-    }
-}
-
-/// Narrow authored output contracts to encoders linked into this server.
-///
-/// The core registry records Mold's complete qualified contract. `/api/models`
-/// describes this concrete binary, so it must not advertise a container the
-/// server cannot deliver. Recipes with no viable container (notably H3 in a
-/// build without MP4) remain unselectable instead of falling back to an
-/// unrelated format.
-fn qualify_profile_delivery_for_build(
-    profile: &mut mold_core::GenerationProfileSet,
-    mp4_built: bool,
-    webp_built: bool,
-) {
-    for recipe in &mut profile.recipes {
-        recipe
-            .capabilities
-            .output
-            .formats
-            .retain(|format| match format {
-                mold_core::OutputFormat::Mp4 => mp4_built,
-                mold_core::OutputFormat::Webp => webp_built,
-                _ => true,
-            });
-        if !recipe
-            .capabilities
-            .output
-            .formats
-            .contains(&recipe.capabilities.output.default_format)
-        {
-            if let Some(format) = recipe.capabilities.output.formats.first().copied() {
-                recipe.capabilities.output.default_format = format;
-            }
-        }
-        if recipe.capabilities.output.audio_requires_mp4 && !mp4_built {
-            recipe.capabilities.supports_audio = false;
-        }
-    }
-
-    profile
-        .recipes
-        .retain(|recipe| !recipe.capabilities.output.formats.is_empty());
-    if !profile
-        .recipes
-        .iter()
-        .any(|recipe| recipe.id == profile.default_recipe_id)
-    {
-        profile.default_recipe_id = profile
-            .recipes
-            .first()
-            .map(|recipe| recipe.id.clone())
-            .unwrap_or_default();
+        mold_core::qualify_generation_profile_delivery(
+            profile,
+            mold_core::GenerationDeliveryCapabilities::new(
+                cfg!(feature = "mp4"),
+                cfg!(feature = "webp"),
+            ),
+        );
     }
 }
 
@@ -3205,7 +3168,10 @@ mod tests {
             supports_extend: false,
             supports_audio: false,
         });
-        qualify_profile_delivery_for_build(&mut video, false, false);
+        mold_core::qualify_generation_profile_delivery(
+            &mut video,
+            mold_core::GenerationDeliveryCapabilities::new(false, false),
+        );
         let output = &video.default_recipe().unwrap().capabilities.output;
         assert_eq!(output.default_format, mold_core::OutputFormat::Gif);
         assert_eq!(
@@ -3229,9 +3195,28 @@ mod tests {
             supports_extend: false,
             supports_audio: true,
         });
-        qualify_profile_delivery_for_build(&mut h3, false, false);
+        mold_core::qualify_generation_profile_delivery(
+            &mut h3,
+            mold_core::GenerationDeliveryCapabilities::new(false, false),
+        );
         assert!(h3.recipes.is_empty());
         assert!(h3.default_recipe_id.is_empty());
+    }
+
+    #[test]
+    fn undeliverable_generation_rows_are_not_advertised() {
+        let mut catalog = mold_core::catalog::build_model_catalog(&Config::default(), None, false);
+        let model = catalog
+            .iter_mut()
+            .find(|entry| entry.generation_profile.is_some())
+            .expect("visible generation row");
+        let removed_name = model.info.name.clone();
+        let profile = model.generation_profile.as_mut().unwrap();
+        profile.recipes.clear();
+        profile.default_recipe_id.clear();
+
+        retain_deliverable_generation_profiles(&mut catalog);
+        assert!(catalog.iter().all(|entry| entry.info.name != removed_name));
     }
 
     #[test]

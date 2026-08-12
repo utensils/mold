@@ -64,17 +64,17 @@ export type GenerationRecipeProfile = { id: string, label: string, request_selec
 export type GenerationProfileSet = { schema_version: number, profile_id: string, profile_hash: string, default_recipe_id: string, recipes: Array<GenerationRecipeProfile>, };
 
 export const LEGACY_RESOLUTION_PRESETS_V1 = {
-  "sd15": [[512, 512], [512, 768], [768, 512], [384, 512], [512, 384]],
-  "sdxl": [[1024, 1024], [1152, 896], [896, 1152], [1216, 832], [832, 1216], [1344, 768], [768, 1344], [1536, 640], [640, 1536]],
-  "sd3": [[1024, 1024], [1152, 896], [896, 1152], [1216, 832], [832, 1216], [1344, 768], [768, 1344]],
-  "flux": [[1024, 1024], [1024, 768], [768, 1024], [1024, 576], [576, 1024], [768, 768]],
-  "flux2": [[1024, 1024], [1024, 768], [768, 1024], [1024, 576], [576, 1024], [768, 768]],
-  "z-image": [],
+  "sd15": [{ width: 512, height: 512, aspect: "1:1" }, { width: 512, height: 768, aspect: "2:3" }, { width: 768, height: 512, aspect: "3:2" }, { width: 384, height: 512, aspect: "3:4" }, { width: 512, height: 384, aspect: "4:3" }],
+  "sdxl": [{ width: 1024, height: 1024, aspect: "1:1" }, { width: 1152, height: 896, aspect: "9:7" }, { width: 896, height: 1152, aspect: "7:9" }, { width: 1216, height: 832, aspect: "19:13" }, { width: 832, height: 1216, aspect: "13:19" }, { width: 1344, height: 768, aspect: "7:4" }, { width: 768, height: 1344, aspect: "4:7" }, { width: 1536, height: 640, aspect: "12:5" }, { width: 640, height: 1536, aspect: "5:12" }],
+  "sd3": [{ width: 1024, height: 1024, aspect: "1:1" }, { width: 1152, height: 896, aspect: "9:7" }, { width: 896, height: 1152, aspect: "7:9" }, { width: 1216, height: 832, aspect: "19:13" }, { width: 832, height: 1216, aspect: "13:19" }, { width: 1344, height: 768, aspect: "7:4" }, { width: 768, height: 1344, aspect: "4:7" }],
+  "flux": [{ width: 1024, height: 1024, aspect: "1:1" }, { width: 1024, height: 768, aspect: "4:3" }, { width: 768, height: 1024, aspect: "3:4" }, { width: 1024, height: 576, aspect: "16:9" }, { width: 576, height: 1024, aspect: "9:16" }, { width: 768, height: 768, aspect: "1:1" }],
+  "flux2": [{ width: 1024, height: 1024, aspect: "1:1" }, { width: 1024, height: 768, aspect: "4:3" }, { width: 768, height: 1024, aspect: "3:4" }, { width: 1024, height: 576, aspect: "16:9" }, { width: 576, height: 1024, aspect: "9:16" }, { width: 768, height: 768, aspect: "1:1" }],
+  "z-image": [{ width: 1024, height: 1024, aspect: "1:1" }, { width: 1152, height: 896, aspect: "9:7" }, { width: 896, height: 1152, aspect: "7:9" }, { width: 1152, height: 864, aspect: "4:3" }, { width: 864, height: 1152, aspect: "3:4" }, { width: 1248, height: 832, aspect: "3:2" }, { width: 832, height: 1248, aspect: "2:3" }, { width: 1280, height: 720, aspect: "16:9" }, { width: 720, height: 1280, aspect: "9:16" }, { width: 1344, height: 576, aspect: "7:3" }, { width: 576, height: 1344, aspect: "3:7" }],
   "qwen-image": [],
   "qwen-image-edit": [],
-  "wuerstchen": [[1024, 1024]],
-  "ltx-video": [[704, 480], [768, 512], [512, 512], [1024, 576], [1216, 704], [576, 1024], [768, 768], [512, 768]],
-  "ltx2": [[704, 480], [768, 512], [512, 512], [1024, 576], [1216, 704], [704, 1216], [576, 1024], [768, 768], [512, 768], [1536, 1024], [1024, 1536], [1920, 1088], [1088, 1920]],
-  "wan": [[832, 480], [480, 832], [1280, 720], [720, 1280]],
-  "minimax-h3": [[1536, 672], [1344, 768], [1024, 768], [768, 768], [768, 1024], [768, 1344]],
+  "wuerstchen": [{ width: 1024, height: 1024, aspect: "1:1" }],
+  "ltx-video": [{ width: 704, height: 480, aspect: "22:15" }, { width: 768, height: 512, aspect: "3:2" }, { width: 512, height: 512, aspect: "1:1" }, { width: 1024, height: 576, aspect: "16:9" }, { width: 1216, height: 704, aspect: "19:11" }, { width: 576, height: 1024, aspect: "9:16" }, { width: 768, height: 768, aspect: "1:1" }, { width: 512, height: 768, aspect: "2:3" }],
+  "ltx2": [{ width: 704, height: 480, aspect: "22:15" }, { width: 768, height: 512, aspect: "3:2" }, { width: 512, height: 512, aspect: "1:1" }, { width: 1024, height: 576, aspect: "16:9" }, { width: 1216, height: 704, aspect: "19:11" }, { width: 704, height: 1216, aspect: "11:19" }, { width: 576, height: 1024, aspect: "9:16" }, { width: 768, height: 768, aspect: "1:1" }, { width: 512, height: 768, aspect: "2:3" }, { width: 1536, height: 1024, aspect: "3:2" }, { width: 1024, height: 1536, aspect: "2:3" }, { width: 1920, height: 1088, aspect: "30:17" }, { width: 1088, height: 1920, aspect: "17:30" }],
+  "wan": [{ width: 832, height: 480, aspect: "26:15" }, { width: 480, height: 832, aspect: "15:26" }, { width: 1280, height: 720, aspect: "16:9" }, { width: 720, height: 1280, aspect: "9:16" }],
+  "minimax-h3": [{ width: 1536, height: 672, aspect: "16:7" }, { width: 1344, height: 768, aspect: "7:4" }, { width: 1024, height: 768, aspect: "4:3" }, { width: 768, height: 768, aspect: "1:1" }, { width: 768, height: 1024, aspect: "3:4" }, { width: 768, height: 1344, aspect: "4:7" }],
 } as const;

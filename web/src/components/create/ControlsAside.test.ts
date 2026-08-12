@@ -272,16 +272,16 @@ describe("ControlsAside", () => {
   });
 
   it("applies the projected dims when resolution changes", async () => {
-    const wrapper = factory({ width: 1024, height: 1024 }, "qwen-image");
+    const wrapper = factory({ width: 1024, height: 1024 }, "flux");
     wrapper
       .getComponent(ResolutionSelector)
-      .vm.$emit("update:modelValue", (1328 * 1328) / 1_000_000);
+      .vm.$emit("update:modelValue", (768 * 768) / 1_000_000);
     await wrapper.vm.$nextTick();
     const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
       GenerateFormState,
     ];
-    expect(next.width).toBe(1328);
-    expect(next.height).toBe(1328);
+    expect(next.width).toBe(768);
+    expect(next.height).toBe(768);
   });
 
   it("labels a model's only runnable bucket as Native", () => {

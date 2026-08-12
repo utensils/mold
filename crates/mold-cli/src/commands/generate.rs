@@ -131,7 +131,7 @@ fn validate_local_request(req: &GenerateRequest, config: &Config) -> Result<()> 
     .map_err(|e| anyhow::anyhow!(e))?;
     if let Some(manifest) = manifest::find_manifest(&manifest::resolve_model_name(&req.model)) {
         let model_config = config.resolved_model_config(&manifest.name);
-        let profile = mold_core::generation_profile_for_manifest_with_defaults(
+        let mut profile = mold_core::generation_profile_for_manifest_with_defaults(
             manifest,
             mold_core::GenerationDefaultsProfile {
                 width: model_config.effective_width(config),
@@ -144,10 +144,44 @@ fn validate_local_request(req: &GenerateRequest, config: &Config) -> Result<()> 
                     .map(str::to_string),
             },
         );
+        mold_core::qualify_generation_profile_delivery(
+            &mut profile,
+            local_generation_delivery_capabilities(),
+        );
         mold_core::validate_request_against_generation_profile(&profile, req)
             .map_err(anyhow::Error::msg)?;
     }
     Ok(())
+}
+
+fn local_generation_delivery_capabilities() -> mold_core::GenerationDeliveryCapabilities {
+    mold_core::GenerationDeliveryCapabilities::new(cfg!(feature = "mp4"), cfg!(feature = "webp"))
+}
+
+fn local_generation_profile(
+    config: &Config,
+    model: &str,
+) -> Option<mold_core::GenerationProfileSet> {
+    let manifest = manifest::find_manifest(&manifest::resolve_model_name(model))?;
+    let model_config = config.resolved_model_config(&manifest.name);
+    let mut profile = mold_core::generation_profile_for_manifest_with_defaults(
+        manifest,
+        mold_core::GenerationDefaultsProfile {
+            width: model_config.effective_width(config),
+            height: model_config.effective_height(config),
+            steps: model_config.effective_steps(config),
+            guidance: model_config.effective_guidance(),
+            frames: model_config.effective_frames(),
+            fps: model_config.effective_fps(),
+            negative_prompt: manifest::default_negative_prompt_for_family(&manifest.family)
+                .map(str::to_string),
+        },
+    );
+    mold_core::qualify_generation_profile_delivery(
+        &mut profile,
+        local_generation_delivery_capabilities(),
+    );
+    Some(profile)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -469,14 +503,43 @@ pub async fn run(
     let audio_only_pipeline = ltx2
         .pipeline
         .is_some_and(mold_core::Ltx2PipelineMode::is_audio_only);
-    let output_format = default_output_format(
-        family.as_deref(),
-        format,
-        effective_frames,
-        audio_only_pipeline,
-        is_h3,
-        cfg!(feature = "mp4"),
-    );
+    let local_profile = if local {
+        let profile = local_generation_profile(&config, model).ok_or_else(|| {
+            anyhow::anyhow!("no generation profile is available for local model '{model}'")
+        })?;
+        // Resolve the recipe even for an explicit format. This rejects an
+        // MP4-only model such as H3 immediately in a featureless local build,
+        // before model download or inference can begin.
+        mold_core::generation_profile_default_output_format(&profile, ltx2.pipeline)
+            .map_err(anyhow::Error::msg)?;
+        Some(profile)
+    } else {
+        None
+    };
+    let output_format = if format == OutputFormat::Png && effective_frames.is_some() {
+        if let Some(profile) = local_profile.as_ref() {
+            mold_core::generation_profile_default_output_format(profile, ltx2.pipeline)
+                .map_err(anyhow::Error::msg)?
+        } else {
+            default_output_format(
+                family.as_deref(),
+                format,
+                effective_frames,
+                audio_only_pipeline,
+                is_h3,
+                cfg!(feature = "mp4"),
+            )
+        }
+    } else {
+        default_output_format(
+            family.as_deref(),
+            format,
+            effective_frames,
+            audio_only_pipeline,
+            is_h3,
+            cfg!(feature = "mp4"),
+        )
+    };
 
     // ── Chain routing ─────────────────────────────────────────────────────
     // When --frames exceeds the per-clip cap, auto-build a ChainRequest and
@@ -3035,6 +3098,40 @@ mod tests {
             ),
             OutputFormat::Mp4
         );
+    }
+
+    #[test]
+    fn local_profile_default_matches_linked_delivery_encoders() {
+        let profile = local_generation_profile(&Config::default(), "ltx-2-19b-dev:fp8")
+            .expect("built-in LTX-2 profile");
+        let default = mold_core::generation_profile_default_output_format(&profile, None).unwrap();
+        if cfg!(feature = "mp4") {
+            assert_eq!(default, OutputFormat::Mp4);
+        } else {
+            assert_eq!(default, OutputFormat::Gif);
+            assert!(profile.recipes.iter().all(|recipe| {
+                !recipe
+                    .capabilities
+                    .output
+                    .formats
+                    .contains(&OutputFormat::Mp4)
+            }));
+        }
+        if !cfg!(feature = "webp") {
+            assert!(profile.recipes.iter().all(|recipe| {
+                !recipe
+                    .capabilities
+                    .output
+                    .formats
+                    .contains(&OutputFormat::Webp)
+            }));
+        }
+        if !cfg!(feature = "mp4") {
+            let h3 =
+                local_generation_profile(&Config::default(), mold_core::minimax_h3::FL2VA_OFFICIAL)
+                    .expect("built-in H3 profile");
+            assert!(mold_core::generation_profile_default_output_format(&h3, None).is_err());
+        }
     }
 
     /// #798 regression guard: a single-frame wan render is a still and stays

@@ -189,7 +189,7 @@ export function presetsForFamily(family: string): ResolutionPreset[] {
     family,
   ) as keyof typeof LEGACY_RESOLUTION_PRESETS_V1;
   return (LEGACY_RESOLUTION_PRESETS_V1[canonical] ?? []).map(
-    ([width, height]) => p(width, height),
+    ({ width, height, aspect }) => p(width, height, aspect),
   );
 }
 

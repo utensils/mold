@@ -200,6 +200,23 @@ pub struct OutputCapabilitiesProfile {
     pub delivery_reason: Option<String>,
 }
 
+/// Delivery encoders linked into a concrete Mold binary.
+///
+/// The authored registry describes the complete Mold-qualified contract. Each
+/// executable narrows that contract to what it can actually deliver before it
+/// advertises, renders, or validates a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenerationDeliveryCapabilities {
+    pub mp4: bool,
+    pub webp: bool,
+}
+
+impl GenerationDeliveryCapabilities {
+    pub const fn new(mp4: bool, webp: bool) -> Self {
+        Self { mp4, webp }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct WanRecipeCapabilitiesProfile {
     pub mode: ControlMode,
@@ -287,6 +304,90 @@ impl GenerationProfileSet {
         let encoded = serde_json::to_vec(self).expect("generation profile must serialize");
         self.profile_hash = format!("{:x}", Sha256::digest(encoded));
     }
+}
+
+/// Narrow an authored profile to the delivery encoders in a concrete binary.
+///
+/// This is intentionally shared by server and local surfaces so neither can
+/// advertise or accept a format the executing binary cannot encode. Recipes
+/// with no viable delivery format remain unavailable; they are never silently
+/// redirected to an unrelated container.
+pub fn qualify_generation_profile_delivery(
+    profile: &mut GenerationProfileSet,
+    delivery: GenerationDeliveryCapabilities,
+) {
+    for recipe in &mut profile.recipes {
+        recipe
+            .capabilities
+            .output
+            .formats
+            .retain(|format| match format {
+                OutputFormat::Mp4 => delivery.mp4,
+                OutputFormat::Webp => delivery.webp,
+                _ => true,
+            });
+        if !recipe
+            .capabilities
+            .output
+            .formats
+            .contains(&recipe.capabilities.output.default_format)
+        {
+            if let Some(format) = recipe.capabilities.output.formats.first().copied() {
+                recipe.capabilities.output.default_format = format;
+            }
+        }
+        if recipe.capabilities.output.audio_requires_mp4 && !delivery.mp4 {
+            recipe.capabilities.supports_audio = false;
+        }
+    }
+
+    profile
+        .recipes
+        .retain(|recipe| !recipe.capabilities.output.formats.is_empty());
+    if !profile
+        .recipes
+        .iter()
+        .any(|recipe| recipe.id == profile.default_recipe_id)
+    {
+        profile.default_recipe_id = profile
+            .recipes
+            .first()
+            .map(|recipe| recipe.id.clone())
+            .unwrap_or_default();
+    }
+    profile.refresh_hash();
+}
+
+/// Resolve the profile-owned output default for a concrete request selector.
+pub fn generation_profile_default_output_format(
+    profile: &GenerationProfileSet,
+    pipeline: Option<Ltx2PipelineMode>,
+) -> Result<OutputFormat, String> {
+    let recipe = profile.recipe_for_pipeline(pipeline).ok_or_else(|| {
+        if let Some(pipeline) = pipeline {
+            format!("pipeline '{pipeline}' is not available for this model")
+        } else {
+            format!(
+                "generation profile '{}' has no default recipe",
+                profile.profile_id
+            )
+        }
+    })?;
+    Ok(recipe.capabilities.output.default_format)
+}
+
+/// Fill an omitted request output from its resolved recipe contract.
+pub fn materialize_generation_profile_output_default(
+    profile: &GenerationProfileSet,
+    request: &mut crate::GenerateRequest,
+) -> Result<(), String> {
+    if request.output_format.is_none() {
+        request.output_format = Some(generation_profile_default_output_format(
+            profile,
+            request.pipeline,
+        )?);
+    }
+    Ok(())
 }
 
 /// Validate model-owned request fields against the exact resolved recipe.
@@ -663,8 +764,8 @@ const Z_IMAGE_QUALIFICATION: ResolutionQualificationRecord =
         family: "z-image",
         source: "https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py",
         revision: "768cb50d847cdbba97c89533ae976be69cf5a5b8",
-        qualified: false,
-        evidence: "static-contract: upstream app.py RES_CHOICES[1024] oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded",
+        qualified: true,
+        evidence: "docs/qualification/z-image-1024-tier-metal-q4.json: exact-size Q4 Metal generation and decoded PNG delivery for every 1024-tier candidate",
         candidates: Z_IMAGE_UPSTREAM_CANDIDATES,
     };
 
@@ -698,7 +799,8 @@ pub fn family_presets(family: &str) -> &'static [(u32, u32)] {
         "flux" | "flux2" => FLUX,
         // Upstream candidates are not recommendations until a checked-in
         // runtime-and-delivery campaign qualifies their exact dimensions.
-        "z-image" | "qwen-image" | "qwen-image-edit" => &[],
+        "z-image" => Z_IMAGE_UPSTREAM_CANDIDATES,
+        "qwen-image" | "qwen-image-edit" => &[],
         "wuerstchen" => WUERSTCHEN,
         "ltx-video" => LTX_VIDEO,
         "ltx2" => LTX2,
@@ -706,6 +808,14 @@ pub fn family_presets(family: &str) -> &'static [(u32, u32)] {
         "minimax-h3" => H3,
         _ => &[],
     }
+}
+
+/// Resolve the authored UI grouping for the conservative legacy family
+/// adapter. The dimensions and their display grouping therefore come from the
+/// same registry path as versioned profiles.
+pub fn family_aspect_groups(family: &str) -> Vec<AspectGroup> {
+    let family = canonical_family(family);
+    aspect_groups(family, family_presets(family))
 }
 
 pub fn presets_for_identity<'a>(
@@ -862,7 +972,7 @@ fn recipe(
                 .then_some(crate::minimax_h3::MIN_ASPECT_RATIO),
             max_aspect_ratio: (family == "minimax-h3")
                 .then_some(crate::minimax_h3::MAX_ASPECT_RATIO),
-            aspect_groups: aspect_groups(&dimensions),
+            aspect_groups: aspect_groups(family, &dimensions),
         }
     };
 
@@ -1129,11 +1239,10 @@ fn temporal_profile(input: &GenerationProfileInput<'_>, family: &str) -> Option<
     })
 }
 
-fn aspect_groups(dimensions: &[(u32, u32)]) -> Vec<AspectGroup> {
+fn aspect_groups(family: &str, dimensions: &[(u32, u32)]) -> Vec<AspectGroup> {
     let mut groups: Vec<AspectGroup> = Vec::new();
     for &(width, height) in dimensions {
-        let divisor = gcd(width, height);
-        let id = format!("{}:{}", width / divisor, height / divisor);
+        let id = authored_aspect_label(family, width, height);
         let preset = ResolutionPreset {
             id: format!("{width}x{height}"),
             width,
@@ -1156,6 +1265,17 @@ fn aspect_groups(dimensions: &[(u32, u32)]) -> Vec<AspectGroup> {
             .sort_by_key(|preset| preset.width * preset.height);
     }
     groups
+}
+
+fn authored_aspect_label(family: &str, width: u32, height: u32) -> String {
+    match (canonical_family(family), width, height) {
+        ("qwen-image" | "qwen-image-edit", 1664, 928) => "≈16:9".to_string(),
+        ("qwen-image" | "qwen-image-edit", 928, 1664) => "≈9:16".to_string(),
+        _ => {
+            let divisor = gcd(width, height);
+            format!("{}:{}", width / divisor, height / divisor)
+        }
+    }
 }
 
 fn gcd(mut left: u32, mut right: u32) -> u32 {
@@ -1266,14 +1386,21 @@ mod tests {
     }
 
     #[test]
-    fn unqualified_z_image_candidates_are_not_profile_recommendations() {
+    fn qualified_z_image_candidates_are_profile_recommendations() {
         let profile = resolve_generation_profile(input("z-image-turbo:q4", "z-image"));
         let recipe = profile.default_recipe().unwrap();
-        assert!(recipe.resolution.aspect_groups.is_empty());
+        let presets = recipe
+            .resolution
+            .aspect_groups
+            .iter()
+            .flat_map(|group| &group.presets)
+            .map(|preset| (preset.width, preset.height))
+            .collect::<std::collections::HashSet<_>>();
         let candidates = resolution_qualification_record("z-image").unwrap();
-        assert!(!candidates.qualified);
-        assert!(candidates.candidates.contains(&(1280, 720)));
-        assert!(candidates.candidates.contains(&(720, 1280)));
+        assert!(candidates.qualified);
+        assert_eq!(presets.len(), candidates.candidates.len());
+        assert!(presets.contains(&(1280, 720)));
+        assert!(presets.contains(&(720, 1280)));
     }
 
     #[test]
@@ -1417,29 +1544,30 @@ mod tests {
     }
 
     #[test]
-    fn z_and_qwen_provenance_is_pinned_and_static_evidence_is_explicit() {
-        for (model, family, revision, oracle) in [
+    fn z_and_qwen_provenance_is_pinned_and_qualification_is_explicit() {
+        for (model, family, revision, qualified, evidence_fragment) in [
             (
                 "z-image-turbo:q4",
                 "z-image",
                 "768cb50d847cdbba97c89533ae976be69cf5a5b8",
-                "RES_CHOICES[1024]",
+                true,
+                "docs/qualification/z-image-1024-tier-metal-q4.json",
             ),
             (
                 "qwen-image:q4",
                 "qwen-image",
                 "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-                "aspect_ratios",
+                false,
+                "runtime generation and decoded delivery smoke not recorded",
             ),
         ] {
             let profile = resolve_generation_profile(input(model, family));
             let provenance = &profile.default_recipe().unwrap().provenance[0];
-            assert!(!provenance.qualified);
+            assert_eq!(provenance.qualified, qualified);
             assert_eq!(provenance.revision.as_deref(), Some(revision));
             assert!(provenance.source.contains(revision));
             let evidence = provenance.evidence.as_deref().unwrap();
-            assert!(evidence.contains(oracle));
-            assert!(evidence.contains("runtime generation and decoded delivery smoke not recorded"));
+            assert!(evidence.contains(evidence_fragment));
         }
     }
 
@@ -1658,6 +1786,51 @@ mod tests {
                 .unwrap_err()
                 .contains("output format 'mp4' is not available")
         );
+    }
+
+    #[test]
+    fn delivery_qualification_repairs_defaults_and_withholds_mp4_only_recipes() {
+        let mut ltx2_input = input("ltx2:bf16", "ltx2");
+        ltx2_input.default_frames = Some(97);
+        ltx2_input.default_fps = Some(24);
+        let mut ltx2 = resolve_generation_profile(ltx2_input);
+        let authored_hash = ltx2.profile_hash.clone();
+        qualify_generation_profile_delivery(
+            &mut ltx2,
+            GenerationDeliveryCapabilities::new(false, false),
+        );
+        assert_ne!(ltx2.profile_hash, authored_hash);
+        assert_eq!(
+            generation_profile_default_output_format(&ltx2, None).unwrap(),
+            OutputFormat::Gif
+        );
+        let default = ltx2.default_recipe().unwrap();
+        assert_eq!(
+            default.capabilities.output.formats,
+            vec![OutputFormat::Gif, OutputFormat::Apng]
+        );
+        assert!(!default.capabilities.supports_audio);
+
+        let mut request = request_for(&ltx2, 1216, 704);
+        request.output_format = None;
+        materialize_generation_profile_output_default(&ltx2, &mut request).unwrap();
+        assert_eq!(request.output_format, Some(OutputFormat::Gif));
+        request.output_format = Some(OutputFormat::Apng);
+        materialize_generation_profile_output_default(&ltx2, &mut request).unwrap();
+        assert_eq!(request.output_format, Some(OutputFormat::Apng));
+
+        let mut h3_input = input("minimax-h3-fl2va:official-bf16", "minimax-h3");
+        h3_input.default_frames = Some(crate::minimax_h3::MIN_FRAMES);
+        h3_input.default_fps = Some(crate::minimax_h3::FIXED_FPS);
+        let mut h3 = resolve_generation_profile(h3_input);
+        qualify_generation_profile_delivery(
+            &mut h3,
+            GenerationDeliveryCapabilities::new(false, false),
+        );
+        assert!(h3.recipes.is_empty());
+        assert!(generation_profile_default_output_format(&h3, None)
+            .unwrap_err()
+            .contains("no default recipe"));
     }
 
     #[test]

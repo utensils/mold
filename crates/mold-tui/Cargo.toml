@@ -15,6 +15,8 @@ default = []
 cuda = ["mold-inference/cuda"]
 metal = ["mold-inference/metal"]
 expand = ["mold-inference/expand"]
+mp4 = ["mold-inference/mp4"]
+webp = ["mold-inference/webp"]
 
 [dependencies]
 mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.21.0" }

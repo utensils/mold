@@ -131,12 +131,27 @@ fn render_typescript_contract() -> String {
         "wan",
         "minimax-h3",
     ] {
-        let dimensions = mold_core::generation_profile::family_presets(family)
+        let groups = mold_core::generation_profile::family_aspect_groups(family);
+        let presets = mold_core::generation_profile::family_presets(family)
             .iter()
-            .map(|(width, height)| format!("[{width}, {height}]"))
+            .map(|&(width, height)| {
+                let group = groups
+                    .iter()
+                    .find(|group| {
+                        group
+                            .presets
+                            .iter()
+                            .any(|preset| preset.width == width && preset.height == height)
+                    })
+                    .expect("every family preset belongs to an aspect group");
+                format!(
+                    "{{ width: {width}, height: {height}, aspect: {:?} }}",
+                    group.label
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ");
-        writeln!(out, "  {family:?}: [{dimensions}],").unwrap();
+        writeln!(out, "  {family:?}: [{presets}],").unwrap();
     }
     out.push_str("} as const;\n");
     out
@@ -213,9 +228,9 @@ Regenerate with `cargo run -p mold-ai-core --bin generate_generation_profiles`. 
 - Limits in this document are effective Mold admission limits. Provenance records whether their authored source is upstream or Mold policy.\n\n",
     );
 
-    out.push_str("## Upstream candidates awaiting qualification\n\n");
+    out.push_str("## Upstream resolution qualification records\n\n");
     out.push_str(
-        "These pinned upstream dimensions are **not supported presets** and are absent from the wire profile's `aspect_groups`. They become selectable only after an exact-size Mold generation smoke and decoded output-delivery check is recorded.\n\n",
+        "Pinned upstream dimensions become supported presets only after an exact-size Mold generation smoke and decoded output-delivery check is recorded. Unqualified candidates remain absent from the wire profile aspect groups.\n\n",
     );
     for candidate in &registry.resolution_candidates {
         writeln!(out, "### `{}`\n", candidate.family).unwrap();

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "family": "z-image",
+  "model": "z-image-turbo:q4",
+  "upstream_revision": "768cb50d847cdbba97c89533ae976be69cf5a5b8",
+  "mold_version": "0.21.0 (fe94d8d 2026-08-12)",
+  "backend": "metal",
+  "device": "Apple Metal GPU",
+  "device_memory_mb": 49152,
+  "qualified_at": "2026-08-11T20:27:00-07:00",
+  "prompt": "Mold exact-size qualification chart",
+  "seed": 424242,
+  "guidance": 0.0,
+  "output_format": "png",
+  "delivery_check": "Every response decoded as a non-interlaced 8-bit RGB PNG with the exact requested dimensions.",
+  "renders": [
+    { "width": 1024, "height": 1024, "steps": 1, "sha256": "63c38492c007f6bfa45dfccd3d6e49a7c2eaa8e1aa7e34ebda6cbe90d4c2be36" },
+    { "width": 1152, "height": 896, "steps": 1, "sha256": "3a58b7720ced039ed5fb30a83adfb5df3b05fc93c7012d47a90688afe23955ea" },
+    { "width": 896, "height": 1152, "steps": 1, "sha256": "eac72d75d4af0545c6593f3d2784b70082db5dafd0e3908dfb2c6abd344bdf0c" },
+    { "width": 1152, "height": 864, "steps": 1, "sha256": "b798c83e565a85bef8bafa57bef67983466927281d3e00a1070402480cb896b8" },
+    { "width": 864, "height": 1152, "steps": 1, "sha256": "e3308e1e2bedf975f57a37643e7a591e30454f38305e7a157d2388b497d9a85d" },
+    { "width": 1248, "height": 832, "steps": 1, "sha256": "22a8ab95f5e892ff50666b8f294dc4651cf9102ba14af54bda03064226b237cf" },
+    { "width": 832, "height": 1248, "steps": 1, "sha256": "9432a2f947517bc3a3593371f8aaff13daf3b5363a25721e56c8cc32cc88c2fc" },
+    { "width": 1280, "height": 720, "steps": 9, "sha256": "50bc1590b7022f5cf3b85d61083ee6008f17523e4f56b7260df78ccf5f0df2f9" },
+    { "width": 720, "height": 1280, "steps": 9, "sha256": "a1e8df0f812b543be2e56da7bb273662083d6d45ab4a9798ef8bfbcd1ee07fc2" },
+    { "width": 1344, "height": 576, "steps": 1, "sha256": "aa97b16ed15ed3474d5302bf31642c9c820cef0a99ef832a93d9dd4974408583" },
+    { "width": 576, "height": 1344, "steps": 1, "sha256": "779c7e345271b9bf12a67286078555f757c07c947a193e252cdb9f475ac9758b" }
+  ]
+}

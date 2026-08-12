@@ -46,22 +46,17 @@ describe("resolution presets", () => {
     expect(matchPreset(1000, 1000, "flux")).toBeNull();
   });
 
-  it("keeps the desktop Qwen buckets aligned with the core recommendations", () => {
-    const expected = [
-      ["1:1", 1328, 1328],
-      ["≈16:9", 1664, 928],
-      ["≈9:16", 928, 1664],
-      ["4:3", 1472, 1104],
-      ["3:4", 1104, 1472],
-      ["3:2", 1584, 1056],
-      ["2:3", 1056, 1584],
-    ];
+  it("withholds Qwen candidates until core qualification is recorded", () => {
     for (const family of ["qwen-image", "qwen-image-edit"]) {
-      expect(matchPreset(1328, 1328, family)?.aspect).toBe("1:1");
-      expect(
-        presetsForFamily(family).map(({ aspect, width, height }) => [aspect, width, height]),
-      ).toEqual(expected);
+      expect(matchPreset(1328, 1328, family)).toBeNull();
+      expect(presetsForFamily(family)).toEqual([]);
     }
+  });
+
+  it("exposes the runtime-qualified Z-Image 1024 tier", () => {
+    expect(matchPreset(1280, 720, "z-image")?.aspect).toBe("16:9");
+    expect(matchPreset(720, 1280, "z-image")?.aspect).toBe("9:16");
+    expect(presetsForFamily("z-image")).toHaveLength(11);
   });
 
   it("describes preset and custom aspect ratios with their orientation", () => {

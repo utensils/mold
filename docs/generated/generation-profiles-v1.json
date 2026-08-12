@@ -5,8 +5,8 @@
       "family": "z-image",
       "source": "https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py",
       "revision": "768cb50d847cdbba97c89533ae976be69cf5a5b8",
-      "qualified": false,
-      "evidence": "static-contract: upstream app.py RES_CHOICES[1024] oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded",
+      "qualified": true,
+      "evidence": "docs/qualification/z-image-1024-tier-metal-q4.json: exact-size Q4 Metal generation and decoded PNG delivery for every 1024-tier candidate",
       "candidates": [
         [
           1024,
@@ -21781,7 +21781,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "z-image.z-image-turbo",
-        "profile_hash": "dd06318814fc5648f3250dcc9e715b5d02ca3eee2a7c16e336f62768cd28004f",
+        "profile_hash": "ad23b358b6c93c9ce51dc4253d8368c768cf95b2ddc069f092e8069f1f079178",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -21800,7 +21800,140 @@
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1800000,
-              "aspect_groups": []
+              "aspect_groups": [
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "1024x1024",
+                      "width": 1024,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:7",
+                  "label": "9:7",
+                  "presets": [
+                    {
+                      "id": "1152x896",
+                      "width": 1152,
+                      "height": 896,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "7:9",
+                  "label": "7:9",
+                  "presets": [
+                    {
+                      "id": "896x1152",
+                      "width": 896,
+                      "height": 1152,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "4:3",
+                  "label": "4:3",
+                  "presets": [
+                    {
+                      "id": "1152x864",
+                      "width": 1152,
+                      "height": 864,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:4",
+                  "label": "3:4",
+                  "presets": [
+                    {
+                      "id": "864x1152",
+                      "width": 864,
+                      "height": 1152,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "1248x832",
+                      "width": 1248,
+                      "height": 832,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "832x1248",
+                      "width": 832,
+                      "height": 1248,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1280x720",
+                      "width": 1280,
+                      "height": 720,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "720x1280",
+                      "width": 720,
+                      "height": 1280,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "7:3",
+                  "label": "7:3",
+                  "presets": [
+                    {
+                      "id": "1344x576",
+                      "width": 1344,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:7",
+                  "label": "3:7",
+                  "presets": [
+                    {
+                      "id": "576x1344",
+                      "width": 576,
+                      "height": 1344,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
             },
             "steps": {
               "default": 9,
@@ -21883,8 +22016,8 @@
                 "kind": "upstream",
                 "source": "https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py",
                 "revision": "768cb50d847cdbba97c89533ae976be69cf5a5b8",
-                "qualified": false,
-                "evidence": "static-contract: upstream app.py RES_CHOICES[1024] oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded"
+                "qualified": true,
+                "evidence": "docs/qualification/z-image-1024-tier-metal-q4.json: exact-size Q4 Metal generation and decoded PNG delivery for every 1024-tier candidate"
               }
             ]
           }
