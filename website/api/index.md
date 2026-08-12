@@ -1136,16 +1136,16 @@ level of the object — the defaults are not nested under a `defaults` key.
 Video models additionally advertise their frame semantics there, so clients
 stop hardcoding a frame count that ignores the selected checkpoint:
 
-| Field                           | Meaning                                                                                                                                                               |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `default_frames`                | Default frame count for one clip. LTX-2 defaults to 97, LTX-Video to its shipped 25.                                                                                  |
-| `default_fps`                   | Default frames per second.                                                                                                                                            |
-| `max_frames`                    | Ceiling for a single request **at `default_fps`** — 484 for LTX-2 at 24 fps, 257 for LTX-Video.                                                                       |
+| Field                           | Meaning                                                                                                                                                                                                                                             |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `default_frames`                | Default frame count for one clip. LTX-2 defaults to 97, LTX-Video to its shipped 25.                                                                                                                                                                |
+| `default_fps`                   | Default frames per second.                                                                                                                                                                                                                          |
+| `max_frames`                    | Ceiling for a single request **at `default_fps`** — 484 for LTX-2 at 24 fps, 257 for LTX-Video.                                                                                                                                                     |
 | `supports_extend`               | Whether this model can continue an existing video in one request. Every LTX-2 checkpoint can; Wan answers per checkpoint, from the same `source_image` contract its seam reads. Absent on servers that predate continuation — read absence as "no". |
-| `extend_default_overlap_frames` | Overlap applied when a continuation omits `extend_overlap_frames`. Per family, because it is the family's carryover: 17 on LTX-2, 1 on Wan.                            |
-| `max_runtime_seconds`           | Present when the family's real ceiling is a duration rather than a frame count (LTX-2: 20). Recompute `max_frames` at another fps as `max_runtime_seconds · fps + 4`. |
-| `max_frames_absolute`           | fps-independent frame guard paired with `max_runtime_seconds` (LTX-2: 604).                                                                                           |
-| `frame_step`                    | Valid frame counts are `k · frame_step + 1`; 8 for the LTX families.                                                                                                  |
+| `extend_default_overlap_frames` | Overlap applied when a continuation omits `extend_overlap_frames`. Per family, because it is the family's carryover: 17 on LTX-2, 1 on Wan.                                                                                                         |
+| `max_runtime_seconds`           | Present when the family's real ceiling is a duration rather than a frame count (LTX-2: 20). Recompute `max_frames` at another fps as `max_runtime_seconds · fps + 4`.                                                                               |
+| `max_frames_absolute`           | fps-independent frame guard paired with `max_runtime_seconds` (LTX-2: 604).                                                                                                                                                                         |
+| `frame_step`                    | Valid frame counts are `k · frame_step + 1`; 8 for the LTX families.                                                                                                                                                                                |
 
 Models with a tuned default negative prompt (wan today) additionally
 advertise `default_negative_prompt`: the negative the engine applies when a
