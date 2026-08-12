@@ -2,7 +2,7 @@
 name = "mold-ai-candle"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT AND Apache-2.0"
 repository.workspace = true
 rust-version.workspace = true
 description = "Mold-owned models and extension operations for upstream Candle"
@@ -30,6 +30,7 @@ flash-attn = ["dep:candle-flash-attn", "cuda"]
 candle = { package = "candle-core", version = "0.11" }
 candle-nn = "0.11"
 candle-transformers = "0.11"
+half = "2"
 # The H3 runtime fingerprint qualifies this exact crates.io payload, not
 # an arbitrary semver-compatible 0.11.x implementation.
 candle-flash-attn = { version = "=0.11.0", optional = true }
@@ -39,3 +40,6 @@ sha2 = "0.10"
 thiserror = "2"
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 tracing = "0.1"
+
+[build-dependencies]
+cudaforge = "=0.1.6"

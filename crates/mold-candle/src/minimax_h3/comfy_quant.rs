@@ -12,8 +12,9 @@
 //! - The pruned DiT stores INT8 weights after a regular, normalized, 256-wide
 //!   ConvRot transform and carries one F32 scale per output row. Its source
 //!   reference rotates activations in the input dtype, performs dynamic
-//!   per-row INT8 QDQ, streams output-row chunks, and applies both F32 scales
-//!   without retaining a dense weight.
+//!   per-row INT8 QDQ, and applies both F32 scales. CUDA uses the pinned
+//!   INT8-to-INT32 cuBLASLt boundary; CPU and Metal stream portable F32
+//!   output-row chunks without retaining a dense weight.
 //! - The pruned DiT's scaled FP8 matrices retain E4M3 weights plus scalar F32
 //!   weight/input scales. Their reference path preserves the source QDQ order
 //!   and accumulates against bounded, reconstructed F32 weight chunks.
@@ -39,6 +40,10 @@ pub const H3_COMFY_NVFP4_BLOCK_SIZE: usize = 16;
 
 /// Bounded default for portable dequantized weight staging.
 pub const H3_COMFY_PORTABLE_ROW_CHUNK: usize = 256;
+
+/// Workspace offered to the source-matched cuBLASLt INT8 heuristic.
+#[cfg(any(feature = "cuda", feature = "h3-private-uat"))]
+pub(crate) const H3_NATIVE_INT8_CUBLAS_WORKSPACE_BYTES: usize = 4 * 1024 * 1024;
 
 const E2M1_LUT: [f32; 16] = [
     0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
@@ -471,6 +476,7 @@ impl H3ComfyInt8ConvRotLinear {
         output_dtype: DType,
         rows_per_chunk: usize,
         has_bias: bool,
+        native_cuda: bool,
     ) -> Result<u64> {
         if input_rows == 0 || rows_per_chunk == 0 {
             candle::bail!("MiniMax H3 reference workspace requires positive rows and chunk size")
@@ -501,6 +507,44 @@ impl H3ComfyInt8ConvRotLinear {
             H3_COMFY_CONVROT_GROUP_SIZE,
             input_bytes,
         ])?;
+        if native_cuda {
+            if has_bias {
+                candle::bail!("MiniMax H3 native INT8 CUDA workspace does not accept bias")
+            }
+            let rotated_input = activation_input;
+            let packed_weight = checked(&[
+                self.out_features,
+                self.in_features,
+                std::mem::size_of::<u8>(),
+            ])?;
+            let weight_scales = checked(&[self.out_features, std::mem::size_of::<f32>()])?;
+            let quantized_input =
+                checked(&[input_rows, self.in_features, std::mem::size_of::<i8>()])?;
+            let input_scales = checked(&[input_rows, std::mem::size_of::<f32>()])?;
+            let accumulator =
+                checked(&[input_rows, self.out_features, std::mem::size_of::<i32>()])?;
+            let output = checked(&[input_rows, self.out_features, output_bytes])?;
+            return [
+                hadamard_f32,
+                hadamard_input,
+                rotated_input,
+                packed_weight,
+                weight_scales,
+                quantized_input,
+                input_scales,
+                accumulator,
+                u64::try_from(H3_NATIVE_INT8_CUBLAS_WORKSPACE_BYTES).map_err(|_| {
+                    candle::Error::Msg("MiniMax H3 cuBLAS workspace exceeds u64".into())
+                })?,
+                output,
+            ]
+            .into_iter()
+            .try_fold(0u64, |total, bytes| {
+                total.checked_add(bytes).ok_or_else(|| {
+                    candle::Error::Msg("MiniMax H3 native CUDA workspace sum overflows".into())
+                })
+            });
+        }
         let signed_widening_workspace = accelerator_signed_widening_workspace_upper_bound(
             chunk.checked_mul(self.in_features).ok_or_else(|| {
                 candle::Error::Msg("MiniMax H3 signed widening element count overflows".into())
@@ -738,14 +782,14 @@ impl H3ComfyInt8ConvRotLinear {
         )
     }
 
-    /// Execute Comfy's source-defined INT8 ConvRot W8A8 reference order.
+    /// Execute Comfy's source-defined INT8 ConvRot W8A8 order.
     ///
     /// Activations are rotated in their input dtype, dynamically quantized
     /// per row with `absmax / 127`, rounded and clamped to signed INT8, then
-    /// accumulated against the checkpoint's packed signed bytes. Scales are
-    /// applied in F32 before each bounded output-row chunk is converted to the
-    /// requested output dtype. This mirrors comfy-kitchen's eager fallback
-    /// while retaining neither a dense block weight nor the full output-width
+    /// accumulated against the checkpoint's packed signed bytes. CUDA performs
+    /// native signed INT8-to-INT32 multiplication and applies both scales in
+    /// F32. CPU and Metal mirror the eager fallback with bounded output-row
+    /// chunks, retaining neither a dense block weight nor the full-width
     /// accumulator.
     pub fn forward_reference(
         &self,
@@ -773,6 +817,26 @@ impl H3ComfyInt8ConvRotLinear {
             .reshape((grouped_rows, H3_COMFY_CONVROT_GROUP_SIZE))?
             .matmul(&hadamard)?
             .reshape((rows, self.in_features))?;
+        #[cfg(feature = "cuda")]
+        if device.is_cuda()
+            && bias.is_none()
+            && self.in_features.is_multiple_of(4)
+            && self.out_features.is_multiple_of(4)
+        {
+            let weight = self.weight.to_device(device)?;
+            let weight_scale = self.weight_scale.to_device(device)?;
+            let mut output_shape = output_shape;
+            *output_shape
+                .last_mut()
+                .expect("flattened_input established a nonempty shape") = self.out_features;
+            return super::int8_cuda::native_int8_linear(
+                &rotated,
+                &weight,
+                &weight_scale,
+                output_dtype,
+            )?
+            .reshape(&*output_shape);
+        }
         let input_scale = rotated
             .abs()?
             .max_keepdim(1)?
@@ -1689,6 +1753,62 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "h3-private-uat")]
+    #[test]
+    fn int8_convrot_workspace_prices_native_cuda_lifetimes() -> Result<()> {
+        let outputs = 16;
+        let input_rows = 3;
+        let linear = H3ComfyInt8ConvRotLinear::new(
+            Tensor::zeros(
+                (outputs, H3_COMFY_CONVROT_GROUP_SIZE),
+                DType::U8,
+                &Device::Cpu,
+            )?,
+            Tensor::ones((outputs, 1), DType::F32, &Device::Cpu)?,
+        )?;
+        let hadamard_f32 = H3_COMFY_CONVROT_GROUP_SIZE.pow(2) * 4;
+        let hadamard_bf16 = H3_COMFY_CONVROT_GROUP_SIZE.pow(2) * 2;
+        let rotated_bf16 = input_rows * H3_COMFY_CONVROT_GROUP_SIZE * 2;
+        let packed_weight = outputs * H3_COMFY_CONVROT_GROUP_SIZE;
+        let weight_scales = outputs * 4;
+        let quantized_input = input_rows * H3_COMFY_CONVROT_GROUP_SIZE;
+        let input_scales = input_rows * 4;
+        let accumulator = input_rows * outputs * 4;
+        let output = input_rows * outputs * 2;
+        let expected = hadamard_f32
+            + hadamard_bf16
+            + rotated_bf16
+            + packed_weight
+            + weight_scales
+            + quantized_input
+            + input_scales
+            + accumulator
+            + H3_NATIVE_INT8_CUBLAS_WORKSPACE_BYTES
+            + output;
+        assert_eq!(
+            linear.reference_workspace_upper_bound(
+                input_rows,
+                DType::BF16,
+                DType::BF16,
+                H3_COMFY_PORTABLE_ROW_CHUNK,
+                false,
+                true,
+            )?,
+            expected as u64
+        );
+        assert!(linear
+            .reference_workspace_upper_bound(
+                input_rows,
+                DType::BF16,
+                DType::BF16,
+                H3_COMFY_PORTABLE_ROW_CHUNK,
+                true,
+                true,
+            )
+            .is_err());
+        Ok(())
+    }
+
     fn assert_signed_rows(device: &Device) -> Result<()> {
         let mut bytes = vec![0u8; H3_COMFY_CONVROT_GROUP_SIZE];
         bytes[..4].copy_from_slice(&[0x80, 0xff, 0x00, 0x7f]);
@@ -1717,6 +1837,70 @@ mod tests {
             return Ok(());
         };
         assert_signed_rows(&device)
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn int8_convrot_native_cuda_matches_portable_reference() -> Result<()> {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let cpu = Device::Cpu;
+        let columns = H3_COMFY_CONVROT_GROUP_SIZE;
+        let outputs = 8;
+        let raw = (0..outputs * columns)
+            .map(|index| (((index * 37 + 11) % 251) as i16 - 125) as i8 as u8)
+            .collect::<Vec<_>>();
+        let linear = H3ComfyInt8ConvRotLinear::new(
+            Tensor::from_vec(raw, (outputs, columns), &cpu)?,
+            Tensor::from_vec(
+                (0..outputs)
+                    .map(|index| (index + 1) as f32 / 256.0)
+                    .collect::<Vec<_>>(),
+                (outputs, 1),
+                &cpu,
+            )?,
+        )?;
+        let values = (0..3 * columns)
+            .map(|index| ((index * 17 % 257) as f32 - 128.0) / 37.0)
+            .collect::<Vec<_>>();
+        let expected = linear.forward_reference(
+            &Tensor::from_vec(values.clone(), (3, columns), &cpu)?,
+            None,
+            DType::F32,
+            4,
+        )?;
+        let actual = linear
+            .forward_reference(
+                &Tensor::from_vec(values.clone(), (3, columns), &cuda)?,
+                None,
+                DType::F32,
+                4,
+            )?
+            .to_device(&cpu)?;
+        assert!(max_error(&actual, &expected)? <= 1e-4);
+
+        // Exact BF16 values from the source-pinned PyTorch/Comfy operation:
+        // BF16 ConvRot, rowwise QDQ, signed INT8 accumulation, then ordered
+        // F32 activation-scale and weight-scale multiplication.
+        let expected_bf16 = vec![
+            -8.8125, 11.5625, 9.9375, -17.75, -35.0, -29.125, -4.71875, 11.75, -8.25, 14.125,
+            -1.4453125, -23.375, -51.25, 43.75, -3.921875, -16.375, -14.4375, 8.375, 38.25, -59.25,
+            -58.25, 39.5, 56.25, -84.5,
+        ];
+        let actual_bf16 = linear
+            .forward_reference(
+                &Tensor::from_vec(values, (3, columns), &cuda)?.to_dtype(DType::BF16)?,
+                None,
+                DType::BF16,
+                4,
+            )?
+            .to_device(&cpu)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(actual_bf16, expected_bf16);
+        Ok(())
     }
 
     #[cfg(feature = "metal")]

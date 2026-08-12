@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Run compact MiniMax H3 DiT INT8 projections through the source-matched CUDA path: BF16/F16/F32 ConvRot activations are dynamically quantized by row, multiplied as signed INT8 into INT32 with cached cuBLASLt plans, and dequantized in the pinned F32 scale order. A representative 4096x5376 by 7168 BF16 projection on the qualification L40S measured about 42 ms after plan warmup; the portable CPU/Metal and Qwen weight-only paths are unchanged. This optimization changes the qualified executable identity, so a fresh exact-source campaign remains required before the private allowlist can use it.
+
 - Stage MiniMax H3 compact INT8 transformer weight bytes directly on the execution device before exact signed widening, eliminating per-evaluation host scalar expansion and reducing each streamed weight transfer from four bytes per value to one without changing the portable W8A8 reference equations.
 
 - Fix the iPhone app aborting during native startup by installing its selected rustls cryptography provider before Tauri or any networking plugin can construct a reqwest client.

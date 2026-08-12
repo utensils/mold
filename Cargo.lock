@@ -3139,6 +3139,8 @@ dependencies = [
  "candle-flash-attn",
  "candle-nn",
  "candle-transformers",
+ "cudaforge",
+ "half",
  "serde",
  "serde_json",
  "sha2",
