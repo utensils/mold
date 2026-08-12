@@ -2,6 +2,7 @@ import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import MinimaxH3AuthoringPanel from "./MinimaxH3AuthoringPanel.vue";
 import type { MinimaxH3AuthoringState } from "../lib/minimaxH3Authoring";
+import { emptyMinimaxH3AuthoringState } from "../lib/minimaxH3Authoring";
 import {
   h264AacMp4Fixture,
   pcmWavFixture,
@@ -63,6 +64,81 @@ function fileBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 describe("MinimaxH3AuthoringPanel", () => {
+  it("presents the reviewed first-frame-only contract", () => {
+    const wrapper = mount(MinimaxH3AuthoringPanel, {
+      props: {
+        modelValue: emptyMinimaxH3AuthoringState(),
+        task: "fl2va",
+        requiredEndpoint: "first",
+      },
+    });
+
+    expect(wrapper.get("[data-test='h3-mode']").text()).toBe(
+      "first-frame-required",
+    );
+    expect(wrapper.text()).toContain("Required");
+    expect(wrapper.text()).toContain("accepts no other endpoint mode");
+    expect(wrapper.find("[data-test='h3-last-file']").exists()).toBe(false);
+  });
+
+  it("keeps an incompatible restored last frame removable", () => {
+    const restored = emptyMinimaxH3AuthoringState();
+    restored.lastFrame = {
+      filename: "old-last.png",
+      mimeType: "image/png",
+      width: 1344,
+      height: 768,
+      data: "LAST",
+    };
+    const wrapper = mount(MinimaxH3AuthoringPanel, {
+      props: {
+        modelValue: restored,
+        task: "fl2va",
+        requiredEndpoint: "first",
+      },
+    });
+
+    expect(wrapper.find("[data-test='h3-last-file']").exists()).toBe(true);
+    expect(
+      wrapper.get("[data-test='h3-last-file']").attributes("disabled"),
+    ).toBe("");
+    expect(wrapper.get("[data-test='h3-mode']").text()).toBe(
+      "first-frame-required",
+    );
+    expect(wrapper.text()).toContain("incompatible; remove");
+    expect(wrapper.get("[data-test='h3-last-remove']").text()).toBe("Remove");
+  });
+
+  it("never presents a restored first-plus-last pair as supported", () => {
+    const restored = emptyMinimaxH3AuthoringState();
+    restored.firstFrame = {
+      filename: "first.png",
+      mimeType: "image/png",
+      width: 1344,
+      height: 768,
+      data: "FIRST",
+    };
+    restored.lastFrame = {
+      filename: "old-last.png",
+      mimeType: "image/png",
+      width: 1344,
+      height: 768,
+      data: "LAST",
+    };
+    const wrapper = mount(MinimaxH3AuthoringPanel, {
+      props: {
+        modelValue: restored,
+        task: "fl2va",
+        requiredEndpoint: "first",
+      },
+    });
+
+    expect(wrapper.get("[data-test='h3-mode']").text()).toBe(
+      "first-frame-to-audio-video",
+    );
+    expect(wrapper.text()).not.toContain("first-and-last-frame-to-audio-video");
+  });
+
   it("renders semantic resynthesis, one-based mixed order, soundtrack association, and budgets", () => {
     const wrapper = mount(MinimaxH3AuthoringPanel, {
       props: { modelValue: state(), task: "ref2va" },
