@@ -37,8 +37,8 @@ describe("resolution presets", () => {
     expect(presetsForFamily("sdxl").some((r) => r.width === 1024 && r.height === 1024)).toBe(true);
   });
 
-  it("unknown families fall back to the modern 1 MP list", () => {
-    expect(presetsForFamily("brand-new")).toEqual(presetsForFamily("flux"));
+  it("unknown families do not fabricate FLUX presets", () => {
+    expect(presetsForFamily("brand-new")).toEqual([]);
   });
 
   it("matchPreset finds exact matches and returns null for custom sizes", () => {
@@ -46,32 +46,22 @@ describe("resolution presets", () => {
     expect(matchPreset(1000, 1000, "flux")).toBeNull();
   });
 
-  it("keeps the desktop Qwen buckets aligned with the core recommendations", () => {
-    const expected = [
-      ["1:1", 1328, 1328],
-      ["1:1", 1024, 1024],
-      ["9:7", 1152, 896],
-      ["7:9", 896, 1152],
-      ["19:13", 1216, 832],
-      ["13:19", 832, 1216],
-      ["7:4", 1344, 768],
-      ["4:7", 768, 1344],
-      ["≈16:9", 1664, 928],
-      ["≈9:16", 928, 1664],
-      ["1:1", 768, 768],
-      ["1:1", 512, 512],
-    ];
+  it("withholds Qwen candidates until core qualification is recorded", () => {
     for (const family of ["qwen-image", "qwen-image-edit"]) {
-      expect(matchPreset(1328, 1328, family)?.aspect).toBe("1:1");
-      expect(
-        presetsForFamily(family).map(({ aspect, width, height }) => [aspect, width, height]),
-      ).toEqual(expected);
+      expect(matchPreset(1328, 1328, family)).toBeNull();
+      expect(presetsForFamily(family)).toEqual([]);
     }
+  });
+
+  it("exposes the runtime-qualified Z-Image 1024 tier", () => {
+    expect(matchPreset(1280, 720, "z-image")?.aspect).toBe("16:9");
+    expect(matchPreset(720, 1280, "z-image")?.aspect).toBe("9:16");
+    expect(presetsForFamily("z-image")).toHaveLength(11);
   });
 
   it("describes preset and custom aspect ratios with their orientation", () => {
     expect(aspectRatioLabel(1328, 1328, "qwen-image-edit")).toBe("1:1");
-    expect(aspectRatioLabel(1344, 768, "qwen-image")).toBe("7:4");
+    expect(aspectRatioLabel(1584, 1056, "qwen-image")).toBe("3:2");
     expect(aspectRatioLabel(1200, 800, "flux")).toBe("3:2");
     expect(orientationLabel(1200, 800)).toBe("Landscape");
     expect(orientationLabel(800, 1200)).toBe("Portrait");

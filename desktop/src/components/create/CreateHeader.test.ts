@@ -74,7 +74,7 @@ describe("CreateHeader", () => {
     sequenceForm.fps = 24;
     const wrapper = mount(CreateHeader, { props: { form: sequenceForm } });
     expect(wrapper.get(".ms-header__title").text()).toBe("Untitled sequence");
-    expect(wrapper.get(".ms-header__summary").text()).toBe("16:9 · 1216×704 · 2 clips · 24 fps");
+    expect(wrapper.get(".ms-header__summary").text()).toBe("19:11 · 1216×704 · 2 clips · 24 fps");
   });
 
   it("does not open a routing menu with a single host", async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyMetadataToForm,
   applyModelDefaults,
+  applyRecipeDefaults,
   applyPrefillToForm,
   buildRequest,
   cloneGenerateForm,
@@ -16,6 +17,7 @@ import { MAX_LORA_STACK } from "./capabilities";
 import { WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT } from "@studio/lib/negativePrompt";
 import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
 import type { ModelEntry, OutputMetadata } from "./api/types";
+import type { GenerationProfileSet, GenerationRecipeProfile } from "@studio/lib/generationProfile";
 
 function ltx2Model(): ModelEntry {
   return {
@@ -32,6 +34,123 @@ function ltx2Model(): ModelEntry {
     downloaded: true,
   };
 }
+
+function profiledLtx2Model(): ModelEntry {
+  const recipe = (
+    id: string,
+    pipeline: NonNullable<GenerationRecipeProfile["request_selector"]["pipeline"]>,
+    defaults: { width: number; height: number; steps: number; guidance: number },
+  ): GenerationRecipeProfile => ({
+    id,
+    label: id,
+    request_selector: { pipeline },
+    defaults: { ...defaults, negative_prompt: null },
+    resolution: {
+      domain: "buckets" as const,
+      alignment: 32,
+      min_width: 64,
+      min_height: 64,
+      max_pixels: 2_000_000,
+      aspect_groups: [
+        {
+          id: "fixture",
+          label: "Fixture",
+          presets: [{ id: `${defaults.width}x${defaults.height}`, ...defaults, tier: "native" }],
+        },
+      ],
+    },
+    steps: { default: defaults.steps, min: 1, max: 50, step: 1, mode: "adjustable" as const },
+    guidance: {
+      default: defaults.guidance,
+      min: 0,
+      max: 10,
+      step: 0.1,
+      mode: "adjustable" as const,
+    },
+    temporal: null,
+    capabilities: {
+      guidance: { adjustable: true, supports_negative_prompt: false },
+      negative_prompt: { mode: "hidden" as const, required: false },
+      source_image: "optional" as const,
+      supports_lora: true,
+      supports_controlnet: false,
+      supports_sequence: true,
+      supports_extend: true,
+      supports_audio: true,
+      source_video: { mode: "adjustable" as const, required: false },
+      mask: { mode: "hidden" as const, required: false },
+      keyframes: { mode: "adjustable" as const, required: false },
+      audio: { mode: "adjustable" as const, required: false },
+      lora: { mode: "adjustable" as const, max_count: 4 },
+      controlnet: { mode: "hidden" as const, max_count: 0 },
+      output: {
+        default_format: "mp4" as const,
+        formats: ["mp4" as const, "gif" as const],
+        audio_requires_mp4: true,
+      },
+      wan_recipe: {
+        mode: "hidden" as const,
+        supports_distill_strength: false,
+        supports_first_last_frame: false,
+      },
+      schedulers: [],
+    },
+  });
+  const generation_profile: GenerationProfileSet = {
+    schema_version: 1,
+    profile_id: "ltx2.fixture.v1",
+    profile_hash: "fixture-hash",
+    default_recipe_id: "one-stage",
+    recipes: [
+      recipe("one-stage", "one-stage", {
+        width: 1024,
+        height: 576,
+        steps: 20,
+        guidance: 3,
+      }),
+      recipe("two-stage", "two-stage", {
+        width: 1536,
+        height: 1024,
+        steps: 30,
+        guidance: 4,
+      }),
+    ],
+  };
+  return { ...ltx2Model(), generation_profile };
+}
+
+describe("recipe defaults", () => {
+  it("resets model-owned controls while preserving authored request state", () => {
+    const form = newGenerateForm();
+    form.prompt = "authored prompt";
+    form.seed = "42";
+    form.batchSize = 3;
+    form.sourceImage = "source";
+    form.width = 640;
+    form.height = 640;
+    form.steps = 7;
+    form.guidance = 8;
+    form.scheduler = "euler";
+    form.cfgPlus = true;
+    form.guidanceOverrides = { ...form.guidanceOverrides, stgScale: 2 };
+
+    expect(applyRecipeDefaults(form, profiledLtx2Model(), "two-stage")).toBe(true);
+    expect(form).toMatchObject({
+      prompt: "authored prompt",
+      seed: "42",
+      batchSize: 3,
+      sourceImage: "source",
+      pipeline: "two-stage",
+      width: 1536,
+      height: 1024,
+      steps: 30,
+      guidance: 4,
+      scheduler: "default",
+      cfgPlus: false,
+    });
+    expect(form.guidanceOverrides.stgScale).toBeNull();
+  });
+});
 
 function ltx2Form() {
   const form = newGenerateForm();

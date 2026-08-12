@@ -37,9 +37,11 @@ import Icon from "@ui/components/Icon.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import { ASPECTS } from "@ui/lib/resolution";
 import {
-  MAX_GENERATION_PIXELS,
-  maxAxisPixelsForModel,
-} from "@studio/lib/resolutions";
+  effectiveGenerationRecipe,
+  floatControlError,
+  integerControlError,
+  resolutionProfileError,
+} from "@studio/lib/generationProfile";
 import type { DevelopPhase } from "@ui/lib/grain";
 import type { ClipRailMedia } from "@ui/components/types";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
@@ -1101,6 +1103,7 @@ function syncSourceCanvas(
   const resolution = resolveSourceResolution(
     dimensions,
     currentModel.value ?? form.state.value.modelFamily,
+    form.state.value.pipeline,
   );
   const replaced = image.base64 !== previous.base64;
   const wasFollowing =
@@ -1126,7 +1129,10 @@ watch(
   [
     () => form.state.value.imageAttachments[0]?.base64 ?? null,
     () => currentModel.value?.name ?? form.state.value.model,
+    () => form.state.value.pipeline ?? null,
+    () => currentModel.value?.generation_profile?.profile_hash ?? null,
     () => currentModel.value?.max_pixels ?? null,
+    () => currentModel.value?.max_axis_pixels ?? null,
     () => currentModel.value?.dimension_alignment ?? null,
     () =>
       currentModel.value?.recommended_dimensions
@@ -1152,7 +1158,10 @@ watch(
   [
     () => draft.openingImage?.base64 ?? null,
     () => currentModel.value?.name ?? form.state.value.model,
+    () => form.state.value.pipeline ?? null,
+    () => currentModel.value?.generation_profile?.profile_hash ?? null,
     () => currentModel.value?.max_pixels ?? null,
+    () => currentModel.value?.max_axis_pixels ?? null,
     () => currentModel.value?.dimension_alignment ?? null,
     () =>
       currentModel.value?.recommended_dimensions
@@ -1204,6 +1213,7 @@ const capabilities = computed(() =>
     form.state.value.pipeline,
     null,
     currentModel.value?.source_image ?? form.state.value.sourceImageCapability,
+    effectiveGenerationRecipe(currentModel.value, form.state.value.pipeline),
   ),
 );
 
@@ -2276,26 +2286,20 @@ function validateSubmit(): boolean {
     showAdvanced.value = true;
     return false;
   }
-  const pixels = form.state.value.width * form.state.value.height;
-  const maxPixels = currentModel.value?.max_pixels ?? MAX_GENERATION_PIXELS;
-  if (pixels > maxPixels) {
-    composerError.value = `${form.state.value.width} × ${form.state.value.height} exceeds this model's ${(
-      maxPixels / 1_000_000
-    ).toFixed(1)} MP limit.`;
-    return false;
-  }
-  // The per-axis span is a separate limit from the pixel budget: LTX-2
-  // normalizes RoPE positions by it, so a long edge past it is out of
-  // distribution however small the frame is.
-  const maxAxis = maxAxisPixelsForModel(
+  const recipe = effectiveGenerationRecipe(
     currentModel.value,
     form.state.value.pipeline,
   );
-  if (
-    maxAxis &&
-    Math.max(form.state.value.width, form.state.value.height) > maxAxis
-  ) {
-    composerError.value = `${form.state.value.width} × ${form.state.value.height} exceeds the ${maxAxis}px span this model can hold. Keep the long edge at or below ${maxAxis}px.`;
+  const profileError =
+    resolutionProfileError(
+      form.state.value.width,
+      form.state.value.height,
+      recipe?.resolution,
+    ) ??
+    integerControlError("Steps", form.state.value.steps, recipe?.steps) ??
+    floatControlError("Guidance", form.state.value.guidance, recipe?.guidance);
+  if (profileError) {
+    composerError.value = profileError;
     return false;
   }
   const qwenImageEdit =
@@ -2443,6 +2447,10 @@ function feasibilityMessage(
   result: Exclude<FeasibilityResult, { kind: "route" }>,
   subject: string,
 ): string {
+  if (result.kind === "profile_mismatch") {
+    const machines = result.perHost.map((host) => host.label).join(", ");
+    return `Settings differ by machine${machines ? ` (${machines})` : ""}. Choose a specific machine before generating. Nothing was queued.`;
+  }
   const unreachableMessages = (
     hosts: ReadonlyArray<{ label: string; error: string }>,
   ) =>

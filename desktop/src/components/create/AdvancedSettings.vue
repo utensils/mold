@@ -6,6 +6,7 @@ import SegmentedControl, { type SegmentOption } from "@ui/components/SegmentedCo
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import Chip from "@ui/components/Chip.vue";
 import {
+  applyRecipeDefaults,
   buildRequest,
   formExtendOverlapFrames,
   resetFormToModelDefaults,
@@ -26,9 +27,9 @@ import {
   generationCapabilitiesForFamily,
   MAX_LORA_STACK,
   defaultOutputFormat,
-  outputFormatsForFamily,
 } from "../../lib/capabilities";
 import { schedulerLabel } from "@studio/lib/generationCapabilities";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
   MAX_WAN_DISTILL_STRENGTH,
   emptyWanRecipe,
@@ -131,10 +132,11 @@ const caps = computed(() =>
     // otherwise the form's snapshot of it. Without this the Source image
     // section would render for a text-to-video wan checkpoint that rejects one.
     props.selectedModel?.source_image ?? props.form.sourceImageCapability,
+    effectiveGenerationRecipe(props.selectedModel, props.form.pipeline),
   ),
 );
 const audioOutputSupported = computed(() => props.selectedModel?.supports_audio !== false);
-const formats = computed(() => outputFormatsForFamily(props.form.family));
+const formats = computed(() => caps.value.outputFormats as OutputFormat[]);
 const advancedCount = computed(() => advancedActiveCount(props.form));
 const h3Task = computed(() =>
   props.selectedModel ? minimaxH3TaskForModel(props.form.model) : null,
@@ -183,12 +185,21 @@ function addNegative(word: string) {
 const formatOptions = computed<SegmentOption<OutputFormat>[]>(() =>
   formats.value.map((f) => ({ value: f, label: f })),
 );
-const snap16 = (v: number) => Math.max(64, Math.round(v / 16) * 16);
+const resolutionAlignment = computed(
+  () =>
+    effectiveGenerationRecipe(props.selectedModel, props.form.pipeline)?.resolution.alignment ??
+    props.selectedModel?.dimension_alignment ??
+    16,
+);
+const snapDimension = (v: number) => {
+  const alignment = resolutionAlignment.value;
+  return Math.max(64, Math.round(v / alignment) * alignment);
+};
 function snapWidth() {
-  props.form.width = snap16(props.form.width);
+  props.form.width = snapDimension(props.form.width);
 }
 function snapHeight() {
-  props.form.height = snap16(props.form.height);
+  props.form.height = snapDimension(props.form.height);
 }
 function swapSize() {
   [props.form.width, props.form.height] = [props.form.height, props.form.width];
@@ -303,9 +314,10 @@ const pipelineOptions: Ltx2PipelineMode[] = [
 const spatialOptions: Ltx2SpatialUpscale[] = ["x1-5", "x2"];
 const temporalOptions: Ltx2TemporalUpscale[] = ["x2"];
 function setPipeline(v: string) {
-  props.form.pipeline = (v || null) as Ltx2PipelineMode | null;
-  if (!isControlAdapterPipeline(props.form.pipeline)) props.form.icLoraControl = null;
-  if (props.form.pipeline !== "retake") props.form.retakeRange = null;
+  const pipeline = (v || null) as Ltx2PipelineMode | null;
+  applyRecipeDefaults(props.form, props.selectedModel, pipeline);
+  if (!isControlAdapterPipeline(pipeline)) props.form.icLoraControl = null;
+  if (pipeline !== "retake") props.form.retakeRange = null;
   // `t2a` renders no frames, so the server rejects every video container.
   // Move the format with the mode rather than letting the user discover the
   // mismatch as a 422; leaving `t2a` restores the family default.
@@ -317,9 +329,13 @@ function setPipeline(v: string) {
 }
 const audioOnlyPipeline = computed(() => isAudioOnlyPipeline(props.form.pipeline));
 function setControlAdapter(value: string) {
-  props.form.icLoraControl = value || null;
   // Lip dub is a pipeline of its own; every other adapter drives `ic-lora`.
-  if (value) props.form.pipeline = pipelineForControlId(value);
+  if (value) {
+    applyRecipeDefaults(props.form, props.selectedModel, pipelineForControlId(value));
+    props.form.icLoraControl = value;
+  } else {
+    props.form.icLoraControl = null;
+  }
 }
 function setSpatial(v: string) {
   props.form.spatialUpscale = (v || null) as Ltx2SpatialUpscale | null;
@@ -714,7 +730,7 @@ function reset() {
           <input
             v-model.number="form.width"
             type="number"
-            step="16"
+            :step="resolutionAlignment"
             min="64"
             aria-label="Width"
             class="ms-input data-mono"
@@ -732,7 +748,7 @@ function reset() {
           <input
             v-model.number="form.height"
             type="number"
-            step="16"
+            :step="resolutionAlignment"
             min="64"
             aria-label="Height"
             class="ms-input data-mono"

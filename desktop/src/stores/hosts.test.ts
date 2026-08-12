@@ -427,6 +427,51 @@ describe("hosts store", () => {
     expect(hosts.resolveRoute(null)?.hostId).toBe("hal9000-7680");
   });
 
+  it("requires an explicit machine when installed model profiles differ", async () => {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "host-key",
+      status: "ready",
+      error: null,
+      instanceId: "hal-instance",
+    });
+    const hostModels = useHostModelsStore();
+    hostModels.byHost.local = {
+      entries: [
+        {
+          ...installedModel(placementRequest.model),
+          generation_profile: { profile_hash: "local-profile" } as never,
+        },
+      ],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    hostModels.byHost[hal.id] = {
+      entries: [
+        {
+          ...installedModel(placementRequest.model),
+          generation_profile: { profile_hash: "remote-profile" } as never,
+        },
+      ],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+
+    expect(hosts.resolveRoute(null, placementRequest.model)).toBeNull();
+    await expect(hosts.resolveFeasible(null, placementRequest)).resolves.toEqual({
+      kind: "profile_mismatch",
+      perHost: [
+        expect.objectContaining({ hostId: "local", profileHash: "local-profile" }),
+        expect.objectContaining({ hostId: hal.id, profileHash: "remote-profile" }),
+      ],
+    });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+    expect(hosts.resolveRoute(hal.id, placementRequest.model)?.hostId).toBe(hal.id);
+  });
+
   it("resolveRoute honors an explicit pick and refuses unavailable hosts", async () => {
     testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
     const hosts = useHostsStore();

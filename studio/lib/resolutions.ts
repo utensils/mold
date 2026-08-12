@@ -1,5 +1,11 @@
 /** Shared, server-aligned resolution presets for web, desktop, and iPhone. */
 
+import {
+  effectiveGenerationRecipe,
+  type GenerationProfileSet,
+} from "./generationProfile";
+import { LEGACY_RESOLUTION_PRESETS_V1 } from "./generated/generationProfileV1";
+
 export interface ResolutionPreset {
   label: string;
   aspect: string;
@@ -20,6 +26,7 @@ export interface ModelResolutionContract {
   max_axis_pixels?: number | null;
   recommended_dimensions?: RecommendedDimensions[] | null;
   dimension_alignment?: number | null;
+  generation_profile?: GenerationProfileSet | null;
 }
 
 export const MAX_GENERATION_PIXELS = 1_800_000;
@@ -61,9 +68,10 @@ function canonicalFamily(family: string | null | undefined): string {
 }
 
 export function maxPixelsForFamily(family: string | null | undefined): number {
-  return canonicalFamily(family) === "ltx2"
-    ? LTX2_MAX_GENERATION_PIXELS
-    : MAX_GENERATION_PIXELS;
+  const canonical = canonicalFamily(family);
+  if (canonical === "ltx2") return LTX2_MAX_GENERATION_PIXELS;
+  if (canonical === "minimax-h3") return 576 * 1856;
+  return MAX_GENERATION_PIXELS;
 }
 
 export function maxAxisPixelsForFamily(
@@ -116,6 +124,8 @@ export function maxAxisPixelsForModel(
   if (typeof model === "string" || !model) {
     return maxAxisPixelsForFamily(typeof model === "string" ? model : null);
   }
+  const recipe = effectiveGenerationRecipe(model, pipeline);
+  if (recipe) return recipe.resolution.max_axis_pixels ?? null;
   const advertised =
     model.max_axis_pixels ?? maxAxisPixelsForFamily(model.family);
   if (advertised === null) return null;
@@ -131,6 +141,8 @@ export function maxPixelsForModel(
   if (typeof model === "string" || !model) {
     return maxPixelsForFamily(typeof model === "string" ? model : null);
   }
+  const recipe = effectiveGenerationRecipe(model, pipeline);
+  if (recipe) return recipe.resolution.max_pixels;
   const advertised = model.max_pixels ?? maxPixelsForFamily(model.family);
   if (pipelineRefinesSpatially(pipeline)) return advertised;
   return canonicalFamily(model.family) === "ltx2"
@@ -142,7 +154,11 @@ export function dimensionAlignmentForFamily(
   family: string | null | undefined,
 ): number {
   const normalized = canonicalFamily(family);
-  return normalized === "ltx-video" || normalized === "ltx2" ? 32 : 16;
+  return normalized === "ltx-video" ||
+    normalized === "ltx2" ||
+    normalized === "minimax-h3"
+    ? 32
+    : 16;
 }
 
 function gcd(a: number, b: number): number {
@@ -168,124 +184,32 @@ const p = (
   height,
 });
 
-const SD15 = [p(512, 512), p(512, 768), p(768, 512), p(384, 512), p(512, 384)];
-const SDXL = [
-  p(1024, 1024),
-  p(1152, 896),
-  p(896, 1152),
-  p(1216, 832),
-  p(832, 1216),
-  p(1344, 768),
-  p(768, 1344),
-  p(1536, 640),
-  p(640, 1536),
-];
-const SD3 = SDXL.slice(0, 7);
-const FLUX = [
-  p(1024, 1024),
-  p(1024, 768),
-  p(768, 1024),
-  p(1024, 576),
-  p(576, 1024),
-  p(768, 768),
-];
-const ZIMAGE = [p(1024, 1024), p(1024, 768), p(768, 1024)];
-const QWEN_IMAGE = [
-  p(1328, 1328),
-  p(1024, 1024),
-  p(1152, 896),
-  p(896, 1152),
-  p(1216, 832),
-  p(832, 1216),
-  p(1344, 768),
-  p(768, 1344),
-  p(1664, 928, "≈16:9"),
-  p(928, 1664, "≈9:16"),
-  p(768, 768),
-  p(512, 512),
-];
-const VIDEO = [
-  p(704, 480, "22:15"),
-  p(768, 512),
-  p(512, 512),
-  p(1024, 576),
-  p(1216, 704, "16:9"),
-  p(576, 1024),
-  p(768, 768),
-  p(512, 768),
-];
-/**
- * LTX-2 adds upstream's 1080p HQ pair and a 9:16 transpose of the default.
- *
- * Single-pass shapes only. The composed rungs (1440p, 4K) reach a client
- * exclusively through the server's per-model `recommended_dimensions`, because
- * whether a checkpoint can render them is a property of that checkpoint.
- */
-const LTX2_VIDEO = [
-  p(704, 480, "22:15"),
-  p(768, 512),
-  p(512, 512),
-  p(1024, 576),
-  p(1216, 704, "16:9"),
-  p(704, 1216, "9:16"),
-  p(576, 1024),
-  p(768, 768),
-  p(512, 768),
-  p(1920, 1088, "16:9"),
-  p(1088, 1920, "9:16"),
-];
-
-/**
- * Wan's family-wide buckets, mirroring `WAN_DIMS` in
- * `crates/mold-core/src/validation.rs`.
- *
- * Deliberately a union no single checkpoint supports: 2.1 and the A14B pair
- * are 480p/720p on a 16px grid, while TI2V-5B's native pair is 1280x704 on
- * its 2.2 VAE's 32px grid. `/api/models` resolves the real list per model via
- * `wan_recommended_dimensions`, so this fallback only serves a host that
- * predates that field — and it is a strict improvement on what wan got
- * before, which was `FLUX`: square 1024x1024 image buckets offered for a
- * video family.
- */
-const WAN_VIDEO = [
-  p(832, 480, "16:9"),
-  p(480, 832, "9:16"),
-  p(1280, 720, "16:9"),
-  p(720, 1280, "9:16"),
-  p(1280, 704, "16:9"),
-  p(704, 1280, "9:16"),
-];
-
-const BY_FAMILY: Record<string, ResolutionPreset[]> = {
-  sd15: SD15,
-  sdxl: SDXL,
-  sd3: SD3,
-  flux: FLUX,
-  flux2: FLUX,
-  zimage: ZIMAGE,
-  "z-image": ZIMAGE,
-  "qwen-image": QWEN_IMAGE,
-  "qwen-image-edit": QWEN_IMAGE,
-  wuerstchen: [p(1024, 1024)],
-  "ltx-video": VIDEO,
-  ltx2: LTX2_VIDEO,
-  wan: WAN_VIDEO,
-};
-
 export function presetsForFamily(family: string): ResolutionPreset[] {
-  return BY_FAMILY[family] ?? FLUX;
+  const canonical = canonicalFamily(
+    family,
+  ) as keyof typeof LEGACY_RESOLUTION_PRESETS_V1;
+  return (LEGACY_RESOLUTION_PRESETS_V1[canonical] ?? []).map(
+    ({ width, height, aspect }) => p(width, height, aspect),
+  );
 }
 
 export function presetsForModel(
   model: ModelResolutionContract | string,
+  pipeline?: string | null,
 ): ResolutionPreset[] {
   if (typeof model === "string") return presetsForFamily(model);
+  const recipe = effectiveGenerationRecipe(model, pipeline);
+  if (recipe) {
+    return recipe.resolution.aspect_groups.flatMap((group) =>
+      group.presets.map(({ width, height }) => p(width, height, group.label)),
+    );
+  }
   const advertised = model.recommended_dimensions ?? [];
   if (advertised.length === 0) return presetsForFamily(model.family);
   // The server's advertised values win; the family fallbacks only cover a
   // host that predates them.
-  const maxPixels = maxPixelsForModel(model);
-  const maxAxis = maxAxisPixelsForModel(model);
+  const maxPixels = maxPixelsForModel(model, pipeline);
+  const maxAxis = maxAxisPixelsForModel(model, pipeline);
   const alignment =
     model.dimension_alignment ?? dimensionAlignmentForFamily(model.family);
   return advertised
@@ -308,9 +232,10 @@ export function matchPreset(
   width: number,
   height: number,
   model: ModelResolutionContract | string,
+  pipeline?: string | null,
 ): ResolutionPreset | null {
   return (
-    presetsForModel(model).find(
+    presetsForModel(model, pipeline).find(
       (r) => r.width === width && r.height === height,
     ) ?? null
   );
@@ -320,9 +245,10 @@ export function aspectRatioLabel(
   width: number,
   height: number,
   model: ModelResolutionContract | string,
+  pipeline?: string | null,
 ): string {
   return (
-    matchPreset(width, height, model)?.aspect ??
+    matchPreset(width, height, model, pipeline)?.aspect ??
     rawAspectRatioLabel(width, height)
   );
 }
@@ -348,8 +274,9 @@ export function presetsNearRatio(
     }))
     .sort((a, b) => a.diff - b.diff);
   const best = ranked[0]?.diff ?? Number.POSITIVE_INFINITY;
+  if (best > tolerance) return [];
   return ranked
-    .filter(({ diff }) => diff <= Math.max(best + Number.EPSILON, tolerance))
+    .filter(({ diff }) => diff <= tolerance)
     .map(({ preset }) => preset)
     .sort((a, b) => a.width * a.height - b.width * b.height);
 }

@@ -1271,7 +1271,7 @@ mod tests {
                             "width": 960,
                             "height": 576,
                             "steps": 8,
-                            "guidance": 3.0,
+                            "guidance": 1.0,
                             "batch_size": 1,
                             "output_format": "mp4",
                             "source_video_path": "/does/not/exist.mp4",
@@ -1335,7 +1335,7 @@ mod tests {
                             "width": 960,
                             "height": 576,
                             "steps": 8,
-                            "guidance": 3.0,
+                            "guidance": 1.0,
                             "batch_size": 1,
                             "output_format": "mp4",
                             "guidance_overrides": { "rescale_scale": 2.0 }

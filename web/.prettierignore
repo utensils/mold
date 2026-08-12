@@ -3,3 +3,4 @@ dist/
 coverage/
 .vite/
 .bun/
+../studio/lib/generated/generationProfileV1.ts

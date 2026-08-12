@@ -13,6 +13,13 @@ import { sourceImageValidationError } from "@studio/lib/sourceImageCapability";
 import { submitsExtend } from "@studio/lib/extend";
 import { wanRecipeError } from "@studio/lib/wanRecipe";
 import { minimaxH3TaskForModel } from "@studio/lib/minimaxH3Authoring";
+import {
+  effectiveGenerationRecipe,
+  floatControlError,
+  generationRecipeSelectionError,
+  integerControlError,
+  resolutionProfileError,
+} from "@studio/lib/generationProfile";
 
 export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
 // JSON base64 expands bytes by roughly 4/3 and the server body limit is 64
@@ -97,10 +104,34 @@ export function stepsValidationError(value: number): string | null {
     : "Steps must be a whole number from 1 to 100.";
 }
 
+export function profileStepsValidationError(
+  value: number,
+  contract?: ModelResolutionContract | null,
+  pipeline?: string | null,
+): string | null {
+  const selectionError = generationRecipeSelectionError(contract, pipeline);
+  if (selectionError) return selectionError;
+  const control = effectiveGenerationRecipe(contract, pipeline)?.steps;
+  if (!control) return stepsValidationError(value);
+  return integerControlError("Steps", value, control);
+}
+
 export function guidanceValidationError(value: number): string | null {
   return Number.isFinite(value) && value >= 0 && value <= 100
     ? null
     : "Guidance must be from 0 to 100.";
+}
+
+export function profileGuidanceValidationError(
+  value: number,
+  contract?: ModelResolutionContract | null,
+  pipeline?: string | null,
+): string | null {
+  const selectionError = generationRecipeSelectionError(contract, pipeline);
+  if (selectionError) return selectionError;
+  const control = effectiveGenerationRecipe(contract, pipeline)?.guidance;
+  if (!control) return guidanceValidationError(value);
+  return floatControlError("Guidance", value, control);
 }
 
 export function fpsValidationError(value: number): string | null {
@@ -124,6 +155,12 @@ export function resolutionValidationError(
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 64 || height < 64) {
     return "Width and height must each be at least 64 pixels.";
   }
+  const selectionError = generationRecipeSelectionError(contract, pipeline);
+  if (selectionError) return selectionError;
+  const recipe = effectiveGenerationRecipe(contract, pipeline);
+  const profileError = resolutionProfileError(width, height, recipe?.resolution);
+  if (profileError) return profileError;
+  if (recipe) return null;
   const alignment = contract?.dimension_alignment ?? dimensionAlignmentForFamily(contract?.family);
   if (width % alignment !== 0 || height % alignment !== 0) {
     return `Width and height must be multiples of ${alignment}.`;

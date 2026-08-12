@@ -593,7 +593,7 @@ exact prompt bytes,
 the absence of a negative prompt, ordered raw conditioning-byte digests, an
 unsigned 64-bit seed, dimensions, frame count, FPS, and both sampler settings.
 The runner enforces the H3 32-pixel dimension grid, pixel/aspect limits,
-124–362-frame `17k+5` grid, 24 FPS, equal step counts of at least two, zero
+124–345-frame `17k+5` grid, 24 FPS, equal step counts of at least two, zero
 guidance, rectified-flow Euler schedules, and video/audio shifts 12/3. T2VA has
 no conditioning, FL2VA has canonical first/last-frame ordering, and Ref2VA has
 a non-empty ordered reference list. Oracle and Mold input digests must match;
@@ -633,8 +633,7 @@ that licensed GPU UAT passed.
 
 ## Day-zero frame decision
 
-Mold intentionally accepts the advertised nominal 15-second result after H3
-alignment: 362 frames at 24 fps, or 15.0833 seconds. The pinned Diffusers path
-currently aligns 360 to 362 and then rejects it for exceeding 15 seconds. The
-synthetic fixture preserves both the discrepancy and Mold's explicit decision
-so later refactors cannot inherit the rejection accidentally.
+Mold caps the advertised duration at the largest valid `17k+5` value that does
+not exceed 15 seconds: 345 frames at 24 fps, or 14.375 seconds. The pinned
+Diffusers path aligns 360 to 362 and then rejects it for exceeding 15 seconds.
+The fixture preserves that discrepancy and Mold's compatible 345-frame policy.

@@ -15,6 +15,7 @@ import MobileSeedPicker from "./MobileSeedPicker.vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 
 const props = withDefaults(
   defineProps<{
@@ -47,8 +48,14 @@ const emit = defineEmits<{
 const fpsError = computed(() => (props.showFps ? fpsValidationError(props.form.fps) : null));
 const supportsVideo = computed(
   () =>
-    generationCapabilitiesForFamily(props.form.family, props.form.model, props.form.pipeline)
-      .supportsVideo,
+    generationCapabilitiesForFamily(
+      props.form.family,
+      props.form.model,
+      props.form.pipeline,
+      null,
+      null,
+      effectiveGenerationRecipe(props.model, props.form.pipeline),
+    ).supportsVideo,
 );
 const guidanceCaps = computed(() =>
   generationCapabilitiesForFamily(
@@ -56,8 +63,14 @@ const guidanceCaps = computed(() =>
     props.form.model,
     props.form.pipeline,
     props.model?.guidance_capabilities,
+    props.model?.source_image ?? props.form.sourceImageCapability,
+    effectiveGenerationRecipe(props.model, props.form.pipeline),
   ),
 );
+const recipe = computed(() => effectiveGenerationRecipe(props.model, props.form.pipeline));
+const stepsControl = computed(() => recipe.value?.steps);
+const guidanceControl = computed(() => recipe.value?.guidance);
+const fpsControl = computed(() => recipe.value?.temporal?.fps);
 const draft = useSequenceDraftStore();
 const sourceDimensions = computed(() => {
   if (props.showFps) {
@@ -79,6 +92,7 @@ const sourceDimensions = computed(() => {
     v-model:height="form.height"
     :family="form.family"
     :model="model"
+    :pipeline="form.pipeline"
     :source-dimensions="sourceDimensions"
     :disabled="disabled"
     @validity-change="emit('resolution-validity', $event)"
@@ -99,8 +113,10 @@ const sourceDimensions = computed(() => {
       class="control"
       type="number"
       inputmode="numeric"
-      min="1"
-      max="60"
+      :min="fpsControl?.mode === 'adjustable' ? fpsControl.min : 1"
+      :max="fpsControl?.mode === 'adjustable' ? fpsControl.max : 60"
+      :step="fpsControl?.mode === 'adjustable' ? fpsControl.step : 1"
+      :disabled="fpsControl?.mode === 'fixed'"
       :aria-invalid="fpsError ? 'true' : undefined"
     />
   </label>
@@ -120,8 +136,10 @@ const sourceDimensions = computed(() => {
         class="control"
         type="number"
         inputmode="numeric"
-        min="1"
-        max="100"
+        :min="stepsControl?.min ?? 1"
+        :max="stepsControl?.max ?? 100"
+        :step="stepsControl?.step ?? 1"
+        :disabled="stepsControl?.mode === 'fixed'"
         :aria-invalid="stepsError ? 'true' : undefined"
       />
     </label>
@@ -132,10 +150,10 @@ const sourceDimensions = computed(() => {
         class="control"
         type="number"
         inputmode="decimal"
-        step="0.1"
-        min="0"
-        max="100"
-        :disabled="!guidanceCaps.guidanceAdjustable"
+        :step="guidanceControl?.step ?? 0.1"
+        :min="guidanceControl?.min ?? 0"
+        :max="guidanceControl?.max ?? 100"
+        :disabled="guidanceControl?.mode === 'fixed' || !guidanceCaps.guidanceAdjustable"
         :aria-invalid="guidanceError ? 'true' : undefined"
         @input="
           guidanceCaps.guidanceAdjustable &&

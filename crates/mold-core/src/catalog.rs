@@ -9,6 +9,36 @@ pub struct ResolutionDefaults {
     pub dimension_alignment: Option<u32>,
 }
 
+/// One-release flattened compatibility view derived from the canonical
+/// profile. New code consumes `GenerationProfileSet` directly.
+pub fn resolution_defaults_from_profile(
+    profile: &crate::GenerationProfileSet,
+) -> ResolutionDefaults {
+    let Some(recipe) = profile.default_recipe() else {
+        return ResolutionDefaults {
+            max_pixels: None,
+            max_axis_pixels: None,
+            recommended_dimensions: Vec::new(),
+            dimension_alignment: None,
+        };
+    };
+    ResolutionDefaults {
+        max_pixels: Some(recipe.resolution.max_pixels),
+        max_axis_pixels: recipe.resolution.max_axis_pixels,
+        recommended_dimensions: recipe
+            .resolution
+            .aspect_groups
+            .iter()
+            .flat_map(|group| group.presets.iter())
+            .map(|preset| RecommendedDimensions {
+                width: preset.width,
+                height: preset.height,
+            })
+            .collect(),
+        dimension_alignment: Some(recipe.resolution.alignment),
+    }
+}
+
 /// Build the advertised resolution contract for a specific model.
 ///
 /// Per model, not per family: an LTX-2 checkpoint that ships the spatial
@@ -111,7 +141,6 @@ pub fn build_model_catalog(
                         .is_ok()
             })
     }) {
-        let resolution = resolution_defaults(&manifest.name, &manifest.family);
         let model_cfg = config.resolved_model_config(&manifest.name);
         let downloaded = config.manifest_model_is_downloaded(&manifest.name);
         let (_, remaining_download_bytes) = crate::manifest::compute_download_size(manifest);
@@ -119,16 +148,41 @@ pub fn build_model_catalog(
             let (bytes, _gb) = model_cfg.disk_usage();
             bytes
         });
+        let default_steps = model_cfg.effective_steps(config);
+        let default_guidance = model_cfg.effective_guidance();
+        let default_width = model_cfg.effective_width(config);
+        let default_height = model_cfg.effective_height(config);
+        let default_frames = model_cfg.effective_frames();
+        let default_fps = model_cfg.effective_fps();
+        let default_negative_prompt =
+            crate::manifest::default_negative_prompt_for_family(&manifest.family)
+                .map(str::to_string);
+        let supports_extend =
+            extend_capable_model(&manifest.family, manifest.defaults.source_image);
+        let supports_sequence = chain_capable_family(&manifest.family);
+        let generation_profile = crate::generation_profile_for_manifest_with_defaults(
+            manifest,
+            crate::GenerationDefaultsProfile {
+                width: default_width,
+                height: default_height,
+                steps: default_steps,
+                guidance: default_guidance,
+                frames: default_frames,
+                fps: default_fps,
+                negative_prompt: default_negative_prompt.clone(),
+            },
+        );
+        let resolution = resolution_defaults_from_profile(&generation_profile);
 
         models.push(ModelInfoExtended {
             downloaded,
             defaults: ModelDefaults {
-                default_steps: model_cfg.effective_steps(config),
-                default_guidance: model_cfg.effective_guidance(),
-                default_width: model_cfg.effective_width(config),
-                default_height: model_cfg.effective_height(config),
-                default_frames: model_cfg.effective_frames(),
-                default_fps: model_cfg.effective_fps(),
+                default_steps,
+                default_guidance,
+                default_width,
+                default_height,
+                default_frames,
+                default_fps,
                 min_frames: crate::validation::min_frames_for_family(&manifest.family),
                 max_frames: crate::validation::max_frames_for_family_at_fps(
                     &manifest.family,
@@ -149,10 +203,7 @@ pub fn build_model_catalog(
                 // carries a CLI-layer default the server never substitutes,
                 // and advertising it would promise behavior an HTTP request
                 // does not get.
-                default_negative_prompt: crate::manifest::default_negative_prompt_for_family(
-                    &manifest.family,
-                )
-                .map(str::to_string),
+                default_negative_prompt,
                 max_pixels: resolution.max_pixels,
                 max_axis_pixels: resolution.max_axis_pixels,
                 recommended_dimensions: resolution.recommended_dimensions,
@@ -195,11 +246,8 @@ pub fn build_model_catalog(
             // final frame becomes image conditioning — so only an
             // image-conditioned checkpoint can extend. `source_image` is that
             // classification (#783).
-            supports_extend: Some(extend_capable_model(
-                &manifest.family,
-                manifest.defaults.source_image,
-            )),
-            supports_sequence: Some(chain_capable_family(&manifest.family)),
+            supports_extend: Some(supports_extend),
+            supports_sequence: Some(supports_sequence),
             // Per family, because the overlap a continuation defaults to is
             // its carryover: LTX-2 re-encodes a 17-frame latent motion tail,
             // wan re-renders the one frame it was seeded with (#783).
@@ -215,6 +263,7 @@ pub fn build_model_catalog(
             // structurally knows the task (#772). Cold tiers advertise
             // correctly before any file exists.
             source_image: manifest.defaults.source_image,
+            generation_profile: Some(generation_profile),
         });
     }
 
@@ -239,11 +288,14 @@ pub fn build_model_catalog(
     for (name, model_cfg) in config_only {
         let (disk_usage_bytes, size_gb_f64) = model_cfg.disk_usage();
         let size_gb = size_gb_f64 as f32;
-        let family: String = model_cfg
+        // A path-only custom model has no architecture identity. Treating it
+        // as FLUX made every client advertise FLUX controls and presets even
+        // though neither admission nor the engine had established that fact.
+        let family = model_cfg
             .family
             .clone()
-            .unwrap_or_else(|| "flux".to_string());
-        let resolution = resolution_defaults(name, &family);
+            .unwrap_or_else(|| "custom".to_string());
+        let has_profile_identity = model_cfg.family.is_some();
         let sequence_capable = chain_capable_family(&family);
         // Config-only models have local weights but no manifest task
         // structure, so mold-core cannot classify the conditioning contract:
@@ -259,16 +311,59 @@ pub fn build_model_catalog(
             name,
             model_cfg.description.as_deref().unwrap_or_default()
         );
+        let default_steps = model_cfg.default_steps.unwrap_or(if has_profile_identity {
+            config.default_steps
+        } else {
+            20
+        });
+        let default_guidance = model_cfg
+            .default_guidance
+            .unwrap_or(if has_profile_identity {
+                model_cfg.effective_guidance()
+            } else {
+                7.5
+            });
+        let default_width = model_cfg.default_width.unwrap_or(if has_profile_identity {
+            config.default_width
+        } else {
+            512
+        });
+        let default_height = model_cfg.default_height.unwrap_or(if has_profile_identity {
+            config.default_height
+        } else {
+            512
+        });
+        let default_frames = model_cfg.effective_frames();
+        let default_fps = model_cfg.effective_fps();
+        let default_negative_prompt =
+            crate::manifest::default_negative_prompt_for_family(&family).map(str::to_string);
+        let generation_profile = crate::resolve_generation_profile(crate::GenerationProfileInput {
+            model: name,
+            family: &family,
+            sub_family: None,
+            default_width,
+            default_height,
+            default_steps,
+            default_guidance,
+            default_frames,
+            default_fps,
+            default_negative_prompt: default_negative_prompt.clone(),
+            source_image: None,
+            supports_sequence: sequence_capable,
+            supports_extend: extend_capable_model(&family, source_image_contract),
+            supports_audio: family == "ltx2",
+        });
+        let resolution = resolution_defaults_from_profile(&generation_profile);
 
         models.push(ModelInfoExtended {
             downloaded: true,
             defaults: ModelDefaults {
-                default_steps: model_cfg.effective_steps(config),
-                default_guidance: model_cfg.effective_guidance(),
-                default_width: model_cfg.effective_width(config),
-                default_height: model_cfg.effective_height(config),
-                default_frames: model_cfg.effective_frames(),
-                default_fps: model_cfg.effective_fps(),
+                default_steps,
+                default_guidance,
+                default_width,
+                default_height,
+                default_frames,
+                default_fps,
                 min_frames: crate::validation::min_frames_for_family(&family),
                 max_frames: crate::validation::max_frames_for_family_at_fps(
                     &family,
@@ -280,10 +375,7 @@ pub fn build_model_catalog(
                 max_frames_absolute: crate::validation::max_frames_absolute_for_family(&family),
                 frame_step: crate::validation::frame_step_for_family(&family),
                 frame_offset: crate::validation::frame_offset_for_family(&family),
-                default_negative_prompt: crate::manifest::default_negative_prompt_for_family(
-                    &family,
-                )
-                .map(str::to_string),
+                default_negative_prompt,
                 max_pixels: resolution.max_pixels,
                 max_axis_pixels: resolution.max_axis_pixels,
                 recommended_dimensions: resolution.recommended_dimensions,
@@ -322,6 +414,7 @@ pub fn build_model_catalog(
             // pass derives the contract from checkpoint headers, the same
             // classification the engine applies (#772).
             source_image: source_image_contract,
+            generation_profile: Some(generation_profile),
         });
     }
 
@@ -330,6 +423,18 @@ pub fn build_model_catalog(
     sort_models_by_variant_quality(&mut models);
 
     models
+}
+
+/// Apply a concrete binary's delivery encoders to every catalog profile.
+pub fn qualify_catalog_generation_delivery(
+    catalog: &mut [ModelInfoExtended],
+    delivery: crate::GenerationDeliveryCapabilities,
+) {
+    for entry in catalog {
+        if let Some(profile) = &mut entry.generation_profile {
+            crate::qualify_generation_profile_delivery(profile, delivery);
+        }
+    }
 }
 
 /// Sort models so variants of the same base name are grouped together,
@@ -695,6 +800,36 @@ mod tests {
     }
 
     #[test]
+    fn config_only_model_without_family_gets_conservative_custom_profile() {
+        let mut models = HashMap::new();
+        models.insert("path-only-model".to_string(), ModelConfig::default());
+        let config = Config {
+            default_width: 1024,
+            default_height: 1024,
+            default_steps: 28,
+            models,
+            ..Config::default()
+        };
+
+        let entry = build_model_catalog(&config, None, false)
+            .into_iter()
+            .find(|model| model.name == "path-only-model")
+            .expect("config-only model should exist");
+        assert_eq!(entry.family, "custom");
+        assert_eq!(entry.defaults.default_width, 512);
+        assert_eq!(entry.defaults.default_height, 512);
+        assert_eq!(entry.defaults.default_steps, 20);
+        let profile = entry.generation_profile.expect("profile is advertised");
+        assert!(profile.profile_id.starts_with("custom."));
+        assert!(profile
+            .default_recipe()
+            .unwrap()
+            .resolution
+            .aspect_groups
+            .is_empty());
+    }
+
+    #[test]
     fn build_model_catalog_hides_compliance_gated_config_only_models() {
         let mut models = HashMap::new();
         models.insert(
@@ -794,6 +929,7 @@ mod tests {
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
                 source_image: None,
+                generation_profile: None,
             }
         }
 

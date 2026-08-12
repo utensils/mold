@@ -126,9 +126,9 @@
         "fps": { "const": 24 },
         "frame_step": { "const": 17 },
         "frame_offset": { "const": 5 },
-        "nominal_15_second_frames": { "const": 362 },
-        "nominal_15_second_actual_duration": { "const": 15.083333333333334 },
-        "mold_decision": { "const": "accept-aligned-362" },
+        "nominal_15_second_frames": { "const": 345 },
+        "nominal_15_second_actual_duration": { "const": 14.375 },
+        "mold_decision": { "const": "cap-at-valid-345" },
         "diffusers_discrepancy": { "const": "aligns-to-362-then-rejects-over-15s" }
       }
     },

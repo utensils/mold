@@ -1331,6 +1331,59 @@ describe("useHostRouting", () => {
     expect(route?.target.baseUrl).not.toContain("sk-studio");
   });
 
+  it("requires an explicit machine when installed model profiles differ", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, [
+      model("flux-dev:q4", {
+        generation_profile: { profile_hash: "origin-profile" } as never,
+      }),
+    ]);
+    statuses.set(studio.id, status());
+    models.set(studio.id, [
+      model("flux-dev:q4", {
+        generation_profile: { profile_hash: "studio-profile" } as never,
+      }),
+    ]);
+    setGenerateTargetId(AUTO_TARGET_ID);
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    expect(routing.modelOwnerIds("flux-dev:q4")).toEqual([
+      ORIGIN_HOST_ID,
+      studio.id,
+    ]);
+    expect(routing.resolve("flux-dev:q4")).toBeNull();
+    await expect(
+      routing.resolveFeasible({
+        prompt: "print",
+        model: "flux-dev:q4",
+        width: 1024,
+        height: 1024,
+        steps: 20,
+        guidance: 3.5,
+        seed: null,
+        batch_size: 1,
+      }),
+    ).resolves.toEqual({
+      kind: "profile_mismatch",
+      perHost: [
+        expect.objectContaining({
+          hostId: ORIGIN_HOST_ID,
+          profileHash: "origin-profile",
+        }),
+        expect.objectContaining({
+          hostId: studio.id,
+          profileHash: "studio-profile",
+        }),
+      ],
+    });
+    expect(placementCall).not.toHaveBeenCalled();
+
+    routing.setTarget(studio.id);
+    expect(routing.resolve("flux-dev:q4")?.hostId).toBe(studio.id);
+  });
+
   it("shows only the pinned host's models when a host is pinned", async () => {
     const studio = addHost({ url: "http://studio:7680", name: "Studio" });
     statuses.set(ORIGIN_HOST_ID, status());

@@ -724,7 +724,7 @@ mod tests {
     fn duration_resolves_onto_exact_h3_grid() {
         assert_eq!(frames_for_duration(5.0).unwrap(), 124);
         assert_eq!(frames_for_duration(10.0).unwrap(), 243);
-        assert_eq!(frames_for_duration(15.0).unwrap(), 362);
+        assert_eq!(frames_for_duration(15.0).unwrap(), 345);
         assert_eq!(frames_for_duration(200.5 / 24.0).unwrap(), 192);
         assert!(frames_for_duration(4.99).is_err());
         assert!(frames_for_duration(15.01).is_err());

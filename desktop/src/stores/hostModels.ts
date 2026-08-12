@@ -3,7 +3,7 @@ import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import { apiJsonTo } from "../lib/api/client";
 import type { ModelEntry } from "../lib/api/types";
 import { mergeModelPresentationMetadata } from "../lib/models";
-import { isGenerationModel } from "./models";
+import { isGenerationModel, useModelStore } from "./models";
 import { useHostsStore } from "./hosts";
 
 /** A per-host `/api/models` result younger than this is not refetched. */
@@ -71,6 +71,30 @@ export const useHostModelsStore = defineStore("hostModels", {
     /** Host ids that have `name` installed; [] when unknown or nowhere. */
     hostsFor(): (name: string) => string[] {
       return (name) => this.unionInstalled.find((m) => m.name === name)?.hostIds ?? [];
+    },
+    /**
+     * Resolve the authoritative model row for Create's active host policy.
+     * An explicit machine owns runtime defaults and its generation profile;
+     * only Auto/Most capable may use the fleet union's preferred row.
+     */
+    installedEntryForTarget(): (name: string, targetHostId: string | null) => ModelEntry | null {
+      return (name, targetHostId) => {
+        if (!name) return null;
+        const primaryEntry = filterRestrictedModels(
+          useModelStore().installed,
+          useHostsStore().capabilities.local,
+        ).find((model) => model.name === name);
+        if (!targetHostId || targetHostId === "capable") {
+          return primaryEntry ?? this.unionInstalled.find((model) => model.name === name) ?? null;
+        }
+
+        // The primary model store is populated by this exact local server and
+        // can become ready before the all-host fanout.
+        if (targetHostId === "local" && primaryEntry) {
+          return primaryEntry;
+        }
+        return this.installedOn(targetHostId).find((model) => model.name === name) ?? null;
+      };
     },
     allReadyHostsFetched(state): boolean {
       const hosts = useHostsStore();

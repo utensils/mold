@@ -130,7 +130,9 @@ mod base64_required {
 /// - `Euler` / `DpmPp` — Wan's flow-matching sample solvers (upstream
 ///   `--sample_solver`), alongside `UniPc` which doubles as Wan's default
 ///   FlowUniPC. Validation rejects them for every non-wan family (#795).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum Scheduler {
     #[default]
@@ -966,7 +968,7 @@ impl GenerationReference {
 
     /// Redacted metadata for the exact generated duration that will consume
     /// this reference. Long reference video/audio is truncated to the target
-    /// duration, so its prepared shape must not inherit the 362-frame planning
+    /// duration, so its prepared shape must not inherit the 345-frame planning
     /// ceiling when a shorter request is queued or persisted.
     pub fn redacted_metadata_for_target(
         &self,
@@ -1464,7 +1466,9 @@ pub struct TimeRange {
     pub end_seconds: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum Ltx2PipelineMode {
     OneStage,
@@ -1553,7 +1557,7 @@ impl Ltx2PipelineMode {
 }
 
 /// User-facing guidance controls for a resolved model/pipeline recipe.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct GuidanceCapabilities {
     /// Whether the primary guidance scale changes the render.
     pub adjustable: bool,
@@ -2222,7 +2226,9 @@ impl OutputMetadata {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     #[default]
@@ -2474,13 +2480,20 @@ pub struct ModelInfoExtended {
     /// against a server that enforces nothing at admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_image: Option<SourceImageCapability>,
+    /// Complete, versioned generation-control contract for this concrete
+    /// model and every selectable recipe. New clients use this instead of
+    /// reconstructing policy from family names and legacy flattened fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_profile: Option<crate::generation_profile::GenerationProfileSet>,
 }
 
 /// How a model relates to a conditioning source image (#772).
 ///
 /// Derived from checkpoint structure — the engine's own conditioning
 /// classification — never from model names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum SourceImageCapability {
     /// The checkpoint has no image-conditioning input; a supplied source is
@@ -2708,6 +2721,7 @@ mod model_display_name_tests {
             extend_default_overlap_frames: None,
             guidance_capabilities: None,
             source_image: None,
+            generation_profile: None,
         }
     }
 
@@ -6953,6 +6967,11 @@ pub struct DispatchCapabilities {
 /// can add their own sub-structs without churning existing fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerCapabilities {
+    /// `/api/models` rows carry a complete version-1 generation profile.
+    /// Absent/false identifies a legacy host whose flattened fields require
+    /// the contained one-release client adapter.
+    #[serde(default)]
+    pub generation_profile_v1: bool,
     pub gallery: GalleryCapabilities,
     pub catalog: CatalogCapabilities,
     /// Explicit model-family restrictions enforced by this server. Absent on

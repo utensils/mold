@@ -276,6 +276,22 @@ use crate::queue::clean_error_message;
         mold_core::ImageData,
         mold_core::OutputFormat,
         mold_core::ModelInfo,
+        mold_core::GenerationProfileSet,
+        mold_core::GenerationRecipeProfile,
+        mold_core::GenerationDefaultsProfile,
+        mold_core::GenerationCapabilitiesProfile,
+        mold_core::ResolutionProfile,
+        mold_core::ResolutionDomain,
+        mold_core::ResolutionPreset,
+        mold_core::AspectGroup,
+        mold_core::IntegerControl,
+        mold_core::FloatControl,
+        mold_core::ControlMode,
+        mold_core::TemporalProfile,
+        mold_core::FpsControl,
+        mold_core::RecipeSelector,
+        mold_core::ProfileProvenance,
+        mold_core::ProvenanceKind,
         mold_core::LoraInfo,
         mold_core::ServerStatus,
         PairingSessionResponse,
@@ -893,10 +909,34 @@ async fn prepare_generation(
     // Expand only after live catalog resolution, so opaque cv:/hf: IDs use
     // their authoritative family and conditioning-aware task template.
     maybe_expand_prompt(state, request, preferred_gpu, resolved_family.as_deref()).await?;
-    // Fill in a family-aware output format default when the caller omitted the
-    // field. This must happen before validation so the validator sees a concrete
-    // format and can gate on it correctly.
-    request.normalise_output_format(resolved_family.as_deref());
+    let canonical_model = mold_core::manifest::resolve_model_name(&request.model);
+    let resolved_profile = if private_h3_ingress {
+        None
+    } else {
+        model_manager::list_models(state)
+            .await
+            .into_iter()
+            .find(|entry| entry.info.name == request.model || entry.info.name == canonical_model)
+            .and_then(|entry| entry.generation_profile)
+    };
+    if !private_h3_ingress && resolved_profile.is_none() {
+        return Err(ApiError::validation(format!(
+            "model '{}' has no generation recipe deliverable by this server build",
+            request.model
+        )));
+    }
+    // The effective, delivery-qualified recipe owns the output default. A
+    // family heuristic here can select MP4 even when this binary did not link
+    // the encoder, causing an omitted field to fail its own advertised profile.
+    if request.output_format.is_none() {
+        if let Some(profile) = resolved_profile.as_ref() {
+            mold_core::materialize_generation_profile_output_default(profile, request)
+                .map_err(ApiError::validation)?;
+        } else if private_h3_ingress {
+            // Private H3 ingress is outside the public catalog contract.
+            request.normalise_output_format(resolved_family.as_deref());
+        }
+    }
     // Materialize the family's tuned default negative (wan) into the request
     // when the caller omitted the field, so the queue/worker metadata — and
     // therefore saved gallery provenance and "Reuse settings" — record the
@@ -931,6 +971,12 @@ async fn prepare_generation(
     } else {
         &*request
     };
+    if !private_h3_ingress {
+        if let Some(profile) = resolved_profile {
+            mold_core::validate_request_against_generation_profile(&profile, validation_request)
+                .map_err(ApiError::validation)?;
+        }
+    }
     #[cfg(feature = "h3-private-uat")]
     let validation = if private_h3_ingress {
         mold_core::validation::validate_h3_private_uat_request(validation_request)
@@ -4822,6 +4868,7 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
     let server_batch =
         state.scheduled_work.v2_authoritative() && !state.is_output_disabled(&config);
     Json(mold_core::ServerCapabilities {
+        generation_profile_v1: true,
         gallery: mold_core::GalleryCapabilities { can_delete: true },
         catalog: mold_core::CatalogCapabilities {
             available: catalog_available,

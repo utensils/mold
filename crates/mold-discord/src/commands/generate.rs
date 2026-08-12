@@ -425,7 +425,14 @@ fn resolve_video_timing(
     if requested_frames > f64::from(u32::MAX) {
         return Err("Duration is too large.".to_string());
     }
-    let frames_on_grid = snap_to_grid(requested_frames);
+    // H3 accepts nominal durations through 15 seconds, but its last valid
+    // 17n+5 frame count under that duration is 345. Match the dedicated CLI:
+    // snap duration sugar, then cap it to the advertised valid grid maximum.
+    let frames_on_grid = if is_h3 {
+        snap_to_grid(requested_frames).min(max_frames_on_grid)
+    } else {
+        snap_to_grid(requested_frames)
+    };
     if frames_on_grid < min_frames {
         return Err(format!(
             "Duration for this model must be at least {:.1} seconds.",
@@ -1728,7 +1735,7 @@ mod tests {
                 Some(15.0),
             )
             .unwrap(),
-            ResolvedTiming::new(Some(362), Some(24))
+            ResolvedTiming::new(Some(345), Some(24))
         );
         assert_eq!(
             resolve_video_timing(
@@ -2274,6 +2281,7 @@ mod tests {
             extend_default_overlap_frames: None,
             guidance_capabilities: None,
             source_image: None,
+            generation_profile: None,
         }
     }
 
@@ -2442,6 +2450,7 @@ mod tests {
             extend_default_overlap_frames: None,
             guidance_capabilities: None,
             source_image: None,
+            generation_profile: None,
         }];
         assert_eq!(
             family_for_model(&models, "ltx-2-19b-distilled:fp8"),
@@ -2478,6 +2487,7 @@ mod tests {
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
                 source_image: None,
+                generation_profile: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -2502,6 +2512,7 @@ mod tests {
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
                 source_image: None,
+                generation_profile: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
@@ -2532,6 +2543,7 @@ mod tests {
             extend_default_overlap_frames: None,
             guidance_capabilities: None,
             source_image: None,
+            generation_profile: None,
         }];
         assert_eq!(resolve_default_model(&models), "flux-dev:q4");
     }
@@ -2567,6 +2579,7 @@ mod tests {
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
                 source_image: None,
+                generation_profile: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -2591,6 +2604,7 @@ mod tests {
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
                 source_image: None,
+                generation_profile: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
@@ -2622,6 +2636,7 @@ mod tests {
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
                 source_image: None,
+                generation_profile: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -2646,6 +2661,7 @@ mod tests {
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
                 source_image: None,
+                generation_profile: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");

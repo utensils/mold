@@ -28,6 +28,7 @@ import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
 import { filterRestrictedModels, modelAccessRestrictionFor } from "@studio/lib/modelAccess";
 import { expansionTaskForRequest } from "@studio/lib/expandTask";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
   conditioningFingerprint,
   defaultRemixDimensions,
@@ -141,13 +142,13 @@ import { isUpscaledImage } from "../lib/gallery/upscaled";
 import { percent } from "../lib/format";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import {
-  guidanceValidationError,
+  profileGuidanceValidationError,
+  profileStepsValidationError,
   inlineGenerationMediaBytes,
   MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
   MOBILE_MEDIA_BUDGET_ERROR,
   mobileMediaBudgetValidationError,
   sourceConditioningValidationError,
-  stepsValidationError,
 } from "../lib/generateValidation";
 import { blobToBase64, isStillImageFile } from "../lib/image";
 import { parseMissingExpandModel } from "../lib/expandErrors";
@@ -724,6 +725,7 @@ const caps = computed(() =>
     // source well would render for a text-to-video wan checkpoint that
     // rejects one, and the End frame well (#779) would never appear.
     selectedGenerationModel.value?.source_image ?? form.sourceImageCapability,
+    effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline),
   ),
 );
 const h3Family = computed(() => isMinimaxH3Identity(form.family, form.model));
@@ -921,7 +923,9 @@ const sourceSectionSummary = computed(() => {
   if (caps.value.requiresSourceImage) return "Required";
   return form.controlImage ? "Control photo selected" : "Optional";
 });
-const outputFormats = computed(() => outputFormatsForFamily(form.family));
+const outputFormats = computed(
+  () => caps.value.outputFormats as ReturnType<typeof outputFormatsForFamily>,
+);
 const selectedModelAvailable = computed(
   () =>
     modelsHostId.value === selectedHostId.value &&
@@ -960,6 +964,7 @@ function applyMobileSourceResolution(
   const resolution = resolveSourceResolution(
     dimensions,
     selectedGenerationModel.value ?? form.family,
+    form.pipeline,
   );
   const replaced = base64 !== previous.base64;
   const wasFollowing =
@@ -979,7 +984,10 @@ watch(
         ? (form.imageAttachments[0] ?? null)
         : form.sourceImage,
     () => selectedGenerationModel.value?.name ?? form.model,
+    () => form.pipeline ?? null,
+    () => selectedGenerationModel.value?.generation_profile?.profile_hash ?? null,
     () => selectedGenerationModel.value?.max_pixels ?? null,
+    () => selectedGenerationModel.value?.max_axis_pixels ?? null,
     () => selectedGenerationModel.value?.dimension_alignment ?? null,
     () =>
       selectedGenerationModel.value?.recommended_dimensions
@@ -1013,7 +1021,10 @@ watch(
   [
     () => draft.openingImage?.base64 ?? null,
     () => selectedGenerationModel.value?.name ?? form.model,
+    () => form.pipeline ?? null,
+    () => selectedGenerationModel.value?.generation_profile?.profile_hash ?? null,
     () => selectedGenerationModel.value?.max_pixels ?? null,
+    () => selectedGenerationModel.value?.max_axis_pixels ?? null,
     () => selectedGenerationModel.value?.dimension_alignment ?? null,
     () =>
       selectedGenerationModel.value?.recommended_dimensions
@@ -1051,8 +1062,12 @@ const sourceControlsValid = computed(() => !caps.value.supportsImg2img || source
  * advertised text-to-video checkpoint hides the well entirely.
  */
 const sourceConditioningError = computed(() => sourceConditioningValidationError(form));
-const stepsError = computed(() => stepsValidationError(form.steps));
-const guidanceError = computed(() => guidanceValidationError(form.guidance));
+const stepsError = computed(() =>
+  profileStepsValidationError(form.steps, selectedGenerationModel.value, form.pipeline),
+);
+const guidanceError = computed(() =>
+  profileGuidanceValidationError(form.guidance, selectedGenerationModel.value, form.pipeline),
+);
 const basicParametersValid = computed(() => !stepsError.value && !guidanceError.value);
 const mobileMediaBudgetError = computed(() => mobileMediaBudgetValidationError(form));
 // Desktop parity: a conditioned LTX-2 render may go out undescribed, so the
@@ -4900,6 +4915,7 @@ onBeforeUnmount(() => {
                 </summary>
                 <MobileSourceControls
                   :form="form"
+                  :model="selectedGenerationModel"
                   :target="selectedTarget"
                   :control-models="controlModels"
                   :upscalers="upscalers"
@@ -4910,6 +4926,7 @@ onBeforeUnmount(() => {
                 v-if="selectedTarget"
                 :form="form"
                 :target="selectedTarget"
+                :model="selectedGenerationModel"
                 @append-word="appendPromptWord"
               />
               <label class="field"

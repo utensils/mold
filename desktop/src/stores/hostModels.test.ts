@@ -217,4 +217,23 @@ describe("hostModels store", () => {
     expect(store.hostsFor("z-image:q8")).toEqual(["hal9000-7680"]);
     expect(store.hostsFor("never-heard-of-it")).toEqual([]);
   });
+
+  it("resolves an explicit host's exact model row instead of the union's first row", () => {
+    addExtra("hal9000-7680", "http://hal9000:7680");
+    const store = useHostModelsStore();
+    store.byHost.local = {
+      entries: [model("flux-dev:q8", { default_steps: 20 })],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    store.byHost["hal9000-7680"] = {
+      entries: [model("flux-dev:q8", { default_steps: 36 })],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+
+    expect(store.installedEntryForTarget("flux-dev:q8", null)?.default_steps).toBe(20);
+    expect(store.installedEntryForTarget("flux-dev:q8", "hal9000-7680")?.default_steps).toBe(36);
+    expect(store.installedEntryForTarget("missing", "hal9000-7680")).toBeNull();
+  });
 });

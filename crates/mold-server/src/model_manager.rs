@@ -211,6 +211,8 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
         ));
         annotate_audio_capabilities(&mut catalog, &config);
         annotate_source_image_capabilities(&mut catalog, &config);
+        synchronize_generation_profile_capabilities(&mut catalog);
+        retain_deliverable_generation_profiles(&mut catalog);
         return catalog;
     }
 
@@ -229,7 +231,18 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
     // conditioning contracts: classification reads safetensors headers, not
     // a GPU.
     annotate_source_image_capabilities(&mut catalog, &config);
+    synchronize_generation_profile_capabilities(&mut catalog);
+    retain_deliverable_generation_profiles(&mut catalog);
     catalog
+}
+
+fn retain_deliverable_generation_profiles(catalog: &mut Vec<ModelInfoExtended>) {
+    catalog.retain(|entry| {
+        entry
+            .generation_profile
+            .as_ref()
+            .is_none_or(|profile| !profile.recipes.is_empty())
+    });
 }
 
 fn annotate_audio_capabilities(catalog: &mut [ModelInfoExtended], config: &Config) {
@@ -274,6 +287,54 @@ fn annotate_source_image_capabilities(catalog: &mut [ModelInfoExtended], config:
             &entry.info.family,
             entry.source_image,
         ));
+    }
+}
+
+/// Runtime checkpoint probes can refine cold manifest capabilities. Keep the
+/// versioned profile and its content hash synchronized with those resolved
+/// row fields so clients and mixed-host routing never receive a stale
+/// pre-probe contract.
+fn synchronize_generation_profile_capabilities(catalog: &mut [ModelInfoExtended]) {
+    for entry in catalog {
+        let Some(profile) = entry.generation_profile.as_mut() else {
+            continue;
+        };
+        if entry.supports_audio == Some(false) {
+            profile.recipes.retain(|recipe| {
+                recipe.request_selector.pipeline != Some(mold_core::Ltx2PipelineMode::T2a)
+            });
+        }
+        for recipe in &mut profile.recipes {
+            if let Some(supports_audio) = entry.supports_audio {
+                recipe.capabilities.supports_audio = supports_audio;
+            }
+            if let Some(source_image) = entry.source_image {
+                recipe.capabilities.source_image = Some(source_image);
+                if entry.info.family == "wan" {
+                    let accepts_source =
+                        source_image != mold_core::SourceImageCapability::Unsupported;
+                    recipe.capabilities.wan_recipe.supports_first_last_frame = accepts_source;
+                    recipe.capabilities.keyframes.mode = if accepts_source {
+                        mold_core::ControlMode::Adjustable
+                    } else {
+                        mold_core::ControlMode::Hidden
+                    };
+                    recipe.capabilities.keyframes.required = false;
+                    recipe.capabilities.keyframes.reason = (!accepts_source)
+                        .then(|| "This Wan checkpoint does not accept keyframes.".to_string());
+                }
+            }
+            if let Some(supports_extend) = entry.supports_extend {
+                recipe.capabilities.supports_extend = supports_extend;
+            }
+        }
+        mold_core::qualify_generation_profile_delivery(
+            profile,
+            mold_core::GenerationDeliveryCapabilities::new(
+                cfg!(feature = "mp4"),
+                cfg!(feature = "webp"),
+            ),
+        );
     }
 }
 
@@ -687,7 +748,32 @@ fn installed_catalog_models(
                 _ => sidecar.name.clone(),
             });
 
-        let resolution = mold_core::catalog::resolution_defaults(&sidecar.id, &sidecar.family);
+        let supports_audio =
+            mold_inference::audio::checkpoint_output_supported(&sidecar.family, &primary_path);
+        let supports_extend = sidecar.family == "ltx2";
+        let supports_sequence =
+            crate::chain_limits::sequence_support(&sidecar.name, &sidecar.family, false).supported;
+        let generation_profile =
+            mold_core::resolve_generation_profile(mold_core::GenerationProfileInput {
+                model: &sidecar.id,
+                family: &sidecar.family,
+                sub_family: sidecar.sub_family.as_deref(),
+                default_width: w,
+                default_height: h,
+                default_steps: steps,
+                default_guidance: guidance,
+                default_frames: frames,
+                default_fps: fps,
+                default_negative_prompt: mold_core::manifest::default_negative_prompt_for_family(
+                    &sidecar.family,
+                )
+                .map(str::to_string),
+                source_image: None,
+                supports_sequence,
+                supports_extend,
+                supports_audio: supports_audio.unwrap_or(false),
+            });
+        let resolution = mold_core::catalog::resolution_defaults_from_profile(&generation_profile);
         out.push(ModelInfoExtended {
             downloaded: true,
             defaults: ModelDefaults {
@@ -741,10 +827,7 @@ fn installed_catalog_models(
             kind: Some(sidecar.kind.clone()),
             modality: Some(sidecar.modality.clone()),
             nsfw: sidecar.nsfw,
-            supports_audio: mold_inference::audio::checkpoint_output_supported(
-                &sidecar.family,
-                &primary_path,
-            ),
+            supports_audio,
             // One authority, `mold_core::catalog::extend_capable_model`: the
             // whole ltx2 family continues through its latent motion tail,
             // while wan continues only from a checkpoint that conditions on
@@ -752,10 +835,7 @@ fn installed_catalog_models(
             // reads the headers, and re-deriving it there from this same
             // helper is what keeps `supports_extend` from restating a family
             // literal that contradicts its own overlap default (#783).
-            supports_extend: Some(mold_core::catalog::extend_capable_model(
-                &sidecar.family,
-                None,
-            )),
+            supports_extend: Some(supports_extend),
             // Per family: the overlap a continuation defaults to is its
             // carryover, and wan's is the one frame it was seeded with (#783).
             extend_default_overlap_frames: Some(
@@ -765,10 +845,7 @@ fn installed_catalog_models(
             ),
             // Per-model, not per-family, because this is where a future
             // pipeline that cannot chain would have to be caught.
-            supports_sequence: Some(
-                crate::chain_limits::sequence_support(&sidecar.name, &sidecar.family, false)
-                    .supported,
-            ),
+            supports_sequence: Some(supports_sequence),
             guidance_capabilities: Some(mold_core::GuidanceCapabilities::for_recipe(
                 &sidecar.family,
                 &format!("{} {} {}", sidecar.id, sidecar.name, primary_path.display()),
@@ -780,6 +857,7 @@ fn installed_catalog_models(
             // annotate pass below fills this once paths resolve; a bare
             // primary file cannot answer alone.
             source_image: None,
+            generation_profile: Some(generation_profile),
         });
     }
     out
@@ -3041,6 +3119,144 @@ mod tests {
         );
         let combined = installed_catalog_models(&state, &config, dir.path(), None, false);
         assert_eq!(combined[0].supports_audio, Some(true));
+    }
+
+    #[test]
+    fn runtime_probe_refreshes_generation_profile_and_hash() {
+        let mut catalog = mold_core::catalog::build_model_catalog(&Config::default(), None, false);
+        let entry = catalog
+            .iter_mut()
+            .find(|entry| entry.info.family == "ltx2")
+            .expect("built-in LTX-2 model");
+        let previous_hash = entry
+            .generation_profile
+            .as_ref()
+            .expect("generation profile")
+            .profile_hash
+            .clone();
+        entry.supports_audio = Some(false);
+
+        synchronize_generation_profile_capabilities(&mut catalog);
+
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.info.family == "ltx2")
+            .expect("built-in LTX-2 model");
+        let profile = entry.generation_profile.as_ref().unwrap();
+        assert_ne!(profile.profile_hash, previous_hash);
+        assert!(profile.recipes.iter().all(|recipe| {
+            !recipe.capabilities.supports_audio
+                && recipe.request_selector.pipeline != Some(mold_core::Ltx2PipelineMode::T2a)
+        }));
+    }
+
+    #[test]
+    fn delivery_qualification_filters_formats_and_repairs_defaults() {
+        let mut video = mold_core::resolve_generation_profile(mold_core::GenerationProfileInput {
+            model: "wan22-t2v-a14b:fp8",
+            family: "wan",
+            sub_family: Some("wan22-t2v-a14b"),
+            default_width: 1280,
+            default_height: 720,
+            default_steps: 4,
+            default_guidance: 1.0,
+            default_frames: Some(81),
+            default_fps: Some(16),
+            default_negative_prompt: None,
+            source_image: Some(mold_core::SourceImageCapability::Unsupported),
+            supports_sequence: true,
+            supports_extend: false,
+            supports_audio: false,
+        });
+        mold_core::qualify_generation_profile_delivery(
+            &mut video,
+            mold_core::GenerationDeliveryCapabilities::new(false, false),
+        );
+        let output = &video.default_recipe().unwrap().capabilities.output;
+        assert_eq!(output.default_format, mold_core::OutputFormat::Gif);
+        assert_eq!(
+            output.formats,
+            vec![mold_core::OutputFormat::Gif, mold_core::OutputFormat::Apng]
+        );
+
+        let mut h3 = mold_core::resolve_generation_profile(mold_core::GenerationProfileInput {
+            model: "minimax-h3",
+            family: "minimax-h3",
+            sub_family: None,
+            default_width: 1280,
+            default_height: 720,
+            default_steps: 30,
+            default_guidance: 0.0,
+            default_frames: Some(345),
+            default_fps: Some(24),
+            default_negative_prompt: None,
+            source_image: None,
+            supports_sequence: false,
+            supports_extend: false,
+            supports_audio: true,
+        });
+        mold_core::qualify_generation_profile_delivery(
+            &mut h3,
+            mold_core::GenerationDeliveryCapabilities::new(false, false),
+        );
+        assert!(h3.recipes.is_empty());
+        assert!(h3.default_recipe_id.is_empty());
+    }
+
+    #[test]
+    fn undeliverable_generation_rows_are_not_advertised() {
+        let mut catalog = mold_core::catalog::build_model_catalog(&Config::default(), None, false);
+        let model = catalog
+            .iter_mut()
+            .find(|entry| entry.generation_profile.is_some())
+            .expect("visible generation row");
+        let removed_name = model.info.name.clone();
+        let profile = model.generation_profile.as_mut().unwrap();
+        profile.recipes.clear();
+        profile.default_recipe_id.clear();
+
+        retain_deliverable_generation_profiles(&mut catalog);
+        assert!(catalog.iter().all(|entry| entry.info.name != removed_name));
+    }
+
+    #[test]
+    fn wan_runtime_probe_recomputes_dependent_profile_controls() {
+        let mut catalog = mold_core::catalog::build_model_catalog(&Config::default(), None, false);
+        {
+            let entry = catalog
+                .iter_mut()
+                .find(|entry| entry.info.family == "wan")
+                .expect("built-in Wan model");
+            entry.source_image = Some(mold_core::SourceImageCapability::Unsupported);
+            entry.supports_extend = Some(false);
+        }
+
+        synchronize_generation_profile_capabilities(&mut catalog);
+        let entry = catalog
+            .iter_mut()
+            .find(|entry| entry.info.family == "wan")
+            .expect("built-in Wan model");
+        let profile = entry.generation_profile.as_ref().unwrap();
+        let recipe = profile.default_recipe().unwrap();
+        assert!(!recipe.capabilities.wan_recipe.supports_first_last_frame);
+        assert_eq!(
+            recipe.capabilities.keyframes.mode,
+            mold_core::ControlMode::Hidden
+        );
+        let unsupported_hash = profile.profile_hash.clone();
+
+        entry.source_image = Some(mold_core::SourceImageCapability::Optional);
+        entry.supports_extend = Some(true);
+        synchronize_generation_profile_capabilities(std::slice::from_mut(entry));
+        let profile = entry.generation_profile.as_ref().unwrap();
+        let recipe = profile.default_recipe().unwrap();
+        assert!(recipe.capabilities.wan_recipe.supports_first_last_frame);
+        assert_eq!(
+            recipe.capabilities.keyframes.mode,
+            mold_core::ControlMode::Adjustable
+        );
+        assert!(recipe.capabilities.supports_extend);
+        assert_ne!(profile.profile_hash, unsupported_hash);
     }
 
     /// #787: an installed wan checkpoint (cv:/hf:, no manifest) advertises
