@@ -14,7 +14,20 @@ use crate::device::{PhaseVramProbe, PhaseVramReport};
 use super::pipeline::{H3PipelineEvent, H3PipelinePhase};
 
 pub(crate) const H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA: &str =
-    "mold.minimax-h3.private-uat-runtime-bound-observation.v2";
+    "mold.minimax-h3.private-uat-runtime-bound-observation.v3";
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct H3PrivateRuntimeAuthorityObservation {
+    pub(crate) bootstrap_record_sha256: String,
+    pub(crate) runtime_qualification_identity_sha256: String,
+    pub(crate) device_id: String,
+    pub(crate) device_ordinal: usize,
+    pub(crate) compute_capability: [u16; 2],
+    pub(crate) attention_runtime_identity_sha256: String,
+    pub(crate) attention_kernel_identity: String,
+    pub(crate) attention_qualification_sha256: String,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +52,7 @@ pub(crate) struct H3PrivateRuntimeEnvelopeObservation {
 #[serde(deny_unknown_fields)]
 pub(crate) struct H3PrivateRuntimeBoundObservation {
     pub(crate) schema: String,
+    pub(crate) authority: H3PrivateRuntimeAuthorityObservation,
     pub(crate) envelope: H3PrivateRuntimeEnvelopeObservation,
     pub(crate) fixed_runtime_host_bytes: u64,
     pub(crate) fixed_runtime_device_bytes: u64,
@@ -60,6 +74,7 @@ struct ObservationState {
     device: Option<Device>,
     qwen_on_cpu: bool,
     envelope: Option<H3PrivateRuntimeEnvelopeObservation>,
+    authority: Option<H3PrivateRuntimeAuthorityObservation>,
     first_error: Option<String>,
     fixed_runtime_host_bytes: u64,
     overall: Option<PhaseVramProbe>,
@@ -87,6 +102,7 @@ impl H3PrivateRuntimeBoundCapture {
         device: &Device,
         qwen_on_cpu: bool,
         envelope: H3PrivateRuntimeEnvelopeObservation,
+        authority: H3PrivateRuntimeAuthorityObservation,
     ) -> Result<Self> {
         device
             .synchronize()
@@ -99,6 +115,7 @@ impl H3PrivateRuntimeBoundCapture {
                 device: Some(device.clone()),
                 qwen_on_cpu,
                 envelope: Some(envelope),
+                authority: Some(authority),
                 fixed_runtime_host_bytes: process_resident_bytes()?,
                 overall: Some(PhaseVramProbe::enter("h3.private.complete-attempt")),
                 ..ObservationState::default()
@@ -380,6 +397,10 @@ fn build_observation(
             .ok_or_else(|| anyhow!("private H3 Qwen encode has no routed workspace peak"))?;
     let observation = H3PrivateRuntimeBoundObservation {
         schema: H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA.into(),
+        authority: state
+            .authority
+            .clone()
+            .ok_or_else(|| anyhow!("private H3 runtime authority observation disappeared"))?,
         envelope: state
             .envelope
             .clone()

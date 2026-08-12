@@ -71,7 +71,8 @@ use super::private_qwen::{
 use super::private_qwen_support::{load_qualified_private_qwen_support, H3PrivateQwenSupport};
 #[cfg(feature = "mp4")]
 use super::private_runtime_observer::{
-    H3PrivateRuntimeBoundCapture, H3PrivateRuntimeEnvelopeObservation,
+    H3PrivateRuntimeAuthorityObservation, H3PrivateRuntimeBoundCapture,
+    H3PrivateRuntimeEnvelopeObservation,
 };
 #[cfg(feature = "mp4")]
 use super::vae_runtime::{
@@ -97,7 +98,7 @@ use crate::{
 };
 
 pub(crate) const RUNTIME_QUALIFICATION_SCHEMA: &str =
-    "mold.minimax-h3.private-runtime-qualification.v2";
+    "mold.minimax-h3.private-runtime-qualification.v3";
 pub(crate) const RUNTIME_QUALIFICATION_DECISION: &str = "qualified-private-fl2va-runtime";
 pub(crate) const MAX_RUNTIME_QUALIFICATION_BYTES: u64 = 128 * 1024;
 
@@ -357,6 +358,8 @@ pub(crate) struct H3PrivateRuntimeQualificationRecord {
     pub(crate) task: String,
     pub(crate) campaign_source_sha: String,
     pub(crate) campaign_runtime_code_identity_sha256: String,
+    pub(crate) campaign_bootstrap_record_sha256: String,
+    pub(crate) campaign_bootstrap_identity_sha256: String,
     pub(crate) measured_server_executable_relative_path: String,
     pub(crate) measured_server_executable_sha256: String,
     pub(crate) authorization_record_sha256: String,
@@ -2850,6 +2853,27 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
         } = *self;
         runtime_envelope.validate_prepared(prepared.prepared_request_input())?;
         let observed_envelope = runtime_envelope_observation(prepared.prepared_request_input())?;
+        let observed_compute_capability = match attention.device() {
+            H3AttentionDevice::Cuda {
+                compute_capability: Some((major, minor)),
+            } => [major, minor],
+            device => bail!(
+                "private H3 terminal authority requires a concrete CUDA compute capability, got {device:?}"
+            ),
+        };
+        let observed_authority = H3PrivateRuntimeAuthorityObservation {
+            bootstrap_record_sha256: activation.runtime_qualification.record_file_sha256().into(),
+            runtime_qualification_identity_sha256: activation
+                .runtime_qualification
+                .identity_sha256()
+                .into(),
+            device_id: owner.device_id.clone(),
+            device_ordinal: owner.device_ordinal,
+            compute_capability: observed_compute_capability,
+            attention_runtime_identity_sha256: attention.identity_sha256().into(),
+            attention_kernel_identity: attention.kernel().identity().into(),
+            attention_qualification_sha256: artifact_lease.attention_qualification_sha256.clone(),
+        };
         with_private_h3_cuda_execution_attempt(|| {
             consumption_binding.revalidate(&owner, &activation.scheduler_ledger)?;
             let cuda_device = commit_private_h3_allocation_then(&mut allocation_commit, || {
@@ -2860,8 +2884,12 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
                 authority.conditioner_placement(),
                 H3FactoryConditionerPlacement::HostCpuThenDrop
             );
-            let runtime_bound_capture =
-                H3PrivateRuntimeBoundCapture::begin(&cuda_device, qwen_on_cpu, observed_envelope)?;
+            let runtime_bound_capture = H3PrivateRuntimeBoundCapture::begin(
+                &cuda_device,
+                qwen_on_cpu,
+                observed_envelope,
+                observed_authority,
+            )?;
             // Keep one completion fence alive outside the concrete owner graph.
             // It runs only after a successful pipeline result and before any
             // CUDA-bearing local leaves the execution-attempt boundary.
@@ -3883,6 +3911,8 @@ pub(crate) fn validate_runtime_qualification_record_shape(
     record.bounds.validate()?;
     let sha_values = [
         record.campaign_runtime_code_identity_sha256.as_str(),
+        record.campaign_bootstrap_record_sha256.as_str(),
+        record.campaign_bootstrap_identity_sha256.as_str(),
         record.measured_server_executable_sha256.as_str(),
         record.authorization_record_sha256.as_str(),
         record.authorization_source_document_sha256.as_str(),
@@ -3937,7 +3967,7 @@ pub(crate) fn runtime_qualification_identity(
     record: &H3PrivateRuntimeQualificationRecord,
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"mold.minimax-h3.private-runtime-qualification.v2\0");
+    digest.update(b"mold.minimax-h3.private-runtime-qualification.v3\0");
     for value in [
         record.schema.as_str(),
         record.decision.as_str(),
@@ -3945,6 +3975,8 @@ pub(crate) fn runtime_qualification_identity(
         record.task.as_str(),
         record.campaign_source_sha.as_str(),
         record.campaign_runtime_code_identity_sha256.as_str(),
+        record.campaign_bootstrap_record_sha256.as_str(),
+        record.campaign_bootstrap_identity_sha256.as_str(),
         record.measured_server_executable_relative_path.as_str(),
         record.measured_server_executable_sha256.as_str(),
         record.authorization_record_sha256.as_str(),
@@ -4119,6 +4151,8 @@ mod tests {
             task: "fl2va".into(),
             campaign_source_sha: source_sha('d'),
             campaign_runtime_code_identity_sha256: sha('5'),
+            campaign_bootstrap_record_sha256: sha('6'),
+            campaign_bootstrap_identity_sha256: sha('7'),
             measured_server_executable_relative_path: "bin/mold-campaign".into(),
             measured_server_executable_sha256: sha('4'),
             authorization_record_sha256: sha('a'),
