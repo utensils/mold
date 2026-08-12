@@ -238,10 +238,19 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
 
 fn retain_deliverable_generation_profiles(catalog: &mut Vec<ModelInfoExtended>) {
     catalog.retain(|entry| {
-        entry
-            .generation_profile
-            .as_ref()
-            .is_none_or(|profile| !profile.recipes.is_empty())
+        entry.generation_profile.as_ref().is_none_or(|profile| {
+            !profile.recipes.is_empty()
+                || (mold_core::require_model_acquisition(
+                    &entry.info.name,
+                    Some(&entry.info.family),
+                )
+                .is_ok()
+                    && mold_core::require_model_activation(
+                        &entry.info.name,
+                        Some(&entry.info.family),
+                    )
+                    .is_err())
+        })
     });
 }
 
@@ -1098,7 +1107,7 @@ pub(crate) async fn model_component_status(
     model_name: &str,
 ) -> Result<ModelComponentsResponse, ApiError> {
     let family = family_for_model(state, model_name).await;
-    mold_core::require_model_activation(model_name, family.as_deref())
+    mold_core::require_model_acquisition(model_name, family.as_deref())
         .map_err(ApiError::model_activation)?;
     let resolved = mold_core::manifest::resolve_model_name(model_name);
     if let Some(manifest) = mold_core::manifest::find_manifest(&resolved) {
@@ -3217,6 +3226,34 @@ mod tests {
 
         retain_deliverable_generation_profiles(&mut catalog);
         assert!(catalog.iter().all(|entry| entry.info.name != removed_name));
+    }
+
+    #[test]
+    fn downloadable_h3_rows_survive_without_a_runtime_recipe() {
+        let mut catalog = mold_core::catalog::build_model_catalog(&Config::default(), None, false);
+        for entry in catalog
+            .iter_mut()
+            .filter(|entry| entry.info.family == mold_core::minimax_h3::FAMILY)
+        {
+            let profile = entry.generation_profile.as_mut().unwrap();
+            profile.recipes.clear();
+            profile.default_recipe_id.clear();
+        }
+
+        retain_deliverable_generation_profiles(&mut catalog);
+
+        let h3 = catalog
+            .iter()
+            .filter(|entry| entry.info.family == mold_core::minimax_h3::FAMILY)
+            .map(|entry| entry.info.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            h3,
+            std::collections::BTreeSet::from([
+                mold_core::minimax_h3::FL2VA_COMFY,
+                mold_core::minimax_h3::REF2VA_COMFY,
+            ])
+        );
     }
 
     #[test]

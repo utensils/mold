@@ -134,12 +134,7 @@ pub fn build_model_catalog(
     let artifact_root = config.resolved_models_dir();
 
     for manifest in visible_manifests().filter(|manifest| {
-        crate::require_model_activation(&manifest.name, Some(&manifest.family)).is_ok()
-            && manifest.files.iter().all(|file| {
-                crate::require_model_activation(&file.hf_repo, Some(&manifest.family)).is_ok()
-                    && crate::require_model_activation(&file.hf_filename, Some(&manifest.family))
-                        .is_ok()
-            })
+        crate::require_model_acquisition(&manifest.name, Some(&manifest.family)).is_ok()
     }) {
         let model_cfg = config.resolved_model_config(&manifest.name);
         let downloaded = config.manifest_model_is_downloaded(&manifest.name);
@@ -830,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn build_model_catalog_hides_compliance_gated_config_only_models() {
+    fn build_model_catalog_lists_only_registered_h3_acquisitions() {
         let mut models = HashMap::new();
         models.insert(
             "private-checkpoint".to_string(),
@@ -873,6 +868,14 @@ mod tests {
         assert!(catalog
             .iter()
             .any(|model| model.name == "ordinary-custom-model"));
+        assert!(crate::require_model_activation("private-checkpoint", Some("minimax-h3")).is_err());
+        for model in [
+            crate::minimax_h3::FL2VA_COMFY,
+            crate::minimax_h3::REF2VA_COMFY,
+        ] {
+            assert!(catalog.iter().any(|entry| entry.name == model));
+            assert!(crate::require_model_activation(model, Some("minimax-h3")).is_err());
+        }
     }
 
     #[test]

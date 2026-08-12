@@ -98,6 +98,35 @@ pub fn model_activation_available(identifier: &str, family: Option<&str>) -> boo
     model_activation(identifier, family) == ModelActivation::Available
 }
 
+/// Return whether a model may be discovered and acquired from its pinned
+/// upstream source.
+///
+/// MiniMax H3's reviewed authorization permits upstream-direct downloads and
+/// local storage, but execution remains independently gated by
+/// [`model_activation`]. Keeping those authorities separate prevents a
+/// downloadable checkpoint from becoming an implicit runtime approval.
+pub fn model_acquisition(identifier: &str, family: Option<&str>) -> ModelActivation {
+    if is_reviewed_minimax_h3_acquisition_identity(identifier) {
+        ModelActivation::Available
+    } else {
+        model_activation(identifier, family)
+    }
+}
+
+pub fn model_acquisition_available(identifier: &str, family: Option<&str>) -> bool {
+    model_acquisition(identifier, family) == ModelActivation::Available
+}
+
+pub fn require_model_acquisition(
+    identifier: &str,
+    family: Option<&str>,
+) -> Result<(), ModelActivationError> {
+    match model_acquisition(identifier, family) {
+        ModelActivation::Available => Ok(()),
+        ModelActivation::ComplianceGated => Err(ModelActivationError),
+    }
+}
+
 pub fn require_model_activation(
     identifier: &str,
     family: Option<&str>,
@@ -167,6 +196,13 @@ fn is_minimax_h3_identity(value: &str) -> bool {
             && after.is_none_or(|ch| !ch.is_ascii_alphanumeric())
     });
     separated_alias || normalized.split('-').any(is_minimax_h3_compact_alias)
+}
+
+fn is_reviewed_minimax_h3_acquisition_identity(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "minimax-h3" | "minimax-h3-fl2va:comfy-pruned-int8" | "minimax-h3-ref2va:comfy-pruned-int8"
+    )
 }
 
 fn is_minimax_h3_compact_alias(token: &str) -> bool {
@@ -241,6 +277,38 @@ mod tests {
             Some("minimax-h3")
         ));
         assert!(model_activation_available("flux", Some("flux")));
+    }
+
+    #[test]
+    fn reviewed_h3_acquisition_does_not_activate_execution() {
+        for identifier in [
+            "minimax-h3",
+            "minimax-h3-fl2va:comfy-pruned-int8",
+            "minimax-h3-ref2va:comfy-pruned-int8",
+        ] {
+            assert_eq!(
+                model_acquisition(identifier, Some("minimax-h3")),
+                ModelActivation::Available,
+                "{identifier}"
+            );
+            assert_eq!(
+                model_activation(identifier, Some("minimax-h3")),
+                ModelActivation::ComplianceGated,
+                "{identifier}"
+            );
+        }
+
+        for unreviewed in [
+            "hf:Comfy-Org/MiniMax-H3",
+            "minimax-h3:custom",
+            "transformer/high_noise.safetensors",
+        ] {
+            assert_eq!(
+                model_acquisition(unreviewed, Some("minimax-h3")),
+                ModelActivation::ComplianceGated,
+                "{unreviewed}"
+            );
+        }
     }
 
     #[test]

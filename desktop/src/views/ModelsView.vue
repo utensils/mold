@@ -13,7 +13,6 @@ import { useHostsStore } from "../stores/hosts";
 import { primaryModifierPressed } from "../lib/platform";
 import { mediaTypeFromQuery, type MediaType } from "../lib/modelAvailability";
 import { mergeModelPresentationMetadata } from "../lib/models";
-import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 
 const conn = useConnectionStore();
@@ -57,12 +56,9 @@ function setMediaType(type: MediaType) {
 
 const installedModels = computed(() => {
   const byName = new Map(
-    filterRestrictedModels(models.installed, hosts.capabilities.local).map((entry) => [
-      entry.name,
-      { ...entry, hostIds: ["local"] },
-    ]),
+    models.installed.map((entry) => [entry.name, { ...entry, hostIds: ["local"] }]),
   );
-  for (const entry of hostModels.unionInstalled) {
+  for (const entry of hostModels.unionDownloaded) {
     const existing = byName.get(entry.name);
     if (existing) {
       byName.set(entry.name, {

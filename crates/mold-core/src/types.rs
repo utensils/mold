@@ -7223,8 +7223,10 @@ mod minimax_h3_capability_tests {
                 state: "installed".into(),
             }],
         };
-        let mut server = ServerCapabilities::default();
-        server.minimax_h3 = Some(capability);
+        let server = ServerCapabilities {
+            minimax_h3: Some(capability),
+            ..ServerCapabilities::default()
+        };
         let value = serde_json::to_value(server).unwrap();
         assert_eq!(value["minimax_h3"]["partitions"][0]["task"], "fl2va");
         assert!(value["minimax_h3"]["qualification"]["metal_supported"]

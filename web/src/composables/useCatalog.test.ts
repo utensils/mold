@@ -125,6 +125,62 @@ describe("useCatalog", () => {
     expect(cat.families.value[0].family).toBe("flux");
   });
 
+  it("surfaces pinned compact H3 manifests for download without treating them as installed", async () => {
+    const models: ModelInfoExtended[] = [
+      {
+        name: "minimax-h3-fl2va:comfy-pruned-int8",
+        family: "minimax-h3",
+        size_gb: 20.97,
+        is_loaded: false,
+        last_used: null,
+        hf_repo: "Comfy-Org/MiniMax-H3",
+        downloaded: false,
+        default_steps: 21,
+        default_guidance: 1,
+        default_width: 1344,
+        default_height: 768,
+        description: "Compact FL2VA",
+      },
+      {
+        name: "minimax-h3-ref2va:comfy-pruned-int8",
+        family: "minimax-h3",
+        size_gb: 20.97,
+        is_loaded: false,
+        last_used: null,
+        hf_repo: "Comfy-Org/MiniMax-H3",
+        downloaded: false,
+        default_steps: 21,
+        default_guidance: 1,
+        default_width: 1344,
+        default_height: 768,
+        description: "Compact Ref2VA",
+      },
+    ];
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url === "/api/models") {
+        return { ok: true, json: async () => models };
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const cat = useCatalog();
+    await cat.refreshInstalled();
+
+    expect(cat.installed.value).toEqual([]);
+    expect(cat.manifestEntries.value.map((entry) => entry.id)).toEqual(
+      models.map((model) => model.name),
+    );
+    expect(cat.manifestEntries.value.every((entry) => entry.supported)).toBe(
+      true,
+    );
+    await cat.openDetail(models[0].name);
+    expect(cat.detail.value).toMatchObject({
+      kind: "catalog",
+      entry: { id: models[0].name, installed: false },
+      variants: [{ id: models[0].name, label: "safetensors" }],
+    });
+  });
+
   it("states include_nsfw=false by default so the unchecked box matches the server", async () => {
     // `GET /api/catalog/search` treats a missing `include_nsfw` as *true*.
     // Leaving it out of the default filter meant the topbar rendered an

@@ -1,11 +1,11 @@
 //! Opened-file-bound Qwen support assets for private MiniMax H3 UAT.
 //!
 //! This module is compiled only with `h3-private-uat`. It resolves the five
-//! lightweight files consumed by the conditioner through the exact hidden H3
+//! lightweight files consumed by the conditioner through the exact pinned H3
 //! manifest and `storage_path` contract, then parses only bytes read from
 //! authenticated, no-follow file descriptors. It does not register an engine,
-//! expose a model through the catalog, download anything, or relax the public
-//! H3 capability gate.
+//! expose runtime capability, download anything, or relax H3 execution
+//! admission.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, Metadata};
@@ -291,18 +291,17 @@ fn production_support_contracts(model: &str) -> Result<Vec<SupportFileContract>>
         contract::REF2VA_COMFY => Task::Ref2va,
         _ => bail!("private H3 Qwen support requires an exact Comfy manifest name"),
     };
-    let manifest = find_manifest(model)
-        .ok_or_else(|| anyhow!("missing hidden MiniMax H3 manifest for {model}"))?;
+    let manifest =
+        find_manifest(model).ok_or_else(|| anyhow!("missing MiniMax H3 manifest for {model}"))?;
     let manifest_authority = contract::manifest_contract(manifest)
         .ok_or_else(|| anyhow!("MiniMax H3 manifest has no frozen contract"))?;
     if manifest.name != model
         || manifest.family != contract::FAMILY
-        || !manifest.hidden
         || manifest_authority.task != task
         || manifest_authority.layout != Layout::ComfyPrunedInt8ConvrotNvfp4Awq
         || manifest_authority.runtime_available
     {
-        bail!("private H3 Qwen support requires the exact inactive hidden Comfy manifest")
+        bail!("private H3 Qwen support requires the exact inactive Comfy manifest")
     }
 
     let mut contracts = Vec::with_capacity(SupportRole::ALL.len());

@@ -5136,6 +5136,47 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn list_models_surfaces_only_the_two_pinned_compact_h3_downloads() {
+        let app = app_with(MockEngine::ready());
+        let resp = app
+            .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        let h3 = models
+            .iter()
+            .filter(|model| model["family"] == mold_core::minimax_h3::FAMILY)
+            .map(|model| {
+                (
+                    model["name"].as_str().unwrap(),
+                    model["downloaded"].as_bool().unwrap(),
+                    model["hf_repo"].as_str().unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            h3,
+            std::collections::BTreeSet::from([
+                (
+                    mold_core::minimax_h3::FL2VA_COMFY,
+                    false,
+                    "Comfy-Org/MiniMax-H3",
+                ),
+                (
+                    mold_core::minimax_h3::REF2VA_COMFY,
+                    false,
+                    "Comfy-Org/MiniMax-H3",
+                ),
+            ])
+        );
+    }
+
     /// Sequence capability is advertised per model, so a picker never has to
     /// infer it from the checkpoint name. Every LTX-2 checkpoint qualifies,
     /// dev included — the old name heuristic hid dev checkpoints from the
@@ -5884,6 +5925,29 @@ mod tests {
 
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(models_dir);
+    }
+
+    #[tokio::test]
+    async fn compact_h3_components_are_inspectable_before_runtime_qualification() {
+        let app = app_empty();
+        let resp = app
+            .oneshot(
+                Request::get("/api/models/minimax-h3-fl2va%3Acomfy-pruned-int8/components")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = json_body(resp).await;
+        assert_eq!(json["model"], mold_core::minimax_h3::FL2VA_COMFY);
+        let components = json["components"].as_array().unwrap();
+        assert!(!components.is_empty());
+        assert!(components.iter().all(|component| {
+            component["repair_model"] == mold_core::minimax_h3::FL2VA_COMFY
+                && component["present"] == false
+        }));
     }
 
     // ── /api/openapi.json ────────────────────────────────────────────────────
@@ -9724,10 +9788,10 @@ mod tests {
     // ─── Downloads UI (Agent A) ─────────────────────────────────────────────
 
     #[tokio::test]
-    async fn post_api_downloads_rejects_h3_before_queueing() {
+    async fn post_api_downloads_enqueues_authorized_compact_h3() {
         let state = AppState::for_tests();
         let app = app_with_state(state.clone());
-        let body = serde_json::json!({ "model": "hf:MiniMaxAI/MiniMax-H3" });
+        let body = serde_json::json!({ "model": mold_core::minimax_h3::FL2VA_COMFY });
         let response = app
             .oneshot(
                 Request::builder()
@@ -9740,16 +9804,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
-        let body = json_body(response).await;
-        assert_eq!(body["code"], mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED);
+        assert_eq!(response.status(), StatusCode::OK);
         let listing = state.downloads.listing().await;
         assert!(listing.active.is_none());
-        assert!(listing.queued.is_empty());
+        assert_eq!(listing.queued.len(), 1);
+        assert_eq!(listing.queued[0].model, mold_core::minimax_h3::FL2VA_COMFY);
     }
 
     #[tokio::test]
-    async fn config_only_h3_admin_and_download_routes_share_the_451_gate() {
+    async fn config_only_h3_download_and_runtime_admin_routes_remain_gated() {
         let state = AppState::for_tests();
         state.config.write().await.models.insert(
             "private-video-model".to_string(),

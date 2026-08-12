@@ -758,6 +758,26 @@ async fn require_server_model_activation(
     Ok(family)
 }
 
+/// Validate discovery/storage authority without implying that the same model
+/// can execute on this server. Only download and repair ingress may use this;
+/// generation, loading, cloud, expansion, and utility routes retain
+/// [`require_server_model_activation`].
+async fn require_server_model_acquisition(
+    state: &AppState,
+    model_name: &str,
+) -> Result<Option<String>, ApiError> {
+    let family = model_manager::family_for_model(state, model_name).await;
+    mold_core::require_model_acquisition(model_name, family.as_deref())
+        .map_err(ApiError::model_activation)?;
+
+    let resolved = mold_core::manifest::resolve_model_name(model_name);
+    if let Some(manifest) = mold_core::manifest::find_manifest(&resolved) {
+        mold_core::require_model_acquisition(&manifest.name, Some(&manifest.family))
+            .map_err(ApiError::model_activation)?;
+    }
+    Ok(family)
+}
+
 pub(crate) async fn require_server_generation_request_activation(
     state: &AppState,
     request: &mold_core::GenerateRequest,
@@ -3547,7 +3567,7 @@ async fn pull_model_endpoint(
     headers: HeaderMap,
     Json(body): Json<LoadModelBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_server_model_activation(&state, &body.model).await?;
+    require_server_model_acquisition(&state, &body.model).await?;
     let wants_sse = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -7400,7 +7420,7 @@ pub async fn create_download(
     Json(body): Json<CreateDownloadBody>,
 ) -> axum::response::Response {
     use crate::downloads::{EnqueueError, EnqueueOutcome};
-    if let Err(error) = require_server_model_activation(&state, &body.model).await {
+    if let Err(error) = require_server_model_acquisition(&state, &body.model).await {
         return error.into_response();
     }
     match state.downloads.enqueue(body.model.clone()).await {

@@ -35,15 +35,16 @@ pub const ALL_FAMILIES: &[Family] = &[
     Family::Wuerstchen,
 ];
 
-/// Families permitted in ordinary discovery surfaces for this build.
+/// Families permitted in ordinary acquisition surfaces for this build.
 ///
 /// `ALL_FAMILIES` remains the exhaustive internal taxonomy so classification
 /// and exhaustive matches know about contract-only families. Public catalog
 /// endpoints must consume this filtered iterator instead: its predicate is a
-/// direct view of mold-core's single activation authority.
+/// direct view of mold-core's acquisition authority and does not imply runtime
+/// availability.
 pub fn active_families() -> impl Iterator<Item = Family> {
     ALL_FAMILIES.iter().copied().filter(|family| {
-        mold_core::model_activation_available(family.as_str(), Some(family.as_str()))
+        mold_core::model_acquisition_available(family.as_str(), Some(family.as_str()))
     })
 }
 
@@ -134,9 +135,9 @@ mod tests {
     }
 
     #[test]
-    fn compliance_gated_families_stay_out_of_public_discovery() {
+    fn authorized_h3_is_visible_for_acquisition() {
         let families = active_families().collect::<Vec<_>>();
-        assert!(!families.contains(&Family::MinimaxH3));
+        assert!(families.contains(&Family::MinimaxH3));
         assert!(families.contains(&Family::Flux));
     }
 }
