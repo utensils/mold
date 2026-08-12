@@ -34,6 +34,9 @@ import {
   type CatalogSortOption,
 } from "../lib/catalogFilters";
 import { familyLabel } from "@studio/lib/modelFamily";
+import { filterRestrictedModels } from "@studio/lib/modelAccess";
+import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
+import { reviewedMiniMaxH3ModelAccess } from "@studio/lib/minimaxH3Inventory";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 import { modelKindLabel, modelKindValue, modelWeightsLabel } from "@studio/lib/modelMetadata";
@@ -199,11 +202,26 @@ function ownerHostIds(entry: MobileCatalogEntry): string[] {
   return entry.installed ? [props.selectedHostId] : [];
 }
 
+/** Catalog ids are portable recipes, while a plain manifest name is valid
+ * only on a host that advertised that exact row from `/api/models`. This is
+ * especially important for additive families: an older machine's missing row
+ * is not permission to POST a newly introduced manifest name to it. */
+function acquisitionHosts(entry: MobileCatalogEntry): MobileHost[] {
+  if (isCatalogModelId(entry.id) || !isMinimaxH3Identity(entry.family, entry.name)) {
+    return downloadHosts.value;
+  }
+  return downloadHosts.value.filter((host) =>
+    (modelsByHost.value[host.id] ?? []).some(
+      (model) => model.name === entry.name || model.name === entry.id,
+    ),
+  );
+}
+
 /** A row is a merge of every connected machine, so "installed" means installed
  * SOMEWHERE. An install therefore stays on offer until every reachable machine
  * owns the model, at which point the only remaining action is a repair. */
 function installPlan(entry: MobileCatalogEntry): ModelInstallPlan<MobileHost> {
-  return planModelInstall(downloadHosts.value, ownerHostIds(entry));
+  return planModelInstall(acquisitionHosts(entry), ownerHostIds(entry));
 }
 
 const targetPlan = computed<ModelInstallPlan<MobileHost> | null>(() => {
@@ -454,6 +472,26 @@ const detailModel = computed(() => {
         (model) => model.name === entry?.name || model.name === entry?.id,
       ) ?? null)
     : null;
+});
+
+/** Downloaded artifacts remain inventory even when execution is unavailable.
+ * Load is a runtime action, so it requires the same host capability/model-row
+ * authority Create uses; unload remains available for recovery. */
+const detailRuntimeAvailable = computed(() => {
+  const model = detailModel.value;
+  const entry = detailEntry.value;
+  const host = entry ? owningHost(entry) : null;
+  if (!model || !host) return false;
+  if (isMinimaxH3Identity(model.family, model.name)) {
+    return Boolean(
+      reviewedMiniMaxH3ModelAccess(
+        capabilitiesByHost.value[host.id],
+        model.name,
+        model.generation_profile?.profile_hash,
+      ),
+    );
+  }
+  return filterRestrictedModels([model], capabilitiesByHost.value[host.id]).length === 1;
 });
 
 /** Runnable manifest siblings (`base:tag`) become exact pull targets. */
@@ -784,7 +822,10 @@ async function cancelDownload(row: DownloadRow): Promise<void> {
 
 function requestPull(entry: MobileCatalogEntry): void {
   const candidates = installPlan(entry).targets;
-  if (candidates.length === 0 && ownerHostIds(entry).length > 0) {
+  if (
+    candidates.length === 0 &&
+    (isMinimaxH3Identity(entry.family, entry.name) || ownerHostIds(entry).length > 0)
+  ) {
     announce("No reachable machine is available for this model right now.", true);
     return;
   }
@@ -1607,6 +1648,13 @@ onBeforeUnmount(() => {
               class="mobile-catalog-installed-actions"
               aria-label="Installed model actions"
             >
+              <p
+                v-if="!detailModel.is_loaded && !detailRuntimeAvailable"
+                class="mobile-catalog-detail-muted"
+                data-test="mobile-catalog-runtime-unavailable"
+              >
+                Stored on this host. Runtime unavailable.
+              </p>
               <button
                 v-if="detailModel.is_loaded"
                 type="button"
@@ -1617,7 +1665,7 @@ onBeforeUnmount(() => {
                 {{ detailBusy === "unload" ? "Unloading…" : "Unload from GPU" }}
               </button>
               <button
-                v-else
+                v-else-if="detailRuntimeAvailable"
                 type="button"
                 class="secondary-button"
                 :disabled="Boolean(detailBusy)"
