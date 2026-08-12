@@ -106,6 +106,8 @@ require_text "Dockerfile" \
   'scripts/seal-cuda-ptx-manifest.py /build/target/release/mold'
 require_text "Dockerfile" \
   'scripts/probe-cuda-embedded-ptx.py /build/target/release/mold'
+require_text "Dockerfile" \
+  'COPY crates/mold-candle/src/minimax_h3/cuda/int8_linear.cu crates/mold-candle/src/minimax_h3/cuda/int8_linear.cu'
 while IFS= read -r workspace_member; do
   require_text "Dockerfile" \
     "COPY ${workspace_member}/Cargo.toml ${workspace_member}/Cargo.toml"
