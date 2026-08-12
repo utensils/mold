@@ -83,3 +83,7 @@ crates/*/cv-*/
 # directory next to the crate root. Both are scratch.
 crates/*/.hf-cache/
 crates/mold-cli/ltx2-control-union-19b/
+
+# Python bytecode from the contract scripts under scripts/
+__pycache__/
+*.pyc

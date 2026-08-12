@@ -9,7 +9,6 @@ import type {
   FloatControl,
   ProfileAspectGroup,
   ProfileFpsControl,
-  ProfileResolutionPreset,
   ResolutionProfile,
   TemporalProfile,
   WanRecipeCapabilitiesProfile,
@@ -615,18 +614,6 @@ export function groupDimensions(
     );
   }
   return groups;
-}
-
-export function profilePresets(
-  model: GenerationProfileModel | null | undefined,
-  pipeline?: string | null,
-): ProfileResolutionPreset[] {
-  return (
-    effectiveGenerationRecipe(
-      model,
-      pipeline,
-    )?.resolution.aspect_groups.flatMap((group) => group.presets) ?? []
-  );
 }
 
 export interface ProfileAspectOption {

@@ -584,7 +584,10 @@ def exact_layer_contracts(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]
             "frame_step": 17,
             "frame_offset": 5,
             "min_frames": 124,
-            "max_frames": 362,
+            # 345, not 362: #985 lowered the ceiling (362 is 15.083 s, which
+            # the diffusers path rejects) and moved the fixture manifest and
+            # `mold_core::minimax_h3::MAX_FRAMES` with it. This copy was missed.
+            "max_frames": 345,
             "max_pixels": 1_069_056,
             "min_aspect_ratio": "0.25",
             "max_aspect_ratio": "4",

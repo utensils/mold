@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import struct
+import sys
 import tempfile
 import time
 import unittest
@@ -218,7 +219,13 @@ class RunnerPureContracts(unittest.TestCase):
         started = time.monotonic()
         with self.assertRaisesRegex(TimeoutError, "deadline"):
             runner.run_process_group(
-                ["/bin/sh", "-c", "sleep 30"],
+                # The sleeper is this interpreter by absolute path, not
+                # `sh -c "sleep 30"`: a distribution without `/bin/sleep` or
+                # `/usr/bin/sleep` (NixOS, and any non-FHS host) exits the
+                # shell immediately with 127, so the deadline never expires
+                # and the assertion below fails for a reason that has nothing
+                # to do with the timeout it covers.
+                [sys.executable, "-c", "import time; time.sleep(30)"],
                 env={"PATH": "/usr/bin:/bin"},
                 deadline=runner.Deadline(0.05),
             )

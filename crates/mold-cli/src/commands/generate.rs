@@ -4342,11 +4342,7 @@ mod tests {
         assert_eq!(preview_loop_count(Duration::from_secs(30)), 1);
     }
 
-    #[test]
-    fn forced_local_validation_passes_family_hint() {
-        // `cv:` / `hf:` catalog IDs are absent from the static manifest, so the
-        // forced-local path must feed the config-resolved family through or
-        // every family-gated LTX-2 feature fails with "unknown model family".
+    fn ltx2_catalog_id_config() -> Config {
         let mut config = Config::default();
         config.models.insert(
             "cv:2781713".to_string(),
@@ -4355,6 +4351,47 @@ mod tests {
                 ..ModelConfig::default()
             },
         );
+        config
+    }
+
+    #[test]
+    fn forced_local_validation_passes_family_hint() {
+        // `cv:` / `hf:` catalog IDs are absent from the static manifest, so the
+        // forced-local path must feed the config-resolved family through or
+        // every family-gated LTX-2 feature fails with "unknown model family".
+        //
+        // The gated field here is `spatial_upscale` and the container is one
+        // every build can deliver. This used to be `enable_audio` over `mp4`:
+        // since output formats became recipe-qualified, an `mp4` request is
+        // invalid in a binary compiled without that feature, so the default
+        // feature run failed on the container rather than exercising the family
+        // gate this covers. The audio path keeps its own mp4-gated case below.
+        let config = ltx2_catalog_id_config();
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a red apple",
+            "model": "cv:2781713",
+            "width": 960,
+            "height": 576,
+            "steps": 8,
+            "guidance": 3.0,
+            "batch_size": 1,
+            "output_format": "apng",
+            "spatial_upscale": "x2"
+        }))
+        .unwrap();
+
+        // Sanity: without the hint the family gate rejects it.
+        assert!(mold_core::validate_generate_request(&request).is_err());
+        validate_local_request(&request, &config).unwrap();
+    }
+
+    /// The same hint, carrying the LTX-2-only audio flag in the one container
+    /// that can hold a soundtrack — so this case exists only where the build
+    /// can actually deliver it.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn forced_local_validation_passes_family_hint_for_generated_audio() {
+        let config = ltx2_catalog_id_config();
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "prompt": "a red apple",
             "model": "cv:2781713",
@@ -4368,7 +4405,6 @@ mod tests {
         }))
         .unwrap();
 
-        // Sanity: without the hint the family gate rejects it.
         assert!(mold_core::validate_generate_request(&request).is_err());
         validate_local_request(&request, &config).unwrap();
     }

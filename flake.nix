@@ -1082,14 +1082,10 @@
               {
                 category = "check";
                 name = "ci-local";
-                help = "run the same sequence CI runs: fmt-check, check, clippy, test";
+                help = "run main's CI gates locally in a clean env (rust/web/docs/contracts; --list, -k)";
                 command = ''
-                  set -euo pipefail
-                  cargo fmt --all -- --check
-                  cargo check --workspace
-                  cargo clippy --workspace --all-targets -- -D warnings
-                  cargo test --workspace
-                  cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns
+                  repo_dir="''${PRJ_ROOT:-$(git rev-parse --show-toplevel)}"
+                  exec "$repo_dir/scripts/ci-local.sh" "$@"
                 '';
               }
               {

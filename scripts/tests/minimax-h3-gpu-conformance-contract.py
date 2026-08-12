@@ -431,7 +431,9 @@ def layer_document(
             "seed": 42,
             "width": 1280,
             "height": 768,
-            "frames": 362,
+            # The ceiling moved to 345 in #985 (362 is 15.083 s, which the
+            # diffusers path rejects); 345 is still on the 17n+5 grid.
+            "frames": 345,
             "fps": 24,
             "video_sampler": {
                 "algorithm": "minimax-h3-flow-euler-v1",
