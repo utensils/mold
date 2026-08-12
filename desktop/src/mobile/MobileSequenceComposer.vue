@@ -145,12 +145,14 @@ function setCameraMode(mode: string) {
   }
 }
 
-/** Durations are the 8n+1 grid up to the cap, strictly above the motion tail;
- *  an off-grid loaded value stays visible rather than silently re-snapping. */
+/** Durations are the family's own grid (`8n+1`, `4n+1` for wan — #783) up to
+ *  the cap, strictly above the motion tail; an off-grid loaded value stays
+ *  visible rather than silently re-snapping. */
 function frameOptionsFor(frames: number): number[] {
   const options = sequenceFrameOptions(
     props.chainLimits?.frames_per_clip_cap ?? 97,
     motionTail.value,
+    props.selectedModel?.family ?? props.form.family,
   );
   if (!options.includes(frames)) options.push(frames);
   return options.sort((a, b) => a - b);

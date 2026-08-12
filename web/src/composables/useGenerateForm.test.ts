@@ -97,6 +97,123 @@ describe("useGenerateForm", () => {
     });
   });
 
+  /**
+   * Continuation is not LTX-2-only (#783). The extend fields rode inside the
+   * LTX-2 request spread, so a wan continuation the surface now offers would
+   * have gone out as a plain text-to-video request — silently, with the
+   * source clip dropped.
+   */
+  it("sends a wan continuation's source clip and overlap", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "wan22-i2v-a14b:q5";
+    form.state.value.modelFamily = "wan";
+    form.state.value.frames = 53;
+    form.state.value.extendVideoPath = "/srv/mold/clip.mp4";
+    form.state.value.extendOverlapFrames = 1;
+    expect(form.toRequest()).toMatchObject({
+      extend_video_path: "/srv/mold/clip.mp4",
+      extend_overlap_frames: 1,
+    });
+  });
+
+  /**
+   * The overlap the control shows must be the overlap the request carries.
+   * Wan offers exactly one choice, so `@change` never fires and the form field
+   * stays null; leaving the wire field absent handed the host its own
+   * family-wide default of 17, which `wan/pipeline.rs`'s `extend_inner`
+   * refuses — every untouched wan continuation failed (#783 review).
+   */
+  it("submits wan's single carried frame from an untouched overlap control", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "wan22-i2v-a14b:q5";
+    form.state.value.modelFamily = "wan";
+    form.state.value.frames = 53;
+    form.state.value.extendVideoPath = "/srv/mold/clip.mp4";
+    form.state.value.extendOverlapFrames = null;
+    const request = form.toRequest(
+      makeModel({
+        name: "wan22-i2v-a14b:q5",
+        family: "wan",
+        supports_extend: true,
+        // The host advertises the family-wide LTX-2 value; the clamp is the
+        // client's, so it has to survive all the way onto the wire.
+        extend_default_overlap_frames: 17,
+      }),
+    );
+    expect(request.extend_overlap_frames).toBe(1);
+  });
+
+  it("submits the host's advertised default for an untouched LTX-2 continuation", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "ltx2-13b-distilled";
+    form.state.value.modelFamily = "ltx2";
+    form.state.value.frames = 97;
+    form.state.value.extendVideoPath = "/srv/mold/clip.mp4";
+    form.state.value.extendOverlapFrames = null;
+    const request = form.toRequest(
+      makeModel({
+        name: "ltx2-13b-distilled",
+        family: "ltx2",
+        supports_extend: true,
+        extend_default_overlap_frames: 25,
+      }),
+    );
+    expect(request.extend_overlap_frames).toBe(25);
+  });
+
+  it("keeps the overlap home when there is no clip to continue", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "wan22-i2v-a14b:q5";
+    form.state.value.modelFamily = "wan";
+    form.state.value.frames = 53;
+    expect(form.toRequest().extend_overlap_frames).toBeUndefined();
+  });
+
+  /**
+   * Continuation is per family, not part of the LTX-2 suite (#783), so the
+   * staged clip is cleared on leaving a family that can continue at all — not
+   * on leaving LTX-2. Desktop and iPhone apply the same rule.
+   */
+  it("keeps a staged continuation across a switch within a continuing family", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(
+      makeModel({ name: "wan22-i2v-a14b:q5", family: "wan" }),
+    );
+    form.state.value.extendVideoPath = "/srv/mold/clip.mp4";
+    form.state.value.extendOverlapFrames = 1;
+
+    form.applyModelDefaults(
+      makeModel({ name: "wan22-i2v-a14b:q8", family: "wan" }),
+    );
+    expect(form.state.value.extendVideoPath).toBe("/srv/mold/clip.mp4");
+    expect(form.state.value.extendOverlapFrames).toBe(1);
+  });
+
+  it("drops a staged continuation on a switch to a family that cannot continue", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(
+      makeModel({ name: "wan22-i2v-a14b:q5", family: "wan" }),
+    );
+    form.state.value.extendVideoPath = "/srv/mold/clip.mp4";
+    form.state.value.extendOverlapFrames = 1;
+
+    form.applyModelDefaults(makeModel());
+    expect(form.state.value.extendVideoPath).toBe("");
+    expect(form.state.value.extendOverlapFrames).toBeNull();
+  });
+
+  it("keeps the LTX-2 suite out of a wan request", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "wan22-i2v-a14b:q5";
+    form.state.value.modelFamily = "wan";
+    form.state.value.extendVideoPath = "/srv/mold/clip.mp4";
+    form.state.value.sourceVideoPath = "/srv/mold/guide.mp4";
+    const request = form.toRequest();
+    expect(request.extend_video_path).toBe("/srv/mold/clip.mp4");
+    expect(request.source_video_path).toBeUndefined();
+    expect(request.pipeline).toBeUndefined();
+  });
+
   it("projects Ref2VA through the shared H3 request authority", () => {
     const form = useGenerateForm();
     form.state.value.model = "minimax-h3-ref2va:official-bf16";

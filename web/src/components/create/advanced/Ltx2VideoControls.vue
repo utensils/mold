@@ -43,12 +43,6 @@ import {
   isAudioOnlyPipeline,
 } from "@studio/lib/ltx2Pipeline";
 import {
-  DEFAULT_EXTEND_OVERLAP_FRAMES,
-  extendNewFrames,
-  extendOverlapOptions,
-  extendValidationError,
-} from "@studio/lib/extend";
-import {
   emptyGuidanceOverrides,
   guidanceOverrideCount,
   stgBlocksError,
@@ -61,14 +55,8 @@ const props = withDefaults(
   defineProps<{
     modelValue: GenerateFormState;
     audioOutputSupported?: boolean;
-    canExtend?: boolean;
-    extendDefaultOverlapFrames?: number;
   }>(),
-  {
-    audioOutputSupported: true,
-    canExtend: false,
-    extendDefaultOverlapFrames: DEFAULT_EXTEND_OVERLAP_FRAMES,
-  },
+  { audioOutputSupported: true },
 );
 const emit = defineEmits<{ "update:modelValue": [value: GenerateFormState] }>();
 const controlAdapters = ref<Ltx2ControlAdapterInfo[]>([]);
@@ -315,48 +303,6 @@ async function onSourceVideo(event: Event) {
 function clearSourceVideo() {
   patch({ sourceVideo: null });
 }
-async function onExtendVideo(event: Event) {
-  const extendVideo = await readMedia(event);
-  if (!extendVideo) return;
-  patch({ extendVideo, extendVideoPath: "" });
-}
-function clearExtendVideo() {
-  // Drop the overlap with the clip so a later continuation starts from the
-  // server default rather than inheriting a stale, possibly invalid value.
-  patch({ extendVideo: null, extendOverlapFrames: null });
-}
-
-const extendOverlap = computed(
-  () =>
-    props.modelValue.extendOverlapFrames ?? props.extendDefaultOverlapFrames,
-);
-const isExtending = computed(
-  () =>
-    props.modelValue.extendVideo !== null ||
-    props.modelValue.extendVideoPath.trim() !== "",
-);
-const extendOverlapChoices = computed(() =>
-  extendOverlapOptions(props.modelValue.frames),
-);
-const extendError = computed(() =>
-  isExtending.value
-    ? extendValidationError({
-        overlapFrames: extendOverlap.value,
-        frames: props.modelValue.frames,
-        hasSourceImage: props.modelValue.imageAttachments.length > 0,
-        hasSourceVideo:
-          props.modelValue.sourceVideo !== null ||
-          props.modelValue.sourceVideoPath.trim() !== "",
-        hasKeyframes: props.modelValue.keyframes.length > 0,
-      })
-    : null,
-);
-const extendSummary = computed(() => {
-  const added = extendNewFrames(props.modelValue.frames, extendOverlap.value);
-  if (added === null) return "";
-  return `Appends ${added} new frames after the source clip.`;
-});
-
 // ── Retake range ──────────────────────────────────────────────────────
 function setRetakeStart(raw: string) {
   patch({
@@ -617,72 +563,6 @@ function removeKeyframe(index: number) {
           patch({ sourceVideoPath: ($event.target as HTMLInputElement).value })
         "
       />
-    </div>
-
-    <div v-if="canExtend" class="ltx2__field" data-test="ltx2-extend">
-      <label class="ltx2__label">Continue a video</label>
-      <label v-if="!modelValue.extendVideo" class="ltx2__file">
-        <span>Attach video to continue</span>
-        <input
-          type="file"
-          accept="video/*"
-          class="ltx2__file-input"
-          data-test="ltx2-extend-attach"
-          @change="onExtendVideo"
-        />
-      </label>
-      <div v-else class="ltx2__source-row">
-        <span class="ltx2__source-name">{{
-          modelValue.extendVideo.filename
-        }}</span>
-        <button
-          type="button"
-          class="ltx2__remove"
-          data-test="ltx2-extend-clear"
-          @click="clearExtendVideo"
-        >
-          Remove
-        </button>
-      </div>
-      <input
-        class="ltx2__input"
-        data-test="ltx2-extend-path"
-        placeholder="or server video path"
-        :value="modelValue.extendVideoPath"
-        :disabled="modelValue.extendVideo !== null"
-        @input="
-          patch({ extendVideoPath: ($event.target as HTMLInputElement).value })
-        "
-      />
-      <template v-if="isExtending">
-        <label class="ltx2__label">Overlap (frames of motion context)</label>
-        <select
-          class="ltx2__input"
-          data-test="ltx2-extend-overlap"
-          :value="String(extendOverlap)"
-          @change="
-            patch({
-              extendOverlapFrames: Number(
-                ($event.target as HTMLSelectElement).value,
-              ),
-            })
-          "
-        >
-          <option
-            v-for="option in extendOverlapChoices"
-            :key="option"
-            :value="String(option)"
-          >
-            {{ option }}
-          </option>
-        </select>
-        <p v-if="extendError" class="ltx2__error" data-test="ltx2-extend-error">
-          {{ extendError }}
-        </p>
-        <p v-else class="ltx2__hint" data-test="ltx2-extend-summary">
-          {{ extendSummary }}
-        </p>
-      </template>
     </div>
 
     <div class="ltx2__field">

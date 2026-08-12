@@ -547,3 +547,100 @@ describe("clear sequence", () => {
     ]);
   });
 });
+
+/**
+ * Wan's clip grid and seam are both per checkpoint (#783). The composer took
+ * neither: it enumerated the LTX `8k+1` durations for every family — so wan's
+ * own 53-frame routing default was not even selectable — and read the motion
+ * tail from bare name/family strings, which made an image-conditioned
+ * checkpoint's real handoff look like LTX-Video's "Join".
+ */
+describe("SequenceComposer — wan", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    pinia = createPinia();
+    setActivePinia(pinia);
+    fetchChainLimitsMock.mockReset();
+    validateChainMock.mockReset();
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  function wanLimits(): api.ChainLimits {
+    return ltx2Limits({
+      model: "wan22-i2v-a14b:q5",
+      frames_per_clip_cap: 121,
+      frames_per_clip_recommended: 53,
+      supports_audio: false,
+    });
+  }
+
+  function mountWan(sourceImage: string | null) {
+    fetchChainLimitsMock.mockResolvedValue(wanLimits());
+    return mountComposer({
+      model: "wan22-i2v-a14b:q5",
+      family: "wan",
+      sourceImage,
+      modelDefaultFrames: 53,
+      shared: {
+        ...shared(),
+        model: "wan22-i2v-a14b:q5",
+        family: "wan",
+        fps: 16,
+      },
+    });
+  }
+
+  it("offers wan clip durations on its own 4k+1 grid", async () => {
+    const wrapper = mountWan("required");
+    await flushPromises();
+    const frames = wrapper
+      .get("[data-test='clip-frames']")
+      .findAll("option")
+      .map((option) => Number(option.attributes("value")));
+    expect(frames).toContain(53);
+    for (const value of frames) expect((value - 1) % 4).toBe(0);
+  });
+
+  it("names the seam from the checkpoint's own conditioning contract", async () => {
+    const conditioned = mountWan("required");
+    await flushPromises();
+    expect(conditioned.get(".ms-seam").attributes("aria-label")).toBe(
+      "Transition: Smooth",
+    );
+
+    // A text-to-video checkpoint genuinely joins end to end.
+    const unconditioned = mountWan("unsupported");
+    await flushPromises();
+    expect(unconditioned.get(".ms-seam").attributes("aria-label")).toBe(
+      "Transition: Join",
+    );
+  });
+
+  /**
+   * Making the grid family-dependent made it possible for a loaded clip to sit
+   * off the current model's ladder — wan's 53 is not an LTX `8k+1` value, and
+   * a sequence reused or edited across a model switch carries it in. A select
+   * whose `:value` matches no option renders blank and silently rewrites the
+   * clip on the next change, so the loaded value stays listed. Desktop and
+   * iPhone already guard this; web did not.
+   */
+  it("keeps an off-grid loaded duration selectable", async () => {
+    fetchChainLimitsMock.mockResolvedValue(ltx2Limits());
+    const store = useSequenceDraftStore();
+    store.clearSequence(53);
+    store.clips[0]!.frames = 53;
+    store.clips[1]!.frames = 53;
+    store.activeClipId = store.clips[0]!.id;
+
+    const wrapper = mountComposer();
+    await flushPromises();
+    const select = wrapper.get("[data-test='clip-frames']");
+    const frames = select
+      .findAll("option")
+      .map((option) => Number(option.attributes("value")));
+    expect(frames).toContain(53);
+    // Still sorted, and the LTX grid is otherwise untouched.
+    expect(frames).toEqual([...frames].sort((a, b) => a - b));
+    expect(frames).toContain(97);
+  });
+});

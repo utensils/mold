@@ -939,6 +939,18 @@ describe("AdvancedDrawer source-image contract", () => {
     );
   });
 
+  // #783: the inline notice has to read a continuation the way submit and
+  // admission do (`request_carries_source_frames`), or the well contradicts a
+  // Generate button that accepts the draft.
+  it("clears the inline message for a continuation with no attached image", () => {
+    const wrapper = wan("required", {
+      extendVideo: { kind: "upload", filename: "clip.mp4", base64: "Q0xJUA==" },
+    });
+    expect(
+      wrapper.find("[data-test='source-conditioning-error']").exists(),
+    ).toBe(false);
+  });
+
   it("clears the inline message once the opening frame is attached", () => {
     const wrapper = wan("required", {
       imageAttachments: [
@@ -988,5 +1000,62 @@ describe("AdvancedDrawer source-image contract", () => {
     });
     expect(wrapper.find("[data-test='section-source']").exists()).toBe(true);
     expect(wrapper.find("[data-test='end-frame-well']").exists()).toBe(false);
+  });
+});
+
+/**
+ * Continuation is not an LTX-2 control (#783). Wan continues by seeding the
+ * render with the source clip's final frame, which its image-conditioned
+ * checkpoints accept — but the extend field lived inside the LTX-2 advanced
+ * suite, whose gate is the audio families, so no wan checkpoint could reach
+ * it however the host advertised `supports_extend`.
+ */
+describe("AdvancedDrawer — continue a video", () => {
+  it("offers continuation for a wan checkpoint the host advertises", () => {
+    const wrapper = factory(
+      "wan",
+      { model: "wan22-i2v-a14b:q5", modelFamily: "wan" },
+      { canExtend: true, extendDefaultOverlapFrames: 1 },
+    );
+    expect(wrapper.find("[data-test='extend-field']").exists()).toBe(true);
+    // …without dragging the LTX-2 suite in behind it.
+    expect(wrapper.find("[data-test='ltx2-pipeline']").exists()).toBe(false);
+  });
+
+  it("keeps the control hidden when the host advertises nothing", () => {
+    const wrapper = factory("wan", {
+      model: "wan22-t2v-a14b:q5",
+      modelFamily: "wan",
+    });
+    expect(wrapper.find("[data-test='extend-field']").exists()).toBe(false);
+  });
+
+  it("still offers continuation on LTX-2", () => {
+    const wrapper = factory(
+      "ltx2",
+      { model: "ltx-2-19b-distilled:fp8", modelFamily: "ltx2" },
+      { canExtend: true },
+    );
+    expect(wrapper.find("[data-test='extend-field']").exists()).toBe(true);
+  });
+
+  // Wan's engine refuses any overlap but the one frame it was seeded with,
+  // so the 8k+1 ladder offered four choices and three of them failed.
+  it("offers wan only the single overlap its engine accepts", () => {
+    const wrapper = factory(
+      "wan",
+      {
+        model: "wan22-i2v-a14b:q5",
+        modelFamily: "wan",
+        frames: 53,
+        extendVideoPath: "/srv/mold/clip.mp4",
+      },
+      { canExtend: true, extendDefaultOverlapFrames: 1 },
+    );
+    const options = wrapper
+      .get("[data-test='extend-overlap']")
+      .findAll("option")
+      .map((option) => option.attributes("value"));
+    expect(options).toEqual(["1"]);
   });
 });

@@ -369,6 +369,14 @@ resolved overlap is written into the request before the job is queued, so the
 saved metadata records the 1 that rendered even for an installed `cv:` / `hf:`
 checkpoint the manifest cannot classify.
 
+The web, desktop, and iPhone **Continue a video** control reads that same
+advertised field, so it appears for any wan checkpoint the host says can
+continue and offers the single 1-frame overlap wan accepts. A continuation on
+an I2V checkpoint needs no attached source image: the clip you are continuing
+supplies the first frame, and both the server and every Studio surface count it
+as satisfying the checkpoint's image requirement. Attaching an image alongside
+the clip is still refused — the first frames are pinned by the source tail.
+
 ```bash
 mold run wan22-ti2v-5b:q8 "the paper boat drifts on past a storm drain" \
   --extend clip.mp4 --frames 49 \

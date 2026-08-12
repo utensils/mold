@@ -442,3 +442,37 @@ describe("SequenceComposer — TOML import", () => {
     expect(useSequenceDraftStore().openingImage?.base64).toBe("aGk=");
   });
 });
+
+/**
+ * Wan's clip grid is its own: the family's VAE compresses time by 4, so its
+ * clips are `4k+1` and the LTX `8k+1` ladder hid every value wan actually
+ * routes to — including its 53-frame auto-chaining default (#783).
+ */
+describe("SequenceComposer — wan clip grid", () => {
+  const wanModel = {
+    name: "wan22-i2v-a14b:q5",
+    family: "wan",
+    source_image: "required",
+  } as ModelEntry;
+
+  it("offers wan durations on the 4k+1 grid", async () => {
+    const draft = seedDraft();
+    draft.activeClipId = draft.clips[1]!.id;
+    const wanForm = reactive({
+      ...newGenerateForm(),
+      family: "wan",
+      model: "wan22-i2v-a14b:q5",
+    }) as GenerateForm;
+    const wrapper = mountComposer({
+      form: wanForm,
+      selectedModel: wanModel,
+      chainLimits: { ...limits, model: "wan22-i2v-a14b:q5", frames_per_clip_cap: 121 },
+    });
+
+    const frames = wrapper.get<HTMLSelectElement>("[data-test='clip-frames']");
+    const values = Array.from(frames.element.options).map((option) => Number(option.value));
+    expect(values).toContain(53);
+    for (const value of values) expect((value - 1) % 4).toBe(0);
+    await flushPromises();
+  });
+});

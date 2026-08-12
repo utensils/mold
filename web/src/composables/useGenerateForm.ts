@@ -36,6 +36,10 @@ import {
 } from "@studio/lib/negativePrompt";
 import { defaultVideoFps } from "@studio/lib/sequence";
 import {
+  familySupportsExtend,
+  resolveExtendOverlapFrames,
+} from "@studio/lib/extend";
+import {
   cameraMotionLoraPath,
   normalizeCameraMotionLoraState,
   syncCameraMotionLora,
@@ -324,14 +328,20 @@ function modelDefaultsPatch(
       distillStrengthLow: null,
     };
   }
+  // Continuation is per family, not part of the LTX-2 suite (#783) — wan
+  // continues too, so the staged clip is cleared on leaving a family that can
+  // continue at all rather than on leaving LTX-2. Desktop and iPhone apply the
+  // same rule in `reconcileModelCapabilities`.
+  if (!familySupportsExtend(model.family)) {
+    next.extendVideo = null;
+    next.extendVideoPath = "";
+    next.extendOverlapFrames = null;
+  }
   if (model.family !== "ltx2" && model.family !== "ltx-2") {
     next.audioFile = null;
     next.audioFilePath = "";
     next.sourceVideo = null;
     next.sourceVideoPath = "";
-    next.extendVideo = null;
-    next.extendVideoPath = "";
-    next.extendOverlapFrames = null;
     next.keyframes = [];
     next.pipeline = null;
     next.icLoraControl = null;
@@ -1134,16 +1144,6 @@ export function useGenerateForm(): UseGenerateForm {
               source_video_path: s.sourceVideo
                 ? undefined
                 : sourceVideoPath || undefined,
-              extend_video: s.extendVideo?.base64 ?? undefined,
-              extend_video_path: s.extendVideo
-                ? undefined
-                : extendVideoPath || undefined,
-              // Only travels with a video to continue; the server rejects a
-              // bare overlap, and omitting it takes the server's default.
-              extend_overlap_frames:
-                (s.extendVideo || extendVideoPath) && s.extendOverlapFrames
-                  ? s.extendOverlapFrames
-                  : undefined,
               keyframes: s.keyframes.length
                 ? s.keyframes.map((k) => ({
                     frame: k.frame,
@@ -1159,6 +1159,31 @@ export function useGenerateForm(): UseGenerateForm {
               spatial_upscale: s.spatialUpscale ?? undefined,
               temporal_upscale: s.temporalUpscale ?? undefined,
               guidance_overrides: guidanceOverridesToWire(s.guidanceOverrides),
+            }
+          : {}),
+        // Continuation is per family, not part of the LTX-2 suite (#783):
+        // wan continues by seeding the render with the source clip's final
+        // frame, so its fields have to survive outside the `ltx2` spread or
+        // an offered wan continuation goes out as a plain text-to-video job.
+        ...(familySupportsExtend(family)
+          ? {
+              extend_video: s.extendVideo?.base64 ?? undefined,
+              extend_video_path: s.extendVideo
+                ? undefined
+                : extendVideoPath || undefined,
+              // Only travels with a video to continue — the server rejects a
+              // bare overlap — but when it does travel it carries the value
+              // the control is showing, resolved by the one shared authority.
+              // Leaving it absent handed the host its own default, which for
+              // wan is the family-wide 17 `extend_inner` refuses.
+              extend_overlap_frames:
+                s.extendVideo || extendVideoPath
+                  ? resolveExtendOverlapFrames(s.extendOverlapFrames, {
+                      family: model?.family ?? family,
+                      extend_default_overlap_frames:
+                        model?.extend_default_overlap_frames,
+                    })
+                  : undefined,
             }
           : {}),
         // Spread rather than assigned: an untouched control contributes no

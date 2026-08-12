@@ -25,7 +25,12 @@ import {
   decideGenerateRequestRouting,
   type ChainRoutingDecision,
 } from "../lib/chainRouting";
-import { buildRequest, type GenerateForm, type PickedImage } from "../lib/generateForm";
+import {
+  buildRequest,
+  formExtendOverlapFrames,
+  type GenerateForm,
+  type PickedImage,
+} from "../lib/generateForm";
 import {
   advancedVideoValidationError,
   audioOutputValidationError,
@@ -50,7 +55,6 @@ import {
   extendNewFrames,
   extendOverlapOptions,
   extendValidationError,
-  serverExtendOverlapDefault,
 } from "@studio/lib/extend";
 import {
   guidanceOverrideCount,
@@ -425,15 +429,22 @@ function clearExtendVideo(): void {
 }
 
 const canExtend = computed(() => canOfferExtend(props.selectedModel));
-const extendOverlap = computed(
-  () => props.form.extendOverlapFrames ?? serverExtendOverlapDefault(props.selectedModel),
+// Exactly what `buildRequest` will submit, so the number on screen is the
+// number on the wire — wan offers one option, so `@change` never fires and
+// the form field stays null.
+const extendOverlap = computed(() => formExtendOverlapFrames(props.form));
+// The overlap grid belongs to the family: LTX-2 re-encodes an 8k+1 tail,
+// while wan carries the single frame it was seeded with (#783).
+const extendFamily = computed(() => props.selectedModel?.family ?? props.form.family);
+const extendOverlapChoices = computed(() =>
+  extendOverlapOptions(props.form.frames, extendFamily.value),
 );
-const extendOverlapChoices = computed(() => extendOverlapOptions(props.form.frames));
 const extendError = computed(() =>
   props.form.extendVideo
     ? extendValidationError({
         overlapFrames: extendOverlap.value,
         frames: props.form.frames,
+        family: extendFamily.value,
         hasSourceImage: props.form.sourceImage !== null || props.form.imageAttachments.length > 0,
         hasSourceVideo: props.form.sourceVideo !== null,
         hasKeyframes: props.form.keyframes.length > 0,
@@ -858,6 +869,52 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         {{ audioFormatError }}
       </p>
 
+      <!-- Continuation is per model, not part of the LTX-2 suite (#783):
+           wan continues by seeding the render with the source clip's final
+           frame and never renders the LTX-2 pipeline disclosure. -->
+      <div v-if="canExtend" class="mobile-generate-file-field">
+        <span class="mobile-generate-label">Continue a video</span>
+        <div v-if="form.extendVideo" class="mobile-generate-picked-file">
+          <span>{{ form.extendVideo.filename }}</span>
+          <button
+            type="button"
+            class="mobile-generate-clear"
+            data-test="mobile-ltx2-extend-clear"
+            @click="clearExtendVideo"
+          >
+            Remove
+          </button>
+        </div>
+        <label v-else class="mobile-generate-file-button">
+          <span>Choose video to continue</span>
+          <input
+            type="file"
+            accept="video/*"
+            data-test="mobile-ltx2-extend-video"
+            @change="setExtendVideo"
+          />
+        </label>
+        <template v-if="form.extendVideo">
+          <span class="mobile-generate-label">Overlap (frames of motion context)</span>
+          <select
+            class="mobile-generate-select"
+            data-test="mobile-ltx2-extend-overlap"
+            :value="String(extendOverlap)"
+            @change="form.extendOverlapFrames = Number(($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="option in extendOverlapChoices" :key="option" :value="String(option)">
+              {{ option }}
+            </option>
+          </select>
+          <p v-if="extendError" class="mobile-generate-error" data-test="mobile-ltx2-extend-error">
+            {{ extendError }}
+          </p>
+          <p v-else class="mobile-generate-note" data-test="mobile-ltx2-extend-summary">
+            {{ extendSummary }}
+          </p>
+        </template>
+      </div>
+
       <label v-if="caps.supportsAdvancedVideo" class="field mobile-generate-field">
         <span>Camera motion</span>
         <select
@@ -1183,55 +1240,6 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
               @change="setSourceVideo"
             />
           </label>
-        </div>
-
-        <div v-if="canExtend" class="mobile-generate-file-field">
-          <span class="mobile-generate-label">Continue a video</span>
-          <div v-if="form.extendVideo" class="mobile-generate-picked-file">
-            <span>{{ form.extendVideo.filename }}</span>
-            <button
-              type="button"
-              class="mobile-generate-clear"
-              data-test="mobile-ltx2-extend-clear"
-              @click="clearExtendVideo"
-            >
-              Remove
-            </button>
-          </div>
-          <label v-else class="mobile-generate-file-button">
-            <span>Choose video to continue</span>
-            <input
-              type="file"
-              accept="video/*"
-              data-test="mobile-ltx2-extend-video"
-              @change="setExtendVideo"
-            />
-          </label>
-          <template v-if="form.extendVideo">
-            <span class="mobile-generate-label">Overlap (frames of motion context)</span>
-            <select
-              class="mobile-generate-select"
-              data-test="mobile-ltx2-extend-overlap"
-              :value="String(extendOverlap)"
-              @change="
-                form.extendOverlapFrames = Number(($event.target as HTMLSelectElement).value)
-              "
-            >
-              <option v-for="option in extendOverlapChoices" :key="option" :value="String(option)">
-                {{ option }}
-              </option>
-            </select>
-            <p
-              v-if="extendError"
-              class="mobile-generate-error"
-              data-test="mobile-ltx2-extend-error"
-            >
-              {{ extendError }}
-            </p>
-            <p v-else class="mobile-generate-note" data-test="mobile-ltx2-extend-summary">
-              {{ extendSummary }}
-            </p>
-          </template>
         </div>
 
         <div class="mobile-generate-file-field">

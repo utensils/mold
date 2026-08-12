@@ -851,6 +851,49 @@ describe("CreatePage layout and behavior", () => {
     expect(submitMock).toHaveBeenCalled();
   });
 
+  // #783: a continuation supplies its own first frames from the tail of the
+  // clip it continues, which is why admission counts it as carrying source
+  // (`mold_core::validation::request_carries_source_frames`). Without the same
+  // reading here, the Continue-a-video control this branch made visible for a
+  // Wan I2V checkpoint offered work submit refused.
+  it("lets a Wan I2V continuation through with no attached image", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "wan22-i2v-a14b:q8";
+    form.state.value.modelFamily = "wan";
+    form.state.value.sourceImageCapability = "required";
+    form.state.value.frames = 49;
+    form.state.value.extendVideo = {
+      kind: "upload",
+      filename: "clip.mp4",
+      base64: "Q0xJUA==",
+    };
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("This checkpoint is image-to-video");
+    expect(submitMock).toHaveBeenCalled();
+  });
+
+  it("holds Generate for a Wan continuation on a text-to-video checkpoint", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "wan22-t2v-a14b:q8";
+    form.state.value.modelFamily = "wan";
+    form.state.value.sourceImageCapability = "unsupported";
+    form.state.value.frames = 49;
+    form.state.value.extendVideoPath = "/srv/mold/clip.mp4";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("text-to-video only and cannot continue");
+  });
+
   it("holds Generate when a text-to-video checkpoint carries a source image", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();

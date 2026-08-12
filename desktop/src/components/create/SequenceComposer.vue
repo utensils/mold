@@ -90,6 +90,9 @@ const frameOptions = computed(() => {
   const options = sequenceFrameOptions(
     props.chainLimits?.frames_per_clip_cap ?? 97,
     motionTail.value,
+    // Wan's VAE compresses time by 4, so its clips sit on `4k+1`; offering
+    // the LTX grid hid its own 53-frame routing default (#783).
+    props.selectedModel?.family ?? props.form.family,
   );
   // An off-grid loaded value must stay visible rather than mis-render.
   const current = activeClip.value?.frames;
