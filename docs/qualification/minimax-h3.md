@@ -292,15 +292,26 @@ generation UAT, public authorization, or release activation.
 
 ### Private runtime-record candidate
 
-The server's reviewed runtime-record allowlist remains empty until a separate
-CUDA campaign measures and reviews all thirteen non-artifact bounds. The
-development-only `h3_runtime_qualification_record` binary breaks the evidence
-collection/review cycle without self-authorizing: it re-hashes the complete
-42.5 GB FL2VA artifact set, validates an owner-only capture manifest, hashes
-every retained evidence file, and writes deterministic record bytes to stdout.
-It never edits the source allowlist, constructs the runtime, or activates a
-public capability. Published-binary verification rejects its dedicated claim
-marker as well as the underlying private artifact reader.
+The reviewed runtime-record allowlist contains one independently reviewed
+candidate for the exact compact FL2VA quality envelope described below:
+`4257780531215ac670cc8a10ee6ad4cd4c89e4a8f41be80130e0f22cc801086c`.
+The candidate binds source `7ebe35a0723e2b5e828f23db2365f7e73fc2b37b`,
+runtime-code identity
+`06f8778226de835f7738bfbed9956797c72af8f96eb7926b0bb4c05b338f950e`,
+and a successful L40S campaign whose H.264/AAC output hash is
+`dc5d9907fc95851edf701f07437c3413a8c77ec2a5842f49c352a20d4aea21e5`.
+The campaign authenticated all 42,482,090,318 artifact bytes and retained
+all thirteen synchronized runtime observations. This authority is FL2VA-only
+and does not extend to Ref2VA, other envelopes, devices, artifacts, attention
+implementations, runtime builds, public release, or broader license scope.
+
+The development-only `h3_runtime_qualification_record` binary breaks the
+evidence collection/review cycle without self-authorizing: it re-hashes the
+complete 42.5 GB FL2VA artifact set, validates an owner-only capture manifest,
+hashes every retained evidence file, and writes deterministic record bytes to
+stdout. It never edits the source allowlist, constructs the runtime, or
+activates a public capability. Published-binary verification rejects its
+dedicated claim marker as well as the underlying private artifact reader.
 
 The next capture manifest must use
 [`mold.minimax-h3.private-runtime-bound-capture.v5`](./minimax-h3-private-runtime-capture.schema.json).

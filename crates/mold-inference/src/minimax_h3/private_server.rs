@@ -4,8 +4,8 @@
 //! private runtime's opened descriptors, Candle tensors, paths, trait graph,
 //! and singular owner roots remain crate-private. A reviewed CUDA campaign can
 //! authorize the opaque preparation seam by adding the exact SHA-256 of one
-//! record matching the schema below. Until then the allowlist is empty and the
-//! reader fails before any record can become runtime authority.
+//! record matching the schema below. The reader still fails before path access
+//! whenever its reviewed authority set is empty.
 
 #[cfg(all(feature = "mp4", feature = "cuda"))]
 const H3_CUDA_ATTEMPT_RETAINED_MARKER: &str =
@@ -117,11 +117,14 @@ pub(crate) fn valid_stable_cuda_device_id(value: &str) -> bool {
 
 /// Exact reviewed runtime-qualification record hashes.
 ///
-/// This is intentionally empty. Artifact qualification and the payload-free
-/// attention benchmark do not qualify the complete runtime-memory profile.
-/// The CUDA UAT slice must add one reviewed record hash here; accepting a hash
-/// supplied alongside the record would merely let the caller self-authorize.
-const REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256: &[&str] = &[];
+/// Each entry is an independently reviewed, content-addressed qualification
+/// record. Accepting a hash supplied alongside a record would let the caller
+/// self-authorize, so this list remains a source-controlled authority boundary.
+///
+/// The first record covers only the exact compact FL2VA quality envelope and
+/// artifact/device/runtime/kernel identities retained by its v5 campaign.
+const REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256: &[&str] =
+    &["4257780531215ac670cc8a10ee6ad4cd4c89e4a8f41be80130e0f22cc801086c"];
 
 /// Report whether this binary contains at least one reviewed private-runtime
 /// qualification record. This performs no filesystem access and is suitable
@@ -873,8 +876,8 @@ impl H3PrivateFl2VaAdmissionEvidence {
 /// FL2VA request and one concrete CUDA route. Endpoint normalization and noise
 /// preparation deliberately remain here and may construct CPU-only Candle
 /// tensors; this function never creates a CUDA `Device` or CUDA tensor. It
-/// independently repeats the empty reviewed-allowlist gate before inspecting
-/// any supplied path.
+/// independently checks that reviewed authority exists before inspecting any
+/// supplied path.
 pub fn prepare_h3_private_fl2va_admission(
     input: H3PrivateFl2VaAdmissionInput<'_>,
     progress: &ProgressReporter,
@@ -1859,11 +1862,10 @@ impl H3PrivateFl2VaPreparedAttempt {
 /// Production preparation entrypoint. Exact endpoint preprocessing remains
 /// CPU-only and intentionally precedes allocation commitment; CUDA `Device`
 /// construction remains exclusively inside the one-shot runner after the
-/// scheduler callback succeeds. The reviewed record allowlist is empty
-/// in this revision, so it deterministically rejects before path access,
-/// hashing, preprocessing, or device construction. Its full input and opaque
-/// success types are fixed now so adding a reviewed CUDA record does not
-/// require a server API redesign.
+/// scheduler callback succeeds. An empty reviewed authority set
+/// deterministically rejects before path access, hashing, preprocessing, or
+/// device construction. Its full input and opaque success types keep that
+/// boundary independent of the number of reviewed records.
 pub fn prepare_h3_private_fl2va_attempt(
     input: H3PrivateFl2VaPrepareInput<'_>,
     progress: &ProgressReporter,
@@ -3828,9 +3830,9 @@ fn open_reviewed_h3_private_runtime_qualification_for_source(
 /// Authenticate an exact runtime-qualification record against the reviewed
 /// record allowlist and the independently produced artifact qualification.
 ///
-/// The allowlist is deliberately empty until a full runtime CUDA campaign
-/// produces the thirteen non-artifact bounds. Therefore this function is a
-/// concrete fail-closed seam today, not a caller-configurable approval gate.
+/// The source-controlled allowlist is fixed independently of the supplied
+/// record, so this remains a fail-closed seam rather than a caller-configurable
+/// approval gate.
 #[allow(clippy::too_many_arguments)]
 pub fn authenticate_h3_private_runtime_qualification(
     path: &Path,
@@ -4608,85 +4610,26 @@ mod tests {
     }
 
     #[test]
-    fn empty_reviewed_allowlist_rejects_before_any_path_access() {
-        assert!(!reviewed_h3_private_runtime_available());
-        assert!(!reviewed_h3_private_runtime_available_for_task(Task::Fl2va));
+    fn reviewed_allowlist_is_scoped_to_fl2va() {
+        assert!(reviewed_h3_private_runtime_available());
+        assert!(reviewed_h3_private_runtime_available_for_task(Task::Fl2va));
         assert!(!reviewed_h3_private_runtime_available_for_task(
             Task::Ref2va
         ));
-        let factory = base_factory();
-        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
-            "prompt": "test",
-            "model": contract::FL2VA_COMFY,
-            "width": 768,
-            "height": 512,
-            "steps": 30
-        }))
-        .unwrap();
-        let evidence = admission_evidence(&request, &factory);
+    }
+
+    #[test]
+    fn empty_injected_allowlist_rejects_before_path_access() {
         let missing = Path::new("/private-h3-path-must-not-be-opened");
-        let error = prepare_h3_private_fl2va_attempt(
-            H3PrivateFl2VaPrepareInput {
-                request: &request,
-                frozen_factory: &factory,
-                admission_evidence: &evidence,
-                paths: H3PrivateFl2VaUatPaths {
-                    models_root: missing,
-                    staging_root: missing,
-                    authorization_record: missing,
-                    runtime_qualification_record: missing,
-                },
-                owner_fence: H3PrivateFl2VaOwnerFenceFacts {
-                    work_identity_sha256: sha('9'),
-                    cancellation_scope_identity_sha256: sha('a'),
-                    device_id: DEVICE_0.into(),
-                    device_ordinal: 0,
-                    compute_capability: (8, 9),
-                    memory_ledger_sequence: 1,
-                    admission_evidence_identity_sha256: evidence.identity_sha256().into(),
-                    artifact_qualification_identity_sha256: evidence
-                        .artifact_qualification_identity_sha256()
-                        .into(),
-                    runtime_qualification_identity_sha256: evidence
-                        .runtime_qualification_identity_sha256()
-                        .into(),
-                    prepared_attempt_identity_sha256: evidence
-                        .prepared_attempt_identity_sha256()
-                        .into(),
-                    target_budget_identity_sha256: evidence.target_budget_identity_sha256().into(),
-                    predicted_device_peak_bytes: 1,
-                    predicted_host_increment_bytes: 1,
-                },
-            },
-            &ProgressReporter::default(),
+        let error = open_reviewed_h3_private_runtime_qualification_for_source(
+            missing,
+            &[],
+            &source_sha('e'),
+            &sha('6'),
         )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            H3PrivateFl2VaPrepareError::MissingReviewedRuntimeQualification
-        ));
-        let error = prepare_h3_private_fl2va_admission(
-            H3PrivateFl2VaAdmissionInput {
-                request: &request,
-                paths: H3PrivateFl2VaUatPaths {
-                    models_root: missing,
-                    staging_root: missing,
-                    authorization_record: missing,
-                    runtime_qualification_record: missing,
-                },
-                device_id: DEVICE_0,
-                device_ordinal: 0,
-                compute_capability: (8, 9),
-                available_device_bytes: 1,
-                available_host_headroom_bytes: 1,
-            },
-            &ProgressReporter::default(),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            H3PrivateFl2VaPrepareError::MissingReviewedRuntimeQualification
-        ));
+        .err()
+        .expect("empty authority must reject");
+        assert!(error.to_string().contains("reviewed evidence allowlist"));
     }
 
     #[test]
