@@ -298,14 +298,14 @@ generation UAT, public authorization, or release activation.
 
 The reviewed runtime-record allowlist contains one independently reviewed
 candidate for the exact compact FL2VA quality envelope described below:
-`6ddb831b38294c2920d1df7cc984bd617e61840dc1b132cd9374cf374cbbf6ce`.
-The candidate binds source `1bc961cf572192bc4a168828ebade61fc4fa865c`,
+`f624f71ce1eba7ebb75a13801da855a92f5eec0fccbcb9783f547479c7abfce5`.
+The candidate binds source `66fc4d9ea8dc8df0c96718c0f82c0de3ff552bfa`,
 runtime-code identity
-`d9c1c89bbda4df09312b5c84ca40d383cd4c16d3d716e6f59773576992d18105`,
+`0f37dc42394a25a2b612a61f3b476f24959193fd7d84bd4a8fde68f95245fe57`,
 and a successful L40S campaign whose H.264/AAC output hash is
-`dc5d9907fc95851edf701f07437c3413a8c77ec2a5842f49c352a20d4aea21e5`.
+`7e34b50a40eead47ae232982e7d048c2ac326fce9174b7f57d747c2464a522d6`.
 The campaign authenticated all 42,482,090,318 artifact bytes and retained
-all thirteen synchronized runtime observations plus 18,694 external telemetry
+all thirteen synchronized runtime observations plus 18,611 external telemetry
 samples. This authority is FL2VA-only
 and does not extend to Ref2VA, other envelopes, devices, artifacts, attention
 implementations, runtime builds, public release, or broader license scope.
