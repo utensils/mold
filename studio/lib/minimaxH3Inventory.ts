@@ -1,4 +1,3 @@
-import { modelAccessRestrictionFor } from "./modelAccess";
 import { modelKindLabel } from "./modelMetadata";
 
 export const MINIMAX_H3_FAMILY = "minimax-h3";
@@ -287,18 +286,17 @@ function sumUnique(
 
 /**
  * Validate and present one exact host's H3 facts. This is the #831/#841
- * authority boundary: denial, absence, disabled runtime, Metal support, or a
- * malformed component graph all return null, so no surface can tease support.
+ * authority boundary: absence, disabled runtime, Metal support, or a malformed
+ * component graph all return null, so no surface can tease support. The
+ * additive partition is intentionally narrower than the legacy family-wide
+ * model-access denial, which remains present for clients that do not understand
+ * this exact private capability.
  */
 export function presentMiniMaxH3Host(
   host: MiniMaxH3HostInput,
 ): MiniMaxH3HostPresentation | null {
   const capabilities = host.capabilities;
-  if (
-    !capabilities ||
-    modelAccessRestrictionFor(capabilities, { family: MINIMAX_H3_FAMILY }) ||
-    capabilities.minimax_h3?.runtime_available !== true
-  ) {
+  if (!capabilities || capabilities.minimax_h3?.runtime_available !== true) {
     return null;
   }
   const raw = capabilities.minimax_h3;

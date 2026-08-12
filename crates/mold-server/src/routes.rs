@@ -4855,7 +4855,10 @@ async fn discovery_peers(
 /// Report the feature toggles a client needs to render correctly (hide the
 /// delete button when delete isn't allowed, etc.). Authentication follows the
 /// rest of `/api/*` when an API key is configured.
-async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::ServerCapabilities> {
+async fn server_capabilities(
+    State(state): State<AppState>,
+    auth_state: Option<Extension<crate::auth::AuthState>>,
+) -> Json<mold_core::ServerCapabilities> {
     let catalog_available = std::env::var("MOLD_CATALOG_DISABLE")
         .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
@@ -4864,6 +4867,19 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
     let expand_model_present =
         expand_settings.is_local() && config.manifest_model_is_downloaded(&expand_settings.model);
     let expand = expand_capabilities(&expand_settings, expand_model_present);
+    let api_key_auth_enabled = auth_state
+        .as_ref()
+        .is_some_and(|Extension(state)| state.is_some());
+    let device_state = current_device_state(&state);
+    let minimax_h3 = advertised_private_h3_capability(
+        api_key_auth_enabled,
+        &config.resolved_models_dir(),
+        &device_state,
+    );
+    // The family-wide public restriction remains intact. H3-aware clients may
+    // present only the exact additive private partition above; older clients
+    // continue to see the conservative family denial.
+    let model_access = mold_core::model_access_capabilities();
 
     let server_batch =
         state.scheduled_work.v2_authoritative() && !state.is_output_disabled(&config);
@@ -4880,7 +4896,8 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
                 .map(|s| s.to_string())
                 .collect::<Vec<_>>(),
         },
-        model_access: mold_core::model_access_capabilities(),
+        model_access,
+        minimax_h3,
         discovery: mold_core::DiscoveryCapabilities {
             can_browse: state.discovery.can_browse(),
         },
@@ -4915,6 +4932,28 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
         dispatch: dispatch_capabilities(&state.scheduled_work),
         expand: Some(expand),
     })
+}
+
+#[cfg(feature = "h3-private-uat")]
+fn advertised_private_h3_capability(
+    api_key_auth_enabled: bool,
+    models_root: &std::path::Path,
+    device_state: &mold_core::DeviceState,
+) -> Option<mold_core::MiniMaxH3Capability> {
+    crate::h3_private_bridge::advertised_h3_private_capability(
+        api_key_auth_enabled,
+        models_root,
+        device_state,
+    )
+}
+
+#[cfg(not(feature = "h3-private-uat"))]
+fn advertised_private_h3_capability(
+    _api_key_auth_enabled: bool,
+    _models_root: &std::path::Path,
+    _device_state: &mold_core::DeviceState,
+) -> Option<mold_core::MiniMaxH3Capability> {
+    None
 }
 
 #[derive(Debug, Deserialize)]
@@ -7564,6 +7603,15 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    #[test]
+    fn family_wide_h3_access_remains_restricted_for_legacy_clients() {
+        let access = mold_core::model_access_capabilities();
+        assert!(access
+            .restrictions
+            .iter()
+            .any(|restriction| restriction.family == mold_core::minimax_h3::FAMILY));
     }
 
     /// #787: an absent negative on a wan request materializes the tuned

@@ -21,13 +21,14 @@ use std::time::Instant;
 use anyhow::{anyhow, bail, Context, Result};
 #[cfg(feature = "mp4")]
 use candle_core::Device;
-use mold_candle::minimax_h3::H3AttentionRuntimeAuthority;
 #[cfg(feature = "mp4")]
 use mold_candle::minimax_h3::{
-    open_h3_comfy_published_int8_checkpoint, H3AttentionDevice, H3AttentionModelContract,
-    H3AuthenticatedQwenNvfp4Authority, H3ComfyInt8Cancellation, H3ComfyOpenedInt8Checkpoint,
-    H3ComfyPublishedArtifact, H3TransformerTask, H3_QWEN_NVFP4_AWQ_POLICY_SHA256,
-    H3_QWEN_NVFP4_AWQ_SHA256,
+    open_h3_comfy_published_int8_checkpoint, H3AuthenticatedQwenNvfp4Authority,
+    H3ComfyInt8Cancellation, H3ComfyOpenedInt8Checkpoint, H3ComfyPublishedArtifact,
+    H3TransformerTask, H3_QWEN_NVFP4_AWQ_POLICY_SHA256, H3_QWEN_NVFP4_AWQ_SHA256,
+};
+use mold_candle::minimax_h3::{
+    H3AttentionDevice, H3AttentionModelContract, H3AttentionRuntimeAuthority,
 };
 use mold_core::minimax_h3::{self as contract, Mode, Task};
 use mold_core::secure_file::{open_regular_file_no_follow, sha256_open_file};
@@ -58,6 +59,9 @@ use super::private_opened_evidence::{
     H3PrivateOpenedActivationFacts, H3PrivatePreparedFl2VaFactoryInputs,
     H3PrivateQualifiedRuntimeBounds,
 };
+use super::private_qualification::validate_private_presentation_scope;
+#[cfg(test)]
+use super::private_qualification::validate_private_presentation_scope_against_evidence;
 use super::private_qualification::H3PrivateArtifactQualificationReport;
 #[cfg(feature = "mp4")]
 use super::private_qualification::{qualify_private_artifacts_with_control, H3QualifiedArtifact};
@@ -124,7 +128,7 @@ pub(crate) fn valid_stable_cuda_device_id(value: &str) -> bool {
 /// The first record covers only the exact compact FL2VA quality envelope and
 /// artifact/device/runtime/kernel identities retained by its v5 campaign.
 const REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256: &[&str] =
-    &["4257780531215ac670cc8a10ee6ad4cd4c89e4a8f41be80130e0f22cc801086c"];
+    &["ddab00ae326d0526c1dbab02e110790fe8a5baca3f457b6dc7f34e5465932ca8"];
 
 /// Report whether this binary contains at least one reviewed private-runtime
 /// qualification record. This performs no filesystem access and is suitable
@@ -143,6 +147,50 @@ pub const fn reviewed_h3_private_runtime_available_for_task(task: Task) -> bool 
         // Ref2VA remains sealed until its own artifact and runtime campaign is
         // reviewed. Do not infer authority from an FL2VA record.
         Task::Ref2va => false,
+    }
+}
+
+/// One scheduler-visible CUDA route eligible for authenticated private H3
+/// capability presentation. Supplying this record grants nothing: the
+/// source-controlled runtime record must match it exactly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct H3PrivatePresentationRoute<'a> {
+    pub device_id: &'a str,
+    pub device_ordinal: usize,
+    pub compute_capability: (u16, u16),
+}
+
+/// Payload-free proof that the exact reviewed FL2VA qualification, external
+/// authorization scope, current runtime code, and one live scheduler route
+/// were all crossed for capability presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct H3PrivatePresentationAuthority {
+    canonical_model: String,
+    task: Task,
+    device_id: String,
+    device_ordinal: usize,
+    compute_capability: (u16, u16),
+}
+
+impl H3PrivatePresentationAuthority {
+    pub fn canonical_model(&self) -> &str {
+        &self.canonical_model
+    }
+
+    pub const fn task(&self) -> Task {
+        self.task
+    }
+
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    pub const fn device_ordinal(&self) -> usize {
+        self.device_ordinal
+    }
+
+    pub const fn compute_capability(&self) -> (u16, u16) {
+        self.compute_capability
     }
 }
 
@@ -3827,6 +3875,139 @@ fn open_reviewed_h3_private_runtime_qualification_for_source(
     Ok(reviewed)
 }
 
+/// Authenticate the small, presentation-only private H3 authority chain.
+///
+/// This reads only the owner-protected authorization wrapper, its exact source
+/// document, and the bounded reviewed runtime record. It never opens model
+/// artifacts and cannot construct an engine or mutate runtime availability.
+pub fn authenticate_h3_private_presentation(
+    models_root: &Path,
+    authorization_record: &Path,
+    runtime_qualification_record: &Path,
+    routes: &[H3PrivatePresentationRoute<'_>],
+) -> Result<H3PrivatePresentationAuthority> {
+    if !reviewed_h3_private_runtime_available_for_task(Task::Fl2va) {
+        bail!("private H3 presentation has no reviewed FL2VA qualification")
+    }
+    if routes.is_empty() {
+        bail!("private H3 presentation requires one live schedulable CUDA route")
+    }
+    let scope = validate_private_presentation_scope(
+        models_root,
+        authorization_record,
+        runtime_qualification_record,
+    )?;
+    authenticate_h3_private_presentation_with_scope(
+        scope,
+        runtime_qualification_record,
+        REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256,
+        exact_h3_runtime_build_source_sha()?,
+        super::PRIVATE_RUNTIME_CODE_IDENTITY_SHA256,
+        routes,
+        None,
+    )
+}
+
+fn authenticate_h3_private_presentation_with_scope(
+    scope: super::private_qualification::ValidatedPrivateScope,
+    runtime_qualification_record: &Path,
+    reviewed_record_sha256: &[&str],
+    executing_source_sha: &str,
+    executing_runtime_code_identity_sha256: &str,
+    routes: &[H3PrivatePresentationRoute<'_>],
+    test_attention_identity: Option<(&str, &str)>,
+) -> Result<H3PrivatePresentationAuthority> {
+    let reviewed = open_reviewed_h3_private_runtime_qualification_for_source(
+        runtime_qualification_record,
+        reviewed_record_sha256,
+        executing_source_sha,
+        executing_runtime_code_identity_sha256,
+    )?;
+    if reviewed.record.canonical_model != contract::FL2VA_COMFY
+        || reviewed.record.task != "fl2va"
+        || reviewed.record.authorization_record_sha256 != scope.authorization_record_sha256()
+        || reviewed.record.authorization_source_document_sha256
+            != scope.authorization_source_document_sha256()
+    {
+        bail!("private H3 presentation authority does not match the reviewed FL2VA scope")
+    }
+    let route = routes
+        .iter()
+        .find(|route| {
+            reviewed.record.device_id == route.device_id
+                && reviewed.record.device_ordinal == route.device_ordinal
+                && reviewed.record.compute_capability
+                    == [route.compute_capability.0, route.compute_capability.1]
+        })
+        .ok_or_else(|| {
+            anyhow!("private H3 presentation has no live route matching reviewed evidence")
+        })?;
+    reviewed.validate_route(
+        route.device_id,
+        route.device_ordinal,
+        route.compute_capability,
+    )?;
+    let attention;
+    let (attention_runtime_identity_sha256, attention_kernel_identity) =
+        if let Some(identity) = test_attention_identity {
+            identity
+        } else {
+            attention = H3AttentionRuntimeAuthority::qualify_flash_attention_v2(
+                H3AttentionDevice::Cuda {
+                    compute_capability: Some(route.compute_capability),
+                },
+                H3AttentionModelContract::released_bf16(),
+            )
+            .map_err(|error| anyhow!(error.to_string()))?;
+            (attention.identity_sha256(), attention.kernel().identity())
+        };
+    if reviewed.record.attention_runtime_identity_sha256 != attention_runtime_identity_sha256
+        || reviewed.record.attention_kernel_identity != attention_kernel_identity
+    {
+        bail!("private H3 presentation attention authority does not match the live CUDA route")
+    }
+    scope.revalidate()?;
+    reviewed.revalidate()?;
+    Ok(H3PrivatePresentationAuthority {
+        canonical_model: reviewed.record.canonical_model.clone(),
+        task: Task::Fl2va,
+        device_id: route.device_id.to_string(),
+        device_ordinal: route.device_ordinal,
+        compute_capability: route.compute_capability,
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn authenticate_h3_private_presentation_for_test(
+    models_root: &Path,
+    authorization_record: &Path,
+    runtime_qualification_record: &Path,
+    reviewed_authorization_evidence_sha256: &str,
+    reviewed_runtime_record_sha256: &[&str],
+    executing_source_sha: &str,
+    executing_runtime_code_identity_sha256: &str,
+    routes: &[H3PrivatePresentationRoute<'_>],
+    attention_runtime_identity_sha256: &str,
+    attention_kernel_identity: &str,
+) -> Result<H3PrivatePresentationAuthority> {
+    let scope = validate_private_presentation_scope_against_evidence(
+        models_root,
+        authorization_record,
+        runtime_qualification_record,
+        reviewed_authorization_evidence_sha256,
+    )?;
+    authenticate_h3_private_presentation_with_scope(
+        scope,
+        runtime_qualification_record,
+        reviewed_runtime_record_sha256,
+        executing_source_sha,
+        executing_runtime_code_identity_sha256,
+        routes,
+        Some((attention_runtime_identity_sha256, attention_kernel_identity)),
+    )
+}
+
 /// Authenticate an exact runtime-qualification record against the reviewed
 /// record allowlist and the independently produced artifact qualification.
 ///
@@ -4125,14 +4306,15 @@ fn valid_runtime_evidence_relative_path(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::Write;
 
     use super::*;
     use crate::attention::{AttentionBackend, AttentionChunkPolicy};
     use crate::{
-        H3AttentionActivation, H3AttentionBackend, H3AttentionDevice, H3AttentionKernel,
-        H3AttentionModelContract, H3FactoryAuthorityInput, H3FactoryComponentAuthority,
-        H3FactoryComponentRole, H3FactoryConditionerPlacement, H3FactoryQuantizationAuthority,
+        H3AttentionActivation, H3AttentionBackend, H3AttentionKernel, H3FactoryAuthorityInput,
+        H3FactoryComponentAuthority, H3FactoryComponentRole, H3FactoryConditionerPlacement,
+        H3FactoryQuantizationAuthority,
     };
     #[cfg(feature = "mp4")]
     use crate::{H3FactoryEndpointInput, H3FactoryEndpointPreprocess, H3FactoryPreparedRowsInput};
@@ -4423,6 +4605,155 @@ mod tests {
         serde_json::to_writer(&mut file, record).unwrap();
         file.flush().unwrap();
         (root, path)
+    }
+
+    #[cfg(unix)]
+    struct PresentationFixture {
+        _root: tempfile::TempDir,
+        models_root: PathBuf,
+        authorization_record: PathBuf,
+        runtime_record: PathBuf,
+        source_sha256: String,
+        runtime_record_sha256: String,
+        runtime_code_identity_sha256: String,
+        route: H3PrivatePresentationRoute<'static>,
+    }
+
+    #[cfg(unix)]
+    impl PresentationFixture {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt;
+
+            fn private_directory(path: &Path) {
+                fs::create_dir_all(path).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+
+            fn private_file(path: &Path, bytes: &[u8]) {
+                fs::write(path, bytes).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+
+            let root = tempfile::tempdir().unwrap();
+            let campaign = root.path().canonicalize().unwrap().join("campaign");
+            let mold_home = campaign.join("mold-home");
+            let models_root = mold_home.join("models");
+            let compliance = campaign.join("compliance");
+            for directory in [&campaign, &mold_home, &models_root, &compliance] {
+                private_directory(directory);
+            }
+            let source_document = compliance.join("authorization-evidence.bin");
+            private_file(&source_document, b"presentation-review-evidence");
+            let source_sha256 =
+                format!("{:x}", Sha256::digest(fs::read(&source_document).unwrap()));
+            let authorization_record = compliance.join("authorization.v1.json");
+            private_file(
+                &authorization_record,
+                &serde_json::to_vec(&serde_json::json!({
+                    "schema_version": "mold.minimax-h3.authorization.v1",
+                    "family": contract::FAMILY,
+                    "decision": "approved",
+                    "license_revision": contract::OFFICIAL_REVISION,
+                    "license_sha256": contract::LICENSE_SHA256,
+                    "approved_scopes": [
+                        "checkpoint-execution",
+                        "fixture-capture",
+                        "generated-output-retention"
+                    ],
+                    "source_document_path": source_document,
+                    "source_document_sha256": source_sha256.clone(),
+                    "review_reference": "presentation-test-review"
+                }))
+                .unwrap(),
+            );
+            let authorization_record_sha256 = format!(
+                "{:x}",
+                Sha256::digest(fs::read(&authorization_record).unwrap())
+            );
+            let mut record = record();
+            record.authorization_record_sha256 = authorization_record_sha256;
+            record.authorization_source_document_sha256 = source_sha256.clone();
+            record.identity_sha256 = runtime_qualification_identity(&record);
+            let runtime_code_identity_sha256 = record.campaign_runtime_code_identity_sha256.clone();
+            let runtime_record = compliance.join("runtime-qualification.json");
+            private_file(&runtime_record, &serde_json::to_vec(&record).unwrap());
+            let runtime_record_sha256 =
+                sha256_open_file(&open_regular_file_no_follow(&runtime_record).unwrap()).unwrap();
+            Self {
+                _root: root,
+                models_root,
+                authorization_record,
+                runtime_record,
+                source_sha256,
+                runtime_record_sha256,
+                runtime_code_identity_sha256,
+                route: H3PrivatePresentationRoute {
+                    device_id: DEVICE_0,
+                    device_ordinal: 0,
+                    compute_capability: (8, 9),
+                },
+            }
+        }
+
+        fn authenticate(&self) -> Result<H3PrivatePresentationAuthority> {
+            authenticate_h3_private_presentation_for_test(
+                &self.models_root,
+                &self.authorization_record,
+                &self.runtime_record,
+                &self.source_sha256,
+                &[self.runtime_record_sha256.as_str()],
+                &source_sha('d'),
+                &self.runtime_code_identity_sha256,
+                &[self.route],
+                &sha('1'),
+                "qualified-kernel",
+            )
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn presentation_authenticates_exact_records_and_live_route() {
+        let fixture = PresentationFixture::new();
+        let authority = fixture.authenticate().unwrap();
+        assert_eq!(authority.canonical_model(), contract::FL2VA_COMFY);
+        assert_eq!(authority.task(), Task::Fl2va);
+        assert_eq!(authority.device_id(), DEVICE_0);
+        assert_eq!(authority.device_ordinal(), 0);
+        assert_eq!(authority.compute_capability(), (8, 9));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn presentation_rejects_record_scope_and_route_substitution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = PresentationFixture::new();
+        fs::set_permissions(&fixture.runtime_record, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(fixture.authenticate().is_err());
+        fs::set_permissions(&fixture.runtime_record, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let wrong_route = H3PrivatePresentationRoute {
+            device_id: DEVICE_1,
+            device_ordinal: 1,
+            compute_capability: (8, 9),
+        };
+        assert!(authenticate_h3_private_presentation_for_test(
+            &fixture.models_root,
+            &fixture.authorization_record,
+            &fixture.runtime_record,
+            &fixture.source_sha256,
+            &[fixture.runtime_record_sha256.as_str()],
+            &source_sha('d'),
+            &fixture.runtime_code_identity_sha256,
+            &[wrong_route],
+            &sha('1'),
+            "qualified-kernel",
+        )
+        .is_err());
+
+        fs::write(&fixture.runtime_record, b"{}").unwrap();
+        assert!(fixture.authenticate().is_err());
     }
 
     fn base_factory() -> FrozenH3FactoryAuthority {

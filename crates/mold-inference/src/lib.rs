@@ -55,14 +55,15 @@ pub const fn h3_private_runtime_code_identity_sha256() -> &'static str {
 #[cfg(feature = "h3-private-uat")]
 #[doc(hidden)]
 pub use minimax_h3::private_server::{
-    authenticate_h3_private_runtime_qualification, prepare_h3_private_fl2va_admission,
-    prepare_h3_private_fl2va_attempt, reviewed_h3_private_runtime_available,
-    reviewed_h3_private_runtime_available_for_task, H3PrivateAllocationCommit,
-    H3PrivateFl2VaAdmissionEvidence, H3PrivateFl2VaAdmissionInput, H3PrivateFl2VaAttemptFacts,
-    H3PrivateFl2VaMediaContract, H3PrivateFl2VaOwnerFenceFacts, H3PrivateFl2VaPrepareError,
-    H3PrivateFl2VaPrepareInput, H3PrivateFl2VaPreparedAttempt, H3PrivateFl2VaRunContext,
-    H3PrivateFl2VaRunOutput, H3PrivateFl2VaRuntimeBounds, H3PrivateFl2VaTerminalIdentityEcho,
-    H3PrivateFl2VaUatPaths, H3PrivateRuntimeQualificationAuthority,
+    authenticate_h3_private_presentation, authenticate_h3_private_runtime_qualification,
+    prepare_h3_private_fl2va_admission, prepare_h3_private_fl2va_attempt,
+    reviewed_h3_private_runtime_available, reviewed_h3_private_runtime_available_for_task,
+    H3PrivateAllocationCommit, H3PrivateFl2VaAdmissionEvidence, H3PrivateFl2VaAdmissionInput,
+    H3PrivateFl2VaAttemptFacts, H3PrivateFl2VaMediaContract, H3PrivateFl2VaOwnerFenceFacts,
+    H3PrivateFl2VaPrepareError, H3PrivateFl2VaPrepareInput, H3PrivateFl2VaPreparedAttempt,
+    H3PrivateFl2VaRunContext, H3PrivateFl2VaRunOutput, H3PrivateFl2VaRuntimeBounds,
+    H3PrivateFl2VaTerminalIdentityEcho, H3PrivateFl2VaUatPaths, H3PrivatePresentationAuthority,
+    H3PrivatePresentationRoute, H3PrivateRuntimeQualificationAuthority,
     H3PrivateSchedulerLedgerIdentity,
 };
 pub mod model_registry;

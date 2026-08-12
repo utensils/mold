@@ -140,7 +140,7 @@ describe("MinimaxH3InventoryPanel", () => {
     expect(wrapper.text()).not.toContain("Ref2VA");
   });
 
-  it("renders nothing when model access denies H3 or runtime availability is false", async () => {
+  it("renders the exact private partition through legacy denial but hides disabled runtime", async () => {
     const available = capability();
     const wrapper = mount(MinimaxH3InventoryPanel, {
       props: {
@@ -166,7 +166,7 @@ describe("MinimaxH3InventoryPanel", () => {
         ],
       },
     });
-    expect(wrapper.find("[data-test='h3-inventory']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='h3-inventory']").exists()).toBe(true);
 
     available.runtime_available = false;
     await wrapper.setProps({

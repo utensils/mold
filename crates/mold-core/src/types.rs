@@ -6962,6 +6962,56 @@ pub struct DispatchCapabilities {
     pub request_placement_preview: bool,
 }
 
+/// Presentation-only state for one authenticated MiniMax H3 component.
+///
+/// These facts never authorize a download or loader. The private generation
+/// path independently authenticates every byte before admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MiniMaxH3ComponentCapability {
+    pub id: String,
+    pub display_name: String,
+    pub kind: String,
+    pub role: String,
+    pub scope: String,
+    pub size_bytes: u64,
+    pub state: String,
+}
+
+/// One exact task partition implemented by the authenticated private runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MiniMaxH3PartitionCapability {
+    pub task: String,
+    pub model: String,
+    pub display_name: String,
+    pub runtime_available: bool,
+    pub tier: String,
+    pub component_ids: Vec<String>,
+}
+
+/// Hardware and implementation boundary for one private H3 capability record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MiniMaxH3QualificationCapability {
+    pub backend: String,
+    pub metal_supported: bool,
+    pub minimum_host_ram_bytes: u64,
+    pub minimum_vram_bytes: u64,
+    pub attention_profile: String,
+    pub quantization_profile: String,
+}
+
+/// Additive host-authored MiniMax H3 inventory.
+///
+/// This record is deliberately separate from model manifests and catalog
+/// recipes. It can reveal an already reviewed private partition but cannot
+/// create install or public runtime authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MiniMaxH3Capability {
+    pub runtime_available: bool,
+    pub qualification: MiniMaxH3QualificationCapability,
+    pub partitions: Vec<MiniMaxH3PartitionCapability>,
+    pub components: Vec<MiniMaxH3ComponentCapability>,
+}
+
 /// Capabilities payload returned by `GET /api/capabilities`. Grouping keeps
 /// the shape extensible — future areas (inpainting, upscaling modes, etc.)
 /// can add their own sub-structs without churning existing fields.
@@ -6978,6 +7028,10 @@ pub struct ServerCapabilities {
     /// older servers, where clients must still trust server-side rejection.
     #[serde(default)]
     pub model_access: crate::ModelAccessCapabilities,
+    /// Present only on an authenticated private-UAT server whose exact runtime
+    /// partition has a source-controlled reviewed qualification record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimax_h3: Option<MiniMaxH3Capability>,
     /// Absent on older servers. Missing means LAN browsing is unavailable.
     #[serde(default)]
     pub discovery: DiscoveryCapabilities,
@@ -7090,6 +7144,56 @@ mod device_types_tests {
         assert!(caps.model_access.restrictions.is_empty());
         assert!(!caps.reference_uploads.available);
         assert_eq!(caps.reference_uploads.protocol_version, 0);
+    }
+}
+
+#[cfg(test)]
+mod minimax_h3_capability_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_capabilities_omit_private_h3_inventory() {
+        let value = serde_json::to_value(ServerCapabilities::default()).unwrap();
+        assert!(value.get("minimax_h3").is_none());
+    }
+
+    #[test]
+    fn private_h3_inventory_serializes_the_single_task_graph() {
+        let capability = MiniMaxH3Capability {
+            runtime_available: true,
+            qualification: MiniMaxH3QualificationCapability {
+                backend: "cuda".into(),
+                metal_supported: false,
+                minimum_host_ram_bytes: 128,
+                minimum_vram_bytes: 40,
+                attention_profile: "reviewed attention".into(),
+                quantization_profile: "reviewed compact layout".into(),
+            },
+            partitions: vec![MiniMaxH3PartitionCapability {
+                task: "fl2va".into(),
+                model: crate::minimax_h3::FL2VA_COMFY.into(),
+                display_name: "MiniMax H3 FL2VA".into(),
+                runtime_available: true,
+                tier: "Compact".into(),
+                component_ids: vec!["transformer".into()],
+            }],
+            components: vec![MiniMaxH3ComponentCapability {
+                id: "transformer".into(),
+                display_name: "FL2VA transformer".into(),
+                kind: "checkpoint".into(),
+                role: "transformer".into(),
+                scope: "fl2va".into(),
+                size_bytes: 20,
+                state: "installed".into(),
+            }],
+        };
+        let mut server = ServerCapabilities::default();
+        server.minimax_h3 = Some(capability);
+        let value = serde_json::to_value(server).unwrap();
+        assert_eq!(value["minimax_h3"]["partitions"][0]["task"], "fl2va");
+        assert!(value["minimax_h3"]["qualification"]["metal_supported"]
+            .as_bool()
+            .is_some_and(|supported| !supported));
     }
 }
 
