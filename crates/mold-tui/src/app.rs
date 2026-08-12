@@ -2951,6 +2951,20 @@ impl App {
         )
     }
 
+    /// Fully resolved recipe advertised for the selected model and pipeline.
+    /// Cloning keeps the keyboard mutation path borrow-simple; profiles are
+    /// small catalog metadata, not runtime model state.
+    fn active_generation_recipe(&self) -> Option<mold_core::GenerationRecipeProfile> {
+        self.models
+            .catalog
+            .iter()
+            .find(|entry| entry.name == self.generate.params.model)?
+            .generation_profile
+            .as_ref()?
+            .recipe_for_pipeline(self.generate.params.pipeline)
+            .cloned()
+    }
+
     /// Handle a raw crossterm event.
     pub fn handle_crossterm_event(&mut self, event: CrosstermEvent) {
         // Handle mouse events
@@ -3411,8 +3425,17 @@ impl App {
                         let text = input.trim().to_string();
                         self.close_popup();
                         if let Some((w, h)) = parse_size_input(&text) {
+                            if let Some(recipe) = self.active_generation_recipe() {
+                                if let Err(error) =
+                                    mold_core::validate_dimensions_against_recipe(&recipe, w, h)
+                                {
+                                    self.generate.error_message = Some(error);
+                                    return;
+                                }
+                            }
                             self.generate.params.width = w;
                             self.generate.params.height = h;
+                            self.generate.error_message = None;
                         }
                     }
                     KeyCode::Char(c)
@@ -4609,13 +4632,24 @@ impl App {
 
     /// Apply a `+`/`-`/`◀▶` adjustment to one parameter field.
     fn adjust_field(&mut self, field: ParamField, delta: i32) {
-        // Size presets need the model's default area before we borrow
-        // params mutably.
-        let default_size = if field == ParamField::Size {
-            Some(self.model_default_size())
-        } else {
-            None
-        };
+        let active_recipe = self.active_generation_recipe();
+        let size_presets = (field == ParamField::Size).then(|| {
+            active_recipe.as_ref().map_or_else(
+                || {
+                    let (width, height) = self.model_default_size();
+                    crate::ui::create_form::size_presets(width, height, 64)
+                },
+                |recipe| {
+                    recipe
+                        .resolution
+                        .aspect_groups
+                        .iter()
+                        .flat_map(|group| &group.presets)
+                        .map(|preset| (preset.width, preset.height))
+                        .collect()
+                },
+            )
+        });
         let video_grid = if matches!(
             field,
             ParamField::Duration | ParamField::Frames | ParamField::Fps
@@ -4637,22 +4671,44 @@ impl App {
                 .or_else(|| mold_core::validation::frame_offset_for_family(&family))
                 .unwrap_or(1)
                 .max(1);
-            Some(TuiVideoGrid {
-                step,
-                offset,
-                min_frames: mold_core::validation::min_frames_for_family(&family).unwrap_or(offset),
-                fixed_fps: mold_core::validation::fixed_fps_for_family(&family),
-                runtime_seconds: entry
-                    .and_then(|entry| entry.defaults.max_runtime_seconds)
-                    .or_else(|| mold_core::validation::max_runtime_seconds_for_family(&family)),
-                absolute_frames: entry
-                    .and_then(|entry| entry.defaults.max_frames_absolute)
-                    .or_else(|| mold_core::validation::max_frames_absolute_for_family(&family)),
-                fixed_frames: entry
-                    .and_then(|entry| entry.defaults.max_frames)
-                    .or_else(|| mold_core::validation::max_frames_for_family(&family))
-                    .unwrap_or(257),
-            })
+            active_recipe
+                .as_ref()
+                .and_then(|recipe| recipe.temporal.as_ref())
+                .map(|temporal| TuiVideoGrid {
+                    step: temporal.frames.step,
+                    offset: temporal.frame_offset,
+                    min_frames: temporal.frames.min,
+                    fixed_fps: match temporal.fps {
+                        mold_core::FpsControl::Fixed { value } => Some(value),
+                        mold_core::FpsControl::Adjustable { .. } => None,
+                    },
+                    runtime_seconds: temporal.max_duration_seconds,
+                    absolute_frames: Some(temporal.frames.max),
+                    fixed_frames: temporal.frames.max,
+                })
+                .or_else(|| {
+                    Some(TuiVideoGrid {
+                        step,
+                        offset,
+                        min_frames: mold_core::validation::min_frames_for_family(&family)
+                            .unwrap_or(offset),
+                        fixed_fps: mold_core::validation::fixed_fps_for_family(&family),
+                        runtime_seconds: entry
+                            .and_then(|entry| entry.defaults.max_runtime_seconds)
+                            .or_else(|| {
+                                mold_core::validation::max_runtime_seconds_for_family(&family)
+                            }),
+                        absolute_frames: entry
+                            .and_then(|entry| entry.defaults.max_frames_absolute)
+                            .or_else(|| {
+                                mold_core::validation::max_frames_absolute_for_family(&family)
+                            }),
+                        fixed_frames: entry
+                            .and_then(|entry| entry.defaults.max_frames)
+                            .or_else(|| mold_core::validation::max_frames_for_family(&family))
+                            .unwrap_or(257),
+                    })
+                })
         } else {
             None
         };
@@ -4661,10 +4717,9 @@ impl App {
         let p = &mut self.generate.params;
         match field {
             ParamField::Size => {
-                // Cycle the aspect presets fitted to the model's default
-                // pixel area; a custom size snaps to the first preset.
-                let (dw, dh) = default_size.unwrap_or((p.width, p.height));
-                let presets = crate::ui::create_form::size_presets(dw, dh, 64);
+                // Profile-aware servers provide exact, qualified presets.
+                // The synthetic grid remains only as a one-release adapter.
+                let presets = size_presets.unwrap_or_default();
                 if presets.is_empty() {
                     return;
                 }
@@ -4676,13 +4731,24 @@ impl App {
                 (p.width, p.height) = presets[next];
             }
             ParamField::Steps => {
-                p.steps = (p.steps as i32 + delta).clamp(1, 200) as u32;
+                let (min, max, step) = active_recipe.as_ref().map_or((1, 200, 1), |recipe| {
+                    (recipe.steps.min, recipe.steps.max, recipe.steps.step)
+                });
+                p.steps = (i64::from(p.steps) + i64::from(delta) * i64::from(step))
+                    .clamp(i64::from(min), i64::from(max)) as u32;
             }
             ParamField::Guidance => {
                 if !guidance_adjustable {
                     return;
                 }
-                p.guidance = (p.guidance + delta as f64 * 0.5).clamp(0.0, 30.0);
+                let (min, max, step) = active_recipe.as_ref().map_or((0.0, 30.0, 0.5), |recipe| {
+                    (
+                        recipe.guidance.min,
+                        recipe.guidance.max,
+                        recipe.guidance.step,
+                    )
+                });
+                p.guidance = (p.guidance + f64::from(delta) * step).clamp(min, max);
             }
             ParamField::Seed => {
                 // ◀▶ cycles the seed mode (random → fixed → increment).
@@ -4871,6 +4937,18 @@ impl App {
         }
         if field == ParamField::Pipeline {
             self.sync_pipeline_guidance();
+            if let Some(recipe) = self.active_generation_recipe() {
+                self.generate.params.width = recipe.defaults.width;
+                self.generate.params.height = recipe.defaults.height;
+                self.generate.params.steps = recipe.defaults.steps;
+                self.generate.params.guidance = recipe.defaults.guidance;
+                if let Some(frames) = recipe.defaults.frames {
+                    self.generate.params.frames = frames;
+                }
+                if let Some(fps) = recipe.defaults.fps {
+                    self.generate.params.fps = fps;
+                }
+            }
         }
     }
 
@@ -11748,6 +11826,36 @@ mod tests {
         assert_eq!(
             (app.generate.params.width, app.generate.params.height),
             presets[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_size_row_cycles_only_exact_z_image_presets() {
+        let mut app = make_settings_test_app();
+        app.models.catalog = mold_core::build_model_catalog(&app.config, None, false);
+        app.generate.params.model = "z-image-turbo:q4".to_string();
+        app.generate.params.width = 1024;
+        app.generate.params.height = 1024;
+
+        let recipe = app.active_generation_recipe().expect("profile");
+        let expected = recipe
+            .resolution
+            .aspect_groups
+            .iter()
+            .flat_map(|group| &group.presets)
+            .map(|preset| (preset.width, preset.height))
+            .collect::<std::collections::HashSet<_>>();
+        assert!(expected.contains(&(1280, 720)));
+        assert!(expected.contains(&(720, 1280)));
+
+        for _ in 0..expected.len() {
+            assert!(expected.contains(&(app.generate.params.width, app.generate.params.height)));
+            app.adjust_field(ParamField::Size, 1);
+        }
+        assert_eq!(
+            (app.generate.params.width, app.generate.params.height),
+            (1024, 1024),
+            "the exact profile ring must wrap without synthesizing a canvas"
         );
     }
 

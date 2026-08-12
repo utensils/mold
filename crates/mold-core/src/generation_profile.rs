@@ -206,6 +206,168 @@ impl GenerationProfileSet {
     }
 }
 
+/// Validate model-owned request fields against the exact resolved recipe.
+/// Family validation may still perform engine-specific structural checks, but
+/// it must not widen these advertised controls.
+pub fn validate_request_against_generation_profile(
+    profile: &GenerationProfileSet,
+    request: &crate::GenerateRequest,
+) -> Result<(), String> {
+    let recipe = if let Some(pipeline) = request.pipeline {
+        profile
+            .recipes
+            .iter()
+            .find(|recipe| recipe.request_selector.pipeline == Some(pipeline))
+            .ok_or_else(|| format!("pipeline '{}' is not available for this model", pipeline))?
+    } else {
+        profile.default_recipe().ok_or_else(|| {
+            format!(
+                "generation profile '{}' has no default recipe",
+                profile.profile_id
+            )
+        })?
+    };
+    validate_request_against_recipe(recipe, request)
+}
+
+pub fn validate_request_against_recipe(
+    recipe: &GenerationRecipeProfile,
+    request: &crate::GenerateRequest,
+) -> Result<(), String> {
+    validate_integer("steps", request.steps, &recipe.steps)?;
+    validate_float("guidance", request.guidance, &recipe.guidance)?;
+
+    let resolution = &recipe.resolution;
+    if resolution.domain != ResolutionDomain::None {
+        validate_resolution(resolution, request.width, request.height)?;
+    }
+
+    if let Some(temporal) = &recipe.temporal {
+        let frames = request.frames.unwrap_or(temporal.frames.default);
+        validate_integer("frames", frames, &temporal.frames)?;
+        match temporal.fps {
+            FpsControl::Fixed { value } => {
+                if request.fps.is_some_and(|fps| fps != value) {
+                    return Err(format!("fps is fixed at {value} for this recipe"));
+                }
+            }
+            FpsControl::Adjustable { min, max, step, .. } => {
+                if let Some(fps) = request.fps {
+                    if !(min..=max).contains(&fps) || !(fps - min).is_multiple_of(step) {
+                        return Err(format!(
+                            "fps must be {min} through {max} in steps of {step}"
+                        ));
+                    }
+                }
+            }
+        }
+    } else if request.frames.is_some() || request.fps.is_some() {
+        return Err("frames and fps are not supported by this recipe".to_string());
+    }
+    Ok(())
+}
+
+pub fn validate_dimensions_against_recipe(
+    recipe: &GenerationRecipeProfile,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    if recipe.resolution.domain == ResolutionDomain::None {
+        return Err("resolution is not available for this recipe".to_string());
+    }
+    validate_resolution(&recipe.resolution, width, height)
+}
+
+fn validate_resolution(profile: &ResolutionProfile, width: u32, height: u32) -> Result<(), String> {
+    if width < profile.min_width || height < profile.min_height {
+        return Err(format!(
+            "width and height must each be at least {}x{} for this recipe",
+            profile.min_width, profile.min_height
+        ));
+    }
+    if !width.is_multiple_of(profile.alignment) || !height.is_multiple_of(profile.alignment) {
+        return Err(format!(
+            "width and height must be multiples of {} for this recipe",
+            profile.alignment
+        ));
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > profile.max_pixels {
+        return Err(format!(
+            "resolution {width}x{height} exceeds this recipe's {} pixel limit",
+            profile.max_pixels
+        ));
+    }
+    if let Some(max_axis) = profile.max_axis_pixels {
+        if width > max_axis || height > max_axis {
+            return Err(format!(
+                "width and height must not exceed {max_axis} for this recipe"
+            ));
+        }
+    }
+    let aspect = f64::from(width) / f64::from(height);
+    if profile
+        .min_aspect_ratio
+        .is_some_and(|minimum| aspect < minimum)
+        || profile
+            .max_aspect_ratio
+            .is_some_and(|maximum| aspect > maximum)
+    {
+        return Err(format!(
+            "resolution {width}x{height} is outside this recipe's aspect-ratio range"
+        ));
+    }
+    if profile.domain == ResolutionDomain::Buckets
+        && !profile
+            .aspect_groups
+            .iter()
+            .flat_map(|group| &group.presets)
+            .any(|preset| preset.width == width && preset.height == height)
+    {
+        return Err(format!(
+            "resolution {width}x{height} is not an available bucket for this recipe"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_integer(name: &str, value: u32, control: &IntegerControl) -> Result<(), String> {
+    if control.mode == ControlMode::Fixed && value != control.default {
+        return Err(format!(
+            "{name} is fixed at {} for this recipe",
+            control.default
+        ));
+    }
+    if !(control.min..=control.max).contains(&value)
+        || !(value - control.min).is_multiple_of(control.step)
+    {
+        return Err(format!(
+            "{name} must be {} through {} in steps of {}",
+            control.min, control.max, control.step
+        ));
+    }
+    Ok(())
+}
+
+fn validate_float(name: &str, value: f64, control: &FloatControl) -> Result<(), String> {
+    if !value.is_finite() {
+        return Err(format!("{name} must be finite"));
+    }
+    if control.mode == ControlMode::Fixed && (value - control.default).abs() > f64::EPSILON {
+        return Err(format!(
+            "{name} is fixed at {} for this recipe",
+            control.default
+        ));
+    }
+    if value < control.min || value > control.max {
+        return Err(format!(
+            "{name} must be {} through {}",
+            control.min, control.max
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct GenerationProfileInput<'a> {
     pub model: &'a str,
@@ -948,5 +1110,67 @@ mod tests {
         if let Some(max) = resolution.max_aspect_ratio {
             assert!(aspect <= max, "{context}: aspect above maximum");
         }
+    }
+
+    fn request_for(
+        profile: &GenerationProfileSet,
+        width: u32,
+        height: u32,
+    ) -> crate::GenerateRequest {
+        let recipe = profile.default_recipe().unwrap();
+        serde_json::from_value(serde_json::json!({
+            "prompt": "test",
+            "model": "test",
+            "width": width,
+            "height": height,
+            "steps": recipe.defaults.steps,
+            "guidance": recipe.defaults.guidance,
+            "frames": recipe.defaults.frames,
+            "fps": recipe.defaults.fps
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn profile_admission_accepts_z_wide_and_rejects_non_bucket_wan() {
+        let z = resolve_generation_profile(input("z-image-turbo:q4", "z-image"));
+        let z_request = request_for(&z, 1280, 720);
+        validate_request_against_generation_profile(&z, &z_request).unwrap();
+
+        let mut wan_input = input("wan22-t2v-a14b:q5", "wan");
+        wan_input.default_width = 1280;
+        wan_input.default_height = 720;
+        wan_input.default_frames = Some(81);
+        wan_input.default_fps = Some(16);
+        let wan = resolve_generation_profile(wan_input);
+        let valid = request_for(&wan, 1280, 720);
+        validate_request_against_generation_profile(&wan, &valid).unwrap();
+        let invalid = request_for(&wan, 1024, 768);
+        assert!(validate_request_against_generation_profile(&wan, &invalid)
+            .unwrap_err()
+            .contains("not an available bucket"));
+    }
+
+    #[test]
+    fn profile_admission_enforces_h3_fixed_controls_and_frame_cap() {
+        let mut h3_input = input("minimax-h3-fl2va:official-bf16", "minimax-h3");
+        h3_input.default_width = 768;
+        h3_input.default_height = 768;
+        h3_input.default_frames = Some(crate::minimax_h3::MIN_FRAMES);
+        h3_input.default_fps = Some(crate::minimax_h3::FIXED_FPS);
+        let h3 = resolve_generation_profile(h3_input);
+        let mut request = request_for(&h3, 768, 768);
+        request.frames = Some(crate::minimax_h3::MAX_FRAMES);
+        validate_request_against_generation_profile(&h3, &request).unwrap();
+
+        request.frames = Some(362);
+        assert!(validate_request_against_generation_profile(&h3, &request)
+            .unwrap_err()
+            .contains("frames must be"));
+        request.frames = Some(crate::minimax_h3::MAX_FRAMES);
+        request.guidance = 1.0;
+        assert!(validate_request_against_generation_profile(&h3, &request)
+            .unwrap_err()
+            .contains("guidance is fixed"));
     }
 }

@@ -128,7 +128,26 @@ fn validate_local_request(req: &GenerateRequest, config: &Config) -> Result<()> 
         req,
         resolve_family(&req.model, config).as_deref(),
     )
-    .map_err(|e| anyhow::anyhow!(e))
+    .map_err(|e| anyhow::anyhow!(e))?;
+    if let Some(manifest) = manifest::find_manifest(&manifest::resolve_model_name(&req.model)) {
+        let model_config = config.resolved_model_config(&manifest.name);
+        let profile = mold_core::generation_profile_for_manifest_with_defaults(
+            manifest,
+            mold_core::GenerationDefaultsProfile {
+                width: model_config.effective_width(config),
+                height: model_config.effective_height(config),
+                steps: model_config.effective_steps(config),
+                guidance: model_config.effective_guidance(),
+                frames: model_config.effective_frames(),
+                fps: model_config.effective_fps(),
+                negative_prompt: manifest::default_negative_prompt_for_family(&manifest.family)
+                    .map(str::to_string),
+            },
+        );
+        mold_core::validate_request_against_generation_profile(&profile, req)
+            .map_err(anyhow::Error::msg)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

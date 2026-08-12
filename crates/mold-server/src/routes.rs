@@ -947,6 +947,18 @@ async fn prepare_generation(
     } else {
         &*request
     };
+    if !private_h3_ingress {
+        let canonical_model = mold_core::manifest::resolve_model_name(&request.model);
+        if let Some(profile) = model_manager::list_models(state)
+            .await
+            .into_iter()
+            .find(|entry| entry.info.name == request.model || entry.info.name == canonical_model)
+            .and_then(|entry| entry.generation_profile)
+        {
+            mold_core::validate_request_against_generation_profile(&profile, validation_request)
+                .map_err(ApiError::validation)?;
+        }
+    }
     #[cfg(feature = "h3-private-uat")]
     let validation = if private_h3_ingress {
         mold_core::validation::validate_h3_private_uat_request(validation_request)
