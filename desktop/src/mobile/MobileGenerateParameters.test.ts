@@ -72,6 +72,34 @@ async function attachFile(wrapper: VueWrapper, selector: string, file: File): Pr
 }
 
 describe("MobileGenerateParameters", () => {
+  it("resets model-owned controls when the recipe changes", async () => {
+    const model = {
+      name: "ltx2:test",
+      family: "ltx2",
+      default_width: 1024,
+      default_height: 576,
+      default_steps: 30,
+      default_guidance: 3,
+      size_gb: 1,
+      is_loaded: false,
+      hf_repo: "fixture",
+      description: "",
+      downloaded: true,
+    } as ModelEntry;
+    const initial = formFor("ltx2", model.name);
+    Object.assign(initial, { width: 640, height: 640, steps: 7, guidance: 8 });
+    const { wrapper, form } = mountParameters(initial, [], true, [], [], model);
+    await wrapper.get("[data-test='mobile-ltx2-disclosure']").trigger("click");
+    await wrapper.get("[data-test='mobile-ltx2-pipeline']").setValue("two-stage");
+    expect(form).toMatchObject({
+      pipeline: "two-stage",
+      width: 1024,
+      height: 576,
+      steps: 30,
+      guidance: 3,
+    });
+  });
+
   it("offers a duration slider while retaining exact video fields", async () => {
     const model = {
       name: "ltx-2-19b-distilled:fp8",

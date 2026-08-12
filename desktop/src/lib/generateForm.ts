@@ -56,6 +56,7 @@ import { pipelineForControlId } from "@studio/lib/ltx2Control";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
 import { isWanFamily } from "@studio/lib/generationCapabilities";
 import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
   MINIMAX_H3_MIN_FRAMES,
   cloneMinimaxH3AuthoringState,
@@ -339,6 +340,63 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
       }),
     );
   }
+}
+
+/** Apply one fully resolved recipe as a fresh model-owned settings boundary.
+ * Prompt, seed, batch and compatible conditioning remain user-owned. An
+ * unknown explicit selector returns false and leaves the prior controls in
+ * place so client validation can fail closed without destroying authored work.
+ */
+export function applyRecipeDefaults(
+  form: GenerateForm,
+  m: ModelEntry | null | undefined,
+  pipeline: string | null,
+): boolean {
+  form.pipeline = pipeline as Ltx2PipelineMode | null;
+  const recipe = effectiveGenerationRecipe(m, pipeline);
+  if (!recipe) return false;
+
+  form.width = recipe.defaults.width;
+  form.height = recipe.defaults.height;
+  form.steps = recipe.defaults.steps;
+  form.guidance = recipe.defaults.guidance;
+  if (recipe.defaults.frames != null) form.frames = recipe.defaults.frames;
+  if (recipe.defaults.fps != null) form.fps = recipe.defaults.fps;
+
+  const negativeDefault = recipe.defaults.negative_prompt ?? "";
+  form.negativePrompt = negativeDefault;
+  form.negativePromptDefault = negativeDefault;
+  form.negativeExplicitClear = false;
+  form.guidanceCapabilities = {
+    adjustable: recipe.capabilities.guidance.adjustable,
+    supports_negative_prompt: recipe.capabilities.guidance.supports_negative_prompt,
+    fixed_scale: recipe.capabilities.guidance.fixed_scale ?? null,
+  };
+
+  form.scheduler = "default";
+  form.cfgPlus = false;
+  form.spatialUpscale = null;
+  form.temporalUpscale = null;
+  form.guidanceOverrides = emptyGuidanceOverrides();
+  form.retakeRange = null;
+  form.icLoraControl = null;
+  if (recipe.capabilities.source_image === "unsupported") {
+    form.sourceImage = null;
+    form.sourceImageName = null;
+    form.sourceImageWidth = null;
+    form.sourceImageHeight = null;
+    form.maskImage = null;
+    form.imageAttachments = [];
+  }
+  if (!recipe.capabilities.supports_extend) {
+    form.extendVideo = null;
+    form.extendOverlapFrames = null;
+  }
+  if (!recipe.capabilities.supports_audio) {
+    form.enableAudio = false;
+    form.audioFile = null;
+  }
+  return true;
 }
 
 /**

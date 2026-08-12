@@ -26,6 +26,7 @@ import {
   type ChainRoutingDecision,
 } from "../lib/chainRouting";
 import {
+  applyRecipeDefaults,
   buildRequest,
   formExtendOverlapFrames,
   type GenerateForm,
@@ -320,14 +321,19 @@ const spatialOptions: Ltx2SpatialUpscale[] = ["x1-5", "x2"];
 const temporalOptions: Ltx2TemporalUpscale[] = ["x2"];
 
 function setPipeline(value: string): void {
-  props.form.pipeline = (value || null) as Ltx2PipelineMode | null;
-  if (!isControlAdapterPipeline(props.form.pipeline)) props.form.icLoraControl = null;
-  if (props.form.pipeline !== "retake") props.form.retakeRange = null;
+  const pipeline = (value || null) as Ltx2PipelineMode | null;
+  applyRecipeDefaults(props.form, props.selectedModel, pipeline);
+  if (!isControlAdapterPipeline(pipeline)) props.form.icLoraControl = null;
+  if (pipeline !== "retake") props.form.retakeRange = null;
 }
 function setControlAdapter(value: string): void {
-  props.form.icLoraControl = value || null;
   // Lip dub is a pipeline of its own; every other adapter drives `ic-lora`.
-  if (value) props.form.pipeline = pipelineForControlId(value);
+  if (value) {
+    applyRecipeDefaults(props.form, props.selectedModel, pipelineForControlId(value));
+    props.form.icLoraControl = value;
+  } else {
+    props.form.icLoraControl = null;
+  }
 }
 
 function setSpatial(value: string): void {

@@ -16,6 +16,7 @@ import { minimaxH3TaskForModel } from "@studio/lib/minimaxH3Authoring";
 import {
   effectiveGenerationRecipe,
   floatControlError,
+  generationRecipeSelectionError,
   integerControlError,
   resolutionProfileError,
 } from "@studio/lib/generationProfile";
@@ -108,6 +109,8 @@ export function profileStepsValidationError(
   contract?: ModelResolutionContract | null,
   pipeline?: string | null,
 ): string | null {
+  const selectionError = generationRecipeSelectionError(contract, pipeline);
+  if (selectionError) return selectionError;
   const control = effectiveGenerationRecipe(contract, pipeline)?.steps;
   if (!control) return stepsValidationError(value);
   return integerControlError("Steps", value, control);
@@ -124,6 +127,8 @@ export function profileGuidanceValidationError(
   contract?: ModelResolutionContract | null,
   pipeline?: string | null,
 ): string | null {
+  const selectionError = generationRecipeSelectionError(contract, pipeline);
+  if (selectionError) return selectionError;
   const control = effectiveGenerationRecipe(contract, pipeline)?.guidance;
   if (!control) return guidanceValidationError(value);
   return floatControlError("Guidance", value, control);
@@ -150,6 +155,8 @@ export function resolutionValidationError(
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 64 || height < 64) {
     return "Width and height must each be at least 64 pixels.";
   }
+  const selectionError = generationRecipeSelectionError(contract, pipeline);
+  if (selectionError) return selectionError;
   const recipe = effectiveGenerationRecipe(contract, pipeline);
   const profileError = resolutionProfileError(width, height, recipe?.resolution);
   if (profileError) return profileError;

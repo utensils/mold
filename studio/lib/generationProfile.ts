@@ -129,18 +129,7 @@ export function advertisedGenerationProfile(
   model: GenerationProfileModel | null | undefined,
 ): GenerationProfileSet | null {
   const profile = model?.generation_profile;
-  if (
-    !profile ||
-    profile.schema_version !== 1 ||
-    !profile.profile_id ||
-    !profile.profile_hash ||
-    !profile.default_recipe_id ||
-    !Array.isArray(profile.recipes) ||
-    profile.recipes.length === 0
-  ) {
-    return null;
-  }
-  return profile;
+  return isGenerationProfileSetV1(profile) ? profile : null;
 }
 
 /** Resolve one complete recipe; clients never merge recipe overrides. */
@@ -161,12 +150,272 @@ export function effectiveGenerationRecipe(
     const exact = profile.recipes.find(
       (recipe) => recipe.request_selector.pipeline === pipeline,
     );
-    if (exact) return exact;
+    return exact ?? null;
   }
   return (
     profile.recipes.find((recipe) => recipe.id === profile.default_recipe_id) ??
-    profile.recipes[0] ??
     null
+  );
+}
+
+/** Name an explicit recipe selector the advertised v1 contract cannot resolve. */
+export function generationRecipeSelectionError(
+  model: GenerationProfileModel | null | undefined,
+  pipeline?: string | null,
+): string | null {
+  const profile = advertisedGenerationProfile(model);
+  if (!profile || !pipeline) return null;
+  return profile.recipes.some(
+    (recipe) => recipe.request_selector.pipeline === pipeline,
+  )
+    ? null
+    : `Pipeline “${pipeline}” is not supported by this model.`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function finiteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function positiveIntegerValue(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) > 0;
+}
+
+function nullableFinite(value: unknown): boolean {
+  return value === undefined || value === null || finiteNumber(value);
+}
+
+function isIntegerControl(value: unknown): value is IntegerControl {
+  if (!isRecord(value)) return false;
+  const { default: initial, min, max, step, mode, recommended } = value;
+  return (
+    Number.isInteger(initial) &&
+    Number.isInteger(min) &&
+    Number.isInteger(max) &&
+    positiveIntegerValue(step) &&
+    Number(min) <= Number(initial) &&
+    Number(initial) <= Number(max) &&
+    (mode === "adjustable" || mode === "fixed" || mode === "hidden") &&
+    (recommended === undefined ||
+      (Array.isArray(recommended) &&
+        recommended.every((item) => Number.isInteger(item))))
+  );
+}
+
+function isFloatControl(value: unknown): value is FloatControl {
+  if (!isRecord(value)) return false;
+  const { default: initial, min, max, step, mode } = value;
+  return (
+    finiteNumber(initial) &&
+    finiteNumber(min) &&
+    finiteNumber(max) &&
+    finiteNumber(step) &&
+    step > 0 &&
+    min <= initial &&
+    initial <= max &&
+    (mode === "adjustable" || mode === "fixed" || mode === "hidden")
+  );
+}
+
+function isResolutionProfile(value: unknown): value is ResolutionProfile {
+  if (!isRecord(value) || !Array.isArray(value.aspect_groups)) return false;
+  const noResolution = value.domain === "none";
+  if (
+    !["dynamic", "buckets", "source-driven", "none"].includes(
+      String(value.domain),
+    ) ||
+    !positiveIntegerValue(value.alignment) ||
+    (noResolution
+      ? value.min_width !== 0 ||
+        value.min_height !== 0 ||
+        value.max_pixels !== 0 ||
+        value.aspect_groups.length !== 0
+      : !positiveIntegerValue(value.min_width) ||
+        !positiveIntegerValue(value.min_height) ||
+        !positiveIntegerValue(value.max_pixels)) ||
+    !nullableFinite(value.max_axis_pixels) ||
+    !nullableFinite(value.min_aspect_ratio) ||
+    !nullableFinite(value.max_aspect_ratio)
+  ) {
+    return false;
+  }
+  return value.aspect_groups.every((group) => {
+    if (
+      !isRecord(group) ||
+      typeof group.id !== "string" ||
+      !group.id ||
+      typeof group.label !== "string"
+    ) {
+      return false;
+    }
+    if (!Array.isArray(group.presets)) return false;
+    return group.presets.every(
+      (preset) =>
+        isRecord(preset) &&
+        typeof preset.id === "string" &&
+        Boolean(preset.id) &&
+        positiveIntegerValue(preset.width) &&
+        positiveIntegerValue(preset.height) &&
+        typeof preset.tier === "string",
+    );
+  });
+}
+
+function isTemporalProfile(value: unknown): value is TemporalProfile {
+  if (
+    !isRecord(value) ||
+    !isIntegerControl(value.frames) ||
+    !Number.isInteger(value.frame_offset)
+  ) {
+    return false;
+  }
+  const fps = value.fps;
+  const validFps =
+    isRecord(fps) &&
+    ((fps.mode === "fixed" && finiteNumber(fps.value)) ||
+      (fps.mode === "adjustable" &&
+        finiteNumber(fps.default) &&
+        finiteNumber(fps.min) &&
+        finiteNumber(fps.max) &&
+        finiteNumber(fps.step) &&
+        fps.step > 0 &&
+        fps.min <= fps.default &&
+        fps.default <= fps.max));
+  return validFps && nullableFinite(value.max_duration_seconds);
+}
+
+function isRecipe(value: unknown): value is GenerationRecipeProfile {
+  if (
+    !isRecord(value) ||
+    !isRecord(value.request_selector) ||
+    !isRecord(value.defaults)
+  ) {
+    return false;
+  }
+  const selector = value.request_selector.pipeline;
+  const defaults = value.defaults;
+  const caps = value.capabilities;
+  const structurallyValid =
+    typeof value.id === "string" &&
+    Boolean(value.id) &&
+    typeof value.label === "string" &&
+    (selector === undefined ||
+      selector === null ||
+      (typeof selector === "string" && selector.length > 0)) &&
+    (isRecord(value.resolution) && value.resolution.domain === "none"
+      ? defaults.width === 0 && defaults.height === 0
+      : positiveIntegerValue(defaults.width) &&
+        positiveIntegerValue(defaults.height)) &&
+    positiveIntegerValue(defaults.steps) &&
+    finiteNumber(defaults.guidance) &&
+    nullableFinite(defaults.frames) &&
+    nullableFinite(defaults.fps) &&
+    (defaults.negative_prompt === undefined ||
+      defaults.negative_prompt === null ||
+      typeof defaults.negative_prompt === "string") &&
+    isResolutionProfile(value.resolution) &&
+    isIntegerControl(value.steps) &&
+    isFloatControl(value.guidance) &&
+    (value.temporal === undefined ||
+      value.temporal === null ||
+      isTemporalProfile(value.temporal)) &&
+    isRecord(caps) &&
+    isRecord(caps.guidance) &&
+    typeof caps.guidance.adjustable === "boolean" &&
+    typeof caps.guidance.supports_negative_prompt === "boolean" &&
+    nullableFinite(caps.guidance.fixed_scale) &&
+    (caps.source_image === undefined ||
+      caps.source_image === null ||
+      ["unsupported", "optional", "required"].includes(
+        String(caps.source_image),
+      )) &&
+    typeof caps.supports_lora === "boolean" &&
+    typeof caps.supports_controlnet === "boolean" &&
+    typeof caps.supports_sequence === "boolean" &&
+    typeof caps.supports_extend === "boolean" &&
+    typeof caps.supports_audio === "boolean" &&
+    (caps.schedulers === undefined ||
+      (Array.isArray(caps.schedulers) &&
+        caps.schedulers.every((scheduler) => typeof scheduler === "string")));
+  if (!structurallyValid) return false;
+
+  const recipe = value as unknown as GenerationRecipeProfile;
+  return (
+    resolutionProfileError(
+      recipe.defaults.width,
+      recipe.defaults.height,
+      recipe.resolution,
+    ) === null &&
+    integerControlError("Steps", recipe.defaults.steps, recipe.steps) ===
+      null &&
+    floatControlError("Guidance", recipe.defaults.guidance, recipe.guidance) ===
+      null &&
+    recipe.resolution.aspect_groups.every((group) =>
+      group.presets.every(
+        (preset) =>
+          resolutionProfileError(
+            preset.width,
+            preset.height,
+            recipe.resolution,
+          ) === null,
+      ),
+    ) &&
+    (recipe.temporal === null ||
+      recipe.temporal === undefined ||
+      ((recipe.defaults.frames === null ||
+        recipe.defaults.frames === undefined ||
+        integerControlError(
+          "Frames",
+          recipe.defaults.frames,
+          recipe.temporal.frames,
+        ) === null) &&
+        (recipe.defaults.fps === null ||
+          recipe.defaults.fps === undefined ||
+          fpsControlAccepts(recipe.temporal.fps, recipe.defaults.fps))))
+  );
+}
+
+function fpsControlAccepts(control: ProfileFpsControl, value: number): boolean {
+  if (control.mode === "fixed") return value === control.value;
+  return (
+    value >= control.min &&
+    value <= control.max &&
+    Number.isInteger((value - control.min) / control.step)
+  );
+}
+
+function isGenerationProfileSetV1(
+  value: unknown,
+): value is GenerationProfileSet {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.recipes) ||
+    value.recipes.length === 0
+  )
+    return false;
+  if (
+    value.schema_version !== 1 ||
+    typeof value.profile_id !== "string" ||
+    !value.profile_id ||
+    typeof value.profile_hash !== "string" ||
+    !value.profile_hash ||
+    typeof value.default_recipe_id !== "string" ||
+    !value.default_recipe_id ||
+    !value.recipes.every(isRecipe)
+  ) {
+    return false;
+  }
+  const ids = value.recipes.map((recipe) => recipe.id);
+  const pipelines = value.recipes
+    .map((recipe) => recipe.request_selector.pipeline)
+    .filter((pipeline): pipeline is string => typeof pipeline === "string");
+  return (
+    new Set(ids).size === ids.length &&
+    new Set(pipelines).size === pipelines.length &&
+    ids.includes(value.default_recipe_id)
   );
 }
 

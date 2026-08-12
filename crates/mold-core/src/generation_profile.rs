@@ -193,13 +193,19 @@ impl GenerationProfileSet {
         &self,
         pipeline: Option<Ltx2PipelineMode>,
     ) -> Option<&GenerationRecipeProfile> {
-        self.recipes
-            .iter()
-            .find(|recipe| recipe.request_selector.pipeline == pipeline)
-            .or_else(|| self.default_recipe())
+        match pipeline {
+            Some(pipeline) => self
+                .recipes
+                .iter()
+                .find(|recipe| recipe.request_selector.pipeline == Some(pipeline)),
+            None => self.default_recipe(),
+        }
     }
 
-    fn seal_hash(&mut self) {
+    /// Recompute the content address after a server-side runtime probe refines
+    /// an advertised capability. The profile hash must describe the exact
+    /// contract on the wire, not the pre-probe manifest approximation.
+    pub fn refresh_hash(&mut self) {
         self.profile_hash.clear();
         let encoded = serde_json::to_vec(self).expect("generation profile must serialize");
         self.profile_hash = format!("{:x}", Sha256::digest(encoded));
@@ -236,6 +242,14 @@ pub fn validate_request_against_recipe(
 ) -> Result<(), String> {
     validate_integer("steps", request.steps, &recipe.steps)?;
     validate_float("guidance", request.guidance, &recipe.guidance)?;
+    if let Some(scheduler) = request.scheduler {
+        let advertised = &recipe.capabilities.schedulers;
+        if !advertised.is_empty() && !advertised.contains(&scheduler) {
+            return Err(format!(
+                "scheduler '{scheduler}' is not available for this recipe"
+            ));
+        }
+    }
 
     let resolution = &recipe.resolution;
     if resolution.domain != ResolutionDomain::None {
@@ -244,7 +258,22 @@ pub fn validate_request_against_recipe(
 
     if let Some(temporal) = &recipe.temporal {
         let frames = request.frames.unwrap_or(temporal.frames.default);
-        validate_integer("frames", frames, &temporal.frames)?;
+        let effective_fps = request.fps.unwrap_or(match temporal.fps {
+            FpsControl::Fixed { value } => value,
+            FpsControl::Adjustable { default, .. } => default,
+        });
+        let mut effective_frames = temporal.frames.clone();
+        if let Some(seconds) = temporal.max_duration_seconds {
+            let raw_duration_cap = seconds
+                .saturating_mul(effective_fps.max(1))
+                .saturating_add(temporal.frame_offset);
+            let grid_cap = raw_duration_cap.saturating_sub(temporal.frame_offset)
+                / temporal.frames.step
+                * temporal.frames.step
+                + temporal.frame_offset;
+            effective_frames.max = effective_frames.max.min(grid_cap);
+        }
+        validate_integer("frames", frames, &effective_frames)?;
         match temporal.fps {
             FpsControl::Fixed { value } => {
                 if request.fps.is_some_and(|fps| fps != value) {
@@ -363,6 +392,17 @@ fn validate_float(name: &str, value: f64, control: &FloatControl) -> Result<(), 
         return Err(format!(
             "{name} must be {} through {}",
             control.min, control.max
+        ));
+    }
+    if control.step <= 0.0 || !control.step.is_finite() {
+        return Err(format!("{name} has an invalid profile step"));
+    }
+    let steps = (value - control.min) / control.step;
+    let tolerance = f64::EPSILON * 16.0 * steps.abs().max(1.0);
+    if (steps - steps.round()).abs() > tolerance {
+        return Err(format!(
+            "{name} must be {} through {} in steps of {}",
+            control.min, control.max, control.step
         ));
     }
     Ok(())
@@ -612,7 +652,7 @@ pub fn resolve_generation_profile(input: GenerationProfileInput<'_>) -> Generati
         default_recipe_id: if family == "ltx2" { "auto" } else { "default" }.to_string(),
         recipes,
     };
-    set.seal_hash();
+    set.refresh_hash();
     set
 }
 
@@ -771,15 +811,12 @@ fn recipe(
             supports_sequence: input.supports_sequence && !audio_only,
             supports_extend: input.supports_extend && !audio_only,
             supports_audio: input.supports_audio || audio_only,
-            schedulers: if matches!(family, "sd15" | "sdxl" | "wan") {
-                vec![
-                    Scheduler::Euler,
-                    Scheduler::EulerAncestral,
-                    Scheduler::Ddim,
-                    Scheduler::UniPc,
-                ]
-            } else {
-                Vec::new()
+            schedulers: match family {
+                "sd15" | "sdxl" => {
+                    vec![Scheduler::Ddim, Scheduler::EulerAncestral, Scheduler::UniPc]
+                }
+                "wan" => vec![Scheduler::UniPc, Scheduler::Euler, Scheduler::DpmPp],
+                _ => Vec::new(),
             },
         },
         provenance: provenance(family),
@@ -792,6 +829,11 @@ fn temporal_profile(input: &GenerationProfileInput<'_>, family: &str) -> Option<
     let fps = input.default_fps.unwrap_or(validation::LTX2_DEFAULT_FPS);
     let max = if family == "minimax-h3" {
         345
+    } else if family == "ltx2" {
+        // The absolute resource guard (604) is not itself on LTX-2's 8n+1
+        // request grid. Advertise the largest requestable value; admission
+        // applies the lower duration-derived cap for the selected FPS.
+        validation::max_frames_for_family_at_fps(family, 120)?
     } else {
         validation::max_frames_for_family_at_fps(family, fps)?
     };
@@ -813,7 +855,7 @@ fn temporal_profile(input: &GenerationProfileInput<'_>, family: &str) -> Option<
             FpsControl::Adjustable {
                 default: fps,
                 min: 1,
-                max: 60,
+                max: 120,
                 step: 1,
             }
         },
@@ -1008,6 +1050,91 @@ mod tests {
         let right = resolve_generation_profile(input("flux-dev:q4", "flux"));
         assert_eq!(left.profile_hash, right.profile_hash);
         assert_eq!(left.profile_hash.len(), 64);
+    }
+
+    #[test]
+    fn explicit_pipeline_lookup_never_falls_back_to_default_recipe() {
+        let mut ltx = input("ltx2-distilled:q4", "ltx2");
+        ltx.default_frames = Some(121);
+        ltx.default_fps = Some(24);
+        let profile = resolve_generation_profile(ltx);
+        assert!(profile.recipe_for_pipeline(None).is_some());
+        assert!(profile
+            .recipe_for_pipeline(Some(Ltx2PipelineMode::T2a))
+            .is_none());
+    }
+
+    #[test]
+    fn scheduler_contract_matches_engine_solver_families() {
+        let sd = resolve_generation_profile(input("sdxl-base:q4", "sdxl"));
+        assert_eq!(
+            sd.default_recipe().unwrap().capabilities.schedulers,
+            vec![Scheduler::Ddim, Scheduler::EulerAncestral, Scheduler::UniPc]
+        );
+
+        let mut wan_input = input("wan22-t2v-a14b:q5", "wan");
+        wan_input.default_frames = Some(81);
+        wan_input.default_fps = Some(16);
+        let wan = resolve_generation_profile(wan_input);
+        assert_eq!(
+            wan.default_recipe().unwrap().capabilities.schedulers,
+            vec![Scheduler::UniPc, Scheduler::Euler, Scheduler::DpmPp]
+        );
+        let mut request = request_for(&wan, 1280, 720);
+        request.scheduler = Some(Scheduler::Ddim);
+        assert!(validate_request_against_generation_profile(&wan, &request)
+            .unwrap_err()
+            .contains("not available"));
+    }
+
+    #[test]
+    fn adjustable_float_controls_enforce_the_advertised_step() {
+        let profile = resolve_generation_profile(input("flux-dev:q4", "flux"));
+        let mut request = request_for(&profile, 1024, 1024);
+        request.guidance = 3.6;
+        validate_request_against_generation_profile(&profile, &request).unwrap();
+        request.guidance = 3.65;
+        assert!(
+            validate_request_against_generation_profile(&profile, &request)
+                .unwrap_err()
+                .contains("steps of 0.1")
+        );
+    }
+
+    #[test]
+    fn ltx2_frame_ceiling_tracks_the_requested_fps() {
+        let mut ltx = input("ltx2-distilled:q4", "ltx2");
+        ltx.default_width = 768;
+        ltx.default_height = 512;
+        ltx.default_frames = Some(121);
+        ltx.default_fps = Some(24);
+        let profile = resolve_generation_profile(ltx);
+        assert_eq!(
+            profile
+                .default_recipe()
+                .unwrap()
+                .temporal
+                .as_ref()
+                .unwrap()
+                .frames
+                .max,
+            validation::LTX2_MAX_FRAMES_ABSOLUTE - 3
+        );
+
+        let mut request = request_for(&profile, 768, 512);
+        request.fps = Some(12);
+        request.frames = Some(241);
+        validate_request_against_generation_profile(&profile, &request).unwrap();
+        request.frames = Some(249);
+        assert!(
+            validate_request_against_generation_profile(&profile, &request)
+                .unwrap_err()
+                .contains("frames must be")
+        );
+
+        request.fps = Some(120);
+        request.frames = Some(601);
+        validate_request_against_generation_profile(&profile, &request).unwrap();
     }
 
     #[test]

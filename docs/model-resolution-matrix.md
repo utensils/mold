@@ -262,7 +262,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `ltx-video-0.9.6-distilled:bf16`
 
-Schema 1 · hash `e55531c5f343e6d3555bb146ed24a5abe266f1b1cfd5c4448d236523d0865b33` · default recipe `default`
+Schema 1 · hash `af619ed6ce91932dae3492fe5941a761f48c34386de024f8818464db5fba5d92` · default recipe `default`
 
 Models: `ltx-video-0.9.6-distilled:bf16`.
 
@@ -271,7 +271,7 @@ Models: `ltx-video-0.9.6-distilled:bf16`.
 - Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–257 on `8n+1` (default 25); FPS 1–60 by 1, default 30; duration limit none.
+- Temporal: frames 1–257 on `8n+1` (default 25); FPS 1–120 by 1, default 30; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -287,7 +287,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d05305762
 
 ### `ltx-video-0.9.6:bf16`
 
-Schema 1 · hash `1b4aebc87b3b610d61c14143e2618b453301a65309743c9b8b556c811128ee27` · default recipe `default`
+Schema 1 · hash `2071e616c10801053d80741195154744c603314c4383ac051e20bb1f2f02e9b8` · default recipe `default`
 
 Models: `ltx-video-0.9.6:bf16`.
 
@@ -296,7 +296,7 @@ Models: `ltx-video-0.9.6:bf16`.
 - Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `1216x704`, 40 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–257 on `8n+1` (default 25); FPS 1–60 by 1, default 30; duration limit none.
+- Temporal: frames 1–257 on `8n+1` (default 25); FPS 1–120 by 1, default 30; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -312,7 +312,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d05305762
 
 ### `ltx-video-0.9.8-13b-dev:bf16`
 
-Schema 1 · hash `da59f7d0f2b637102430592e5d7a37442ae6cbd8cc8636916d0ac712604ed2bf` · default recipe `default`
+Schema 1 · hash `991ddc112d2853cd459e68cde2092d24dc3eae0b60296dba69dfdf89ceb8891e` · default recipe `default`
 
 Models: `ltx-video-0.9.8-13b-dev:bf16`.
 
@@ -321,7 +321,7 @@ Models: `ltx-video-0.9.8-13b-dev:bf16`.
 - Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `1216x704`, 30 steps, guidance 8.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–257 on `8n+1` (default 25); FPS 1–60 by 1, default 30; duration limit none.
+- Temporal: frames 1–257 on `8n+1` (default 25); FPS 1–120 by 1, default 30; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -337,7 +337,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d05305762
 
 ### `ltx-video-0.9.8-13b-distilled:bf16`
 
-Schema 1 · hash `220294ac4d7d4853f9185338d1b710d4257a5441e7c4407b3b69df65c90c8e76` · default recipe `default`
+Schema 1 · hash `2b258b747836ba7f064dec5dea5828026921dc0d487e5b6c28e87247edcf0190` · default recipe `default`
 
 Models: `ltx-video-0.9.8-13b-distilled:bf16`.
 
@@ -346,7 +346,7 @@ Models: `ltx-video-0.9.8-13b-distilled:bf16`.
 - Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `1216x704`, 7 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–257 on `8n+1` (default 25); FPS 1–60 by 1, default 30; duration limit none.
+- Temporal: frames 1–257 on `8n+1` (default 25); FPS 1–120 by 1, default 30; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -362,7 +362,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d05305762
 
 ### `ltx-video-0.9.8-2b-distilled:bf16`
 
-Schema 1 · hash `35844070e2c01ce22f110ed1678574d0b9ddb50f845cf00af289a2c8357ce083` · default recipe `default`
+Schema 1 · hash `17f216169e4564f62e344b2bbdcf3661f47c219a7c8053901b4c19d485c998b4` · default recipe `default`
 
 Models: `ltx-video-0.9.8-2b-distilled:bf16`.
 
@@ -371,7 +371,7 @@ Models: `ltx-video-0.9.8-2b-distilled:bf16`.
 - Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `1216x704`, 7 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–257 on `8n+1` (default 25); FPS 1–60 by 1, default 30; duration limit none.
+- Temporal: frames 1–257 on `8n+1` (default 25); FPS 1–120 by 1, default 30; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -389,7 +389,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d05305762
 
 ### `ltx-2-19b-dev:fp8`
 
-Schema 1 · hash `ebb001deacc384e8cf11caf744a488d23bdb269e413a2ad4fa105bec711e40aa` · default recipe `auto`
+Schema 1 · hash `e7a05b8322c4108eacb56a7e86855f739a3fc610a57a6dcf4c0bdb0892d477ac` · default recipe `auto`
 
 Models: `ltx-2-19b-dev:fp8`.
 
@@ -398,7 +398,7 @@ Models: `ltx-2-19b-dev:fp8`.
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -421,7 +421,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -443,7 +443,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -466,7 +466,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -489,7 +489,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -512,7 +512,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -535,7 +535,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -558,7 +558,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -581,7 +581,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: source driven; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -603,7 +603,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: source driven; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -625,14 +625,14 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: none; alignment `1`; minimum `0x0`; maximum `0` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `0x0`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 - Presets: none.
 
 Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
 
 ### `ltx-2-19b-distilled:fp8`
 
-Schema 1 · hash `fcdb3ce81221032b3eb7b5b938475d355b7b6375aa2da0e9db8f6e99688e7719` · default recipe `auto`
+Schema 1 · hash `54d9996b78ab2f7392e369cd9dbad702d532bb9965e76e2246fb1f8552343a14` · default recipe `auto`
 
 Models: `ltx-2-19b-distilled:fp8`.
 
@@ -641,7 +641,7 @@ Models: `ltx-2-19b-distilled:fp8`.
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -664,7 +664,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -686,7 +686,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -709,7 +709,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -732,7 +732,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -755,7 +755,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -778,7 +778,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -801,7 +801,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -824,7 +824,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: source driven; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -846,7 +846,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: source driven; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -868,14 +868,14 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: none; alignment `1`; minimum `0x0`; maximum `0` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `0x0`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 - Presets: none.
 
 Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
 
 ### Profile `ltx2.ltx-2.3-22b-dev`
 
-Schema 1 · hash `f90c3647667064df910554f4155f922e90113d3c7ebc28327a5af9dbe74db30d` · default recipe `auto`
+Schema 1 · hash `de01d44a8fa1373643f9a9e66dfd917925becb3cfd52dde3eb789d49522a8d95` · default recipe `auto`
 
 Models: `ltx-2.3-22b-dev:bf16`, `ltx-2.3-22b-dev:fp8`.
 
@@ -884,7 +884,7 @@ Models: `ltx-2.3-22b-dev:bf16`, `ltx-2.3-22b-dev:fp8`.
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -907,7 +907,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -929,7 +929,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -952,7 +952,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -975,7 +975,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -998,7 +998,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1021,7 +1021,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1044,7 +1044,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1067,7 +1067,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: source driven; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1089,7 +1089,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: source driven; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1111,14 +1111,14 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: none; alignment `1`; minimum `0x0`; maximum `0` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `0x0`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 - Presets: none.
 
 Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
 
 ### Profile `ltx2.ltx-2.3-22b-distilled`
 
-Schema 1 · hash `3a4a33bdfc437cf4021c66c48a8c122475aa413a93a3f388b715f1acea87c28c` · default recipe `auto`
+Schema 1 · hash `b340233caf53fbba768a709449892fcb0efd34af00062ea814a0b509dc6192b2` · default recipe `auto`
 
 Models: `ltx-2.3-22b-distilled:bf16`, `ltx-2.3-22b-distilled:fp8`.
 
@@ -1127,7 +1127,7 @@ Models: `ltx-2.3-22b-distilled:bf16`, `ltx-2.3-22b-distilled:fp8`.
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1150,7 +1150,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1172,7 +1172,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1195,7 +1195,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1218,7 +1218,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1241,7 +1241,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1264,7 +1264,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1287,7 +1287,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1310,7 +1310,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: source driven; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1332,7 +1332,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: source driven; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
 - Defaults: `1216x704`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1354,7 +1354,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Resolution: none; alignment `1`; minimum `0x0`; maximum `0` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `0x0`, 8 steps, guidance 3.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–481 on `8n+1` (default 97); FPS 1–60 by 1, default 24; duration limit 20s.
+- Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 - Presets: none.
 
 Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
@@ -1537,7 +1537,7 @@ Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image), qualified: `true`.
 
 ### `dreamshaper-v8:fp16`
 
-Schema 1 · hash `79b82080246d0976a61f4456bdb6bdf0d20caa184c8f50745f7f1e903df52a0b` · default recipe `default`
+Schema 1 · hash `5af479b940080ac6c9e6fb3058b60206011a1ffc6bb5bddfc9fc469daa66cb00` · default recipe `default`
 
 Models: `dreamshaper-v8:fp16`.
 
@@ -1559,7 +1559,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `realistic-vision-v5:fp16`
 
-Schema 1 · hash `164e53905f9c5f0e201d0c3c02938713611b9cf5c1284ac2ebfed0d5c8740cc8` · default recipe `default`
+Schema 1 · hash `883dce82cc2f57d44c407ccda744256e4648f872da866c0798fcd2465eb99ee0` · default recipe `default`
 
 Models: `realistic-vision-v5:fp16`.
 
@@ -1581,7 +1581,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `sd15:fp16`
 
-Schema 1 · hash `a1345066897dce58a4a67b2a49f26f4bef2cee2833d20035eb3d0312f40a8557` · default recipe `default`
+Schema 1 · hash `6394a14f7246696d58335bb100b9d55a9f1252bcf7dae49abea61e60b25bf9e9` · default recipe `default`
 
 Models: `sd15:fp16`.
 
@@ -1679,7 +1679,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `cyberrealistic-pony:fp16`
 
-Schema 1 · hash `94b2eddd197015d2ef6f4010e48831f27723228bb04b20da76e00debf01cb280` · default recipe `default`
+Schema 1 · hash `b6c4e2ecb8ab3dadae95aa818b3aeacc2fbc58988b89339ff5bf7e905e06388c` · default recipe `default`
 
 Models: `cyberrealistic-pony:fp16`.
 
@@ -1705,7 +1705,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `dreamshaper-xl:fp16`
 
-Schema 1 · hash `d6eb1b384fc974424d8e17a45108136a6d517c6551cd2a64f656c7ac2a47f5c8` · default recipe `default`
+Schema 1 · hash `134a8bfe2e535c8227bd447730ac8805e08fe4f634350c056b483568e2a9c60a` · default recipe `default`
 
 Models: `dreamshaper-xl:fp16`.
 
@@ -1731,7 +1731,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `juggernaut-xl:fp16`
 
-Schema 1 · hash `a4bb45460d31c2c1b56f3623bc6e1c0d010aee10aca09958ee5d86c87d0b330e` · default recipe `default`
+Schema 1 · hash `3176a66365281486966f9e6215a835a3e61469907579461c57a44e5609464512` · default recipe `default`
 
 Models: `juggernaut-xl:fp16`.
 
@@ -1757,7 +1757,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `playground-v2.5:fp16`
 
-Schema 1 · hash `ee9326362d9e64cd9e1e477538d04da09d031adef37dc751917e1219113c323b` · default recipe `default`
+Schema 1 · hash `a37692129da9510c016be2590aed7c3979588167f5cdd9792b7e205ca106439e` · default recipe `default`
 
 Models: `playground-v2.5:fp16`.
 
@@ -1783,7 +1783,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `pony-v6:fp16`
 
-Schema 1 · hash `e1c6ef77f0a8e5f1f9904b646ff697e9ff0d6324f5868f84fccb448474c83076` · default recipe `default`
+Schema 1 · hash `ae01c5a60984289b3c403ad6f510e4521d2bbe9d7a0e4e3b19ce46003af11dbd` · default recipe `default`
 
 Models: `pony-v6:fp16`.
 
@@ -1809,7 +1809,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `realvis-xl:fp16`
 
-Schema 1 · hash `dad3b00dc4cce7eec280e44f639c54b07877776d8e48c08efa35573d5aa0f1be` · default recipe `default`
+Schema 1 · hash `470b998268059f974dfa65f3d6b69376301e69a7901167b04f4946e976275b72` · default recipe `default`
 
 Models: `realvis-xl:fp16`.
 
@@ -1835,7 +1835,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `sdxl-base:fp16`
 
-Schema 1 · hash `3ea93b52abe9f0bad4c2c209e671d6a8d4275e38b903d60303451de39094e819` · default recipe `default`
+Schema 1 · hash `d7ee7f4362346d8391185ae5f809be98c4d88ef430f14b625df3417a3c06bc19` · default recipe `default`
 
 Models: `sdxl-base:fp16`.
 
@@ -1861,7 +1861,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `sdxl-turbo:fp16`
 
-Schema 1 · hash `26ef65ee08a69c65e7c388f93dcb3cb0c626cbb1ca49f8f92b85a686144a51d6` · default recipe `default`
+Schema 1 · hash `964e8e18568a998ac35d527ba63bd5baa89355281bb4c4e5659bc86227f3b158` · default recipe `default`
 
 Models: `sdxl-turbo:fp16`.
 
@@ -1889,7 +1889,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `wan21-t2v-1.3b:bf16`
 
-Schema 1 · hash `649a02b500b99698811c9f04a8bad45e82b1f1ab1b6bcbbab3987c2edbd30011` · default recipe `default`
+Schema 1 · hash `938b688830db7da8d5e36fae47c21fbfa09ef631294fe0a0c5b61cce746303bd` · default recipe `default`
 
 Models: `wan21-t2v-1.3b:bf16`.
 
@@ -1898,7 +1898,7 @@ Models: `wan21-t2v-1.3b:bf16`.
 - Resolution: buckets; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `832x480`, 30 steps, guidance 6.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–257 on `4n+1` (default 81); FPS 1–60 by 1, default 16; duration limit none.
+- Temporal: frames 1–257 on `4n+1` (default 81); FPS 1–120 by 1, default 16; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1909,7 +1909,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan21-t2v-14b`
 
-Schema 1 · hash `3006e7c60d6acacc7e5437ec579dd46318deb47ae23012e319ea87d501e33aa5` · default recipe `default`
+Schema 1 · hash `2fef53011043f49f8bd95947f5a82007d108e4ead2ff9078c123814b99735f92` · default recipe `default`
 
 Models: `wan21-t2v-14b:q5`, `wan21-t2v-14b:q8`.
 
@@ -1918,7 +1918,7 @@ Models: `wan21-t2v-14b:q5`, `wan21-t2v-14b:q8`.
 - Resolution: buckets; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `832x480`, 30 steps, guidance 6.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–257 on `4n+1` (default 81); FPS 1–60 by 1, default 16; duration limit none.
+- Temporal: frames 1–257 on `4n+1` (default 81); FPS 1–120 by 1, default 16; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1931,7 +1931,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan22-i2v-a14b`
 
-Schema 1 · hash `f1b48109f697ada8cf2412cd69777c95b746ac1c948fdd88c8d512b3d8908b95` · default recipe `default`
+Schema 1 · hash `42fb5e01c71feb192d0351ec8610fc810714a11c419f8bf3ae2a547b371b58b0` · default recipe `default`
 
 Models: `wan22-i2v-a14b:fp8`, `wan22-i2v-a14b:q8`.
 
@@ -1940,7 +1940,7 @@ Models: `wan22-i2v-a14b:fp8`, `wan22-i2v-a14b:q8`.
 - Resolution: buckets; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `832x480`, 20 steps, guidance 3.5.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–257 on `4n+1` (default 33); FPS 1–60 by 1, default 16; duration limit none.
+- Temporal: frames 1–257 on `4n+1` (default 33); FPS 1–120 by 1, default 16; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1953,7 +1953,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan22-i2v-a14b`
 
-Schema 1 · hash `04cb0d4c391b6de18065f8d91ec7224c4fde3d9e6493806275cf84254153cf57` · default recipe `default`
+Schema 1 · hash `f81b090e88eca03a08bd320a7fe4c65064dbbe748b3d9681aa0c6424f9ccbb60` · default recipe `default`
 
 Models: `wan22-i2v-a14b:q4`, `wan22-i2v-a14b:q5`.
 
@@ -1962,7 +1962,7 @@ Models: `wan22-i2v-a14b:q4`, `wan22-i2v-a14b:q5`.
 - Resolution: buckets; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `832x480`, 4 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–257 on `4n+1` (default 81); FPS 1–60 by 1, default 16; duration limit none.
+- Temporal: frames 1–257 on `4n+1` (default 81); FPS 1–120 by 1, default 16; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1975,7 +1975,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan22-t2v-a14b`
 
-Schema 1 · hash `11894a19b9b433e5e13404ebcf79fe8ac1ea58b8262be31f2d214779f4115fd3` · default recipe `default`
+Schema 1 · hash `616b2bdffa274bab1a014fcf7af7492cb16c182d543de53a463de76d0d60e015` · default recipe `default`
 
 Models: `wan22-t2v-a14b:fp8`, `wan22-t2v-a14b:q8`.
 
@@ -1984,7 +1984,7 @@ Models: `wan22-t2v-a14b:fp8`, `wan22-t2v-a14b:q8`.
 - Resolution: buckets; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `832x480`, 20 steps, guidance 3.5.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–257 on `4n+1` (default 33); FPS 1–60 by 1, default 16; duration limit none.
+- Temporal: frames 1–257 on `4n+1` (default 33); FPS 1–120 by 1, default 16; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1997,7 +1997,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan22-t2v-a14b`
 
-Schema 1 · hash `bb102e638f0a9d1e4fe32060ee03825343c405dae5e4131492249e9d685f84f7` · default recipe `default`
+Schema 1 · hash `d2987a8bbaee9916e1bc33f90caece91104a4a3142c8fc274508f7d5ff789f6d` · default recipe `default`
 
 Models: `wan22-t2v-a14b:q4`, `wan22-t2v-a14b:q5`.
 
@@ -2006,7 +2006,7 @@ Models: `wan22-t2v-a14b:q4`, `wan22-t2v-a14b:q5`.
 - Resolution: buckets; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `832x480`, 4 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–257 on `4n+1` (default 81); FPS 1–60 by 1, default 16; duration limit none.
+- Temporal: frames 1–257 on `4n+1` (default 81); FPS 1–120 by 1, default 16; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -2019,7 +2019,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan22-ti2v-5b`
 
-Schema 1 · hash `9515db0029a875fd8392f5acc6ff5ce438c4b422c5db91dd8b04f6125aa42467` · default recipe `default`
+Schema 1 · hash `b8069962d7251dfc77a32c680d3ec9471e43990bb4bd4d802611bbd6ce6d5a1f` · default recipe `default`
 
 Models: `wan22-ti2v-5b:fp16`, `wan22-ti2v-5b:q8`.
 
@@ -2028,7 +2028,7 @@ Models: `wan22-ti2v-5b:fp16`, `wan22-ti2v-5b:q8`.
 - Resolution: buckets; alignment `32`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `1280x704`, 20 steps, guidance 5.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–257 on `4n+1` (default 121); FPS 1–60 by 1, default 24; duration limit none.
+- Temporal: frames 1–257 on `4n+1` (default 121); FPS 1–120 by 1, default 24; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -2039,7 +2039,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-ti2v-5b:turbo`
 
-Schema 1 · hash `fae55dc22c6fb2be443eca03ed7ffbab207d7dc2fd42bfd6f9372d2bf80fc98e` · default recipe `default`
+Schema 1 · hash `32ba08c9486466b3ff3d18c1c603328c77a9a6c891e60b83779004f35394f4c0` · default recipe `default`
 
 Models: `wan22-ti2v-5b:turbo`.
 
@@ -2048,7 +2048,7 @@ Models: `wan22-ti2v-5b:turbo`.
 - Resolution: buckets; alignment `32`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `1280x704`, 4 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–257 on `4n+1` (default 121); FPS 1–60 by 1, default 24; duration limit none.
+- Temporal: frames 1–257 on `4n+1` (default 121); FPS 1–120 by 1, default 24; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|

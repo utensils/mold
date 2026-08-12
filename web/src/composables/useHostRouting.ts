@@ -36,6 +36,7 @@ import {
 } from "@studio/lib/modelAccess";
 import type { DeviceInfo } from "@studio/api/devices";
 import { ApiError, type ApiTarget } from "@studio/api/client";
+import { profileHashConflict } from "@studio/lib/profileFleet";
 import { predictedCompletionUnixMs } from "@studio/api/queuePlan";
 import {
   comparePlacementPreviews,
@@ -158,6 +159,14 @@ export interface TransientHost {
 
 export type FeasibilityResult =
   | { kind: "route"; route: HostRoute }
+  | {
+      kind: "profile_mismatch";
+      perHost: Array<{
+        hostId: string;
+        label: string;
+        profileHash: string | null;
+      }>;
+    }
   | {
       kind: "infeasible";
       perHost: InfeasibleHost[];
@@ -527,6 +536,17 @@ function resolve(model: string | null): HostRoute | null {
   const eligible = model
     ? hosts.value.filter((host) => !accessRestrictionForHost(host.id, model))
     : hosts.value;
+  if (
+    model &&
+    (selection === AUTO_TARGET_ID || selection === CAPABLE_TARGET_ID) &&
+    profileHashConflict(
+      accessibleModelsByHost.value,
+      model,
+      eligible.filter((host) => host.status === "ready").map((host) => host.id),
+    )
+  ) {
+    return null;
+  }
   return withReferenceUploads(
     resolveRoute(eligible, selection, hostsForModel(model)),
   );
@@ -567,6 +587,25 @@ async function resolveFeasibleWithPreview(
   );
   if (candidates.length === 0 && restricted.length > 0) {
     return { kind: "infeasible", perHost: restricted };
+  }
+  if (selection === AUTO_TARGET_ID || selection === CAPABLE_TARGET_ID) {
+    const conflict = profileHashConflict(
+      accessibleModelsByHost.value,
+      model,
+      candidates.map((candidate) => candidate.id),
+    );
+    if (conflict) {
+      return {
+        kind: "profile_mismatch",
+        perHost: conflict.hostIds.map((hostId) => ({
+          hostId,
+          label:
+            candidates.find((candidate) => candidate.id === hostId)?.label ??
+            hostId,
+          profileHash: conflict.hashesByHost[hostId] ?? null,
+        })),
+      };
+    }
   }
   const probes = await Promise.all(
     candidates.map(async (candidate) => {

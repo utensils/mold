@@ -2446,6 +2446,10 @@ function feasibilityMessage(
   result: Exclude<FeasibilityResult, { kind: "route" }>,
   subject: string,
 ): string {
+  if (result.kind === "profile_mismatch") {
+    const machines = result.perHost.map((host) => host.label).join(", ");
+    return `Settings differ by machine${machines ? ` (${machines})` : ""}. Choose a specific machine before generating. Nothing was queued.`;
+  }
   const unreachableMessages = (
     hosts: ReadonlyArray<{ label: string; error: string }>,
   ) =>

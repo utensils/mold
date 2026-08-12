@@ -6,6 +6,7 @@ import SegmentedControl, { type SegmentOption } from "@ui/components/SegmentedCo
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import Chip from "@ui/components/Chip.vue";
 import {
+  applyRecipeDefaults,
   buildRequest,
   formExtendOverlapFrames,
   resetFormToModelDefaults,
@@ -313,9 +314,10 @@ const pipelineOptions: Ltx2PipelineMode[] = [
 const spatialOptions: Ltx2SpatialUpscale[] = ["x1-5", "x2"];
 const temporalOptions: Ltx2TemporalUpscale[] = ["x2"];
 function setPipeline(v: string) {
-  props.form.pipeline = (v || null) as Ltx2PipelineMode | null;
-  if (!isControlAdapterPipeline(props.form.pipeline)) props.form.icLoraControl = null;
-  if (props.form.pipeline !== "retake") props.form.retakeRange = null;
+  const pipeline = (v || null) as Ltx2PipelineMode | null;
+  applyRecipeDefaults(props.form, props.selectedModel, pipeline);
+  if (!isControlAdapterPipeline(pipeline)) props.form.icLoraControl = null;
+  if (pipeline !== "retake") props.form.retakeRange = null;
   // `t2a` renders no frames, so the server rejects every video container.
   // Move the format with the mode rather than letting the user discover the
   // mismatch as a 422; leaving `t2a` restores the family default.
@@ -327,9 +329,13 @@ function setPipeline(v: string) {
 }
 const audioOnlyPipeline = computed(() => isAudioOnlyPipeline(props.form.pipeline));
 function setControlAdapter(value: string) {
-  props.form.icLoraControl = value || null;
   // Lip dub is a pipeline of its own; every other adapter drives `ic-lora`.
-  if (value) props.form.pipeline = pipelineForControlId(value);
+  if (value) {
+    applyRecipeDefaults(props.form, props.selectedModel, pipelineForControlId(value));
+    props.form.icLoraControl = value;
+  } else {
+    props.form.icLoraControl = null;
+  }
 }
 function setSpatial(v: string) {
   props.form.spatialUpscale = (v || null) as Ltx2SpatialUpscale | null;

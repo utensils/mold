@@ -346,6 +346,36 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     expect(wrapper.find("[data-test='ltx2-retake-start']").exists()).toBe(true);
   });
 
+  it("resets model-owned controls when the recipe changes", async () => {
+    const form = formFor("ltx2");
+    form.width = 640;
+    form.height = 640;
+    form.steps = 7;
+    form.guidance = 8;
+    const selectedModel = {
+      name: "ltx2:test",
+      family: "ltx2",
+      default_width: 1024,
+      default_height: 576,
+      default_steps: 30,
+      default_guidance: 3,
+      size_gb: 1,
+      is_loaded: false,
+      hf_repo: "fixture",
+      description: "",
+      downloaded: true,
+    } as ModelEntry;
+    const wrapper = mountSettings(form, { selectedModel });
+    await wrapper.get("[data-test='ltx2-pipeline']").setValue("two-stage");
+    expect(form).toMatchObject({
+      pipeline: "two-stage",
+      width: 1024,
+      height: 576,
+      steps: 30,
+      guidance: 3,
+    });
+  });
+
   it("edits, validates, counts, and resets guidance overrides", async () => {
     const form = formFor("ltx2");
     const wrapper = mountSettings(form);

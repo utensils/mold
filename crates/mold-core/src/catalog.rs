@@ -288,10 +288,14 @@ pub fn build_model_catalog(
     for (name, model_cfg) in config_only {
         let (disk_usage_bytes, size_gb_f64) = model_cfg.disk_usage();
         let size_gb = size_gb_f64 as f32;
-        let family: String = model_cfg
+        // A path-only custom model has no architecture identity. Treating it
+        // as FLUX made every client advertise FLUX controls and presets even
+        // though neither admission nor the engine had established that fact.
+        let family = model_cfg
             .family
             .clone()
-            .unwrap_or_else(|| "flux".to_string());
+            .unwrap_or_else(|| "custom".to_string());
+        let has_profile_identity = model_cfg.family.is_some();
         let sequence_capable = chain_capable_family(&family);
         // Config-only models have local weights but no manifest task
         // structure, so mold-core cannot classify the conditioning contract:
@@ -307,10 +311,28 @@ pub fn build_model_catalog(
             name,
             model_cfg.description.as_deref().unwrap_or_default()
         );
-        let default_steps = model_cfg.effective_steps(config);
-        let default_guidance = model_cfg.effective_guidance();
-        let default_width = model_cfg.effective_width(config);
-        let default_height = model_cfg.effective_height(config);
+        let default_steps = model_cfg.default_steps.unwrap_or(if has_profile_identity {
+            config.default_steps
+        } else {
+            20
+        });
+        let default_guidance = model_cfg
+            .default_guidance
+            .unwrap_or(if has_profile_identity {
+                model_cfg.effective_guidance()
+            } else {
+                7.5
+            });
+        let default_width = model_cfg.default_width.unwrap_or(if has_profile_identity {
+            config.default_width
+        } else {
+            512
+        });
+        let default_height = model_cfg.default_height.unwrap_or(if has_profile_identity {
+            config.default_height
+        } else {
+            512
+        });
         let default_frames = model_cfg.effective_frames();
         let default_fps = model_cfg.effective_fps();
         let default_negative_prompt =
@@ -763,6 +785,36 @@ mod tests {
         assert!(entry.downloaded);
         assert_eq!(entry.family, "custom");
         assert_eq!(entry.defaults.default_steps, 12);
+    }
+
+    #[test]
+    fn config_only_model_without_family_gets_conservative_custom_profile() {
+        let mut models = HashMap::new();
+        models.insert("path-only-model".to_string(), ModelConfig::default());
+        let config = Config {
+            default_width: 1024,
+            default_height: 1024,
+            default_steps: 28,
+            models,
+            ..Config::default()
+        };
+
+        let entry = build_model_catalog(&config, None, false)
+            .into_iter()
+            .find(|model| model.name == "path-only-model")
+            .expect("config-only model should exist");
+        assert_eq!(entry.family, "custom");
+        assert_eq!(entry.defaults.default_width, 512);
+        assert_eq!(entry.defaults.default_height, 512);
+        assert_eq!(entry.defaults.default_steps, 20);
+        let profile = entry.generation_profile.expect("profile is advertised");
+        assert!(profile.profile_id.starts_with("custom."));
+        assert!(profile
+            .default_recipe()
+            .unwrap()
+            .resolution
+            .aspect_groups
+            .is_empty());
     }
 
     #[test]

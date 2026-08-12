@@ -211,6 +211,7 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
         ));
         annotate_audio_capabilities(&mut catalog, &config);
         annotate_source_image_capabilities(&mut catalog, &config);
+        synchronize_generation_profile_capabilities(&mut catalog);
         return catalog;
     }
 
@@ -229,6 +230,7 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
     // conditioning contracts: classification reads safetensors headers, not
     // a GPU.
     annotate_source_image_capabilities(&mut catalog, &config);
+    synchronize_generation_profile_capabilities(&mut catalog);
     catalog
 }
 
@@ -274,6 +276,35 @@ fn annotate_source_image_capabilities(catalog: &mut [ModelInfoExtended], config:
             &entry.info.family,
             entry.source_image,
         ));
+    }
+}
+
+/// Runtime checkpoint probes can refine cold manifest capabilities. Keep the
+/// versioned profile and its content hash synchronized with those resolved
+/// row fields so clients and mixed-host routing never receive a stale
+/// pre-probe contract.
+fn synchronize_generation_profile_capabilities(catalog: &mut [ModelInfoExtended]) {
+    for entry in catalog {
+        let Some(profile) = entry.generation_profile.as_mut() else {
+            continue;
+        };
+        if entry.supports_audio == Some(false) {
+            profile.recipes.retain(|recipe| {
+                recipe.request_selector.pipeline != Some(mold_core::Ltx2PipelineMode::T2a)
+            });
+        }
+        for recipe in &mut profile.recipes {
+            if let Some(supports_audio) = entry.supports_audio {
+                recipe.capabilities.supports_audio = supports_audio;
+            }
+            if let Some(source_image) = entry.source_image {
+                recipe.capabilities.source_image = Some(source_image);
+            }
+            if let Some(supports_extend) = entry.supports_extend {
+                recipe.capabilities.supports_extend = supports_extend;
+            }
+        }
+        profile.refresh_hash();
     }
 }
 
@@ -3058,6 +3089,35 @@ mod tests {
         );
         let combined = installed_catalog_models(&state, &config, dir.path(), None, false);
         assert_eq!(combined[0].supports_audio, Some(true));
+    }
+
+    #[test]
+    fn runtime_probe_refreshes_generation_profile_and_hash() {
+        let mut catalog = mold_core::catalog::build_model_catalog(&Config::default(), None, false);
+        let entry = catalog
+            .iter_mut()
+            .find(|entry| entry.info.family == "ltx2")
+            .expect("built-in LTX-2 model");
+        let previous_hash = entry
+            .generation_profile
+            .as_ref()
+            .expect("generation profile")
+            .profile_hash
+            .clone();
+        entry.supports_audio = Some(false);
+
+        synchronize_generation_profile_capabilities(&mut catalog);
+
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.info.family == "ltx2")
+            .expect("built-in LTX-2 model");
+        let profile = entry.generation_profile.as_ref().unwrap();
+        assert_ne!(profile.profile_hash, previous_hash);
+        assert!(profile.recipes.iter().all(|recipe| {
+            !recipe.capabilities.supports_audio
+                && recipe.request_selector.pipeline != Some(mold_core::Ltx2PipelineMode::T2a)
+        }));
     }
 
     /// #787: an installed wan checkpoint (cv:/hf:, no manifest) advertises

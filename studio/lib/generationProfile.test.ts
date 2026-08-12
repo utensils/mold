@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   advertisedGenerationProfile,
   effectiveGenerationRecipe,
+  generationRecipeSelectionError,
   profileAspectOptions,
   resolutionProfileError,
   type GenerationProfileModel,
@@ -96,6 +97,22 @@ describe("generation profile contract", () => {
       schema_version: 2,
     } as unknown as GenerationProfileSet;
     expect(advertisedGenerationProfile(model)).toBeNull();
+  });
+
+  it("rejects malformed nested controls instead of trusting the outer version", () => {
+    const model = profileModel();
+    const recipe = model.generation_profile?.recipes[0];
+    if (!recipe) throw new Error("missing fixture recipe");
+    recipe.resolution.alignment = 0;
+    expect(advertisedGenerationProfile(model)).toBeNull();
+  });
+
+  it("fails closed for an explicit pipeline absent from a valid v1 profile", () => {
+    const model = profileModel();
+    expect(effectiveGenerationRecipe(model, "future-pipeline")).toBeNull();
+    expect(generationRecipeSelectionError(model, "future-pipeline")).toContain(
+      "not supported",
+    );
   });
 
   it("enforces bucket membership after grid and budget validation", () => {

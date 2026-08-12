@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { modelAccessRestrictionFor } from "@studio/lib/modelAccess";
+import { profileHashConflict } from "@studio/lib/profileFleet";
 import { listDevices, type DeviceInfo } from "@studio/api/devices";
 import { listQueue, predictedCompletionUnixMs } from "@studio/api/queuePlan";
 import {
@@ -181,6 +182,10 @@ export type HostFeasibilityFailure = HostPlacementFailure | HostProbeFailure;
 
 export type FeasibleRouteResult =
   | { kind: "route"; route: HostRoute }
+  | {
+      kind: "profile_mismatch";
+      perHost: Array<{ hostId: string; label: string; profileHash: string | null }>;
+    }
   | { kind: "infeasible"; perHost: HostPlacementFailure[] }
   | { kind: "unreachable"; perHost: HostProbeFailure[] }
   | { kind: "transient"; perHost: HostProbeFailure[] }
@@ -550,6 +555,23 @@ export const useHostsStore = defineStore("hosts", {
             !modelName || !accessRestrictionForHost(host.id, modelName, this.capabilities[host.id]),
         );
       const modelHostIds = modelName ? useHostModelsStore().hostsFor(modelName) : [];
+      const automatic = selection === null || selection === "capable";
+      if (
+        modelName &&
+        automatic &&
+        profileHashConflict(
+          Object.fromEntries(
+            Object.entries(useHostModelsStore().byHost).map(([id, snapshot]) => [
+              id,
+              snapshot.entries,
+            ]),
+          ),
+          modelName,
+          routable.filter((host) => host.status === "ready").map((host) => host.id),
+        )
+      ) {
+        return null;
+      }
 
       let chosen: (typeof routable)[number] | null;
       if (selection === "capable") {
@@ -648,6 +670,30 @@ export const useHostsStore = defineStore("hosts", {
         );
         if (candidates.length === 0 && restricted.length > 0) {
           return { kind: "infeasible", perHost: restricted };
+        }
+
+        const automatic = selection === null || selection === "capable";
+        const profileConflict = automatic
+          ? profileHashConflict(
+              Object.fromEntries(
+                Object.entries(useHostModelsStore().byHost).map(([id, snapshot]) => [
+                  id,
+                  snapshot.entries,
+                ]),
+              ),
+              request.model,
+              candidates.map((host) => host.id),
+            )
+          : null;
+        if (profileConflict) {
+          return {
+            kind: "profile_mismatch",
+            perHost: profileConflict.hostIds.map((hostId) => ({
+              hostId,
+              label: this.all.find((host) => host.id === hostId)?.label ?? hostId,
+              profileHash: profileConflict.hashesByHost[hostId] ?? null,
+            })),
+          };
         }
 
         if (candidates.length === 0) {

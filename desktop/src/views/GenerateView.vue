@@ -204,6 +204,10 @@ const pullResume = usePullResumeStore();
 const liveActivity = useLiveActivityStore();
 
 function placementFailureMessage(result: Exclude<FeasibleRouteResult, { kind: "route" }>): string {
+  if (result.kind === "profile_mismatch") {
+    const machines = result.perHost.map((host) => host.label).join(", ");
+    return `Settings differ by machine${machines ? ` (${machines})` : ""}. Choose a specific machine before generating. Nothing was queued.`;
+  }
   if (result.kind === "infeasible") {
     const details = result.perHost
       .map((failure) => {
