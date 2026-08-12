@@ -70,7 +70,9 @@ use super::private_qwen::{
 #[cfg(feature = "mp4")]
 use super::private_qwen_support::{load_qualified_private_qwen_support, H3PrivateQwenSupport};
 #[cfg(feature = "mp4")]
-use super::private_runtime_observer::H3PrivateRuntimeBoundCapture;
+use super::private_runtime_observer::{
+    H3PrivateRuntimeBoundCapture, H3PrivateRuntimeEnvelopeObservation,
+};
 #[cfg(feature = "mp4")]
 use super::vae_runtime::{
     open_h3_comfy_vae_authority, H3AuthenticatedComfyVaeAuthority, H3ComfyVaeLoadError,
@@ -90,12 +92,12 @@ use crate::{
 #[cfg(feature = "mp4")]
 use crate::{
     H3FactoryAuthorityInput, H3FactoryComponentAuthority, H3FactoryComponentRole,
-    H3FactoryConditionerPlacement, H3FactoryExecutionBudgetEchoInput,
-    H3FactoryQuantizationAuthority,
+    H3FactoryConditionerPlacement, H3FactoryEndpointAnchor, H3FactoryExecutionBudgetEchoInput,
+    H3FactoryPreparedRequestInput, H3FactoryQuantizationAuthority,
 };
 
 pub(crate) const RUNTIME_QUALIFICATION_SCHEMA: &str =
-    "mold.minimax-h3.private-runtime-qualification.v1";
+    "mold.minimax-h3.private-runtime-qualification.v2";
 pub(crate) const RUNTIME_QUALIFICATION_DECISION: &str = "qualified-private-fl2va-runtime";
 pub(crate) const MAX_RUNTIME_QUALIFICATION_BYTES: u64 = 128 * 1024;
 
@@ -148,6 +150,105 @@ const PRIVATE_ACTIVATION_COVERAGE: [H3FactoryActivationPrerequisite; 9] = [
     H3FactoryActivationPrerequisite::OneShotSchedulerLease,
     H3FactoryActivationPrerequisite::SameAttemptCancellationCoverage,
 ];
+
+/// Exact request/preprocessing envelope measured by one reviewed campaign.
+///
+/// The first private runtime record deliberately qualifies only the small
+/// conditioned route that was actually exercised. Larger canvases, longer
+/// clips, additional endpoints, and larger prepared sequences require their
+/// own reviewed campaign instead of inheriting bounds from this record.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct H3PrivateRuntimeEnvelopeRecord {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) frames: u32,
+    pub(crate) fps: u32,
+    pub(crate) batch_size: u32,
+    pub(crate) max_steps: u32,
+    pub(crate) endpoint_count: u32,
+    pub(crate) endpoint_anchor: String,
+    pub(crate) max_qwen_output_text_rows: u64,
+    pub(crate) max_qwen_vision_rows: u64,
+    pub(crate) max_condition_visual_rows: u64,
+    pub(crate) max_target_video_rows: u64,
+    pub(crate) max_target_audio_rows: u64,
+    pub(crate) max_total_packed_rows: u64,
+}
+
+impl H3PrivateRuntimeEnvelopeRecord {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.width != 960
+            || self.height != 544
+            || self.frames != contract::MIN_FRAMES
+            || self.fps != contract::FIXED_FPS
+            || self.batch_size != 1
+            || self.max_steps == 0
+            || self.max_steps > 2
+            || self.endpoint_count != 1
+            || self.endpoint_anchor != "first"
+            || [
+                self.max_qwen_output_text_rows,
+                self.max_qwen_vision_rows,
+                self.max_condition_visual_rows,
+                self.max_target_video_rows,
+                self.max_target_audio_rows,
+                self.max_total_packed_rows,
+            ]
+            .contains(&0)
+        {
+            bail!("private H3 runtime qualification has an invalid small-route envelope")
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "mp4")]
+    fn validate_prepared(&self, request: &H3FactoryPreparedRequestInput) -> Result<()> {
+        self.validate()?;
+        let endpoint = request.endpoints.first();
+        if request.width != self.width
+            || request.height != self.height
+            || request.frames != self.frames
+            || request.fps != self.fps
+            || request.batch_size != self.batch_size
+            || request.grid_points > self.max_steps
+            || request.mode != Mode::FirstFrameToAudioVideo
+            || request.endpoints.len() != usize::try_from(self.endpoint_count)?
+            || !endpoint.is_some_and(|endpoint| endpoint.anchor == H3FactoryEndpointAnchor::First)
+            || request.rows.qwen_output_text_rows > self.max_qwen_output_text_rows
+            || request.rows.qwen_vision_rows > self.max_qwen_vision_rows
+            || request.rows.condition_visual_rows > self.max_condition_visual_rows
+            || request.rows.condition_audio_rows != 0
+            || request.rows.target_video_rows > self.max_target_video_rows
+            || request.rows.target_audio_rows > self.max_target_audio_rows
+            || request.rows.total_packed_rows > self.max_total_packed_rows
+        {
+            bail!("private H3 request exceeds the reviewed small-runtime envelope")
+        }
+        Ok(())
+    }
+
+    fn update_identity(&self, digest: &mut Sha256) {
+        for value in [
+            u64::from(self.width),
+            u64::from(self.height),
+            u64::from(self.frames),
+            u64::from(self.fps),
+            u64::from(self.batch_size),
+            u64::from(self.max_steps),
+            u64::from(self.endpoint_count),
+            self.max_qwen_output_text_rows,
+            self.max_qwen_vision_rows,
+            self.max_condition_visual_rows,
+            self.max_target_video_rows,
+            self.max_target_audio_rows,
+            self.max_total_packed_rows,
+        ] {
+            digest.update(value.to_le_bytes());
+        }
+        update_string(digest, &self.endpoint_anchor);
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -259,6 +360,7 @@ pub(crate) struct H3PrivateRuntimeQualificationRecord {
     pub(crate) attention_runtime_identity_sha256: String,
     pub(crate) attention_kernel_identity: String,
     pub(crate) attention_qualification_sha256: String,
+    pub(crate) envelope: H3PrivateRuntimeEnvelopeRecord,
     pub(crate) bounds: H3PrivateRuntimeBoundRecord,
     pub(crate) evidence_artifacts: Vec<H3PrivateRuntimeEvidenceArtifact>,
     pub(crate) identity_sha256: String,
@@ -884,6 +986,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         progress,
         &mut prepare_observer,
     )?;
+    runtime_qualification.validate_prepared_envelope(&admission_request.request)?;
     let seed = admission_request.seed;
     let mut resolved_request = request.clone();
     resolved_request.seed = Some(seed);
@@ -1964,6 +2067,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     let seed = prepared_attempt.seed();
     let prepared = prepared_attempt.into_factory_inputs();
     prepared.revalidate()?;
+    runtime_qualification.validate_prepared_envelope(prepared.prepared_request_input())?;
     let enriched_factory = frozen_factory.with_private_prepared_attempt(
         prepared.factory_attempt_input().clone(),
         prepared.budget_echo_input().clone(),
@@ -2026,6 +2130,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &opened_qwen,
         &opened_vae,
     )?;
+    let runtime_envelope = runtime_qualification.record.envelope.clone();
     let activation = H3PrivateFactoryActivationEvidence::derive(
         &enriched_factory,
         runtime_qualification,
@@ -2057,6 +2162,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         attention,
         artifact_lease,
         memory_overlap,
+        runtime_envelope,
         owner,
         consumption_binding,
     };
@@ -2668,8 +2774,38 @@ struct H3PrivateConcretePreparedRunner {
     attention: H3AttentionRuntimeAuthority,
     artifact_lease: H3PrivateServerFl2VaArtifactLease,
     memory_overlap: H3PrivateFl2VaMemoryOverlapAuthority,
+    runtime_envelope: H3PrivateRuntimeEnvelopeRecord,
     owner: H3PrivateFl2VaOwnerFacts,
     consumption_binding: H3PrivateAttemptConsumptionBinding,
+}
+
+#[cfg(feature = "mp4")]
+fn runtime_envelope_observation(
+    request: &H3FactoryPreparedRequestInput,
+) -> Result<H3PrivateRuntimeEnvelopeObservation> {
+    let endpoint = request
+        .endpoints
+        .first()
+        .ok_or_else(|| anyhow!("private H3 runtime envelope has no endpoint"))?;
+    if request.endpoints.len() != 1 || endpoint.anchor != H3FactoryEndpointAnchor::First {
+        bail!("private H3 runtime envelope requires exactly one first-frame endpoint")
+    }
+    Ok(H3PrivateRuntimeEnvelopeObservation {
+        width: request.width,
+        height: request.height,
+        frames: request.frames,
+        fps: request.fps,
+        batch_size: request.batch_size,
+        steps: request.grid_points,
+        endpoint_count: 1,
+        endpoint_anchor: "first".into(),
+        qwen_output_text_rows: request.rows.qwen_output_text_rows,
+        qwen_vision_rows: request.rows.qwen_vision_rows,
+        condition_visual_rows: request.rows.condition_visual_rows,
+        target_video_rows: request.rows.target_video_rows,
+        target_audio_rows: request.rows.target_audio_rows,
+        total_packed_rows: request.rows.total_packed_rows,
+    })
 }
 
 #[cfg(feature = "mp4")]
@@ -2699,9 +2835,12 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
             attention,
             artifact_lease,
             memory_overlap,
+            runtime_envelope,
             owner,
             consumption_binding,
         } = *self;
+        runtime_envelope.validate_prepared(prepared.prepared_request_input())?;
+        let observed_envelope = runtime_envelope_observation(prepared.prepared_request_input())?;
         with_private_h3_cuda_execution_attempt(|| {
             consumption_binding.revalidate(&owner, &activation.scheduler_ledger)?;
             let cuda_device = commit_private_h3_allocation_then(&mut allocation_commit, || {
@@ -2713,7 +2852,7 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
                 H3FactoryConditionerPlacement::HostCpuThenDrop
             );
             let runtime_bound_capture =
-                H3PrivateRuntimeBoundCapture::begin(&cuda_device, qwen_on_cpu)?;
+                H3PrivateRuntimeBoundCapture::begin(&cuda_device, qwen_on_cpu, observed_envelope)?;
             // Keep one completion fence alive outside the concrete owner graph.
             // It runs only after a successful pipeline result and before any
             // CUDA-bearing local leaves the execution-attempt boundary.
@@ -3430,6 +3569,11 @@ impl H3PrivateRuntimeQualificationAuthority {
         &self.bounds
     }
 
+    #[cfg(feature = "mp4")]
+    fn validate_prepared_envelope(&self, request: &H3FactoryPreparedRequestInput) -> Result<()> {
+        self.record.envelope.validate_prepared(request)
+    }
+
     pub(crate) fn revalidate(&self) -> Result<()> {
         revalidate_runtime_qualification_file(
             &self.path,
@@ -3726,6 +3870,7 @@ fn validate_runtime_qualification_record_binding(
 pub(crate) fn validate_runtime_qualification_record_shape(
     record: &H3PrivateRuntimeQualificationRecord,
 ) -> Result<()> {
+    record.envelope.validate()?;
     record.bounds.validate()?;
     let sha_values = [
         record.campaign_runtime_code_identity_sha256.as_str(),
@@ -3783,7 +3928,7 @@ pub(crate) fn runtime_qualification_identity(
     record: &H3PrivateRuntimeQualificationRecord,
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"mold.minimax-h3.private-runtime-qualification.v1\0");
+    digest.update(b"mold.minimax-h3.private-runtime-qualification.v2\0");
     for value in [
         record.schema.as_str(),
         record.decision.as_str(),
@@ -3807,6 +3952,7 @@ pub(crate) fn runtime_qualification_identity(
     update_string(&mut digest, &record.attention_runtime_identity_sha256);
     update_string(&mut digest, &record.attention_kernel_identity);
     update_string(&mut digest, &record.attention_qualification_sha256);
+    record.envelope.update_identity(&mut digest);
     record.bounds.update_identity(&mut digest);
     digest.update((record.evidence_artifacts.len() as u64).to_le_bytes());
     for evidence in &record.evidence_artifacts {
@@ -3876,6 +4022,8 @@ mod tests {
         H3AttentionModelContract, H3FactoryAuthorityInput, H3FactoryComponentAuthority,
         H3FactoryComponentRole, H3FactoryConditionerPlacement, H3FactoryQuantizationAuthority,
     };
+    #[cfg(feature = "mp4")]
+    use crate::{H3FactoryEndpointInput, H3FactoryEndpointPreprocess, H3FactoryPreparedRowsInput};
 
     const DEVICE_0: &str = "cuda:00000000000000000000000000000000";
     const DEVICE_1: &str = "cuda:00000000000000000000000000000001";
@@ -3963,6 +4111,22 @@ mod tests {
             attention_runtime_identity_sha256: sha('1'),
             attention_kernel_identity: "qualified-kernel".into(),
             attention_qualification_sha256: sha('2'),
+            envelope: H3PrivateRuntimeEnvelopeRecord {
+                width: 960,
+                height: 544,
+                frames: contract::MIN_FRAMES,
+                fps: contract::FIXED_FPS,
+                batch_size: 1,
+                max_steps: 2,
+                endpoint_count: 1,
+                endpoint_anchor: "first".into(),
+                max_qwen_output_text_rows: 128,
+                max_qwen_vision_rows: 1_024,
+                max_condition_visual_rows: 1_024,
+                max_target_video_rows: 16_384,
+                max_target_audio_rows: 1_024,
+                max_total_packed_rows: 19_560,
+            },
             bounds: H3PrivateRuntimeBoundRecord {
                 fixed_runtime_host_bytes: 1,
                 fixed_runtime_device_bytes: 2,
@@ -3994,6 +4158,103 @@ mod tests {
         };
         record.identity_sha256 = runtime_qualification_identity(&record);
         record
+    }
+
+    #[cfg(feature = "mp4")]
+    fn prepared_request_for_small_envelope() -> H3FactoryPreparedRequestInput {
+        H3FactoryPreparedRequestInput {
+            identity_sha256: sha('0'),
+            canonical_model: contract::FL2VA_COMFY.into(),
+            task: Task::Fl2va,
+            mode: Mode::FirstFrameToAudioVideo,
+            prompt_sha256: sha('1'),
+            seed: 42,
+            grid_points: 2,
+            denoise_forward_count: 1,
+            guidance_f64_bits: 0.0_f64.to_bits(),
+            strength_f64_bits: 1.0_f64.to_bits(),
+            batch_size: 1,
+            width: 960,
+            height: 544,
+            frames: contract::MIN_FRAMES,
+            fps: contract::FIXED_FPS,
+            synchronized_audio: true,
+            mp4_output: true,
+            video_latent_frames: 37,
+            audio_latents_per_channel: 207,
+            audio_samples_per_channel: 165_600,
+            conditioning_fingerprint: sha('2'),
+            reference_fingerprint: sha('3'),
+            endpoints: vec![H3FactoryEndpointInput {
+                anchor: H3FactoryEndpointAnchor::First,
+                encoded_bytes: 128,
+                encoded_content_sha256: sha('4'),
+                preprocess: H3FactoryEndpointPreprocess::PillowLanczosRgbU8CpuV1,
+                normalized_shape: [1, 3, 1, 544, 960],
+                normalized_cpu_bytes: 960 * 544 * 3,
+                normalized_cpu_content_sha256: sha('5'),
+            }],
+            rows: H3FactoryPreparedRowsInput {
+                qwen_output_text_rows: 128,
+                qwen_vision_rows: 1_024,
+                condition_visual_rows: 1_024,
+                condition_audio_rows: 0,
+                target_video_rows: 16_384,
+                target_audio_rows: 1_024,
+                total_packed_rows: 18_560,
+            },
+        }
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn small_runtime_envelope_rejects_every_unreviewed_request_axis() {
+        let envelope = record().envelope;
+        let reviewed = prepared_request_for_small_envelope();
+        envelope.validate_prepared(&reviewed).unwrap();
+
+        let mut cases = Vec::new();
+        let mut request = reviewed.clone();
+        request.width = 544;
+        request.height = 960;
+        cases.push(request);
+        let mut request = reviewed.clone();
+        request.frames += 1;
+        cases.push(request);
+        let mut request = reviewed.clone();
+        request.grid_points += 1;
+        cases.push(request);
+        let mut request = reviewed.clone();
+        request.batch_size += 1;
+        cases.push(request);
+        let mut request = reviewed.clone();
+        request.endpoints[0].anchor = H3FactoryEndpointAnchor::Last;
+        cases.push(request);
+        let mut request = reviewed.clone();
+        request.rows.qwen_output_text_rows += 1;
+        cases.push(request);
+        let mut request = reviewed.clone();
+        request.rows.qwen_vision_rows += 1;
+        cases.push(request);
+        let mut request = reviewed.clone();
+        request.rows.condition_visual_rows += 1;
+        cases.push(request);
+        let mut request = reviewed.clone();
+        request.rows.condition_audio_rows = 1;
+        cases.push(request);
+        let mut request = reviewed.clone();
+        request.rows.target_video_rows += 1;
+        cases.push(request);
+        let mut request = reviewed.clone();
+        request.rows.target_audio_rows += 1;
+        cases.push(request);
+        let mut request = reviewed;
+        request.rows.total_packed_rows += 1_001;
+        cases.push(request);
+
+        for request in cases {
+            assert!(envelope.validate_prepared(&request).is_err());
+        }
     }
 
     fn write_record(record: &H3PrivateRuntimeQualificationRecord) -> (tempfile::TempDir, PathBuf) {
