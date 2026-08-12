@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { promptPlaceholder, promptRequired } from "@studio/lib/promptRequirement";
-import { minimaxH3AuthoringError } from "@studio/lib/minimaxH3Authoring";
+import { promptPlaceholder } from "@studio/lib/promptRequirement";
 import Keycap from "@ui/components/Keycap.vue";
 import Icon from "@ui/components/Icon.vue";
+import ActionBlocker from "@ui/components/ActionBlocker.vue";
 import ExpandControl from "../generate/ExpandControl.vue";
 import EstimateBadge from "../generate/EstimateBadge.vue";
 import StyleChips from "./StyleChips.vue";
@@ -28,14 +28,12 @@ const props = withDefaults(
     expansionHostLabel: string | null;
     canUndo: boolean;
     preparedBlocked: boolean;
-    hasPrepared: boolean;
-    chainReject: boolean;
+    disabledReason: string | null;
     submitting: boolean;
     buttonLabel: string;
     estimateRequest: GenerateRequest | null;
     estimateTarget: ApiTarget | null;
     preprocessingStatus: string | null;
-    h3RequireFirstFrame?: boolean;
     remixSource?: "original" | "current";
     /** Recent prompts for ↑/↓ history cycling. */
     history?: string[];
@@ -51,28 +49,9 @@ const emit = defineEmits<{
   "update:remixSource": [value: "original" | "current"];
 }>();
 
-// A conditioned LTX-2 render may go out undescribed. The placeholder says so,
-// and Generate must not stay disabled on a request the server would admit —
-// the view's `generate()` early return moves with this in lockstep.
-const promptMissing = computed(() => promptRequired(props.form) && !props.form.prompt.trim());
-const h3AuthoringError = computed(() =>
-  minimaxH3AuthoringError(
-    props.form.family,
-    props.form.model,
-    props.form.h3Authoring,
-    props.h3RequireFirstFrame,
-  ),
-);
-const generateDisabled = computed(
-  () =>
-    promptMissing.value ||
-    !!h3AuthoringError.value ||
-    !props.form.model ||
-    props.chainReject ||
-    props.hasPrepared ||
-    props.expansionRunning ||
-    props.submitting,
-);
+// The view owns one blocker authority shared with its submit guard. This card
+// only renders that reason and reflects it in the button state.
+const generateDisabled = computed(() => props.disabledReason !== null || props.submitting);
 const placeholder = computed(() =>
   promptPlaceholder(props.form, "Describe the image you want to create…"),
 );
@@ -176,10 +155,10 @@ defineExpose({ focus, expand, record });
       />
       <div class="ms-composer__right">
         <span
-          v-if="h3AuthoringError || preprocessingStatus"
+          v-if="preprocessingStatus"
           class="ms-composer__status"
-          :data-test="h3AuthoringError ? 'h3-authoring-error' : 'preprocessing-status'"
-          >{{ h3AuthoringError || preprocessingStatus }}</span
+          data-test="preprocessing-status"
+          >{{ preprocessingStatus }}</span
         >
         <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
         <button
@@ -195,6 +174,7 @@ defineExpose({ focus, expand, record });
         </button>
       </div>
     </div>
+    <ActionBlocker v-if="disabledReason" class="ms-composer__blocker" :reason="disabledReason" />
   </div>
 </template>
 
@@ -249,6 +229,10 @@ defineExpose({ focus, expand, record });
   gap: 12px;
   margin-left: auto;
   min-width: 0;
+}
+.ms-composer__blocker {
+  order: 3;
+  margin-top: 10px;
 }
 .ms-composer__status {
   font-size: 11px;

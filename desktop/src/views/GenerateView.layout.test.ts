@@ -82,29 +82,21 @@ describe("GenerateView layout", () => {
     expect(viewSource).toContain("Describe an image below, pick a look, and press Generate.");
   });
 
-  // A conditioned LTX-2 render may go out undescribed. The disabled Generate
-  // button and `generate()`'s silent early return are the two halves of one
-  // rule; if they ever disagree the enabled control becomes the text-only
-  // dead end the prepared-expansion invariant forbids. Both must read the
-  // shared predicate, and neither may keep a bare `!form.prompt.trim()`.
-  it("gates Generate on the shared prompt-requirement predicate in lockstep", () => {
-    expect(composerCardSource).toContain('from "@studio/lib/promptRequirement"');
-    expect(composerCardSource).toMatch(
-      /const promptMissing = computed\(\s*\(\) => promptRequired\(props\.form\) && !props\.form\.prompt\.trim\(\),?\s*\);/s,
-    );
+  // A conditioned LTX-2 render may go out undescribed. The view owns the
+  // shared blocker authority; the composer only renders and reflects it.
+  it("gates Generate on one visible blocker authority", () => {
     expect(tagFor(composerCardSource, "generate-button")).toContain(':disabled="generateDisabled"');
-    expect(composerCardSource).toMatch(
-      /const generateDisabled = computed\([\s\S]*?promptMissing\.value/,
-    );
+    expect(composerCardSource).toContain("props.disabledReason !== null");
+    expect(composerCardSource).toContain('<ActionBlocker v-if="disabledReason"');
     expect(composerCardSource).not.toContain("!form.prompt.trim() || !form.model");
 
     expect(viewSource).toContain('from "@studio/lib/promptRequirement"');
     expect(viewSource).toMatch(
       /const promptMissing = computed\(\(\) => promptRequired\(form\) && !form\.prompt\.trim\(\)\);/,
     );
-    expect(viewSource).toMatch(
-      /async function generate\(\) \{\s*if \(\s*promptMissing\.value \|\|/s,
-    );
+    expect(viewSource).toContain("const generationInputBlockerReason = computed");
+    expect(viewSource).toContain("if (generationInputBlockerReason.value ||");
+    expect(viewSource).toContain(':disabled-reason="composerBlockerReason"');
   });
 
   it("softens the blank-canvas guidance when the prompt is optional", () => {

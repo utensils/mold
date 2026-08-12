@@ -19,7 +19,7 @@ import HistoryDrawer from "../components/library/HistoryDrawer.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import HostFilterChips from "../components/shell/HostFilterChips.vue";
 import { layoutJustifiedRows } from "../lib/gallery/layout";
-import { galleryMediaPath, isAudioItem, isVideoItem, mediaPath } from "../lib/gallery/media";
+import { galleryMediaPath, isAudioItem, isVideoItem } from "../lib/gallery/media";
 import { applySelectionClick } from "../lib/gallery/selection";
 import {
   planSequenceReuse,
@@ -27,7 +27,7 @@ import {
   sequenceGoneMessage,
   sequenceHostUnreachableMessage,
 } from "@studio/lib/sequenceReuse";
-import { ApiError, apiFetch, apiFetchTo, type ApiTarget } from "../lib/api/client";
+import { ApiError, apiFetchTo, type ApiTarget } from "../lib/api/client";
 import {
   useGalleryStore,
   type GalleryKindFilter,
@@ -50,6 +50,8 @@ import { modelDisplayNameForId } from "../lib/models";
 import type { GalleryImage } from "../lib/api/types";
 import { isUpscaledImage } from "../lib/gallery/upscaled";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import { readGalleryMediaBase64, readGalleryMediaBlob } from "../lib/gallery/sourceMedia";
+import { attachPickedImage, attachPickedVideo } from "../lib/sourceAttachment";
 import {
   appendMinimaxH3GalleryImageReference,
   isMinimaxH3Identity,
@@ -119,13 +121,11 @@ const canSaveLocally = (entry: MergedPrint) =>
 
 /** Authed source bytes for a host-gallery item (origin-aware). */
 async function fetchItemBlob(entry: MergedPrint): Promise<Blob> {
-  const path = mediaPath(entry.item.filename);
-  const target = targetFor(entry);
-  return (target ? apiFetchTo(target, path) : apiFetch(path)).then((r) => r.blob());
+  return readGalleryMediaBlob(entry, gallery);
 }
 
 async function fetchItemBase64(entry: MergedPrint): Promise<string> {
-  return blobToBase64(await fetchItemBlob(entry));
+  return readGalleryMediaBase64(entry, gallery);
 }
 
 async function saveToThisMac(entry: MergedPrint) {
@@ -319,7 +319,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
     },
     {
       label: "Use as source",
-      disabled: isVideo(item),
+      disabled: isAudio(item),
       action: () => void useAsSource(entry),
     },
     {
@@ -715,6 +715,13 @@ async function useAsSource(entry: MergedPrint) {
     const blob = await fetchItemBlob(entry);
     const base64 = await blobToBase64(blob);
     const form = generateForm.form;
+    if (isVideo(entry.item)) {
+      attachPickedVideo(form, { filename: entry.item.filename, base64 });
+      lightboxOpen.value = false;
+      toasts.push("Loaded as source video");
+      void router.push("/create");
+      return;
+    }
     const h3Task = minimaxH3TaskForModel(form.model);
     if (h3Task) {
       const dimensions = imageDimensionsFromBase64(base64) ?? {
@@ -739,9 +746,7 @@ async function useAsSource(entry: MergedPrint) {
         "Choose an explicit MiniMax H3 FL2VA or Ref2VA model before adding a source.",
       );
     } else {
-      form.sourceImage = base64;
-      form.sourceImageName = entry.item.filename;
-      form.sourceFit = { mode: "lanczos-resize" };
+      attachPickedImage(form, { filename: entry.item.filename, base64 });
     }
     lightboxOpen.value = false;
     toasts.push(h3Task === "ref2va" ? "Added as ordered reference" : "Loaded as source");

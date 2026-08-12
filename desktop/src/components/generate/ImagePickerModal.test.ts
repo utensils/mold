@@ -89,12 +89,12 @@ describe("ImagePickerModal", () => {
     pinia = createPinia();
     setActivePinia(pinia);
     apiJson.mockReset();
-    apiFetch.mockReset().mockResolvedValue({
-      blob: () => Promise.resolve(new Blob(["x"], { type: "image/png" })),
-    });
-    apiFetchTo.mockReset().mockResolvedValue({
-      blob: () => Promise.resolve(new Blob(["y"], { type: "image/jpeg" })),
-    });
+    apiFetch
+      .mockReset()
+      .mockResolvedValue(new Response(new Blob(["x"], { type: "image/png" }), { status: 200 }));
+    apiFetchTo
+      .mockReset()
+      .mockResolvedValue(new Response(new Blob(["y"], { type: "image/jpeg" }), { status: 200 }));
   });
 
   afterEach(() => {

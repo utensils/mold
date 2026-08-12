@@ -649,7 +649,11 @@ function resetSettings() {
           :disabled="activeRecipe?.guidance.mode === 'fixed' || !caps.guidanceAdjustable"
           @update:model-value="form.guidance = $event"
         />
-        <p v-if="!caps.guidanceAdjustable" class="ms-hint" data-test="fixed-guidance-hint">
+        <p
+          v-if="!caps.guidanceAdjustable"
+          class="ms-field__hint ms-field__hint--after-slider"
+          data-test="fixed-guidance-hint"
+        >
           Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline
           to adjust it.
         </p>
@@ -894,6 +898,9 @@ function resetSettings() {
   color: var(--ink-3);
   margin-top: 6px;
   line-height: 1.4;
+}
+.ms-field__hint--after-slider {
+  margin-top: 12px;
 }
 .ms-field__error {
   font-size: 11px;

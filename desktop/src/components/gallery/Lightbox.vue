@@ -520,7 +520,9 @@ async function performVideoExport(options: VideoExportOptions) {
         <div class="mt-2.5 flex gap-2.5">
           <button
             type="button"
+            data-test="lightbox-use-source"
             class="border-ce h-10 flex-1 rounded-control border text-body font-semibold text-ink-2 transition-colors duration-100 hover:text-ink"
+            :disabled="audio"
             @click="emit('useSource')"
           >
             Use as source

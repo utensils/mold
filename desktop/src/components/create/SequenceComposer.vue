@@ -30,6 +30,7 @@ import {
   stageInvalidation,
 } from "@studio/lib/sequenceForm";
 import { promptOptional } from "@studio/lib/promptRequirement";
+import ActionBlocker from "@ui/components/ActionBlocker.vue";
 import { parseChainScript, serializeChainScript } from "@studio/lib/chainToml";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import { sequenceParams } from "../../lib/sequenceParams";
@@ -616,14 +617,14 @@ async function copyToml() {
         Clear sequence
       </button>
 
-      <span
+      <ActionBlocker
         v-if="disabledReason"
         data-test="sequence-validation"
-        role="alert"
-        class="ms-seqbench__note ms-seqbench__note--blocked"
-      >
-        {{ disabledReason }}
-      </span>
+        class="ms-seqbench__blocker"
+        compact
+        :reason="disabledReason"
+        title="Before you generate"
+      />
       <span v-else data-test="sequence-fit" class="ms-seqbench__note">{{ fitNote }}</span>
 
       <div class="ms-seqbench__spacer" />
@@ -881,8 +882,8 @@ async function copyToml() {
   font-size: 10px;
   color: var(--halide);
 }
-.ms-seqbench__note--blocked {
-  color: var(--stop);
+.ms-seqbench__blocker {
+  max-width: min(380px, 38vw);
 }
 .ms-seqbench__generate {
   height: 32px;

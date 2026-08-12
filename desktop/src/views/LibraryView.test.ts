@@ -136,8 +136,11 @@ async function mountView(
       loaded: true,
     };
   }
-  localGalleryList.mockResolvedValue({ images: [...prints], target: null });
   seed?.(gallery);
+  localGalleryList.mockResolvedValue({
+    images: [...(gallery.buckets.local?.items ?? prints)],
+    target: null,
+  });
 
   const wrapper = mount(LibraryView, {
     global: {
@@ -446,6 +449,63 @@ describe("LibraryView delete keyboard handling", () => {
     const event = new KeyboardEvent("keydown", { key: "Backspace", cancelable: true });
     expect(search.dispatchEvent(event)).toBe(true);
     expect(localGalleryDelete).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+});
+
+describe("LibraryView source reuse", () => {
+  it("uses the same native-authority loader from the Lightbox as the gallery picker", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(new Uint8Array([65, 66, 67]), {
+        status: 200,
+        headers: { "Content-Type": "image/png" },
+      }),
+    );
+    const { wrapper, router } = await mountView();
+    const tile = wrapper.findAll("button").find((button) => button.text().includes("S 1"));
+    expect(tile).toBeDefined();
+    await tile!.trigger("dblclick");
+    await wrapper.get("[data-test='lightbox-use-source']").trigger("click");
+    await flushPromises();
+
+    expect(fetchMock).toHaveBeenCalledWith("mold-local://localhost/first.png");
+    expect(useGenerateFormStore().form.sourceImage).toBe("QUJD");
+    expect(useGenerateFormStore().form.sourceFit).toEqual({ mode: "lanczos-resize" });
+    expect(router.currentRoute.value.path).toBe("/create");
+    wrapper.unmount();
+  });
+
+  it("enables Use as source for video and attaches it to the LTX source-video field", async () => {
+    const video = {
+      ...prints[0]!,
+      filename: "clip.mp4",
+      format: "mp4",
+      metadata: { ...prints[0]!.metadata, model: "ltx-2.3-22b-dev:fp8" },
+    } as GalleryImage;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(new Uint8Array([65, 66, 67]), {
+        status: 200,
+        headers: { "Content-Type": "video/mp4" },
+      }),
+    );
+    const { wrapper, router } = await mountView(undefined, (gallery) => {
+      gallery.buckets.local!.items = [video];
+    });
+    const tile = wrapper.get(".ms-lib-tile");
+    await tile.trigger("contextmenu");
+    const source = useContextMenuStore().entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Use as source",
+    );
+    expect(source).toMatchObject({ disabled: false });
+    useContextMenuStore().activate(source!);
+    await flushPromises();
+
+    expect(useGenerateFormStore().form.sourceVideo).toEqual({
+      filename: "clip.mp4",
+      base64: "QUJD",
+    });
+    expect(router.currentRoute.value.path).toBe("/create");
+    expect(useToastStore().items.at(-1)?.message).toBe("Loaded as source video");
     wrapper.unmount();
   });
 });

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import AuthedMedia from "../gallery/AuthedMedia.vue";
-import { apiFetch, apiFetchTo } from "../../lib/api/client";
-import { galleryMediaPath, localMediaPath, mediaPath } from "../../lib/gallery/media";
-import { blobToBase64, fileToBase64, isStillImageFile } from "../../lib/image";
+import { galleryMediaPath } from "../../lib/gallery/media";
+import { readGalleryMediaBase64 } from "../../lib/gallery/sourceMedia";
+import { fileToBase64, isStillImageFile } from "../../lib/image";
 import { inTauri, ipc } from "../../lib/ipc";
 import type { PickedImage } from "../../lib/generateForm";
 import { useGalleryStore, type MergedPrint } from "../../stores/gallery";
@@ -132,23 +132,9 @@ async function chooseFiles() {
 
 async function pickFromGallery(entry: MergedPrint) {
   try {
-    // Bytes come from the print's own origin: a host print is fetched with
-    // that host's auth, and a This-Mac IPC print (local engine down or
-    // mid-restart) over the mold-local:// protocol — the same source its
-    // thumbnail rendered from, so a pick can't fail where a preview worked.
-    let res: Response;
-    if (gallery.mediaSourceOf(entry.sourceKey) === "local") {
-      res = await fetch(localMediaPath(entry.item.filename));
-      // fetch() resolves on 404/500 — the host branch throws via apiFetchTo,
-      // so match it rather than base64-encoding an error body.
-      if (!res.ok) throw new Error(`Could not read ${entry.item.filename} (HTTP ${res.status})`);
-    } else {
-      const path = mediaPath(entry.item.filename);
-      const target = gallery.targetOf(entry.sourceKey);
-      res = await (target ? apiFetchTo(target, path) : apiFetch(path));
-    }
-    const blob = await res.blob();
-    emit("pick", [{ filename: entry.item.filename, base64: await blobToBase64(blob) }]);
+    emit("pick", [
+      { filename: entry.item.filename, base64: await readGalleryMediaBase64(entry, gallery) },
+    ]);
     emit("close");
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);

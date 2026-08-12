@@ -31,8 +31,7 @@ function mountComposer(form: GenerateForm, overrides: Record<string, unknown> = 
       expansionHostLabel: null,
       canUndo: false,
       preparedBlocked: false,
-      hasPrepared: false,
-      chainReject: false,
+      disabledReason: null,
       submitting: false,
       buttonLabel: "Generate",
       estimateRequest: null,
@@ -70,14 +69,18 @@ describe("ComposerCard", () => {
     expect(form.prompt).toBe("a lighthouse"); // textarea untouched
   });
 
-  it("disables Generate without a prompt or with a prepared batch", () => {
+  it("disables Generate and displays the shared corrective reason", () => {
     const emptyForm = baseForm();
     emptyForm.prompt = "";
+    const missingPrompt = mountComposer(emptyForm, {
+      disabledReason: "Add a prompt before generating.",
+    });
+    expect(missingPrompt.get("[data-test='generate-button']").attributes("disabled")).toBeDefined();
+    expect(missingPrompt.get("[data-test='action-blocker']").text()).toContain(
+      "Add a prompt before generating.",
+    );
     expect(
-      mountComposer(emptyForm).get("[data-test='generate-button']").attributes("disabled"),
-    ).toBeDefined();
-    expect(
-      mountComposer(baseForm(), { hasPrepared: true })
+      mountComposer(baseForm(), { disabledReason: "Use the reviewed variations panel." })
         .get("[data-test='generate-button']")
         .attributes("disabled"),
     ).toBeDefined();
@@ -97,6 +100,7 @@ describe("ComposerCard", () => {
     const wrapper = mountComposer(baseForm(), {
       effectiveBatchSize: 3,
       expansionRunning: true,
+      disabledReason: "Wait for prompt preparation to finish.",
     });
     expect(wrapper.get("[data-test='generate-button']").attributes("disabled")).toBeDefined();
   });
@@ -104,7 +108,7 @@ describe("ComposerCard", () => {
   it("does not submit from the shortcut while Generate is disabled", async () => {
     const wrapper = mountComposer(baseForm(), {
       effectiveBatchSize: 3,
-      hasPrepared: true,
+      disabledReason: "Use the reviewed variations panel.",
     });
     await wrapper
       .get("textarea[aria-label='Prompt']")
