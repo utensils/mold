@@ -155,12 +155,12 @@ const PRIVATE_ACTIVATION_COVERAGE: [H3FactoryActivationPrerequisite; 9] = [
     H3FactoryActivationPrerequisite::SameAttemptCancellationCoverage,
 ];
 
-/// Exact request/preprocessing envelope measured by one reviewed campaign.
+/// Exact request/preprocessing envelope required from one reviewed campaign.
 ///
-/// The first private runtime record deliberately qualifies only the small
-/// conditioned route that was actually exercised. Larger canvases, longer
-/// clips, additional endpoints, and larger prepared sequences require their
-/// own reviewed campaign instead of inheriting bounds from this record.
+/// The first quality runtime record can qualify only the compact conditioned
+/// route selected by the released Comfy workflow. Larger canvases, longer
+/// clips, additional endpoints, and different prepared sequences require
+/// their own reviewed campaign instead of inheriting these bounds.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct H3PrivateRuntimeEnvelopeRecord {
@@ -182,13 +182,12 @@ pub(crate) struct H3PrivateRuntimeEnvelopeRecord {
 
 impl H3PrivateRuntimeEnvelopeRecord {
     pub(crate) fn validate(&self) -> Result<()> {
-        if self.width != 960
-            || self.height != 544
+        if self.width != contract::DEFAULT_WIDTH
+            || self.height != contract::DEFAULT_HEIGHT
             || self.frames != contract::MIN_FRAMES
             || self.fps != contract::FIXED_FPS
             || self.batch_size != 1
-            || self.max_steps == 0
-            || self.max_steps > 2
+            || self.max_steps != contract::COMFY_DEFAULT_STEPS
             || self.endpoint_count != 1
             || self.endpoint_anchor != "first"
             || [
@@ -201,7 +200,7 @@ impl H3PrivateRuntimeEnvelopeRecord {
             ]
             .contains(&0)
         {
-            bail!("private H3 runtime qualification has an invalid small-route envelope")
+            bail!("private H3 runtime qualification has an invalid compact-quality envelope")
         }
         Ok(())
     }
@@ -215,8 +214,10 @@ impl H3PrivateRuntimeEnvelopeRecord {
             || request.frames != self.frames
             || request.fps != self.fps
             || request.batch_size != self.batch_size
-            || request.grid_points > self.max_steps
+            || request.grid_points != self.max_steps
             || request.mode != Mode::FirstFrameToAudioVideo
+            || !request.synchronized_audio
+            || !request.mp4_output
             || request.endpoints.len() != usize::try_from(self.endpoint_count)?
             || !endpoint.is_some_and(|endpoint| endpoint.anchor == H3FactoryEndpointAnchor::First)
             || request.rows.qwen_output_text_rows > self.max_qwen_output_text_rows
@@ -227,7 +228,7 @@ impl H3PrivateRuntimeEnvelopeRecord {
             || request.rows.target_audio_rows > self.max_target_audio_rows
             || request.rows.total_packed_rows > self.max_total_packed_rows
         {
-            bail!("private H3 request exceeds the reviewed small-runtime envelope")
+            bail!("private H3 request differs from the reviewed compact-quality envelope")
         }
         Ok(())
     }
@@ -4247,12 +4248,12 @@ mod tests {
                 cuda_toolkit_version: 12_080,
             },
             envelope: H3PrivateRuntimeEnvelopeRecord {
-                width: 960,
-                height: 544,
+                width: contract::DEFAULT_WIDTH,
+                height: contract::DEFAULT_HEIGHT,
                 frames: contract::MIN_FRAMES,
                 fps: contract::FIXED_FPS,
                 batch_size: 1,
-                max_steps: 2,
+                max_steps: contract::COMFY_DEFAULT_STEPS,
                 endpoint_count: 1,
                 endpoint_anchor: "first".into(),
                 max_qwen_output_text_rows: 128,
@@ -4300,7 +4301,7 @@ mod tests {
     }
 
     #[cfg(feature = "mp4")]
-    fn prepared_request_for_small_envelope() -> H3FactoryPreparedRequestInput {
+    fn prepared_request_for_compact_quality_envelope() -> H3FactoryPreparedRequestInput {
         H3FactoryPreparedRequestInput {
             identity_sha256: sha('0'),
             canonical_model: contract::FL2VA_COMFY.into(),
@@ -4308,13 +4309,13 @@ mod tests {
             mode: Mode::FirstFrameToAudioVideo,
             prompt_sha256: sha('1'),
             seed: 42,
-            grid_points: 2,
-            denoise_forward_count: 1,
+            grid_points: contract::COMFY_DEFAULT_STEPS,
+            denoise_forward_count: contract::COMFY_DEFAULT_STEPS - 1,
             guidance_f64_bits: 0.0_f64.to_bits(),
             strength_f64_bits: 1.0_f64.to_bits(),
             batch_size: 1,
-            width: 960,
-            height: 544,
+            width: contract::DEFAULT_WIDTH,
+            height: contract::DEFAULT_HEIGHT,
             frames: contract::MIN_FRAMES,
             fps: contract::FIXED_FPS,
             synchronized_audio: true,
@@ -4329,8 +4330,10 @@ mod tests {
                 encoded_bytes: 128,
                 encoded_content_sha256: sha('4'),
                 preprocess: H3FactoryEndpointPreprocess::PillowLanczosRgbU8CpuV1,
-                normalized_shape: [1, 3, 1, 544, 960],
-                normalized_cpu_bytes: 960 * 544 * 3,
+                normalized_shape: [1, 3, 1, contract::DEFAULT_HEIGHT, contract::DEFAULT_WIDTH],
+                normalized_cpu_bytes: u64::from(contract::DEFAULT_WIDTH)
+                    * u64::from(contract::DEFAULT_HEIGHT)
+                    * 3,
                 normalized_cpu_content_sha256: sha('5'),
             }],
             rows: H3FactoryPreparedRowsInput {
@@ -4347,9 +4350,9 @@ mod tests {
 
     #[cfg(feature = "mp4")]
     #[test]
-    fn small_runtime_envelope_rejects_every_unreviewed_request_axis() {
+    fn compact_quality_envelope_rejects_every_unreviewed_request_axis() {
         let envelope = record().envelope;
-        let reviewed = prepared_request_for_small_envelope();
+        let reviewed = prepared_request_for_compact_quality_envelope();
         envelope.validate_prepared(&reviewed).unwrap();
 
         let mut cases = Vec::new();
@@ -4361,10 +4364,25 @@ mod tests {
         request.frames += 1;
         cases.push(request);
         let mut request = reviewed.clone();
+        request.fps += 1;
+        cases.push(request);
+        let mut request = reviewed.clone();
         request.grid_points += 1;
         cases.push(request);
         let mut request = reviewed.clone();
+        request.grid_points -= 1;
+        cases.push(request);
+        let mut request = reviewed.clone();
         request.batch_size += 1;
+        cases.push(request);
+        let mut request = reviewed.clone();
+        request.mode = Mode::TextToAudioVideo;
+        cases.push(request);
+        let mut request = reviewed.clone();
+        request.synchronized_audio = false;
+        cases.push(request);
+        let mut request = reviewed.clone();
+        request.mp4_output = false;
         cases.push(request);
         let mut request = reviewed.clone();
         request.endpoints[0].anchor = H3FactoryEndpointAnchor::Last;
@@ -4538,8 +4556,8 @@ mod tests {
             prepared_attempt_identity_sha256: sha('7'),
             target_budget_identity_sha256: sha('8'),
             component_set_identity_sha256: sha('9'),
-            requested_grid_points: 2,
-            transformer_evaluations: 1,
+            requested_grid_points: contract::COMFY_DEFAULT_STEPS,
+            transformer_evaluations: contract::COMFY_DEFAULT_STEPS - 1,
             predicted_device_peak_bytes: 7,
             predicted_host_increment_bytes: 8,
             media: media(),
@@ -4566,11 +4584,19 @@ mod tests {
     #[test]
     fn terminal_sampler_provenance_is_exactly_bound_to_the_owner() {
         let owner = owner_facts();
-        validate_private_sampler_provenance("comfy-res-multistep", 2, 1, &owner).unwrap();
+        let grid_points = usize::try_from(contract::COMFY_DEFAULT_STEPS).unwrap();
+        let evaluations = grid_points - 1;
+        validate_private_sampler_provenance(
+            "comfy-res-multistep",
+            grid_points,
+            evaluations,
+            &owner,
+        )
+        .unwrap();
         for (sampler, grid_points, evaluations) in [
-            ("official-euler", 2, 1),
-            ("comfy-res-multistep", 3, 1),
-            ("comfy-res-multistep", 2, 2),
+            ("official-euler", grid_points, evaluations),
+            ("comfy-res-multistep", grid_points + 1, evaluations),
+            ("comfy-res-multistep", grid_points, evaluations + 1),
         ] {
             assert!(
                 validate_private_sampler_provenance(sampler, grid_points, evaluations, &owner)

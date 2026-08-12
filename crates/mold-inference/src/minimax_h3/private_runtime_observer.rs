@@ -24,7 +24,7 @@ use crate::device::{PhaseVramProbe, PhaseVramReport};
 use super::pipeline::{H3PipelineEvent, H3PipelinePhase};
 
 pub(crate) const H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA: &str =
-    "mold.minimax-h3.private-uat-runtime-bound-observation.v4";
+    "mold.minimax-h3.private-uat-runtime-bound-observation.v5";
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
