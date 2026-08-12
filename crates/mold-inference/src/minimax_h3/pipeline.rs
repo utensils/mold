@@ -44,6 +44,14 @@ const VIDEO_PATCH: [usize; 3] = [1, 2, 2];
 const AUDIO_LATENTS_PER_SECOND: usize = 40;
 const AUDIO_SAMPLES_PER_LATENT: usize = 800;
 
+pub(crate) const SMALL_VIDEO_ONLY_MP4_MAX_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const SMALL_THUMBNAIL_PNG_MAX_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const SMALL_FINAL_MP4_MAX_BYTES: usize = 512 * 1024 * 1024;
+pub(crate) const SMALL_ENCODED_VIDEO_HOST_BYTES_BOUND: u64 = 1024 * 1024 * 1024;
+pub(crate) const SMALL_THUMBNAIL_HOST_BYTES_BOUND: u64 = 8 * 1024 * 1024;
+pub(crate) const SMALL_MUX_OUTPUT_HOST_BYTES_BOUND: u64 = 512 * 1024 * 1024;
+pub(crate) const SMALL_AAC_MUX_STAGING_HOST_BYTES: u64 = 8 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum H3EndpointAnchor {
@@ -878,17 +886,29 @@ pub(crate) fn finalize_av(
     progress: &ProgressReporter,
     observer: &mut dyn H3PipelineObserver,
 ) -> Result<H3PipelineOutput> {
-    use crate::av_media::{mux_aac_track_to_mp4_bytes, AacMuxOptions};
+    use crate::av_media::{mux_aac_track_to_mp4_bytes_bounded, AacMuxOptions, AvMuxLimits};
 
     let mut control = PipelineControl { progress, observer };
     phase_boundary(&mut control, H3PipelinePhase::Mux, false)?;
     let samples = interleaved_pcm(&staged.waveform)?;
-    let muxed = mux_aac_track_to_mp4_bytes(
+    let sample_bytes = samples
+        .capacity()
+        .checked_mul(std::mem::size_of::<f32>())
+        .context("H3 interleaved PCM capacity overflowed")?;
+    let aac_staging_limit = usize::try_from(SMALL_AAC_MUX_STAGING_HOST_BYTES)
+        .context("H3 AAC staging limit exceeded usize")?
+        .checked_sub(sample_bytes)
+        .context("H3 interleaved PCM exceeds the AAC staging limit")?;
+    let muxed = mux_aac_track_to_mp4_bytes_bounded(
         &staged.video_only_mp4,
         &samples,
         AUDIO_SAMPLE_RATE_HZ,
         u16::try_from(AUDIO_CHANNELS).expect("audio channels fit u16"),
         AacMuxOptions::match_video(),
+        AvMuxLimits {
+            output_bytes: SMALL_FINAL_MP4_MAX_BYTES,
+            aac_staging_bytes: aac_staging_limit,
+        },
         &|_| progress.checkpoint().is_err(),
     )
     .map_err(|error| {
@@ -941,7 +961,12 @@ impl H3VideoEncodeSink {
         let width = u32::try_from(width).context("H3 width does not fit u32")?;
         let height = u32::try_from(height).context("H3 height does not fit u32")?;
         Ok(H3VideoEncodeSink {
-            encoder: Some(Mp4StreamEncoder::new(width, height, FIXED_FPS)?),
+            encoder: Some(Mp4StreamEncoder::new_bounded(
+                width,
+                height,
+                FIXED_FPS,
+                SMALL_VIDEO_ONLY_MP4_MAX_BYTES,
+            )?),
             expected_frames,
             width,
             height,
@@ -999,7 +1024,10 @@ impl H3VideoEncodeSink {
             .first_frame
             .take()
             .ok_or_else(|| anyhow!("MiniMax H3 visual decoder emitted no frames"))?;
-        let thumbnail_png = video_enc::first_frame_png(std::slice::from_ref(&first))?;
+        let thumbnail_png = video_enc::first_frame_png_bounded(
+            std::slice::from_ref(&first),
+            SMALL_THUMBNAIL_PNG_MAX_BYTES,
+        )?;
         Ok(EncodedVideo {
             mp4: self
                 .encoder

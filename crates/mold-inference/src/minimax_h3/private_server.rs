@@ -327,6 +327,15 @@ impl H3PrivateRuntimeBoundRecord {
         {
             bail!("private H3 runtime qualification bounds must all be nonzero")
         }
+        if self.encoded_video_host_bytes_bound
+            != super::pipeline::SMALL_ENCODED_VIDEO_HOST_BYTES_BOUND
+            || self.thumbnail_host_bytes_bound != super::pipeline::SMALL_THUMBNAIL_HOST_BYTES_BOUND
+            || self.mux_output_host_bytes_bound
+                != super::pipeline::SMALL_MUX_OUTPUT_HOST_BYTES_BOUND
+            || self.aac_mux_staging_host_bytes != super::pipeline::SMALL_AAC_MUX_STAGING_HOST_BYTES
+        {
+            bail!("private H3 runtime qualification media bounds must match enforced caps")
+        }
         Ok(())
     }
 }
@@ -4051,6 +4060,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn runtime_record_requires_the_enforced_media_caps() {
+        let mut candidate = record();
+        validate_runtime_qualification_record_shape(&candidate).unwrap();
+        candidate.bounds.thumbnail_host_bytes_bound -= 1;
+        assert!(validate_runtime_qualification_record_shape(&candidate)
+            .unwrap_err()
+            .to_string()
+            .contains("media bounds must match enforced caps"));
+    }
+
     fn media() -> H3PrivateFl2VaMediaContract {
         H3PrivateFl2VaMediaContract {
             canonical_model: contract::FL2VA_COMFY.into(),
@@ -4137,10 +4157,14 @@ mod tests {
                 ffn_workspace_device_bytes: 7,
                 decoder_tile_workspace_device_bytes: 8,
                 audio_decode_workspace_device_bytes: 9,
-                encoded_video_host_bytes_bound: 10,
-                thumbnail_host_bytes_bound: 11,
-                mux_output_host_bytes_bound: 12,
-                aac_mux_staging_host_bytes: 13,
+                encoded_video_host_bytes_bound:
+                    super::super::pipeline::SMALL_ENCODED_VIDEO_HOST_BYTES_BOUND,
+                thumbnail_host_bytes_bound:
+                    super::super::pipeline::SMALL_THUMBNAIL_HOST_BYTES_BOUND,
+                mux_output_host_bytes_bound:
+                    super::super::pipeline::SMALL_MUX_OUTPUT_HOST_BYTES_BOUND,
+                aac_mux_staging_host_bytes:
+                    super::super::pipeline::SMALL_AAC_MUX_STAGING_HOST_BYTES,
             },
             evidence_artifacts: vec![
                 H3PrivateRuntimeEvidenceArtifact {
@@ -4542,7 +4566,10 @@ mod tests {
         )
         .unwrap();
         authority.revalidate().unwrap();
-        assert_eq!(authority.bounds().aac_mux_staging_host_bytes, 13);
+        assert_eq!(
+            authority.bounds().aac_mux_staging_host_bytes,
+            super::super::pipeline::SMALL_AAC_MUX_STAGING_HOST_BYTES
+        );
     }
 
     #[test]

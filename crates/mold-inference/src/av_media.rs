@@ -24,7 +24,78 @@ use mp4_rs::{
     Mp4Reader, Mp4Sample, Mp4Writer, SampleFreqIndex, TrackConfig, TrackType,
 };
 #[cfg(feature = "mp4")]
-use std::io::Cursor;
+use std::io::{Cursor, Seek, SeekFrom};
+
+#[cfg(feature = "mp4")]
+struct BoundedCursor {
+    inner: Cursor<Vec<u8>>,
+    max_bytes: usize,
+}
+
+#[cfg(feature = "mp4")]
+impl BoundedCursor {
+    fn new(max_bytes: usize) -> Result<Self> {
+        if max_bytes == 0 {
+            bail!("bounded MP4 output requires a nonzero limit")
+        }
+        let bytes = if max_bytes == usize::MAX {
+            Vec::new()
+        } else {
+            Vec::with_capacity(max_bytes)
+        };
+        anyhow::ensure!(
+            max_bytes == usize::MAX || bytes.capacity() == max_bytes,
+            "bounded MP4 allocator did not honor the exact capacity"
+        );
+        Ok(Self {
+            inner: Cursor::new(bytes),
+            max_bytes,
+        })
+    }
+
+    fn into_inner(self) -> Result<Vec<u8>> {
+        let bytes = self.inner.into_inner();
+        anyhow::ensure!(
+            bytes.len() <= self.max_bytes
+                && (self.max_bytes == usize::MAX || bytes.capacity() == self.max_bytes),
+            "bounded MP4 output violated its allocation limit"
+        );
+        Ok(bytes)
+    }
+}
+
+#[cfg(feature = "mp4")]
+impl Write for BoundedCursor {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let end = usize::try_from(self.inner.position())
+            .ok()
+            .and_then(|position| position.checked_add(bytes.len()))
+            .ok_or_else(|| std::io::Error::other("bounded MP4 output size overflow"))?;
+        if end > self.max_bytes {
+            return Err(std::io::Error::other(
+                "bounded MP4 output exceeds its limit",
+            ));
+        }
+        self.inner.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+#[cfg(feature = "mp4")]
+impl Seek for BoundedCursor {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        let previous = self.inner.position();
+        let next = self.inner.seek(position)?;
+        if next > self.max_bytes as u64 {
+            self.inner.set_position(previous);
+            return Err(std::io::Error::other("bounded MP4 seek exceeds its limit"));
+        }
+        Ok(next)
+    }
+}
 
 /// How decoded PCM is conformed before AAC encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +116,12 @@ pub enum AudioTimelinePolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AacMuxOptions {
     pub timeline: AudioTimelinePolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AvMuxLimits {
+    pub output_bytes: usize,
+    pub aac_staging_bytes: usize,
 }
 
 impl AacMuxOptions {
@@ -197,6 +274,49 @@ pub fn mux_aac_track_to_mp4_bytes(
     options: AacMuxOptions,
     cancelled: &(dyn Fn(AvMuxPhase) -> bool + Send + Sync),
 ) -> Result<MuxedMp4> {
+    mux_aac_track_to_mp4_bytes_with_limit(
+        video_only_mp4,
+        samples,
+        sample_rate,
+        channels,
+        options,
+        cancelled,
+        None,
+    )
+}
+
+/// Encode AAC and mux while rejecting every container write beyond `max_output_bytes`.
+#[cfg(feature = "mp4")]
+pub fn mux_aac_track_to_mp4_bytes_bounded(
+    video_only_mp4: &[u8],
+    samples: &[f32],
+    sample_rate: u32,
+    channels: u16,
+    options: AacMuxOptions,
+    limits: AvMuxLimits,
+    cancelled: &(dyn Fn(AvMuxPhase) -> bool + Send + Sync),
+) -> Result<MuxedMp4> {
+    mux_aac_track_to_mp4_bytes_with_limit(
+        video_only_mp4,
+        samples,
+        sample_rate,
+        channels,
+        options,
+        cancelled,
+        Some(limits),
+    )
+}
+
+#[cfg(feature = "mp4")]
+fn mux_aac_track_to_mp4_bytes_with_limit(
+    video_only_mp4: &[u8],
+    samples: &[f32],
+    sample_rate: u32,
+    channels: u16,
+    options: AacMuxOptions,
+    cancelled: &(dyn Fn(AvMuxPhase) -> bool + Send + Sync),
+    limits: Option<AvMuxLimits>,
+) -> Result<MuxedMp4> {
     check_cancelled(cancelled, AvMuxPhase::Validate)?;
     validate_pcm(samples, sample_rate, channels)?;
     let mut reader =
@@ -238,6 +358,14 @@ pub fn mux_aac_track_to_mp4_bytes(
         "encoding synchronized AAC track"
     );
 
+    let aligned_pcm_bytes = usize::try_from(output_samples_per_channel)
+        .ok()
+        .and_then(|samples| samples.checked_mul(usize::from(channels)))
+        .and_then(|samples| samples.checked_mul(std::mem::size_of::<i16>()))
+        .context("aligned AAC PCM byte count overflowed")?;
+    if limits.is_some_and(|limits| aligned_pcm_bytes > limits.aac_staging_bytes) {
+        bail!("aligned AAC PCM exceeds its staging byte limit")
+    }
     let pcm = aligned_pcm_i16(samples, channels, output_samples_per_channel)?;
     let bitrate = recommended_aac_bitrate(sample_rate, channels);
     let encoder = FdkEncoder::new(FdkEncoderParams {
@@ -258,7 +386,8 @@ pub fn mux_aac_track_to_mp4_bytes(
         );
     }
 
-    let mut writer = Mp4Writer::write_start(Cursor::new(Vec::new()), &mp4_config()?)
+    let output_limit = limits.map_or(usize::MAX, |limits| limits.output_bytes);
+    let mut writer = Mp4Writer::write_start(BoundedCursor::new(output_limit)?, &mp4_config()?)
         .context("failed to start MP4 writer for A/V mux")?;
     writer
         .add_track(&video_track_config(&video))
@@ -312,6 +441,12 @@ pub fn mux_aac_track_to_mp4_bytes(
     .try_fold(0usize, |total, bytes| total.checked_add(bytes))
     .and_then(|bytes| u64::try_from(bytes).ok())
     .context("AAC staging byte count overflowed")?;
+    if limits.is_some_and(|limits| {
+        report.peak_aac_staging_host_bytes
+            > u64::try_from(limits.aac_staging_bytes).unwrap_or(u64::MAX)
+    }) {
+        bail!("AAC encode exceeds its staging byte limit")
+    }
     let mut start_time = 0u64;
     let mut remaining = output_samples_per_channel;
     let mut offset = 0usize;
@@ -364,7 +499,7 @@ pub fn mux_aac_track_to_mp4_bytes(
     writer
         .write_end()
         .context("failed to finalize AAC MP4 output")?;
-    let bytes = writer.into_writer().into_inner();
+    let bytes = writer.into_writer().into_inner()?;
     tracing::debug!(
         audio_samples_per_channel = start_time,
         output_bytes = bytes.len(),
@@ -722,6 +857,64 @@ mod tests {
                 video_track_signature(&muxed.bytes),
                 video_track_signature(&video)
             );
+        }
+
+        #[test]
+        fn bounded_mux_rejects_container_growth_before_publication() {
+            let video = sample_video(4, 24);
+            let samples = stereo_pcm(4_000, 32_000);
+            let exact = mux_aac_track_to_mp4_bytes(
+                &video,
+                &samples,
+                32_000,
+                2,
+                AacMuxOptions::match_video(),
+                &|_| false,
+            )
+            .unwrap()
+            .bytes;
+            assert!(mux_aac_track_to_mp4_bytes_bounded(
+                &video,
+                &samples,
+                32_000,
+                2,
+                AacMuxOptions::match_video(),
+                AvMuxLimits {
+                    output_bytes: exact.len() - 1,
+                    aac_staging_bytes: usize::MAX,
+                },
+                &|_| false,
+            )
+            .is_err());
+            assert!(mux_aac_track_to_mp4_bytes_bounded(
+                &video,
+                &samples,
+                32_000,
+                2,
+                AacMuxOptions::match_video(),
+                AvMuxLimits {
+                    output_bytes: exact.len(),
+                    aac_staging_bytes: 1,
+                },
+                &|_| false,
+            )
+            .is_err());
+            let bounded = mux_aac_track_to_mp4_bytes_bounded(
+                &video,
+                &samples,
+                32_000,
+                2,
+                AacMuxOptions::match_video(),
+                AvMuxLimits {
+                    output_bytes: exact.len(),
+                    aac_staging_bytes: usize::MAX,
+                },
+                &|_| false,
+            )
+            .unwrap()
+            .bytes;
+            assert_eq!(bounded.capacity(), exact.len());
+            assert_eq!(bounded, exact);
         }
 
         #[test]

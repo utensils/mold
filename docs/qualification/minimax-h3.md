@@ -315,6 +315,16 @@ its proposed bound:
   workspaces;
 - encoded-video, thumbnail, mux-output, and AAC-staging host bounds.
 
+For the first smaller-route record, the four media bounds are not derived from
+one scene's compressed sizes. Production enforces a 256 MiB video-only MP4
+limit before final container allocation, a 4 MiB bounded PNG writer, an 8 MiB
+AAC staging limit that includes the caller-owned interleaved F32 samples, and a
+512 MiB bounded final MP4 writer. The reviewed record must carry the exact
+conservative admission charges: 1 GiB for simultaneous H.264 sample/container
+staging, 8 MiB for the retained first RGB frame plus PNG output/scratch, 8 MiB
+for waveform/AAC staging, and 512 MiB for final mux output. Smaller observed
+capacities remain evidence, but they cannot reduce these enforced bounds.
+
 The evidence root and every directory below that root must be mode `0700`; the
 capture and evidence files must be mode `0600`, process-owned, regular,
 non-symlink files outside the checkout. Ancestors above the private root are not
