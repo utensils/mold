@@ -311,8 +311,8 @@ require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
   'scheduler_ledger_identity_sha256: ledger.identity_sha256().into(),' \
   "private H3 FL2VA overlap does not retain the issuing scheduler ledger identity"
 require_text crates/mold-inference/src/minimax_h3/private_server.rs \
-  'const REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256: &[&str] = &[];' \
-  "private H3 runtime qualification does not fail closed before reviewed CUDA evidence"
+  '4257780531215ac670cc8a10ee6ad4cd4c89e4a8f41be80130e0f22cc801086c' \
+  "private H3 runtime qualification omits the independently reviewed compact FL2VA candidate"
 require_text crates/mold-inference/src/minimax_h3/private_server.rs \
   'pub const fn reviewed_h3_private_runtime_available() -> bool {' \
   "private H3 ingress has no zero-I/O reviewed-runtime availability probe"
