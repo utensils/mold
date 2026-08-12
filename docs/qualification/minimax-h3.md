@@ -313,6 +313,20 @@ stdout. It never edits the source allowlist, constructs the runtime, or
 activates a public capability. Published-binary verification rejects its
 dedicated claim marker as well as the underlying private artifact reader.
 
+An API-key-authenticated private server may expose that exact reviewed
+partition through the additive `GET /api/capabilities` field
+`minimax_h3`. Emission additionally requires the configured authorization
+wrapper, authorization source document, and exact allowlisted runtime record to
+pass the inference-owned no-follow, bounded-read, ownership, permission, hash,
+schema, scope, source/runtime-identity, and live CUDA route checks. The response
+contains only the FL2VA compact partition, CUDA/attention/quantization
+presentation facts, and five manifest-derived component groups; it contains no
+paths, hashes, credentials, prompts, media, or download recipe. The component
+states are informational. Generation still opens and authenticates all artifact
+bytes before admission. The family-wide model-access restriction remains for
+legacy clients; H3-aware clients may override it only with this exact additive
+FL2VA partition. Ordinary builds omit the field, while Ref2VA remains absent.
+
 The next capture manifest must use
 [`mold.minimax-h3.private-runtime-bound-capture.v5`](./minimax-h3-private-runtime-capture.schema.json).
 It binds the exact 40-character Mold source SHA, the stable runtime-code

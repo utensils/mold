@@ -253,6 +253,219 @@ fn reviewed_h3_private_runtime_available(_task: mold_core::minimax_h3::Task) -> 
     false
 }
 
+/// Build the presentation-only capability for the one reviewed private task.
+///
+/// This deliberately performs no artifact hashing and grants no runtime
+/// authority. Generation admission separately authenticates the authorization
+/// record, qualification record, and every model component. Omission is the
+/// safe response when API-key authentication or either external authority file
+/// is unavailable.
+#[cfg_attr(all(test, not(feature = "h3-private-uat")), allow(dead_code))]
+pub(crate) fn advertised_h3_private_capability(
+    api_key_auth_enabled: bool,
+    models_root: &std::path::Path,
+    device_state: &mold_core::DeviceState,
+) -> Option<mold_core::MiniMaxH3Capability> {
+    #[cfg(feature = "h3-private-uat")]
+    {
+        if !api_key_auth_enabled {
+            return None;
+        }
+        let paths = H3PrivateUatPathSet::resolve(models_root.to_path_buf());
+        let routes = device_state
+            .devices
+            .iter()
+            .filter(|device| {
+                device.backend == mold_core::GpuBackend::Cuda
+                    && device.schedulable
+                    && device.ordinal.is_some()
+                    && device.compute_capability.is_some()
+            })
+            .filter_map(|device| {
+                let (major, minor) = device.compute_capability.as_deref()?.split_once('.')?;
+                Some(mold_inference::H3PrivatePresentationRoute {
+                    device_id: &device.id,
+                    device_ordinal: device.ordinal?,
+                    compute_capability: (major.parse().ok()?, minor.parse().ok()?),
+                })
+            })
+            .collect::<Vec<_>>();
+        let authority = mold_inference::authenticate_h3_private_presentation(
+            models_root,
+            &paths.authorization_record,
+            &paths.runtime_qualification_record,
+            &routes,
+        )
+        .ok()?;
+        if authority.task() != mold_core::minimax_h3::Task::Fl2va
+            || authority.canonical_model() != mold_core::minimax_h3::FL2VA_COMFY
+        {
+            return None;
+        }
+        return build_fl2va_capability(models_root);
+    }
+    #[cfg(not(feature = "h3-private-uat"))]
+    {
+        let _ = (api_key_auth_enabled, models_root, device_state);
+        None
+    }
+}
+
+#[cfg(any(test, feature = "h3-private-uat"))]
+fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::MiniMaxH3Capability> {
+    use mold_core::manifest::{find_manifest, storage_path, ModelComponent};
+
+    #[derive(Clone, Copy)]
+    enum Group {
+        Transformer,
+        Qwen,
+        Processor,
+        VideoVae,
+        AudioVae,
+    }
+
+    fn group(component: ModelComponent, filename: &str) -> Group {
+        match component {
+            ModelComponent::Transformer
+            | ModelComponent::TransformerShard
+            | ModelComponent::TaskConfig => Group::Transformer,
+            ModelComponent::TextEncoder | ModelComponent::TextTokenizer => Group::Qwen,
+            ModelComponent::Vae => Group::VideoVae,
+            ModelComponent::AudioVae => Group::AudioVae,
+            ModelComponent::ModelConfig if filename.starts_with("text_encoder/") => Group::Qwen,
+            ModelComponent::ModelConfig if filename.starts_with("vae/") => Group::VideoVae,
+            ModelComponent::ModelConfig if filename.starts_with("audio_vae/") => Group::AudioVae,
+            ModelComponent::Processor
+            | ModelComponent::VideoScheduler
+            | ModelComponent::AudioScheduler
+            | ModelComponent::ModelConfig => Group::Processor,
+            _ => Group::Processor,
+        }
+    }
+
+    struct ComponentAccumulator {
+        id: &'static str,
+        display_name: &'static str,
+        kind: &'static str,
+        role: &'static str,
+        scope: &'static str,
+        size_bytes: u64,
+        installed: bool,
+    }
+
+    let manifest = find_manifest(mold_core::minimax_h3::FL2VA_COMFY)?;
+    let mut components = [
+        ComponentAccumulator {
+            id: "minimax-h3-fl2va-transformer",
+            display_name: "FL2VA pruned INT8 transformer",
+            kind: "checkpoint",
+            role: "transformer",
+            scope: "fl2va",
+            size_bytes: 0,
+            installed: true,
+        },
+        ComponentAccumulator {
+            id: "minimax-h3-shared-qwen",
+            display_name: "Qwen3-VL NVFP4-AWQ conditioner",
+            kind: "text-encoder",
+            role: "qwen",
+            scope: "shared",
+            size_bytes: 0,
+            installed: true,
+        },
+        ComponentAccumulator {
+            id: "minimax-h3-shared-processor",
+            display_name: "MiniMax H3 processor and schedules",
+            kind: "tokenizer",
+            role: "processor",
+            scope: "shared",
+            size_bytes: 0,
+            installed: true,
+        },
+        ComponentAccumulator {
+            id: "minimax-h3-shared-video-vae",
+            display_name: "MiniMax H3 FP16 video VAE",
+            kind: "vae",
+            role: "video-vae",
+            scope: "shared",
+            size_bytes: 0,
+            installed: true,
+        },
+        ComponentAccumulator {
+            id: "minimax-h3-shared-audio-vae",
+            display_name: "MiniMax H3 FP32 stereo AudioVAE",
+            kind: "vae",
+            role: "audio-vae",
+            scope: "shared",
+            size_bytes: 0,
+            installed: true,
+        },
+    ];
+    for file in &manifest.files {
+        let index = match group(file.component, &file.hf_filename) {
+            Group::Transformer => 0,
+            Group::Qwen => 1,
+            Group::Processor => 2,
+            Group::VideoVae => 3,
+            Group::AudioVae => 4,
+        };
+        components[index].size_bytes = components[index].size_bytes.checked_add(file.size_bytes)?;
+        let path = models_root.join(storage_path(manifest, file));
+        components[index].installed &= path.symlink_metadata().is_ok_and(|metadata| {
+            metadata.file_type().is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.len() == file.size_bytes
+        });
+    }
+    if components.iter().any(|component| component.size_bytes == 0) {
+        return None;
+    }
+
+    let component_ids = components
+        .iter()
+        .map(|component| component.id.to_string())
+        .collect();
+    Some(mold_core::MiniMaxH3Capability {
+        runtime_available: true,
+        qualification: mold_core::MiniMaxH3QualificationCapability {
+            backend: "cuda".into(),
+            metal_supported: false,
+            minimum_host_ram_bytes: crate::h3_admission::H3_CURATED_HOST_RAM_RECOMMENDATION_BYTES,
+            // The reviewed 38.7 GB peak is advertised as a conservative 40 GiB
+            // hardware tier rather than as false byte-level precision.
+            minimum_vram_bytes: 40 * 1024 * 1024 * 1024,
+            attention_profile: "FlashAttention v2 BF16, SM80-compatible (qualified on CUDA SM89)"
+                .into(),
+            quantization_profile: "Comfy pruned INT8-convrot + Qwen NVFP4-AWQ".into(),
+        },
+        partitions: vec![mold_core::MiniMaxH3PartitionCapability {
+            task: "fl2va".into(),
+            model: mold_core::minimax_h3::FL2VA_COMFY.into(),
+            display_name: "MiniMax H3 FL2VA".into(),
+            runtime_available: true,
+            tier: "Compact 40 GiB VRAM".into(),
+            component_ids,
+        }],
+        components: components
+            .into_iter()
+            .map(|component| mold_core::MiniMaxH3ComponentCapability {
+                id: component.id.into(),
+                display_name: component.display_name.into(),
+                kind: component.kind.into(),
+                role: component.role.into(),
+                scope: component.scope.into(),
+                size_bytes: component.size_bytes,
+                state: if component.installed {
+                    "installed"
+                } else {
+                    "missing"
+                }
+                .into(),
+            })
+            .collect(),
+    })
+}
+
 #[cfg(any(test, feature = "h3-private-uat"))]
 fn ingress_digest(domain: &[u8], values: &[&[u8]]) -> String {
     use sha2::{Digest, Sha256};
@@ -992,6 +1205,84 @@ fn validate_private_h3_live_owner_route(
 
 #[cfg(all(test, feature = "h3-private-uat"))]
 mod tests {
+    use std::fs::{self, OpenOptions};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn private_file(path: &std::path::Path, bytes: u64) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        file.set_len(bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    fn capability_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models");
+        let manifest =
+            mold_core::manifest::find_manifest(mold_core::minimax_h3::FL2VA_COMFY).unwrap();
+        for file in &manifest.files {
+            private_file(
+                &models.join(mold_core::manifest::storage_path(manifest, file)),
+                file.size_bytes,
+            );
+        }
+        (root, models)
+    }
+
+    #[test]
+    fn authenticated_capability_advertises_only_the_reviewed_fl2va_partition() {
+        let (_root, models) = capability_fixture();
+        let capability = super::build_fl2va_capability(&models)
+            .expect("complete manifest projection must advertise");
+
+        assert!(capability.runtime_available);
+        assert_eq!(capability.qualification.backend, "cuda");
+        assert!(!capability.qualification.metal_supported);
+        assert_eq!(capability.partitions.len(), 1);
+        assert_eq!(capability.partitions[0].task, "fl2va");
+        assert_eq!(
+            capability.partitions[0].model,
+            mold_core::minimax_h3::FL2VA_COMFY
+        );
+        assert_eq!(capability.components.len(), 5);
+        assert!(capability
+            .components
+            .iter()
+            .all(|component| component.state == "installed"));
+        assert_eq!(
+            capability.partitions[0].component_ids.len(),
+            capability.components.len()
+        );
+    }
+
+    #[test]
+    fn capability_reports_missing_components_without_inventing_download_authority() {
+        let (_root, models) = capability_fixture();
+        let manifest =
+            mold_core::manifest::find_manifest(mold_core::minimax_h3::FL2VA_COMFY).unwrap();
+        let transformer = manifest
+            .files
+            .iter()
+            .find(|file| file.component == mold_core::manifest::ModelComponent::Transformer)
+            .unwrap();
+        fs::remove_file(models.join(mold_core::manifest::storage_path(manifest, transformer)))
+            .unwrap();
+        let capability = super::build_fl2va_capability(&models).unwrap();
+        assert_eq!(
+            capability
+                .components
+                .iter()
+                .find(|component| component.role == "transformer")
+                .unwrap()
+                .state,
+            "missing"
+        );
+    }
+
     #[test]
     fn missing_reviewed_runtime_qualification_stays_a_typed_fail_closed_rejection() {
         assert_eq!(
@@ -1006,8 +1297,48 @@ mod tests {
 #[cfg(test)]
 mod structural_tests {
     use super::BoxedH3PreparedAttempt;
+    use std::fs::{self, OpenOptions};
+    use std::os::unix::fs::PermissionsExt;
 
     const INSTANCE_ID: &str = "test-server-instance";
+
+    #[test]
+    fn private_capability_is_auth_bound_fl2va_only_and_manifest_derived() {
+        fn sparse_file(path: &std::path::Path, bytes: u64) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(path)
+                .unwrap();
+            file.set_len(bytes).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models");
+        let manifest =
+            mold_core::manifest::find_manifest(mold_core::minimax_h3::FL2VA_COMFY).unwrap();
+        for file in &manifest.files {
+            sparse_file(
+                &models.join(mold_core::manifest::storage_path(manifest, file)),
+                file.size_bytes,
+            );
+        }
+        let capability = super::build_fl2va_capability(&models).unwrap();
+        assert_eq!(capability.partitions.len(), 1);
+        assert_eq!(capability.partitions[0].task, "fl2va");
+        assert_eq!(
+            capability.partitions[0].model,
+            mold_core::minimax_h3::FL2VA_COMFY
+        );
+        assert_eq!(capability.components.len(), 5);
+        assert!(capability
+            .components
+            .iter()
+            .all(|component| component.state == "installed"));
+        assert!(!capability.qualification.metal_supported);
+    }
 
     fn request(model: &str) -> mold_core::GenerateRequest {
         serde_json::from_value(serde_json::json!({

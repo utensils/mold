@@ -139,12 +139,26 @@ struct ProtectedPath {
 }
 
 #[derive(Debug)]
-struct ValidatedPrivateScope {
+pub(crate) struct ValidatedPrivateScope {
     models_root: PathBuf,
     authorization_record_sha256: String,
     authorization_source_document_sha256: String,
     authorization_review_reference: String,
     protected_paths: Vec<ProtectedPath>,
+}
+
+impl ValidatedPrivateScope {
+    pub(crate) fn authorization_record_sha256(&self) -> &str {
+        &self.authorization_record_sha256
+    }
+
+    pub(crate) fn authorization_source_document_sha256(&self) -> &str {
+        &self.authorization_source_document_sha256
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        revalidate_private_scope(self)
+    }
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -364,6 +378,59 @@ fn validate_private_scope(
         authorization_record,
         REVIEWED_AUTHORIZATION_EVIDENCE_SHA256,
     )
+}
+
+/// Authenticate the small authorization boundary used for capability
+/// presentation without opening any model artifact. The runtime record is
+/// required to be a direct, owner-only sibling of the authorization wrapper
+/// and its independently hashed source document.
+pub(crate) fn validate_private_presentation_scope(
+    models_root: &Path,
+    authorization_record: &Path,
+    runtime_qualification_record: &Path,
+) -> Result<ValidatedPrivateScope> {
+    validate_private_presentation_scope_against_evidence(
+        models_root,
+        authorization_record,
+        runtime_qualification_record,
+        REVIEWED_AUTHORIZATION_EVIDENCE_SHA256,
+    )
+}
+
+pub(crate) fn validate_private_presentation_scope_against_evidence(
+    models_root: &Path,
+    authorization_record: &Path,
+    runtime_qualification_record: &Path,
+    reviewed_evidence_sha256: &str,
+) -> Result<ValidatedPrivateScope> {
+    let mut scope = validate_private_scope_against_evidence(
+        models_root,
+        authorization_record,
+        reviewed_evidence_sha256,
+    )?;
+    let authorization_record =
+        canonical_absolute_path(authorization_record, "private H3 authorization record")?;
+    let runtime_qualification_record = canonical_absolute_path(
+        runtime_qualification_record,
+        "private H3 runtime qualification record",
+    )?;
+    if runtime_qualification_record == authorization_record
+        || runtime_qualification_record.parent() != authorization_record.parent()
+    {
+        bail!(
+            "private H3 runtime qualification record must be a distinct direct child of campaign compliance"
+        )
+    }
+    let owner = scope
+        .protected_paths
+        .first()
+        .ok_or_else(|| anyhow!("private H3 campaign scope has no owner authority"))?
+        .owner();
+    scope
+        .protected_paths
+        .push(require_private_file(&runtime_qualification_record, owner)?);
+    scope.revalidate()?;
+    Ok(scope)
 }
 
 fn validate_private_scope_against_evidence(

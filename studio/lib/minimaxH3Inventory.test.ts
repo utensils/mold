@@ -266,7 +266,7 @@ describe("MiniMax H3 inventory presentation", () => {
     expect(plan?.bytesToDownload).toBe(70 * GB);
   });
 
-  it("fails closed for access denial, disabled runtime, Metal, and malformed graphs", () => {
+  it("lets the exact private partition override legacy family denial but rejects invalid authority", () => {
     const denied = host();
     denied.capabilities = {
       ...denied.capabilities,
@@ -282,7 +282,11 @@ describe("MiniMax H3 inventory presentation", () => {
         ],
       },
     };
-    expect(presentMiniMaxH3Host(denied)).toBeNull();
+    const exactPrivate = presentMiniMaxH3Host(denied);
+    expect(exactPrivate?.tasks.map((task) => task.task)).toEqual([
+      "fl2va",
+      "ref2va",
+    ]);
 
     const disabled = h3Capability();
     disabled.runtime_available = false;
