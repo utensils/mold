@@ -47,6 +47,9 @@ export interface SequenceStage {
 export interface SequenceLimits {
   maxStages: number;
   maxTotalFrames: number;
+  maxFramesPerClip?: number;
+  frameStep?: number;
+  frameOffset?: number;
   motionTailFrames: number;
   /**
    * Whether a clip may be left undescribed — `promptOptional` from
@@ -181,6 +184,25 @@ export function sequenceValidation(
   if (stages.length > limits.maxStages) {
     return [`Reduce the sequence to ${limits.maxStages} clips or fewer.`];
   }
+  if (limits.maxFramesPerClip != null) {
+    const cap = limits.maxFramesPerClip;
+    const oversized = stages.findIndex((stage) => stage.frames > cap);
+    if (oversized >= 0) {
+      return [`Reduce clip ${oversized + 1} to ${cap} frames or fewer.`];
+    }
+  }
+  if (limits.frameStep != null) {
+    const step = limits.frameStep;
+    const offset = limits.frameOffset ?? 1;
+    const offGrid = stages.findIndex(
+      (stage) => stage.frames % step !== offset % step,
+    );
+    if (offGrid >= 0) {
+      return [
+        `Change clip ${offGrid + 1} to the ${step}k+${offset} frame grid.`,
+      ];
+    }
+  }
   const total = sequenceDuration(stages, 1, limits.motionTailFrames).frames;
   if (total > limits.maxTotalFrames) {
     return [
@@ -237,21 +259,25 @@ export function defaultVideoFps(
  * active GPU — which is exactly why default/recommended win over cap.
  */
 export function defaultClipFrames(
-  model: { default_frames?: number | null } | null | undefined,
+  model:
+    | { default_frames?: number | null; family?: string | null }
+    | null
+    | undefined,
   limits:
     | { frames_per_clip_cap: number; frames_per_clip_recommended: number }
     | null
     | undefined,
   motionTailFrames: number,
 ): number {
+  const step = sequenceFrameStep(model?.family);
   const cap = limits?.frames_per_clip_cap ?? Number.MAX_SAFE_INTEGER;
   const preferred =
     model?.default_frames ??
     limits?.frames_per_clip_recommended ??
     DEFAULT_SEQUENCE_CLIP_FRAMES;
   let frames = Math.min(preferred, cap);
-  if (frames > 1) frames -= (frames - 1) % 8;
-  while (frames <= motionTailFrames) frames += 8;
-  return Math.max(frames, 9);
+  if (frames > 1) frames -= (frames - 1) % step;
+  while (frames <= motionTailFrames) frames += step;
+  return Math.max(frames, step + 1);
 }
 import { describeTransportError } from "./errors";

@@ -25,6 +25,7 @@ import {
   formatFrameDuration,
   sequenceDuration,
   sequenceFrameOptions,
+  sequenceFrameStep,
   sequenceMotionTailFrames,
   sequenceValidation,
   transitionLabel,
@@ -122,20 +123,34 @@ const motionTail = computed(() =>
 );
 const defaultFrames = computed(() =>
   defaultClipFrames(
-    { default_frames: props.modelDefaultFrames },
+    { default_frames: props.modelDefaultFrames, family: props.family },
     limits.value,
     motionTail.value,
   ),
 );
 
+let limitsFetch = 0;
 async function loadLimits() {
+  const version = ++limitsFetch;
   limitsLoaded.value = false;
-  limits.value = await fetchChainLimits(props.model, props.target).catch(
-    () => null,
-  );
+  const next = await fetchChainLimits(
+    props.model,
+    props.target,
+    props.shared.fps,
+  ).catch(() => null);
+  if (version !== limitsFetch) return;
+  limits.value = next;
   limitsLoaded.value = true;
   // A non-AV model must not carry a stale audio request onto the wire.
   if (!limits.value?.supports_audio) draft.enableAudio = false;
+  if (!draft.editing && limits.value) {
+    const frames = defaultClipFrames(
+      { default_frames: props.modelDefaultFrames, family: props.family },
+      limits.value,
+      motionTail.value,
+    );
+    draft.adoptSequenceModel(props.model, frames);
+  }
 }
 
 onMounted(() => {
@@ -145,8 +160,18 @@ onMounted(() => {
 });
 
 watch(
-  () => [props.model, props.family, props.target?.baseUrl],
-  () => void loadLimits(),
+  () =>
+    [
+      props.model,
+      props.family,
+      props.target?.baseUrl,
+      props.shared.fps,
+    ] as const,
+  (next, previous) => {
+    const modelChanged = next[0] !== previous?.[0];
+    if (modelChanged && draft.editing) draft.stopEditing();
+    void loadLimits();
+  },
 );
 
 // ── Active clip ───────────────────────────────────────────────────────
@@ -217,6 +242,11 @@ const validationErrors = computed(() =>
   sequenceValidation(stages.value, {
     maxStages: maxStages.value,
     maxTotalFrames: limits.value?.max_total_frames ?? 1552,
+    ...(limits.value
+      ? { maxFramesPerClip: limits.value.frames_per_clip_cap }
+      : {}),
+    frameStep: sequenceFrameStep(props.family),
+    frameOffset: 1,
     motionTailFrames: motionTail.value,
     // The opening image conditions clip 1, and every later clip inherits the
     // previous clip's motion tail — the same handoff extend uses — so a

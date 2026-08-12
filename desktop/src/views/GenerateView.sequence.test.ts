@@ -420,6 +420,41 @@ describe("GenerateView — sequence output", () => {
     expect(wrapper.find("sequence-composer-stub").exists()).toBe(false);
   });
 
+  it("detaches an amend session before switching its model authority", async () => {
+    readyLocal();
+    const wanModel = {
+      ...videoModel,
+      name: "wan22-i2v-a14b:q5",
+      family: "wan",
+      default_frames: 53,
+    } as ModelEntry;
+    installedPayload = [videoModel, wanModel];
+    useModelStore().all = [videoModel, wanModel];
+    const formStore = useGenerateFormStore();
+    formStore.form.model = videoModel.name;
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    draft.ensureClips(97);
+    draft.loadFromJob(
+      {
+        jobId: "job-model-a",
+        hostId: "local",
+        baseline: draft.clips.map((clip) => ({ ...clip })),
+        completedStages: 0,
+      },
+      draft.clips.map((clip) => ({ ...clip })),
+      false,
+    );
+
+    mountView();
+    await flushPromises();
+    formStore.form.model = wanModel.name;
+    await flushPromises();
+
+    expect(draft.editing).toBeNull();
+  });
+
   it("amends with an explicit enable_audio boolean so edits can turn audio off", async () => {
     // null means "keep current" server-side — sending it when the draft's
     // audio is off would make disabling audio via edit-in-place impossible.

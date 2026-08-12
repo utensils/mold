@@ -12,6 +12,7 @@ import {
   maxPixelsForModel,
   megapixelLabel,
   presetsForFamily,
+  presetsForAspectGroup,
   presetsForModel,
 } from "./resolutions";
 
@@ -117,6 +118,110 @@ describe("shared resolution contract", () => {
       width: 1216,
       height: 704,
     });
+  });
+
+  it("selects an exact profile aspect group without nearby-ratio leakage", () => {
+    const model = {
+      family: "ltx2",
+      generation_profile: {
+        schema_version: 1 as const,
+        profile_id: "ltx2.fixture",
+        profile_hash: "hash",
+        default_recipe_id: "auto",
+        recipes: [
+          {
+            id: "auto",
+            label: "Auto",
+            request_selector: { pipeline: null },
+            defaults: { width: 1216, height: 704, steps: 8, guidance: 3 },
+            resolution: {
+              domain: "dynamic" as const,
+              alignment: 64,
+              min_width: 64,
+              min_height: 64,
+              max_pixels: 8_912_896,
+              max_axis_pixels: 4096,
+              min_aspect_ratio: null,
+              max_aspect_ratio: null,
+              aspect_groups: [
+                {
+                  id: "16:9",
+                  label: "16:9",
+                  presets: [
+                    {
+                      id: "1024x576",
+                      width: 1024,
+                      height: 576,
+                      tier: "recommended",
+                    },
+                  ],
+                },
+                {
+                  id: "19:11",
+                  label: "19:11",
+                  presets: [
+                    {
+                      id: "1216x704",
+                      width: 1216,
+                      height: 704,
+                      tier: "recommended",
+                    },
+                  ],
+                },
+              ],
+            },
+            steps: {
+              default: 8,
+              min: 1,
+              max: 50,
+              step: 1,
+              mode: "adjustable" as const,
+            },
+            guidance: {
+              default: 3,
+              min: 0,
+              max: 10,
+              step: 0.1,
+              mode: "adjustable" as const,
+            },
+            temporal: null,
+            capabilities: {
+              guidance: { adjustable: true, supports_negative_prompt: true },
+              negative_prompt: {
+                mode: "adjustable" as const,
+                required: false,
+              },
+              supports_lora: false,
+              supports_controlnet: false,
+              supports_sequence: true,
+              supports_extend: false,
+              supports_audio: false,
+              source_video: { mode: "hidden" as const, required: false },
+              mask: { mode: "hidden" as const, required: false },
+              keyframes: { mode: "hidden" as const, required: false },
+              audio: { mode: "hidden" as const, required: false },
+              lora: { mode: "hidden" as const, max_count: 0 },
+              controlnet: { mode: "hidden" as const, max_count: 0 },
+              output: {
+                default_format: "mp4" as const,
+                formats: ["mp4" as const],
+                audio_requires_mp4: false,
+              },
+              wan_recipe: {
+                mode: "hidden" as const,
+                supports_distill_strength: false,
+                supports_first_last_frame: false,
+              },
+              schedulers: [],
+            },
+            provenance: [],
+          },
+        ],
+      },
+    };
+    expect(presetsForAspectGroup(model, null, "16:9")).toEqual([
+      expect.objectContaining({ width: 1024, height: 576, aspect: "16:9" }),
+    ]);
   });
 
   it("offers upstream's 1080p pair and a 9:16 portrait for ltx2 only", () => {

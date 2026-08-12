@@ -270,6 +270,14 @@ describe("sequence authoring", () => {
     expect(defaultClipFrames({ default_frames: 500 }, limits, 17)).toBe(97);
     // Never at or below the motion tail — raised to the first valid option.
     expect(defaultClipFrames({ default_frames: 9 }, limits, 17)).toBe(25);
+    // Wan owns a different 4k+1 grid; its shipped 53-frame default stays 53.
+    expect(
+      defaultClipFrames(
+        { default_frames: 53, family: "wan" },
+        { frames_per_clip_cap: 257, frames_per_clip_recommended: 53 },
+        1,
+      ),
+    ).toBe(53);
   });
 
   it("defaults fps from the model, then the current value, then the fallback", () => {
@@ -284,6 +292,42 @@ describe("sequence authoring", () => {
     // Nothing at all → the 24-fps fallback.
     expect(defaultVideoFps(null)).toBe(DEFAULT_VIDEO_FPS);
     expect(defaultVideoFps({ default_fps: null }, null)).toBe(24);
+  });
+
+  it("rejects a stale clip above the selected model and fps cap", () => {
+    expect(
+      sequenceValidation(
+        [
+          { prompt: "opening", frames: 481, transition: "smooth" },
+          { prompt: "ending", frames: 97, transition: "smooth" },
+        ],
+        {
+          maxStages: 16,
+          maxTotalFrames: 241 * 16,
+          maxFramesPerClip: 241,
+          motionTailFrames: 17,
+        },
+      ),
+    ).toEqual(["Reduce clip 1 to 241 frames or fewer."]);
+  });
+
+  it("rejects a stale clip from another family's temporal grid", () => {
+    expect(
+      sequenceValidation(
+        [
+          { prompt: "opening", frames: 53, transition: "smooth" },
+          { prompt: "ending", frames: 97, transition: "smooth" },
+        ],
+        {
+          maxStages: 16,
+          maxTotalFrames: 481 * 16,
+          maxFramesPerClip: 481,
+          frameStep: 8,
+          frameOffset: 1,
+          motionTailFrames: 17,
+        },
+      ),
+    ).toEqual(["Change clip 1 to the 8k+1 frame grid."]);
   });
 
   it("formats frame durations consistently across sequence surfaces", () => {

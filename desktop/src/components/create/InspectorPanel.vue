@@ -44,6 +44,7 @@ import {
   aspectIdFor,
   closestResolutionPreset,
   megapixelLabel,
+  presetsForAspectGroup,
   presetsForModel,
   presetsNearRatio,
 } from "../../lib/resolutions";
@@ -380,12 +381,15 @@ const shapeId = computed(() =>
         : aspectIdFor(props.form.width, props.form.height)) ?? ""),
 );
 const resolutionRatio = computed(() => props.form.width / props.form.height);
-const resolutionPresets = computed(() =>
-  presetsNearRatio(
-    presetsForModel(selectedModel.value ?? props.form.family, props.form.pipeline),
-    resolutionRatio.value,
-  ),
-);
+const resolutionPresets = computed(() => {
+  const exactGroup = presetsForAspectGroup(selectedModel.value, props.form.pipeline, shapeId.value);
+  return exactGroup.length > 0
+    ? exactGroup
+    : presetsNearRatio(
+        presetsForModel(selectedModel.value ?? props.form.family, props.form.pipeline),
+        resolutionRatio.value,
+      );
+});
 const resolutionOptions = computed(() => {
   const presets = resolutionPresets.value.map((preset, index, all) => ({
     mp: (preset.width * preset.height) / 1_000_000,
@@ -448,11 +452,14 @@ function onShape(id: string) {
   }
   const aspect = shapeOptions.value.find((option) => option.id === id);
   if (!aspect) return;
+  const exactGroup = presetsForAspectGroup(selectedModel.value, props.form.pipeline, id);
   const preset = closestResolutionPreset(
-    presetsNearRatio(
-      presetsForModel(selectedModel.value ?? props.form.family, props.form.pipeline),
-      aspect.ratio,
-    ),
+    exactGroup.length > 0
+      ? exactGroup
+      : presetsNearRatio(
+          presetsForModel(selectedModel.value ?? props.form.family, props.form.pipeline),
+          aspect.ratio,
+        ),
     props.form.width,
     props.form.height,
   );

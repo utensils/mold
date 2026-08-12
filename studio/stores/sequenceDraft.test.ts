@@ -348,6 +348,51 @@ describe("sequence draft store", () => {
     expect(store.output).toBe("sequence");
   });
 
+  it("resets only model-owned clip lengths when the selected model changes", () => {
+    const store = freshStore();
+    store.hydrate();
+    store.ensureClips(97);
+    store.clips[0]!.prompt = "opening";
+    store.clips[1]!.prompt = "ending";
+    store.clips[1]!.transition = "cut";
+
+    store.resetClipFrames(53);
+
+    expect(store.clips.map((clip) => clip.frames)).toEqual([53, 53]);
+    expect(store.clips.map((clip) => clip.prompt)).toEqual([
+      "opening",
+      "ending",
+    ]);
+    expect(store.clips[1]!.transition).toBe("cut");
+  });
+
+  it("persists the model that owns clip lengths and resets only on a change", () => {
+    const store = freshStore();
+    store.hydrate();
+    store.ensureClips(53);
+
+    expect(store.adoptSequenceModel("wan22-i2v-a14b:q5", 53)).toBe(true);
+    store.clips[0]!.frames = 57;
+    expect(store.adoptSequenceModel("wan22-i2v-a14b:q5", 53)).toBe(false);
+    expect(store.clips[0]!.frames).toBe(57);
+    expect(store.adoptSequenceModel("ltx-2.3-22b-dev:fp8", 97)).toBe(true);
+    expect(store.clips.map((clip) => clip.frames)).toEqual([97, 97]);
+  });
+
+  it("binds deliberately imported timings without resetting them", () => {
+    const store = freshStore();
+    store.hydrate();
+    store.ensureClips(97);
+    store.clips[0]!.frames = 481;
+
+    store.bindSequenceModel("ltx-2.3-22b-dev:fp8");
+
+    expect(store.sequenceModel).toBe("ltx-2.3-22b-dev:fp8");
+    expect(store.clips[0]!.frames).toBe(481);
+    expect(store.adoptSequenceModel("ltx-2.3-22b-dev:fp8", 97)).toBe(false);
+    expect(store.clips[0]!.frames).toBe(481);
+  });
+
   it("tracks an edit session without persisting it", () => {
     const store = freshStore();
     store.hydrate();
