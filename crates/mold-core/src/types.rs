@@ -1279,8 +1279,9 @@ pub struct GenerateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extend_video_path: Option<String>,
     /// Pixel frames of the source tail re-encoded as motion conditioning for
-    /// the continuation. Must be `8k+1` (the LTX-2 VAE's causal temporal grid)
-    /// and strictly less than `frames`. `None` uses the chain default.
+    /// the continuation. Must land on the family's own temporal grid — `8k+1`
+    /// for LTX-2's causal VAE, `4k+1` for wan — and be strictly less than
+    /// `frames`. `None` resolves to that family's carryover default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extend_overlap_frames: Option<u32>,
     /// Optional keyframe conditioning images for LTX-2 keyframe interpolation.
@@ -1363,10 +1364,23 @@ impl GenerateRequest {
     }
 
     /// Pixel-frame overlap the continuation conditions on, defaulting to the
-    /// chain motion tail so extend and sequence seams behave identically.
-    pub fn effective_extend_overlap_frames(&self) -> u32 {
+    /// family's own chain motion tail so extend and sequence seams behave
+    /// identically — 17 latent-carryover frames on LTX-2, the one seeded frame
+    /// on wan.
+    pub fn effective_extend_overlap_frames_for_family(&self, family: Option<&str>) -> u32 {
         self.extend_overlap_frames
-            .unwrap_or(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES)
+            .unwrap_or_else(|| crate::validation::default_extend_overlap_frames_for_family(family))
+    }
+
+    /// [`Self::effective_extend_overlap_frames_for_family`] for callers that
+    /// hold no family hint, resolving it from the request's own model through
+    /// the manifest. An unclassifiable model (an installed `cv:` / `hf:` id)
+    /// falls back to `DEFAULT_EXTEND_OVERLAP_FRAMES`, so a caller that knows
+    /// the resolved family — admission and every engine — should pass it.
+    pub fn effective_extend_overlap_frames(&self) -> u32 {
+        self.effective_extend_overlap_frames_for_family(
+            crate::manifest::find_manifest(&self.model).map(|manifest| manifest.family.as_str()),
+        )
     }
 
     /// Net-new pixel frames an extend request appends to its source: the

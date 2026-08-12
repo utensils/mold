@@ -494,6 +494,151 @@ fn run_qwen_image_edit_rejects_batch_before_remote_generation() {
         ));
 }
 
+/// `mold run <wan I2V checkpoint> --extend clip.mp4` must reach dispatch.
+///
+/// An extend carries its source frames in the clip it continues, and
+/// `validate_extend` forbids pairing `--extend` with an image or keyframes —
+/// so a preflight that counted only those saw every continuation as
+/// source-less and refused it with "this Wan I2V checkpoint needs a source
+/// image", the exact contract that makes the checkpoint extend-capable
+/// (#783). This drives the real binary, so restoring the inline `has_source`
+/// expression at the call site fails it.
+#[test]
+fn run_extend_satisfies_a_wan_i2v_checkpoints_source_contract() {
+    let env = TestEnv::new();
+    let clip = env.home.join("clip.mp4");
+    std::fs::write(&clip, b"\0\0\0\x20ftypisom").unwrap();
+
+    // The run still fails — nothing is downloaded and the fake host is
+    // unreachable — but it must not fail *on the contract*.
+    env.cmd()
+        .args([
+            "run",
+            "wan22-i2v-a14b:q8",
+            "a cat keeps walking",
+            "--extend",
+        ])
+        .arg(&clip)
+        .args(["--local", "--frames", "49", "--output", "out.mp4"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs a source image").not());
+
+    // The same checkpoint with no source at all is still refused, so the
+    // assertion above is not vacuous.
+    env.cmd()
+        .args([
+            "run",
+            "wan22-i2v-a14b:q8",
+            "a cat keeps walking",
+            "--local",
+            "--frames",
+            "49",
+            "--output",
+            "out.mp4",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs a source image"));
+}
+
+/// A continuation aimed at a family with no continuation path is refused for
+/// *that*, not for source frames it never supplied (#783).
+#[test]
+fn run_extend_on_a_family_without_a_continuation_path_names_extend() {
+    let env = TestEnv::new();
+    let clip = env.home.join("clip.mp4");
+    std::fs::write(&clip, b"\0\0\0\x20ftypisom").unwrap();
+
+    env.cmd()
+        .args([
+            "run",
+            "ltx-video-0.9.8-13b-distilled:bf16",
+            "a cat keeps walking",
+            "--extend",
+        ])
+        .arg(&clip)
+        .args(["--local", "--output", "out.mp4"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--extend is only supported for LTX-2 / LTX-2.3 and Wan models",
+        ))
+        .stderr(predicate::str::contains("source image").not());
+}
+
+/// The overlap the CLI *sends* is the family's, not LTX-2's (#783).
+///
+/// `mold run` materializes `extend_overlap_frames` into the request it builds,
+/// so a wan continuation that named no overlap carries 1 — the frame the
+/// continuation is seeded with — rather than inheriting a family-blind 17 that
+/// clears wan's `4k+1` grid check and then fails inside the engine, after the
+/// expert load has been paid for. The recorded value is also what saved
+/// provenance reports, and an installed `cv:` / `hf:` wan checkpoint has no
+/// manifest for metadata to resolve a family from later.
+///
+/// This drives the real binary against a mock host, so deleting the
+/// materialization call in `commands::generate::run` fails it.
+#[tokio::test]
+async fn run_extend_sends_the_familys_own_carryover_overlap() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let clip = env.home.join("clip.mp4");
+    std::fs::write(&clip, b"\0\0\0\x20ftypisom").unwrap();
+
+    let server = MockServer::start().await;
+    // Refuse the render outright: this test is about the request the CLI
+    // composes, and a 422 is a hard error, so nothing falls back to local
+    // inference or tries to pull a checkpoint.
+    Mock::given(method("POST"))
+        .and(path("/api/generate/stream"))
+        .respond_with(
+            ResponseTemplate::new(422).set_body_json(serde_json::json!({"error": "mock refusal"})),
+        )
+        .mount(&server)
+        .await;
+
+    let overlap_of = |model: &str| {
+        env.cmd()
+            .args(["run", model, "a cat keeps walking", "--extend"])
+            .arg(&clip)
+            .args([
+                "--host",
+                &server.uri(),
+                "--frames",
+                "49",
+                "--output",
+                "out.mp4",
+            ])
+            .assert()
+            .failure();
+    };
+
+    overlap_of("wan22-i2v-a14b:q8");
+    overlap_of("ltx-2-19b-dev:fp8");
+
+    let sent: Vec<serde_json::Value> = server
+        .received_requests()
+        .await
+        .expect("the mock server records requests")
+        .iter()
+        .map(|request| serde_json::from_slice(&request.body).expect("the CLI posts JSON"))
+        .collect();
+    assert_eq!(sent.len(), 2, "one generate request per run");
+    assert_eq!(
+        sent[0]["extend_overlap_frames"],
+        serde_json::json!(mold_core::validation::WAN_HANDOFF_DUPLICATED_FRAMES),
+        "wan's continuation carries its own one-frame carryover"
+    );
+    assert_eq!(
+        sent[1]["extend_overlap_frames"],
+        serde_json::json!(mold_core::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
+        "the same seam resolves LTX-2's 17 from the resolved family"
+    );
+}
+
 // ── mold pull (error paths) ───────────────────────────────────────────────
 
 #[test]

@@ -283,7 +283,10 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
                 // fast tier's four-step distill pair rides on.
                 lora: true,
                 generated_audio: false,
-                chain: false,
+                // `WanEngine` implements `ChainStageRenderer` and
+                // `chain::capability_for_family("wan")` answers — the static
+                // table said otherwise and contradicted its own runtime (#783).
+                chain: true,
             },
         ),
     ];
@@ -296,6 +299,63 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
         assert_eq!(capability.block_offload, block_offload, "{family} offload");
         assert_eq!(capability.media, media, "{family} media");
         assert_eq!(capability.workflows, workflows, "{family} workflows");
+    }
+}
+
+/// The static table is a pre-load *description* of the runtime, so its `chain`
+/// flag has exactly one authority: whether `chain::capability_for_family`
+/// answers for that family. Wan's entry said `false` while its engine
+/// implemented `ChainStageRenderer` and the chain registry routed to it (#783);
+/// pinning the two together is what keeps the table from drifting again.
+#[test]
+fn static_chain_capability_agrees_with_the_chain_registry() {
+    for capability in production_family_capabilities() {
+        assert_eq!(
+            capability.workflows.chain,
+            mold_inference::chain::capability_for_family(capability.family).is_some(),
+            "{} chain",
+            capability.family
+        );
+    }
+}
+
+/// The checked-in qualification matrix is a *description* of the registry, so
+/// its columns are pinned to it rather than reviewed by eye. Wan's row claimed
+/// no block offload while `batch.rs` declared `block_offload: true` for the
+/// partial-park path the A14B pair depends on (#783).
+#[test]
+fn the_qualification_matrix_block_offload_column_matches_the_registry() {
+    let matrix = include_str!("../../../docs/qualification/multi-gpu-family-matrix.md");
+    // `| family | aliases | backends | cpu placement | block offload | …`
+    const BLOCK_OFFLOAD_COLUMN: usize = 4;
+
+    for capability in production_family_capabilities() {
+        let row = matrix
+            .lines()
+            .find(|line| {
+                line.trim_start()
+                    .starts_with(&format!("| `{}` |", capability.family))
+            })
+            .unwrap_or_else(|| panic!("qualification matrix has no row for {}", capability.family));
+        let cells: Vec<&str> = row
+            .trim()
+            .trim_matches('|')
+            .split('|')
+            .map(str::trim)
+            .collect();
+        let declared = match cells[BLOCK_OFFLOAD_COLUMN] {
+            "yes" => true,
+            "no" => false,
+            other => panic!(
+                "{} block-offload cell is neither yes nor no: {other:?}",
+                capability.family
+            ),
+        };
+        assert_eq!(
+            declared, capability.block_offload,
+            "{} block offload: matrix says {declared}, registry says {}",
+            capability.family, capability.block_offload
+        );
     }
 }
 

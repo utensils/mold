@@ -50,13 +50,20 @@ noise transferred to the execution device.
 | `qwen-image-edit` | — | supported / supported / supported | none | yes | native CUDA | `[1]` / cooperative | image; ordered edit references, LoRA |
 | `ltx-video` | `ltx_video` | supported / supported / supported | none | no | no | `[1]` / cooperative | video; independent-clip chains; no source/audio/LoRA |
 | `ltx2` | `ltx-2`, `ltx2.3` | supported / correctness-only / correctness-only | Gemma text encoder | yes | native temporal chunks | `[1]` / cooperative | video; source/keyframes/retake/LoRA/chain; generated audio is checkpoint-specific |
-| `wan` | — | supported / unsupported / correctness-only | UMT5 text encoder | no | no | `[1]` / cooperative | video; text-to-video and single-image conditioning, no chain/audio/LoRA yet |
+| `wan` | — | supported / unsupported / correctness-only | UMT5 text encoder | yes | no | `[1]` / cooperative | video; source, LoRA, chain and extend — both per checkpoint, since only an image-conditioned one carries context across a seam or accepts a continuation; no generated audio |
 | `wuerstchen` | `wuerstchen-v2` | supported / supported / supported | none | no | no | `[1]` / cooperative | image; source and inpaint; no LoRA |
 
 The registry intentionally does not claim generic tiled VAE for Z-Image.
 Qwen-Image has a separate CUDA tiler, and LTX-2 uses native temporal/framewise
 video-decode chunks. The shared tiling policy is wired through FLUX, Flux.2,
 SD1.5, SDXL, and SD3.
+
+Wan's `Block offload` is the partial-park path — trailing blocks of a quantized
+checkpoint park in host RAM and return for the duration of their own forward —
+not the stream-everything FLUX mode; a render that fits parks nothing. Its
+`chain` and `extend` claims are engine-contract claims, pinned to the registry
+by `family_capability_contract.rs`; no hardware campaign covers either path
+yet, so they carry the same Tier-1 caveat as the rest of the wan row.
 
 ## Tier-1 owner and runnable reference
 

@@ -844,7 +844,7 @@ impl Ltx2Engine {
         let native_output = work_dir.path().join("ltx2-native-output.mp4");
         let (source_frames, probe) = Self::load_extend_source(req, work_dir.path())?;
 
-        let overlap = req.effective_extend_overlap_frames();
+        let overlap = req.effective_extend_overlap_frames_for_family(Some("ltx2"));
         if (source_frames.len() as u32) < overlap {
             bail!(
                 "the video to extend has {} frames but the requested overlap is {overlap}; \

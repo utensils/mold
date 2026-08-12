@@ -442,7 +442,13 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
             edit_references: false,
             lora: true,
             generated_audio: false,
-            chain: false,
+            // `WanEngine` implements `ChainStageRenderer` and
+            // `chain::capability_for_family("wan")` answers, so the family
+            // renders sequence clips. What varies by checkpoint is only the
+            // carryover across the seam — `wan_carryover` reads that from the
+            // `source_image` contract, and a text-to-video checkpoint still
+            // chains, as independent clips (#783).
+            chain: true,
         },
         tier1: TIER1,
         tier2: deep(

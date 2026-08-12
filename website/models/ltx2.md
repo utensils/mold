@@ -661,10 +661,10 @@ the length of the _rendered continuation_, and its leading `--extend-overlap`
 frames re-render the source tail as motion context — those are dropped from the
 result, so the run appends `frames - overlap` new frames.
 
-| Flag                 | Default | Description                                                                              |
-| -------------------- | ------- | ---------------------------------------------------------------------------------------- |
-| `--extend PATH`      | —       | Video to continue. LTX-2 only.                                                           |
-| `--extend-overlap N` | `17`    | Pixel frames of the source tail used as motion context. Must be `8k+1` and `< --frames`. |
+| Flag                 | Default | Description                                                                                                                                                                                        |
+| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--extend PATH`      | —       | Video to continue. On LTX-2 every checkpoint continues; [Wan](./wan.md#extending-a-clip) continues from an image-conditioned checkpoint. No other family has a continuation path.                  |
+| `--extend-overlap N` | `17`    | Pixel frames of the source tail used as motion context. On LTX-2, must be `8k+1` and `< --frames`. The default is per family — see [Wan](./wan.md#extending-a-clip), whose carryover is one frame. |
 
 Constraints, all enforced before any GPU work:
 

@@ -745,12 +745,23 @@ fn installed_catalog_models(
                 &sidecar.family,
                 &primary_path,
             ),
-            // Continuation reuses the chain motion-tail handoff, which the
-            // whole ltx2 family implements — unlike audio, it does not depend
-            // on optional checkpoint assets.
-            supports_extend: Some(sidecar.family == "ltx2"),
+            // One authority, `mold_core::catalog::extend_capable_model`: the
+            // whole ltx2 family continues through its latent motion tail,
+            // while wan continues only from a checkpoint that conditions on
+            // an image. The contract is unknown until the annotate pass below
+            // reads the headers, and re-deriving it there from this same
+            // helper is what keeps `supports_extend` from restating a family
+            // literal that contradicts its own overlap default (#783).
+            supports_extend: Some(mold_core::catalog::extend_capable_model(
+                &sidecar.family,
+                None,
+            )),
+            // Per family: the overlap a continuation defaults to is its
+            // carryover, and wan's is the one frame it was seeded with (#783).
             extend_default_overlap_frames: Some(
-                mold_core::validation::DEFAULT_EXTEND_OVERLAP_FRAMES,
+                mold_core::validation::default_extend_overlap_frames_for_family(Some(
+                    &sidecar.family,
+                )),
             ),
             // Per-model, not per-family, because this is where a future
             // pipeline that cannot chain would have to be caught.
@@ -2031,6 +2042,67 @@ mod tests {
             companions: Vec::new(),
             bundling: mold_catalog::entry::Bundling::SingleFile,
         }
+    }
+
+    /// `/api/models` must advertise extend for the wan checkpoints that can
+    /// actually do it (#783).
+    ///
+    /// `supports_extend` is seeded family-blind for a locally installed entry
+    /// because mold-core cannot read checkpoint headers, and the annotate
+    /// pass — the same one that resolves the `source_image` contract — is
+    /// what settles it through `catalog::extend_capable_model`. Dropping that
+    /// re-derivation leaves every installed wan checkpoint advertising
+    /// `false` while its paired `extend_default_overlap_frames` already says
+    /// `wan`, which is the contradiction this exists to prevent.
+    #[test]
+    fn the_annotate_pass_settles_extend_support_from_the_resolved_wan_contract() {
+        use mold_core::types::SourceImageCapability;
+
+        let mut models = std::collections::HashMap::new();
+        models.insert(
+            "local-wan".to_string(),
+            mold_core::config::ModelConfig {
+                family: Some("wan".to_string()),
+                ..mold_core::config::ModelConfig::default()
+            },
+        );
+        let config = Config {
+            models,
+            ..Config::default()
+        };
+        let entry_for = |contract: Option<SourceImageCapability>| {
+            let mut catalog = mold_core::catalog::build_model_catalog(&config, None, false);
+            let index = catalog
+                .iter()
+                .position(|entry| entry.info.name == "local-wan")
+                .expect("config-only wan entry");
+            // Stand in for the header probe: `ModelPaths` cannot resolve a
+            // real checkpoint in a unit test, and the pass keeps whatever
+            // contract is already resolved when the probe finds nothing.
+            catalog[index].source_image = contract;
+            annotate_source_image_capabilities(&mut catalog, &config);
+            catalog.remove(index)
+        };
+
+        assert_eq!(
+            entry_for(Some(SourceImageCapability::Required)).supports_extend,
+            Some(true),
+            "an I2V checkpoint continues from the source's final frame"
+        );
+        assert_eq!(
+            entry_for(Some(SourceImageCapability::Optional)).supports_extend,
+            Some(true)
+        );
+        assert_eq!(
+            entry_for(Some(SourceImageCapability::Unsupported)).supports_extend,
+            Some(false),
+            "a text-to-video checkpoint has no channel to accept the carryover frame"
+        );
+        assert_eq!(
+            entry_for(None).supports_extend,
+            Some(false),
+            "an unclassified checkpoint never advertises a continuation"
+        );
     }
 
     #[test]
