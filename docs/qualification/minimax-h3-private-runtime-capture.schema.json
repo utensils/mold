@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://utensils.io/mold/schemas/minimax-h3-private-runtime-bound-capture-v3.json",
+  "$id": "https://utensils.io/mold/schemas/minimax-h3-private-runtime-bound-capture-v4.json",
   "title": "Mold private MiniMax H3 runtime-bound capture",
   "type": "object",
   "additionalProperties": false,
@@ -22,6 +22,7 @@
     "attention_runtime_identity_sha256",
     "attention_kernel_identity",
     "attention_qualification_sha256",
+    "process",
     "runtime_observation_artifact",
     "envelope",
     "bounds",
@@ -29,7 +30,7 @@
   ],
   "properties": {
     "schema": {
-      "const": "mold.minimax-h3.private-runtime-bound-capture.v3"
+      "const": "mold.minimax-h3.private-runtime-bound-capture.v4"
     },
     "canonical_model": {
       "const": "minimax-h3-fl2va:comfy-pruned-int8"
@@ -63,6 +64,7 @@
       "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
     },
     "attention_qualification_sha256": { "$ref": "#/$defs/sha256" },
+    "process": { "$ref": "#/$defs/process" },
     "runtime_observation_artifact": { "$ref": "#/$defs/relativePath" },
     "envelope": {
       "type": "object",
@@ -143,6 +145,36 @@
     }
   },
   "$defs": {
+    "process": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "process_id",
+        "process_start_time_ticks",
+        "linux_boot_id_sha256",
+        "executable_device",
+        "executable_inode",
+        "executable_bytes",
+        "executable_sha256",
+        "launch_argv_sha256",
+        "launch_environment_sha256",
+        "cuda_driver_version",
+        "cuda_toolkit_version"
+      ],
+      "properties": {
+        "process_id": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "process_start_time_ticks": { "type": "integer", "minimum": 1 },
+        "linux_boot_id_sha256": { "$ref": "#/$defs/sha256" },
+        "executable_device": { "type": "integer", "minimum": 1 },
+        "executable_inode": { "type": "integer", "minimum": 1 },
+        "executable_bytes": { "type": "integer", "minimum": 1 },
+        "executable_sha256": { "$ref": "#/$defs/sha256" },
+        "launch_argv_sha256": { "$ref": "#/$defs/sha256" },
+        "launch_environment_sha256": { "$ref": "#/$defs/sha256" },
+        "cuda_driver_version": { "type": "integer", "minimum": 1 },
+        "cuda_toolkit_version": { "type": "integer", "minimum": 1 }
+      }
+    },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "positiveRows": { "type": "integer", "minimum": 1 },
     "relativePath": {

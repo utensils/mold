@@ -15,6 +15,7 @@ private_runtime_observation_markers=(
   'mold.minimax-h3.private-uat-runtime-bound-observation.v1'
   'mold.minimax-h3.private-uat-runtime-bound-observation.v2'
   'mold.minimax-h3.private-uat-runtime-bound-observation.v3'
+  'mold.minimax-h3.private-uat-runtime-bound-observation.v4'
 )
 private_qwen_capture_marker='mold.minimax-h3.private-uat-exact-bf16-qwen-layer50-capture.v1'
 private_visual_vae_capture_marker='mold.minimax-h3.private-uat-visual-vae-f32-fp16-capture.v1'

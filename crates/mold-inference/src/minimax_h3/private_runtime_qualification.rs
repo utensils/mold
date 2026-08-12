@@ -23,7 +23,8 @@ use super::private_qualification::{
 #[cfg(test)]
 use super::private_runtime_observer::H3PrivateRuntimeAuthorityObservation;
 use super::private_runtime_observer::{
-    H3PrivateRuntimeBoundObservation, H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA,
+    H3PrivateRuntimeBoundObservation, H3PrivateRuntimeProcessObservation,
+    H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA,
 };
 use super::private_server::{
     runtime_qualification_identity, valid_stable_cuda_device_id,
@@ -36,7 +37,7 @@ use super::private_server::{
 pub const H3_PRIVATE_RUNTIME_RECORD_PRODUCER_MARKER: &str =
     "mold.minimax-h3.private-runtime-record-producer.v1";
 
-const CAPTURE_SCHEMA: &str = "mold.minimax-h3.private-runtime-bound-capture.v3";
+const CAPTURE_SCHEMA: &str = "mold.minimax-h3.private-runtime-bound-capture.v4";
 const MAX_CAPTURE_BYTES: u64 = 128 * 1024;
 const MAX_RUNTIME_OBSERVATION_BYTES: u64 = 128 * 1024;
 const MAX_EVIDENCE_ARTIFACTS: usize = 128;
@@ -239,6 +240,7 @@ fn validate_observed_authority(
         || authority.attention_runtime_identity_sha256 != capture.attention_runtime_identity_sha256
         || authority.attention_kernel_identity != capture.attention_kernel_identity
         || authority.attention_qualification_sha256 != capture.attention_qualification_sha256
+        || authority.process != capture.process
     {
         bail!("private H3 runtime authority differs from its structured observation")
     }
@@ -265,6 +267,7 @@ struct H3PrivateRuntimeBoundCaptureManifest {
     attention_runtime_identity_sha256: String,
     attention_kernel_identity: String,
     attention_qualification_sha256: String,
+    process: H3PrivateRuntimeProcessObservation,
     runtime_observation_artifact: String,
     envelope: H3PrivateRuntimeEnvelopeRecord,
     bounds: H3PrivateRuntimeBoundCaptureSet,
@@ -314,6 +317,7 @@ impl H3PrivateRuntimeBoundCaptureManifest {
         {
             bail!("private H3 runtime capture has invalid CUDA attention authority")
         }
+        validate_process_observation(&self.process)?;
         self.envelope.validate()?;
         validate_relative_path(
             &self.runtime_observation_artifact,
@@ -503,6 +507,11 @@ fn build_candidate(
         .iter()
         .find(|artifact| artifact.relative_path == capture.measured_server_executable)
         .ok_or_else(|| anyhow!("private H3 runtime candidate lost its measured executable"))?;
+    if capture.process.executable_sha256 != measured_server_executable.sha256
+        || capture.process.executable_bytes != measured_server_executable.bytes
+    {
+        bail!("private H3 process attestation differs from the retained server executable")
+    }
 
     let mut record = H3PrivateRuntimeQualificationRecord {
         schema: RUNTIME_QUALIFICATION_SCHEMA.into(),
@@ -527,6 +536,7 @@ fn build_candidate(
         attention_runtime_identity_sha256: capture.attention_runtime_identity_sha256,
         attention_kernel_identity: capture.attention_kernel_identity,
         attention_qualification_sha256: capture.attention_qualification_sha256,
+        campaign_process: capture.process,
         envelope: capture.envelope,
         bounds,
         evidence_artifacts,
@@ -880,6 +890,28 @@ fn valid_lower_sha256(value: &str) -> bool {
     valid_lower_hex(value, 64)
 }
 
+fn validate_process_observation(process: &H3PrivateRuntimeProcessObservation) -> Result<()> {
+    if process.process_id == 0
+        || process.process_start_time_ticks == 0
+        || process.executable_device == 0
+        || process.executable_inode == 0
+        || process.executable_bytes == 0
+        || process.cuda_driver_version == 0
+        || process.cuda_toolkit_version == 0
+        || [
+            process.linux_boot_id_sha256.as_str(),
+            process.executable_sha256.as_str(),
+            process.launch_argv_sha256.as_str(),
+            process.launch_environment_sha256.as_str(),
+        ]
+        .into_iter()
+        .any(|value| !valid_lower_sha256(value))
+    {
+        bail!("private H3 process attestation is incomplete")
+    }
+    Ok(())
+}
+
 fn valid_lower_hex(value: &str, length: usize) -> bool {
     value.len() == length
         && value
@@ -973,6 +1005,22 @@ mod tests {
         }
     }
 
+    fn process() -> H3PrivateRuntimeProcessObservation {
+        H3PrivateRuntimeProcessObservation {
+            process_id: 42,
+            process_start_time_ticks: 99,
+            linux_boot_id_sha256: sha('1'),
+            executable_device: 7,
+            executable_inode: 8,
+            executable_bytes: 1,
+            executable_sha256: sha('4'),
+            launch_argv_sha256: sha('2'),
+            launch_environment_sha256: sha('3'),
+            cuda_driver_version: 12_080,
+            cuda_toolkit_version: 12_080,
+        }
+    }
+
     fn capture(path: &str) -> H3PrivateRuntimeBoundCaptureManifest {
         H3PrivateRuntimeBoundCaptureManifest {
             schema: CAPTURE_SCHEMA.into(),
@@ -992,6 +1040,7 @@ mod tests {
             attention_runtime_identity_sha256: sha('d'),
             attention_kernel_identity: "h3-flash-attention-sm89".into(),
             attention_qualification_sha256: sha('e'),
+            process: process(),
             runtime_observation_artifact: path.into(),
             envelope: envelope(),
             bounds: H3PrivateRuntimeBoundCaptureSet {
@@ -1047,6 +1096,7 @@ mod tests {
                     .clone(),
                 attention_kernel_identity: capture.attention_kernel_identity.clone(),
                 attention_qualification_sha256: capture.attention_qualification_sha256.clone(),
+                process: capture.process.clone(),
             },
             envelope: super::super::private_runtime_observer::H3PrivateRuntimeEnvelopeObservation {
                 width: capture.envelope.width,
@@ -1177,9 +1227,42 @@ mod tests {
         let mut changed = observation.clone();
         changed.authority.device_ordinal += 1;
         assert!(validate_observed_authority(&capture, &changed).is_err());
-        let mut changed = observation;
+        let mut changed = observation.clone();
         changed.authority.compute_capability[0] += 1;
         assert!(validate_observed_authority(&capture, &changed).is_err());
+
+        macro_rules! reject_process_number_change {
+            ($field:ident) => {{
+                let mut changed = observation.clone();
+                changed.authority.process.$field += 1;
+                assert!(validate_observed_authority(&capture, &changed).is_err());
+            }};
+        }
+        reject_process_number_change!(process_id);
+        reject_process_number_change!(process_start_time_ticks);
+        reject_process_number_change!(executable_device);
+        reject_process_number_change!(executable_inode);
+        reject_process_number_change!(executable_bytes);
+        reject_process_number_change!(cuda_driver_version);
+        reject_process_number_change!(cuda_toolkit_version);
+        for field in [
+            "linux_boot_id_sha256",
+            "executable_sha256",
+            "launch_argv_sha256",
+            "launch_environment_sha256",
+        ] {
+            let mut changed = observation.clone();
+            match field {
+                "linux_boot_id_sha256" => changed.authority.process.linux_boot_id_sha256 = sha('0'),
+                "executable_sha256" => changed.authority.process.executable_sha256 = sha('0'),
+                "launch_argv_sha256" => changed.authority.process.launch_argv_sha256 = sha('0'),
+                "launch_environment_sha256" => {
+                    changed.authority.process.launch_environment_sha256 = sha('0')
+                }
+                _ => unreachable!(),
+            }
+            assert!(validate_observed_authority(&capture, &changed).is_err());
+        }
     }
 
     #[cfg(unix)]
@@ -1203,7 +1286,9 @@ mod tests {
         fs::create_dir(&logs).unwrap();
         fs::set_permissions(&logs, fs::Permissions::from_mode(0o700)).unwrap();
         let evidence = logs.join("runtime-observation.json");
-        let capture = capture("logs/runtime-observation.json");
+        let mut capture = capture("logs/runtime-observation.json");
+        capture.process.executable_bytes = executable_bytes.len() as u64;
+        capture.process.executable_sha256 = format!("{:x}", Sha256::digest(executable_bytes));
         fs::write(
             &evidence,
             serde_json::to_vec_pretty(&observation(&capture)).unwrap(),
@@ -1412,6 +1497,45 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("does not embed"), "{error:#}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_rejects_coordinated_process_and_manifest_executable_substitution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, capture_path, observation_path, _) = private_fixture();
+        let mut manifest: H3PrivateRuntimeBoundCaptureManifest =
+            serde_json::from_slice(&fs::read(&capture_path).unwrap()).unwrap();
+        manifest.process.executable_sha256 = sha('0');
+        let mut observed = observation(&manifest);
+        observed.authority.process.executable_sha256 = sha('0');
+        fs::write(
+            &observation_path,
+            serde_json::to_vec_pretty(&observed).unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(&observation_path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&capture_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        fs::set_permissions(&capture_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let capture_relative = relative_evidence_path(root.path(), &capture_path).unwrap();
+        let capture_artifact =
+            hash_evidence_artifact(root.path(), &capture_relative, Some(MAX_CAPTURE_BYTES))
+                .unwrap();
+        let error = build_candidate(
+            &artifact_report(),
+            root.path(),
+            capture_relative,
+            capture_artifact,
+            manifest,
+            &source_sha(),
+            &runtime_code_identity(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("retained server executable"),
+            "{error:#}"
+        );
     }
 
     #[cfg(unix)]
