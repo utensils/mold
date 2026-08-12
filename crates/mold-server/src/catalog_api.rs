@@ -819,7 +819,7 @@ pub async fn live_search_catalog(
     };
     if let Some(family) = family {
         if let Err(error) =
-            mold_core::require_model_activation(family.as_str(), Some(family.as_str()))
+            mold_core::require_model_acquisition(family.as_str(), Some(family.as_str()))
         {
             return model_activation_response(error);
         }
@@ -829,7 +829,7 @@ pub async fn live_search_catalog(
             .map(str::trim)
             .filter(|query| !query.is_empty())
     {
-        if let Err(error) = mold_core::require_model_activation(query, None) {
+        if let Err(error) = mold_core::require_model_acquisition(query, None) {
             return model_activation_response(error);
         }
     }

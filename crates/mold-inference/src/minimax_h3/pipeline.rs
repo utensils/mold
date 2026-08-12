@@ -2045,7 +2045,7 @@ mod tests {
 
     #[test]
     fn exact_geometry_covers_short_and_nominal_fifteen_second_boundaries() {
-        for (frames, video_latents, audio_latents) in [(124, 37, 207), (362, 107, 603)] {
+        for (frames, video_latents, audio_latents) in [(124, 37, 207), (345, 102, 575)] {
             let mut req = request();
             req.frames = Some(frames);
             let prepared = prepared(&req);

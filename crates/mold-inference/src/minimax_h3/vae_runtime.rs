@@ -239,8 +239,8 @@ pub(crate) struct FrozenH3ComfyVaeLoadPlan {
 }
 
 impl FrozenH3ComfyVaeLoadPlan {
-    /// Resolve the exact private VAE component paths from Mold's hidden,
-    /// source-pinned manifest and canonical storage authority. No caller-
+    /// Resolve the exact private VAE component paths from Mold's source-pinned
+    /// compact manifest and canonical storage authority. No caller-
     /// mutable `ModelPaths` value participates in this plan.
     pub(crate) fn from_hidden_storage(
         model: &str,
@@ -252,9 +252,18 @@ impl FrozenH3ComfyVaeLoadPlan {
         let manifest = find_manifest(model).ok_or_else(|| {
             H3ComfyVaeLoadError::InvalidPlan(format!("missing manifest {model:?}"))
         })?;
-        if !manifest.hidden {
+        let manifest_authority = contract::manifest_contract(manifest).ok_or_else(|| {
+            H3ComfyVaeLoadError::InvalidPlan("MiniMax H3 manifest has no frozen contract".into())
+        })?;
+        if !matches!(model, contract::FL2VA_COMFY | contract::REF2VA_COMFY)
+            || manifest.name != model
+            || manifest.family != contract::FAMILY
+            || manifest_authority.layout != contract::Layout::ComfyPrunedInt8ConvrotNvfp4Awq
+            || manifest_authority.runtime_available
+        {
             return Err(H3ComfyVaeLoadError::InvalidPlan(
-                "private H3 VAE storage resolution requires a hidden manifest".into(),
+                "private H3 VAE storage resolution requires an exact inactive compact manifest"
+                    .into(),
             ));
         }
         let path_for = |role: H3ComfyVaeArtifactRole| -> LoadResult<PathBuf> {
@@ -268,7 +277,7 @@ impl FrozenH3ComfyVaeLoadPlan {
                 .collect::<Vec<_>>();
             let [file] = matches.as_slice() else {
                 return Err(H3ComfyVaeLoadError::InvalidPlan(format!(
-                    "hidden manifest {model:?} requires exactly one {expected_path}"
+                    "compact manifest {model:?} requires exactly one {expected_path}"
                 )));
             };
             let relative = storage_path(manifest, file);
@@ -278,7 +287,7 @@ impl FrozenH3ComfyVaeLoadPlan {
                     .any(|component| !matches!(component, Component::Normal(_)))
             {
                 return Err(H3ComfyVaeLoadError::InvalidPlan(
-                    "hidden manifest produced a non-canonical VAE storage path".into(),
+                    "compact manifest produced a non-canonical VAE storage path".into(),
                 ));
             }
             Ok(models_root.join(relative))

@@ -15508,7 +15508,7 @@
         {
           "model": "minimax-h3-fl2va:comfy-pruned-int8",
           "family": "minimax-h3",
-          "hidden": true
+          "hidden": false
         }
       ],
       "profile": {
@@ -15944,7 +15944,7 @@
         {
           "model": "minimax-h3-ref2va:comfy-pruned-int8",
           "family": "minimax-h3",
-          "hidden": true
+          "hidden": false
         }
       ],
       "profile": {

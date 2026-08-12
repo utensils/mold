@@ -2573,11 +2573,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_h3_catalog_id_is_rejected_without_live_lookup() {
-        let error = resolve_catalog_id("hf:MiniMaxAI/MiniMax-H3")
+    async fn raw_h3_catalog_id_remains_outside_the_pinned_manifest_path() {
+        let error = resolve_catalog_id("hf:Comfy-Org/MiniMax-H3")
             .await
             .err()
-            .expect("H3 must remain compliance-gated");
+            .expect("raw repositories must not bypass the pinned compact manifests");
         assert!(error
             .to_string()
             .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));

@@ -122,10 +122,24 @@ pub enum EnqueueOutcome {
 fn require_manifest_enqueue_activation(
     manifest: &mold_core::manifest::ModelManifest,
 ) -> Result<(), EnqueueError> {
-    mold_core::require_model_activation(&manifest.name, Some(&manifest.family))?;
-    for file in &manifest.files {
-        mold_core::require_model_activation(&file.hf_repo, Some(&manifest.family))?;
-        mold_core::require_model_activation(&file.hf_filename, Some(&manifest.family))?;
+    let contains_gated_identity =
+        mold_core::require_model_activation(&manifest.name, Some(&manifest.family)).is_err()
+            || manifest.files.iter().any(|file| {
+                mold_core::require_model_activation(&file.hf_repo, Some(&manifest.family)).is_err()
+                    || mold_core::require_model_activation(
+                        &file.hf_filename,
+                        Some(&manifest.family),
+                    )
+                    .is_err()
+            });
+    if contains_gated_identity {
+        mold_core::require_model_acquisition(&manifest.name, Some(&manifest.family))?;
+        let reviewed = mold_core::manifest::find_manifest(&manifest.name);
+        if !reviewed.is_some_and(|reviewed| std::ptr::eq(reviewed, manifest)) {
+            mold_core::require_model_activation("minimax-h3", Some("minimax-h3"))?;
+        }
+    } else {
+        mold_core::require_model_acquisition(&manifest.name, Some(&manifest.family))?;
     }
     Ok(())
 }
@@ -213,10 +227,11 @@ impl DownloadQueue {
         model: String,
         hf_fallback_token: Option<String>,
     ) -> Result<(String, usize, EnqueueOutcome), EnqueueError> {
-        // Check the caller-supplied identity before resolution so a gated
-        // model that has no registered manifest still receives the stable
-        // policy error rather than being flattened into UnknownModel.
-        mold_core::require_model_activation(&model, None)?;
+        // Check the caller-supplied identity against acquisition policy before
+        // resolution so a future download-gated model that has no registered
+        // manifest still receives the stable policy error rather than being
+        // flattened into UnknownModel.
+        mold_core::require_model_acquisition(&model, None)?;
 
         // Manifest validation up front so the caller gets a real 400 instead of a
         // background failure.

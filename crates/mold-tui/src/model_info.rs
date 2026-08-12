@@ -38,9 +38,9 @@ pub struct ModelCapabilities {
 /// Determine model capabilities from family name.
 pub fn capabilities_for_family(family: &str) -> ModelCapabilities {
     if mold_core::minimax_h3::is_family(family) {
-        // Static form-shape knowledge only. H3 remains hidden and every H3
-        // identity remains server-gated, so recognizing aliases here cannot
-        // make the family selectable or runnable.
+        // Static form-shape knowledge only. Compact weights may be downloaded,
+        // but every H3 runtime identity remains server-gated, so recognizing
+        // aliases here cannot make the family runnable.
         return ModelCapabilities {
             supports_negative_prompt: false,
             supports_scheduler: false,

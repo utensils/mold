@@ -105,6 +105,7 @@ function build() {
   // ── Installed models (the Installed tab) ──────────────────────────────
   const tab = ref<ModelsTab>("installed");
   const installed = ref<ModelInfoExtended[]>([]);
+  const availableManifests = ref<ModelInfoExtended[]>([]);
   const installedLoading = ref(false);
   const installedError = ref<string | null>(null);
   // The default tab follows whether anything is installed — but only until
@@ -118,18 +119,77 @@ function build() {
   // `modality` is the one UI filter the server has no parameter for. Every
   // entry carries its own derived modality, so it is applied locally and
   // deliberately stripped from requests by `searchParams`.
+  const manifestEntries = computed<CatalogEntryWire[]>(() => {
+    const query = filter.value.q?.trim().toLowerCase() ?? "";
+    if (filter.value.source === "civitai") return [];
+    if (filter.value.kind && filter.value.kind !== "checkpoint") return [];
+    return availableManifests.value
+      .filter((model) => model.family === "minimax-h3" && !model.downloaded)
+      .filter(
+        (model) => !filter.value.family || model.family === filter.value.family,
+      )
+      .filter(
+        (model) =>
+          !query ||
+          model.name.toLowerCase().includes(query) ||
+          model.description.toLowerCase().includes(query),
+      )
+      .map((model) => ({
+        id: model.name,
+        source: "hf",
+        source_id: model.hf_repo,
+        name: model.name,
+        author: model.hf_repo.split("/")[0] || null,
+        family: model.family,
+        family_role: "foundation",
+        sub_family: null,
+        modality: "video",
+        kind: "checkpoint",
+        file_format: "safetensors",
+        bundling: "separated",
+        size_bytes: Math.round(model.size_gb * 1_000_000_000),
+        download_count: 0,
+        rating: null,
+        likes: 0,
+        nsfw: false,
+        thumbnail_url: null,
+        description: model.description || null,
+        license: null,
+        license_flags: null,
+        tags: ["MiniMax H3", "compact"],
+        companions: [],
+        companion_details: [],
+        download_recipe: { files: [], needs_token: null },
+        supported: true,
+        installed: false,
+        primary_path: null,
+        created_at: null,
+        updated_at: null,
+        added_at: 0,
+        page_url: model.hf_repo
+          ? `https://huggingface.co/${model.hf_repo}`
+          : null,
+      }));
+  });
+
   const visibleEntries = computed(() => {
     const m = filter.value.modality;
-    if (!m) return entries.value;
-    return entries.value.filter((e) => e.modality === m);
+    const byId = new Map<string, CatalogEntryWire>();
+    for (const entry of [...manifestEntries.value, ...entries.value]) {
+      if (!isRenderableEntry(entry)) continue;
+      if (!byId.has(entry.id)) byId.set(entry.id, entry);
+    }
+    const combined = [...byId.values()];
+    if (!m) return combined;
+    return combined.filter((e) => e.modality === m);
   });
 
   /** Rows the grid actually shows. The server total describes the unfiltered
    * feed, so it overstates the grid whenever a client-side filter is on. */
   const resultCount = computed(() => {
     if (filter.value.modality) return visibleEntries.value.length;
-    if (total.value !== null) return total.value;
-    return entries.value.length;
+    if (total.value !== null) return total.value + manifestEntries.value.length;
+    return visibleEntries.value.length;
   });
 
   // Bounds `autoFill` so a feed that never yields a matching row can't spin
@@ -230,7 +290,7 @@ function build() {
     // to the API when the user opens an id that isn't in the current page —
     // e.g. a future deep-link path.
     detailError.value = null;
-    const cached = entries.value.find((e) => e?.id === id);
+    const cached = visibleEntries.value.find((e) => e?.id === id);
     if (cached) {
       // Everything from here to `detail.value = …` runs on wire data. A throw
       // would escape the async function (callers use `void openDetail(id)`)
@@ -343,7 +403,9 @@ function build() {
       // assignment renders the entire catalog as if it were installed — and
       // the tab heuristic below then always lands on a shelf of models the
       // user does not have. Host detail already filters this way.
-      installed.value = (await fetchModels()).filter(
+      const models = await fetchModels();
+      availableManifests.value = models;
+      installed.value = models.filter(
         (m) => m.downloaded && isStandaloneGenerationModel(m),
       );
       // First load with no explicit user choice: land on Installed when the
@@ -416,6 +478,7 @@ function build() {
     layout,
     page,
     entries,
+    manifestEntries,
     visibleEntries,
     resultCount,
     total,

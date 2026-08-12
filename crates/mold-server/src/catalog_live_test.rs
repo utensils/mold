@@ -174,28 +174,20 @@ async fn post(router: axum::Router, uri: &str) -> (StatusCode, String) {
     (status, String::from_utf8(bytes.to_vec()).unwrap())
 }
 
-#[tokio::test]
-async fn raw_h3_catalog_routes_fail_before_upstream_lookup_or_download() {
-    let router = create_router(AppState::for_tests());
-    let encoded_id = "hf%3AMiniMaxAI%2FMiniMax-H3";
-
-    let (get_status, get_body) = get(router.clone(), &format!("/api/catalog/{encoded_id}")).await;
-    assert_eq!(get_status, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
-    assert!(get_body.contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
-
-    let (post_status, post_body) =
-        post(router, &format!("/api/catalog/{encoded_id}/download")).await;
-    assert_eq!(post_status, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
-    assert!(post_body.contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+#[test]
+fn pinned_compact_h3_identity_is_acquirable_but_not_runtime_activated() {
+    let id = mold_core::minimax_h3::FL2VA_COMFY;
+    mold_core::require_model_acquisition(id, Some("minimax-h3")).unwrap();
+    assert!(mold_core::require_model_activation(id, Some("minimax-h3")).is_err());
 }
 
 #[tokio::test]
-async fn h3_search_identity_fails_before_any_upstream_request() {
+async fn h3_search_identity_reaches_the_upstream_catalog() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(wm_path("/api/v1/models"))
         .respond_with(ResponseTemplate::new(500))
-        .expect(0)
+        .expect(2)
         .mount(&server)
         .await;
     let state = AppState::for_tests().with_civitai_base(server.uri());
@@ -206,15 +198,17 @@ async fn h3_search_identity_fails_before_any_upstream_request() {
         "/api/catalog/search?q=MiniMax-H3&source=civitai",
     ] {
         let (status, body) = get(router.clone(), uri).await;
-        assert_eq!(status, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS, "{body}");
-        assert!(body.contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     }
 
-    assert!(server
-        .received_requests()
-        .await
-        .expect("recorded requests")
-        .is_empty());
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .len(),
+        2
+    );
     server.verify().await;
 }
 

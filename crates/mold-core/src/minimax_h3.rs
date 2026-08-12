@@ -1,9 +1,9 @@
 //! Static MiniMax H3 contracts.
 //!
-//! H3 is intentionally *not* a runnable Mold family yet.  The compliance gate
-//! in `model_policy` remains the first authority for every public ingress.  This
-//! module records the immutable model/layout/request facts needed by the later
-//! engine work without weakening that gate or claiming that weights can run.
+//! H3 acquisition and execution are separate authorities. The compact
+//! upstream checkpoints are downloadable, while runtime admission remains
+//! limited to an independently qualified CUDA route. This module records the
+//! immutable model/layout/request facts shared by both boundaries.
 
 use crate::manifest::{ManifestDefaults, ModelComponent, ModelFile, ModelManifest};
 use crate::{
@@ -285,8 +285,8 @@ pub const fn capabilities(task: Task) -> Capabilities {
 
 /// Exact per-model capability authority for later server/surface advertising.
 ///
-/// This contract is intentionally not serialized while H3 is policy-hidden.
-/// Callers that advertise *runnable* models must use
+/// Compact acquisition manifests may be serialized without implying runtime
+/// support. Callers that advertise *runnable* models must use
 /// [`runnable_capability_contract_for_model`], which returns `None` until an
 /// engine is registered and qualified. Keeping task and layout in this typed
 /// value prevents UI/server code from guessing modes from family strings.
@@ -2265,8 +2265,10 @@ fn defaults(layout: Layout) -> ManifestDefaults {
     }
 }
 
-/// Hidden manifests used for exact identity, storage, and future engine work.
-/// They must remain hidden while `capabilities(...).runtime_available` is false.
+/// Pinned manifests used for exact identity, storage, and runtime work.
+/// Official BF16 manifests remain qualification references; compact upstream
+/// manifests are visible for direct download even when the current host cannot
+/// execute them.
 pub(crate) fn manifests() -> Vec<ModelManifest> {
     [
         (FL2VA_OFFICIAL, Task::Fl2va, Layout::OfficialBf16),
@@ -2287,10 +2289,10 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
         name: name.to_string(),
         family: FAMILY.to_string(),
         description: match (task, layout) {
-            (Task::Fl2va, Layout::OfficialBf16) => "MiniMax H3 FL2VA official BF16 transformer/conditioner + FP32 VAEs (compliance-gated; runtime unavailable)",
-            (Task::Ref2va, Layout::OfficialBf16) => "MiniMax H3 Ref2VA official BF16 transformer/conditioner + FP32 VAEs (compliance-gated; runtime unavailable)",
-            (Task::Fl2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 FL2VA Comfy pruned INT8-convrot + NVFP4-AWQ (compliance-gated; runtime unavailable)",
-            (Task::Ref2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 Ref2VA Comfy pruned INT8-convrot + NVFP4-AWQ (compliance-gated; runtime unavailable)",
+            (Task::Fl2va, Layout::OfficialBf16) => "MiniMax H3 FL2VA official BF16 transformer/conditioner + FP32 VAEs (qualification reference; hidden from downloads)",
+            (Task::Ref2va, Layout::OfficialBf16) => "MiniMax H3 Ref2VA official BF16 transformer/conditioner + FP32 VAEs (qualification reference; hidden from downloads)",
+            (Task::Fl2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 FL2VA Comfy pruned INT8-convrot + NVFP4-AWQ (downloadable; execution requires a qualified CUDA host)",
+            (Task::Ref2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 Ref2VA Comfy pruned INT8-convrot + NVFP4-AWQ (downloadable; execution requires a qualified CUDA host)",
         }
         .to_string(),
         files: match layout {
@@ -2298,7 +2300,7 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
             Layout::ComfyPrunedInt8ConvrotNvfp4Awq => comfy_files(task),
         },
         defaults: defaults(layout),
-        hidden: true,
+        hidden: layout == Layout::OfficialBf16,
     })
     .collect()
 }
@@ -3230,17 +3232,32 @@ mod tests {
         }
 
         let advertised = crate::build_model_catalog(&crate::Config::default(), None, false);
-        assert!(advertised.iter().all(|model| model.family != FAMILY));
+        let advertised_h3 = advertised
+            .iter()
+            .filter(|model| model.family == FAMILY)
+            .map(|model| model.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            advertised_h3,
+            std::collections::BTreeSet::from([FL2VA_COMFY, REF2VA_COMFY])
+        );
+        assert!(advertised
+            .iter()
+            .filter(|model| model.family == FAMILY)
+            .all(|model| model.defaults.description.contains("downloadable")));
     }
 
     #[test]
-    fn manifests_are_hidden_pinned_and_cannot_mix_task_transformers() {
+    fn manifests_expose_only_compact_downloads_and_cannot_mix_task_transformers() {
         let fl_official = find_manifest(FL2VA_OFFICIAL).unwrap();
         let ref_official = find_manifest(REF2VA_OFFICIAL).unwrap();
         let fl_comfy = find_manifest(FL2VA_COMFY).unwrap();
         let ref_comfy = find_manifest(REF2VA_COMFY).unwrap();
+        assert!(fl_official.hidden);
+        assert!(ref_official.hidden);
+        assert!(!fl_comfy.hidden);
+        assert!(!ref_comfy.hidden);
         for manifest in [fl_official, ref_official, fl_comfy, ref_comfy] {
-            assert!(manifest.hidden);
             let contract = manifest_contract(manifest).unwrap();
             assert!(!contract.runtime_available);
             assert_eq!(contract.license_url, MINIMAX_H3_LICENSE_URL);
@@ -3304,6 +3321,15 @@ mod tests {
         };
         assert!(task_files(fl_official).is_disjoint(&task_files(ref_official)));
         assert!(task_files(fl_comfy).is_disjoint(&task_files(ref_comfy)));
+
+        let visible = crate::manifest::visible_manifests()
+            .filter(|manifest| manifest.family == FAMILY)
+            .map(|manifest| manifest.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            visible,
+            std::collections::BTreeSet::from([FL2VA_COMFY, REF2VA_COMFY])
+        );
 
         let ref_transformer = ref_comfy
             .files

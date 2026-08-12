@@ -558,7 +558,7 @@ fn reviewed_h3_private_generation_profile() -> Option<(mold_core::GenerationProf
 /// row clients may submit. Hidden manifests remain absent from ordinary
 /// inventory; a row exists only when every exact component is already landed
 /// and the reviewed partition carries the one admitted request envelope.
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(feature = "h3-private-uat")]
 pub(crate) fn authenticated_h3_private_model_row(
     capability: &mold_core::MiniMaxH3Capability,
 ) -> Option<mold_core::ModelInfoExtended> {

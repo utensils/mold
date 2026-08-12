@@ -26,7 +26,8 @@
 //!   portable forward dequantizes weight chunks before the linear operation.
 //!
 //! These are reusable Candle operations, not runtime activation authority.
-//! H3 remains hidden behind Mold's compliance gate and unavailable factory.
+//! Compact artifacts may be downloaded independently, but execution remains
+//! limited to Mold's separately qualified runtime route.
 
 use candle::{DType, Device, Result, Tensor};
 
