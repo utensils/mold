@@ -356,16 +356,22 @@ a sequence boundary with the carryover coming from a file: the source clip's
 final frame becomes the continuation's conditioning, so `--extend-overlap` is
 always **1** on wan — the multi-frame overlap LTX-2 accepts is a latent motion
 tail wan does not have, and a larger value is refused rather than silently
-trimming good frames.
+trimming good frames. That is also the default: `/api/models` advertises
+`extend_default_overlap_frames: 1` for wan checkpoints, so the flag can be
+omitted.
 
 Resolution and fps are locked to the source clip; a mismatch is refused rather
 than rescaled, because the stitched result is one video. `/api/models`
 advertises `supports_extend` per checkpoint, from the same `source_image`
-contract the seam reads — a text-to-video checkpoint cannot extend.
+contract the seam reads — a text-to-video checkpoint cannot extend, and its
+continuation is refused at admission rather than after the model load. The
+resolved overlap is written into the request before the job is queued, so the
+saved metadata records the 1 that rendered even for an installed `cv:` / `hf:`
+checkpoint the manifest cannot classify.
 
 ```bash
 mold run wan22-ti2v-5b:q8 "the paper boat drifts on past a storm drain" \
-  --extend clip.mp4 --extend-overlap 1 --frames 49 \
+  --extend clip.mp4 --frames 49 \
   --width 704 --height 384 --fps 24
 ```
 

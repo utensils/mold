@@ -797,6 +797,13 @@ pub async fn run(
         temporal_upscale,
         placement,
     };
+    // A continuation that named no overlap renders with its family's own
+    // carryover, and the metadata `record_local_save` builds resolves the
+    // family through the manifest — which an installed `cv:` / `hf:` wan
+    // checkpoint has none of, so a forced-local wan extend was saved as
+    // having used LTX-2's 17 (#783). Server admission materializes the same
+    // field from the same helper, so a remote run records the same value.
+    mold_core::validation::materialize_extend_overlap_frames(&mut req, family.as_deref());
     let base_seed = req.seed.unwrap_or_else(|| rand::thread_rng().gen());
     let mut reference_session = None;
     if local {

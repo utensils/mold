@@ -494,6 +494,79 @@ fn run_qwen_image_edit_rejects_batch_before_remote_generation() {
         ));
 }
 
+/// `mold run <wan I2V checkpoint> --extend clip.mp4` must reach dispatch.
+///
+/// An extend carries its source frames in the clip it continues, and
+/// `validate_extend` forbids pairing `--extend` with an image or keyframes —
+/// so a preflight that counted only those saw every continuation as
+/// source-less and refused it with "this Wan I2V checkpoint needs a source
+/// image", the exact contract that makes the checkpoint extend-capable
+/// (#783). This drives the real binary, so restoring the inline `has_source`
+/// expression at the call site fails it.
+#[test]
+fn run_extend_satisfies_a_wan_i2v_checkpoints_source_contract() {
+    let env = TestEnv::new();
+    let clip = env.home.join("clip.mp4");
+    std::fs::write(&clip, b"\0\0\0\x20ftypisom").unwrap();
+
+    // The run still fails — nothing is downloaded and the fake host is
+    // unreachable — but it must not fail *on the contract*.
+    env.cmd()
+        .args([
+            "run",
+            "wan22-i2v-a14b:q8",
+            "a cat keeps walking",
+            "--extend",
+        ])
+        .arg(&clip)
+        .args(["--local", "--frames", "49", "--output", "out.mp4"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs a source image").not());
+
+    // The same checkpoint with no source at all is still refused, so the
+    // assertion above is not vacuous.
+    env.cmd()
+        .args([
+            "run",
+            "wan22-i2v-a14b:q8",
+            "a cat keeps walking",
+            "--local",
+            "--frames",
+            "49",
+            "--output",
+            "out.mp4",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs a source image"));
+}
+
+/// A continuation aimed at a family with no continuation path is refused for
+/// *that*, not for source frames it never supplied (#783).
+#[test]
+fn run_extend_on_a_family_without_a_continuation_path_names_extend() {
+    let env = TestEnv::new();
+    let clip = env.home.join("clip.mp4");
+    std::fs::write(&clip, b"\0\0\0\x20ftypisom").unwrap();
+
+    env.cmd()
+        .args([
+            "run",
+            "ltx-video-0.9.8-13b-distilled:bf16",
+            "a cat keeps walking",
+            "--extend",
+        ])
+        .arg(&clip)
+        .args(["--local", "--output", "out.mp4"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--extend is only supported for LTX-2 / LTX-2.3 and Wan models",
+        ))
+        .stderr(predicate::str::contains("source image").not());
+}
+
 // ── mold pull (error paths) ───────────────────────────────────────────────
 
 #[test]

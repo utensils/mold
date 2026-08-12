@@ -112,9 +112,9 @@ fn wan_default_clip_frames(model: &str) -> u32 {
 /// The handoff seeds the continuation with the previous clip's final frame, so
 /// it re-renders exactly that one frame and the stitch trims exactly one. This
 /// is not LTX-2's 17: that is the pixel window its VAE turns into three latent
-/// slots of carryover, which wan has no equivalent of. Mirrors
-/// `mold_inference::wan::WAN_HANDOFF_DUPLICATED_FRAMES`.
-const WAN_HANDOFF_DUPLICATED_FRAMES: u32 = 1;
+/// slots of carryover, which wan has no equivalent of. The value lives in
+/// `mold-core`, which both this planner and the engine that enforces it read.
+const WAN_HANDOFF_DUPLICATED_FRAMES: u32 = mold_core::validation::WAN_HANDOFF_DUPLICATED_FRAMES;
 
 /// Pure decision function — given a model family, the user's requested
 /// `frames`, and the optional `--clip-frames` override, decide whether to

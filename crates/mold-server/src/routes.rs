@@ -904,6 +904,13 @@ async fn prepare_generation(
     // either way; an explicit value (the empty-string opt-out included) is
     // authoritative and passes through untouched.
     materialize_default_negative_prompt(request, resolved_family.as_deref());
+    // Same seam, same reason: a continuation that named no overlap renders
+    // with its family's carryover, and the metadata every queue/worker path
+    // builds resolves the family through the manifest — which an installed
+    // `cv:` / `hf:` wan checkpoint has none of. Filling the field in here,
+    // with the family admission already resolved, is what keeps saved
+    // provenance equal to what actually rendered (#783).
+    mold_core::validation::materialize_extend_overlap_frames(request, resolved_family.as_deref());
 
     let planned_control = plan_builtin_ltx2_control(state, request).await?;
     let planned_camera_controls = plan_builtin_ltx2_camera_controls(state, request).await?;
@@ -2021,11 +2028,12 @@ async fn enforce_source_image_capability(
     } else {
         manifest_contract
     };
-    // First/last-frame keyframes carry the source frames too (#779): a
-    // T2V-only checkpoint can no more render them than a lone source image,
-    // and a required-source checkpoint is satisfied by them.
-    let has_source =
-        request.source_image.is_some() || request.keyframes.as_ref().is_some_and(|k| !k.is_empty());
+    // Keyframes (#779) and an extend (#783) carry the source frames too, so
+    // the shared predicate owns the whole list — an extend's first frames come
+    // from the tail of the clip it continues, and counting only an image left
+    // admission refusing every Wan I2V continuation with the very contract
+    // that makes the checkpoint extend-capable.
+    let has_source = mold_core::validation::request_carries_source_frames(request);
     match mold_core::validation::source_image_contract_violation(
         resolved_family,
         &request.model,
@@ -7578,6 +7586,93 @@ mod tests {
         assert_eq!(
             metadata.negative_prompt.as_deref(),
             Some(mold_core::manifest::WAN_DEFAULT_NEGATIVE_PROMPT)
+        );
+    }
+
+    fn wan_continuation(model: &str) -> mold_core::GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "a cat keeps walking",
+            "model": model,
+            "width": 832,
+            "height": 480,
+            "steps": 20,
+            "guidance": 3.5,
+            "batch_size": 1,
+            "strength": 0.75,
+            "frames": 49,
+            "fps": 16,
+            "output_format": "mp4",
+            "extend_video_path": "/srv/mold/clip.mp4"
+        }))
+        .unwrap()
+    }
+
+    /// Admission's source-image contract gate has to count an extend as
+    /// carrying source frames (#783).
+    ///
+    /// `validate_extend` forbids pairing `extend_video` with `source_image`
+    /// or keyframes, so a continuation provably has neither — and a gate that
+    /// counted only those refused every Wan I2V extend with "this Wan I2V
+    /// checkpoint needs a source image", the exact contract that makes the
+    /// checkpoint extend-capable. This drives the real admission helper, so
+    /// restoring the inline `source_image.is_some() || keyframes` expression
+    /// fails it.
+    #[tokio::test]
+    async fn admission_reads_a_wan_continuation_as_carrying_source_frames() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::for_tests();
+        // No checkpoints on disk: the header probe finds nothing and the
+        // manifest's own task classification binds, exactly as it does for a
+        // cold tier.
+        state.config.write().await.models_dir = temp.path().display().to_string();
+
+        enforce_source_image_capability(
+            &state,
+            &wan_continuation("wan22-i2v-a14b:q8"),
+            Some("wan"),
+        )
+        .await
+        .expect("a Required-source checkpoint is satisfied by the clip being continued");
+
+        // …and the same predicate still refuses a text-to-video checkpoint at
+        // admission, instead of letting it die in the engine after the UMT5
+        // encode and expert load are paid for.
+        let refused = enforce_source_image_capability(
+            &state,
+            &wan_continuation("wan22-t2v-a14b:q8"),
+            Some("wan"),
+        )
+        .await
+        .expect_err("a text-to-video checkpoint cannot accept a continuation");
+        assert!(
+            refused.error.contains("text-to-video only"),
+            "got: {}",
+            refused.error
+        );
+
+        // The pre-existing carriers are untouched: an ordinary text-to-video
+        // render still reads as source-less and is admitted.
+        let mut plain = wan_continuation("wan22-t2v-a14b:q8");
+        plain.extend_video_path = None;
+        enforce_source_image_capability(&state, &plain, Some("wan"))
+            .await
+            .expect("an ordinary text-to-video render carries no source frames");
+    }
+
+    /// The overlap admission materializes is what saved provenance records.
+    ///
+    /// An installed `cv:` / `hf:` wan checkpoint has no manifest, so metadata
+    /// built from an unmaterialized request resolved LTX-2's 17 for a render
+    /// that used one frame (#783).
+    #[test]
+    fn materialized_extend_overlap_reaches_output_metadata() {
+        let mut request = wan_continuation("cv:2041121");
+        assert_eq!(request.extend_overlap_frames, None);
+        mold_core::validation::materialize_extend_overlap_frames(&mut request, Some("wan"));
+        let metadata = mold_core::OutputMetadata::from_generate_request(&request, 7, None, "test");
+        assert_eq!(
+            metadata.extend_overlap_frames,
+            Some(mold_core::validation::WAN_HANDOFF_DUPLICATED_FRAMES)
         );
     }
 

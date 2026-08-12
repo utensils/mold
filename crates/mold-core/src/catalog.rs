@@ -200,7 +200,12 @@ pub fn build_model_catalog(
                 manifest.defaults.source_image,
             )),
             supports_sequence: Some(chain_capable_family(&manifest.family)),
-            extend_default_overlap_frames: Some(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
+            // Per family, because the overlap a continuation defaults to is
+            // its carryover: LTX-2 re-encodes a 17-frame latent motion tail,
+            // wan re-renders the one frame it was seeded with (#783).
+            extend_default_overlap_frames: Some(
+                crate::validation::default_extend_overlap_frames_for_family(Some(&manifest.family)),
+            ),
             guidance_capabilities: Some(crate::GuidanceCapabilities::for_recipe(
                 &manifest.family,
                 &manifest.name,
@@ -239,8 +244,16 @@ pub fn build_model_catalog(
             .clone()
             .unwrap_or_else(|| "flux".to_string());
         let resolution = resolution_defaults(name, &family);
-        let is_ltx2 = family == "ltx2";
         let sequence_capable = chain_capable_family(&family);
+        // Config-only models have local weights but no manifest task
+        // structure, so mold-core cannot classify the conditioning contract:
+        // the server's `annotate_source_image_capabilities` pass reads it off
+        // the checkpoint headers and re-derives `supports_extend` from the
+        // same helper. Unknown here, never a second hardcoded family list —
+        // `extend_capable_model` is the one authority, and it answers `false`
+        // for an unclassified wan checkpoint rather than promising a
+        // continuation a text-to-video export cannot accept (#783).
+        let source_image_contract: Option<crate::types::SourceImageCapability> = None;
         let guidance_identity = format!(
             "{} {}",
             name,
@@ -295,9 +308,11 @@ pub fn build_model_catalog(
             modality: None,
             nsfw: None,
             supports_audio: None,
-            supports_extend: Some(is_ltx2),
+            supports_extend: Some(extend_capable_model(&family, source_image_contract)),
             supports_sequence: Some(sequence_capable),
-            extend_default_overlap_frames: Some(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
+            extend_default_overlap_frames: Some(
+                crate::validation::default_extend_overlap_frames_for_family(Some(&family)),
+            ),
             guidance_capabilities: Some(crate::GuidanceCapabilities::for_recipe(
                 &family,
                 &guidance_identity,
@@ -306,7 +321,7 @@ pub fn build_model_catalog(
             // Config-only models have local weights: the server's annotate
             // pass derives the contract from checkpoint headers, the same
             // classification the engine applies (#772).
-            source_image: None,
+            source_image: source_image_contract,
         });
     }
 
@@ -890,5 +905,89 @@ mod tests {
 
         assert!(entry.is_upscaler());
         assert!(!entry.is_generation_model());
+    }
+
+    /// `/api/models` must advertise the overlap the *engine* will accept.
+    /// Wan's continuation carries exactly the one frame it was seeded with, so
+    /// advertising LTX-2's 17 promised a value wan's engine refuses (#783).
+    #[test]
+    fn advertised_extend_overlap_default_is_per_family() {
+        let catalog = build_model_catalog(&Config::default(), None, false);
+
+        let wan = catalog
+            .iter()
+            .find(|m| m.info.family == "wan")
+            .expect("catalog should include wan checkpoints");
+        assert_eq!(
+            wan.extend_default_overlap_frames,
+            Some(crate::validation::WAN_HANDOFF_DUPLICATED_FRAMES),
+            "{} advertises an overlap its engine refuses",
+            wan.info.name
+        );
+
+        let ltx2 = catalog
+            .iter()
+            .find(|m| m.info.family == "ltx2")
+            .expect("catalog should include ltx2 checkpoints");
+        assert_eq!(
+            ltx2.extend_default_overlap_frames,
+            Some(crate::validation::DEFAULT_EXTEND_OVERLAP_FRAMES)
+        );
+    }
+
+    /// `extend_capable_model` is the only authority for `supports_extend`.
+    ///
+    /// Every advertised row — manifest tier or config-only entry — must
+    /// derive from it, never from a second `family == "ltx2"` test. Wan
+    /// extends per checkpoint, so a duplicated family literal advertises
+    /// `false` for the very checkpoints this exists to unblock while the
+    /// paired `extend_default_overlap_frames` already says `wan` (#783).
+    #[test]
+    fn advertised_extend_support_comes_only_from_extend_capable_model() {
+        let mut models = HashMap::new();
+        models.insert(
+            "local-wan-i2v".to_string(),
+            ModelConfig {
+                family: Some("wan".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        models.insert(
+            "local-ltx2".to_string(),
+            ModelConfig {
+                family: Some("ltx2".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let config = Config {
+            models,
+            ..Config::default()
+        };
+        let catalog = build_model_catalog(&config, None, false);
+
+        for entry in &catalog {
+            assert_eq!(
+                entry.supports_extend,
+                Some(extend_capable_model(&entry.info.family, entry.source_image)),
+                "{} advertises supports_extend from a second policy",
+                entry.info.name
+            );
+        }
+
+        // The config-only rows really did land, so the loop above is not
+        // vacuous over the interesting case.
+        let config_only_ltx2 = catalog
+            .iter()
+            .find(|m| m.info.name == "local-ltx2")
+            .expect("config-only ltx2 entry");
+        assert_eq!(config_only_ltx2.supports_extend, Some(true));
+        let config_only_wan = catalog
+            .iter()
+            .find(|m| m.info.name == "local-wan-i2v")
+            .expect("config-only wan entry");
+        // Unclassified: mold-core cannot read checkpoint headers, so the
+        // server's annotate pass is what upgrades this one.
+        assert_eq!(config_only_wan.source_image, None);
+        assert_eq!(config_only_wan.supports_extend, Some(false));
     }
 }

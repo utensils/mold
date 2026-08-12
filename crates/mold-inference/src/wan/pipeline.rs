@@ -2155,13 +2155,32 @@ impl crate::engine::InferenceEngine for WanEngine {
 
 /// The pixel frames a wan continuation duplicates from the clip before it.
 ///
-/// Wan has no latent motion tail. Its handoff is last-frame *image*
-/// conditioning: the continuation is seeded with the previous clip's final
-/// frame, so it re-renders exactly that one frame and the stitch trims exactly
-/// one. This is deliberately not LTX-2's 17 — that number is the pixel window
-/// its VAE turns into three latent slots of carryover, which wan has no
-/// equivalent of, and copying it would discard sixteen good frames per seam.
-pub const WAN_HANDOFF_DUPLICATED_FRAMES: u32 = 1;
+/// Re-exported from `mold-core`, which is where every surface that must agree
+/// with this engine can reach it — admission, `/api/models`, and the CLI's
+/// chain planner all derive their overlap from the same constant instead of
+/// restating 1 (#783).
+pub use mold_core::validation::WAN_HANDOFF_DUPLICATED_FRAMES;
+
+/// The overlap [`WanEngine::extend_inner`] will run with, or the error it
+/// refuses the request with.
+///
+/// Extracted from `extend_inner` so the acceptance itself is testable without
+/// a checkpoint: this is the gate, not a restatement of it.
+fn accepted_extend_overlap(req: &GenerateRequest) -> Result<u32> {
+    // Name the family: an installed `cv:` / `hf:` wan checkpoint has no
+    // manifest for the request to resolve itself through, and the
+    // family-blind fallback is LTX-2's 17 — which this gate refuses.
+    let overlap = req.effective_extend_overlap_frames_for_family(Some("wan"));
+    if overlap != WAN_HANDOFF_DUPLICATED_FRAMES {
+        bail!(
+            "Wan continuations carry exactly {WAN_HANDOFF_DUPLICATED_FRAMES} frame of \
+             context — the source's final frame becomes the continuation's conditioning — \
+             so extend_overlap_frames must be {WAN_HANDOFF_DUPLICATED_FRAMES}, not {overlap}. \
+             (LTX-2's multi-frame overlap is a latent motion tail wan does not have.)"
+        );
+    }
+    Ok(overlap)
+}
 
 impl WanEngine {
     /// Continue an existing clip in one request.
@@ -2178,15 +2197,7 @@ impl WanEngine {
     /// Resolution and fps are locked to the source: the stitched output is one
     /// video, and rescaling or retiming mid-clip is always a surprise.
     fn extend_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
-        let overlap = req.effective_extend_overlap_frames();
-        if overlap != WAN_HANDOFF_DUPLICATED_FRAMES {
-            bail!(
-                "Wan continuations carry exactly {WAN_HANDOFF_DUPLICATED_FRAMES} frame of \
-                 context — the source's final frame becomes the continuation's conditioning — \
-                 so extend_overlap_frames must be {WAN_HANDOFF_DUPLICATED_FRAMES}, not {overlap}. \
-                 (LTX-2's multi-frame overlap is a latent motion tail wan does not have.)"
-            );
-        }
+        let overlap = accepted_extend_overlap(req)?;
 
         let work_dir = tempfile::tempdir().context("Wan: creating the continuation temp dir")?;
         let path = match (&req.extend_video, &req.extend_video_path) {
@@ -2427,6 +2438,41 @@ mod tests {
         for clip in [5u32, 53, 121, 257] {
             assert!(WAN_HANDOFF_DUPLICATED_FRAMES < clip, "clip {clip}");
         }
+    }
+
+    /// `extend_inner` must accept a continuation that names no overlap.
+    ///
+    /// This drives the engine's own gate, not the core helper it consults:
+    /// the advertised default used to be LTX-2's 17 for every family, 17 sits
+    /// on wan's `4k+1` grid so validation waved it through, and the request
+    /// then died right here — after the model load had been paid for (#783).
+    #[test]
+    fn the_engine_accepts_an_unset_overlap_and_refuses_ltx2s() {
+        let continuation = || {
+            let mut req = request();
+            // An installed catalog id, so the request cannot resolve its own
+            // family through the manifest — the case that made the
+            // family-blind fallback fatal.
+            req.model = "cv:2041121".to_string();
+            req.frames = Some(49);
+            req.extend_video_path = Some("/srv/mold/clip.mp4".to_string());
+            req
+        };
+
+        let unset = continuation();
+        assert!(unset.extend_overlap_frames.is_none());
+        assert_eq!(
+            accepted_extend_overlap(&unset).unwrap(),
+            WAN_HANDOFF_DUPLICATED_FRAMES
+        );
+
+        let mut ltx2_overlap = continuation();
+        ltx2_overlap.extend_overlap_frames =
+            Some(mold_core::validation::DEFAULT_EXTEND_OVERLAP_FRAMES);
+        let error = accepted_extend_overlap(&ltx2_overlap)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must be 1, not 17"), "got: {error}");
     }
 
     /// A CPU placement is not the last word when the encoder measurably fits.

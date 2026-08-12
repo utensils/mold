@@ -95,11 +95,49 @@ pub const LTX2_MAX_FRAMES_ABSOLUTE: u32 = LTX2_MAX_RUNTIME_SECONDS * 30 + 4;
 /// duration budget (currently `ltx-video`).
 pub const MAX_FRAMES_GLOBAL: u32 = 257;
 
-/// Default pixel-frame overlap for `extend_video`, matching the chain
+/// Default pixel-frame overlap for `extend_video` on LTX-2 — and the fallback
+/// for a family whose carryover cannot be resolved — matching the chain
 /// motion-tail default so an extend seam and a sequence seam behave the same.
 /// 17 pixel frames is three LTX-2 latent frames under the VAE's 8x causal
-/// temporal compression.
+/// temporal compression. Resolve it through
+/// [`default_extend_overlap_frames_for_family`] rather than reading it
+/// directly: it is not the answer for every extend-capable family.
 pub const DEFAULT_EXTEND_OVERLAP_FRAMES: u32 = 17;
+
+/// Pixel-frame overlap an `extend_video` request gets when it names none.
+///
+/// The default is a property of the family's *carryover*, never a global
+/// scalar. Wan's continuation is seeded with one frame and its engine refuses
+/// any other overlap, so advertising LTX-2's 17 handed wan clients a value
+/// that clears wan's `4k+1` grid check at admission and then fails inside the
+/// engine, after the model load had already been paid for (#783).
+pub fn default_extend_overlap_frames_for_family(family: Option<&str>) -> u32 {
+    match family {
+        Some("wan") => WAN_HANDOFF_DUPLICATED_FRAMES,
+        _ => DEFAULT_EXTEND_OVERLAP_FRAMES,
+    }
+}
+
+/// Write the family's own carryover into a continuation that named no overlap.
+///
+/// This is a mutation rather than a read at the point of use because of
+/// *provenance*. [`crate::OutputMetadata::from_generate_request`] records what
+/// rendered, and it holds no family — it resolves one through the manifest,
+/// which an installed `cv:` / `hf:` wan checkpoint does not have. A wan
+/// continuation that ran with one carryover frame was therefore saved as
+/// having used LTX-2's 17 (#783). Server admission and the forced-local CLI
+/// path both know the resolved family, so both fill the field in before
+/// anything reads it — the same seam `materialize_default_negative_prompt`
+/// uses for the wan uncond.
+///
+/// An explicit value is authoritative and passes through untouched, and a
+/// non-extend request is never given one: a bare `extend_overlap_frames` is a
+/// validation error, not a default.
+pub fn materialize_extend_overlap_frames(req: &mut GenerateRequest, family: Option<&str>) {
+    if req.is_extend() && req.extend_overlap_frames.is_none() {
+        req.extend_overlap_frames = Some(default_extend_overlap_frames_for_family(family));
+    }
+}
 
 /// Inline `extend_video` payloads share the source-video body budget.
 pub const MAX_INLINE_EXTEND_VIDEO_BYTES: usize = MAX_INLINE_SOURCE_VIDEO_BYTES;
@@ -171,6 +209,20 @@ pub fn snap_frames_to_8k1(frames: u32) -> u32 {
 /// pixel-frame count is always `4k + 1` (upstream enforces the same grid in
 /// `Wan2.1/generate.py`).
 pub const WAN_TEMPORAL_SCALE: u32 = 4;
+
+/// The pixel frames a wan continuation duplicates from the clip before it.
+///
+/// Wan has no latent motion tail. Its handoff is last-frame *image*
+/// conditioning: the continuation is seeded with the previous clip's final
+/// frame, so it re-renders exactly that one frame and the stitch trims exactly
+/// one. This is deliberately not LTX-2's 17 — that number is the pixel window
+/// its VAE turns into three latent slots of carryover, which wan has no
+/// equivalent of, and copying it would discard sixteen good frames per seam.
+///
+/// It lives in `mold-core` because it is the value the whole stack derives
+/// from — admission, `/api/models`, the CLI's chain planner, and the engine
+/// gate that enforces it (`mold_inference::wan::pipeline` re-exports this).
+pub const WAN_HANDOFF_DUPLICATED_FRAMES: u32 = 1;
 
 /// Smallest clip `wan22-ti2v-5b` first/last-frame conditioning accepts. TI2V
 /// pins both endpoints in latent space, where the 2.2 VAE's 4x temporal
@@ -1407,7 +1459,7 @@ fn validate_extend(req: &GenerateRequest, family: Option<&str>) -> Result<(), St
         return Err("extend_video cannot be combined with keyframes".to_string());
     }
 
-    let overlap = req.effective_extend_overlap_frames();
+    let overlap = req.effective_extend_overlap_frames_for_family(family);
     if overlap == 0 {
         return Err(
             "extend_overlap_frames must be >= 1 so the continuation has motion context".to_string(),
@@ -1444,7 +1496,16 @@ fn validate_extend(req: &GenerateRequest, family: Option<&str>) -> Result<(), St
 /// only an image-conditioned checkpoint can accept. The per-model
 /// `supports_extend` field is what narrows the family to those checkpoints;
 /// this gate only rejects families with no continuation path at all.
-fn require_extend_capable_family(family: Option<&str>, feature_name: &str) -> Result<(), String> {
+///
+/// Public because the CLI preflight has to ask it *before* the source-image
+/// contract gate does: an extend now counts as carrying source frames, so a
+/// continuation aimed at a text-to-video-only family would otherwise be
+/// refused for "does not accept a source image or keyframes" — wording for a
+/// request that supplied neither (#783).
+pub fn require_extend_capable_family(
+    family: Option<&str>,
+    feature_name: &str,
+) -> Result<(), String> {
     match family {
         Some("ltx2") | Some("wan") => Ok(()),
         None => Err(format!(
@@ -1555,6 +1616,26 @@ pub fn require_generate_request_model_activation(
         )?;
     }
     Ok(())
+}
+
+/// Whether a request carries the source frames the per-checkpoint
+/// source-image contract (#772) is asked about — the `has_source` argument of
+/// [`source_image_contract_violation`].
+///
+/// Three inputs carry them. A `source_image` is the obvious one; first/last
+/// frame `keyframes` carry them too (#779); and so does an extend, whose first
+/// frames come from the tail of the clip it continues (#783). Extend is the
+/// non-obvious member: [`validate_generate_request`] forbids pairing
+/// `extend_video` with `source_image` or keyframes, so an extend request
+/// provably has neither of the other two — and a gate that counted only those
+/// saw every continuation as source-less. That refused every Wan I2V extend
+/// with "this Wan I2V checkpoint needs a source image", the exact contract
+/// that makes the checkpoint extend-capable, while letting a text-to-video
+/// extend through to die in the engine after the load was paid for.
+pub fn request_carries_source_frames(req: &GenerateRequest) -> bool {
+    req.source_image.is_some()
+        || req.keyframes.as_ref().is_some_and(|k| !k.is_empty())
+        || req.is_extend()
 }
 
 /// The one wording for a source-image contract violation (#772), shared by
@@ -4587,6 +4668,163 @@ mod tests {
         // 97 rendered frames minus the 17-frame overlap that reproduces the
         // source tail = 80 genuinely new frames appended.
         assert_eq!(req.extend_new_frames(), Some(80));
+    }
+
+    /// An extend carries its source frames in the clip it continues (#783).
+    ///
+    /// `validate_extend` forbids pairing `extend_video` with `source_image` or
+    /// keyframes, so a gate that counted only those two saw *every*
+    /// continuation as source-less — and refused every Wan I2V extend with
+    /// "this Wan I2V checkpoint needs a source image", the very contract that
+    /// makes the checkpoint extend-capable in the first place.
+    #[test]
+    fn extend_carries_the_source_frames_the_contract_gate_looks_for() {
+        use crate::types::SourceImageCapability;
+
+        let mut req = extend_req();
+        req.model = "wan22-i2v-a14b:q8".to_string();
+        req.width = 832;
+        req.height = 480;
+        req.fps = Some(16);
+        req.frames = Some(49);
+        assert!(req.source_image.is_none() && req.keyframes.is_none());
+        assert!(request_carries_source_frames(&req));
+
+        // Required + extend is satisfied: admission must let it through.
+        assert_eq!(
+            source_image_contract_violation(
+                Some("wan"),
+                &req.model,
+                Some(SourceImageCapability::Required),
+                request_carries_source_frames(&req),
+            ),
+            None
+        );
+        // …and a text-to-video checkpoint is refused at admission instead of
+        // dying in the engine after the UMT5 encode and expert load are paid.
+        assert!(source_image_contract_violation(
+            Some("wan"),
+            "wan22-t2v-a14b:q8",
+            Some(SourceImageCapability::Unsupported),
+            request_carries_source_frames(&req),
+        )
+        .is_some());
+
+        // An ordinary render still carries nothing.
+        let plain = valid_req();
+        assert!(!request_carries_source_frames(&plain));
+    }
+
+    /// The overlap default is a property of the family's carryover, not a
+    /// global scalar (#783): wan's handoff is one frame and its engine refuses
+    /// anything else, so advertising LTX-2's 17 handed every wan client a
+    /// value that clears wan's `4k+1` grid check and then fails in the engine.
+    #[test]
+    fn extend_overlap_default_follows_the_familys_own_carryover() {
+        assert_eq!(
+            default_extend_overlap_frames_for_family(Some("wan")),
+            WAN_HANDOFF_DUPLICATED_FRAMES
+        );
+        assert_eq!(WAN_HANDOFF_DUPLICATED_FRAMES, 1);
+        assert_eq!(
+            default_extend_overlap_frames_for_family(Some("ltx2")),
+            DEFAULT_EXTEND_OVERLAP_FRAMES
+        );
+        // An unresolved family keeps the historical scalar.
+        assert_eq!(
+            default_extend_overlap_frames_for_family(None),
+            DEFAULT_EXTEND_OVERLAP_FRAMES
+        );
+
+        let mut req = extend_req();
+        req.model = "wan22-ti2v-5b:fp16".to_string();
+        req.width = 704;
+        req.height = 384;
+        req.fps = Some(24);
+        req.frames = Some(49);
+        assert_eq!(
+            req.effective_extend_overlap_frames_for_family(Some("wan")),
+            WAN_HANDOFF_DUPLICATED_FRAMES
+        );
+        // With no hint the request resolves its own family from the manifest,
+        // so metadata provenance records what the engine actually applied.
+        assert_eq!(
+            req.effective_extend_overlap_frames(),
+            WAN_HANDOFF_DUPLICATED_FRAMES
+        );
+        assert_eq!(req.extend_new_frames(), Some(48));
+        assert!(validate_generate_request(&req).is_ok());
+
+        // An explicit value is never overridden — validation still owns it.
+        req.extend_overlap_frames = Some(9);
+        assert_eq!(
+            req.effective_extend_overlap_frames_for_family(Some("wan")),
+            9
+        );
+    }
+
+    /// Saved provenance has to name the overlap that actually rendered.
+    ///
+    /// `OutputMetadata::from_generate_request` holds no family and resolves
+    /// one through the manifest, which an installed `cv:` / `hf:` wan
+    /// checkpoint has none of — so a continuation that ran with wan's single
+    /// carryover frame was recorded as having used LTX-2's 17 (#783).
+    /// Admission and the forced-local CLI both know the resolved family and
+    /// materialize it before metadata is built.
+    #[test]
+    fn materializing_the_overlap_makes_saved_provenance_match_the_render() {
+        let installed_wan = || {
+            let mut req = extend_req();
+            // An installed catalog id: `find_manifest` cannot classify it, so
+            // the family-blind fallback is the wrong 17.
+            req.model = "cv:2041121".to_string();
+            req.width = 832;
+            req.height = 480;
+            req.fps = Some(16);
+            req.frames = Some(49);
+            req
+        };
+
+        let unmaterialized = installed_wan();
+        assert_eq!(
+            unmaterialized.effective_extend_overlap_frames(),
+            DEFAULT_EXTEND_OVERLAP_FRAMES,
+            "the family-blind fallback is exactly what makes materialization necessary"
+        );
+
+        let mut req = installed_wan();
+        materialize_extend_overlap_frames(&mut req, Some("wan"));
+        assert_eq!(
+            req.extend_overlap_frames,
+            Some(WAN_HANDOFF_DUPLICATED_FRAMES)
+        );
+        let metadata = crate::OutputMetadata::from_generate_request(&req, 7, None, "test");
+        assert_eq!(
+            metadata.extend_overlap_frames,
+            Some(WAN_HANDOFF_DUPLICATED_FRAMES),
+            "recorded provenance must be the overlap the engine applied"
+        );
+        // Net-new frames are derived from the same field, so the recorded
+        // clip length stops disagreeing with the file too.
+        assert_eq!(req.extend_new_frames(), Some(48));
+
+        // An explicit value is authoritative.
+        let mut explicit = installed_wan();
+        explicit.extend_overlap_frames = Some(5);
+        materialize_extend_overlap_frames(&mut explicit, Some("wan"));
+        assert_eq!(explicit.extend_overlap_frames, Some(5));
+
+        // LTX-2 keeps 17, and an ordinary render is never handed a bare
+        // overlap — that is a validation error, not a default.
+        let mut ltx2 = extend_req();
+        materialize_extend_overlap_frames(&mut ltx2, Some("ltx2"));
+        assert_eq!(
+            ltx2.extend_overlap_frames,
+            Some(DEFAULT_EXTEND_OVERLAP_FRAMES)
+        );
+        let mut plain = valid_req();
+        materialize_extend_overlap_frames(&mut plain, Some("wan"));
+        assert_eq!(plain.extend_overlap_frames, None);
     }
 
     #[test]

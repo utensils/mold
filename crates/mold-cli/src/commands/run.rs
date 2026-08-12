@@ -357,6 +357,28 @@ fn source_image_contract_error(
     mold_core::validation::source_image_contract_violation(family, model, capability, has_source)
 }
 
+/// The `has_source` argument above, from the flags that carry source frames.
+///
+/// This preflight runs before the request exists, so it cannot call
+/// `mold_core::validation::request_carries_source_frames` — but it must answer
+/// the same question. `--extend` belongs on the list because a continuation's
+/// first frames come from the tail of the clip it continues (#783); it is
+/// mutually exclusive with every other flag here, so an extend that did not
+/// count read as a text-to-video run.
+fn cli_carries_source_frames(
+    images: &[String],
+    keyframes: &[String],
+    first_frame: Option<&Path>,
+    last_frame: Option<&Path>,
+    extend: Option<&str>,
+) -> bool {
+    !images.is_empty()
+        || !keyframes.is_empty()
+        || first_frame.is_some()
+        || last_frame.is_some()
+        || extend.is_some()
+}
+
 /// The manifest is the same source the server's admission gate consults
 /// for cold tiers, and it is on disk here — so this preflight costs no round
 /// trip and works identically for a remote run, a local fallback, and
@@ -1039,6 +1061,23 @@ pub async fn run(
         );
     }
 
+    // The extend gate reports FIRST, because an extend now counts as carrying
+    // source frames below. On a family with no continuation path at all that
+    // ordering is the whole difference between "--extend is only supported
+    // for LTX-2 / LTX-2.3 and Wan models" and the source-image contract's
+    // "does not accept a source image or keyframes" — wording for a request
+    // that supplied neither (#783).
+    // Scoped to `--extend`: a lone `--extend-overlap` is not a continuation,
+    // and validation's "extend_overlap_frames requires extend_video …" is the
+    // more useful thing to tell that caller.
+    if extend.is_some() {
+        if let Err(message) =
+            mold_core::validation::require_extend_capable_family(Some(family.as_str()), "--extend")
+        {
+            anyhow::bail!(message);
+        }
+    }
+
     // Before any image is read and before dispatch: an impossible pairing
     // costs nothing here and minutes on the server. Every flag that can carry
     // a source frame counts, so a boundary-image run is never mistaken for
@@ -1050,7 +1089,13 @@ pub async fn run(
         Some(family.as_str()),
         &model,
         resolve_source_image_contract(&model, host.as_deref(), local).await,
-        !image.is_empty() || !keyframe.is_empty() || first_frame.is_some() || last_frame.is_some(),
+        cli_carries_source_frames(
+            &image,
+            &keyframe,
+            first_frame.as_deref(),
+            last_frame.as_deref(),
+            extend.as_deref(),
+        ),
     ) {
         anyhow::bail!(message);
     }
@@ -1709,6 +1754,45 @@ mod placement_flag_tests {
 mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
+
+    /// An extend carries its source frames in the clip it continues (#783),
+    /// so the preflight has to count it — the same rule admission applies
+    /// through `mold_core::validation::request_carries_source_frames`.
+    /// Without it `mold run <i2v checkpoint> --extend clip.mp4` was refused
+    /// locally for "needs a source image", the very contract that makes the
+    /// checkpoint extend-capable.
+    #[test]
+    fn the_source_contract_preflight_counts_an_extend() {
+        let none: Vec<String> = Vec::new();
+        assert!(!cli_carries_source_frames(&none, &none, None, None, None));
+        assert!(cli_carries_source_frames(
+            &none,
+            &none,
+            None,
+            None,
+            Some("clip.mp4")
+        ));
+
+        // The pre-existing carriers still count.
+        let one = vec!["still.png".to_string()];
+        assert!(cli_carries_source_frames(&one, &none, None, None, None));
+        assert!(cli_carries_source_frames(&none, &one, None, None, None));
+        let anchor = PathBuf::from("first.png");
+        assert!(cli_carries_source_frames(
+            &none,
+            &none,
+            Some(&anchor),
+            None,
+            None
+        ));
+        assert!(cli_carries_source_frames(
+            &none,
+            &none,
+            None,
+            Some(&anchor),
+            None
+        ));
+    }
 
     /// The pre-dispatch contract check. Identical table in `mold-ai-tui` and
     /// `mold-ai-discord`; all three must agree with the server's admission
