@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix the iPhone app aborting during native startup by installing its selected rustls cryptography provider before Tauri or any networking plugin can construct a reqwest client.
+
 - Fix web generation routing to react immediately when a machine is added or selected in the same tab, and make the qualified MiniMax H3 FL2VA editor visibly require its sole supported first-frame endpoint across web, desktop, and mobile surfaces.
 
 - **The downloadable MiniMax H3 build now has a freshly reviewed compact FL2VA runtime record.** A memory-preflighted L40S campaign used a new alpine-lake first frame and prompt, authenticated all 42,482,090,318 artifact bytes, retained 18,611 telemetry samples and all thirteen synchronized observations, and produced a 6,429,310-byte, 124-frame H.264 plus stereo AAC result. The source-controlled allowlist now accepts only that candidate's exact source/runtime, artifact, CUDA, attention, process, and 1344×768 first-frame envelope. Ref2VA, other endpoints, broader envelopes, other devices/builds, and public release execution remain closed.
