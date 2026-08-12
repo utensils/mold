@@ -27,7 +27,6 @@ import {
   generationCapabilitiesForFamily,
   MAX_LORA_STACK,
   defaultOutputFormat,
-  outputFormatsForFamily,
 } from "../../lib/capabilities";
 import { schedulerLabel } from "@studio/lib/generationCapabilities";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
@@ -133,10 +132,11 @@ const caps = computed(() =>
     // otherwise the form's snapshot of it. Without this the Source image
     // section would render for a text-to-video wan checkpoint that rejects one.
     props.selectedModel?.source_image ?? props.form.sourceImageCapability,
+    effectiveGenerationRecipe(props.selectedModel, props.form.pipeline),
   ),
 );
 const audioOutputSupported = computed(() => props.selectedModel?.supports_audio !== false);
-const formats = computed(() => outputFormatsForFamily(props.form.family));
+const formats = computed(() => caps.value.outputFormats as OutputFormat[]);
 const advancedCount = computed(() => advancedActiveCount(props.form));
 const h3Task = computed(() =>
   props.selectedModel ? minimaxH3TaskForModel(props.form.model) : null,

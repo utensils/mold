@@ -48,8 +48,14 @@ const emit = defineEmits<{
 const fpsError = computed(() => (props.showFps ? fpsValidationError(props.form.fps) : null));
 const supportsVideo = computed(
   () =>
-    generationCapabilitiesForFamily(props.form.family, props.form.model, props.form.pipeline)
-      .supportsVideo,
+    generationCapabilitiesForFamily(
+      props.form.family,
+      props.form.model,
+      props.form.pipeline,
+      null,
+      null,
+      effectiveGenerationRecipe(props.model, props.form.pipeline),
+    ).supportsVideo,
 );
 const guidanceCaps = computed(() =>
   generationCapabilitiesForFamily(
@@ -57,6 +63,8 @@ const guidanceCaps = computed(() =>
     props.form.model,
     props.form.pipeline,
     props.model?.guidance_capabilities,
+    props.model?.source_image ?? props.form.sourceImageCapability,
+    effectiveGenerationRecipe(props.model, props.form.pipeline),
   ),
 );
 const recipe = computed(() => effectiveGenerationRecipe(props.model, props.form.pipeline));

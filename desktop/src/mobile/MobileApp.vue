@@ -28,6 +28,7 @@ import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
 import { filterRestrictedModels, modelAccessRestrictionFor } from "@studio/lib/modelAccess";
 import { expansionTaskForRequest } from "@studio/lib/expandTask";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
   conditioningFingerprint,
   defaultRemixDimensions,
@@ -724,6 +725,7 @@ const caps = computed(() =>
     // source well would render for a text-to-video wan checkpoint that
     // rejects one, and the End frame well (#779) would never appear.
     selectedGenerationModel.value?.source_image ?? form.sourceImageCapability,
+    effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline),
   ),
 );
 const h3Family = computed(() => isMinimaxH3Identity(form.family, form.model));
@@ -921,7 +923,9 @@ const sourceSectionSummary = computed(() => {
   if (caps.value.requiresSourceImage) return "Required";
   return form.controlImage ? "Control photo selected" : "Optional";
 });
-const outputFormats = computed(() => outputFormatsForFamily(form.family));
+const outputFormats = computed(
+  () => caps.value.outputFormats as ReturnType<typeof outputFormatsForFamily>,
+);
 const selectedModelAvailable = computed(
   () =>
     modelsHostId.value === selectedHostId.value &&
@@ -4911,6 +4915,7 @@ onBeforeUnmount(() => {
                 </summary>
                 <MobileSourceControls
                   :form="form"
+                  :model="selectedGenerationModel"
                   :target="selectedTarget"
                   :control-models="controlModels"
                   :upscalers="upscalers"
@@ -4921,6 +4926,7 @@ onBeforeUnmount(() => {
                 v-if="selectedTarget"
                 :form="form"
                 :target="selectedTarget"
+                :model="selectedGenerationModel"
                 @append-word="appendPromptWord"
               />
               <label class="field"

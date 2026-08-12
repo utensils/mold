@@ -27,6 +27,7 @@ import InspectorPanel from "../components/create/InspectorPanel.vue";
 import SequenceComposer from "../components/create/SequenceComposer.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { useLiveActivityStore } from "../stores/liveActivity";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
@@ -524,6 +525,7 @@ const caps = computed(() =>
     form.pipeline,
     form.guidanceCapabilities,
     form.sourceImageCapability,
+    effectiveGenerationRecipe(selectedEntry.value, form.pipeline),
   ),
 );
 const formValidationError = computed(
@@ -724,7 +726,9 @@ const activeRoute = useRoute();
 const draft = useSequenceDraftStore();
 const chains = useChainJobsStore();
 const isSequence = computed(() => draft.output === "sequence");
-const selectedEntry = computed(() => findInstalledModel(installedModels.value, form.model));
+const selectedEntry = computed(() =>
+  hostModels.installedEntryForTarget(form.model, stickyTarget.value),
+);
 
 let previousStillSource = "";
 let previousStillResolution: SourceResolutionResult | null = null;

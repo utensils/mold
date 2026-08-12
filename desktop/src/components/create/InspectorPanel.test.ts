@@ -14,6 +14,9 @@ import { aspectIdFor } from "../../lib/resolutions";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { useGenerateFormStore } from "../../stores/generateForm";
 import { useModelStore } from "../../stores/models";
+import { useConnectionStore } from "../../stores/connection";
+import { useHostModelsStore } from "../../stores/hostModels";
+import { useHostsStore } from "../../stores/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ModelEntry } from "../../lib/api/types";
@@ -109,6 +112,49 @@ describe("InspectorPanel — layout", () => {
 });
 
 describe("InspectorPanel — shape + resolution projection", () => {
+  it("uses the explicit host's model profile instead of the fleet union's first row", () => {
+    const name = "shared-model";
+    const local = {
+      name,
+      family: "flux",
+      downloaded: true,
+      recommended_dimensions: [{ width: 1024, height: 1024 }],
+    } as ModelEntry;
+    const remote = {
+      ...local,
+      recommended_dimensions: [{ width: 1280, height: 720 }],
+    } as ModelEntry;
+    const connection = useConnectionStore();
+    connection.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "k" };
+    connection.status = "ready";
+    useHostsStore().extras.push({
+      id: "hal9000-7680",
+      label: "HAL 9000",
+      url: "http://hal9000:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    useModelStore().all = [local];
+    const hostModels = useHostModelsStore();
+    hostModels.byHost.local = { entries: [local], fetchedAt: Date.now(), error: null };
+    hostModels.byHost["hal9000-7680"] = {
+      entries: [remote],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    useAppPrefsStore().settings = { generateTargetHost: "hal9000-7680" } as never;
+    const form = formFor("flux");
+    form.model = name;
+
+    const wrapper = mount(InspectorPanel, { props: { form } });
+
+    expect(wrapper.getComponent(ShapePicker).props("options")).toEqual([
+      expect.objectContaining({ label: "16:9" }),
+    ]);
+  });
+
   it("hides aspect ratios the selected wan checkpoint does not support", () => {
     const model = {
       name: "wan22-i2v-a14b:q5",

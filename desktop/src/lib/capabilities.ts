@@ -46,6 +46,7 @@ export function generationCapabilitiesForFamily(
   pipeline?: string | null,
   advertisedGuidance?: Parameters<typeof baseGenerationCapabilities>[3],
   advertisedSourceImage?: string | null,
+  advertisedRecipe?: Parameters<typeof baseGenerationCapabilities>[5],
 ): GenerationCapabilities {
   const shared = baseGenerationCapabilities(
     family,
@@ -53,6 +54,7 @@ export function generationCapabilitiesForFamily(
     pipeline,
     advertisedGuidance,
     advertisedSourceImage,
+    advertisedRecipe,
   );
   const supportsAdvancedVideo = isAdvancedVideoFamily(family);
   return {
@@ -83,7 +85,14 @@ export function isVideoFamily(family: string): boolean {
 }
 
 /** Output-format options for a family, most-preferred first (the UI default). */
-export function outputFormatsForFamily(family: string): OutputFormat[] {
+export function outputFormatsForFamily(
+  family: string,
+  recipe?: Parameters<typeof baseGenerationCapabilities>[5],
+): OutputFormat[] {
+  if (recipe) {
+    return baseGenerationCapabilities(family, "", null, null, null, recipe)
+      .outputFormats as OutputFormat[];
+  }
   // `wav` is deliberately absent: it is valid only for LTX-2's audio-only
   // `t2a` pipeline, which sets the format itself. Offering it as a free choice
   // would let a video request pick a container the server rejects.
@@ -91,8 +100,11 @@ export function outputFormatsForFamily(family: string): OutputFormat[] {
   return isVideoFamily(family) ? ["mp4", "gif", "apng", "webp"] : ["png", "jpeg", "webp"];
 }
 
-export function defaultOutputFormat(family: string): OutputFormat {
-  return outputFormatsForFamily(family)[0]!;
+export function defaultOutputFormat(
+  family: string,
+  recipe?: Parameters<typeof baseGenerationCapabilities>[5],
+): OutputFormat {
+  return outputFormatsForFamily(family, recipe)[0]!;
 }
 
 /**

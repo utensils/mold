@@ -40,6 +40,10 @@ import {
   resolveExtendOverlapFrames,
 } from "@studio/lib/extend";
 import {
+  effectiveGenerationRecipe,
+  type GenerationRecipeProfile,
+} from "@studio/lib/generationProfile";
+import {
   cameraMotionLoraPath,
   normalizeCameraMotionLoraState,
   syncCameraMotionLora,
@@ -89,7 +93,13 @@ export function promptWithStyle(state: GenerateFormState): string {
  * `wav` is deliberately absent: it is valid only for LTX-2's audio-only `t2a`
  * pipeline, which sets the format itself when selected. Offering it as a free
  * choice would let a video request pick a container the server rejects. */
-export function outputFormatsForFamily(family: string): OutputFormat[] {
+export function outputFormatsForFamily(
+  family: string,
+  recipe?: GenerationRecipeProfile | null,
+): OutputFormat[] {
+  if (recipe && !recipe.legacy_adapter) {
+    return recipe.capabilities.output.formats.slice();
+  }
   if (isMinimaxH3Family(family)) return ["mp4"];
   return isVideoFamily(family)
     ? ["mp4", "gif", "apng", "webp"]
@@ -282,6 +292,7 @@ function modelDefaultsPatch(
     null,
     null,
     model.source_image,
+    effectiveGenerationRecipe(model, null),
   );
   if (capabilities.supportsVideo) {
     next.frames = isMinimaxH3Family(model.family)
@@ -295,7 +306,7 @@ function modelDefaultsPatch(
     next.fps = null;
     next.gifPreview = false;
   }
-  const formats = outputFormatsForFamily(model.family);
+  const formats = capabilities.outputFormats as OutputFormat[];
   if (!formats.includes(next.outputFormat)) {
     next.outputFormat = formats[0];
   }

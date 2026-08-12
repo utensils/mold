@@ -63,6 +63,8 @@ export interface TemporalProfile {
 }
 
 export interface GenerationRecipeProfile {
+  /** Client-only marker for the one-release pre-v1 compatibility projection. */
+  legacy_adapter?: true;
   id: string;
   label: string;
   request_selector: { pipeline?: string | null };
@@ -86,13 +88,49 @@ export interface GenerationRecipeProfile {
       fixed_scale?: number | null;
     };
     source_image?: "unsupported" | "optional" | "required" | null;
+    negative_prompt: FeatureControlProfile;
     supports_lora: boolean;
     supports_controlnet: boolean;
     supports_sequence: boolean;
     supports_extend: boolean;
     supports_audio: boolean;
+    source_video: FeatureControlProfile;
+    mask: FeatureControlProfile;
+    keyframes: FeatureControlProfile;
+    audio: FeatureControlProfile;
+    lora: AdapterControlProfile;
+    controlnet: AdapterControlProfile;
+    output: OutputCapabilitiesProfile;
+    wan_recipe: WanRecipeCapabilitiesProfile;
     schedulers: string[];
   };
+}
+
+export interface FeatureControlProfile {
+  mode: ControlMode;
+  required: boolean;
+  reason?: string | null;
+}
+
+export interface AdapterControlProfile {
+  mode: ControlMode;
+  max_count: number;
+  reason?: string | null;
+}
+
+export interface OutputCapabilitiesProfile {
+  default_format: "png" | "jpeg" | "gif" | "apng" | "webp" | "mp4" | "wav";
+  formats: ("png" | "jpeg" | "gif" | "apng" | "webp" | "mp4" | "wav")[];
+  audio_requires_mp4: boolean;
+  delivery_reason?: string | null;
+}
+
+export interface WanRecipeCapabilitiesProfile {
+  mode: ControlMode;
+  supports_distill_strength: boolean;
+  supports_first_last_frame: boolean;
+  first_last_frame_min_frames?: number | null;
+  reason?: string | null;
 }
 
 export interface GenerationProfileSet {
@@ -146,6 +184,16 @@ export function effectiveGenerationRecipe(
         Boolean(model.recommended_dimensions?.length));
     return hasLegacyContract ? legacyRecipe(model, pipeline) : null;
   }
+  return advertisedGenerationRecipe(model, pipeline);
+}
+
+/** Resolve only a server-authored v1 recipe, never the Release-N legacy adapter. */
+export function advertisedGenerationRecipe(
+  model: GenerationProfileModel | null | undefined,
+  pipeline?: string | null,
+): GenerationRecipeProfile | null {
+  const profile = advertisedGenerationProfile(model);
+  if (!profile) return null;
   if (pipeline) {
     const exact = profile.recipes.find(
       (recipe) => recipe.request_selector.pipeline === pipeline,
@@ -326,6 +374,7 @@ function isRecipe(value: unknown): value is GenerationRecipeProfile {
     isRecord(caps.guidance) &&
     typeof caps.guidance.adjustable === "boolean" &&
     typeof caps.guidance.supports_negative_prompt === "boolean" &&
+    isFeatureControl(caps.negative_prompt) &&
     nullableFinite(caps.guidance.fixed_scale) &&
     (caps.source_image === undefined ||
       caps.source_image === null ||
@@ -337,6 +386,14 @@ function isRecipe(value: unknown): value is GenerationRecipeProfile {
     typeof caps.supports_sequence === "boolean" &&
     typeof caps.supports_extend === "boolean" &&
     typeof caps.supports_audio === "boolean" &&
+    isFeatureControl(caps.source_video) &&
+    isFeatureControl(caps.mask) &&
+    isFeatureControl(caps.keyframes) &&
+    isFeatureControl(caps.audio) &&
+    isAdapterControl(caps.lora) &&
+    isAdapterControl(caps.controlnet) &&
+    isOutputCapabilities(caps.output) &&
+    isWanRecipeCapabilities(caps.wan_recipe) &&
     (caps.schedulers === undefined ||
       (Array.isArray(caps.schedulers) &&
         caps.schedulers.every((scheduler) => typeof scheduler === "string")));
@@ -375,6 +432,65 @@ function isRecipe(value: unknown): value is GenerationRecipeProfile {
         (recipe.defaults.fps === null ||
           recipe.defaults.fps === undefined ||
           fpsControlAccepts(recipe.temporal.fps, recipe.defaults.fps))))
+  );
+}
+
+function isFeatureControl(value: unknown): value is FeatureControlProfile {
+  return (
+    isRecord(value) &&
+    ["adjustable", "fixed", "hidden"].includes(String(value.mode)) &&
+    typeof value.required === "boolean" &&
+    (value.reason === undefined ||
+      value.reason === null ||
+      typeof value.reason === "string")
+  );
+}
+
+function isAdapterControl(value: unknown): value is AdapterControlProfile {
+  return (
+    isRecord(value) &&
+    ["adjustable", "fixed", "hidden"].includes(String(value.mode)) &&
+    Number.isInteger(value.max_count) &&
+    Number(value.max_count) >= 0 &&
+    (value.reason === undefined ||
+      value.reason === null ||
+      typeof value.reason === "string")
+  );
+}
+
+const OUTPUT_FORMATS = ["png", "jpeg", "gif", "apng", "webp", "mp4", "wav"];
+
+function isOutputCapabilities(
+  value: unknown,
+): value is OutputCapabilitiesProfile {
+  return (
+    isRecord(value) &&
+    OUTPUT_FORMATS.includes(String(value.default_format)) &&
+    Array.isArray(value.formats) &&
+    value.formats.length > 0 &&
+    value.formats.every((format) => OUTPUT_FORMATS.includes(String(format))) &&
+    value.formats.includes(value.default_format) &&
+    typeof value.audio_requires_mp4 === "boolean" &&
+    (value.delivery_reason === undefined ||
+      value.delivery_reason === null ||
+      typeof value.delivery_reason === "string")
+  );
+}
+
+function isWanRecipeCapabilities(
+  value: unknown,
+): value is WanRecipeCapabilitiesProfile {
+  return (
+    isRecord(value) &&
+    ["adjustable", "fixed", "hidden"].includes(String(value.mode)) &&
+    typeof value.supports_distill_strength === "boolean" &&
+    typeof value.supports_first_last_frame === "boolean" &&
+    (value.first_last_frame_min_frames === undefined ||
+      value.first_last_frame_min_frames === null ||
+      positiveIntegerValue(value.first_last_frame_min_frames)) &&
+    (value.reason === undefined ||
+      value.reason === null ||
+      typeof value.reason === "string")
   );
 }
 
@@ -494,6 +610,7 @@ function legacyRecipe(
       }
     : null;
   return {
+    legacy_adapter: true,
     id: "legacy",
     label: "Default",
     request_selector: {},
@@ -541,11 +658,37 @@ function legacyRecipe(
         adjustable: true,
         supports_negative_prompt: true,
       },
+      negative_prompt: {
+        mode: "adjustable",
+        required: false,
+      },
       supports_lora: false,
       supports_controlnet: false,
       supports_sequence: false,
       supports_extend: false,
       supports_audio: false,
+      source_video: { mode: "hidden", required: false },
+      mask: { mode: "adjustable", required: false },
+      keyframes: { mode: "hidden", required: false },
+      audio: { mode: "hidden", required: false },
+      lora: { mode: "hidden", max_count: 0 },
+      controlnet: { mode: "hidden", max_count: 0 },
+      output: {
+        default_format:
+          family === "ltx2" || family === "ltx-video" || family === "wan"
+            ? "mp4"
+            : "png",
+        formats:
+          family === "ltx2" || family === "ltx-video" || family === "wan"
+            ? ["mp4", "gif", "apng", "webp"]
+            : ["png", "jpeg", "webp"],
+        audio_requires_mp4: family === "ltx2",
+      },
+      wan_recipe: {
+        mode: "hidden",
+        supports_distill_strength: false,
+        supports_first_last_frame: false,
+      },
       schedulers: [],
     },
   };

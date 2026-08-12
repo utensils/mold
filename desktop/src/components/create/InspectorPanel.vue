@@ -222,12 +222,12 @@ const installedModels = computed(() =>
     hostModels.unionInstalled,
   ),
 );
-const selectedModel = computed<ModelEntry | null>(() =>
-  findInstalledModel(installedModels.value, props.form.model),
-);
-
 const stickyTarget = computed<string | null>(() =>
   normalizeTargetHost(appPrefs.settings?.generateTargetHost ?? null, hosts.all),
+);
+
+const selectedModel = computed<ModelEntry | null>(() =>
+  hostModels.installedEntryForTarget(props.form.model, stickyTarget.value),
 );
 
 const pickerModels = computed<ModelEntry[]>(() => {

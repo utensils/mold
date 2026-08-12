@@ -53,7 +53,6 @@ import {
   wanRecipeError,
   type WanRecipeState,
 } from "@studio/lib/wanRecipe";
-import { outputFormatsForFamily } from "../../composables/useGenerateForm";
 import { blobToBase64 } from "../../lib/base64";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
@@ -232,6 +231,7 @@ const caps = computed(() =>
     props.modelValue.pipeline,
     selectedModel.value?.guidance_capabilities,
     selectedModel.value?.source_image ?? props.modelValue.sourceImageCapability,
+    effectiveGenerationRecipe(selectedModel.value, props.modelValue.pipeline),
   ),
 );
 const flux2Dev = computed(() => isFlux2DevModel(props.modelValue.model));
@@ -247,7 +247,7 @@ const h3Authoring = computed(
 function setH3Authoring(value: MinimaxH3AuthoringState) {
   patch({ h3Authoring: value });
 }
-const formats = computed(() => outputFormatsForFamily(props.family));
+const formats = computed(() => caps.value.outputFormats as OutputFormat[]);
 
 // Wan puts its solver in the recipe section below, next to the flow shift it
 // belongs with, so the generic section would otherwise render a second picker

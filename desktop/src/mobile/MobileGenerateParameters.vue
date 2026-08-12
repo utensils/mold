@@ -66,6 +66,7 @@ import {
   type Ltx2GuidanceOverridesState,
 } from "@studio/lib/guidanceOverrides";
 import { schedulerLabel } from "@studio/lib/generationCapabilities";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
   MAX_WAN_DISTILL_STRENGTH,
   wanRecipeCount,
@@ -112,7 +113,16 @@ const emit = defineEmits<{
   "validity-change": [valid: boolean];
 }>();
 
-const caps = computed(() => generationCapabilitiesForFamily(props.form.family, props.form.model));
+const caps = computed(() =>
+  generationCapabilitiesForFamily(
+    props.form.family,
+    props.form.model,
+    props.form.pipeline,
+    props.selectedModel?.guidance_capabilities,
+    props.selectedModel?.source_image ?? props.form.sourceImageCapability,
+    effectiveGenerationRecipe(props.selectedModel, props.form.pipeline),
+  ),
+);
 const h3Task = computed(() =>
   props.selectedModel ? minimaxH3TaskForModel(props.form.model) : null,
 );

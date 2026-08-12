@@ -7,6 +7,7 @@ import {
   supportsFirstLastFrames,
   type SourceImageCapability,
 } from "./sourceImageCapability";
+import type { GenerationRecipeProfile } from "./generationProfile";
 
 export { isMinimaxH3Family } from "./minimaxH3Authoring";
 
@@ -49,7 +50,17 @@ export interface BaseGenerationCapabilities {
   supportsVideo: boolean;
   supportsAudio: boolean;
   supportsLora: boolean;
+  maxLoraStack: number;
   supportsControlNet: boolean;
+  outputFormats: string[];
+  defaultOutputFormat: string;
+  outputDeliveryReason: string | null;
+  supportsSourceVideo: boolean;
+  requiresSourceVideo: boolean;
+  supportsKeyframes: boolean;
+  requiresKeyframes: boolean;
+  supportsAudioInput: boolean;
+  requiresAudioInput: boolean;
   sourceImageMode: SourceImageMode;
   /**
    * The effective per-model source-image contract (#772): the model's own
@@ -238,6 +249,7 @@ export function baseGenerationCapabilities(
   pipeline?: string | null,
   advertisedGuidance?: AdvertisedGuidanceCapabilities | null,
   advertisedSourceImage?: string | null,
+  advertisedRecipe?: GenerationRecipeProfile | null,
 ): BaseGenerationCapabilities {
   const normalized = family.trim().toLowerCase();
   const qwenEdit = isQwenImageEditFamily(normalized);
@@ -245,11 +257,19 @@ export function baseGenerationCapabilities(
   const h3 = isMinimaxH3Identity(normalized, model);
   const h3Ref2va = h3 && isMinimaxH3Ref2vaModel(model);
   const wan = isWanFamily(normalized);
-  const schedulerOptions = wan
-    ? WAN_SOLVER_OPTIONS.slice()
-    : SCHEDULER_FAMILIES.has(normalized)
-      ? SCHEDULER_OPTIONS.slice()
-      : [];
+  const profileCaps = advertisedRecipe?.legacy_adapter
+    ? undefined
+    : advertisedRecipe?.capabilities;
+  const advertisedSchedulers = profileCaps?.schedulers;
+  const schedulerOptions = advertisedSchedulers
+    ? advertisedSchedulers.length > 0
+      ? (["default", ...advertisedSchedulers] as GenerationScheduler[])
+      : []
+    : wan
+      ? WAN_SOLVER_OPTIONS.slice()
+      : SCHEDULER_FAMILIES.has(normalized)
+        ? SCHEDULER_OPTIONS.slice()
+        : [];
   const normalizedModel = model.trim().toLowerCase();
   const ltx =
     normalized === "ltx-video" ||
@@ -284,9 +304,16 @@ export function baseGenerationCapabilities(
     : advertisedDefault
       ? !advertisedDefault.adjustable
       : inferredFixedGuidance;
+  const profileControlVisible = (mode: string | undefined) =>
+    mode === "adjustable" || mode === "fixed";
+  const legacyOutputFormats = supportsVideo
+    ? ["mp4", "gif", "apng", "webp"]
+    : ["png", "jpeg", "webp"];
   return {
     supportsNegativePrompt:
-      advertisedDefault?.supports_negative_prompt ??
+      (profileCaps
+        ? profileControlVisible(profileCaps.negative_prompt.mode)
+        : advertisedDefault?.supports_negative_prompt) ??
       (!NO_NEGATIVE_PROMPT_FAMILIES.has(normalized) && !fixedGuidance),
     guidanceAdjustable: !fixedGuidance,
     fixedGuidance: fixedGuidance
@@ -297,21 +324,46 @@ export function baseGenerationCapabilities(
     supportsScheduler: schedulerOptions.length > 0,
     schedulerOptions,
     wanRecipe: {
-      supported: wan,
-      supportsDistillStrength: wan && WAN_DISTILL_TIER.test(normalizedModel),
+      supported: profileCaps
+        ? profileControlVisible(profileCaps.wan_recipe.mode)
+        : wan,
+      supportsDistillStrength:
+        profileCaps?.wan_recipe.supports_distill_strength ??
+        (wan && WAN_DISTILL_TIER.test(normalizedModel)),
     },
     supportsCfgPlus: CFG_PLUS_FAMILIES.has(normalized),
     supportsVideo,
-    supportsAudio: h3 || AUDIO_FAMILIES.has(normalized),
-    supportsLora:
-      !flux2Dev &&
-      // The wan fp8-scaled tier deliberately refuses every adapter stack —
-      // merging into e4m3 would re-round the delta to three mantissa bits —
-      // so offering the control would advertise a load that always fails.
-      // Mirrors `WanTransformer::from_safetensors_with_loras`.
-      !(wan && WAN_FP8_TIER.test(normalizedModel)) &&
-      (LORA_CAPABLE_FAMILIES as readonly string[]).includes(normalized),
-    supportsControlNet: CONTROLNET_FAMILIES.has(normalized),
+    supportsAudio:
+      profileCaps?.supports_audio ?? (h3 || AUDIO_FAMILIES.has(normalized)),
+    supportsLora: profileCaps?.lora
+      ? profileControlVisible(profileCaps.lora.mode)
+      : !flux2Dev &&
+        // The wan fp8-scaled tier deliberately refuses every adapter stack —
+        // merging into e4m3 would re-round the delta to three mantissa bits —
+        // so offering the control would advertise a load that always fails.
+        // Mirrors `WanTransformer::from_safetensors_with_loras`.
+        !(wan && WAN_FP8_TIER.test(normalizedModel)) &&
+        (LORA_CAPABLE_FAMILIES as readonly string[]).includes(normalized),
+    maxLoraStack: profileCaps?.lora.max_count ?? MAX_LORA_STACK,
+    supportsControlNet: profileCaps
+      ? profileControlVisible(profileCaps.controlnet.mode)
+      : CONTROLNET_FAMILIES.has(normalized),
+    outputFormats: profileCaps?.output.formats.slice() ?? legacyOutputFormats,
+    defaultOutputFormat:
+      profileCaps?.output.default_format ?? legacyOutputFormats[0]!,
+    outputDeliveryReason: profileCaps?.output.delivery_reason ?? null,
+    supportsSourceVideo: profileCaps
+      ? profileControlVisible(profileCaps.source_video.mode)
+      : ltx,
+    requiresSourceVideo: profileCaps?.source_video.required ?? false,
+    supportsKeyframes: profileCaps
+      ? profileControlVisible(profileCaps.keyframes.mode)
+      : ltx || wan,
+    requiresKeyframes: profileCaps?.keyframes.required ?? false,
+    supportsAudioInput: profileCaps
+      ? profileControlVisible(profileCaps.audio.mode)
+      : ltx,
+    requiresAudioInput: profileCaps?.audio.required ?? false,
     sourceImageMode: h3Ref2va
       ? "ordered-references"
       : h3
@@ -324,13 +376,14 @@ export function baseGenerationCapabilities(
     sourceImageCapability,
     supportsSourceImage: sourceImageCapability !== "unsupported",
     requiresSourceImage: sourceImageCapability === "required",
-    supportsEndFrame: supportsFirstLastFrames(
-      normalized,
-      advertisedSourceImage,
-    ),
+    supportsEndFrame:
+      profileCaps?.wan_recipe.supports_first_last_frame ??
+      supportsFirstLastFrames(normalized, advertisedSourceImage),
     // Wan pins conditioning frames exactly: no repaint mask, no denoise
     // strength — the engine rejects the former and never reads the latter.
-    supportsMask: !h3 && !qwenEdit && !flux2Dev && !wan,
+    supportsMask: profileCaps
+      ? profileControlVisible(profileCaps.mask.mode)
+      : !h3 && !qwenEdit && !flux2Dev && !wan,
     supportsStrength: !h3 && !qwenEdit && !flux2Dev && !wan,
     forcesBatchSizeOne: h3 || qwenEdit,
   };

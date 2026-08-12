@@ -29,6 +29,7 @@ export function generationCapabilitiesForFamily(
   pipeline?: string | null,
   advertisedGuidance?: Parameters<typeof baseGenerationCapabilities>[3],
   advertisedSourceImage?: string | null,
+  advertisedRecipe?: Parameters<typeof baseGenerationCapabilities>[5],
 ): GenerationCapabilities {
   return baseGenerationCapabilities(
     family,
@@ -36,6 +37,7 @@ export function generationCapabilitiesForFamily(
     pipeline,
     advertisedGuidance,
     advertisedSourceImage,
+    advertisedRecipe,
   );
 }
 

@@ -3,14 +3,16 @@ import { computed, onMounted, ref, watch } from "vue";
 import type { ApiTarget } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { fetchLoras } from "../lib/api/loras";
-import type { LoraInfo } from "../lib/api/types";
+import type { LoraInfo, ModelEntry } from "../lib/api/types";
 import { MAX_LORA_STACK, generationCapabilitiesForFamily } from "../lib/capabilities";
 import type { GenerateForm } from "../lib/generateForm";
 import { cameraMotionLoraPath } from "@studio/lib/cameraMotion";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 
 const props = defineProps<{
   form: GenerateForm;
   target: ApiTarget;
+  model?: ModelEntry | null;
 }>();
 
 const emit = defineEmits<{ (event: "append-word", word: string): void }>();
@@ -22,7 +24,15 @@ const error = ref("");
 let loadToken = 0;
 
 const supported = computed(
-  () => generationCapabilitiesForFamily(props.form.family, props.form.model).supportsLora,
+  () =>
+    generationCapabilitiesForFamily(
+      props.form.family,
+      props.form.model,
+      props.form.pipeline,
+      null,
+      null,
+      effectiveGenerationRecipe(props.model, props.form.pipeline),
+    ).supportsLora,
 );
 const summary = computed(() =>
   props.form.loras.length === 0 ? "Optional" : `${props.form.loras.length} active`,

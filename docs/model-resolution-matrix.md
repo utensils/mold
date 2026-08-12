@@ -16,7 +16,7 @@ Regenerate with `cargo run -p mold-ai-core --bin generate_generation_profiles`. 
 
 ### Profile `flux.flux-dev`
 
-Schema 1 · hash `2dd734c0893969e69e433694a960a7d33df8acd3cd631f72c742c22e4480d9c5` · default recipe `default`
+Schema 1 · hash `6897c71f947371718c4973c10fa28d77ad529eca0068907dfe9378660ab31ce0` · default recipe `default`
 
 Models: `flux-dev:bf16`, `flux-dev:q4`, `flux-dev:q6`, `flux-dev:q8`.
 
@@ -34,11 +34,11 @@ Models: `flux-dev:bf16`, `flux-dev:q4`, `flux-dev:q6`, `flux-dev:q8`.
 | `16:9` | `1024x576` (recommended) |
 | `9:16` | `576x1024` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### Profile `flux.flux-krea`
 
-Schema 1 · hash `744008a7bdd25520ef4f24b646b7bdd81f2b3dc330abe1535502cbd4a1394057` · default recipe `default`
+Schema 1 · hash `5bc9802a645d889b788d7795d84f83aeb7a01c5f51627c058ca64c5593be17fe` · default recipe `default`
 
 Models: `flux-krea:fp8`, `flux-krea:q4`, `flux-krea:q6`, `flux-krea:q8`.
 
@@ -56,11 +56,11 @@ Models: `flux-krea:fp8`, `flux-krea:q4`, `flux-krea:q6`, `flux-krea:q8`.
 | `16:9` | `1024x576` (recommended) |
 | `9:16` | `576x1024` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### Profile `flux.flux-schnell`
 
-Schema 1 · hash `e7580d9a16de12af928e0546cb3cff26017409a1cf28122aa3d28a06e27f5d5c` · default recipe `default`
+Schema 1 · hash `29fb3276bd4dbad7dc5dd7f5e2f7fedc0e24a13d1e808fff531fadef3e96298e` · default recipe `default`
 
 Models: `flux-schnell:bf16`, `flux-schnell:q4`, `flux-schnell:q6`, `flux-schnell:q8`.
 
@@ -78,11 +78,11 @@ Models: `flux-schnell:bf16`, `flux-schnell:q4`, `flux-schnell:q6`, `flux-schnell
 | `16:9` | `1024x576` (recommended) |
 | `9:16` | `576x1024` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `iniverse-mix:fp8`
 
-Schema 1 · hash `f41a31d6f2db96a814d71847a04ab6fd33edb310c146fd9ffcfb49cace66f01c` · default recipe `default`
+Schema 1 · hash `4750ca9b79755e9fd476e348391708c370bf425f96491aa978c5d551a1a0fa5b` · default recipe `default`
 
 Models: `iniverse-mix:fp8`.
 
@@ -100,11 +100,11 @@ Models: `iniverse-mix:fp8`.
 | `16:9` | `1024x576` (recommended) |
 | `9:16` | `576x1024` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### Profile `flux.jibmix-flux`
 
-Schema 1 · hash `3eb5f278b65125fd84534a2bec7e8b120dd7e4cf128f9feadd3a26be747d7f29` · default recipe `default`
+Schema 1 · hash `ae0945af73d7448e03a41e1d84bc0e24d2115c7a3968782eedcd042aec6b512b` · default recipe `default`
 
 Models: `jibmix-flux:fp8`, `jibmix-flux:q3`, `jibmix-flux:q4`, `jibmix-flux:q5`.
 
@@ -122,11 +122,11 @@ Models: `jibmix-flux:fp8`, `jibmix-flux:q3`, `jibmix-flux:q4`, `jibmix-flux:q5`.
 | `16:9` | `1024x576` (recommended) |
 | `9:16` | `576x1024` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `ultrareal-v2:bf16`
 
-Schema 1 · hash `d4f82cea49c397d9ce07ceba30246795ce983a0123169f3215e141e6dfc52c88` · default recipe `default`
+Schema 1 · hash `12c270a4fb704a560b9939af00507a47ce187f997996ce76b7dd207417dccd63` · default recipe `default`
 
 Models: `ultrareal-v2:bf16`.
 
@@ -144,11 +144,11 @@ Models: `ultrareal-v2:bf16`.
 | `16:9` | `1024x576` (recommended) |
 | `9:16` | `576x1024` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### Profile `flux.ultrareal-v3`
 
-Schema 1 · hash `09494e919b7f1023c23a9e8e57392ab7c040f318bc9a09b670aaa3d002775334` · default recipe `default`
+Schema 1 · hash `4564ace0827b3efb266b62c72dc05e171890d7ff33ad22a6d8ec3769d2d4c58a` · default recipe `default`
 
 Models: `ultrareal-v3:q4`, `ultrareal-v3:q6`, `ultrareal-v3:q8`.
 
@@ -166,11 +166,11 @@ Models: `ultrareal-v3:q4`, `ultrareal-v3:q6`, `ultrareal-v3:q8`.
 | `16:9` | `1024x576` (recommended) |
 | `9:16` | `576x1024` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### Profile `flux.ultrareal-v4`
 
-Schema 1 · hash `595ab3ed31c6c38d91b3160541885fce9892c89dd71070a435cfd6de45eba9fa` · default recipe `default`
+Schema 1 · hash `e9ba9d592cbba6fdf3f36266eb55b77d73f48c7592dcc5c9093e9eeee6a871d8` · default recipe `default`
 
 Models: `ultrareal-v4:q4`, `ultrareal-v4:q5`, `ultrareal-v4:q8`.
 
@@ -188,13 +188,13 @@ Models: `ultrareal-v4:q4`, `ultrareal-v4:q5`, `ultrareal-v4:q8`.
 | `16:9` | `1024x576` (recommended) |
 | `9:16` | `576x1024` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ## `flux2`
 
 ### `flux2-dev:bf16`
 
-Schema 1 · hash `b8b90e78b82cce84a7476110096298bd03bb186410e3866ab990ae807dec5c33` · default recipe `default`
+Schema 1 · hash `1d294635726f4e989be8f351eb6ed69bee8353238b6de19b27d74ff6ebff19d4` · default recipe `default`
 
 Models: `flux2-dev:bf16`.
 
@@ -212,11 +212,11 @@ Models: `flux2-dev:bf16`.
 | `16:9` | `1024x576` (recommended) |
 | `9:16` | `576x1024` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### Profile `flux2.flux2-klein-9b`
 
-Schema 1 · hash `13c13162fe8ddddde35087162d3eab284f1302914be7ba756556dc00528516cd` · default recipe `default`
+Schema 1 · hash `bf9a31aafbf533f40abdfccde2dee7bc06d6eb487d1b3524be1bff4635bc9eb4` · default recipe `default`
 
 Models: `flux2-klein-9b:bf16`, `flux2-klein-9b:q4`, `flux2-klein-9b:q6`, `flux2-klein-9b:q8`.
 
@@ -234,11 +234,11 @@ Models: `flux2-klein-9b:bf16`, `flux2-klein-9b:q4`, `flux2-klein-9b:q6`, `flux2-
 | `16:9` | `1024x576` (recommended) |
 | `9:16` | `576x1024` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### Profile `flux2.flux2-klein`
 
-Schema 1 · hash `37e93f32946766ff00a24e244c3d421d2c82647138b659fd113570d712782f66` · default recipe `default`
+Schema 1 · hash `d5a704f6c25a697b29eff977a0f138e7925d7bbd6d720f75ff2ccdd3901d115d` · default recipe `default`
 
 Models: `flux2-klein:bf16`, `flux2-klein:q4`, `flux2-klein:q6`, `flux2-klein:q8`.
 
@@ -256,13 +256,13 @@ Models: `flux2-klein:bf16`, `flux2-klein:q4`, `flux2-klein:q6`, `flux2-klein:q8`
 | `16:9` | `1024x576` (recommended) |
 | `9:16` | `576x1024` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ## `ltx-video`
 
 ### `ltx-video-0.9.6-distilled:bf16`
 
-Schema 1 · hash `af619ed6ce91932dae3492fe5941a761f48c34386de024f8818464db5fba5d92` · default recipe `default`
+Schema 1 · hash `b26e811f626c60585e0a94d9002bfb36fdc705a60f44090105b8a364bcc4575a` · default recipe `default`
 
 Models: `ltx-video-0.9.6-distilled:bf16`.
 
@@ -283,11 +283,11 @@ Models: `ltx-video-0.9.6-distilled:bf16`.
 | `9:16` | `576x1024` (recommended) |
 | `2:3` | `512x768` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d053057623ddd4d0a1d3e9cd28890e9ef487f`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d053057623ddd4d0a1d3e9cd28890e9ef487f`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `ltx-video-0.9.6:bf16`
 
-Schema 1 · hash `2071e616c10801053d80741195154744c603314c4383ac051e20bb1f2f02e9b8` · default recipe `default`
+Schema 1 · hash `80461193ca4e65b0c446ed646ae1649ef5b4e21dda1b701d0edbae04189a588a` · default recipe `default`
 
 Models: `ltx-video-0.9.6:bf16`.
 
@@ -308,11 +308,11 @@ Models: `ltx-video-0.9.6:bf16`.
 | `9:16` | `576x1024` (recommended) |
 | `2:3` | `512x768` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d053057623ddd4d0a1d3e9cd28890e9ef487f`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d053057623ddd4d0a1d3e9cd28890e9ef487f`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `ltx-video-0.9.8-13b-dev:bf16`
 
-Schema 1 · hash `991ddc112d2853cd459e68cde2092d24dc3eae0b60296dba69dfdf89ceb8891e` · default recipe `default`
+Schema 1 · hash `f093f05dcbd567325d1e4197485729df0554831c4c44604924f7903c5bc455c4` · default recipe `default`
 
 Models: `ltx-video-0.9.8-13b-dev:bf16`.
 
@@ -333,11 +333,11 @@ Models: `ltx-video-0.9.8-13b-dev:bf16`.
 | `9:16` | `576x1024` (recommended) |
 | `2:3` | `512x768` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d053057623ddd4d0a1d3e9cd28890e9ef487f`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d053057623ddd4d0a1d3e9cd28890e9ef487f`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `ltx-video-0.9.8-13b-distilled:bf16`
 
-Schema 1 · hash `2b258b747836ba7f064dec5dea5828026921dc0d487e5b6c28e87247edcf0190` · default recipe `default`
+Schema 1 · hash `8f6bce3fb220930eb17c702a22bc4a37f5b4f16caecc36dd28f8203b5e177351` · default recipe `default`
 
 Models: `ltx-video-0.9.8-13b-distilled:bf16`.
 
@@ -358,11 +358,11 @@ Models: `ltx-video-0.9.8-13b-distilled:bf16`.
 | `9:16` | `576x1024` (recommended) |
 | `2:3` | `512x768` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d053057623ddd4d0a1d3e9cd28890e9ef487f`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d053057623ddd4d0a1d3e9cd28890e9ef487f`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `ltx-video-0.9.8-2b-distilled:bf16`
 
-Schema 1 · hash `17f216169e4564f62e344b2bbdcf3661f47c219a7c8053901b4c19d485c998b4` · default recipe `default`
+Schema 1 · hash `1e93e471ac51528454f344dc494365909b306c08f77df7b84c5a9c9cbf19c3fe` · default recipe `default`
 
 Models: `ltx-video-0.9.8-2b-distilled:bf16`.
 
@@ -383,13 +383,13 @@ Models: `ltx-video-0.9.8-2b-distilled:bf16`.
 | `9:16` | `576x1024` (recommended) |
 | `2:3` | `512x768` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d053057623ddd4d0a1d3e9cd28890e9ef487f`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d053057623ddd4d0a1d3e9cd28890e9ef487f`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ## `ltx2`
 
 ### `ltx-2-19b-dev:fp8`
 
-Schema 1 · hash `e7a05b8322c4108eacb56a7e86855f739a3fc610a57a6dcf4c0bdb0892d477ac` · default recipe `auto`
+Schema 1 · hash `983a7133343997646c0278c183f0e08edfd9e275f9ed051b12a8423b747eb717` · default recipe `auto`
 
 Models: `ltx-2-19b-dev:fp8`.
 
@@ -414,7 +414,7 @@ Models: `ltx-2-19b-dev:fp8`.
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### One Stage (`one-stage`)
 
@@ -436,7 +436,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `30:17` | `1920x1088` (recommended) |
 | `17:30` | `1088x1920` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Two Stage (`two-stage`)
 
@@ -459,7 +459,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Two Stage Hq (`two-stage-hq`)
 
@@ -482,7 +482,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Distilled (`distilled`)
 
@@ -505,7 +505,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Ic Lora (`ic-lora`)
 
@@ -528,7 +528,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Keyframe (`keyframe`)
 
@@ -551,7 +551,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### A2 Vid (`a2-vid`)
 
@@ -574,7 +574,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Retake (`retake`)
 
@@ -596,7 +596,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `30:17` | `1920x1088` (recommended) |
 | `17:30` | `1088x1920` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Lip Dub (`lip-dub`)
 
@@ -618,7 +618,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `30:17` | `1920x1088` (recommended) |
 | `17:30` | `1088x1920` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### T2a (`t2a`)
 
@@ -628,11 +628,11 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 - Presets: none.
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `ltx-2-19b-distilled:fp8`
 
-Schema 1 · hash `54d9996b78ab2f7392e369cd9dbad702d532bb9965e76e2246fb1f8552343a14` · default recipe `auto`
+Schema 1 · hash `7dc17cfc83fcf4d641131a3dffcee744d26334215cfa594f016a503705ab9220` · default recipe `auto`
 
 Models: `ltx-2-19b-distilled:fp8`.
 
@@ -657,7 +657,7 @@ Models: `ltx-2-19b-distilled:fp8`.
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### One Stage (`one-stage`)
 
@@ -679,7 +679,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `30:17` | `1920x1088` (recommended) |
 | `17:30` | `1088x1920` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Two Stage (`two-stage`)
 
@@ -702,7 +702,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Two Stage Hq (`two-stage-hq`)
 
@@ -725,7 +725,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Distilled (`distilled`)
 
@@ -748,7 +748,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Ic Lora (`ic-lora`)
 
@@ -771,7 +771,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Keyframe (`keyframe`)
 
@@ -794,7 +794,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### A2 Vid (`a2-vid`)
 
@@ -817,7 +817,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Retake (`retake`)
 
@@ -839,7 +839,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `30:17` | `1920x1088` (recommended) |
 | `17:30` | `1088x1920` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Lip Dub (`lip-dub`)
 
@@ -861,7 +861,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `30:17` | `1920x1088` (recommended) |
 | `17:30` | `1088x1920` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### T2a (`t2a`)
 
@@ -871,11 +871,11 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 - Presets: none.
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### Profile `ltx2.ltx-2.3-22b-dev`
 
-Schema 1 · hash `de01d44a8fa1373643f9a9e66dfd917925becb3cfd52dde3eb789d49522a8d95` · default recipe `auto`
+Schema 1 · hash `6d0ad4a56db905ec0f7df72c9835c07e114269c1dadf63d0d87451b138e2c163` · default recipe `auto`
 
 Models: `ltx-2.3-22b-dev:bf16`, `ltx-2.3-22b-dev:fp8`.
 
@@ -900,7 +900,7 @@ Models: `ltx-2.3-22b-dev:bf16`, `ltx-2.3-22b-dev:fp8`.
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### One Stage (`one-stage`)
 
@@ -922,7 +922,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `30:17` | `1920x1088` (recommended) |
 | `17:30` | `1088x1920` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Two Stage (`two-stage`)
 
@@ -945,7 +945,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Two Stage Hq (`two-stage-hq`)
 
@@ -968,7 +968,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Distilled (`distilled`)
 
@@ -991,7 +991,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Ic Lora (`ic-lora`)
 
@@ -1014,7 +1014,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Keyframe (`keyframe`)
 
@@ -1037,7 +1037,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### A2 Vid (`a2-vid`)
 
@@ -1060,7 +1060,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Retake (`retake`)
 
@@ -1082,7 +1082,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `30:17` | `1920x1088` (recommended) |
 | `17:30` | `1088x1920` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Lip Dub (`lip-dub`)
 
@@ -1104,7 +1104,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `30:17` | `1920x1088` (recommended) |
 | `17:30` | `1088x1920` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### T2a (`t2a`)
 
@@ -1114,11 +1114,11 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 - Presets: none.
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### Profile `ltx2.ltx-2.3-22b-distilled`
 
-Schema 1 · hash `b340233caf53fbba768a709449892fcb0efd34af00062ea814a0b509dc6192b2` · default recipe `auto`
+Schema 1 · hash `380d515aac0fc432638bfb3d597ff05208eea3f61bf3854d61f78c193db1567d` · default recipe `auto`
 
 Models: `ltx-2.3-22b-distilled:bf16`, `ltx-2.3-22b-distilled:fp8`.
 
@@ -1143,7 +1143,7 @@ Models: `ltx-2.3-22b-distilled:bf16`, `ltx-2.3-22b-distilled:fp8`.
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### One Stage (`one-stage`)
 
@@ -1165,7 +1165,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `30:17` | `1920x1088` (recommended) |
 | `17:30` | `1088x1920` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Two Stage (`two-stage`)
 
@@ -1188,7 +1188,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Two Stage Hq (`two-stage-hq`)
 
@@ -1211,7 +1211,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Distilled (`distilled`)
 
@@ -1234,7 +1234,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Ic Lora (`ic-lora`)
 
@@ -1257,7 +1257,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Keyframe (`keyframe`)
 
@@ -1280,7 +1280,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### A2 Vid (`a2-vid`)
 
@@ -1303,7 +1303,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
 | `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Retake (`retake`)
 
@@ -1325,7 +1325,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `30:17` | `1920x1088` (recommended) |
 | `17:30` | `1088x1920` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### Lip Dub (`lip-dub`)
 
@@ -1347,7 +1347,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 | `30:17` | `1920x1088` (recommended) |
 | `17:30` | `1088x1920` (recommended) |
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 #### T2a (`t2a`)
 
@@ -1357,13 +1357,13 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 - Temporal: frames 1–601 on `8n+1` (default 97); FPS 1–120 by 1, default 24; duration limit 20s.
 - Presets: none.
 
-Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ## `minimax-h3`
 
 ### Profile `minimax-h3.minimax-h3-fl2va`
 
-Schema 1 · hash `6afd7b292e4456ab4ce711098399989feae72378b3735b9d07c319fcabdee475` · default recipe `default`
+Schema 1 · hash `f6dbfccd17c5f016689e872c51e2d21e9dd258a57af7906b4e0023e9707efc00` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8` (policy-hidden), `minimax-h3-fl2va:official-bf16` (policy-hidden).
 
@@ -1383,11 +1383,11 @@ Models: `minimax-h3-fl2va:comfy-pruned-int8` (policy-hidden), `minimax-h3-fl2va:
 | `3:4` | `768x1024` (recommended) |
 | `4:7` | `768x1344` (recommended) |
 
-Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`.
+Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### Profile `minimax-h3.minimax-h3-ref2va`
 
-Schema 1 · hash `a82e048af1e78f2b4fba9d0c7ce7531e003c68c56d1245c9c1d6f233604ff186` · default recipe `default`
+Schema 1 · hash `4fce0842fbea999076aefa944fa22b161f015575f38a8c8daaafd8e4c179d763` · default recipe `default`
 
 Models: `minimax-h3-ref2va:comfy-pruned-int8` (policy-hidden), `minimax-h3-ref2va:official-bf16` (policy-hidden).
 
@@ -1407,13 +1407,13 @@ Models: `minimax-h3-ref2va:comfy-pruned-int8` (policy-hidden), `minimax-h3-ref2v
 | `3:4` | `768x1024` (recommended) |
 | `4:7` | `768x1344` (recommended) |
 
-Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`.
+Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ## `qwen-image`
 
 ### Profile `qwen-image.qwen-image-2512`
 
-Schema 1 · hash `2b65ac0052190bef9c19fe4b286ec376fd4a8eec9239b7dec26cde64feb455e4` · default recipe `default`
+Schema 1 · hash `d644e92e2160bb66bd727e9fc47cd19fb8ff3a5067655a652c2768b8d4b697ec` · default recipe `default`
 
 Models: `qwen-image-2512:bf16`, `qwen-image-2512:q2`, `qwen-image-2512:q3`, `qwen-image-2512:q4`, `qwen-image-2512:q5`, `qwen-image-2512:q6`, `qwen-image-2512:q8`.
 
@@ -1433,11 +1433,11 @@ Models: `qwen-image-2512:bf16`, `qwen-image-2512:q2`, `qwen-image-2512:q3`, `qwe
 | `3:2` | `1584x1056` (recommended) |
 | `2:3` | `1056x1584` (recommended) |
 
-Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image), qualified: `true`.
+Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `true`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded`.
 
 ### `qwen-image-lightning:fp8`
 
-Schema 1 · hash `b5f4f44d21747e8621ba046c24d1af1142e18bc4fa09a98b417b60d4b641a384` · default recipe `default`
+Schema 1 · hash `a99195cf3bc0525cbcc97de62fdf0819b4e4e8e77310603348b956153397e89c` · default recipe `default`
 
 Models: `qwen-image-lightning:fp8`.
 
@@ -1457,11 +1457,11 @@ Models: `qwen-image-lightning:fp8`.
 | `3:2` | `1584x1056` (recommended) |
 | `2:3` | `1056x1584` (recommended) |
 
-Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image), qualified: `true`.
+Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `true`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded`.
 
 ### `qwen-image-lightning:fp8-8step`
 
-Schema 1 · hash `8e8b17ec51b7c86ee1dea03fef4d992a1b88e83b7c13c3a6b1432e33691ebe5f` · default recipe `default`
+Schema 1 · hash `0667199f0d7d3f4242062122433353c6b105239ea9eb51d7e076224f20d55a8a` · default recipe `default`
 
 Models: `qwen-image-lightning:fp8-8step`.
 
@@ -1481,11 +1481,11 @@ Models: `qwen-image-lightning:fp8-8step`.
 | `3:2` | `1584x1056` (recommended) |
 | `2:3` | `1056x1584` (recommended) |
 
-Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image), qualified: `true`.
+Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `true`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded`.
 
 ### Profile `qwen-image.qwen-image`
 
-Schema 1 · hash `29dba0b4c2f6b2ef7aea15bff030e571ab2cfb58477170ec40c23775a0fc5985` · default recipe `default`
+Schema 1 · hash `afc66bfc8cd4d1267fcf6473d751cd3a2a59bed572bbc51c79ee9deced77c873` · default recipe `default`
 
 Models: `qwen-image:bf16`, `qwen-image:fp8`, `qwen-image:q2`, `qwen-image:q3`, `qwen-image:q4`, `qwen-image:q5`, `qwen-image:q6`, `qwen-image:q8`.
 
@@ -1505,13 +1505,13 @@ Models: `qwen-image:bf16`, `qwen-image:fp8`, `qwen-image:q2`, `qwen-image:q3`, `
 | `3:2` | `1584x1056` (recommended) |
 | `2:3` | `1056x1584` (recommended) |
 
-Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image), qualified: `true`.
+Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `true`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded`.
 
 ## `qwen-image-edit`
 
 ### Profile `qwen-image-edit.qwen-image-edit-2511`
 
-Schema 1 · hash `3f9f34c09dbe2c8cbcda92adba4df12e4bd5a698da70dabe791ac3cd8bec7867` · default recipe `default`
+Schema 1 · hash `af66a1baa1fe2aebcf25ab9f14a6ac19e2e2e5cc7d450e7e0e097b8c7d69434d` · default recipe `default`
 
 Models: `qwen-image-edit-2511:bf16`, `qwen-image-edit-2511:q2`, `qwen-image-edit-2511:q3`, `qwen-image-edit-2511:q4`, `qwen-image-edit-2511:q5`, `qwen-image-edit-2511:q6`, `qwen-image-edit-2511:q8`.
 
@@ -1531,13 +1531,13 @@ Models: `qwen-image-edit-2511:bf16`, `qwen-image-edit-2511:q2`, `qwen-image-edit
 | `3:2` | `1584x1056` (recommended) |
 | `2:3` | `1056x1584` (recommended) |
 
-Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image), qualified: `true`.
+Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `true`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded`.
 
 ## `sd15`
 
 ### `dreamshaper-v8:fp16`
 
-Schema 1 · hash `5af479b940080ac6c9e6fb3058b60206011a1ffc6bb5bddfc9fc469daa66cb00` · default recipe `default`
+Schema 1 · hash `e2f9f1b87771bf4e3e1020586d4b85e39301cf25bb363bfa6fcc2ecffcb387ce` · default recipe `default`
 
 Models: `dreamshaper-v8:fp16`.
 
@@ -1555,11 +1555,11 @@ Models: `dreamshaper-v8:fp16`.
 | `3:4` | `384x512` (recommended) |
 | `4:3` | `512x384` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `realistic-vision-v5:fp16`
 
-Schema 1 · hash `883dce82cc2f57d44c407ccda744256e4648f872da866c0798fcd2465eb99ee0` · default recipe `default`
+Schema 1 · hash `0a1c6f4cfe20b090d1260e341fa916bfb722596084af26d8d5ca105220f5f50a` · default recipe `default`
 
 Models: `realistic-vision-v5:fp16`.
 
@@ -1577,11 +1577,11 @@ Models: `realistic-vision-v5:fp16`.
 | `3:4` | `384x512` (recommended) |
 | `4:3` | `512x384` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `sd15:fp16`
 
-Schema 1 · hash `6394a14f7246696d58335bb100b9d55a9f1252bcf7dae49abea61e60b25bf9e9` · default recipe `default`
+Schema 1 · hash `a58c7d8104f02d557f059b77ecf1ad8a6231143d4b41541279504bf2fc69f72a` · default recipe `default`
 
 Models: `sd15:fp16`.
 
@@ -1599,13 +1599,13 @@ Models: `sd15:fp16`.
 | `3:4` | `384x512` (recommended) |
 | `4:3` | `512x384` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ## `sd3`
 
 ### `sd3.5-large-turbo:q8`
 
-Schema 1 · hash `b930c05c0b963da00e2532e85f4947086877cd686d85dc41077d05b849032866` · default recipe `default`
+Schema 1 · hash `c48b9c33b7f88179efe699efc6cc2754a213e591d17d934019ffb1b8b755c9ff` · default recipe `default`
 
 Models: `sd3.5-large-turbo:q8`.
 
@@ -1625,11 +1625,11 @@ Models: `sd3.5-large-turbo:q8`.
 | `7:4` | `1344x768` (recommended) |
 | `4:7` | `768x1344` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### Profile `sd3.sd3.5-large`
 
-Schema 1 · hash `8ce21cae7f7a9146a8ab4cdd7c17d01a7d07552d2e129280f6053e5e7d665021` · default recipe `default`
+Schema 1 · hash `666322ce12e07986fa959bc420b5a8a71bbb85e2f653079d8c6a0d6314cc2f2f` · default recipe `default`
 
 Models: `sd3.5-large:q4`, `sd3.5-large:q8`.
 
@@ -1649,11 +1649,11 @@ Models: `sd3.5-large:q4`, `sd3.5-large:q8`.
 | `7:4` | `1344x768` (recommended) |
 | `4:7` | `768x1344` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `sd3.5-medium:q8`
 
-Schema 1 · hash `19d80d7d2746a9ba06351b958b971529a4698aa31570b284df9367bc05c3e18a` · default recipe `default`
+Schema 1 · hash `e92dc3695126ed7b1dc6b7515307acc617453a490a383760aabb2eff9be3c288` · default recipe `default`
 
 Models: `sd3.5-medium:q8`.
 
@@ -1673,13 +1673,13 @@ Models: `sd3.5-medium:q8`.
 | `7:4` | `1344x768` (recommended) |
 | `4:7` | `768x1344` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ## `sdxl`
 
 ### `cyberrealistic-pony:fp16`
 
-Schema 1 · hash `b6c4e2ecb8ab3dadae95aa818b3aeacc2fbc58988b89339ff5bf7e905e06388c` · default recipe `default`
+Schema 1 · hash `bc243297b0bf2f009025c5c23ab17fa88d3019187933fc256194559ebdc0d6a6` · default recipe `default`
 
 Models: `cyberrealistic-pony:fp16`.
 
@@ -1701,11 +1701,11 @@ Models: `cyberrealistic-pony:fp16`.
 | `12:5` | `1536x640` (recommended) |
 | `5:12` | `640x1536` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `dreamshaper-xl:fp16`
 
-Schema 1 · hash `134a8bfe2e535c8227bd447730ac8805e08fe4f634350c056b483568e2a9c60a` · default recipe `default`
+Schema 1 · hash `00cc0bb4e173325ec2bf72736caa8b682e735ce2e412ef2016d26a87947bf8eb` · default recipe `default`
 
 Models: `dreamshaper-xl:fp16`.
 
@@ -1727,11 +1727,11 @@ Models: `dreamshaper-xl:fp16`.
 | `12:5` | `1536x640` (recommended) |
 | `5:12` | `640x1536` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `juggernaut-xl:fp16`
 
-Schema 1 · hash `3176a66365281486966f9e6215a835a3e61469907579461c57a44e5609464512` · default recipe `default`
+Schema 1 · hash `f7aeed1a366f4ebae1267a138cbc61fe3ae298dca7fab95431b4afcc985e84c3` · default recipe `default`
 
 Models: `juggernaut-xl:fp16`.
 
@@ -1753,11 +1753,11 @@ Models: `juggernaut-xl:fp16`.
 | `12:5` | `1536x640` (recommended) |
 | `5:12` | `640x1536` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `playground-v2.5:fp16`
 
-Schema 1 · hash `a37692129da9510c016be2590aed7c3979588167f5cdd9792b7e205ca106439e` · default recipe `default`
+Schema 1 · hash `88488fac47dc264085618b72351846e82f9c8dd523af0f88cfd33bf5f0ee9bdc` · default recipe `default`
 
 Models: `playground-v2.5:fp16`.
 
@@ -1779,11 +1779,11 @@ Models: `playground-v2.5:fp16`.
 | `12:5` | `1536x640` (recommended) |
 | `5:12` | `640x1536` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `pony-v6:fp16`
 
-Schema 1 · hash `ae01c5a60984289b3c403ad6f510e4521d2bbe9d7a0e4e3b19ce46003af11dbd` · default recipe `default`
+Schema 1 · hash `0b50d9733e93a1a85cebf6af89dc79e1568034b5fe6e250c80b04d48d6c7ec86` · default recipe `default`
 
 Models: `pony-v6:fp16`.
 
@@ -1805,11 +1805,11 @@ Models: `pony-v6:fp16`.
 | `12:5` | `1536x640` (recommended) |
 | `5:12` | `640x1536` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `realvis-xl:fp16`
 
-Schema 1 · hash `470b998268059f974dfa65f3d6b69376301e69a7901167b04f4946e976275b72` · default recipe `default`
+Schema 1 · hash `dcc3dd5cca8108b2d8e5c3d67b6e19b0e0fc5a0076a1f8be0b33d6de86d1f22b` · default recipe `default`
 
 Models: `realvis-xl:fp16`.
 
@@ -1831,11 +1831,11 @@ Models: `realvis-xl:fp16`.
 | `12:5` | `1536x640` (recommended) |
 | `5:12` | `640x1536` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `sdxl-base:fp16`
 
-Schema 1 · hash `d7ee7f4362346d8391185ae5f809be98c4d88ef430f14b625df3417a3c06bc19` · default recipe `default`
+Schema 1 · hash `f656cd865add70b28da16dd42124b8ed04f72f5933113d5e6ddb2405260e3943` · default recipe `default`
 
 Models: `sdxl-base:fp16`.
 
@@ -1857,11 +1857,11 @@ Models: `sdxl-base:fp16`.
 | `12:5` | `1536x640` (recommended) |
 | `5:12` | `640x1536` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `sdxl-turbo:fp16`
 
-Schema 1 · hash `964e8e18568a998ac35d527ba63bd5baa89355281bb4c4e5659bc86227f3b158` · default recipe `default`
+Schema 1 · hash `7f9faf443c5bfda571948c48213862444a6f50c082dec6de76522c3f96d43c47` · default recipe `default`
 
 Models: `sdxl-turbo:fp16`.
 
@@ -1883,13 +1883,13 @@ Models: `sdxl-turbo:fp16`.
 | `12:5` | `1536x640` (recommended) |
 | `5:12` | `640x1536` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ## `wan`
 
 ### `wan21-t2v-1.3b:bf16`
 
-Schema 1 · hash `938b688830db7da8d5e36fae47c21fbfa09ef631294fe0a0c5b61cce746303bd` · default recipe `default`
+Schema 1 · hash `726dc2709a3c377078ac16c937a4d93946470ee9e3bc2744108ce51f610fbe57` · default recipe `default`
 
 Models: `wan21-t2v-1.3b:bf16`.
 
@@ -1905,11 +1905,11 @@ Models: `wan21-t2v-1.3b:bf16`.
 | `26:15` | `832x480` (recommended) |
 | `15:26` | `480x832` (recommended) |
 
-Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### Profile `wan.wan21-t2v-14b`
 
-Schema 1 · hash `2fef53011043f49f8bd95947f5a82007d108e4ead2ff9078c123814b99735f92` · default recipe `default`
+Schema 1 · hash `a2e053be1bd09b8e8c77bc8420ead948f44fb57650a1c722ca1d353ed4edafc2` · default recipe `default`
 
 Models: `wan21-t2v-14b:q5`, `wan21-t2v-14b:q8`.
 
@@ -1927,13 +1927,13 @@ Models: `wan21-t2v-14b:q5`, `wan21-t2v-14b:q8`.
 | `16:9` | `1280x720` (recommended) |
 | `9:16` | `720x1280` (recommended) |
 
-Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
-### Profile `wan.wan22-i2v-a14b`
+### `wan22-i2v-a14b:fp8`
 
-Schema 1 · hash `42fb5e01c71feb192d0351ec8610fc810714a11c419f8bf3ae2a547b371b58b0` · default recipe `default`
+Schema 1 · hash `1b25374233788728a736c10bb64f4120d7fd54d889525dbedb48952a6457bc38` · default recipe `default`
 
-Models: `wan22-i2v-a14b:fp8`, `wan22-i2v-a14b:q8`.
+Models: `wan22-i2v-a14b:fp8`.
 
 #### Default (`default`)
 
@@ -1949,11 +1949,11 @@ Models: `wan22-i2v-a14b:fp8`, `wan22-i2v-a14b:q8`.
 | `16:9` | `1280x720` (recommended) |
 | `9:16` | `720x1280` (recommended) |
 
-Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### Profile `wan.wan22-i2v-a14b`
 
-Schema 1 · hash `f81b090e88eca03a08bd320a7fe4c65064dbbe748b3d9681aa0c6424f9ccbb60` · default recipe `default`
+Schema 1 · hash `3cb48434f3390c63334247c1cfc3c4fc885cd13466488645a57b5d08bcaa839f` · default recipe `default`
 
 Models: `wan22-i2v-a14b:q4`, `wan22-i2v-a14b:q5`.
 
@@ -1971,13 +1971,13 @@ Models: `wan22-i2v-a14b:q4`, `wan22-i2v-a14b:q5`.
 | `16:9` | `1280x720` (recommended) |
 | `9:16` | `720x1280` (recommended) |
 
-Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
-### Profile `wan.wan22-t2v-a14b`
+### `wan22-i2v-a14b:q8`
 
-Schema 1 · hash `616b2bdffa274bab1a014fcf7af7492cb16c182d543de53a463de76d0d60e015` · default recipe `default`
+Schema 1 · hash `336c247661f038abcdcfb6a8cd5445736356d98e6652c13bbf0c997dfe5b4c61` · default recipe `default`
 
-Models: `wan22-t2v-a14b:fp8`, `wan22-t2v-a14b:q8`.
+Models: `wan22-i2v-a14b:q8`.
 
 #### Default (`default`)
 
@@ -1993,11 +1993,33 @@ Models: `wan22-t2v-a14b:fp8`, `wan22-t2v-a14b:q8`.
 | `16:9` | `1280x720` (recommended) |
 | `9:16` | `720x1280` (recommended) |
 
-Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+### `wan22-t2v-a14b:fp8`
+
+Schema 1 · hash `b6b43fd3534f4c01921d141958be4b380216936a61ad4cd0c47860ad4f00081f` · default recipe `default`
+
+Models: `wan22-t2v-a14b:fp8`.
+
+#### Default (`default`)
+
+- Resolution: buckets; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `832x480`, 20 steps, guidance 3.5.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Temporal: frames 1–257 on `4n+1` (default 33); FPS 1–120 by 1, default 16; duration limit none.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `26:15` | `832x480` (recommended) |
+| `15:26` | `480x832` (recommended) |
+| `16:9` | `1280x720` (recommended) |
+| `9:16` | `720x1280` (recommended) |
+
+Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### Profile `wan.wan22-t2v-a14b`
 
-Schema 1 · hash `d2987a8bbaee9916e1bc33f90caece91104a4a3142c8fc274508f7d5ff789f6d` · default recipe `default`
+Schema 1 · hash `1d3062aeaab6f6783f7e2a5a43c697d744db41d3ec18e9fb079698181ee59792` · default recipe `default`
 
 Models: `wan22-t2v-a14b:q4`, `wan22-t2v-a14b:q5`.
 
@@ -2015,11 +2037,33 @@ Models: `wan22-t2v-a14b:q4`, `wan22-t2v-a14b:q5`.
 | `16:9` | `1280x720` (recommended) |
 | `9:16` | `720x1280` (recommended) |
 
-Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+### `wan22-t2v-a14b:q8`
+
+Schema 1 · hash `f0ae6ec71175c832387067e71c38118c130275ae06c764e687d74aad30ff9443` · default recipe `default`
+
+Models: `wan22-t2v-a14b:q8`.
+
+#### Default (`default`)
+
+- Resolution: buckets; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `832x480`, 20 steps, guidance 3.5.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Temporal: frames 1–257 on `4n+1` (default 33); FPS 1–120 by 1, default 16; duration limit none.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `26:15` | `832x480` (recommended) |
+| `15:26` | `480x832` (recommended) |
+| `16:9` | `1280x720` (recommended) |
+| `9:16` | `720x1280` (recommended) |
+
+Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### Profile `wan.wan22-ti2v-5b`
 
-Schema 1 · hash `b8069962d7251dfc77a32c680d3ec9471e43990bb4bd4d802611bbd6ce6d5a1f` · default recipe `default`
+Schema 1 · hash `fab8a259ae8b1bd895af3a5814d1d62ceb5cb0e244f969c06257a578ac1db339` · default recipe `default`
 
 Models: `wan22-ti2v-5b:fp16`, `wan22-ti2v-5b:q8`.
 
@@ -2035,11 +2079,11 @@ Models: `wan22-ti2v-5b:fp16`, `wan22-ti2v-5b:q8`.
 | `20:11` | `1280x704` (recommended) |
 | `11:20` | `704x1280` (recommended) |
 
-Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `wan22-ti2v-5b:turbo`
 
-Schema 1 · hash `32ba08c9486466b3ff3d18c1c603328c77a9a6c891e60b83779004f35394f4c0` · default recipe `default`
+Schema 1 · hash `75a5ea12913bdff8640db1e86670a9441918db9ad2ffc8de585ab4d25d21b53f` · default recipe `default`
 
 Models: `wan22-ti2v-5b:turbo`.
 
@@ -2055,13 +2099,13 @@ Models: `wan22-ti2v-5b:turbo`.
 | `20:11` | `1280x704` (recommended) |
 | `11:20` | `704x1280` (recommended) |
 
-Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`.
+Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21833865abc2f9e6c0e67233dc`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ## `wuerstchen`
 
 ### `wuerstchen-v2:fp16`
 
-Schema 1 · hash `8d2fc2886366f63452afd79f33fe65625e8ebeda8cfc0ac6a4a10b9723a948a4` · default recipe `default`
+Schema 1 · hash `a6d3ee6dbcb307c71ce0b3683cff9b000fb10633fb4baabae8d4f8cea76ab053` · default recipe `default`
 
 Models: `wuerstchen-v2:fp16`.
 
@@ -2075,13 +2119,13 @@ Models: `wuerstchen-v2:fp16`.
 |---|---|
 | `1:1` | `1024x1024` (recommended) |
 
-Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`.
+Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ## `z-image`
 
 ### Profile `z-image.z-image-turbo`
 
-Schema 1 · hash `3b812bda0902f794a5d21b852cc5ada90ec7cbfb883686c432f9c11dde56a650` · default recipe `default`
+Schema 1 · hash `0e857cfa43f4423ded4bbd53b0d5dbfaa48c31655f9ae85d1fede3452c7296d7` · default recipe `default`
 
 Models: `z-image-turbo:bf16`, `z-image-turbo:q4`, `z-image-turbo:q6`, `z-image-turbo:q8`.
 
@@ -2105,4 +2149,4 @@ Models: `z-image-turbo:bf16`, `z-image-turbo:q4`, `z-image-turbo:q6`, `z-image-t
 | `7:3` | `1344x576` (recommended) |
 | `3:7` | `576x1344` (recommended) |
 
-Provenance: [Upstream](https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/main/app.py), qualified: `true`.
+Provenance: [Upstream](https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py) at `768cb50d847cdbba97c89533ae976be69cf5a5b8`, qualified: `true`, evidence: `static-contract: upstream app.py RES_CHOICES[1024] oracle + exact profile/admission tests; runtime smoke not recorded`.

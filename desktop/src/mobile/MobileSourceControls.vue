@@ -18,6 +18,7 @@ import {
 import { base64ToDataUrl, fileToBase64, isStillImageFile } from "../lib/image";
 import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
 import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 
 const props = withDefaults(
   defineProps<{
@@ -25,11 +26,13 @@ const props = withDefaults(
     target?: ApiTarget | null;
     controlModels?: ModelEntry[];
     upscalers?: ModelEntry[];
+    model?: ModelEntry | null;
   }>(),
   {
     target: null,
     controlModels: () => [],
     upscalers: () => [],
+    model: null,
   },
 );
 
@@ -50,6 +53,7 @@ const caps = computed(() =>
     props.form.pipeline,
     props.form.guidanceCapabilities,
     props.form.sourceImageCapability,
+    effectiveGenerationRecipe(props.model, props.form.pipeline),
   ),
 );
 const isAttachmentMode = computed(() => caps.value.sourceImageMode !== "single");

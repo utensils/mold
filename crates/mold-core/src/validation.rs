@@ -1741,13 +1741,17 @@ fn validate_generate_request_after_activation(
     } else {
         Ltx2SpatialComposition::SinglePass
     };
-    validate_generation_dimensions_for_model(
-        &req.model,
-        req.width,
-        req.height,
-        family,
-        composition,
-    )?;
+    let audio_only =
+        family == Some("ltx2") && req.pipeline.is_some_and(Ltx2PipelineMode::is_audio_only);
+    if !audio_only {
+        validate_generation_dimensions_for_model(
+            &req.model,
+            req.width,
+            req.height,
+            family,
+            composition,
+        )?;
+    }
     validate_family_video_timing_constraints(req.frames, req.fps, family)?;
     if composition == Ltx2SpatialComposition::TiledTwoStage {
         // The composed ceiling above is the x2 rung's. A request that names a
@@ -3867,6 +3871,8 @@ mod tests {
         req.model = "ltx-2.3-22b-dev:fp8".to_string();
         req.pipeline = Some(Ltx2PipelineMode::T2a);
         req.output_format = Some(OutputFormat::Wav);
+        req.width = 0;
+        req.height = 0;
         assert!(validate_generate_request(&req).is_ok());
 
         req.output_format = Some(OutputFormat::Mp4);
@@ -3875,8 +3881,27 @@ mod tests {
 
         req.pipeline = None;
         req.output_format = Some(OutputFormat::Wav);
+        req.width = 1024;
+        req.height = 1024;
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("pipeline=t2a"), "got: {err}");
+    }
+
+    #[test]
+    fn ltx2_t2a_is_dimensionless_and_ignores_a_legacy_raster_canvas() {
+        let mut req = valid_req();
+        req.model = "ltx-2.3-22b-dev:fp8".to_string();
+        req.pipeline = Some(Ltx2PipelineMode::T2a);
+        req.output_format = Some(OutputFormat::Wav);
+        req.width = 0;
+        req.height = 0;
+        validate_generate_request(&req).unwrap();
+
+        // One-release compatibility: older clients still serialize their
+        // inactive raster fields. They remain irrelevant to T2A admission.
+        req.width = 1024;
+        req.height = 576;
+        validate_generate_request(&req).unwrap();
     }
 
     #[test]
@@ -3886,6 +3911,8 @@ mod tests {
             req.model = "ltx-2.3-22b-dev:fp8".to_string();
             req.pipeline = Some(Ltx2PipelineMode::T2a);
             req.output_format = Some(OutputFormat::Wav);
+            req.width = 0;
+            req.height = 0;
             req
         };
 
@@ -3927,6 +3954,8 @@ mod tests {
         req.model = "ltx-2.3-22b-dev:fp8".to_string();
         req.pipeline = Some(Ltx2PipelineMode::T2a);
         req.output_format = Some(OutputFormat::Wav);
+        req.width = 0;
+        req.height = 0;
         req.control_image = Some(png_bytes());
         req.control_model = Some("controlnet-canny-sd15".to_string());
         req.control_scale = 0.8;
@@ -3947,6 +3976,8 @@ mod tests {
         req.model = "ltx-2.3-22b-dev:fp8".to_string();
         req.pipeline = Some(Ltx2PipelineMode::T2a);
         req.output_format = Some(OutputFormat::Wav);
+        req.width = 0;
+        req.height = 0;
         req.enable_audio = Some(false);
         let err = validate_generate_request(&req).unwrap_err();
         assert!(err.contains("enable_audio=false"), "got: {err}");
@@ -3961,6 +3992,8 @@ mod tests {
         req.model = "ltx-2.3-22b-dev:fp8".to_string();
         req.pipeline = Some(Ltx2PipelineMode::T2a);
         req.output_format = Some(OutputFormat::Wav);
+        req.width = 0;
+        req.height = 0;
         req.guidance_overrides = Some(crate::Ltx2GuidanceOverrides {
             modality_scale: Some(3.0),
             ..Default::default()

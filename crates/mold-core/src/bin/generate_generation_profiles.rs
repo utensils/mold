@@ -244,18 +244,22 @@ fn render_recipe(out: &mut String, recipe: &GenerationRecipeProfile) {
                 .revision
                 .as_deref()
                 .map_or_else(String::new, |revision| format!(" at `{revision}`"));
+            let evidence = provenance
+                .evidence
+                .as_deref()
+                .map_or_else(String::new, |evidence| format!(", evidence: `{evidence}`"));
             if provenance.source.starts_with("http") {
                 write!(
                     out,
-                    "[{:?}]({}){revision}, qualified: `{}`",
-                    provenance.kind, provenance.source, provenance.qualified
+                    "[{:?}]({}){revision}, qualified: `{}`{evidence}",
+                    provenance.kind, provenance.source, provenance.qualified,
                 )
                 .unwrap();
             } else {
                 write!(
                     out,
-                    "{:?} `{}`{revision}, qualified: `{}`",
-                    provenance.kind, provenance.source, provenance.qualified
+                    "{:?} `{}`{revision}, qualified: `{}`{evidence}",
+                    provenance.kind, provenance.source, provenance.qualified,
                 )
                 .unwrap();
             }

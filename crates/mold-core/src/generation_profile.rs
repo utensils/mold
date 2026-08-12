@@ -8,7 +8,10 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{validation, GuidanceCapabilities, Ltx2PipelineMode, Scheduler, SourceImageCapability};
+use crate::{
+    validation, GuidanceCapabilities, Ltx2PipelineMode, OutputFormat, Scheduler,
+    SourceImageCapability,
+};
 
 pub const GENERATION_PROFILE_SCHEMA_VERSION: u32 = 1;
 
@@ -143,9 +146,48 @@ pub struct RecipeSelector {
     pub pipeline: Option<Ltx2PipelineMode>,
 }
 
+/// A non-numeric request field's complete UI/admission contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct FeatureControlProfile {
+    pub mode: ControlMode,
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// A repeatable adapter input and its immutable stack limit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AdapterControlProfile {
+    pub mode: ControlMode,
+    pub max_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct OutputCapabilitiesProfile {
+    pub default_format: OutputFormat,
+    pub formats: Vec<OutputFormat>,
+    pub audio_requires_mp4: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct WanRecipeCapabilitiesProfile {
+    pub mode: ControlMode,
+    pub supports_distill_strength: bool,
+    pub supports_first_last_frame: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_last_frame_min_frames: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GenerationCapabilitiesProfile {
     pub guidance: GuidanceCapabilities,
+    pub negative_prompt: FeatureControlProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_image: Option<SourceImageCapability>,
     pub supports_lora: bool,
@@ -153,6 +195,14 @@ pub struct GenerationCapabilitiesProfile {
     pub supports_sequence: bool,
     pub supports_extend: bool,
     pub supports_audio: bool,
+    pub source_video: FeatureControlProfile,
+    pub mask: FeatureControlProfile,
+    pub keyframes: FeatureControlProfile,
+    pub audio: FeatureControlProfile,
+    pub lora: AdapterControlProfile,
+    pub controlnet: AdapterControlProfile,
+    pub output: OutputCapabilitiesProfile,
+    pub wan_recipe: WanRecipeCapabilitiesProfile,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schedulers: Vec<Scheduler>,
 }
@@ -244,7 +294,7 @@ pub fn validate_request_against_recipe(
     validate_float("guidance", request.guidance, &recipe.guidance)?;
     if let Some(scheduler) = request.scheduler {
         let advertised = &recipe.capabilities.schedulers;
-        if !advertised.is_empty() && !advertised.contains(&scheduler) {
+        if !advertised.contains(&scheduler) {
             return Err(format!(
                 "scheduler '{scheduler}' is not available for this recipe"
             ));
@@ -757,6 +807,67 @@ fn recipe(
     };
     let effective_guidance = guidance_caps.fixed_scale.unwrap_or(input.default_guidance);
     let temporal = temporal_profile(input, family);
+    let flux2_dev = family == "flux2"
+        && crate::manifest::resolve_model_name(input.model)
+            .to_ascii_lowercase()
+            .contains("dev");
+    let wan = family == "wan";
+    let normalized_model = crate::manifest::resolve_model_name(input.model).to_ascii_lowercase();
+    let lora_supported = validation::family_supports_lora(family)
+        && !flux2_dev
+        && !(wan && normalized_model.ends_with("a14b:fp8"));
+    let source_video_required = matches!(
+        pipeline,
+        Some(Ltx2PipelineMode::IcLora | Ltx2PipelineMode::Retake | Ltx2PipelineMode::LipDub)
+    );
+    let source_video_supported = family == "ltx2" && !audio_only;
+    let keyframes_required = pipeline == Some(Ltx2PipelineMode::Keyframe);
+    let keyframes_supported = family == "ltx2" || wan;
+    let audio_input_required = pipeline == Some(Ltx2PipelineMode::A2Vid);
+    let audio_input_supported = family == "ltx2" && !audio_only;
+    let mask_supported = !audio_only
+        && !matches!(
+            family,
+            "ltx-video" | "ltx2" | "wan" | "qwen-image-edit" | "minimax-h3"
+        )
+        && !flux2_dev
+        && input.source_image != Some(SourceImageCapability::Unsupported);
+    let controlnet_supported = family == "sd15";
+    let output = if audio_only {
+        OutputCapabilitiesProfile {
+            default_format: OutputFormat::Wav,
+            formats: vec![OutputFormat::Wav],
+            audio_requires_mp4: false,
+            delivery_reason: Some("Audio-only delivery uses WAV.".to_string()),
+        }
+    } else if family == "minimax-h3" {
+        OutputCapabilitiesProfile {
+            default_format: OutputFormat::Mp4,
+            formats: vec![OutputFormat::Mp4],
+            audio_requires_mp4: true,
+            delivery_reason: Some("Synchronized H3 audio/video delivery requires MP4.".to_string()),
+        }
+    } else if temporal.is_some() {
+        OutputCapabilitiesProfile {
+            default_format: OutputFormat::Mp4,
+            formats: vec![
+                OutputFormat::Mp4,
+                OutputFormat::Gif,
+                OutputFormat::Apng,
+                OutputFormat::Webp,
+            ],
+            audio_requires_mp4: family == "ltx2",
+            delivery_reason: (family == "ltx2")
+                .then(|| "Audio-enabled video delivery requires MP4.".to_string()),
+        }
+    } else {
+        OutputCapabilitiesProfile {
+            default_format: OutputFormat::Png,
+            formats: vec![OutputFormat::Png, OutputFormat::Jpeg, OutputFormat::Webp],
+            audio_requires_mp4: false,
+            delivery_reason: None,
+        }
+    };
     let defaults = GenerationDefaultsProfile {
         width: if audio_only { 0 } else { input.default_width },
         height: if audio_only { 0 } else { input.default_height },
@@ -805,12 +916,81 @@ fn recipe(
         temporal,
         capabilities: GenerationCapabilitiesProfile {
             guidance: guidance_caps,
+            negative_prompt: feature_control(
+                guidance_caps.supports_negative_prompt,
+                false,
+                "This recipe does not encode a negative prompt.",
+            ),
             source_image: input.source_image,
-            supports_lora: validation::family_supports_lora(family),
-            supports_controlnet: matches!(family, "sd15" | "sdxl" | "flux"),
+            supports_lora: lora_supported,
+            supports_controlnet: controlnet_supported,
             supports_sequence: input.supports_sequence && !audio_only,
             supports_extend: input.supports_extend && !audio_only,
             supports_audio: input.supports_audio || audio_only,
+            source_video: feature_control(
+                source_video_supported,
+                source_video_required,
+                "This recipe does not accept a source video.",
+            ),
+            mask: feature_control(
+                mask_supported,
+                false,
+                "This model does not accept an inpainting mask.",
+            ),
+            keyframes: feature_control(
+                keyframes_supported,
+                keyframes_required,
+                "This model does not accept keyframes.",
+            ),
+            audio: feature_control(
+                audio_input_supported,
+                audio_input_required,
+                "This recipe does not accept source audio.",
+            ),
+            lora: AdapterControlProfile {
+                mode: if lora_supported {
+                    ControlMode::Adjustable
+                } else {
+                    ControlMode::Hidden
+                },
+                max_count: if lora_supported {
+                    if pipeline == Some(Ltx2PipelineMode::IcLora) {
+                        3
+                    } else {
+                        4
+                    }
+                } else {
+                    0
+                },
+                reason: (!lora_supported)
+                    .then(|| "This model does not accept LoRA adapters.".to_string()),
+            },
+            controlnet: AdapterControlProfile {
+                mode: if controlnet_supported {
+                    ControlMode::Adjustable
+                } else {
+                    ControlMode::Hidden
+                },
+                max_count: u32::from(controlnet_supported),
+                reason: (!controlnet_supported)
+                    .then(|| "ControlNet generation is available for SD1.5 models.".to_string()),
+            },
+            output,
+            wan_recipe: WanRecipeCapabilitiesProfile {
+                mode: if wan {
+                    ControlMode::Adjustable
+                } else {
+                    ControlMode::Hidden
+                },
+                supports_distill_strength: wan
+                    && (normalized_model.ends_with("a14b:q4")
+                        || normalized_model.ends_with("a14b:q5")),
+                supports_first_last_frame: wan
+                    && input.source_image != Some(SourceImageCapability::Unsupported),
+                first_last_frame_min_frames: wan.then_some(validation::WAN_TI2V_FLF_MIN_FRAMES),
+                reason: (!wan)
+                    .then(|| "Wan sampler controls apply only to Wan models.".to_string()),
+            },
             schedulers: match family {
                 "sd15" | "sdxl" => {
                     vec![Scheduler::Ddim, Scheduler::EulerAncestral, Scheduler::UniPc]
@@ -820,6 +1000,22 @@ fn recipe(
             },
         },
         provenance: provenance(family),
+    }
+}
+
+fn feature_control(
+    supported: bool,
+    required: bool,
+    unsupported_reason: &'static str,
+) -> FeatureControlProfile {
+    FeatureControlProfile {
+        mode: if supported {
+            ControlMode::Adjustable
+        } else {
+            ControlMode::Hidden
+        },
+        required: supported && required,
+        reason: (!supported).then(|| unsupported_reason.to_string()),
     }
 }
 
@@ -927,29 +1123,42 @@ fn pipeline_label(pipeline: Ltx2PipelineMode) -> String {
 }
 
 fn provenance(family: &str) -> Vec<ProfileProvenance> {
-    let (source, revision) = match family {
+    let (source, revision, evidence) = match family {
         "z-image" => (
-            "https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/main/app.py",
-            None,
+            "https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py",
+            Some("768cb50d847cdbba97c89533ae976be69cf5a5b8"),
+            "static-contract: upstream app.py RES_CHOICES[1024] oracle + exact profile/admission tests; runtime smoke not recorded",
         ),
-        "qwen-image" | "qwen-image-edit" => ("https://github.com/QwenLM/Qwen-Image", None),
+        "qwen-image" | "qwen-image-edit" => (
+            "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
+            Some("6b5e1f5cec987d404be5ac6657db3b9aacb56a89"),
+            "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded",
+        ),
         "ltx-video" => (
             "https://github.com/Lightricks/LTX-Video",
             Some("4b2d053057623ddd4d0a1d3e9cd28890e9ef487f"),
+            "mold.generation-profile.v1",
         ),
         "ltx2" => (
             "https://github.com/Lightricks/LTX-2",
             Some("4f8905737aac86a554637cac86c178877a39c744"),
+            "mold.generation-profile.v1",
         ),
         "wan" => (
             "https://github.com/Wan-Video/Wan2.2",
             Some("42bf4cfaa384bc21833865abc2f9e6c0e67233dc"),
+            "mold.generation-profile.v1",
         ),
         "minimax-h3" => (
             "https://github.com/MiniMax-AI/MiniMax-H3",
             Some("fa6891ff7cdaaa03fa4497e89ac64ff169219acf"),
+            "mold.generation-profile.v1",
         ),
-        _ => ("mold-qualified compatibility profile", None),
+        _ => (
+            "mold-qualified compatibility profile",
+            None,
+            "mold.generation-profile.v1",
+        ),
     };
     vec![ProfileProvenance {
         kind: if source.starts_with("http") {
@@ -960,7 +1169,7 @@ fn provenance(family: &str) -> Vec<ProfileProvenance> {
         source: source.to_string(),
         revision: revision.map(str::to_string),
         qualified: true,
-        evidence: Some("mold.generation-profile.v1".to_string()),
+        evidence: Some(evidence.to_string()),
     }]
 }
 
@@ -1053,6 +1262,29 @@ mod tests {
     }
 
     #[test]
+    fn advanced_and_delivery_controls_are_recipe_owned() {
+        let sd15 = resolve_generation_profile(input("sd15-base:q4", "sd15"));
+        let sd15_caps = &sd15.default_recipe().unwrap().capabilities;
+        assert_eq!(sd15_caps.controlnet.mode, ControlMode::Adjustable);
+        assert_eq!(sd15_caps.controlnet.max_count, 1);
+        assert_eq!(
+            sd15_caps.output.formats,
+            vec![OutputFormat::Png, OutputFormat::Jpeg, OutputFormat::Webp]
+        );
+
+        let wan = resolve_generation_profile(input("wan22-t2v-a14b:fp8", "wan"));
+        let wan_caps = &wan.default_recipe().unwrap().capabilities;
+        assert_eq!(wan_caps.lora.mode, ControlMode::Hidden);
+        assert_eq!(wan_caps.controlnet.mode, ControlMode::Hidden);
+        assert_eq!(wan_caps.wan_recipe.mode, ControlMode::Adjustable);
+        assert!(!wan_caps.wan_recipe.supports_distill_strength);
+        assert_eq!(
+            wan_caps.wan_recipe.first_last_frame_min_frames,
+            Some(validation::WAN_TI2V_FLF_MIN_FRAMES)
+        );
+    }
+
+    #[test]
     fn explicit_pipeline_lookup_never_falls_back_to_default_recipe() {
         let mut ltx = input("ltx2-distilled:q4", "ltx2");
         ltx.default_frames = Some(121);
@@ -1062,6 +1294,34 @@ mod tests {
         assert!(profile
             .recipe_for_pipeline(Some(Ltx2PipelineMode::T2a))
             .is_none());
+    }
+
+    #[test]
+    fn t2a_dimensionless_profile_reaches_family_admission_with_zero_canvas() {
+        let mut ltx = input("ltx-2.3-22b-dev:fp8", "ltx2");
+        ltx.default_frames = Some(97);
+        ltx.default_fps = Some(24);
+        ltx.supports_audio = true;
+        let profile = resolve_generation_profile(ltx);
+        let recipe = profile
+            .recipe_for_pipeline(Some(Ltx2PipelineMode::T2a))
+            .unwrap();
+        assert_eq!(recipe.resolution.domain, ResolutionDomain::None);
+        let request: crate::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "rain on a tin roof",
+            "model": "ltx-2.3-22b-dev:fp8",
+            "width": 0,
+            "height": 0,
+            "steps": recipe.defaults.steps,
+            "guidance": recipe.defaults.guidance,
+            "frames": recipe.defaults.frames,
+            "fps": recipe.defaults.fps,
+            "pipeline": "t2a",
+            "output_format": "wav"
+        }))
+        .unwrap();
+        validate_request_against_generation_profile(&profile, &request).unwrap();
+        crate::validation::validate_generate_request_with_family(&request, Some("ltx2")).unwrap();
     }
 
     #[test]
@@ -1085,6 +1345,56 @@ mod tests {
         assert!(validate_request_against_generation_profile(&wan, &request)
             .unwrap_err()
             .contains("not available"));
+
+        let flux = resolve_generation_profile(input("flux-dev:q4", "flux"));
+        let mut flux_request = request_for(&flux, 1024, 1024);
+        flux_request.scheduler = Some(Scheduler::Euler);
+        assert!(
+            validate_request_against_generation_profile(&flux, &flux_request)
+                .unwrap_err()
+                .contains("not available")
+        );
+    }
+
+    #[test]
+    fn z_and_qwen_provenance_is_pinned_and_static_evidence_is_explicit() {
+        for (model, family, revision, oracle) in [
+            (
+                "z-image-turbo:q4",
+                "z-image",
+                "768cb50d847cdbba97c89533ae976be69cf5a5b8",
+                "RES_CHOICES[1024]",
+            ),
+            (
+                "qwen-image:q4",
+                "qwen-image",
+                "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
+                "aspect_ratios",
+            ),
+        ] {
+            let profile = resolve_generation_profile(input(model, family));
+            let provenance = &profile.default_recipe().unwrap().provenance[0];
+            assert_eq!(provenance.revision.as_deref(), Some(revision));
+            assert!(provenance.source.contains(revision));
+            let evidence = provenance.evidence.as_deref().unwrap();
+            assert!(evidence.contains(oracle));
+            assert!(evidence.contains("runtime smoke not recorded"));
+        }
+    }
+
+    #[test]
+    fn qwen_profile_matches_the_pinned_upstream_aspect_ratio_oracle() {
+        let profile = resolve_generation_profile(input("qwen-image:q4", "qwen-image"));
+        let actual = profile
+            .default_recipe()
+            .unwrap()
+            .resolution
+            .aspect_groups
+            .iter()
+            .flat_map(|group| group.presets.iter())
+            .map(|preset| (preset.width, preset.height))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, QWEN);
     }
 
     #[test]

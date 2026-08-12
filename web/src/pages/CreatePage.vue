@@ -1213,6 +1213,7 @@ const capabilities = computed(() =>
     form.state.value.pipeline,
     null,
     currentModel.value?.source_image ?? form.state.value.sourceImageCapability,
+    effectiveGenerationRecipe(currentModel.value, form.state.value.pipeline),
   ),
 );
 
