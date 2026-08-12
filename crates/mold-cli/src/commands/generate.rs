@@ -129,25 +129,7 @@ fn validate_local_request(req: &GenerateRequest, config: &Config) -> Result<()> 
         resolve_family(&req.model, config).as_deref(),
     )
     .map_err(|e| anyhow::anyhow!(e))?;
-    if let Some(manifest) = manifest::find_manifest(&manifest::resolve_model_name(&req.model)) {
-        let model_config = config.resolved_model_config(&manifest.name);
-        let mut profile = mold_core::generation_profile_for_manifest_with_defaults(
-            manifest,
-            mold_core::GenerationDefaultsProfile {
-                width: model_config.effective_width(config),
-                height: model_config.effective_height(config),
-                steps: model_config.effective_steps(config),
-                guidance: model_config.effective_guidance(),
-                frames: model_config.effective_frames(),
-                fps: model_config.effective_fps(),
-                negative_prompt: manifest::default_negative_prompt_for_family(&manifest.family)
-                    .map(str::to_string),
-            },
-        );
-        mold_core::qualify_generation_profile_delivery(
-            &mut profile,
-            local_generation_delivery_capabilities(),
-        );
+    if let Some(profile) = local_generation_profile(config, &req.model) {
         mold_core::validate_request_against_generation_profile(&profile, req)
             .map_err(anyhow::Error::msg)?;
     }
@@ -162,26 +144,16 @@ fn local_generation_profile(
     config: &Config,
     model: &str,
 ) -> Option<mold_core::GenerationProfileSet> {
-    let manifest = manifest::find_manifest(&manifest::resolve_model_name(model))?;
-    let model_config = config.resolved_model_config(&manifest.name);
-    let mut profile = mold_core::generation_profile_for_manifest_with_defaults(
-        manifest,
-        mold_core::GenerationDefaultsProfile {
-            width: model_config.effective_width(config),
-            height: model_config.effective_height(config),
-            steps: model_config.effective_steps(config),
-            guidance: model_config.effective_guidance(),
-            frames: model_config.effective_frames(),
-            fps: model_config.effective_fps(),
-            negative_prompt: manifest::default_negative_prompt_for_family(&manifest.family)
-                .map(str::to_string),
-        },
-    );
-    mold_core::qualify_generation_profile_delivery(
-        &mut profile,
+    let canonical = manifest::resolve_model_name(model);
+    let mut catalog = mold_core::build_model_catalog(config, None, false);
+    mold_core::qualify_catalog_generation_delivery(
+        &mut catalog,
         local_generation_delivery_capabilities(),
     );
-    Some(profile)
+    catalog
+        .into_iter()
+        .find(|entry| entry.info.name == model || entry.info.name == canonical)
+        .and_then(|entry| entry.generation_profile)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3127,11 +3099,37 @@ mod tests {
             }));
         }
         if !cfg!(feature = "mp4") {
-            let h3 =
-                local_generation_profile(&Config::default(), mold_core::minimax_h3::FL2VA_OFFICIAL)
-                    .expect("built-in H3 profile");
-            assert!(mold_core::generation_profile_default_output_format(&h3, None).is_err());
+            assert!(local_generation_profile(
+                &Config::default(),
+                mold_core::minimax_h3::FL2VA_OFFICIAL
+            )
+            .is_none());
         }
+    }
+
+    #[test]
+    fn local_profile_resolves_config_only_model_from_catalog_contract() {
+        let mut config = Config::default();
+        config.models.insert(
+            "my-local-model".to_string(),
+            ModelConfig {
+                family: Some("flux".to_string()),
+                default_width: Some(768),
+                default_height: Some(512),
+                default_steps: Some(12),
+                default_guidance: Some(2.5),
+                ..ModelConfig::default()
+            },
+        );
+
+        let profile = local_generation_profile(&config, "my-local-model")
+            .expect("config-only model resolves through local catalog");
+        let recipe = profile.default_recipe().expect("default recipe");
+        assert_eq!(recipe.defaults.width, 768);
+        assert_eq!(recipe.defaults.height, 512);
+        assert_eq!(recipe.defaults.steps, 12);
+        assert_eq!(recipe.defaults.guidance, 2.5);
+        assert_eq!(recipe.capabilities.output.default_format, OutputFormat::Png);
     }
 
     /// #798 regression guard: a single-frame wan render is a still and stays

@@ -15509,7 +15509,220 @@
           "model": "minimax-h3-fl2va:comfy-pruned-int8",
           "family": "minimax-h3",
           "hidden": true
-        },
+        }
+      ],
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "minimax-h3.minimax-h3-fl2va",
+        "profile_hash": "9918f8fe577353ebfeb588e8c020cbfbc70c0108038755e65be076abee3d66b0",
+        "default_recipe_id": "default",
+        "recipes": [
+          {
+            "id": "default",
+            "label": "Default",
+            "request_selector": {},
+            "defaults": {
+              "width": 1344,
+              "height": 768,
+              "steps": 21,
+              "guidance": 0.0,
+              "frames": 124,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 32,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 1069056,
+              "min_aspect_ratio": 0.25,
+              "max_aspect_ratio": 4.0,
+              "aspect_groups": [
+                {
+                  "id": "16:7",
+                  "label": "16:7",
+                  "presets": [
+                    {
+                      "id": "1536x672",
+                      "width": 1536,
+                      "height": 672,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "7:4",
+                  "label": "7:4",
+                  "presets": [
+                    {
+                      "id": "1344x768",
+                      "width": 1344,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "4:3",
+                  "label": "4:3",
+                  "presets": [
+                    {
+                      "id": "1024x768",
+                      "width": 1024,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:4",
+                  "label": "3:4",
+                  "presets": [
+                    {
+                      "id": "768x1024",
+                      "width": 768,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "4:7",
+                  "label": "4:7",
+                  "presets": [
+                    {
+                      "id": "768x1344",
+                      "width": 768,
+                      "height": 1344,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 21,
+              "min": 2,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                21
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 0.0,
+              "min": 0.0,
+              "max": 0.0,
+              "step": 0.1,
+              "mode": "fixed"
+            },
+            "temporal": {
+              "frames": {
+                "default": 124,
+                "min": 124,
+                "max": 345,
+                "step": 17,
+                "recommended": [
+                  124
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 5,
+              "fps": {
+                "mode": "fixed",
+                "value": 24
+              },
+              "max_duration_seconds": 15
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": false,
+                "supports_negative_prompt": false,
+                "fixed_scale": 0.0
+              },
+              "negative_prompt": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not encode a negative prompt."
+              },
+              "supports_lora": false,
+              "supports_controlnet": false,
+              "supports_sequence": false,
+              "supports_extend": false,
+              "supports_audio": false,
+              "source_video": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept a source video."
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept keyframes."
+              },
+              "audio": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept source audio."
+              },
+              "lora": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "This model does not accept LoRA adapters."
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Synchronized H3 audio/video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/MiniMax-AI/MiniMax-H3",
+                "revision": "fa6891ff7cdaaa03fa4497e89ac64ff169219acf",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "models": [
         {
           "model": "minimax-h3-fl2va:official-bf16",
           "family": "minimax-h3",
@@ -15732,7 +15945,220 @@
           "model": "minimax-h3-ref2va:comfy-pruned-int8",
           "family": "minimax-h3",
           "hidden": true
-        },
+        }
+      ],
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "minimax-h3.minimax-h3-ref2va",
+        "profile_hash": "104fe16b6d900be648295d3fcbc1783ab03fc4a9b769af9d37a897dac2bff0f1",
+        "default_recipe_id": "default",
+        "recipes": [
+          {
+            "id": "default",
+            "label": "Default",
+            "request_selector": {},
+            "defaults": {
+              "width": 1344,
+              "height": 768,
+              "steps": 21,
+              "guidance": 0.0,
+              "frames": 124,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 32,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 1069056,
+              "min_aspect_ratio": 0.25,
+              "max_aspect_ratio": 4.0,
+              "aspect_groups": [
+                {
+                  "id": "16:7",
+                  "label": "16:7",
+                  "presets": [
+                    {
+                      "id": "1536x672",
+                      "width": 1536,
+                      "height": 672,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "7:4",
+                  "label": "7:4",
+                  "presets": [
+                    {
+                      "id": "1344x768",
+                      "width": 1344,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "4:3",
+                  "label": "4:3",
+                  "presets": [
+                    {
+                      "id": "1024x768",
+                      "width": 1024,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:4",
+                  "label": "3:4",
+                  "presets": [
+                    {
+                      "id": "768x1024",
+                      "width": 768,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "4:7",
+                  "label": "4:7",
+                  "presets": [
+                    {
+                      "id": "768x1344",
+                      "width": 768,
+                      "height": 1344,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 21,
+              "min": 2,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                21
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 0.0,
+              "min": 0.0,
+              "max": 0.0,
+              "step": 0.1,
+              "mode": "fixed"
+            },
+            "temporal": {
+              "frames": {
+                "default": 124,
+                "min": 124,
+                "max": 345,
+                "step": 17,
+                "recommended": [
+                  124
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 5,
+              "fps": {
+                "mode": "fixed",
+                "value": 24
+              },
+              "max_duration_seconds": 15
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": false,
+                "supports_negative_prompt": false,
+                "fixed_scale": 0.0
+              },
+              "negative_prompt": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not encode a negative prompt."
+              },
+              "supports_lora": false,
+              "supports_controlnet": false,
+              "supports_sequence": false,
+              "supports_extend": false,
+              "supports_audio": false,
+              "source_video": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept a source video."
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept keyframes."
+              },
+              "audio": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept source audio."
+              },
+              "lora": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "This model does not accept LoRA adapters."
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Synchronized H3 audio/video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/MiniMax-AI/MiniMax-H3",
+                "revision": "fa6891ff7cdaaa03fa4497e89ac64ff169219acf",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "models": [
         {
           "model": "minimax-h3-ref2va:official-bf16",
           "family": "minimax-h3",
