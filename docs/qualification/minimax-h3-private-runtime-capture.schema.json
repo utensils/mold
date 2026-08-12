@@ -124,10 +124,10 @@
         "ffn_workspace_device_bytes": { "$ref": "#/$defs/bound" },
         "decoder_tile_workspace_device_bytes": { "$ref": "#/$defs/bound" },
         "audio_decode_workspace_device_bytes": { "$ref": "#/$defs/bound" },
-        "encoded_video_host_bytes_bound": { "$ref": "#/$defs/bound" },
-        "thumbnail_host_bytes_bound": { "$ref": "#/$defs/bound" },
-        "mux_output_host_bytes_bound": { "$ref": "#/$defs/bound" },
-        "aac_mux_staging_host_bytes": { "$ref": "#/$defs/bound" }
+        "encoded_video_host_bytes_bound": { "$ref": "#/$defs/encodedVideoBound" },
+        "thumbnail_host_bytes_bound": { "$ref": "#/$defs/thumbnailBound" },
+        "mux_output_host_bytes_bound": { "$ref": "#/$defs/muxOutputBound" },
+        "aac_mux_staging_host_bytes": { "$ref": "#/$defs/aacStagingBound" }
       }
     },
     "evidence_artifacts": {
@@ -153,6 +153,46 @@
       "properties": {
         "observed_bytes": { "type": "integer", "minimum": 1 },
         "bound_bytes": { "type": "integer", "minimum": 1 },
+        "evidence_artifact": { "$ref": "#/$defs/relativePath" }
+      }
+    },
+    "encodedVideoBound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed_bytes", "bound_bytes", "evidence_artifact"],
+      "properties": {
+        "observed_bytes": { "type": "integer", "minimum": 1, "maximum": 1073741824 },
+        "bound_bytes": { "const": 1073741824 },
+        "evidence_artifact": { "$ref": "#/$defs/relativePath" }
+      }
+    },
+    "thumbnailBound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed_bytes", "bound_bytes", "evidence_artifact"],
+      "properties": {
+        "observed_bytes": { "type": "integer", "minimum": 1, "maximum": 8388608 },
+        "bound_bytes": { "const": 8388608 },
+        "evidence_artifact": { "$ref": "#/$defs/relativePath" }
+      }
+    },
+    "muxOutputBound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed_bytes", "bound_bytes", "evidence_artifact"],
+      "properties": {
+        "observed_bytes": { "type": "integer", "minimum": 1, "maximum": 536870912 },
+        "bound_bytes": { "const": 536870912 },
+        "evidence_artifact": { "$ref": "#/$defs/relativePath" }
+      }
+    },
+    "aacStagingBound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed_bytes", "bound_bytes", "evidence_artifact"],
+      "properties": {
+        "observed_bytes": { "type": "integer", "minimum": 1, "maximum": 8388608 },
+        "bound_bytes": { "const": 8388608 },
         "evidence_artifact": { "$ref": "#/$defs/relativePath" }
       }
     },

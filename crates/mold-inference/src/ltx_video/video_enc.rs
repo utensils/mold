@@ -2,6 +2,77 @@
 
 use anyhow::{Context, Result};
 use image::RgbImage;
+use std::io::{Cursor, Seek, SeekFrom, Write};
+
+struct BoundedCursor {
+    inner: Cursor<Vec<u8>>,
+    max_bytes: usize,
+}
+
+impl BoundedCursor {
+    fn new(max_bytes: usize) -> Result<Self> {
+        anyhow::ensure!(
+            max_bytes > 0,
+            "bounded media output requires a nonzero limit"
+        );
+        let bytes = if max_bytes == usize::MAX {
+            Vec::new()
+        } else {
+            Vec::with_capacity(max_bytes)
+        };
+        anyhow::ensure!(
+            max_bytes == usize::MAX || bytes.capacity() == max_bytes,
+            "bounded media allocator did not honor the exact capacity"
+        );
+        Ok(Self {
+            inner: Cursor::new(bytes),
+            max_bytes,
+        })
+    }
+
+    fn into_inner(self) -> Result<Vec<u8>> {
+        let bytes = self.inner.into_inner();
+        anyhow::ensure!(
+            bytes.len() <= self.max_bytes
+                && (self.max_bytes == usize::MAX || bytes.capacity() == self.max_bytes),
+            "bounded media output violated its allocation limit"
+        );
+        Ok(bytes)
+    }
+}
+
+impl Write for BoundedCursor {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let end = usize::try_from(self.inner.position())
+            .ok()
+            .and_then(|position| position.checked_add(buf.len()))
+            .ok_or_else(|| std::io::Error::other("bounded media output size overflow"))?;
+        if end > self.max_bytes {
+            return Err(std::io::Error::other(
+                "bounded media output exceeds its limit",
+            ));
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Seek for BoundedCursor {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        let previous = self.inner.position();
+        let next = self.inner.seek(position)?;
+        if next > self.max_bytes as u64 {
+            self.inner.set_position(previous);
+            return Err(std::io::Error::other(
+                "bounded media seek exceeds its limit",
+            ));
+        }
+        Ok(next)
+    }
+}
 
 /// Generation metadata embedded as tEXt chunks in APNG output.
 pub struct VideoMetadata {
@@ -153,6 +224,16 @@ pub fn first_frame_png(frames: &[RgbImage]) -> Result<Vec<u8>> {
     Ok(buf.into_inner())
 }
 
+/// Extract the first frame while rejecting output growth beyond `max_bytes`.
+pub fn first_frame_png_bounded(frames: &[RgbImage], max_bytes: usize) -> Result<Vec<u8>> {
+    anyhow::ensure!(!frames.is_empty(), "no frames for thumbnail");
+    let mut output = BoundedCursor::new(max_bytes)?;
+    frames[0]
+        .write_to(&mut output, image::ImageFormat::Png)
+        .context("failed to encode bounded thumbnail PNG")?;
+    output.into_inner()
+}
+
 /// Encode a sequence of RGB frames into an animated PNG (APNG).
 ///
 /// Loops infinitely. Optionally embeds generation metadata as tEXt/iTXt chunks.
@@ -274,16 +355,35 @@ fn split_annex_b_nals(data: &[u8]) -> Vec<&[u8]> {
 /// frames (asserted by `stream_encoder_matches_slice_encoder_byte_for_byte`).
 pub struct Mp4StreamEncoder {
     encoder: openh264::encoder::Encoder,
-    samples: Vec<(Vec<u8>, bool)>,
+    samples: Vec<(Box<[u8]>, bool)>,
     sps: Option<Vec<u8>>,
     pps: Option<Vec<u8>>,
     width: u32,
     height: u32,
     fps: u32,
+    max_mp4_bytes: Option<usize>,
+    sample_payload_bytes: usize,
 }
 
 impl Mp4StreamEncoder {
     pub fn new(width: u32, height: u32, fps: u32) -> Result<Self> {
+        Self::new_with_limit(width, height, fps, None)
+    }
+
+    pub fn new_bounded(width: u32, height: u32, fps: u32, max_mp4_bytes: usize) -> Result<Self> {
+        anyhow::ensure!(
+            max_mp4_bytes > 0,
+            "bounded MP4 output requires a nonzero limit"
+        );
+        Self::new_with_limit(width, height, fps, Some(max_mp4_bytes))
+    }
+
+    fn new_with_limit(
+        width: u32,
+        height: u32,
+        fps: u32,
+        max_mp4_bytes: Option<usize>,
+    ) -> Result<Self> {
         use openh264::encoder::{EncoderConfig, FrameRate, VuiConfig};
 
         let config = EncoderConfig::new()
@@ -304,6 +404,8 @@ impl Mp4StreamEncoder {
             width,
             height,
             fps,
+            max_mp4_bytes,
+            sample_payload_bytes: 0,
         })
     }
 
@@ -344,8 +446,20 @@ impl Mp4StreamEncoder {
                 }
             }
         }
+        drop(annex_b);
         if !frame_nals.is_empty() {
-            self.samples.push((frame_nals, is_key));
+            let payload_bytes = self
+                .sample_payload_bytes
+                .checked_add(frame_nals.len())
+                .context("H.264 sample payload size overflowed")?;
+            if self
+                .max_mp4_bytes
+                .is_some_and(|max_bytes| payload_bytes > max_bytes)
+            {
+                anyhow::bail!("H.264 sample payload exceeds its bounded MP4 limit");
+            }
+            self.sample_payload_bytes = payload_bytes;
+            self.samples.push((frame_nals.into_boxed_slice(), is_key));
         }
         Ok(())
     }
@@ -354,7 +468,15 @@ impl Mp4StreamEncoder {
         anyhow::ensure!(!self.samples.is_empty(), "no frames to encode");
         let sps = self.sps.context("H.264 encoder produced no SPS")?;
         let pps = self.pps.context("H.264 encoder produced no PPS")?;
-        mp4_mux::write_mp4(&self.samples, &sps, &pps, self.width, self.height, self.fps)
+        mp4_mux::write_mp4(
+            &self.samples,
+            &sps,
+            &pps,
+            self.width,
+            self.height,
+            self.fps,
+            self.max_mp4_bytes,
+        )
     }
 }
 
@@ -450,12 +572,13 @@ mod mp4_mux {
     }
 
     pub fn write_mp4(
-        samples: &[(Vec<u8>, bool)],
+        samples: &[(Box<[u8]>, bool)],
         sps: &[u8],
         pps: &[u8],
         width: u32,
         height: u32,
         fps: u32,
+        max_output_bytes: Option<usize>,
     ) -> Result<Vec<u8>> {
         let timescale = fps * 1000;
         let sample_duration = 1000u32; // each frame = 1000 ticks at timescale = fps*1000
@@ -661,18 +784,31 @@ mod mp4_mux {
             "MP4 mdat exceeds 4 GB limit ({} bytes) — reduce frames or resolution",
             mdat_total
         );
-        let mut mdat = Vec::with_capacity(mdat_total);
-        write_u32(&mut mdat, mdat_total as u32);
-        mdat.extend_from_slice(b"mdat");
-        for (data, _) in samples {
-            mdat.extend_from_slice(data);
+        let output_bytes = ftyp
+            .len()
+            .checked_add(moov.len())
+            .and_then(|bytes| bytes.checked_add(mdat_total))
+            .ok_or_else(|| anyhow::anyhow!("MP4 output size overflowed"))?;
+        if max_output_bytes.is_some_and(|max_bytes| output_bytes > max_bytes) {
+            anyhow::bail!("MP4 output exceeds its configured byte limit");
         }
-
-        // Assemble: ftyp + moov + mdat
-        let mut out = Vec::with_capacity(ftyp.len() + moov.len() + mdat.len());
+        // Assemble directly into one exactly bounded output allocation. The
+        // exact-size boxed samples stay live, but no second full mdat copy does.
+        let mut out = Vec::with_capacity(output_bytes);
         out.extend_from_slice(&ftyp);
         out.extend_from_slice(&moov);
-        out.extend_from_slice(&mdat);
+        write_u32(&mut out, mdat_total as u32);
+        out.extend_from_slice(b"mdat");
+        for (data, _) in samples {
+            out.extend_from_slice(data);
+        }
+        anyhow::ensure!(out.len() == output_bytes, "MP4 assembly length changed");
+        if let Some(max_bytes) = max_output_bytes {
+            anyhow::ensure!(
+                out.capacity() <= max_bytes,
+                "bounded MP4 assembly violated its allocation limit"
+            );
+        }
 
         Ok(out)
     }
@@ -825,6 +961,28 @@ mod tests {
         assert_eq!(&data[..8], &[137, 80, 78, 71, 13, 10, 26, 10]); // PNG magic
     }
 
+    #[test]
+    fn bounded_first_frame_png_rejects_growth_before_publication() {
+        let frames = test_frames(32, 32, 1);
+        let exact = first_frame_png_bounded(&frames, usize::MAX).unwrap();
+        assert!(first_frame_png_bounded(&frames, 8).is_err());
+        assert_eq!(&exact[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    }
+
+    #[test]
+    fn noisy_h3_thumbnail_fits_the_enforced_output_cap() {
+        let frame = RgbImage::from_fn(960, 544, |x, y| {
+            let mixed = x
+                .wrapping_mul(0x9e37_79b9)
+                .rotate_left(y & 31)
+                .wrapping_add(y.wrapping_mul(0x85eb_ca6b));
+            image::Rgb([mixed as u8, (mixed >> 8) as u8, (mixed >> 16) as u8])
+        });
+        let bytes = first_frame_png_bounded(&[frame], 4 * 1024 * 1024).unwrap();
+        assert!(bytes.len() <= 4 * 1024 * 1024);
+        assert_eq!(bytes.capacity(), 4 * 1024 * 1024);
+    }
+
     #[cfg(feature = "webp")]
     #[test]
     fn webp_encodes_valid_output() {
@@ -901,6 +1059,26 @@ mod tests {
             via_slice, via_stream,
             "wrapper and stream outputs must be identical"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "mp4")]
+    fn bounded_stream_encoder_rejects_container_growth() {
+        let frames = gradient_frames(8, 64, 48);
+        let exact = encode_mp4(&frames, 24).expect("reference encode");
+        let mut bounded =
+            Mp4StreamEncoder::new_bounded(64, 48, 24, exact.len() - 1).expect("bounded encoder");
+        for frame in &frames {
+            bounded.push(frame).expect("bounded sample push");
+        }
+        assert!(bounded.finish().is_err());
+
+        let mut exact_bound =
+            Mp4StreamEncoder::new_bounded(64, 48, 24, exact.len()).expect("exact encoder");
+        for frame in &frames {
+            exact_bound.push(frame).expect("exact sample push");
+        }
+        assert_eq!(exact_bound.finish().unwrap(), exact);
     }
 
     #[test]

@@ -908,6 +908,18 @@ mod tests {
         }
     }
 
+    fn capped_bound(
+        path: &str,
+        observed_bytes: u64,
+        bound_bytes: u64,
+    ) -> H3PrivateRuntimeBoundCapture {
+        H3PrivateRuntimeBoundCapture {
+            observed_bytes,
+            bound_bytes,
+            evidence_artifact: path.into(),
+        }
+    }
+
     fn envelope() -> H3PrivateRuntimeEnvelopeRecord {
         H3PrivateRuntimeEnvelopeRecord {
             width: 960,
@@ -956,10 +968,26 @@ mod tests {
                 ffn_workspace_device_bytes: bound(path, 7),
                 decoder_tile_workspace_device_bytes: bound(path, 8),
                 audio_decode_workspace_device_bytes: bound(path, 9),
-                encoded_video_host_bytes_bound: bound(path, 10),
-                thumbnail_host_bytes_bound: bound(path, 11),
-                mux_output_host_bytes_bound: bound(path, 12),
-                aac_mux_staging_host_bytes: bound(path, 13),
+                encoded_video_host_bytes_bound: capped_bound(
+                    path,
+                    10,
+                    super::super::pipeline::SMALL_ENCODED_VIDEO_HOST_BYTES_BOUND,
+                ),
+                thumbnail_host_bytes_bound: capped_bound(
+                    path,
+                    11,
+                    super::super::pipeline::SMALL_THUMBNAIL_HOST_BYTES_BOUND,
+                ),
+                mux_output_host_bytes_bound: capped_bound(
+                    path,
+                    12,
+                    super::super::pipeline::SMALL_MUX_OUTPUT_HOST_BYTES_BOUND,
+                ),
+                aac_mux_staging_host_bytes: capped_bound(
+                    path,
+                    13,
+                    super::super::pipeline::SMALL_AAC_MUX_STAGING_HOST_BYTES,
+                ),
             },
             evidence_artifacts: vec!["bin/mold-server".into(), path.into()],
         }
