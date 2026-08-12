@@ -2537,109 +2537,6 @@ pub fn validate_upscale_request(req: &UpscaleRequest) -> Result<(), String> {
 
 // ── Dimension recommendations ───────────────────────────────────────────────
 
-/// Recommended (width, height) pairs for SD1.5 models (native 512x512).
-const SD15_DIMS: &[(u32, u32)] = &[(512, 512), (512, 768), (768, 512), (384, 512), (512, 384)];
-
-/// Official SDXL training buckets from Stability AI (native 1024x1024).
-const SDXL_DIMS: &[(u32, u32)] = &[
-    (1024, 1024),
-    (1152, 896),
-    (896, 1152),
-    (1216, 832),
-    (832, 1216),
-    (1344, 768),
-    (768, 1344),
-    (1536, 640),
-    (640, 1536),
-];
-
-/// Recommended dimensions for SD3.5 models (native 1024x1024).
-const SD3_DIMS: &[(u32, u32)] = &[
-    (1024, 1024),
-    (1152, 896),
-    (896, 1152),
-    (1216, 832),
-    (832, 1216),
-    (1344, 768),
-    (768, 1344),
-];
-
-/// Recommended dimensions for FLUX models (native 1024x1024).
-const FLUX_DIMS: &[(u32, u32)] = &[
-    (1024, 1024),
-    (1024, 768),
-    (768, 1024),
-    (1024, 576),
-    (576, 1024),
-    (768, 768),
-];
-
-/// Recommended dimensions for Z-Image models (native 1024x1024).
-const ZIMAGE_DIMS: &[(u32, u32)] = &[(1024, 1024), (1024, 768), (768, 1024)];
-
-/// Recommended dimensions for Qwen-Image models (native 1328x1328, ~1.76MP max).
-/// Supports dynamic resolution — any dims divisible by 16 within the megapixel budget work,
-/// but these are the standard aspect-ratio buckets.
-const QWEN_IMAGE_DIMS: &[(u32, u32)] = &[
-    (1328, 1328), // 1:1 (native)
-    (1024, 1024), // 1:1
-    (1152, 896),  // 9:7
-    (896, 1152),  // 7:9
-    (1216, 832),  // 19:13
-    (832, 1216),  // 13:19
-    (1344, 768),  // 7:4
-    (768, 1344),  // 4:7
-    (1664, 928),  // ~16:9
-    (928, 1664),  // ~9:16
-    (768, 768),   // 1:1 (small)
-    (512, 512),   // 1:1 (small, fast)
-];
-
-/// Recommended dimensions for Wuerstchen models (native 1024x1024).
-const WUERSTCHEN_DIMS: &[(u32, u32)] = &[(1024, 1024)];
-
-/// Recommended dimensions for LTX Video models (native 768x512).
-/// LTX Video requires dimensions divisible by 32 (patchification).
-const LTX_VIDEO_DIMS: &[(u32, u32)] = &[
-    (704, 480),  // 22:15 (compact sample bucket)
-    (768, 512),  // 3:2 (native)
-    (512, 512),  // 1:1
-    (1024, 576), // 16:9
-    (1216, 704), // 16:9 (LTX-2 19B/22B default)
-    (576, 1024), // 9:16
-    (768, 768),  // 1:1
-    (512, 768),  // 2:3
-];
-
-/// LTX-2 / LTX-2.3. Adds upstream's shipped 1080p HQ pair and the 9:16
-/// transpose of the 19B/22B default. Every entry is 32-aligned, inside
-/// `LTX2_MAX_PIXELS`, and has both axes within `LTX2_MAX_AXIS_PIXELS`.
-const LTX2_DIMS: &[(u32, u32)] = &[
-    (704, 480),   // 22:15 (compact sample bucket)
-    (768, 512),   // 3:2 (native)
-    (512, 512),   // 1:1
-    (1024, 576),  // 16:9
-    (1216, 704),  // 16:9 (LTX-2 19B/22B default)
-    (704, 1216),  // 9:16 portrait transpose of the default
-    (576, 1024),  // 9:16
-    (768, 768),   // 1:1
-    (512, 768),   // 2:3
-    (1920, 1088), // 16:9 1080p — upstream's LTX_2_3_HQ_PARAMS
-    (1088, 1920), // 9:16 1080p
-];
-
-/// Wan 2.1/2.2 sample buckets. The 14B family trains at 480p and 720p on the
-/// shared 16px grid; 704x1280 is TI2V-5B's native bucket (also 32px-aligned,
-/// which its higher-compression 2.2 VAE requires).
-const WAN_DIMS: &[(u32, u32)] = &[
-    (832, 480),  // 16:9-class 480p (Wan's own default bucket)
-    (480, 832),  // portrait 480p
-    (1280, 720), // 720p
-    (720, 1280), // portrait 720p
-    (1280, 704), // TI2V-5B native (32px grid)
-    (704, 1280), // TI2V-5B portrait
-];
-
 /// Per-checkpoint recommended buckets for the Wan family.
 ///
 /// The family-wide list unions buckets no single checkpoint supports —
@@ -2648,14 +2545,7 @@ const WAN_DIMS: &[(u32, u32)] = &[
 /// advertisement per model. The family list remains the fallback for
 /// checkpoints this build has no manifest for (catalog `cv:`/`hf:` ids).
 pub fn wan_recommended_dimensions(model: &str) -> &'static [(u32, u32)] {
-    let canonical = crate::manifest::resolve_model_name(model);
-    if canonical.starts_with("wan21-t2v-1.3b") {
-        return &[(832, 480), (480, 832)];
-    }
-    if canonical.starts_with("wan22-ti2v-5b") {
-        return &[(1280, 704), (704, 1280)];
-    }
-    recommended_dimensions("wan")
+    crate::generation_profile::presets_for_identity(model, "wan", None)
 }
 
 /// Per-checkpoint dimension grid for the Wan family.
@@ -2682,29 +2572,7 @@ pub fn wan_dimension_alignment(model: &str) -> u32 {
 /// Returns an empty slice for unknown families, utility models (e.g. `qwen3-expand`),
 /// and conditioning models (e.g. ControlNet).
 pub fn recommended_dimensions(family: &str) -> &'static [(u32, u32)] {
-    match family {
-        "sd15" => SD15_DIMS,
-        "sdxl" => SDXL_DIMS,
-        "sd3" => SD3_DIMS,
-        "flux" => FLUX_DIMS,
-        "flux2" => FLUX_DIMS,
-        "z-image" => ZIMAGE_DIMS,
-        "qwen-image" => QWEN_IMAGE_DIMS,
-        "qwen-image-edit" => QWEN_IMAGE_DIMS,
-        "wuerstchen" => WUERSTCHEN_DIMS,
-        "ltx-video" => LTX_VIDEO_DIMS,
-        "ltx2" => LTX2_DIMS,
-        "wan" => WAN_DIMS,
-        family if crate::minimax_h3::is_family(family) => &[
-            (1536, 672),
-            (1344, 768),
-            (1024, 768),
-            (768, 768),
-            (768, 1024),
-            (768, 1344),
-        ],
-        _ => &[],
-    }
+    crate::generation_profile::family_presets(family)
 }
 
 /// Composition-aware counterpart to [`recommended_dimensions`].

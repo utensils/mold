@@ -39,7 +39,10 @@ pub const FIXED_FPS: u32 = 24;
 pub const MIN_DURATION_SECONDS: u32 = 5;
 pub const MAX_DURATION_SECONDS: u32 = 15;
 pub const MIN_FRAMES: u32 = 124;
-pub const MAX_FRAMES: u32 = 362;
+/// Highest `17n+5` frame count that remains within 15 seconds at the fixed
+/// 24 FPS rate. The next grid value, 362, is 15.083 seconds and is rejected by
+/// the pinned upstream Diffusers oracle.
+pub const MAX_FRAMES: u32 = 345;
 pub const FRAME_STEP: u32 = 17;
 pub const FRAME_OFFSET: u32 = 5;
 pub const DIMENSION_ALIGNMENT: u32 = 32;
@@ -2466,7 +2469,7 @@ mod tests {
 
     #[test]
     fn timing_grid_accepts_the_three_documented_nominal_durations() {
-        for frames in [124, 243, 362] {
+        for frames in [124, 243, 345] {
             assert!(valid_frame_count(frames), "{frames}");
         }
         for frames in [123, 125, 361, 363] {

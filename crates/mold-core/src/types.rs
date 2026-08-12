@@ -2474,6 +2474,11 @@ pub struct ModelInfoExtended {
     /// against a server that enforces nothing at admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_image: Option<SourceImageCapability>,
+    /// Complete, versioned generation-control contract for this concrete
+    /// model and every selectable recipe. New clients use this instead of
+    /// reconstructing policy from family names and legacy flattened fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_profile: Option<crate::generation_profile::GenerationProfileSet>,
 }
 
 /// How a model relates to a conditioning source image (#772).
@@ -2708,6 +2713,7 @@ mod model_display_name_tests {
             extend_default_overlap_frames: None,
             guidance_capabilities: None,
             source_image: None,
+            generation_profile: None,
         }
     }
 

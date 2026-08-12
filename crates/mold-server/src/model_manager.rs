@@ -688,6 +688,31 @@ fn installed_catalog_models(
             });
 
         let resolution = mold_core::catalog::resolution_defaults(&sidecar.id, &sidecar.family);
+        let supports_audio =
+            mold_inference::audio::checkpoint_output_supported(&sidecar.family, &primary_path);
+        let supports_extend = sidecar.family == "ltx2";
+        let supports_sequence =
+            crate::chain_limits::sequence_support(&sidecar.name, &sidecar.family, false).supported;
+        let generation_profile =
+            mold_core::resolve_generation_profile(mold_core::GenerationProfileInput {
+                model: &sidecar.id,
+                family: &sidecar.family,
+                sub_family: sidecar.sub_family.as_deref(),
+                default_width: w,
+                default_height: h,
+                default_steps: steps,
+                default_guidance: guidance,
+                default_frames: frames,
+                default_fps: fps,
+                default_negative_prompt: mold_core::manifest::default_negative_prompt_for_family(
+                    &sidecar.family,
+                )
+                .map(str::to_string),
+                source_image: None,
+                supports_sequence,
+                supports_extend,
+                supports_audio: supports_audio.unwrap_or(false),
+            });
         out.push(ModelInfoExtended {
             downloaded: true,
             defaults: ModelDefaults {
@@ -741,10 +766,7 @@ fn installed_catalog_models(
             kind: Some(sidecar.kind.clone()),
             modality: Some(sidecar.modality.clone()),
             nsfw: sidecar.nsfw,
-            supports_audio: mold_inference::audio::checkpoint_output_supported(
-                &sidecar.family,
-                &primary_path,
-            ),
+            supports_audio,
             // One authority, `mold_core::catalog::extend_capable_model`: the
             // whole ltx2 family continues through its latent motion tail,
             // while wan continues only from a checkpoint that conditions on
@@ -752,10 +774,7 @@ fn installed_catalog_models(
             // reads the headers, and re-deriving it there from this same
             // helper is what keeps `supports_extend` from restating a family
             // literal that contradicts its own overlap default (#783).
-            supports_extend: Some(mold_core::catalog::extend_capable_model(
-                &sidecar.family,
-                None,
-            )),
+            supports_extend: Some(supports_extend),
             // Per family: the overlap a continuation defaults to is its
             // carryover, and wan's is the one frame it was seeded with (#783).
             extend_default_overlap_frames: Some(
@@ -765,10 +784,7 @@ fn installed_catalog_models(
             ),
             // Per-model, not per-family, because this is where a future
             // pipeline that cannot chain would have to be caught.
-            supports_sequence: Some(
-                crate::chain_limits::sequence_support(&sidecar.name, &sidecar.family, false)
-                    .supported,
-            ),
+            supports_sequence: Some(supports_sequence),
             guidance_capabilities: Some(mold_core::GuidanceCapabilities::for_recipe(
                 &sidecar.family,
                 &format!("{} {} {}", sidecar.id, sidecar.name, primary_path.display()),
@@ -780,6 +796,7 @@ fn installed_catalog_models(
             // annotate pass below fills this once paths resolve; a bare
             // primary file cannot answer alone.
             source_image: None,
+            generation_profile: Some(generation_profile),
         });
     }
     out

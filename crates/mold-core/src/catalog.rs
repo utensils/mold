@@ -119,16 +119,44 @@ pub fn build_model_catalog(
             let (bytes, _gb) = model_cfg.disk_usage();
             bytes
         });
+        let default_steps = model_cfg.effective_steps(config);
+        let default_guidance = model_cfg.effective_guidance();
+        let default_width = model_cfg.effective_width(config);
+        let default_height = model_cfg.effective_height(config);
+        let default_frames = model_cfg.effective_frames();
+        let default_fps = model_cfg.effective_fps();
+        let default_negative_prompt =
+            crate::manifest::default_negative_prompt_for_family(&manifest.family)
+                .map(str::to_string);
+        let supports_extend =
+            extend_capable_model(&manifest.family, manifest.defaults.source_image);
+        let supports_sequence = chain_capable_family(&manifest.family);
+        let generation_profile = crate::resolve_generation_profile(crate::GenerationProfileInput {
+            model: &manifest.name,
+            family: &manifest.family,
+            sub_family: None,
+            default_width,
+            default_height,
+            default_steps,
+            default_guidance,
+            default_frames,
+            default_fps,
+            default_negative_prompt: default_negative_prompt.clone(),
+            source_image: manifest.defaults.source_image,
+            supports_sequence,
+            supports_extend,
+            supports_audio: manifest.family == "ltx2",
+        });
 
         models.push(ModelInfoExtended {
             downloaded,
             defaults: ModelDefaults {
-                default_steps: model_cfg.effective_steps(config),
-                default_guidance: model_cfg.effective_guidance(),
-                default_width: model_cfg.effective_width(config),
-                default_height: model_cfg.effective_height(config),
-                default_frames: model_cfg.effective_frames(),
-                default_fps: model_cfg.effective_fps(),
+                default_steps,
+                default_guidance,
+                default_width,
+                default_height,
+                default_frames,
+                default_fps,
                 min_frames: crate::validation::min_frames_for_family(&manifest.family),
                 max_frames: crate::validation::max_frames_for_family_at_fps(
                     &manifest.family,
@@ -149,10 +177,7 @@ pub fn build_model_catalog(
                 // carries a CLI-layer default the server never substitutes,
                 // and advertising it would promise behavior an HTTP request
                 // does not get.
-                default_negative_prompt: crate::manifest::default_negative_prompt_for_family(
-                    &manifest.family,
-                )
-                .map(str::to_string),
+                default_negative_prompt,
                 max_pixels: resolution.max_pixels,
                 max_axis_pixels: resolution.max_axis_pixels,
                 recommended_dimensions: resolution.recommended_dimensions,
@@ -195,11 +220,8 @@ pub fn build_model_catalog(
             // final frame becomes image conditioning — so only an
             // image-conditioned checkpoint can extend. `source_image` is that
             // classification (#783).
-            supports_extend: Some(extend_capable_model(
-                &manifest.family,
-                manifest.defaults.source_image,
-            )),
-            supports_sequence: Some(chain_capable_family(&manifest.family)),
+            supports_extend: Some(supports_extend),
+            supports_sequence: Some(supports_sequence),
             // Per family, because the overlap a continuation defaults to is
             // its carryover: LTX-2 re-encodes a 17-frame latent motion tail,
             // wan re-renders the one frame it was seeded with (#783).
@@ -215,6 +237,7 @@ pub fn build_model_catalog(
             // structurally knows the task (#772). Cold tiers advertise
             // correctly before any file exists.
             source_image: manifest.defaults.source_image,
+            generation_profile: Some(generation_profile),
         });
     }
 
@@ -259,16 +282,40 @@ pub fn build_model_catalog(
             name,
             model_cfg.description.as_deref().unwrap_or_default()
         );
+        let default_steps = model_cfg.effective_steps(config);
+        let default_guidance = model_cfg.effective_guidance();
+        let default_width = model_cfg.effective_width(config);
+        let default_height = model_cfg.effective_height(config);
+        let default_frames = model_cfg.effective_frames();
+        let default_fps = model_cfg.effective_fps();
+        let default_negative_prompt =
+            crate::manifest::default_negative_prompt_for_family(&family).map(str::to_string);
+        let generation_profile = crate::resolve_generation_profile(crate::GenerationProfileInput {
+            model: name,
+            family: &family,
+            sub_family: None,
+            default_width,
+            default_height,
+            default_steps,
+            default_guidance,
+            default_frames,
+            default_fps,
+            default_negative_prompt: default_negative_prompt.clone(),
+            source_image: None,
+            supports_sequence: sequence_capable,
+            supports_extend: extend_capable_model(&family, source_image_contract),
+            supports_audio: family == "ltx2",
+        });
 
         models.push(ModelInfoExtended {
             downloaded: true,
             defaults: ModelDefaults {
-                default_steps: model_cfg.effective_steps(config),
-                default_guidance: model_cfg.effective_guidance(),
-                default_width: model_cfg.effective_width(config),
-                default_height: model_cfg.effective_height(config),
-                default_frames: model_cfg.effective_frames(),
-                default_fps: model_cfg.effective_fps(),
+                default_steps,
+                default_guidance,
+                default_width,
+                default_height,
+                default_frames,
+                default_fps,
                 min_frames: crate::validation::min_frames_for_family(&family),
                 max_frames: crate::validation::max_frames_for_family_at_fps(
                     &family,
@@ -280,10 +327,7 @@ pub fn build_model_catalog(
                 max_frames_absolute: crate::validation::max_frames_absolute_for_family(&family),
                 frame_step: crate::validation::frame_step_for_family(&family),
                 frame_offset: crate::validation::frame_offset_for_family(&family),
-                default_negative_prompt: crate::manifest::default_negative_prompt_for_family(
-                    &family,
-                )
-                .map(str::to_string),
+                default_negative_prompt,
                 max_pixels: resolution.max_pixels,
                 max_axis_pixels: resolution.max_axis_pixels,
                 recommended_dimensions: resolution.recommended_dimensions,
@@ -322,6 +366,7 @@ pub fn build_model_catalog(
             // pass derives the contract from checkpoint headers, the same
             // classification the engine applies (#772).
             source_image: source_image_contract,
+            generation_profile: Some(generation_profile),
         });
     }
 
@@ -794,6 +839,7 @@ mod tests {
                 extend_default_overlap_frames: None,
                 guidance_capabilities: None,
                 source_image: None,
+                generation_profile: None,
             }
         }
 

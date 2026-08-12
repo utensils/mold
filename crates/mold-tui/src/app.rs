@@ -13037,6 +13037,7 @@ mod tests {
             extend_default_overlap_frames: None,
             guidance_capabilities: None,
             source_image: None,
+            generation_profile: None,
         }
     }
 
@@ -14708,6 +14709,7 @@ mod tests {
             extend_default_overlap_frames: None,
             guidance_capabilities: None,
             source_image: None,
+            generation_profile: None,
         }
     }
 

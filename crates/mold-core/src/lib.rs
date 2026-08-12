@@ -14,6 +14,7 @@ pub mod error;
 pub mod expand;
 pub mod expand_prompts;
 pub mod format;
+pub mod generation_profile;
 pub mod install_error;
 pub mod lambda;
 pub mod ltx2_camera;
@@ -54,6 +55,13 @@ pub use control::{
     classify_generate_error, classify_server_error, GenerateServerAction, ServerAvailability,
 };
 pub use error::{MoldError, Result as MoldResult};
+pub use generation_profile::{
+    resolve_generation_profile, AspectGroup, ControlMode, FloatControl, FpsControl,
+    GenerationCapabilitiesProfile, GenerationDefaultsProfile, GenerationProfileInput,
+    GenerationProfileSet, GenerationRecipeProfile, IntegerControl, ProfileProvenance,
+    ProvenanceKind, RecipeSelector, ResolutionDomain, ResolutionPreset, ResolutionProfile,
+    TemporalProfile, GENERATION_PROFILE_SCHEMA_VERSION,
+};
 pub use install_error::InstallError;
 pub use media_paths::{configured_media_roots, parse_media_roots_env, resolve_server_media_path};
 pub use model_policy::{

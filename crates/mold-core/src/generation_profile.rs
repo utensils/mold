@@ -1,0 +1,797 @@
+//! Canonical, versioned generation-control profiles.
+//!
+//! A profile is the one model/recipe authority consumed by admission, Rust
+//! clients, and `/api/models`. Browser clients receive the same fully-resolved
+//! recipes and never reconstruct family policy. The legacy flattened model
+//! defaults remain a derived compatibility view for one release.
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::{validation, GuidanceCapabilities, Ltx2PipelineMode, Scheduler, SourceImageCapability};
+
+pub const GENERATION_PROFILE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResolutionDomain {
+    Dynamic,
+    Buckets,
+    SourceDriven,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ControlMode {
+    Adjustable,
+    Fixed,
+    Hidden,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProvenanceKind {
+    Upstream,
+    MoldPolicy,
+    Derived,
+    DeliveryLimit,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ProfileProvenance {
+    pub kind: ProvenanceKind,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    pub qualified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ResolutionPreset {
+    pub id: String,
+    pub width: u32,
+    pub height: u32,
+    pub tier: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AspectGroup {
+    pub id: String,
+    pub label: String,
+    pub presets: Vec<ResolutionPreset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ResolutionProfile {
+    pub domain: ResolutionDomain,
+    pub alignment: u32,
+    pub min_width: u32,
+    pub min_height: u32,
+    pub max_pixels: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_axis_pixels: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_aspect_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_aspect_ratio: Option<f64>,
+    pub aspect_groups: Vec<AspectGroup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct IntegerControl {
+    pub default: u32,
+    pub min: u32,
+    pub max: u32,
+    pub step: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommended: Vec<u32>,
+    pub mode: ControlMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct FloatControl {
+    pub default: f64,
+    pub min: f64,
+    pub max: f64,
+    pub step: f64,
+    pub mode: ControlMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
+pub enum FpsControl {
+    Fixed {
+        value: u32,
+    },
+    Adjustable {
+        default: u32,
+        min: u32,
+        max: u32,
+        step: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct TemporalProfile {
+    pub frames: IntegerControl,
+    pub frame_offset: u32,
+    pub fps: FpsControl,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_duration_seconds: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationDefaultsProfile {
+    pub width: u32,
+    pub height: u32,
+    pub steps: u32,
+    pub guidance: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negative_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RecipeSelector {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<Ltx2PipelineMode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationCapabilitiesProfile {
+    pub guidance: GuidanceCapabilities,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_image: Option<SourceImageCapability>,
+    pub supports_lora: bool,
+    pub supports_controlnet: bool,
+    pub supports_sequence: bool,
+    pub supports_extend: bool,
+    pub supports_audio: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schedulers: Vec<Scheduler>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationRecipeProfile {
+    pub id: String,
+    pub label: String,
+    pub request_selector: RecipeSelector,
+    pub defaults: GenerationDefaultsProfile,
+    pub resolution: ResolutionProfile,
+    pub steps: IntegerControl,
+    pub guidance: FloatControl,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporal: Option<TemporalProfile>,
+    pub capabilities: GenerationCapabilitiesProfile,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<ProfileProvenance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationProfileSet {
+    pub schema_version: u32,
+    pub profile_id: String,
+    pub profile_hash: String,
+    pub default_recipe_id: String,
+    pub recipes: Vec<GenerationRecipeProfile>,
+}
+
+impl GenerationProfileSet {
+    pub fn default_recipe(&self) -> Option<&GenerationRecipeProfile> {
+        self.recipes
+            .iter()
+            .find(|recipe| recipe.id == self.default_recipe_id)
+    }
+
+    pub fn recipe_for_pipeline(
+        &self,
+        pipeline: Option<Ltx2PipelineMode>,
+    ) -> Option<&GenerationRecipeProfile> {
+        self.recipes
+            .iter()
+            .find(|recipe| recipe.request_selector.pipeline == pipeline)
+            .or_else(|| self.default_recipe())
+    }
+
+    fn seal_hash(&mut self) {
+        self.profile_hash.clear();
+        let encoded = serde_json::to_vec(self).expect("generation profile must serialize");
+        self.profile_hash = format!("{:x}", Sha256::digest(encoded));
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GenerationProfileInput<'a> {
+    pub model: &'a str,
+    pub family: &'a str,
+    pub sub_family: Option<&'a str>,
+    pub default_width: u32,
+    pub default_height: u32,
+    pub default_steps: u32,
+    pub default_guidance: f64,
+    pub default_frames: Option<u32>,
+    pub default_fps: Option<u32>,
+    pub default_negative_prompt: Option<String>,
+    pub source_image: Option<SourceImageCapability>,
+    pub supports_sequence: bool,
+    pub supports_extend: bool,
+    pub supports_audio: bool,
+}
+
+const SD15: &[(u32, u32)] = &[(512, 512), (512, 768), (768, 512), (384, 512), (512, 384)];
+const SDXL: &[(u32, u32)] = &[
+    (1024, 1024),
+    (1152, 896),
+    (896, 1152),
+    (1216, 832),
+    (832, 1216),
+    (1344, 768),
+    (768, 1344),
+    (1536, 640),
+    (640, 1536),
+];
+const SD3: &[(u32, u32)] = &[
+    (1024, 1024),
+    (1152, 896),
+    (896, 1152),
+    (1216, 832),
+    (832, 1216),
+    (1344, 768),
+    (768, 1344),
+];
+const FLUX: &[(u32, u32)] = &[
+    (1024, 1024),
+    (1024, 768),
+    (768, 1024),
+    (1024, 576),
+    (576, 1024),
+    (768, 768),
+];
+/// Official Z-Image-Turbo 1024-tier buckets. Every entry fits Mold's current
+/// 1.8 MP resource ceiling and /16 runtime grid.
+const Z_IMAGE: &[(u32, u32)] = &[
+    (1024, 1024),
+    (1152, 896),
+    (896, 1152),
+    (1152, 864),
+    (864, 1152),
+    (1248, 832),
+    (832, 1248),
+    (1280, 720),
+    (720, 1280),
+    (1344, 576),
+    (576, 1344),
+];
+/// Current official Qwen-Image standard buckets.
+const QWEN: &[(u32, u32)] = &[
+    (1328, 1328),
+    (1664, 928),
+    (928, 1664),
+    (1472, 1104),
+    (1104, 1472),
+    (1584, 1056),
+    (1056, 1584),
+];
+const WUERSTCHEN: &[(u32, u32)] = &[(1024, 1024)];
+const LTX_VIDEO: &[(u32, u32)] = &[
+    (704, 480),
+    (768, 512),
+    (512, 512),
+    (1024, 576),
+    (1216, 704),
+    (576, 1024),
+    (768, 768),
+    (512, 768),
+];
+const LTX2: &[(u32, u32)] = &[
+    (704, 480),
+    (768, 512),
+    (512, 512),
+    (1024, 576),
+    (1216, 704),
+    (704, 1216),
+    (576, 1024),
+    (768, 768),
+    (512, 768),
+    (1536, 1024),
+    (1024, 1536),
+    (1920, 1088),
+    (1088, 1920),
+];
+const WAN_480: &[(u32, u32)] = &[(832, 480), (480, 832)];
+const WAN_480_720: &[(u32, u32)] = &[(832, 480), (480, 832), (1280, 720), (720, 1280)];
+const WAN_TI2V: &[(u32, u32)] = &[(1280, 704), (704, 1280)];
+const H3: &[(u32, u32)] = &[
+    (1536, 672),
+    (1344, 768),
+    (1024, 768),
+    (768, 768),
+    (768, 1024),
+    (768, 1344),
+];
+
+pub fn family_presets(family: &str) -> &'static [(u32, u32)] {
+    match canonical_family(family) {
+        "sd15" => SD15,
+        "sdxl" => SDXL,
+        "sd3" => SD3,
+        "flux" | "flux2" => FLUX,
+        "z-image" => Z_IMAGE,
+        "qwen-image" | "qwen-image-edit" => QWEN,
+        "wuerstchen" => WUERSTCHEN,
+        "ltx-video" => LTX_VIDEO,
+        "ltx2" => LTX2,
+        "wan" => WAN_480_720,
+        "minimax-h3" => H3,
+        _ => &[],
+    }
+}
+
+pub fn presets_for_identity<'a>(
+    model: &str,
+    family: &str,
+    sub_family: Option<&str>,
+) -> &'a [(u32, u32)] {
+    let family = canonical_family(family);
+    if family != "wan" {
+        return family_presets(family);
+    }
+    let identity = format!(
+        "{} {}",
+        crate::manifest::resolve_model_name(model).to_ascii_lowercase(),
+        sub_family.unwrap_or_default().to_ascii_lowercase()
+    );
+    if identity.contains("ti2v-5b") {
+        WAN_TI2V
+    } else if identity.contains("1.3b") {
+        WAN_480
+    } else {
+        WAN_480_720
+    }
+}
+
+pub fn canonical_family(family: &str) -> &str {
+    match family.trim() {
+        "ltx-2" => "ltx2",
+        "flux.2" | "flux-2" => "flux2",
+        "minimax_h3" | "minimaxh3" => "minimax-h3",
+        other => other,
+    }
+}
+
+pub fn resolve_generation_profile(input: GenerationProfileInput<'_>) -> GenerationProfileSet {
+    let family = canonical_family(input.family);
+    let profile_id = input
+        .sub_family
+        .map(|sub| format!("{family}.{sub}"))
+        .unwrap_or_else(|| format!("{family}.{}", crate::manifest::model_base_name(input.model)));
+    let mut recipes = if family == "ltx2" {
+        let mut recipes = vec![recipe(&input, "auto", "Auto", None)];
+        for pipeline in Ltx2PipelineMode::ALL {
+            recipes.push(recipe(
+                &input,
+                pipeline.as_str(),
+                &pipeline_label(pipeline),
+                Some(pipeline),
+            ));
+        }
+        recipes
+    } else {
+        vec![recipe(&input, "default", "Default", None)]
+    };
+    recipes.retain(|recipe| {
+        !(family == "ltx2"
+            && recipe.request_selector.pipeline == Some(Ltx2PipelineMode::T2a)
+            && !input.supports_audio)
+    });
+    let mut set = GenerationProfileSet {
+        schema_version: GENERATION_PROFILE_SCHEMA_VERSION,
+        profile_id,
+        profile_hash: String::new(),
+        default_recipe_id: if family == "ltx2" { "auto" } else { "default" }.to_string(),
+        recipes,
+    };
+    set.seal_hash();
+    set
+}
+
+fn recipe(
+    input: &GenerationProfileInput<'_>,
+    id: &str,
+    label: &str,
+    pipeline: Option<Ltx2PipelineMode>,
+) -> GenerationRecipeProfile {
+    let family = canonical_family(input.family);
+    let audio_only = pipeline == Some(Ltx2PipelineMode::T2a);
+    let source_driven = family == "qwen-image-edit"
+        || matches!(
+            pipeline,
+            Some(Ltx2PipelineMode::Retake | Ltx2PipelineMode::LipDub)
+        );
+    let composed = family == "ltx2"
+        && pipeline
+            .map(Ltx2PipelineMode::refines_spatially)
+            .unwrap_or_else(|| {
+                validation::ltx2_spatial_composition(input.model, None)
+                    == validation::Ltx2SpatialComposition::TiledTwoStage
+            });
+    let composition = if composed {
+        validation::Ltx2SpatialComposition::TiledTwoStage
+    } else {
+        validation::Ltx2SpatialComposition::SinglePass
+    };
+    let alignment = if composed {
+        validation::LTX2_TWO_STAGE_ALIGNMENT
+    } else if family == "wan" {
+        identity_alignment(input.model, family, input.sub_family)
+    } else {
+        validation::dimension_alignment_for_family(Some(family))
+    };
+    let mut dimensions = presets_for_identity(input.model, family, input.sub_family).to_vec();
+    if composed {
+        for rung in validation::LTX2_OUTPUT_RUNGS
+            .iter()
+            .filter(|rung| rung.requires_tiled_stage2())
+        {
+            dimensions.push((rung.width, rung.height));
+            dimensions.push((rung.height, rung.width));
+        }
+    }
+    dimensions.retain(|(width, height)| {
+        width.is_multiple_of(alignment)
+            && height.is_multiple_of(alignment)
+            && validation::validate_generation_dimensions_composed(
+                *width,
+                *height,
+                Some(family),
+                composition,
+            )
+            .is_ok()
+    });
+    let resolution = if audio_only {
+        ResolutionProfile {
+            domain: ResolutionDomain::None,
+            alignment: 1,
+            min_width: 0,
+            min_height: 0,
+            max_pixels: 0,
+            max_axis_pixels: None,
+            min_aspect_ratio: None,
+            max_aspect_ratio: None,
+            aspect_groups: Vec::new(),
+        }
+    } else {
+        ResolutionProfile {
+            domain: if source_driven {
+                ResolutionDomain::SourceDriven
+            } else if family == "wan" {
+                ResolutionDomain::Buckets
+            } else {
+                ResolutionDomain::Dynamic
+            },
+            alignment,
+            min_width: alignment.max(64),
+            min_height: alignment.max(64),
+            max_pixels: validation::max_pixels_for_family_composed(Some(family), composition),
+            max_axis_pixels: validation::max_axis_pixels_for_family_composed(
+                Some(family),
+                composition,
+            ),
+            min_aspect_ratio: (family == "minimax-h3")
+                .then_some(crate::minimax_h3::MIN_ASPECT_RATIO),
+            max_aspect_ratio: (family == "minimax-h3")
+                .then_some(crate::minimax_h3::MAX_ASPECT_RATIO),
+            aspect_groups: aspect_groups(&dimensions),
+        }
+    };
+
+    let guidance_caps = if family == "minimax-h3" {
+        GuidanceCapabilities {
+            adjustable: false,
+            supports_negative_prompt: false,
+            fixed_scale: Some(0.0),
+        }
+    } else {
+        GuidanceCapabilities::for_recipe(family, input.model, pipeline)
+    };
+    let effective_guidance = guidance_caps.fixed_scale.unwrap_or(input.default_guidance);
+    let temporal = temporal_profile(input, family);
+    let defaults = GenerationDefaultsProfile {
+        width: if audio_only { 0 } else { input.default_width },
+        height: if audio_only { 0 } else { input.default_height },
+        steps: input.default_steps,
+        guidance: effective_guidance,
+        frames: temporal.as_ref().map(|profile| profile.frames.default),
+        fps: temporal.as_ref().map(|profile| match profile.fps {
+            FpsControl::Fixed { value } => value,
+            FpsControl::Adjustable { default, .. } => default,
+        }),
+        negative_prompt: input.default_negative_prompt.clone(),
+    };
+    GenerationRecipeProfile {
+        id: id.to_string(),
+        label: label.to_string(),
+        request_selector: RecipeSelector { pipeline },
+        defaults,
+        resolution,
+        steps: IntegerControl {
+            default: input.default_steps,
+            min: if family == "minimax-h3" { 2 } else { 1 },
+            max: 100,
+            step: 1,
+            recommended: vec![input.default_steps],
+            mode: ControlMode::Adjustable,
+        },
+        guidance: FloatControl {
+            default: effective_guidance,
+            min: if guidance_caps.adjustable {
+                0.0
+            } else {
+                effective_guidance
+            },
+            max: if guidance_caps.adjustable {
+                100.0
+            } else {
+                effective_guidance
+            },
+            step: 0.1,
+            mode: if guidance_caps.adjustable {
+                ControlMode::Adjustable
+            } else {
+                ControlMode::Fixed
+            },
+        },
+        temporal,
+        capabilities: GenerationCapabilitiesProfile {
+            guidance: guidance_caps,
+            source_image: input.source_image,
+            supports_lora: validation::family_supports_lora(family),
+            supports_controlnet: matches!(family, "sd15" | "sdxl" | "flux"),
+            supports_sequence: input.supports_sequence && !audio_only,
+            supports_extend: input.supports_extend && !audio_only,
+            supports_audio: input.supports_audio || audio_only,
+            schedulers: if matches!(family, "sd15" | "sdxl" | "wan") {
+                vec![
+                    Scheduler::Euler,
+                    Scheduler::EulerAncestral,
+                    Scheduler::Ddim,
+                    Scheduler::UniPc,
+                ]
+            } else {
+                Vec::new()
+            },
+        },
+        provenance: provenance(family),
+    }
+}
+
+fn temporal_profile(input: &GenerationProfileInput<'_>, family: &str) -> Option<TemporalProfile> {
+    let step = validation::frame_step_for_family(family)?;
+    let offset = validation::frame_offset_for_family(family).unwrap_or(1);
+    let fps = input.default_fps.unwrap_or(validation::LTX2_DEFAULT_FPS);
+    let max = if family == "minimax-h3" {
+        345
+    } else {
+        validation::max_frames_for_family_at_fps(family, fps)?
+    };
+    let min = validation::min_frames_for_family(family).unwrap_or(offset);
+    let default = input.default_frames.unwrap_or(min).clamp(min, max);
+    Some(TemporalProfile {
+        frames: IntegerControl {
+            default,
+            min,
+            max,
+            step,
+            recommended: vec![default],
+            mode: ControlMode::Adjustable,
+        },
+        frame_offset: offset,
+        fps: if let Some(fixed) = validation::fixed_fps_for_family(family) {
+            FpsControl::Fixed { value: fixed }
+        } else {
+            FpsControl::Adjustable {
+                default: fps,
+                min: 1,
+                max: 60,
+                step: 1,
+            }
+        },
+        max_duration_seconds: validation::max_runtime_seconds_for_family(family),
+    })
+}
+
+fn aspect_groups(dimensions: &[(u32, u32)]) -> Vec<AspectGroup> {
+    let mut groups: Vec<AspectGroup> = Vec::new();
+    for &(width, height) in dimensions {
+        let divisor = gcd(width, height);
+        let id = format!("{}:{}", width / divisor, height / divisor);
+        let preset = ResolutionPreset {
+            id: format!("{width}x{height}"),
+            width,
+            height,
+            tier: "recommended".to_string(),
+        };
+        if let Some(group) = groups.iter_mut().find(|group| group.id == id) {
+            group.presets.push(preset);
+        } else {
+            groups.push(AspectGroup {
+                label: id.clone(),
+                id,
+                presets: vec![preset],
+            });
+        }
+    }
+    for group in &mut groups {
+        group
+            .presets
+            .sort_by_key(|preset| preset.width * preset.height);
+    }
+    groups
+}
+
+fn gcd(mut left: u32, mut right: u32) -> u32 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left.max(1)
+}
+
+fn identity_alignment(model: &str, family: &str, sub_family: Option<&str>) -> u32 {
+    if family == "wan"
+        && format!("{} {}", model, sub_family.unwrap_or_default())
+            .to_ascii_lowercase()
+            .contains("ti2v-5b")
+    {
+        32
+    } else {
+        validation::dimension_alignment_for_model(model, Some(family))
+    }
+}
+
+fn pipeline_label(pipeline: Ltx2PipelineMode) -> String {
+    pipeline
+        .as_str()
+        .split('-')
+        .map(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn provenance(family: &str) -> Vec<ProfileProvenance> {
+    let (source, revision) = match family {
+        "z-image" => (
+            "https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/main/app.py",
+            None,
+        ),
+        "qwen-image" | "qwen-image-edit" => ("https://github.com/QwenLM/Qwen-Image", None),
+        "ltx-video" => (
+            "https://github.com/Lightricks/LTX-Video",
+            Some("4b2d053057623ddd4d0a1d3e9cd28890e9ef487f"),
+        ),
+        "ltx2" => (
+            "https://github.com/Lightricks/LTX-2",
+            Some("4f8905737aac86a554637cac86c178877a39c744"),
+        ),
+        "wan" => (
+            "https://github.com/Wan-Video/Wan2.2",
+            Some("42bf4cfaa384bc21833865abc2f9e6c0e67233dc"),
+        ),
+        "minimax-h3" => (
+            "https://github.com/MiniMax-AI/MiniMax-H3",
+            Some("fa6891ff7cdaaa03fa4497e89ac64ff169219acf"),
+        ),
+        _ => ("mold-qualified compatibility profile", None),
+    };
+    vec![ProfileProvenance {
+        kind: if source.starts_with("http") {
+            ProvenanceKind::Upstream
+        } else {
+            ProvenanceKind::MoldPolicy
+        },
+        source: source.to_string(),
+        revision: revision.map(str::to_string),
+        qualified: true,
+        evidence: Some("mold.generation-profile.v1".to_string()),
+    }]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input<'a>(model: &'a str, family: &'a str) -> GenerationProfileInput<'a> {
+        GenerationProfileInput {
+            model,
+            family,
+            sub_family: None,
+            default_width: 1024,
+            default_height: 1024,
+            default_steps: 20,
+            default_guidance: 3.5,
+            default_frames: None,
+            default_fps: None,
+            default_negative_prompt: None,
+            source_image: None,
+            supports_sequence: false,
+            supports_extend: false,
+            supports_audio: false,
+        }
+    }
+
+    #[test]
+    fn z_image_profile_contains_exact_wide_and_tall_buckets() {
+        let profile = resolve_generation_profile(input("z-image-turbo:q4", "z-image"));
+        let recipe = profile.default_recipe().unwrap();
+        assert!(recipe.resolution.aspect_groups.iter().any(|group| {
+            group.id == "16:9"
+                && group
+                    .presets
+                    .iter()
+                    .any(|preset| preset.width == 1280 && preset.height == 720)
+        }));
+        assert!(recipe.resolution.aspect_groups.iter().any(|group| {
+            group.id == "9:16"
+                && group
+                    .presets
+                    .iter()
+                    .any(|preset| preset.width == 720 && preset.height == 1280)
+        }));
+    }
+
+    #[test]
+    fn wan_subfamily_selects_exact_checkpoint_contract() {
+        let mut wan = input("cv:opaque", "wan");
+        wan.sub_family = Some("wan22-ti2v-5b");
+        let recipe = resolve_generation_profile(wan)
+            .default_recipe()
+            .unwrap()
+            .clone();
+        assert_eq!(recipe.resolution.alignment, 32);
+        assert_eq!(recipe.resolution.aspect_groups.len(), 2);
+        assert!(recipe.resolution.aspect_groups.iter().all(|group| {
+            group
+                .presets
+                .iter()
+                .all(|preset| preset.width == 1280 || preset.height == 1280)
+        }));
+    }
+
+    #[test]
+    fn h3_temporal_ceiling_is_valid_on_both_grids() {
+        let mut h3 = input("minimax-h3-fl2va:official-bf16", "minimax-h3");
+        h3.default_frames = Some(crate::minimax_h3::MIN_FRAMES);
+        h3.default_fps = Some(24);
+        let temporal = resolve_generation_profile(h3)
+            .default_recipe()
+            .unwrap()
+            .temporal
+            .clone()
+            .unwrap();
+        assert_eq!(temporal.frames.max, 345);
+        assert_eq!(
+            (temporal.frames.max - temporal.frame_offset) % temporal.frames.step,
+            0
+        );
+        assert!(temporal.frames.max <= 15 * 24);
+    }
+
+    #[test]
+    fn profile_hash_is_stable_and_content_addressed() {
+        let left = resolve_generation_profile(input("flux-dev:q4", "flux"));
+        let right = resolve_generation_profile(input("flux-dev:q4", "flux"));
+        assert_eq!(left.profile_hash, right.profile_hash);
+        assert_eq!(left.profile_hash.len(), 64);
+    }
+}
