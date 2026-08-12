@@ -1610,7 +1610,7 @@ pub(crate) fn preparation_authority_fingerprint(
         // This marker lands before runtime activation. It prevents prepared
         // dependencies from surviving a change to H3 row accounting,
         // one-device policy, Qwen truncation, or the host-memory floor even
-        // though the legal gate still rejects H3 before downloads/queueing.
+        // though runtime admission still rejects unqualified H3 execution.
         hash.update(b"\0minimax-h3-admission-authority-v1\0");
         hash.update(authority);
     }

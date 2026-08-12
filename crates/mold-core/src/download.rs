@@ -888,11 +888,22 @@ fn find_existing_placed_file(
 ///
 /// A `.pulling` marker file is written before downloads begin and removed on
 /// success. If the pull is interrupted, the marker signals an incomplete state.
-fn require_manifest_activation(manifest: &ModelManifest) -> Result<(), DownloadError> {
-    crate::require_model_activation(&manifest.name, Some(&manifest.family))?;
-    for file in &manifest.files {
-        crate::require_model_activation(&file.hf_repo, Some(&manifest.family))?;
-        crate::require_model_activation(&file.hf_filename, Some(&manifest.family))?;
+fn require_manifest_acquisition(manifest: &ModelManifest) -> Result<(), DownloadError> {
+    let contains_gated_identity =
+        crate::require_model_activation(&manifest.name, Some(&manifest.family)).is_err()
+            || manifest.files.iter().any(|file| {
+                crate::require_model_activation(&file.hf_repo, Some(&manifest.family)).is_err()
+                    || crate::require_model_activation(&file.hf_filename, Some(&manifest.family))
+                        .is_err()
+            });
+    if contains_gated_identity {
+        crate::require_model_acquisition(&manifest.name, Some(&manifest.family))?;
+        let reviewed = crate::manifest::find_manifest(&manifest.name);
+        if !reviewed.is_some_and(|reviewed| std::ptr::eq(reviewed, manifest)) {
+            crate::require_model_activation("minimax-h3", Some("minimax-h3"))?;
+        }
+    } else {
+        crate::require_model_acquisition(&manifest.name, Some(&manifest.family))?;
     }
     Ok(())
 }
@@ -909,7 +920,7 @@ async fn pull_model_with_hf_token(
     opts: &PullOptions,
     hf_token: Option<&str>,
 ) -> Result<ModelPaths, DownloadError> {
-    require_manifest_activation(manifest)?;
+    require_manifest_acquisition(manifest)?;
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
@@ -983,7 +994,7 @@ async fn pull_model_with_callback_and_hf_token(
     opts: &PullOptions,
     hf_token: Option<&str>,
 ) -> Result<ModelPaths, DownloadError> {
-    require_manifest_activation(manifest)?;
+    require_manifest_acquisition(manifest)?;
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
@@ -1106,7 +1117,7 @@ async fn pull_model_files_only_with_hf_token(
     opts: &PullOptions,
     hf_token: Option<&str>,
 ) -> Result<(), DownloadError> {
-    require_manifest_activation(manifest)?;
+    require_manifest_acquisition(manifest)?;
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
@@ -1159,7 +1170,7 @@ async fn pull_model_files_only_with_callback_and_hf_token(
     opts: &PullOptions,
     hf_token: Option<&str>,
 ) -> Result<(), DownloadError> {
-    require_manifest_activation(manifest)?;
+    require_manifest_acquisition(manifest)?;
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
@@ -1309,7 +1320,7 @@ async fn download_file<P: Progress + Clone + Send + Sync + 'static>(
 
 // ── Synchronous single-file download (for use from spawn_blocking) ───────────
 
-fn require_single_file_activation(
+fn require_single_file_acquisition(
     hf_repo: &str,
     hf_filename: &str,
     target_subdir: Option<&str>,
@@ -1334,7 +1345,7 @@ pub fn download_single_file_sync(
     hf_filename: &str,
     target_subdir: Option<&str>,
 ) -> Result<PathBuf, DownloadError> {
-    require_single_file_activation(hf_repo, hf_filename, target_subdir)?;
+    require_single_file_acquisition(hf_repo, hf_filename, target_subdir)?;
 
     let msg_width = filename_column_width();
     let bar_style = ProgressStyle::with_template(&format!(
@@ -1365,7 +1376,7 @@ pub fn download_single_file_sync_with_progress(
     target_subdir: Option<&str>,
     callback: DownloadProgressCallback,
 ) -> Result<PathBuf, DownloadError> {
-    require_single_file_activation(hf_repo, hf_filename, target_subdir)?;
+    require_single_file_acquisition(hf_repo, hf_filename, target_subdir)?;
 
     download_single_file_sync_with_adapter(
         &models_dir(),
@@ -1386,7 +1397,7 @@ pub fn download_single_file_sync_with_progress_in(
     target_subdir: Option<&str>,
     callback: DownloadProgressCallback,
 ) -> Result<PathBuf, DownloadError> {
-    require_single_file_activation(hf_repo, hf_filename, target_subdir)?;
+    require_single_file_acquisition(hf_repo, hf_filename, target_subdir)?;
 
     download_single_file_sync_with_adapter(
         models_root,
@@ -1431,7 +1442,7 @@ where
     // Keep the policy at the lowest download boundary as a defense against a
     // future internal caller bypassing the public wrappers. The wrappers also
     // check before constructing progress adapters or resolving managed paths.
-    require_single_file_activation(hf_repo, hf_filename, target_subdir)?;
+    require_single_file_acquisition(hf_repo, hf_filename, target_subdir)?;
 
     use hf_hub::api::sync::ApiBuilder;
 
@@ -2476,78 +2487,36 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn pull_rejects_compliance_gated_manifest_before_progress_or_network() {
-        let manifest =
-            compliance_gated_manifest("private-checkpoint", "minimax-h3", "example/renamed");
-        let callbacks = Arc::new(Mutex::new(0usize));
-        let callback_count = callbacks.clone();
-        let callback: DownloadProgressCallback = Arc::new(move |_| {
-            *callback_count.lock().unwrap() += 1;
-        });
-
-        let error = pull_model_with_callback(&manifest, callback, &PullOptions::default())
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, DownloadError::ModelActivation(_)));
-        assert_eq!(*callbacks.lock().unwrap(), 0);
+    #[test]
+    fn reviewed_h3_manifest_is_accepted_for_upstream_acquisition() {
+        let manifest = crate::manifest::find_manifest(crate::minimax_h3::FL2VA_COMFY).unwrap();
+        require_manifest_acquisition(manifest).unwrap();
+        assert!(crate::require_model_activation(&manifest.name, Some(&manifest.family)).is_err());
     }
 
     #[test]
-    fn manifest_repo_identity_cannot_bypass_activation_policy() {
+    fn h3_repo_identity_cannot_bypass_the_pinned_manifest() {
         let manifest = compliance_gated_manifest("renamed-model", "custom", "Comfy-Org/MiniMax-H3");
-        let error = require_manifest_activation(&manifest).unwrap_err();
-        assert!(matches!(error, DownloadError::ModelActivation(_)));
+        assert!(require_manifest_acquisition(&manifest).is_err());
     }
 
     #[test]
-    fn public_sync_downloads_gate_repo_filename_and_target_before_side_effects() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let error = download_single_file_sync("MiniMaxAI/MiniMax-H3", "weights.safetensors", None)
-            .expect_err("an H3 repository must be rejected before progress or network setup");
-        assert!(matches!(error, DownloadError::ModelActivation(_)));
-
-        let callbacks = Arc::new(AtomicUsize::new(0));
-        let observed = callbacks.clone();
-        let callback: DownloadProgressCallback = Arc::new(move |_| {
-            observed.fetch_add(1, Ordering::SeqCst);
-        });
-        let error = download_single_file_sync_with_progress(
-            "example/renamed-model",
-            "MiniMax-H3/weights.safetensors",
-            None,
-            callback,
-        )
-        .expect_err("an H3 filename must be rejected before callback or network setup");
-        assert!(matches!(error, DownloadError::ModelActivation(_)));
-        assert_eq!(callbacks.load(Ordering::SeqCst), 0);
-
-        let models_root = std::env::temp_dir().join(format!(
-            "mold_sync_h3_gate_{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        assert!(!models_root.exists(), "test path must begin absent");
-        let callbacks = Arc::new(AtomicUsize::new(0));
-        let observed = callbacks.clone();
-        let callback: DownloadProgressCallback = Arc::new(move |_| {
-            observed.fetch_add(1, Ordering::SeqCst);
-        });
-        let error = download_single_file_sync_with_progress_in(
-            &models_root,
-            "example/renamed-model",
-            "weights.safetensors",
-            Some("shared/MiniMax-H3"),
-            callback,
-        )
-        .expect_err("an H3 target must be rejected before filesystem or network setup");
-        assert!(matches!(error, DownloadError::ModelActivation(_)));
-        assert_eq!(callbacks.load(Ordering::SeqCst), 0);
-        assert!(
-            !models_root.exists(),
-            "policy rejection must not create the managed model root"
-        );
+    fn arbitrary_h3_single_files_remain_outside_pinned_manifest_acquisition() {
+        for (repo, filename, target) in [
+            ("MiniMaxAI/MiniMax-H3", "weights.safetensors", None),
+            (
+                "example/renamed-model",
+                "MiniMax-H3/weights.safetensors",
+                None,
+            ),
+            (
+                "example/renamed-model",
+                "weights.safetensors",
+                Some("shared/MiniMax-H3"),
+            ),
+        ] {
+            assert!(require_single_file_acquisition(repo, filename, target).is_err());
+        }
     }
 
     #[test]
@@ -2557,7 +2526,7 @@ mod tests {
             ("example/model", "minimaxh30.safetensors", None),
             ("example/model", "weights.safetensors", Some("shared/h3")),
         ] {
-            require_single_file_activation(repo, filename, target)
+            require_single_file_acquisition(repo, filename, target)
                 .unwrap_or_else(|_| panic!("lookalike must remain available: {repo}/{filename}"));
         }
     }

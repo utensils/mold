@@ -1,16 +1,17 @@
 # MiniMax H3 qualification and authorization status
 
-- Public product status: **unavailable; compliance-gated**
+- Public acquisition status: **compact FL2VA and Ref2VA available by upstream-direct download**
+- Runtime status: **compact FL2VA available only on the exact qualified CUDA route**
 - Private qualification status: **authorized under the external private-UAT record**
 - Evidence snapshot: **2026-08-08, Mold main `12bbad65`**
 - Authorization owner: [issue #831](https://github.com/utensils/mold/issues/831)
 - Final qualification owner: [issue #827](https://github.com/utensils/mold/issues/827)
 
-This is an engineering status record and the acceptance plan for a possible
-future MiniMax H3 qualification. It is not a support announcement, a license
-grant, or legal advice. Mold main contains fail-closed H3 contracts, primitives,
-factory authorities, and dispatch seams, but ordinary product builds do not
-advertise, download, load, or execute H3.
+This is an engineering status record, not legal advice. Mold lists the two
+compact Comfy manifests and may download their pinned artifacts directly from
+the reviewed upstream repositories. Downloaded weights are not bundled in Mold
+releases. Execution remains fail-closed unless an exact independently reviewed
+CUDA runtime, artifact graph, task, and request envelope authenticate.
 
 The research used public implementation source and small textual repository
 metadata only. The reviewed
@@ -18,15 +19,15 @@ metadata only. The reviewed
 defines a default territory that excludes the United States, European Union,
 United Kingdom, and Republic of Korea. On 2026-08-08, the maintainer accepted a
 direct attestation that MiniMax authorized H3 integration with Mold. The
-[decision record](../architecture/minimax-h3-authorization.md) limits that
-authority to private downloads, inference, benign outputs, and conformance work
-under the access-controlled campaign record. It does not authorize public
-product activation, hosted or third-party access, distribution, or
-redistribution. The external campaign contains revision-pinned official and
+[decision record](../architecture/minimax-h3-authorization.md) authorizes
+upstream-direct compact downloads and local storage while retaining exact
+runtime admission. It does not authorize Mold-bundled or mirrored weights,
+hosted third-party inference, or publication of private qualification evidence.
+The external campaign contains revision-pinned official and
 practical Comfy artifacts whose size and full SHA-256 identities were verified;
-an authenticated real-checkpoint block-0 qualification also ran on CUDA. That
-does not constitute end-to-end synchronized-A/V generation or runtime
-qualification, and no generated media had been produced at this snapshot.
+an authenticated real-checkpoint block-0 qualification also ran on CUDA. Later
+campaigns produced and independently reviewed the exact synchronized H.264/AAC
+compact FL2VA output recorded below.
 
 See the separate [authorization decision record](../architecture/minimax-h3-authorization.md)
 for the reviewed license identity, activation requirements, review ownership,
@@ -45,22 +46,24 @@ Terms in this record are deliberately narrow:
   exact release artifact that has passed the future acceptance matrix. No
   current H3 state meets that definition.
 
-## Fail-closed product behavior
+## Separate acquisition and execution behavior
 
-[`mold-core::model_policy`](../../crates/mold-core/src/model_policy.rs) is the
-single public-product authorization authority. Under the private-only decision
-in issue #831, all of these statements must remain true for ordinary builds and
-product ingress:
+[`mold-core::model_policy`](../../crates/mold-core/src/model_policy.rs) owns two
+separate authorities. Acquisition permits the reviewed compact upstream files;
+runtime activation remains qualification-gated. These statements must remain
+true:
 
-- H3 is absent from ordinary catalog, install, and model-family discovery.
-- Before any product model payload is transferred, persisted, placed, or
-  queued, the gate checks raw `hf:` identities, aliases, resolved `cv:`
-  metadata, configured families, nested generation artifacts, and root-relative
-  model paths. A Civitai metadata lookup may precede that decision;
-  model-artifact transfer through an ordinary product path may not.
+- The two compact manifests appear in catalog, install, and model-family
+  discovery; official BF16 qualification manifests remain hidden.
+- Acquisition accepts only the two registered compact manifest IDs. Raw
+  repository IDs, arbitrary catalog recipes, configured H3 aliases, and
+  caller-authored manifests remain blocked; the registry fixes every upstream
+  repository, revision, filename, destination, byte count, and SHA-256 before
+  transfer.
 - Existing weight files do not imply authorization.
-- `runtime_available` remains `false`; hidden manifests are identity and
-  accounting contracts, not runnable model registrations.
+- Ordinary compact rows do not imply runtime availability. Only the separately
+  authenticated additive capability and exact generation-profile row may clear
+  the execution restriction.
 - An environment variable, HTTP header, client switch, weight presence, or
   inferred location cannot open the gate.
 
@@ -176,7 +179,8 @@ fixture and external evidence schema.
 ## Weight layouts and storage facts
 
 The file names and object byte counts below were recorded from public repository
-metadata in the hidden, revision-locked manifests in `mold-core::minimax_h3`.
+metadata in the revision-locked manifests in `mold-core::minimax_h3`. Official
+BF16 variants remain hidden; compact variants are visible for acquisition.
 They are planning facts, not evidence that any binary object or header was
 downloaded, opened, or hashed locally.
 
@@ -246,7 +250,7 @@ campaign was established under the qualified external root above. The pinned
 Comfy FL2VA transformer, NVFP4-AWQ Qwen3-VL conditioner, FP16 visual VAE, FP32
 AudioVAE, and exact small official support files were downloaded directly into
 its private `mold-home/models`. All complete objects matched the sizes and
-SHA-256 identities in the hidden manifest. No artifact or header was copied
+SHA-256 identities in the pinned manifest. No artifact or header was copied
 into the repository, and no real-checkpoint report is public evidence.
 
 The development-only qualifier repeats full-content authentication and bounded
@@ -328,17 +332,18 @@ bytes before admission. The family-wide model-access restriction remains for
 legacy clients; H3-aware clients may override it only with this exact additive
 FL2VA partition. Ordinary builds omit the field, while Ref2VA remains absent.
 
-The same authenticated presentation boundary may add one exact compact FL2VA
-row to `GET /api/models`, but only when all five referenced component groups
-are already installed. The row carries no Hugging Face repository or download
-recipe. Its generation profile fixes width 1344, height 768, 124 frames at 24
+The ordinary model list carries two acquisition rows with their upstream source
+and download accounting. The authenticated presentation boundary may replace
+the FL2VA acquisition row with one exact executable row, but only when all five
+referenced component groups are installed. Its generation profile fixes width
+1344, height 768, 124 frames at 24
 fps, 21 terminal-inclusive grid points, batch one, MP4 delivery, and a required
 first-frame source. Web, desktop, and iPhone remove the family-wide denial only
 when that exact model name and request envelope agree with the complete
 additive component graph. A missing component, widened axis, absent first
 frame, supplied last frame, unavailable MP4 encoder, or legacy/partial
-capability keeps the model unavailable. This does not advertise Ref2VA,
-authorize a public download, or broaden the CUDA-only private qualification.
+capability keeps execution unavailable. Ref2VA may be downloaded but remains
+unexecutable; the CUDA-only private qualification is not broadened.
 
 The next capture manifest must use
 [`mold.minimax-h3.private-runtime-bound-capture.v5`](./minimax-h3-private-runtime-capture.schema.json).
@@ -566,7 +571,7 @@ end-to-end run nor throughput, memory fit, output quality, or release support.
 | CUDA primitives     | Tiny synthetic CPU/CUDA parity and execution tests on private UAT host for the sampler ([#845](https://github.com/utensils/mold/pull/845)), AudioVAE ([#849](https://github.com/utensils/mold/pull/849)), Qwen layer 50 ([#850](https://github.com/utensils/mold/pull/850)), visual VAE ([#851](https://github.com/utensils/mold/pull/851)), DiT ([#853](https://github.com/utensils/mold/pull/853)), and portable quantization ([#860](https://github.com/utensils/mold/pull/860)). The scaled-FP8/Qwen-INT8 slice ([#865](https://github.com/utensils/mold/pull/865)) and fail-closed dispatch seams ([#864](https://github.com/utensils/mold/pull/864), [#866](https://github.com/utensils/mold/pull/866)) have synthetic CPU/reference tests plus CUDA contract/typecheck evidence, not physical CUDA execution.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Selected tiny primitives only; CPU-only quantization/dispatch evidence and CUDA typechecks are identified separately. No end-to-end H3 generation or hardware qualification; see the separate real-checkpoint row.                                                                                                                                                     |
 | CUDA full attention | [PR #857](https://github.com/utensils/mold/pull/857) records the earlier synthetic dense-reference-to-FlashAttention-v2 work. Exact PR #871 implementation head `c0625402` and source tree `b1452b5f` were qualified on private UAT host (4× L40S with 46,068 MiB each, SM89, driver 595.71.05, CUDA 12.8.93, Rust 1.95) without model data or runtime activation. The H3 release contract and all 36 adversarial CUDA distribution/parser cases passed; the production dispatch stayed directly guarded by the release-candidate configuration; every actual `usize` tensor stride and rounded launch row was checked before conversion to the kernel's `u32` contract; the isolated 53-kernel candidate built offline with warnings denied; and 11 attention tests passed with 141 filtered. Ten network-isolated BF16 probes ran on GPU UUID `GPU-9ffc81c5-3944-6490-bfd9-f68366f98226`. Their timing samples were 4,974, 5,006, 5,045, 5,047, 5,056, 5,123, 5,130, 5,167, 5,708, and 168,321 microseconds, with p50 5,056 and p95 5,708 under the probe's percentile convention. Maximum absolute parity delta was `0.00048828125` against a `0.02` bound; swapping Q/K produced `0.04736328`, exceeding the required `0.02` sensitivity floor. The candidate binary SHA-256 was `0d494cfc8a165ff1f00ec9b48c6ce370375bd4ebf7634b5894d042d7e9f453af`; tracing found no internet socket or H3/model-artifact path, and recorded `model_artifacts_accessed = false` and `runtime_activated = false`. Long-row workspace shapes 37,296 and 107,856 were planning-only. | Synthetic development evidence only. The opt-in candidate correctly carries the compiled-kernel claim and is not a shipping binary. The same-tree ordinary fixture proves release-candidate exclusion only for a non-publishable shipping-feature build; it does not establish a public release artifact, real-model correctness, quality, peak memory, or throughput. |
 | Metal               | Shared primitive feature compilation, forced-local typecheck, and [#860](https://github.com/utensils/mold/pull/860)'s tiny deterministic CPU/Metal quantized-forward parity. [#865](https://github.com/utensils/mold/pull/865)'s newer scaled-FP8/Qwen-INT8 cases are CPU-only. The H3 capability and admission contracts reject Metal.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Unsupported; tiny primitive parity is not H3 Metal execution, hardware qualification, or UAT                                                                                                                                                                                                                                                                           |
-| Server/factory      | Hidden identities, HTTP 451 policy, request contracts, secure reference ingress, prepared shapes, frozen single-GPU admission, block-streaming ownership, immutable factory authority, fail-closed backend adapter, and FL2VA/Ref2VA worker dispatch                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | No catalog/download activation, admitted real engine, or public H3 runtime at this snapshot                                                                                                                                                                                                                                                                            |
+| Server/factory      | Pinned identities, upstream-direct compact acquisition, runtime request contracts, secure reference ingress, prepared shapes, frozen single-GPU admission, block-streaming ownership, immutable factory authority, fail-closed backend adapter, and FL2VA/Ref2VA worker dispatch                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Compact downloads are available; execution is limited to the exact reviewed FL2VA CUDA route, while Ref2VA and broader routes remain unavailable                                                                                                                                                                                                                       |
 | Studio surfaces     | [#867](https://github.com/utensils/mold/pull/867) is merged in main `50f28de3` with web, desktop, and iPhone authoring, recovery, canonical upload, and provenance contracts. Its media-arithmetic fixtures use ordinary generated test media, not H3 output.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Authoring and recovery contracts only; gated readiness cannot make the runtime available                                                                                                                                                                                                                                                                               |
 | CLI/TUI/Discord     | [#868](https://github.com/utensils/mold/pull/868) is merged in main `50f28de3` with weight-free ordered-reference authoring, canonical reference leases, and media provenance.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Authoring and provenance contracts only; no runtime activation                                                                                                                                                                                                                                                                                                         |
 | Real checkpoint     | [PR #883](https://github.com/utensils/mold/pull/883) authenticated both released 20.97 GB INT8 task transformers from retained descriptors, validated the shared 932-tensor header and 200 quantization sidecars, executed isolated block 0 on CUDA, and returned to zero live blocks; both reports recorded `factory_activated: false`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Private block-0 execution only. Conditioner execution, all 50 denoise blocks, visual/audio decode, mux, synchronized output, quality, and end-to-end memory/performance remain unqualified; the product runtime remains unavailable.                                                                                                                                   |

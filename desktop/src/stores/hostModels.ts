@@ -45,6 +45,13 @@ export const useHostModelsStore = defineStore("hostModels", {
           useHostsStore().capabilities[hostId],
         ).filter((m) => m.downloaded && isGenerationModel(m));
     },
+    /** Downloaded generation artifacts on one host, independent of whether
+     * that host is currently qualified to execute them. Models/repair surfaces
+     * use this; Create and routing continue to use `installedOn`. */
+    downloadedOn(state) {
+      return (hostId: string): ModelEntry[] =>
+        (state.byHost[hostId]?.entries ?? []).filter((m) => m.downloaded && isGenerationModel(m));
+    },
     /**
      * Every installed generation model across all hosts, deduped by name in
      * `hosts.all` order (the first host's entry wins, so the primary's
@@ -55,6 +62,26 @@ export const useHostModelsStore = defineStore("hostModels", {
       const byName = new Map<string, UnionModelEntry>();
       for (const host of hosts.all) {
         for (const m of this.installedOn(host.id)) {
+          const existing = byName.get(m.name);
+          if (existing) {
+            byName.set(m.name, {
+              ...mergeModelPresentationMetadata(existing, m),
+              hostIds: [...new Set([...existing.hostIds, host.id])],
+            });
+          } else {
+            byName.set(m.name, { ...m, hostIds: [host.id] });
+          }
+        }
+      }
+      return [...byName.values()];
+    },
+    /** Every downloaded generation artifact across the fleet, including
+     * models whose runtime remains restricted on the reporting host. */
+    unionDownloaded(): UnionModelEntry[] {
+      const hosts = useHostsStore();
+      const byName = new Map<string, UnionModelEntry>();
+      for (const host of hosts.all) {
+        for (const m of this.downloadedOn(host.id)) {
           const existing = byName.get(m.name);
           if (existing) {
             byName.set(m.name, {

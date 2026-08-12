@@ -1,5 +1,7 @@
 # Changelog
 
+- **MiniMax H3 compact models are now visible and downloadable directly from their pinned upstream repositories.** The maintainer's reviewed authorization now has separate acquisition and execution boundaries: Mold may list, download, SHA-verify, repair, inventory, and remove the Comfy FL2VA and Ref2VA artifact graphs without bundling or mirroring their weights. A successful download does not activate generation—ordinary H3 requests remain blocked unless the server authenticates the exact reviewed CUDA FL2VA runtime, artifact graph, and request profile; Ref2VA, Metal, CPU, broader envelopes, and hosted third-party inference remain unavailable.
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

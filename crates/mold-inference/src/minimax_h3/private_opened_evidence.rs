@@ -452,17 +452,16 @@ impl H3PrivateComfyStorageAuthority {
 
 fn private_fl2va_manifest() -> Result<&'static ModelManifest> {
     let manifest = find_manifest(contract::FL2VA_COMFY)
-        .ok_or_else(|| anyhow!("missing hidden MiniMax H3 FL2VA Comfy manifest"))?;
+        .ok_or_else(|| anyhow!("missing MiniMax H3 FL2VA Comfy manifest"))?;
     let manifest_contract = contract::manifest_contract(manifest)
-        .ok_or_else(|| anyhow!("hidden MiniMax H3 manifest lost its contract"))?;
+        .ok_or_else(|| anyhow!("MiniMax H3 manifest lost its contract"))?;
     if manifest.name != contract::FL2VA_COMFY
         || manifest.family != contract::FAMILY
-        || !manifest.hidden
         || manifest_contract.task != Task::Fl2va
         || manifest_contract.layout != Layout::ComfyPrunedInt8ConvrotNvfp4Awq
         || manifest_contract.runtime_available
     {
-        bail!("private H3 storage requires the exact inactive hidden FL2VA Comfy manifest")
+        bail!("private H3 storage requires the exact inactive FL2VA Comfy manifest")
     }
     Ok(manifest)
 }

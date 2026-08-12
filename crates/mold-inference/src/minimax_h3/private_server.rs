@@ -583,7 +583,7 @@ pub struct H3PrivateFl2VaPrepareInput<'a> {
 }
 
 /// Canonical private-UAT filesystem inputs. Preparation resolves every model
-/// component from the hidden manifest below `models_root`; callers cannot
+/// component from the pinned compact manifest below `models_root`; callers cannot
 /// supply individual checkpoint paths.
 #[derive(Clone, Copy, Debug)]
 pub struct H3PrivateFl2VaUatPaths<'a> {

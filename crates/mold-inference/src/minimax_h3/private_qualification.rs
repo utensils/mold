@@ -772,10 +772,19 @@ fn qualification_manifest(
             bail!("private artifact qualification requires an exact Comfy H3 canonical model name")
         }
     };
-    let manifest = find_manifest(model)
-        .ok_or_else(|| anyhow!("missing hidden MiniMax H3 manifest for {model}"))?;
-    if manifest.name != model || manifest.family != contract::FAMILY || !manifest.hidden {
-        bail!("private H3 artifact qualification requires the exact hidden family manifest")
+    let manifest =
+        find_manifest(model).ok_or_else(|| anyhow!("missing MiniMax H3 manifest for {model}"))?;
+    let authority = contract::manifest_contract(manifest)
+        .ok_or_else(|| anyhow!("MiniMax H3 manifest has no frozen contract"))?;
+    if manifest.name != model
+        || manifest.family != contract::FAMILY
+        || authority.task != task
+        || authority.layout != contract::Layout::ComfyPrunedInt8ConvrotNvfp4Awq
+        || authority.runtime_available
+    {
+        bail!(
+            "private H3 artifact qualification requires the exact inactive compact family manifest"
+        )
     }
     if contract::capabilities(task).runtime_available {
         bail!("private artifact qualification refuses an already-active public H3 runtime")
@@ -1273,7 +1282,7 @@ mod tests {
     fn only_exact_comfy_manifest_names_are_qualifiable() {
         for model in [contract::FL2VA_COMFY, contract::REF2VA_COMFY] {
             let (manifest, _, _) = qualification_manifest(model).unwrap();
-            assert!(manifest.hidden);
+            assert!(!manifest.hidden);
             assert_eq!(manifest.family, contract::FAMILY);
         }
         for model in [

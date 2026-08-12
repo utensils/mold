@@ -138,7 +138,7 @@ describe("hostModels store", () => {
     expect(union.some((m) => m.name === "real-esrgan-x4plus")).toBe(false);
   });
 
-  it("removes rows restricted by each host's advertised model access policy", () => {
+  it("keeps restricted downloads in Models while excluding them from routing", () => {
     const hosts = useHostsStore();
     hosts.capabilities.local = {
       gallery: { can_delete: true },
@@ -163,6 +163,11 @@ describe("hostModels store", () => {
 
     expect(store.modelsOn("local").map((entry) => entry.name)).toEqual(["flux-dev:q8"]);
     expect(store.installedOn("local").map((entry) => entry.name)).toEqual(["flux-dev:q8"]);
+    expect(store.downloadedOn("local").map((entry) => entry.name)).toEqual([
+      "flux-dev:q8",
+      "cv:123",
+    ]);
+    expect(store.unionDownloaded.map((entry) => entry.name)).toEqual(["flux-dev:q8", "cv:123"]);
     expect(store.hostsFor("cv:123")).toEqual([]);
   });
 

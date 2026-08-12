@@ -29,14 +29,14 @@ async fn enqueue_unknown_model_errors() {
 }
 
 #[tokio::test]
-async fn h3_raw_manifest_enqueue_rejects_without_queueing_or_events() {
+async fn raw_h3_repo_id_cannot_bypass_a_registered_manifest_without_queueing() {
     let queue = DownloadQueue::new_for_test();
     let mut events = queue.subscribe();
 
     let error = queue
         .enqueue("hf:MiniMaxAI/MiniMax-H3".to_string())
         .await
-        .expect_err("H3 must be rejected before manifest lookup or queue mutation");
+        .expect_err("a raw repository id is outside reviewed acquisition");
 
     assert!(matches!(
         error,
@@ -957,7 +957,7 @@ fn synthetic_manifest(name: &str, family: &str, repo: &str) -> mold_core::manife
 }
 
 #[tokio::test]
-async fn h3_resolved_manifest_name_family_and_repo_reject_before_queue_mutation() {
+async fn arbitrary_h3_manifest_metadata_cannot_impersonate_a_reviewed_manifest() {
     let cases = [
         ("MiniMax-H3-FL2VA", "custom", "example/weights"),
         ("opaque-model", "minimax-h3", "example/weights"),
@@ -972,7 +972,7 @@ async fn h3_resolved_manifest_name_family_and_repo_reject_before_queue_mutation(
         let error = queue
             .enqueue_resolved_manifest("opaque-model:q8".to_string(), &manifest, None)
             .await
-            .expect_err("resolved H3 metadata must be compliance-gated");
+            .expect_err("caller-authored H3 metadata is not a reviewed manifest");
 
         assert!(matches!(
             error,
@@ -994,7 +994,7 @@ async fn h3_resolved_manifest_name_family_and_repo_reject_before_queue_mutation(
 }
 
 #[tokio::test]
-async fn h3_recipe_id_url_and_dest_reject_before_queue_mutation() {
+async fn arbitrary_h3_recipe_metadata_cannot_bypass_pinned_manifests() {
     let cases = [
         (
             "hf:MiniMaxAI/MiniMax-H3",
@@ -1030,7 +1030,7 @@ async fn h3_recipe_id_url_and_dest_reject_before_queue_mutation() {
         let error = queue
             .enqueue_recipe(payload)
             .await
-            .expect_err("H3 recipe metadata must be compliance-gated");
+            .expect_err("arbitrary H3 recipe metadata must remain gated");
 
         assert!(matches!(
             error,
@@ -1040,10 +1040,7 @@ async fn h3_recipe_id_url_and_dest_reject_before_queue_mutation() {
         assert!(listing.active_jobs.is_empty(), "{catalog_id}/{url}/{dest}");
         assert!(listing.queued.is_empty(), "{catalog_id}/{url}/{dest}");
         assert!(listing.history.is_empty(), "{catalog_id}/{url}/{dest}");
-        assert!(
-            queue.recipe_payloads.lock().unwrap().is_empty(),
-            "{catalog_id}/{url}/{dest}"
-        );
+        assert!(queue.recipe_payloads.lock().unwrap().is_empty());
         assert!(matches!(
             events.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)

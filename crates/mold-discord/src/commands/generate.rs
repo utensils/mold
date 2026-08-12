@@ -165,12 +165,11 @@ impl PipelineChoice {
     }
 }
 
-/// Classify a model family without making it discoverable or runnable.
+/// Classify a model family without making it runnable.
 ///
-/// H3 remains absent from the visible model catalog while its runtime and
-/// compliance gates are closed. Keeping its timing/container semantics here
-/// means an authorized future server can advertise it without Discord falling
-/// back to still-image defaults.
+/// H3 compact artifacts may appear in acquisition catalogs while generation
+/// remains qualification-gated. Keeping its timing/container semantics here
+/// means an authorized server does not fall back to still-image defaults.
 pub fn video_family(family: &str) -> Option<&str> {
     if mold_core::minimax_h3::is_family(family) {
         Some(mold_core::minimax_h3::FAMILY)
