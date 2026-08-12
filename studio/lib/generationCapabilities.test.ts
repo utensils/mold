@@ -6,8 +6,48 @@ import {
   isWanFamily,
   schedulerLabel,
 } from "./generationCapabilities";
+import type { GenerationRecipeProfile } from "./generationProfile";
 
 describe("baseGenerationCapabilities", () => {
+  it("takes advanced, scheduler, and output policy from the resolved recipe", () => {
+    const recipe = {
+      capabilities: {
+        guidance: { adjustable: false, supports_negative_prompt: false },
+        negative_prompt: { mode: "hidden", required: false },
+        supports_audio: false,
+        source_video: { mode: "hidden", required: false },
+        mask: { mode: "hidden", required: false },
+        keyframes: { mode: "hidden", required: false },
+        audio: { mode: "hidden", required: false },
+        lora: { mode: "hidden", max_count: 0 },
+        controlnet: { mode: "adjustable", max_count: 1 },
+        output: {
+          default_format: "jpeg",
+          formats: ["jpeg"],
+          audio_requires_mp4: false,
+        },
+        wan_recipe: {
+          mode: "hidden",
+          supports_distill_strength: false,
+          supports_first_last_frame: false,
+        },
+        schedulers: ["ddim"],
+      },
+    } as unknown as GenerationRecipeProfile;
+    expect(
+      baseGenerationCapabilities("flux", "", null, null, null, recipe),
+    ).toMatchObject({
+      supportsNegativePrompt: false,
+      supportsControlNet: true,
+      supportsLora: false,
+      supportsMask: false,
+      supportsScheduler: true,
+      schedulerOptions: ["default", "ddim"],
+      outputFormats: ["jpeg"],
+      defaultOutputFormat: "jpeg",
+    });
+  });
+
   it("keeps supported family aliases on the same capability policy", () => {
     for (const family of ["sd15", "sd1.5", "stable-diffusion-1.5"]) {
       expect(baseGenerationCapabilities(family)).toMatchObject({

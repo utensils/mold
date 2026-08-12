@@ -430,9 +430,17 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     // clear from here, so the deferred marker has served its purpose.
     form.negativeExplicitClear = false;
   }
-  const caps = generationCapabilitiesForFamily(m.family, m.name, null, null, m.source_image);
-  if (!outputFormatsForFamily(m.family).includes(form.outputFormat)) {
-    form.outputFormat = defaultOutputFormat(m.family);
+  const recipe = effectiveGenerationRecipe(m, null);
+  const caps = generationCapabilitiesForFamily(
+    m.family,
+    m.name,
+    null,
+    null,
+    m.source_image,
+    recipe,
+  );
+  if (!outputFormatsForFamily(m.family, recipe).includes(form.outputFormat)) {
+    form.outputFormat = defaultOutputFormat(m.family, recipe);
   }
   if (!caps.supportsScheduler || !caps.schedulerOptions.includes(form.scheduler)) {
     // The UNet schedulers and wan's solvers share one field but are disjoint
