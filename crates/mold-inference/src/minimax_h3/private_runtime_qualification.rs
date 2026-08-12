@@ -37,7 +37,7 @@ use super::private_server::{
 pub const H3_PRIVATE_RUNTIME_RECORD_PRODUCER_MARKER: &str =
     "mold.minimax-h3.private-runtime-record-producer.v1";
 
-const CAPTURE_SCHEMA: &str = "mold.minimax-h3.private-runtime-bound-capture.v4";
+const CAPTURE_SCHEMA: &str = "mold.minimax-h3.private-runtime-bound-capture.v5";
 const MAX_CAPTURE_BYTES: u64 = 128 * 1024;
 const MAX_RUNTIME_OBSERVATION_BYTES: u64 = 128 * 1024;
 const MAX_EVIDENCE_ARTIFACTS: usize = 128;
@@ -988,12 +988,12 @@ mod tests {
 
     fn envelope() -> H3PrivateRuntimeEnvelopeRecord {
         H3PrivateRuntimeEnvelopeRecord {
-            width: 960,
-            height: 544,
+            width: minimax_h3::DEFAULT_WIDTH,
+            height: minimax_h3::DEFAULT_HEIGHT,
             frames: minimax_h3::MIN_FRAMES,
             fps: minimax_h3::FIXED_FPS,
             batch_size: 1,
-            max_steps: 2,
+            max_steps: minimax_h3::COMFY_DEFAULT_STEPS,
             endpoint_count: 1,
             endpoint_anchor: "first".into(),
             max_qwen_output_text_rows: 128,
@@ -1469,7 +1469,7 @@ mod tests {
             .validate(&artifact_report(), &source_sha(), &runtime_code_identity())
             .unwrap_err()
             .to_string()
-            .contains("small-route envelope"));
+            .contains("compact-quality envelope"));
     }
 
     #[cfg(unix)]
