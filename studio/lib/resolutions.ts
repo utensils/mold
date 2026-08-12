@@ -228,6 +228,31 @@ export function presetsForModel(
     .map(({ width, height }) => p(width, height));
 }
 
+/**
+ * Exact presets authored for one generation-profile aspect group.
+ *
+ * A profile group ID is a user selection, not a fuzzy ratio hint. Keeping
+ * this lookup separate from `presetsNearRatio` prevents nearby buckets such
+ * as LTX-2's 19:11 or Wan's 26:15 from stealing a 16:9 click.
+ */
+export function presetsForAspectGroup(
+  model: ModelResolutionContract | null | undefined,
+  pipeline: string | null | undefined,
+  aspectGroupId: string | null | undefined,
+): ResolutionPreset[] {
+  if (!model || !aspectGroupId) return [];
+  const group = effectiveGenerationRecipe(
+    model,
+    pipeline,
+  )?.resolution.aspect_groups.find(
+    (candidate) => candidate.id === aspectGroupId,
+  );
+  return (
+    group?.presets.map(({ width, height }) => p(width, height, group.label)) ??
+    []
+  );
+}
+
 export function matchPreset(
   width: number,
   height: number,

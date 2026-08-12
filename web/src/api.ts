@@ -64,6 +64,8 @@ export async function deleteGalleryImage(filename: string): Promise<void> {
 export interface ChainLimits {
   model: string;
   frames_per_clip_cap: number;
+  fps?: number | null;
+  frames_per_clip_runtime_seconds?: number | null;
   frames_per_clip_recommended: number;
   max_stages: number;
   max_total_frames: number;
@@ -188,15 +190,17 @@ const CHAIN_LIMITS_TTL_MS = 30_000;
 export async function fetchChainLimits(
   model: string,
   target?: StreamTarget,
+  fps?: number | null,
 ): Promise<ChainLimits> {
   const now = Date.now();
   // Limits are per model AND per host — a remote's checkpoint may chain
   // where the origin's doesn't.
-  const key = `${targetBase(target)}|${model}`;
+  const effectiveFps = fps && fps > 0 ? Math.floor(fps) : null;
+  const key = `${targetBase(target)}|${model}|${effectiveFps ?? "default"}`;
   const cached = chainLimitsCache.get(key);
   if (cached && now - cached.at < CHAIN_LIMITS_TTL_MS) return cached.value;
   const res = await fetch(
-    `${targetBase(target)}/api/capabilities/chain-limits?model=${encodeURIComponent(model)}`,
+    `${targetBase(target)}/api/capabilities/chain-limits?model=${encodeURIComponent(model)}${effectiveFps ? `&fps=${effectiveFps}` : ""}`,
     { headers: targetHeaders(target) },
   );
   if (!res.ok) throw new Error(`chain-limits fetch failed: ${res.status}`);

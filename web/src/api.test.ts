@@ -12,6 +12,7 @@ import {
   gcChainJobs,
   generateStream,
   generateChainStream,
+  fetchChainLimits,
   getChainJob,
   listChainJobs,
   resumeChainJob,
@@ -182,6 +183,33 @@ describe("queue api", () => {
 });
 
 describe("chain validation api", () => {
+  it("requests chain limits for the selected fps", async () => {
+    const limits = {
+      model: "ltx-2-19b-distilled:fp8",
+      frames_per_clip_cap: 241,
+      frames_per_clip_recommended: 97,
+      max_stages: 16,
+      max_total_frames: 3856,
+      fade_frames_max: 32,
+      transition_modes: ["smooth"],
+      quantization_family: "fp8",
+      supports_audio: true,
+      supports_sequence: true,
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify(limits), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchChainLimits(limits.model, undefined, 12),
+    ).resolves.toEqual(limits);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/capabilities/chain-limits?model=${encodeURIComponent(limits.model)}&fps=12`,
+      { headers: {} },
+    );
+  });
+
   it("validates on the exact authenticated host without creating a job", async () => {
     const response = {
       model: "ltx-2-19b-distilled:fp8",

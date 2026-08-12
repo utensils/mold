@@ -89,6 +89,7 @@ interface PersistedDraftV1 {
     (Omit<SequenceClipSourceImage, "base64"> & { base64: null }) | null;
   enableAudio: boolean;
   lastSingleModel: string | null;
+  sequenceModel?: string | null;
 }
 
 function persistableClips(clips: readonly SequenceClipForm[]): PersistedClip[] {
@@ -137,6 +138,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   const enableAudio = ref(false);
   const editing = ref<SequenceEditSession | null>(null);
   const lastSingleModel = ref<string | null>(null);
+  const sequenceModel = ref<string | null>(null);
   const hydrated = ref(false);
 
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -180,6 +182,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
         : null,
       enableAudio: enableAudio.value,
       lastSingleModel: lastSingleModel.value,
+      sequenceModel: sequenceModel.value,
     };
     try {
       draftStorage()?.setItem(SEQUENCE_DRAFT_KEY, JSON.stringify(draft));
@@ -200,6 +203,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     openingImage.value = saved.openingImage ?? null;
     enableAudio.value = saved.enableAudio;
     lastSingleModel.value = saved.lastSingleModel ?? null;
+    sequenceModel.value = saved.sequenceModel ?? null;
   }
 
   async function restorePersistedMedia() {
@@ -317,6 +321,29 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     clips.push(clip);
     activeClipId.value = clip.id;
     return clip;
+  }
+
+  /** Reset the model-owned duration field without disturbing prompts, media,
+   * transitions, seeds, or the active clip. Model selectors call this only
+   * after the new model's authoritative chain limits have arrived. */
+  function resetClipFrames(defaultFrames: number) {
+    for (const clip of clips) clip.frames = defaultFrames;
+  }
+
+  /** Adopt one concrete model as the clip-duration authority. */
+  function adoptSequenceModel(model: string, defaultFrames: number): boolean {
+    if (sequenceModel.value === model) return false;
+    sequenceModel.value = model;
+    resetClipFrames(defaultFrames);
+    return true;
+  }
+
+  /** Bind deliberately imported timings to their concrete model without
+   * treating that import as a model switch. Reuse/edit loaders own the clip
+   * lengths they just restored; later model changes still flow through
+   * `adoptSequenceModel` and reset those model-owned values. */
+  function bindSequenceModel(model: string) {
+    sequenceModel.value = model;
   }
 
   function removeClip(id: string) {
@@ -450,7 +477,7 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
   // Sync flush so the debounce timer arms on the mutation itself (the
   // callback only re-arms a setTimeout — cheap enough for every keystroke).
   watch(
-    [output, clips, openingImage, enableAudio, lastSingleModel],
+    [output, clips, openingImage, enableAudio, lastSingleModel, sequenceModel],
     () => schedulePersist(),
     { deep: true, flush: "sync" },
   );
@@ -464,10 +491,14 @@ export const useSequenceDraftStore = defineStore("sequence-draft", () => {
     enableAudio,
     editing,
     lastSingleModel,
+    sequenceModel,
     hydrated,
     hydrate,
     ensureClips,
     addClip,
+    resetClipFrames,
+    adoptSequenceModel,
+    bindSequenceModel,
     removeClip,
     moveClip,
     setTransition,

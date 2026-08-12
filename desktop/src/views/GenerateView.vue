@@ -980,18 +980,22 @@ function consumeOutputQuery() {
 
 let chainLimitsFetch = 0;
 async function loadChainLimits() {
+  const version = ++chainLimitsFetch;
   const entry = selectedSequenceEntry.value;
   if (!entry) {
     chainLimits.value = null;
     return;
   }
-  const version = ++chainLimitsFetch;
   try {
     const target = routeForModel(entry)?.target ?? null;
-    const limits = (await fetchChainLimits(entry.name, target)) as ChainLimits;
+    const limits = (await fetchChainLimits(entry.name, target, form.fps)) as ChainLimits;
     if (version !== chainLimitsFetch) return;
     chainLimits.value = limits;
     if (!limits.supports_audio) draft.enableAudio = false;
+    if (!draft.editing) {
+      const frames = defaultClipFrames(entry, limits, sequenceMotionTail.value);
+      draft.adoptSequenceModel(entry.name, frames);
+    }
   } catch {
     if (version === chainLimitsFetch) chainLimits.value = null;
   }
@@ -999,7 +1003,18 @@ async function loadChainLimits() {
 
 // Chain limits are per model AND per host — refetch when either moves.
 watch(
-  [isSequence, () => form.model, stickyTarget, () => readyHostSignature(hosts.all)],
+  () => form.model,
+  (next, previous) => {
+    if (isSequence.value && previous && next !== previous) {
+      if (draft.editing) {
+        draft.stopEditing();
+        editSharedBaseline.value = null;
+      }
+    }
+  },
+);
+watch(
+  [isSequence, () => form.model, () => form.fps, stickyTarget, () => readyHostSignature(hosts.all)],
   () => {
     if (isSequence.value && form.model) void loadChainLimits();
   },
@@ -1508,6 +1523,7 @@ async function loadSequence(payload: { hostId: string; jobId: string }, editing:
       draft.enableAudio = loaded.enableAudio;
       draft.openingImage = loaded.openingImage;
     }
+    if (form.model) draft.bindSequenceModel(form.model);
     sequenceStageClipIdsByJob.set(
       `${payload.hostId}:${payload.jobId}`,
       draft.clips.map((clip) => clip.id),
@@ -2931,6 +2947,7 @@ function applySequenceReuse(metadata: OutputMetadata) {
   draft.clips.splice(0, draft.clips.length, ...clips);
   draft.activeClipId = clips[0]?.id ?? null;
   draft.enableAudio = metadata.enable_audio === true;
+  draft.bindSequenceModel(form.model);
 
   const notes = [sequenceReuseNote(clips.length, plan.lossy)];
   if (raised > 0) {

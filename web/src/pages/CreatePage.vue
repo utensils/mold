@@ -1486,7 +1486,9 @@ async function onSubmitSequence() {
   }
   // Refresh chain limits when stale (30 s cache) — the server still remains
   // the final authority at submission.
-  await fetchChainLimits(shared.model, initialRoute.target).catch(() => {});
+  await fetchChainLimits(shared.model, initialRoute.target, shared.fps).catch(
+    () => {},
+  );
   const preliminaryRequest = buildChainRequest(shared, clips, {
     motionTailFrames,
     enableAudio,
@@ -1664,6 +1666,7 @@ async function loadSequence(hostId: string, jobId: string, editing: boolean) {
       draft.enableAudio = loaded.enableAudio;
       draft.openingImage = loaded.openingImage;
     }
+    if (form.state.value.model) draft.bindSequenceModel(form.state.value.model);
     sequenceStageClipIdsByJob.set(
       `${hostId}:${jobId}`,
       draft.clips.map((clip) => clip.id),
@@ -1761,6 +1764,7 @@ function applySequenceReuse(metadata: OutputMetadata) {
   draft.clips.splice(0, draft.clips.length, ...clips);
   draft.activeClipId = clips[0]?.id ?? null;
   draft.enableAudio = metadata.enable_audio === true;
+  draft.bindSequenceModel(form.state.value.model);
 
   const notes = [sequenceReuseNote(clips.length, plan.lossy)];
   if (raised > 0) notes.push(sequenceReuseClampNote(currentModelLabel.value));

@@ -1047,6 +1047,8 @@ export interface ChainScript {
 export interface ChainLimits {
   model: string;
   frames_per_clip_cap: number;
+  fps?: number | null;
+  frames_per_clip_runtime_seconds?: number | null;
   frames_per_clip_recommended: number;
   max_stages: number;
   max_total_frames: number;

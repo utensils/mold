@@ -428,6 +428,29 @@ describe("MobileSequenceComposer guardrails", () => {
     expect(wrapper!.emitted("submit")).toHaveLength(1);
   });
 
+  it("blocks a stale clip above the active fps cap without silently clamping it", async () => {
+    const draft = useSequenceDraftStore();
+    draft.clips[0]!.prompt = "opening";
+    draft.clips[1]!.prompt = "ending";
+    draft.clips[0]!.frames = 481;
+    mountComposer({
+      chainLimits: {
+        ...limits,
+        frames_per_clip_cap: 241,
+        max_total_frames: 241 * 4,
+      },
+    });
+
+    expect(draft.clips[0]!.frames).toBe(481);
+    expect(wrapper!.get("[data-test='mobile-sequence-error']").text()).toContain(
+      "Reduce clip 1 to 241 frames or fewer.",
+    );
+    expect(
+      (wrapper!.get("[data-test='mobile-generate-sequence']").element as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
   it("shows the server's reason when the model cannot render a sequence", () => {
     const draft = useSequenceDraftStore();
     draft.clips[0]!.prompt = "a";
