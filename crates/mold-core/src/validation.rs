@@ -6818,8 +6818,10 @@ mod tests {
     #[test]
     fn every_family_native_in_recommendations() {
         // Each family with a qualified recommendation set includes its native
-        // resolution. Z-Image and Qwen remain dynamic-only until their pinned
-        // upstream candidates pass a recorded runtime-and-delivery campaign.
+        // resolution. Z-Image joined them once its exact-size Q4 Metal
+        // generation-and-delivery campaign was checked in
+        // (`Z_IMAGE_QUALIFICATION`); Qwen remains dynamic-only until its own
+        // pinned candidates pass one.
         let families = &[
             ("sd15", 512, 512),
             ("sdxl", 1024, 1024),
@@ -6829,6 +6831,7 @@ mod tests {
             ("wuerstchen", 1024, 1024),
             ("ltx-video", 768, 512),
             ("minimax-h3", 1344, 768),
+            ("z-image", 1024, 1024),
         ];
         for (family, w, h) in families {
             let dims = recommended_dimensions(family);
@@ -6837,7 +6840,7 @@ mod tests {
                 "{family} native {w}x{h} missing from recommended list"
             );
         }
-        for family in ["z-image", "qwen-image", "qwen-image-edit"] {
+        for family in ["qwen-image", "qwen-image-edit"] {
             assert!(recommended_dimensions(family).is_empty());
         }
     }

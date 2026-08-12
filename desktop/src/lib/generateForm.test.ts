@@ -491,7 +491,10 @@ describe("buildRequest — MiniMax H3 authoring", () => {
 
     const request = buildRequest(form);
     expect(request).toMatchObject({
-      frames: 362,
+      // 360 snaps up to the 17n+5 grid and is then clamped to the family
+      // ceiling, which is 345 — 362 is 15.083 s at the fixed 24 fps and is
+      // refused upstream.
+      frames: 345,
       fps: 24,
       guidance: 0,
       strength: 1,
@@ -499,7 +502,8 @@ describe("buildRequest — MiniMax H3 authoring", () => {
       output_format: "mp4",
       source_image: "FIRST",
       source_image_name: "first.png",
-      keyframes: [{ frame: 361, image: "LAST", name: "last.png" }],
+      // Last frame of the clamped 345-frame clip.
+      keyframes: [{ frame: 344, image: "LAST", name: "last.png" }],
     });
     expect(request.enable_audio).toBeUndefined();
     expect(request.negative_prompt).toBeUndefined();

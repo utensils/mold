@@ -82,6 +82,8 @@ import {
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
+  MINIMAX_H3_MAX_FRAMES,
+  MINIMAX_H3_MIN_FRAMES,
   type MinimaxH3AuthoringState,
 } from "@studio/lib/minimaxH3Authoring";
 import { sourceImageValidationError } from "@studio/lib/sourceImageCapability";
@@ -1372,7 +1374,10 @@ function setSequenceCameraMode(mode: string) {
             />
             <p class="adv__hint">
               Frames must follow {{ frameGridLabel
-              }}<template v-if="h3Family">, from 124 through 362</template>.
+              }}<template v-if="h3Family"
+                >, from {{ MINIMAX_H3_MIN_FRAMES }} through
+                {{ MINIMAX_H3_MAX_FRAMES }}</template
+              >.
             </p>
           </div>
           <div class="adv__field">

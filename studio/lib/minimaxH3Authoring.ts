@@ -9,7 +9,11 @@ import {
 
 export const MINIMAX_H3_FIXED_FPS = 24;
 export const MINIMAX_H3_MIN_FRAMES = 124;
-export const MINIMAX_H3_MAX_FRAMES = 362;
+// Mirrors `mold_core::minimax_h3::MAX_FRAMES`. 345, not 362: the next grid
+// value is 15.083 s at the family's fixed 24 fps, which the diffusers path
+// rejects. This is the fallback for a server that does not advertise its own
+// `max_frames`; an advertised value always wins.
+export const MINIMAX_H3_MAX_FRAMES = 345;
 export const MINIMAX_H3_FRAME_STEP = 17;
 export const MINIMAX_H3_FRAME_OFFSET = 5;
 export const MINIMAX_H3_MAX_REFERENCES = 12;

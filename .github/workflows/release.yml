@@ -894,7 +894,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          version="${VERSION#v}"
+          # `release_version`, not `version`: shellcheck cannot see the `env:`
+          # block above, so a lowercase twin of `VERSION` reads to it as a
+          # misspelling (SC2153) and fails the actionlint contract.
+          release_version="${VERSION#v}"
           local_manifest="artifacts/mold-desktop-stable.json"
           signature_path=$(find artifacts -maxdepth 1 -name 'Mold_*_aarch64.app.tar.gz.sig' -print -quit)
           if [[ ! -f "$local_manifest" || -z "$signature_path" ]]; then
@@ -924,7 +927,7 @@ jobs:
           for attempt in $(seq 1 20); do
             if curl -fsSL "$manifest_url" -o "$remote_manifest" \
               && jq -e \
-                --arg version "$version" \
+                --arg version "$release_version" \
                 --arg url "$payload_url" \
                 --arg signature "$expected_signature" \
                 '.version == $version

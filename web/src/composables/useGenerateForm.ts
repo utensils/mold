@@ -39,10 +39,7 @@ import {
   familySupportsExtend,
   resolveExtendOverlapFrames,
 } from "@studio/lib/extend";
-import {
-  effectiveGenerationRecipe,
-  type GenerationRecipeProfile,
-} from "@studio/lib/generationProfile";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
   cameraMotionLoraPath,
   normalizeCameraMotionLoraState,
@@ -84,26 +81,6 @@ export function promptWithStyle(state: GenerateFormState): string {
   return composeStyle(state.prompt, state.stylePreset ?? "", {
     supportsNegativePrompt: false,
   }).prompt;
-}
-
-/** Output-format options for a given model family, ordered by preference.
- * The first entry is the default the UI auto-selects when a model is
- * chosen.
- *
- * `wav` is deliberately absent: it is valid only for LTX-2's audio-only `t2a`
- * pipeline, which sets the format itself when selected. Offering it as a free
- * choice would let a video request pick a container the server rejects. */
-export function outputFormatsForFamily(
-  family: string,
-  recipe?: GenerationRecipeProfile | null,
-): OutputFormat[] {
-  if (recipe && !recipe.legacy_adapter) {
-    return recipe.capabilities.output.formats.slice();
-  }
-  if (isMinimaxH3Family(family)) return ["mp4"];
-  return isVideoFamily(family)
-    ? ["mp4", "gif", "apng", "webp"]
-    : ["png", "jpeg", "webp"];
 }
 
 const STORAGE_KEY = "mold.generate.form";

@@ -1,7 +1,5 @@
 import { modelKindLabel } from "./modelMetadata";
 
-export const MINIMAX_H3_FAMILY = "minimax-h3";
-
 export type MiniMaxH3Task = "fl2va" | "ref2va";
 export type MiniMaxH3ComponentState =
   "installed" | "missing" | "downloading" | "failed";

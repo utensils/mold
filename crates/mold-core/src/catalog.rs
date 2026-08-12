@@ -541,7 +541,13 @@ mod tests {
             Some(crate::validation::LTX2_COMPOSED_MAX_AXIS_PIXELS),
             "the per-axis span is advertised separately from the pixel budget"
         );
-        assert_eq!(ltx2.defaults.dimension_alignment, Some(32));
+        // 64, not the family's single-pass 32: a composing checkpoint halves
+        // the requested shape for stage 1, so the request itself has to sit on
+        // the doubled grid for that halved shape to land on the VAE's /32.
+        assert_eq!(
+            ltx2.defaults.dimension_alignment,
+            Some(crate::validation::LTX2_TWO_STAGE_ALIGNMENT)
+        );
         assert!(
             ltx2.defaults
                 .recommended_dimensions

@@ -37,7 +37,10 @@ const AUTHORIZATION_SOURCE_SHA256: &str =
 const CLAIM_MARKER: &str = "mold.minimax-h3.private-uat-transformer-capture.v1";
 const MODEL_REVISION: &str = "bfc8ed0353f5a9733be73e6b2c98ec0948195b86";
 const LICENSE_SHA256: &str = "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44";
-const MANIFEST_SHA256: &str = "2b5553f8120ba0a0412a884a1d77405693b96b06a1bd6ed11024fa27249d6b8e";
+// Repinned after #985 edited the reviewed capture manifest (the H3 frame
+// ceiling moved 362 -> 345). The adapter authenticates the manifest by digest
+// before it touches a weight, so a stale pin refuses every capture run.
+const MANIFEST_SHA256: &str = "330536dc7b43933ccf4d1c7fbad95d5eaf301bc6c4b996058a963c8365075f65";
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_AUTHORIZATION_BYTES: u64 = 64 * 1024;
 

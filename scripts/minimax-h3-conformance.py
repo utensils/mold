@@ -1185,7 +1185,11 @@ def validate_manifest() -> dict[str, Any]:
             "frame_step": 17,
             "frame_offset": 5,
             "min_frames": 124,
-            "max_frames": 362,
+            # 345, not 362: #985 lowered the ceiling because the next grid
+            # value is 15.083 s and the diffusers path rejects it. The fixture
+            # manifest and `mold_core::minimax_h3::MAX_FRAMES` moved together;
+            # this copy did not, and the contract has failed ever since.
+            "max_frames": 345,
             "max_pixels": 1_069_056,
             "min_aspect_ratio": "0.25",
             "max_aspect_ratio": "4",
