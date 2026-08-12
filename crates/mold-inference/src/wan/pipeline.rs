@@ -753,14 +753,39 @@ pub(crate) enum WanConditioningShape {
 /// architecturally a plain 36-channel DiT and runs correctly — but only as a
 /// pair. Given one expert alone, the schedule's late half would be denoised by
 /// the network trained for its early half, which renders rather than errors.
+///
+/// Both halves of the probe are set-wide rather than file-wide, and both had
+/// to be (#803):
+///
+/// - **Spelling.** The CLIP branch is named differently per key layout, and
+///   probing only the original `cross_attn.k_img` let every diffusers-layout
+///   2.1 I2V export past this refusal. The diffusers markers are derived from
+///   the same rename table the loader uses, so the two cannot drift apart.
+/// - **Shards.** A diffusers export splits the DiT across files and the split
+///   does not respect any one probe set — the reason
+///   [`detect_transformer_config_across`] reads the whole set — so reading
+///   only `paths.transformer` let a *sharded* diffusers I2V export through
+///   whenever the CLIP adapter landed in a later shard. Take every file the
+///   config detection takes.
 fn reject_unwired_channel_concat_checkpoint(
-    transformer: &Path,
+    transformer_files: &[PathBuf],
     low_noise_expert: Option<&Path>,
 ) -> Result<()> {
-    let has_clip_branch = header_shapes(transformer)?.into_iter().any(|(name, _)| {
-        name.trim_start_matches("model.diffusion_model.")
-            .contains("cross_attn.k_img")
-    });
+    let transformer = transformer_files
+        .first()
+        .map(PathBuf::as_path)
+        .ok_or_else(|| anyhow::anyhow!("Wan DiT: no transformer files supplied"))?;
+    let markers = crate::wan::model::transformer::clip_vision_branch_markers();
+    let mut has_clip_branch = false;
+    for file in transformer_files {
+        if header_shapes(file)?.into_iter().any(|(name, _)| {
+            let bare = name.trim_start_matches("model.diffusion_model.");
+            markers.iter().any(|marker| bare.contains(marker))
+        }) {
+            has_clip_branch = true;
+            break;
+        }
+    }
     if has_clip_branch {
         bail!(
             "{} is a Wan 2.1 image-to-video checkpoint, which needs the CLIP-vision \
@@ -1578,13 +1603,16 @@ impl WanEngine {
         // ------------------------------------------------------------------
         let vae_generation = detect_vae_generation(&paths.vae)?;
         let vae_config = vae_generation.config();
-        let transformer_config = detect_transformer_config_across(&transformer_files(paths))?;
+        let dit_files = transformer_files(paths);
+        let transformer_config = detect_transformer_config_across(&dit_files)?;
         let shape = conditioning_shape(transformer_config.in_dim, vae_config.z_dim)?;
         let low_noise_expert = paths.low_noise_transformer.as_deref();
         // Wan 2.1 I2V is refused outright — it needs a CLIP-vision branch the
         // transformer omits. Wan 2.2 I2V-A14B runs, but only with both experts.
+        // The refusal reads the same shard set the detection above does: the
+        // CLIP adapter is not guaranteed to live in the primary file.
         if shape == WanConditioningShape::ChannelConcat {
-            reject_unwired_channel_concat_checkpoint(&paths.transformer, low_noise_expert)?;
+            reject_unwired_channel_concat_checkpoint(&dit_files, low_noise_expert)?;
         }
 
         let (default_frames, default_fps) = vae_generation.default_timing();
@@ -3351,7 +3379,9 @@ mod tests {
             &[("patch_embedding.weight", &[5120, 36, 1, 2, 2][..])],
         );
         for low_noise in [None, Some(partner.as_path())] {
-            let err = reject_unwired_channel_concat_checkpoint(&clip, low_noise).unwrap_err();
+            let err =
+                reject_unwired_channel_concat_checkpoint(std::slice::from_ref(&clip), low_noise)
+                    .unwrap_err();
             assert!(err.to_string().contains("CLIP-vision"), "got: {err}");
         }
 
@@ -3362,15 +3392,110 @@ mod tests {
             &expert,
             &[("patch_embedding.weight", &[5120, 36, 1, 2, 2][..])],
         );
-        let err = reject_unwired_channel_concat_checkpoint(&expert, None).unwrap_err();
+        let err = reject_unwired_channel_concat_checkpoint(std::slice::from_ref(&expert), None)
+            .unwrap_err();
         assert!(err.to_string().contains("expert pair"), "got: {err}");
         assert!(err.to_string().contains("900"), "got: {err}");
         assert!(err.to_string().contains("wan22-i2v-a14b"), "got: {err}");
 
         // With both experts resolved it is accepted — this is the arm the A14B
         // layer replaced.
-        reject_unwired_channel_concat_checkpoint(&expert, Some(&partner))
+        reject_unwired_channel_concat_checkpoint(std::slice::from_ref(&expert), Some(&partner))
             .expect("a complete A14B pair is runnable");
+    }
+
+    /// The 2.1 I2V refusal must be layout-blind. #803 taught the loader the
+    /// diffusers key layout, but this check kept probing only the original
+    /// `cross_attn.k_img` spelling — so a diffusers-layout I2V export walked
+    /// straight past a refusal that exists precisely because the CLIP-vision
+    /// branch is unimplemented.
+    #[test]
+    fn diffusers_layout_i2v_checkpoints_are_refused_by_name() {
+        let temp = tempfile::tempdir().unwrap();
+        // Both diffusers markers, each on its own, plus the Comfy-Org repack
+        // of one: the prefix and the naming are independent facts.
+        for (file, clip_key) in [
+            (
+                "wan21-i2v-diffusers.safetensors",
+                "blocks.0.attn2.add_k_proj.weight",
+            ),
+            (
+                "wan21-i2v-diffusers-embedder.safetensors",
+                "condition_embedder.image_embedder.ff.net.0.proj.weight",
+            ),
+            (
+                "wan21-i2v-diffusers-repack.safetensors",
+                "model.diffusion_model.blocks.0.attn2.add_k_proj.weight",
+            ),
+        ] {
+            let path = temp.path().join(file);
+            write_header(
+                &path,
+                &[
+                    ("patch_embedding.weight", &[5120, 36, 1, 2, 2][..]),
+                    (clip_key, &[5120, 1280][..]),
+                ],
+            );
+            let err = reject_unwired_channel_concat_checkpoint(std::slice::from_ref(&path), None)
+                .unwrap_err();
+            assert!(err.to_string().contains("CLIP-vision"), "{file}: got {err}");
+        }
+    }
+
+    /// The refusal must read every shard, not just the primary file.
+    ///
+    /// The diffusers layout is precisely the sharded one, and the split does
+    /// not respect any probe set — `Wan2.2-TI2V-5B-Turbo-Diffusers` strands
+    /// `proj_out.weight` alone in a second shard, which is why
+    /// [`detect_transformer_config_across`] reads the whole set. Probing only
+    /// `paths.transformer` therefore admitted a sharded diffusers-layout 2.1
+    /// I2V export outright whenever the CLIP adapter landed in a later shard:
+    /// with a partner supplied this returned `Ok(())` before the fix, i.e. the
+    /// exact export this branch exists to refuse was queued and would have
+    /// rendered from an unwired CLIP-vision branch.
+    #[test]
+    fn sharded_diffusers_layout_i2v_is_refused_across_every_shard() {
+        let temp = tempfile::tempdir().unwrap();
+        let partner = temp.path().join("partner.safetensors");
+        write_header(
+            &partner,
+            &[("patch_embedding.weight", &[5120, 36, 1, 2, 2][..])],
+        );
+
+        // Each diffusers marker in turn, always in the *second* shard, and once
+        // more behind the Comfy-Org repack prefix: the shard the adapter lands
+        // in, its spelling, and the prefix are three independent facts.
+        for (stem, clip_key) in [
+            ("attn-adapter", "blocks.0.attn2.add_k_proj.weight"),
+            (
+                "image-embedder",
+                "condition_embedder.image_embedder.ff.net.0.proj.weight",
+            ),
+            (
+                "repacked",
+                "model.diffusion_model.blocks.0.attn2.add_k_proj.weight",
+            ),
+        ] {
+            let primary = temp
+                .path()
+                .join(format!("{stem}-00001-of-00002.safetensors"));
+            // The primary carries the 36-channel patch embedding and nothing
+            // that names the CLIP branch — this file alone looks runnable.
+            write_header(
+                &primary,
+                &[("patch_embedding.weight", &[5120, 36, 1, 2, 2][..])],
+            );
+            let shard = temp
+                .path()
+                .join(format!("{stem}-00002-of-00002.safetensors"));
+            write_header(&shard, &[(clip_key, &[5120, 1280][..])]);
+            let files = vec![primary, shard];
+
+            for low_noise in [None, Some(partner.as_path())] {
+                let err = reject_unwired_channel_concat_checkpoint(&files, low_noise).unwrap_err();
+                assert!(err.to_string().contains("CLIP-vision"), "{stem}: got {err}");
+            }
+        }
     }
 
     /// A CPU-parked encoder must compute in F32 — candle's CPU backend has no
