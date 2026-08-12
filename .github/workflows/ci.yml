@@ -459,7 +459,7 @@ jobs:
         if: env.RUN_RUST_FORMAT == 'true'
         run: cargo fmt --all -- --check
       - name: Check generated generation profiles
-        if: env.RUN_RUST_FORMAT == 'true'
+        if: env.RUN_RUST_SUITE == 'true'
         run: cargo run -p mold-ai-core --bin generate_generation_profiles -- --check
       - name: Clippy
         if: env.RUN_RUST_SUITE == 'true'
