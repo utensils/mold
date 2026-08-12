@@ -740,6 +740,7 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
       <MinimaxH3AuthoringPanel
         :model-value="h3Authoring"
         :task="h3Task"
+        :required-endpoint="caps.requiresSourceImage ? 'first' : null"
         touch-friendly
         @update:model-value="setH3Authoring"
       />

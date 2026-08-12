@@ -650,7 +650,9 @@ function reset() {
         :title="h3Task === 'fl2va' ? 'Frame endpoints' : 'Ordered references'"
         :summary="
           h3Task === 'fl2va'
-            ? 'First, last, both, or text only'
+            ? caps.requiresSourceImage
+              ? 'First frame required'
+              : 'First, last, both, or text only'
             : `${h3Authoring.references.length} in semantic order`
         "
         :open="true"
@@ -660,6 +662,7 @@ function reset() {
         <MinimaxH3AuthoringPanel
           :model-value="h3Authoring"
           :task="h3Task"
+          :required-endpoint="caps.requiresSourceImage ? 'first' : null"
           @update:model-value="setH3Authoring"
         />
       </AccordionSection>

@@ -17,6 +17,8 @@ import {
   type Ref,
 } from "vue";
 import {
+  GENERATE_TARGET_CHANGED_EVENT,
+  HOSTS_CHANGED_EVENT,
   ORIGIN_HOST_ID,
   getGenerateTargetId,
   listHosts,
@@ -472,6 +474,14 @@ async function refresh(): Promise<void> {
 let timer: ReturnType<typeof setTimeout> | null = null;
 let consumers = 0;
 
+function onHostsChanged(): void {
+  void refresh();
+}
+
+function onGenerateTargetChanged(): void {
+  readTarget();
+}
+
 function tick(): void {
   timer = setTimeout(() => {
     void refresh().finally(() => {
@@ -483,6 +493,11 @@ function tick(): void {
 function start(): void {
   consumers += 1;
   if (consumers > 1) return;
+  window.addEventListener(HOSTS_CHANGED_EVENT, onHostsChanged);
+  window.addEventListener(
+    GENERATE_TARGET_CHANGED_EVENT,
+    onGenerateTargetChanged,
+  );
   readRegistry();
   readTarget();
   void refresh();
@@ -492,6 +507,11 @@ function start(): void {
 function stop(): void {
   consumers = Math.max(0, consumers - 1);
   if (consumers > 0) return;
+  window.removeEventListener(HOSTS_CHANGED_EVENT, onHostsChanged);
+  window.removeEventListener(
+    GENERATE_TARGET_CHANGED_EVENT,
+    onGenerateTargetChanged,
+  );
   if (timer) clearTimeout(timer);
   timer = null;
 }
@@ -1086,6 +1106,11 @@ export function useHostRouting(): HostRouting {
 export const __testing__ = {
   POLL_INTERVAL_MS,
   reset(): void {
+    window.removeEventListener(HOSTS_CHANGED_EVENT, onHostsChanged);
+    window.removeEventListener(
+      GENERATE_TARGET_CHANGED_EVENT,
+      onGenerateTargetChanged,
+    );
     if (timer) clearTimeout(timer);
     timer = null;
     consumers = 0;
