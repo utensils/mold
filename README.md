@@ -186,6 +186,10 @@ with prompt, model, seed, and generation metadata.
 - FLUX.1, Flux.2 Klein and Dev, SD 1.5, SDXL, SD 3.5, Z-Image, Qwen-Image,
   Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3, and Wan 2.1/2.2
   text-to-video
+- Upstream-direct downloads for the 42.482 GB compact MiniMax H3 FL2VA and
+  Ref2VA variants. Execution is narrower than acquisition: only the exact
+  reviewed CUDA FL2VA route is available; Ref2VA, Metal, CPU, and hosted H3 are
+  unsupported. See the [H3 model guide](https://utensils.io/mold/models/minimax-h3).
 - Text-to-image, image-to-image, multimodal editing, inpainting, ControlNet,
   LoRA, prompt expansion, and Real-ESRGAN upscaling
 - Text/image-to-video, multi-prompt video chains, one-request continuation of

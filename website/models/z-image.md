@@ -53,6 +53,15 @@ Z-Image uses a Qwen3 text encoder (BF16 or GGUF with auto-fallback). The
 quantized transformer is implemented directly in mold (not upstream candle) due
 to GGUF tensor naming differences.
 
+On CUDA, `MOLD_ZIMAGE_GGUF_DENSE=1` is a diagnostic escape hatch that
+dequantizes a GGUF transformer into a dense BF16 parameter map. This uses about
+12 GB for the map instead of keeping a Q4 checkpoint near its roughly 3.4 GB
+quantized size, and its speed advantage has not been measured. Leave it unset
+for normal use. Do not enable it on Metal: that backend expands the map to about
+24 GB of F32 parameters, and the retained dense route has produced corrupted
+renders there. The setting is read when the runtime is created, so restart Mold
+after changing it; `true` and `yes` are accepted as alternatives to `1`.
+
 Catalog `cv:*` Z-Image checkpoints use the hidden `z-image-te` companion for
 the same Qwen3 text encoder shards, tokenizer, and VAE. When the Civitai
 version publishes its own text-encoder file, that per-version file is downloaded
