@@ -529,6 +529,97 @@ pub(crate) fn original_to_diffusers(name: &str) -> Option<String> {
     translate(name, false)
 }
 
+/// The 2.1 I2V CLIP-vision key projection, original spelling
+/// (`Wan2.1/wan/modules/model.py:172-176`).
+const ORIGINAL_CLIP_KEY_PROJECTION: &str = "cross_attn.k_img";
+
+/// The same projection inside diffusers' renamed cross-attention module
+/// (`WanImageToVideoAttnProcessor`, `transformer_wan.py`).
+const DIFFUSERS_CLIP_KEY_PROJECTION: &str = "add_k_proj";
+
+/// Diffusers' image-conditioning MLP, hung off the condition-embedder stack
+/// (`WanImageEmbedding`, `transformer_wan.py`).
+const DIFFUSERS_IMAGE_EMBEDDER: &str = "image_embedder";
+
+/// VACE's control blocks (`transformer_wan_vace.py`), which this port omits.
+const VACE_PREFIX: &str = "vace";
+
+/// Name fragments that mark the Wan 2.1 CLIP-vision cross-attention branch, in
+/// whichever spelling a checkpoint carries it (#803).
+///
+/// The diffusers segments are recovered from [`BLOCK_RENAMES`] /
+/// [`TOP_LEVEL_RENAMES`] through [`original_to_diffusers`] rather than restated
+/// as literals: the refusal and the rename tables must not be able to drift.
+/// They already did once — #803 taught the loader the diffusers layout while
+/// the I2V refusal kept probing only `cross_attn.k_img`, so a diffusers-layout
+/// I2V export bypassed a check that exists because the branch is unimplemented.
+pub(crate) fn clip_vision_branch_markers() -> Vec<String> {
+    let mut markers = vec![ORIGINAL_CLIP_KEY_PROJECTION.to_string()];
+    // `blocks.0.cross_attn.k` -> `blocks.0.attn2.to_k`: component 2 is whatever
+    // diffusers calls the cross-attention module the adapter lives in.
+    if let Some(renamed) = original_to_diffusers("blocks.0.cross_attn.k.weight") {
+        if let Some(module) = renamed.split('.').nth(2) {
+            markers.push(format!("{module}.{DIFFUSERS_CLIP_KEY_PROJECTION}"));
+        }
+    }
+    // `time_embedding.0` -> `condition_embedder.time_embedder.linear_1`: the
+    // leading component is the stack the image MLP joins.
+    if let Some(renamed) = original_to_diffusers("time_embedding.0.weight") {
+        if let Some(stack) = renamed.split('.').next() {
+            markers.push(format!("{stack}.{DIFFUSERS_IMAGE_EMBEDDER}"));
+        }
+    }
+    markers
+}
+
+/// Refuse a diffusers-layout checkpoint carrying tensors the rename tables do
+/// not cover, naming the class of what it found.
+///
+/// [`apply_diffusers_renaming`] passes an uncovered name through unchanged, so
+/// a *requested* key that misses fails by name in candle. This is the other
+/// direction: a key the file **holds** and this build would never ask for. That
+/// is not noise — it is an architecture this port does not implement (the 2.1
+/// CLIP adapter, VACE control blocks), and loading the covered subset around it
+/// builds the rest from `VarBuilder` defaults and renders, wrongly.
+fn ensure_diffusers_keys_covered(bare_names: &[String], origin: &Path) -> Result<()> {
+    let mut uncovered: Vec<&str> = bare_names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| diffusers_to_original(name).is_none())
+        .collect();
+    if uncovered.is_empty() {
+        return Ok(());
+    }
+    let clip_markers = clip_vision_branch_markers();
+    if uncovered
+        .iter()
+        .any(|name| clip_markers.iter().any(|marker| name.contains(marker)))
+    {
+        bail!(
+            "{} is a Wan 2.1 image-to-video checkpoint (diffusers key layout), which needs the \
+             CLIP-vision cross-attention branch mold does not implement — use a Wan 2.2 \
+             checkpoint (wan22-i2v-a14b, or wan22-ti2v-5b) for image conditioning",
+            origin.display()
+        );
+    }
+    if uncovered.iter().any(|name| name.starts_with(VACE_PREFIX)) {
+        bail!(
+            "{} carries VACE control blocks (`{VACE_PREFIX}_blocks.*`), which mold does not \
+             implement — use a plain Wan T2V/TI2V checkpoint",
+            origin.display()
+        );
+    }
+    uncovered.sort_unstable();
+    bail!(
+        "{} is a diffusers-layout Wan DiT carrying {} tensor(s) mold's rename table does not \
+         cover, starting with `{}` — refusing to load the covered subset and render the rest \
+         from default weights",
+        origin.display(),
+        uncovered.len(),
+        uncovered[0]
+    )
+}
+
 /// Which key layout a safetensors DiT export uses (#803).
 ///
 /// Detection is header-driven and never reads a filename: the first
@@ -1229,10 +1320,13 @@ impl WanTransformer {
         // every DiT key, diffusers exports rename them, and bare upstream
         // exports do neither. `patch_embedding.weight` is spelled the same in
         // all of them, so the self-attention query projection is the probe
-        // that actually discriminates. Classify once and reuse for both paths.
-        let probe = unsafe { VarBuilder::from_mmaped_safetensors(paths, dtype, device)? };
-        let layout = classify_key_layout(|name| probe.contains_tensor(name));
-        drop(probe);
+        // that actually discriminates. Read the names once — classification and
+        // the diffusers coverage scan below both work off this one list.
+        let names: Vec<String> = {
+            let probe = unsafe { candle_core::safetensors::MmapedSafetensors::multi(paths) }?;
+            probe.tensors().into_iter().map(|(name, _)| name).collect()
+        };
+        let layout = classify_key_layout(|probe| names.iter().any(|name| name == probe));
         let Some(layout) = layout else {
             let first = paths.first().map(PathBuf::as_path).unwrap_or(Path::new(""));
             bail!(
@@ -1249,6 +1343,33 @@ impl WanTransformer {
         // `model.diffusion_modelblocks.0…` and break adapters on every
         // prefixed checkpoint. The `pp` calls below only test emptiness.
         let prefix = layout.prefix.to_string();
+
+        if layout.diffusers_names {
+            let first = paths.first().map(PathBuf::as_path).unwrap_or(Path::new(""));
+            // fp8-scaled is original-layout-only, and not by choice: a
+            // per-tensor `<module>.scale_weight` is not a module path, so the
+            // rename hook passes it through untranslated and every scale lookup
+            // in `fp8::load_linear` would miss. Say so here rather than failing
+            // deep in the loader on a key the user never wrote.
+            if scaled_fp8.is_some() {
+                bail!(
+                    "{} is an fp8-scaled checkpoint in the diffusers key layout, which mold does \
+                     not read — the shipped fp8-scaled Wan files (Kijai's \
+                     `*_fp8_e4m3fn_scaled_*`) use the original layout. Use one of those, or a \
+                     bf16/GGUF diffusers export.",
+                    first.display()
+                );
+            }
+            let bare: Vec<String> = names
+                .iter()
+                .map(|name| {
+                    name.strip_prefix(prefix.as_str())
+                        .unwrap_or(name)
+                        .to_string()
+                })
+                .collect();
+            ensure_diffusers_keys_covered(&bare, first)?;
+        }
 
         if let Some(checkpoint) = scaled_fp8 {
             // Native dtypes all the way in: the weights stay fp8 and the
@@ -3139,6 +3260,236 @@ mod tests {
         let mut keys: Vec<String> = varmap.data().lock().unwrap().keys().cloned().collect();
         keys.sort();
         keys
+    }
+
+    /// Write a complete tiny checkpoint in the diffusers spelling, plus any
+    /// `extras` the rename tables do not cover (zero-sized stand-ins — the
+    /// coverage scan reads names, never payloads).
+    fn write_diffusers_checkpoint(dir: &Path, file: &str, extras: &[&str]) -> PathBuf {
+        let varmap = VarMap::new();
+        WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu),
+            tiny_config(),
+        )
+        .expect("tiny model materializes");
+
+        let mut tensors: HashMap<String, Tensor> = HashMap::new();
+        for (name, var) in varmap.data().lock().unwrap().iter() {
+            let renamed = original_to_diffusers(name)
+                .unwrap_or_else(|| panic!("no diffusers name for original key {name}"));
+            tensors.insert(renamed, var.as_tensor().clone());
+        }
+        for extra in extras {
+            tensors.insert(
+                (*extra).to_string(),
+                Tensor::zeros((2, 2), DType::F32, &Device::Cpu).unwrap(),
+            );
+        }
+        let path = dir.join(file);
+        candle_core::safetensors::save(&tensors, &path).unwrap();
+        path
+    }
+
+    /// A diffusers-layout checkpoint carrying tensors the rename tables do not
+    /// cover must fail closed, naming the class it found. Loading the covered
+    /// subset would build the rest of the transformer from default weights and
+    /// render — wrongly — which is the failure mode the layout check exists to
+    /// prevent.
+    #[test]
+    fn diffusers_layout_fails_closed_on_uncovered_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = tiny_config();
+
+        // The control: a plain diffusers T2V export is fully covered and must
+        // keep loading, or the scan is just a new way to refuse real files.
+        let clean = write_diffusers_checkpoint(dir.path(), "covered.safetensors", &[]);
+        WanTransformer::from_safetensors(&[clean], config.clone(), &Device::Cpu, DType::F32)
+            .expect("a fully covered diffusers export still loads");
+
+        for (file, extra, needle) in [
+            // Wan 2.1 I2V: diffusers renames the CLIP adapter's projections
+            // into the cross-attention module and hangs the image MLP off the
+            // condition-embedder stack.
+            (
+                "clip-adapter.safetensors",
+                "blocks.0.attn2.add_k_proj.weight",
+                "CLIP-vision",
+            ),
+            (
+                "image-embedder.safetensors",
+                "condition_embedder.image_embedder.ff.net.0.proj.weight",
+                "CLIP-vision",
+            ),
+            ("vace.safetensors", "vace_blocks.0.proj_out.weight", "VACE"),
+            // Anything else is named outright rather than guessed at.
+            (
+                "mystery.safetensors",
+                "blocks.0.mystery.weight",
+                "blocks.0.mystery.weight",
+            ),
+        ] {
+            let path = write_diffusers_checkpoint(dir.path(), file, &[extra]);
+            let err = match WanTransformer::from_safetensors(
+                &[path],
+                config.clone(),
+                &Device::Cpu,
+                DType::F32,
+            ) {
+                Ok(_) => panic!("{file} must not load as a partial model"),
+                Err(err) => err.to_string(),
+            };
+            assert!(err.contains(needle), "{file}: expected {needle:?} in {err}");
+        }
+    }
+
+    /// Write a *genuinely* fp8-scaled checkpoint in the diffusers spelling: the
+    /// ten block projections per layer are e4m3, each paired with the
+    /// per-tensor `<module>.scale_weight` ComfyUI writes, and the `scaled_fp8`
+    /// marker is e4m3 too. Returns the path and the key set it holds.
+    ///
+    /// The obvious shortcut — every weight F32 plus a bare marker — cannot
+    /// reproduce the failure the diffusers fp8 refusal exists for:
+    /// [`fp8::load_linear`] dispatches on the *weight's own dtype* and takes
+    /// its non-fp8 early return, so the `scale_weight` lookup that would miss
+    /// is never reached.
+    fn write_fp8_scaled_diffusers_checkpoint(
+        dir: &Path,
+        file: &str,
+    ) -> (PathBuf, std::collections::BTreeSet<String>) {
+        let device = Device::Cpu;
+        let varmap = VarMap::new();
+        WanTransformer::from_var_builder(
+            VarBuilder::from_varmap(&varmap, DType::F32, &device),
+            tiny_config(),
+        )
+        .expect("tiny model materializes");
+
+        let mut tensors: HashMap<String, Tensor> = HashMap::new();
+        let mut quantized = 0usize;
+        for (name, var) in varmap.data().lock().unwrap().iter() {
+            let renamed = original_to_diffusers(name)
+                .unwrap_or_else(|| panic!("no diffusers name for original key {name}"));
+            let tensor = var.as_tensor().clone();
+            if !is_quantized_projection(name) {
+                tensors.insert(renamed, tensor);
+                continue;
+            }
+            let peak = tensor
+                .abs()
+                .unwrap()
+                .max_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            // An all-zero init would divide by zero; scale 1.0 is still a
+            // legitimate per-tensor scale.
+            let scale = if peak > 0.0 { peak / FP8_E4M3_MAX } else { 1.0 };
+            tensors.insert(
+                renamed.clone(),
+                tensor
+                    .affine(1.0 / f64::from(scale), 0.0)
+                    .unwrap()
+                    .to_dtype(DType::F8E4M3)
+                    .unwrap(),
+            );
+            tensors.insert(
+                format!("{}.scale_weight", renamed.trim_end_matches(".weight")),
+                Tensor::from_vec(vec![scale], 1, &device).unwrap(),
+            );
+            quantized += 1;
+        }
+        assert_eq!(
+            quantized, 20,
+            "the fixture must quantize the ten projections of both blocks"
+        );
+        // 2 elements: the mode both Kijai A14B experts declare
+        // (`comfy/utils.py:1414` reads the marker's own dtype/shape).
+        tensors.insert(
+            "scaled_fp8".to_string(),
+            Tensor::zeros(2, DType::F8E4M3, &device).unwrap(),
+        );
+
+        let path = dir.join(file);
+        candle_core::safetensors::save(&tensors, &path).unwrap();
+        let keys = tensors.keys().cloned().collect();
+        (path, keys)
+    }
+
+    /// The fp8-scaled arm reads original names only: `scale_weight` is not a
+    /// module path, so the rename hook passes it through untranslated and every
+    /// per-tensor scale lookup would miss. Refuse by name instead of failing
+    /// deep inside the loader on a key the user never wrote.
+    ///
+    /// The fixture is a real fp8-scaled file, which matters: with the bail
+    /// removed it fails in `ensure_diffusers_keys_covered` naming
+    /// `blocks.0.attn1.to_k.scale_weight`, and with that removed too it reaches
+    /// `fp8::load_linear`'s own "`blocks.0.self_attn.q.scale_weight` is
+    /// missing". An all-F32 fixture behind a bare marker reaches neither —
+    /// `load_linear` dispatches on the weight's dtype and returns early.
+    #[test]
+    fn fp8_scaled_diffusers_layout_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, keys) =
+            write_fp8_scaled_diffusers_checkpoint(dir.path(), "diffusers-fp8.safetensors");
+
+        // The fixture really is on the fp8 path: e4m3 weights with per-tensor
+        // scales, not F32 weights behind a marker. `fp8::load_linear`
+        // dispatches on the weight's dtype, so only this shape reaches the
+        // `scale_weight` lookup at all.
+        assert!(keys.contains("blocks.0.attn2.to_k.weight"), "{keys:?}");
+        assert!(
+            keys.contains("blocks.0.attn2.to_k.scale_weight"),
+            "{keys:?}"
+        );
+
+        // ...and that lookup is exactly what cannot be translated. The loader
+        // builds the model under the original names, so it asks for
+        // `blocks.0.cross_attn.k.scale_weight`; `scale_weight` is a per-tensor
+        // leaf rather than a module path, so the rename hook has no mapping and
+        // passes the name through verbatim — a key this file does not hold.
+        assert!(
+            original_to_diffusers("blocks.0.cross_attn.k.scale_weight").is_none(),
+            "a translatable scale key would mean the refusal is unnecessary"
+        );
+        assert!(
+            !keys.contains("blocks.0.cross_attn.k.scale_weight"),
+            "{keys:?}"
+        );
+
+        let err = match WanTransformer::from_safetensors(
+            &[path],
+            tiny_config(),
+            &Device::Cpu,
+            DType::F32,
+        ) {
+            Ok(_) => panic!("an fp8-scaled diffusers-layout file must be refused"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("fp8-scaled"), "{err}");
+        assert!(err.contains("diffusers"), "{err}");
+    }
+
+    /// The CLIP-branch probes must stay tied to the rename tables. The
+    /// diffusers module names are derived from them rather than restated, so a
+    /// table edit can never leave the refusal matching nothing — which is
+    /// exactly how the diffusers I2V spelling slipped through.
+    #[test]
+    fn clip_vision_branch_markers_are_derived_from_the_rename_table() {
+        let markers = clip_vision_branch_markers();
+        assert!(
+            markers.iter().any(|m| m == "cross_attn.k_img"),
+            "{markers:?}"
+        );
+        assert!(
+            markers.iter().any(|m| m == "attn2.add_k_proj"),
+            "{markers:?}"
+        );
+        assert!(
+            markers
+                .iter()
+                .any(|m| m == "condition_embedder.image_embedder"),
+            "{markers:?}"
+        );
     }
 
     /// The loader must request exactly the original checkpoint layout,

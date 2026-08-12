@@ -497,6 +497,18 @@ self-attention query projection is what actually distinguishes them. A
 checkpoint matching none of the layouts is refused by name at load rather than
 constructing a transformer from default weights and rendering noise.
 
+A layout that loads is not a promise that every checkpoint in it runs. Wan 2.1
+image-to-video is refused in **either** spelling — original `cross_attn.k_img`
+or diffusers `attn2.add_k_proj` / `condition_embedder.image_embedder.*` — since
+its CLIP-vision cross-attention branch is not implemented; use `wan22-i2v-a14b`
+or `wan22-ti2v-5b` for image conditioning. A diffusers-layout file is
+additionally scanned whole and refused by name when it carries tensors the
+rename table does not cover, such as VACE control blocks (`vace_blocks.*`),
+rather than loading the covered subset. `*_fp8_e4m3fn_scaled` weights read in
+the original layout only: the per-tensor `<module>.scale_weight` is not a
+module path, so there is nothing for the rename table to translate, and a
+diffusers-keyed fp8 file is refused rather than half-loaded.
+
 ## Discovery
 
 The models in the table above install by name. Community Wan fine-tunes are
