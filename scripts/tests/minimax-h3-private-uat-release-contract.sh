@@ -311,7 +311,7 @@ require_text crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs \
   'scheduler_ledger_identity_sha256: ledger.identity_sha256().into(),' \
   "private H3 FL2VA overlap does not retain the issuing scheduler ledger identity"
 require_text crates/mold-inference/src/minimax_h3/private_server.rs \
-  'ddab00ae326d0526c1dbab02e110790fe8a5baca3f457b6dc7f34e5465932ca8' \
+  '6ddb831b38294c2920d1df7cc984bd617e61840dc1b132cd9374cf374cbbf6ce' \
   "private H3 runtime qualification omits the independently reviewed compact FL2VA candidate"
 require_text crates/mold-inference/src/minimax_h3/private_server.rs \
   'pub const fn reviewed_h3_private_runtime_available() -> bool {' \

@@ -35,6 +35,7 @@ const props = withDefaults(
     estimateRequest: GenerateRequest | null;
     estimateTarget: ApiTarget | null;
     preprocessingStatus: string | null;
+    h3RequireFirstFrame?: boolean;
     remixSource?: "original" | "current";
     /** Recent prompts for ↑/↓ history cycling. */
     history?: string[];
@@ -55,7 +56,12 @@ const emit = defineEmits<{
 // the view's `generate()` early return moves with this in lockstep.
 const promptMissing = computed(() => promptRequired(props.form) && !props.form.prompt.trim());
 const h3AuthoringError = computed(() =>
-  minimaxH3AuthoringError(props.form.family, props.form.model, props.form.h3Authoring),
+  minimaxH3AuthoringError(
+    props.form.family,
+    props.form.model,
+    props.form.h3Authoring,
+    props.h3RequireFirstFrame,
+  ),
 );
 const generateDisabled = computed(
   () =>

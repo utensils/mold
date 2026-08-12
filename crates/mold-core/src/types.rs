@@ -6986,6 +6986,31 @@ pub struct MiniMaxH3PartitionCapability {
     pub runtime_available: bool,
     pub tier: String,
     pub component_ids: Vec<String>,
+    /// Exact request envelope admitted by this reviewed runtime partition.
+    /// This is presentation authority only; private admission independently
+    /// authenticates and validates the retained qualification record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<MiniMaxH3RequestCapability>,
+}
+
+/// Exact client-visible request shape for one reviewed H3 task partition.
+///
+/// The initial compact FL2VA authority is intentionally a single quality
+/// point. Keeping every axis explicit prevents a model picker from widening a
+/// narrow runtime qualification into the family's larger theoretical range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MiniMaxH3RequestCapability {
+    pub width: u32,
+    pub height: u32,
+    pub frames: u32,
+    pub fps: u32,
+    pub steps: u32,
+    pub batch_size: u32,
+    pub output_format: String,
+    pub required_endpoint: String,
+    /// Content address of the sole generation profile clients may use for
+    /// this narrow partition.
+    pub generation_profile_sha256: String,
 }
 
 /// Hardware and implementation boundary for one private H3 capability record.
@@ -7176,6 +7201,17 @@ mod minimax_h3_capability_tests {
                 runtime_available: true,
                 tier: "Compact".into(),
                 component_ids: vec!["transformer".into()],
+                request: Some(MiniMaxH3RequestCapability {
+                    width: crate::minimax_h3::DEFAULT_WIDTH,
+                    height: crate::minimax_h3::DEFAULT_HEIGHT,
+                    frames: crate::minimax_h3::MIN_FRAMES,
+                    fps: crate::minimax_h3::FIXED_FPS,
+                    steps: crate::minimax_h3::COMFY_DEFAULT_STEPS,
+                    batch_size: 1,
+                    output_format: "mp4".into(),
+                    required_endpoint: "first".into(),
+                    generation_profile_sha256: "a".repeat(64),
+                }),
             }],
             components: vec![MiniMaxH3ComponentCapability {
                 id: "transformer".into(),
@@ -7194,6 +7230,20 @@ mod minimax_h3_capability_tests {
         assert!(value["minimax_h3"]["qualification"]["metal_supported"]
             .as_bool()
             .is_some_and(|supported| !supported));
+    }
+
+    #[test]
+    fn older_private_h3_partition_without_request_stays_deserializable() {
+        let decoded: MiniMaxH3PartitionCapability = serde_json::from_value(serde_json::json!({
+            "task": "fl2va",
+            "model": crate::minimax_h3::FL2VA_COMFY,
+            "display_name": "MiniMax H3 FL2VA",
+            "runtime_available": true,
+            "tier": "Compact",
+            "component_ids": ["transformer"]
+        }))
+        .expect("an older additive H3 partition must not reject the whole capability response");
+        assert!(decoded.request.is_none());
     }
 }
 

@@ -3039,8 +3039,30 @@ async fn generate_stream(
         (status = 200, description = "List of available models", body = Vec<ModelInfoExtended>),
     )
 )]
-async fn list_models(State(state): State<AppState>) -> Json<Vec<ModelInfoExtended>> {
-    Json(model_manager::list_models(&state).await)
+async fn list_models(
+    State(state): State<AppState>,
+    auth_state: Option<Extension<crate::auth::AuthState>>,
+) -> Json<Vec<ModelInfoExtended>> {
+    let mut models = model_manager::list_models(&state).await;
+    let api_key_auth_enabled = auth_state
+        .as_ref()
+        .is_some_and(|Extension(state)| state.is_some());
+    let private_capability = {
+        let config = state.config.read().await;
+        advertised_private_h3_capability(
+            api_key_auth_enabled,
+            &config.resolved_models_dir(),
+            &current_device_state(&state),
+        )
+    };
+    if let Some(row) = private_capability
+        .as_ref()
+        .and_then(authenticated_private_h3_model_row)
+    {
+        models.retain(|entry| entry.info.name != row.info.name);
+        models.push(row);
+    }
+    Json(models)
 }
 
 async fn generate_estimate(
@@ -4945,6 +4967,20 @@ fn advertised_private_h3_capability(
         models_root,
         device_state,
     )
+}
+
+#[cfg(feature = "h3-private-uat")]
+fn authenticated_private_h3_model_row(
+    capability: &mold_core::MiniMaxH3Capability,
+) -> Option<mold_core::ModelInfoExtended> {
+    crate::h3_private_bridge::authenticated_h3_private_model_row(capability)
+}
+
+#[cfg(not(feature = "h3-private-uat"))]
+fn authenticated_private_h3_model_row(
+    _capability: &mold_core::MiniMaxH3Capability,
+) -> Option<mold_core::ModelInfoExtended> {
+    None
 }
 
 #[cfg(not(feature = "h3-private-uat"))]

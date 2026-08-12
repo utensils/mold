@@ -1,3 +1,8 @@
+import {
+  reviewedMiniMaxH3ModelAccess,
+  type MiniMaxH3Capability,
+} from "./minimaxH3Inventory";
+
 /**
  * Additive `/api/capabilities.model_access` contract shared by every Studio
  * surface. Older servers omit it, which means the client has no advertised
@@ -15,11 +20,13 @@ export interface ModelAccessCapabilityRecord {
   model_access?: {
     restrictions?: readonly ModelAccessRestriction[] | null;
   } | null;
+  minimax_h3?: MiniMaxH3Capability | null;
 }
 
 export interface ModelAccessIdentity {
   model?: string | null | undefined;
   family?: string | null | undefined;
+  generation_profile_sha256?: string | null | undefined;
 }
 
 function normalizeIdentity(value: string): string {
@@ -62,6 +69,15 @@ export function modelAccessRestrictionFor(
   capabilities: ModelAccessCapabilityRecord | null | undefined,
   identity: ModelAccessIdentity,
 ): ModelAccessRestriction | null {
+  if (
+    reviewedMiniMaxH3ModelAccess(
+      capabilities,
+      identity.model,
+      identity.generation_profile_sha256,
+    )
+  ) {
+    return null;
+  }
   const identities = [identity.model, identity.family].filter(
     (value): value is string =>
       typeof value === "string" && value.trim().length > 0,
@@ -88,6 +104,7 @@ export function filterRestrictedModels<
     name: string;
     family?: string | null;
     runtime_available?: boolean | null;
+    generation_profile?: { profile_hash?: string | null } | null;
   },
 >(
   models: readonly T[],
@@ -99,6 +116,8 @@ export function filterRestrictedModels<
       !isModelAccessRestricted(capabilities, {
         model: model.name,
         family: model.family,
+        generation_profile_sha256:
+          model.generation_profile?.profile_hash ?? null,
       }),
   );
 }

@@ -227,6 +227,7 @@ function accessRestrictionForHost(
   return modelAccessRestrictionFor(capabilities, {
     model,
     family: entry?.family,
+    generation_profile_sha256: entry?.generation_profile?.profile_hash ?? null,
   });
 }
 

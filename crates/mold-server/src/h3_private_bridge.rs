@@ -268,7 +268,7 @@ pub(crate) fn advertised_h3_private_capability(
 ) -> Option<mold_core::MiniMaxH3Capability> {
     #[cfg(feature = "h3-private-uat")]
     {
-        if !api_key_auth_enabled {
+        if !api_key_auth_enabled || !cfg!(feature = "mp4") {
             return None;
         }
         let paths = H3PrivateUatPathSet::resolve(models_root.to_path_buf());
@@ -425,6 +425,7 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
         .iter()
         .map(|component| component.id.to_string())
         .collect();
+    let generation_profile_sha256 = reviewed_h3_private_generation_profile()?.0.profile_hash;
     Some(mold_core::MiniMaxH3Capability {
         runtime_available: true,
         qualification: mold_core::MiniMaxH3QualificationCapability {
@@ -445,6 +446,17 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
             runtime_available: true,
             tier: "Compact 40 GiB VRAM".into(),
             component_ids,
+            request: Some(mold_core::MiniMaxH3RequestCapability {
+                width: mold_core::minimax_h3::DEFAULT_WIDTH,
+                height: mold_core::minimax_h3::DEFAULT_HEIGHT,
+                frames: mold_core::minimax_h3::MIN_FRAMES,
+                fps: mold_core::minimax_h3::FIXED_FPS,
+                steps: mold_core::minimax_h3::COMFY_DEFAULT_STEPS,
+                batch_size: 1,
+                output_format: "mp4".into(),
+                required_endpoint: "first".into(),
+                generation_profile_sha256,
+            }),
         }],
         components: components
             .into_iter()
@@ -463,6 +475,189 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
                 .into(),
             })
             .collect(),
+    })
+}
+
+#[cfg(any(test, feature = "h3-private-uat"))]
+fn reviewed_h3_private_generation_profile() -> Option<(mold_core::GenerationProfileSet, u32, u64)> {
+    use mold_core::generation_profile::{
+        AspectGroup, ControlMode, FpsControl, ResolutionDomain, ResolutionPreset,
+    };
+
+    let width = mold_core::minimax_h3::DEFAULT_WIDTH;
+    let height = mold_core::minimax_h3::DEFAULT_HEIGHT;
+    let frames = mold_core::minimax_h3::MIN_FRAMES;
+    let fps = mold_core::minimax_h3::FIXED_FPS;
+    let steps = mold_core::minimax_h3::COMFY_DEFAULT_STEPS;
+    let mut profile = mold_core::resolve_generation_profile(mold_core::GenerationProfileInput {
+        model: mold_core::minimax_h3::FL2VA_COMFY,
+        family: mold_core::minimax_h3::FAMILY,
+        sub_family: None,
+        default_width: width,
+        default_height: height,
+        default_steps: steps,
+        default_guidance: 0.0,
+        default_frames: Some(frames),
+        default_fps: Some(fps),
+        default_negative_prompt: None,
+        source_image: Some(mold_core::SourceImageCapability::Required),
+        supports_sequence: false,
+        supports_extend: false,
+        supports_audio: true,
+    });
+    let recipe = profile.recipes.first_mut()?;
+    let pixels = u64::from(width).checked_mul(u64::from(height))?;
+    let aspect = f64::from(width) / f64::from(height);
+    recipe.resolution.domain = ResolutionDomain::Buckets;
+    recipe.resolution.min_width = width;
+    recipe.resolution.min_height = height;
+    recipe.resolution.max_pixels = pixels;
+    recipe.resolution.max_axis_pixels = Some(width.max(height));
+    recipe.resolution.min_aspect_ratio = Some(aspect);
+    recipe.resolution.max_aspect_ratio = Some(aspect);
+    recipe.resolution.aspect_groups = vec![AspectGroup {
+        id: "reviewed-landscape".into(),
+        label: "Reviewed landscape".into(),
+        presets: vec![ResolutionPreset {
+            id: format!("{width}x{height}"),
+            width,
+            height,
+            tier: "reviewed".into(),
+        }],
+    }];
+    recipe.steps.default = steps;
+    recipe.steps.min = steps;
+    recipe.steps.max = steps;
+    recipe.steps.step = 1;
+    recipe.steps.recommended = vec![steps];
+    recipe.steps.mode = ControlMode::Fixed;
+    let temporal = recipe.temporal.as_mut()?;
+    temporal.frames.default = frames;
+    temporal.frames.min = frames;
+    temporal.frames.max = frames;
+    temporal.frames.step = 1;
+    temporal.frames.recommended = vec![frames];
+    temporal.frames.mode = ControlMode::Fixed;
+    temporal.fps = FpsControl::Fixed { value: fps };
+    temporal.max_duration_seconds = Some(frames.div_ceil(fps));
+    recipe.defaults.width = width;
+    recipe.defaults.height = height;
+    recipe.defaults.steps = steps;
+    recipe.defaults.frames = Some(frames);
+    recipe.defaults.fps = Some(fps);
+    recipe.capabilities.source_image = Some(mold_core::SourceImageCapability::Required);
+    let alignment = recipe.resolution.alignment;
+    mold_core::qualify_generation_profile_delivery(
+        &mut profile,
+        mold_core::GenerationDeliveryCapabilities::new(true, cfg!(feature = "webp")),
+    );
+    (profile.recipes.len() == 1).then_some((profile, alignment, pixels))
+}
+
+/// Convert the authenticated presentation graph into the sole private model
+/// row clients may submit. Hidden manifests remain absent from ordinary
+/// inventory; a row exists only when every exact component is already landed
+/// and the reviewed partition carries the one admitted request envelope.
+#[cfg(any(test, feature = "h3-private-uat"))]
+pub(crate) fn authenticated_h3_private_model_row(
+    capability: &mold_core::MiniMaxH3Capability,
+) -> Option<mold_core::ModelInfoExtended> {
+    if !capability.runtime_available || capability.partitions.len() != 1 {
+        return None;
+    }
+    let partition = capability.partitions.first()?;
+    let request = partition.request.as_ref()?;
+    if partition.task != "fl2va"
+        || partition.model != mold_core::minimax_h3::FL2VA_COMFY
+        || !partition.runtime_available
+        || request.width != mold_core::minimax_h3::DEFAULT_WIDTH
+        || request.height != mold_core::minimax_h3::DEFAULT_HEIGHT
+        || request.frames != mold_core::minimax_h3::MIN_FRAMES
+        || request.fps != mold_core::minimax_h3::FIXED_FPS
+        || request.steps != mold_core::minimax_h3::COMFY_DEFAULT_STEPS
+        || request.batch_size != 1
+        || request.output_format != "mp4"
+        || request.required_endpoint != "first"
+        || partition.component_ids.len() != capability.components.len()
+    {
+        return None;
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut disk_usage_bytes = 0_u64;
+    for component_id in &partition.component_ids {
+        if !seen.insert(component_id.as_str()) {
+            return None;
+        }
+        let component = capability
+            .components
+            .iter()
+            .find(|component| component.id == *component_id)?;
+        if component.state != "installed" {
+            return None;
+        }
+        disk_usage_bytes = disk_usage_bytes.checked_add(component.size_bytes)?;
+    }
+    if disk_usage_bytes == 0 {
+        return None;
+    }
+
+    let (generation_profile, alignment, pixels) = reviewed_h3_private_generation_profile()?;
+    if request.generation_profile_sha256 != generation_profile.profile_hash {
+        return None;
+    }
+
+    Some(mold_core::ModelInfoExtended {
+        info: mold_core::ModelInfo {
+            name: partition.model.clone(),
+            family: mold_core::minimax_h3::FAMILY.into(),
+            size_gb: disk_usage_bytes as f32 / 1_000_000_000.0,
+            is_loaded: false,
+            last_used: None,
+            // This private row is not a public download recipe.
+            hf_repo: String::new(),
+        },
+        defaults: mold_core::ModelDefaults {
+            default_steps: request.steps,
+            default_guidance: 0.0,
+            default_width: request.width,
+            default_height: request.height,
+            description: "Authenticated compact FL2VA runtime with synchronized audio; exact reviewed first-frame quality envelope.".into(),
+            default_frames: Some(request.frames),
+            default_fps: Some(request.fps),
+            min_frames: Some(request.frames),
+            max_frames: Some(request.frames),
+            max_runtime_seconds: Some(request.frames.div_ceil(request.fps)),
+            max_frames_absolute: Some(request.frames),
+            frame_step: Some(1),
+            frame_offset: Some(0),
+            max_pixels: Some(pixels),
+            max_axis_pixels: Some(request.width.max(request.height)),
+            default_negative_prompt: None,
+            recommended_dimensions: vec![mold_core::RecommendedDimensions {
+                width: request.width,
+                height: request.height,
+            }],
+            dimension_alignment: Some(alignment),
+        },
+        downloaded: true,
+        disk_usage_bytes: Some(disk_usage_bytes),
+        remaining_download_bytes: Some(0),
+        display_name: Some(partition.display_name.clone()),
+        kind: Some("checkpoint".into()),
+        modality: Some("video".into()),
+        nsfw: None,
+        supports_audio: Some(true),
+        supports_extend: Some(false),
+        extend_default_overlap_frames: None,
+        supports_sequence: Some(false),
+        guidance_capabilities: Some(mold_core::GuidanceCapabilities {
+            adjustable: false,
+            supports_negative_prompt: false,
+            fixed_scale: Some(0.0),
+        }),
+        source_image: Some(mold_core::SourceImageCapability::Required),
+        generation_profile: Some(generation_profile),
     })
 }
 
@@ -1257,6 +1452,76 @@ mod tests {
             capability.partitions[0].component_ids.len(),
             capability.components.len()
         );
+        assert_eq!(
+            capability.partitions[0].request,
+            Some(mold_core::MiniMaxH3RequestCapability {
+                width: mold_core::minimax_h3::DEFAULT_WIDTH,
+                height: mold_core::minimax_h3::DEFAULT_HEIGHT,
+                frames: mold_core::minimax_h3::MIN_FRAMES,
+                fps: mold_core::minimax_h3::FIXED_FPS,
+                steps: mold_core::minimax_h3::COMFY_DEFAULT_STEPS,
+                batch_size: 1,
+                output_format: "mp4".into(),
+                required_endpoint: "first".into(),
+                generation_profile_sha256: capability.partitions[0]
+                    .request
+                    .as_ref()
+                    .unwrap()
+                    .generation_profile_sha256
+                    .clone(),
+            })
+        );
+    }
+
+    #[test]
+    fn authenticated_model_row_is_exactly_the_reviewed_quality_envelope() {
+        let (_root, models) = capability_fixture();
+        let capability = super::build_fl2va_capability(&models).unwrap();
+        let row = super::authenticated_h3_private_model_row(&capability)
+            .expect("complete authenticated partition must produce one row");
+
+        assert_eq!(row.info.name, mold_core::minimax_h3::FL2VA_COMFY);
+        assert_eq!(row.info.family, mold_core::minimax_h3::FAMILY);
+        assert!(row.downloaded);
+        assert_eq!(row.info.hf_repo, "");
+        assert_eq!(row.defaults.default_width, 1344);
+        assert_eq!(row.defaults.default_height, 768);
+        assert_eq!(row.defaults.default_frames, Some(124));
+        assert_eq!(row.defaults.min_frames, Some(124));
+        assert_eq!(row.defaults.max_frames, Some(124));
+        assert_eq!(row.defaults.default_steps, 21);
+        assert_eq!(
+            row.source_image,
+            Some(mold_core::SourceImageCapability::Required)
+        );
+        let profile = row.generation_profile.unwrap();
+        assert_eq!(
+            capability.partitions[0]
+                .request
+                .as_ref()
+                .unwrap()
+                .generation_profile_sha256,
+            profile.profile_hash
+        );
+        let recipe = profile.default_recipe().unwrap();
+        assert_eq!(
+            recipe.resolution.domain,
+            mold_core::generation_profile::ResolutionDomain::Buckets
+        );
+        assert_eq!(recipe.resolution.aspect_groups[0].presets.len(), 1);
+        assert_eq!(recipe.steps.min, 21);
+        assert_eq!(recipe.steps.max, 21);
+        assert_eq!(
+            recipe.steps.mode,
+            mold_core::generation_profile::ControlMode::Fixed
+        );
+        let temporal = recipe.temporal.as_ref().unwrap();
+        assert_eq!(temporal.frames.min, 124);
+        assert_eq!(temporal.frames.max, 124);
+        assert_eq!(
+            temporal.frames.mode,
+            mold_core::generation_profile::ControlMode::Fixed
+        );
     }
 
     #[test]
@@ -1281,6 +1546,22 @@ mod tests {
                 .state,
             "missing"
         );
+        assert!(super::authenticated_h3_private_model_row(&capability).is_none());
+    }
+
+    #[test]
+    fn model_row_rejects_any_widened_partition_axis() {
+        let (_root, models) = capability_fixture();
+        let capability = super::build_fl2va_capability(&models).unwrap();
+        for mutate in [
+            |value: &mut mold_core::MiniMaxH3RequestCapability| value.width += 64,
+            |value: &mut mold_core::MiniMaxH3RequestCapability| value.frames += 17,
+            |value: &mut mold_core::MiniMaxH3RequestCapability| value.steps += 1,
+        ] {
+            let mut widened = capability.clone();
+            mutate(widened.partitions[0].request.as_mut().unwrap());
+            assert!(super::authenticated_h3_private_model_row(&widened).is_none());
+        }
     }
 
     #[test]

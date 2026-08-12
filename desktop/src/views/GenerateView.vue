@@ -2371,8 +2371,13 @@ function sourcePreprocessingNeedsRoute(draft: ReturnType<typeof cloneGenerateFor
 // that quietly does nothing is exactly the dead end the prepared-expansion
 // invariant forbids.
 const promptMissing = computed(() => promptRequired(form) && !form.prompt.trim());
+const h3RequireFirstFrame = computed(
+  () =>
+    effectiveGenerationRecipe(selectedEntry.value, form.pipeline)?.capabilities.source_image ===
+    "required",
+);
 const h3AuthoringError = computed(() =>
-  minimaxH3AuthoringError(form.family, form.model, form.h3Authoring),
+  minimaxH3AuthoringError(form.family, form.model, form.h3Authoring, h3RequireFirstFrame.value),
 );
 
 const emptyCanvasGuidance = computed(() =>
@@ -3512,6 +3517,7 @@ onBeforeUnmount(() => {
             :estimate-request="estimateRequest"
             :estimate-target="estimateTarget"
             :preprocessing-status="preprocessingStatus"
+            :h3-require-first-frame="h3RequireFirstFrame"
             :history="promptHistory"
             :remix-source="remixSource"
             @generate="generate"

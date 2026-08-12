@@ -2280,6 +2280,8 @@ function validateSubmit(): boolean {
     currentFamily.value,
     form.state.value.model,
     form.state.value.h3Authoring,
+    effectiveGenerationRecipe(currentModel.value, form.state.value.pipeline)
+      ?.capabilities.source_image === "required",
   );
   if (h3Error) {
     composerError.value = h3Error;

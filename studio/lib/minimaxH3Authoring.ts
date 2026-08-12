@@ -81,6 +81,7 @@ export interface MinimaxH3ModelIdentity {
    * remains compatible with pre-field servers, whose model list itself is a
    * runnable-model boundary. */
   runtime_available?: boolean | null;
+  generation_profile?: { profile_hash?: string | null } | null;
 }
 
 function normalize(value: string): string {
@@ -303,6 +304,7 @@ export function minimaxH3AuthoringCapabilities(
   const restricted = isModelAccessRestricted(serverCapabilities, {
     model: model.name,
     family: model.family,
+    generation_profile_sha256: model.generation_profile?.profile_hash ?? null,
   });
   return {
     task,
@@ -509,6 +511,7 @@ export function minimaxH3AuthoringError(
   family: string | null | undefined,
   model: string,
   state: MinimaxH3AuthoringState | null | undefined,
+  requireFirstFrame = false,
 ): string | null {
   if (!isMinimaxH3Identity(family, model)) return null;
   const task = minimaxH3TaskForModel(model);
@@ -516,6 +519,12 @@ export function minimaxH3AuthoringError(
     return "MiniMax H3 requires an explicit FL2VA or Ref2VA model partition.";
   const value = state ?? emptyMinimaxH3AuthoringState();
   if (task === "fl2va") {
+    if (requireFirstFrame && !value.firstFrame) {
+      return "This reviewed MiniMax H3 runtime requires a first frame.";
+    }
+    if (requireFirstFrame && value.lastFrame) {
+      return "This reviewed MiniMax H3 runtime accepts only one first-frame endpoint.";
+    }
     if (value.firstFrame && !value.firstFrame.data) {
       return `Reattach first frame ${value.firstFrame.filename} before generating.`;
     }

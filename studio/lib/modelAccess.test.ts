@@ -5,6 +5,10 @@ import {
   modelAccessRestrictionFor,
   type ModelAccessCapabilityRecord,
 } from "./modelAccess";
+import {
+  AUTHENTICATED_MINIMAX_H3_PROFILE_SHA256,
+  authenticatedMiniMaxH3Capabilities,
+} from "./minimaxH3Inventory.testFixtures";
 
 const capabilities: ModelAccessCapabilityRecord = {
   model_access: {
@@ -66,5 +70,51 @@ describe("model access policy", () => {
       },
     ];
     expect(filterRestrictedModels(models, undefined)).toEqual([models[0]]);
+  });
+
+  it("opens only the exact fully authenticated private FL2VA row", () => {
+    const exact = {
+      name: "minimax-h3-fl2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      generation_profile: {
+        profile_hash: AUTHENTICATED_MINIMAX_H3_PROFILE_SHA256,
+      },
+    };
+    const unrelated = { name: "hf:opaque", family: "minimax-h3" };
+    expect(
+      filterRestrictedModels(
+        [exact, unrelated],
+        authenticatedMiniMaxH3Capabilities(),
+      ),
+    ).toEqual([exact]);
+  });
+
+  it("keeps the family closed when request or component authority is incomplete", () => {
+    const model = {
+      name: "minimax-h3-fl2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      generation_profile: {
+        profile_hash: AUTHENTICATED_MINIMAX_H3_PROFILE_SHA256,
+      },
+    };
+    const missingRequest = authenticatedMiniMaxH3Capabilities();
+    delete missingRequest.minimax_h3?.partitions[0]!.request;
+    expect(filterRestrictedModels([model], missingRequest)).toEqual([]);
+
+    const missingComponent = authenticatedMiniMaxH3Capabilities();
+    missingComponent.minimax_h3!.components[0]!.state = "missing";
+    expect(filterRestrictedModels([model], missingComponent)).toEqual([]);
+
+    const widenedEnvelope = authenticatedMiniMaxH3Capabilities();
+    widenedEnvelope.minimax_h3!.partitions[0]!.request!.frames = 141;
+    expect(filterRestrictedModels([model], widenedEnvelope)).toEqual([]);
+
+    const mismatchedProfile = authenticatedMiniMaxH3Capabilities();
+    expect(
+      filterRestrictedModels(
+        [{ ...model, generation_profile: { profile_hash: "b".repeat(64) } }],
+        mismatchedProfile,
+      ),
+    ).toEqual([]);
   });
 });

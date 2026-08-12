@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import type { ModelEntry } from "../lib/api/types";
+import type { ModelEntry, ServerCapabilities } from "../lib/api/types";
+import {
+  AUTHENTICATED_MINIMAX_H3_PROFILE_SHA256,
+  authenticatedMiniMaxH3Capabilities,
+} from "@studio/lib/minimaxH3Inventory.testFixtures";
 
 vi.mock("../lib/ipc", () => ({
   inTauri: () => false,
@@ -160,6 +164,32 @@ describe("hostModels store", () => {
     expect(store.modelsOn("local").map((entry) => entry.name)).toEqual(["flux-dev:q8"]);
     expect(store.installedOn("local").map((entry) => entry.name)).toEqual(["flux-dev:q8"]);
     expect(store.hostsFor("cv:123")).toEqual([]);
+  });
+
+  it("keeps and routes the exact authenticated private FL2VA row", () => {
+    const h3 = "minimax-h3-fl2va:comfy-pruned-int8";
+    const hosts = useHostsStore();
+    hosts.capabilities.local = {
+      gallery: { can_delete: true },
+      ...authenticatedMiniMaxH3Capabilities(),
+    } as ServerCapabilities;
+    const store = useHostModelsStore();
+    store.byHost.local = {
+      entries: [
+        model(h3, {
+          family: "minimax-h3",
+          generation_profile: {
+            profile_hash: AUTHENTICATED_MINIMAX_H3_PROFILE_SHA256,
+          } as never,
+        }),
+      ],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+
+    expect(store.modelsOn("local").map((entry) => entry.name)).toEqual([h3]);
+    expect(store.installedOn("local").map((entry) => entry.name)).toEqual([h3]);
+    expect(store.hostsFor(h3)).toEqual(["local"]);
   });
 
   it("conservatively fills missing presentation metadata from duplicate host rows", () => {

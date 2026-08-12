@@ -730,7 +730,13 @@ const caps = computed(() =>
 );
 const h3Family = computed(() => isMinimaxH3Identity(form.family, form.model));
 const h3AuthoringError = computed(() =>
-  minimaxH3AuthoringError(form.family, form.model, form.h3Authoring),
+  minimaxH3AuthoringError(
+    form.family,
+    form.model,
+    form.h3Authoring,
+    effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline)?.capabilities
+      .source_image === "required",
+  ),
 );
 const effectiveBatchSize = computed(() =>
   caps.value.forcesBatchSizeOne ||
@@ -934,6 +940,14 @@ const selectedModelAvailable = computed(
 const selectedGenerationModel = computed(
   () => generationModels.value.find((model) => model.name === form.model) ?? null,
 );
+
+function generationProfileHashForHost(hostId: string, model: string): string | null {
+  if (modelsHostId.value !== hostId) return null;
+  return (
+    generationModels.value.find((candidate) => candidate.name === model)?.generation_profile
+      ?.profile_hash ?? null
+  );
+}
 
 let previousStillSource = "";
 let previousStillResolution: SourceResolutionResult | null = null;
@@ -1910,6 +1924,7 @@ async function submitMobileSequence(): Promise<void> {
     ? modelAccessRestrictionFor(serverCapabilities[host.id], {
         model: form.model,
         family: form.family,
+        generation_profile_sha256: generationProfileHashForHost(host.id, form.model),
       })
     : null;
   if (restriction) {
@@ -3258,6 +3273,7 @@ async function generate(): Promise<void> {
     ? modelAccessRestrictionFor(serverCapabilities[route.hostId], {
         model: form.model,
         family: form.family,
+        generation_profile_sha256: generationProfileHashForHost(route.hostId, form.model),
       })
     : null;
   if (restriction) {
