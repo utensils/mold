@@ -9,6 +9,7 @@ import {
   familySupportsExtend,
   resolveExtendOverlapFrames,
   serverExtendOverlapDefault,
+  submitsExtend,
 } from "./extend";
 import { WAN_HANDOFF_DUPLICATED_FRAMES } from "./chainRouting";
 import { sequenceFrameStep } from "./sequence";
@@ -263,5 +264,41 @@ describe("extendNewFrames", () => {
 
   it("never reports negative growth", () => {
     expect(extendNewFrames(9, 17)).toBe(0);
+  });
+});
+
+/**
+ * The browser mirror of `GenerateRequest::is_extend()` ANDed with the family
+ * gate both request builders apply. It is what tells the source-image contract
+ * that a continuation carries its own first frames (#783), so it has to be
+ * exactly as true — and as false — as the wire.
+ */
+describe("submitsExtend", () => {
+  it("reads either continuation field on a capable family", () => {
+    expect(
+      submitsExtend({ family: "wan", extendVideo: { base64: "CLIP" } }),
+    ).toBe(true);
+    expect(
+      submitsExtend({ family: "ltx2", extendVideoPath: "/srv/clip.mp4" }),
+    ).toBe(true);
+  });
+
+  it("is false with no clip staged", () => {
+    expect(submitsExtend({ family: "wan" })).toBe(false);
+    expect(submitsExtend({ family: "wan", extendVideoPath: "   " })).toBe(
+      false,
+    );
+    expect(submitsExtend({ family: "wan", extendVideo: null })).toBe(false);
+  });
+
+  it("is false on a family whose builder drops the fields", () => {
+    // A stale staged clip on flux or ltx-video never reaches the wire, so it
+    // must not satisfy a source-image requirement either.
+    expect(
+      submitsExtend({ family: "ltx-video", extendVideo: { base64: "CLIP" } }),
+    ).toBe(false);
+    expect(
+      submitsExtend({ family: null, extendVideoPath: "/srv/clip.mp4" }),
+    ).toBe(false);
   });
 });

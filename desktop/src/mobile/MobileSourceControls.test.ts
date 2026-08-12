@@ -115,6 +115,37 @@ describe("MobileSourceControls", () => {
     expect(wrapper.emitted("validity-change")?.at(-1)).toEqual([true]);
   });
 
+  // #783: a continuation supplies its own first frames from the tail of the
+  // clip it continues, exactly as admission reads it through
+  // `mold_core::validation::request_carries_source_frames`. Without that, the
+  // Continue-a-video control iPhone now offers for a Wan I2V checkpoint kept
+  // Develop disabled with "attach a source image".
+  it("accepts a Wan I2V continuation as its own source frames", async () => {
+    const form = formFor("wan");
+    form.sourceImageCapability = "required";
+    const wrapper = mount(MobileSourceControls, {
+      props: { form },
+      global: { stubs: { MobileImagePickerSheet: true } },
+    });
+
+    expect(wrapper.emitted("validity-change")?.at(-1)).toEqual([false]);
+
+    form.extendVideo = { filename: "clip.mp4", base64: "Q0xJUA==" };
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-source-conditioning-error']").exists()).toBe(false);
+    expect(wrapper.emitted("validity-change")?.at(-1)).toEqual([true]);
+
+    // Removing the clip restores the requirement — this is not a permanent
+    // opt-out of the contract.
+    form.extendVideo = null;
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-source-conditioning-error']").text()).toContain(
+      "image-to-video only",
+    );
+    expect(wrapper.emitted("validity-change")?.at(-1)).toEqual([false]);
+  });
+
   it("offers an optional end frame on wan and refuses an end-frame-only draft", async () => {
     const form = formFor("wan");
     form.sourceImageCapability = "optional";

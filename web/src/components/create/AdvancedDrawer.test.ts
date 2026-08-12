@@ -939,6 +939,18 @@ describe("AdvancedDrawer source-image contract", () => {
     );
   });
 
+  // #783: the inline notice has to read a continuation the way submit and
+  // admission do (`request_carries_source_frames`), or the well contradicts a
+  // Generate button that accepts the draft.
+  it("clears the inline message for a continuation with no attached image", () => {
+    const wrapper = wan("required", {
+      extendVideo: { kind: "upload", filename: "clip.mp4", base64: "Q0xJUA==" },
+    });
+    expect(
+      wrapper.find("[data-test='source-conditioning-error']").exists(),
+    ).toBe(false);
+  });
+
   it("clears the inline message once the opening frame is attached", () => {
     const wrapper = wan("required", {
       imageAttachments: [

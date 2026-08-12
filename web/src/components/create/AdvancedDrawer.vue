@@ -25,7 +25,10 @@ import PlacementPanel from "../PlacementPanel.vue";
 import ExtendVideoControls from "./advanced/ExtendVideoControls.vue";
 import Ltx2VideoControls from "./advanced/Ltx2VideoControls.vue";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
-import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
+import {
+  DEFAULT_EXTEND_OVERLAP_FRAMES,
+  submitsExtend,
+} from "@studio/lib/extend";
 import UpscaleSection from "./advanced/UpscaleSection.vue";
 import type {
   DevicePlacement,
@@ -327,13 +330,20 @@ const hasEndFrame = computed(
   () => caps.value.supportsEndFrame && props.modelValue.endFrame != null,
 );
 /** Why the attached conditioning would be refused, in the server's own order.
- * H3 keeps its own authoring validator, which names its boundaries precisely. */
+ * H3 keeps its own authoring validator, which names its boundaries precisely.
+ * A continuation carries its own first frames (#783), so the well's notice has
+ * to read it the way submit and admission do or the two disagree. */
 const sourceConditioningError = computed(() =>
   h3Family.value
     ? null
     : sourceImageValidationError({
         capability: caps.value.sourceImageCapability,
         hasSourceImage: hasSource.value,
+        isExtend: submitsExtend({
+          family: props.family,
+          extendVideo: props.modelValue.extendVideo,
+          extendVideoPath: props.modelValue.extendVideoPath,
+        }),
         hasEndFrame: hasEndFrame.value,
         frames: caps.value.supportsVideo ? props.modelValue.frames : null,
         model: props.modelValue.model,

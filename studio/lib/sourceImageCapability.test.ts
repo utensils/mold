@@ -218,6 +218,63 @@ describe("sourceImageValidationError", () => {
     ).toBeNull();
   });
 
+  // #783: a continuation supplies its own first frames from the tail of the
+  // clip it continues, which is exactly why the server counts it as carrying
+  // source — `mold_core::validation::request_carries_source_frames`.
+  it("satisfies a required-source checkpoint from the clip being continued", () => {
+    expect(
+      sourceImageValidationError({
+        capability: "required",
+        hasSourceImage: false,
+        isExtend: true,
+        frames: 49,
+        model: "wan22-i2v-a14b:q8",
+      }),
+    ).toBeNull();
+  });
+
+  it("still blocks an ordinary image-to-video render with no image", () => {
+    expect(
+      sourceImageValidationError({
+        capability: "required",
+        hasSourceImage: false,
+        isExtend: false,
+        frames: 49,
+        model: "wan22-i2v-a14b:q8",
+      }),
+    ).toMatch(/image-to-video only/);
+    // Absent reads as "not a continuation", the pre-#783 meaning.
+    expect(
+      sourceImageValidationError({
+        capability: "required",
+        hasSourceImage: false,
+      }),
+    ).toMatch(/image-to-video only/);
+  });
+
+  it("refuses a continuation on a text-to-video-only checkpoint", () => {
+    // The server rejects it at admission with the same reasoning; naming it
+    // here keeps the surface from offering a guaranteed 422. The wording is
+    // the continuation's, not "remove the image" — it has no image.
+    expect(
+      sourceImageValidationError({
+        capability: "unsupported",
+        hasSourceImage: false,
+        isExtend: true,
+        frames: 49,
+        model: "wan22-t2v-a14b:q8",
+      }),
+    ).toMatch(/text-to-video only and cannot continue/);
+    // An ordinary text-to-video render is untouched.
+    expect(
+      sourceImageValidationError({
+        capability: "unsupported",
+        hasSourceImage: false,
+        isExtend: false,
+      }),
+    ).toBeNull();
+  });
+
   it("enforces TI2V's latent-endpoint floor of nine frames", () => {
     // TI2V pins endpoints in latent space (4x temporal stride): a 5-frame
     // pixel clip is two latent frames, both anchored. The server rejects

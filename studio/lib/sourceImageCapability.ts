@@ -160,6 +160,24 @@ export interface SourceImageValidationInput {
   capability: SourceImageCapability;
   /** Whether the source-image well holds an image. */
   hasSourceImage: boolean;
+  /**
+   * Whether the request will go out as a continuation (#783).
+   *
+   * An extend carries its own first frames in the tail of the clip it
+   * continues, which is exactly why the server counts it as carrying source:
+   * `mold_core::validation::request_carries_source_frames` ORs `is_extend()`
+   * in beside `source_image` and `keyframes`, and admission's
+   * `enforce_source_image_capability` feeds that whole predicate to
+   * `source_image_contract_violation`. Counting only the image left every Wan
+   * I2V continuation refused for missing the very contract that makes the
+   * checkpoint extend-capable.
+   *
+   * Absent reads as "not a continuation" — the pre-#783 meaning — so an
+   * ordinary render is unaffected. Callers must pass the same predicate their
+   * request builder applies, family gate included: a staged clip that the
+   * builder drops carries nothing.
+   */
+  isExtend?: boolean;
   /** Whether the End frame well holds an image. */
   hasEndFrame?: boolean;
   /** The clip length the request will carry. */
@@ -194,10 +212,24 @@ function isWanTi2vModel(model: string | null | undefined): boolean {
 export function sourceImageValidationError(
   input: SourceImageValidationInput,
 ): string | null {
-  if (input.capability === "unsupported" && input.hasSourceImage) {
-    return "This checkpoint is text-to-video only and does not accept a source image. Remove the image, or pick an image-to-video checkpoint.";
+  // The client mirror of admission's `has_source` (#783): the clip a
+  // continuation carries counts, so a Required checkpoint is satisfied by it
+  // and an Unsupported one is refused for it. The two arms keep separate
+  // wording because "remove the image" is nonsense advice for a continuation
+  // that has none.
+  if (input.capability === "unsupported") {
+    if (input.hasSourceImage) {
+      return "This checkpoint is text-to-video only and does not accept a source image. Remove the image, or pick an image-to-video checkpoint.";
+    }
+    if (input.isExtend) {
+      return "This checkpoint is text-to-video only and cannot continue an existing clip — a continuation is seeded with the source clip's final frame. Pick an image-to-video checkpoint.";
+    }
   }
-  if (input.capability === "required" && !input.hasSourceImage) {
+  if (
+    input.capability === "required" &&
+    !input.hasSourceImage &&
+    !input.isExtend
+  ) {
     return "This checkpoint is image-to-video only. Attach a source image to use as the first frame.";
   }
   if (!input.hasEndFrame) return null;

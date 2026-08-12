@@ -10,6 +10,7 @@ import {
 import { guidanceOverridesError } from "@studio/lib/guidanceOverrides";
 import { isMinimaxH3Family } from "@studio/lib/minimaxH3Authoring";
 import { sourceImageValidationError } from "@studio/lib/sourceImageCapability";
+import { submitsExtend } from "@studio/lib/extend";
 import { wanRecipeError } from "@studio/lib/wanRecipe";
 import { minimaxH3TaskForModel } from "@studio/lib/minimaxH3Authoring";
 
@@ -173,6 +174,14 @@ export function cameraControlValidationError(
  * The per-model source-image contract (#772) plus wan's first/last-frame
  * pairing (#779). H3 is excluded: its boundary images have their own
  * authoring validator, which names the missing one precisely.
+ *
+ * A continuation counts as carrying source (#783), the same reading admission
+ * takes through `mold_core::validation::request_carries_source_frames` — its
+ * first frames come from the tail of the clip being continued. Without it the
+ * Continue-a-video control a Wan I2V checkpoint now offers would be
+ * unsubmittable, refused for the very contract that makes the checkpoint
+ * extend-capable. `submitsExtend` applies the family gate `buildRequest`
+ * applies, so a staged clip the wire drops satisfies nothing.
  */
 export function sourceConditioningValidationError(form: GenerateForm): string | null {
   if (isMinimaxH3Family(form.family)) return null;
@@ -190,6 +199,10 @@ export function sourceConditioningValidationError(form: GenerateForm): string | 
   return sourceImageValidationError({
     capability: caps.sourceImageCapability,
     hasSourceImage,
+    isExtend: submitsExtend({
+      family: form.family,
+      extendVideo: form.extendVideo,
+    }),
     hasEndFrame: caps.supportsEndFrame && Boolean(form.endFrame),
     frames: caps.supportsVideo ? form.frames : null,
     model: form.model,

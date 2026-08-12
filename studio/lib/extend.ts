@@ -142,6 +142,31 @@ export function extendOverlapOptions(
   return options;
 }
 
+/**
+ * Whether the composer will actually submit a continuation.
+ *
+ * The browser mirror of `GenerateRequest::is_extend()` — either continuation
+ * field present — ANDed with the extend-capable family gate both request
+ * builders already apply before spreading those fields onto the wire. Both
+ * halves matter: `is_extend()` is what
+ * `mold_core::validation::request_carries_source_frames` reads, and a staged
+ * clip on a family that cannot continue is dropped by the builder, so it must
+ * not be allowed to satisfy the source-image contract either.
+ *
+ * One derivation, three surfaces: web reads `extendVideo` + `extendVideoPath`,
+ * desktop and iPhone hold only the staged clip.
+ */
+export function submitsExtend(input: {
+  family?: string | null;
+  extendVideo?: unknown;
+  extendVideoPath?: string | null;
+}): boolean {
+  if (!familySupportsExtend(input.family)) return false;
+  return (
+    Boolean(input.extendVideo) || Boolean(input.extendVideoPath?.trim().length)
+  );
+}
+
 export type ExtendValidationInput = {
   overlapFrames: number | null | undefined;
   frames: number | null | undefined;

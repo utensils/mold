@@ -171,7 +171,11 @@ import {
   type FeasibilityResult,
 } from "../composables/useHostRouting";
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
-import { canOfferExtend, serverExtendOverlapDefault } from "@studio/lib/extend";
+import {
+  canOfferExtend,
+  serverExtendOverlapDefault,
+  submitsExtend,
+} from "@studio/lib/extend";
 import { promptOptional } from "@studio/lib/promptRequirement";
 import {
   MINIMAX_H3_PROMPT_PLACEHOLDER,
@@ -2315,7 +2319,9 @@ function validateSubmit(): boolean {
   // The per-model source-image contract (#772) plus wan's first/last-frame
   // pairing (#779), in the same order admission checks them. H3 is excluded:
   // its boundary images have their own authoring validator above, which names
-  // the missing one precisely.
+  // the missing one precisely. A continuation carries its own first frames in
+  // the tail of the clip it continues, so it satisfies the contract exactly as
+  // admission's `request_carries_source_frames` reads it (#783).
   const conditioningError = isMinimaxH3Identity(
     currentFamily.value,
     form.state.value.model,
@@ -2324,6 +2330,11 @@ function validateSubmit(): boolean {
     : sourceImageValidationError({
         capability: capabilities.value.sourceImageCapability,
         hasSourceImage: form.state.value.imageAttachments.length > 0,
+        isExtend: submitsExtend({
+          family: currentFamily.value,
+          extendVideo: form.state.value.extendVideo,
+          extendVideoPath: form.state.value.extendVideoPath,
+        }),
         hasEndFrame:
           capabilities.value.supportsEndFrame &&
           form.state.value.endFrame != null,
