@@ -141,7 +141,10 @@ pub enum BackgroundEvent {
     },
     HostCapabilitiesUpdate {
         host_id: String,
-        capabilities: Option<mold_core::ServerCapabilities>,
+        // Boxed like the device payload above: `ServerCapabilities` grew past
+        // the point where inlining it set the size of every variant in this
+        // enum, which is sent for every poll of every host.
+        capabilities: Option<Box<mold_core::ServerCapabilities>>,
     },
     /// Per-host queue snapshot for the selected Machines row.
     HostQueueUpdate {
@@ -2187,7 +2190,7 @@ impl App {
                     });
                     let _ = tx.send(BackgroundEvent::HostCapabilitiesUpdate {
                         host_id: crate::hosts::LOCAL_HOST_ID.to_string(),
-                        capabilities: client.server_capabilities().await.ok(),
+                        capabilities: client.server_capabilities().await.ok().map(Box::new),
                     });
                 }
                 Err(_) => {
@@ -7880,7 +7883,8 @@ impl App {
                     host_id,
                     capabilities,
                 } => {
-                    self.machines.apply_capabilities(host_id, capabilities);
+                    self.machines
+                        .apply_capabilities(host_id, capabilities.map(|boxed| *boxed));
                 }
                 BackgroundEvent::HostQueueUpdate { host_id, queue } => {
                     self.machines.apply_queue(host_id, queue);

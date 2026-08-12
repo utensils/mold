@@ -5681,19 +5681,35 @@ fn a14b_manifest(tier: A14bTier, task: A14bTask) -> ModelManifest {
             // no-offload envelope, recorded here when 23,975 MiB at 53 frames
             // was the most the pair could hold.
             //
-            // The Q8 and fp8 tiers stay at 33. Their resident expert is ~4.6
-            // and ~3.5 GB larger than Q5's, so their shortfall is bigger than
-            // parking can be relied on to cover, and raising a default on
-            // arithmetic rather than a measurement is what produced the
-            // 81-frame OOM this replaces. Those move when they are measured.
+            // The Q8 and fp8 tiers carry a larger resident expert, so parking
+            // does not reach 81 for them — but 33 was never their envelope
+            // either; it was the number recorded before anyone measured. Both
+            // are measured now, on the same card and by the same protocol
+            // (largest 4n+1 count admission accepts on an idle 4090, then a
+            // real render):
+            //
+            // * Q8 (~15.3 GB expert, parks): **73 frames**, 2,235.0 s at a
+            //   16,650 MiB peak. 77 and 81 are refused at ~25.3 and ~25.9 GB
+            //   against ~24.8 GB usable.
+            // * fp8 (~14.3 GB expert, cannot park — the byte round trip is
+            //   GGUF-only): **45 frames**, 996.4 s at a 19,082 MiB peak. 49 is
+            //   refused at ~25.2 GB.
+            //
+            // Both defaults sit at the edge of what admission accepts with the
+            // card otherwise idle, which is the same posture the pre-offload
+            // 53 held (23,975 MiB of 24,564). A card sharing VRAM with a
+            // desktop session should pass a smaller `--frames` rather than
+            // meet a refusal at the tier's own default.
             //
             // Q4 is measured too, not inferred from Q5: 81f at 832x480 renders
             // in 317.5 s at a 15,722 MiB peak on the same card. Inferring it
             // from Q5's smaller resident would have been the same
-            // arithmetic-not-measurement move this comment refuses for Q8.
+            // arithmetic-not-measurement move this comment refuses everywhere
+            // else.
             frames: Some(match tier {
                 A14bTier::Fast | A14bTier::Compact => 81,
-                A14bTier::Quality | A14bTier::Fp8 => 33,
+                A14bTier::Quality => 73,
+                A14bTier::Fp8 => 45,
             }),
             fps: Some(16),
             // Recorded from the task this manifest was assembled for, not
@@ -7267,14 +7283,14 @@ mod tests {
             }
 
             let defaults = &manifest.defaults;
-            // Defaults are the measured RTX 4090 envelope, not the trained
-            // 81: the Q5 pair peaks at 23,975 MiB rendering 53 frames at
-            // 832x480 (81 OOM'd at a 23.0 GB peak), and the Q8 pair's larger
-            // resident expert moves its edge to ~33. The Q4 pair's expert is
-            // ~1.1 GB smaller than Q5's, so 53 fits wherever Q5's does — its
-            // measured T2V peak is 21,372 MiB (#794). All stay on the 4n+1
-            // grid; bigger cards pass --frames 81 explicitly.
-            let expected_frames = if name.ends_with(":q8") { 33 } else { 81 };
+            // Every default is a measured RTX 4090 envelope. The Q5/Q4 tiers
+            // reach the checkpoint's trained 81 frames because block offload
+            // parks trailing blocks for them (#776 item 3). The Q8 pair's
+            // ~4.6 GB larger resident expert does not: its measured edge is
+            // 73 frames (2,235.0 s at a 16,650 MiB peak; 77 and 81 are both
+            // refused, at ~25.3 and ~25.9 GB against ~24.8 GB usable). All
+            // stay on the 4n+1 grid; bigger cards pass --frames 81 explicitly.
+            let expected_frames = if name.ends_with(":q8") { 73 } else { 81 };
             assert_eq!(defaults.frames, Some(expected_frames), "{name}");
             assert_eq!(
                 (expected_frames - 1) % 4,

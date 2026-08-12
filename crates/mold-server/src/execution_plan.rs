@@ -2457,7 +2457,13 @@ fn build_plan(
         mold_inference::attention::AttentionBackend::Math => AttentionBackend::Math,
         mold_inference::attention::AttentionBackend::Flash => AttentionBackend::Flash,
     };
-    let offload_mode = if memory.block_offload {
+    // `wan_block_offload` joins the disposition here and nowhere else. The
+    // component load strategy and the host-RAM reservation above stay on
+    // `block_offload` alone, because wan parks a subset of one expert's blocks
+    // rather than streaming a transformer from host RAM — charging it as
+    // `StreamedBlocks` would reserve every A14B expert file at full size
+    // (#776).
+    let offload_mode = if memory.block_offload || memory.wan_block_offload {
         OffloadMode::Block
     } else {
         OffloadMode::None
