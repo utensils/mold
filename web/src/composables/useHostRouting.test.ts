@@ -205,6 +205,34 @@ describe("useHostRouting", () => {
     expect(routing.multiHost.value).toBe(false);
   });
 
+  it("reacts to same-tab host and generation-target changes", async () => {
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, [model("flux2-klein:q4")]);
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    const remoteId = "studio-local-7680";
+    statuses.set(remoteId, status());
+    models.set(remoteId, [model("flux-dev:q8")]);
+    const remote = addHost({
+      url: "http://studio.local:7680",
+      name: "Studio",
+    });
+    expect(remote.id).toBe(remoteId);
+
+    await vi.waitFor(() => {
+      expect(routing.hosts.value.map((host) => host.id)).toContain(remote.id);
+    });
+
+    setGenerateTargetId(remote.id);
+    expect(routing.targetId.value).toBe(remote.id);
+    await vi.waitFor(() => {
+      expect(routing.targetModels.value.map((entry) => entry.name)).toEqual([
+        "flux-dev:q8",
+      ]);
+    });
+  });
+
   it("removes advertised restricted rows and refuses routing before placement", async () => {
     statuses.set(ORIGIN_HOST_ID, status());
     models.set(ORIGIN_HOST_ID, [

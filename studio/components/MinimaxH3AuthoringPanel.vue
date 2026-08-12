@@ -28,10 +28,11 @@ const props = withDefaults(
   defineProps<{
     modelValue: MinimaxH3AuthoringState;
     task: MinimaxH3Task;
+    requiredEndpoint?: "first" | null;
     disabled?: boolean;
     touchFriendly?: boolean;
   }>(),
-  { disabled: false, touchFriendly: false },
+  { requiredEndpoint: null, disabled: false, touchFriendly: false },
 );
 
 const emit = defineEmits<{
@@ -43,7 +44,13 @@ const busy = ref(false);
 const budget = computed(() =>
   minimaxH3ReferenceBudget(props.modelValue.references),
 );
-const mode = computed(() => minimaxH3Mode(props.task, props.modelValue));
+const mode = computed(() =>
+  props.requiredEndpoint === "first"
+    ? props.modelValue.firstFrame
+      ? "first-frame-to-audio-video"
+      : "first-frame-required"
+    : minimaxH3Mode(props.task, props.modelValue),
+);
 
 function patch(next: Partial<MinimaxH3AuthoringState>): void {
   emit("update:modelValue", {
@@ -306,8 +313,14 @@ function durationLabel(
         <div>
           <strong>Frame endpoints</strong>
           <p>
-            Use neither, first, last, or both endpoints. The final endpoint
-            follows clip duration.
+            <template v-if="requiredEndpoint === 'first'">
+              Attach the required opening frame. This reviewed runtime accepts
+              no other endpoint mode.
+            </template>
+            <template v-else>
+              Use neither, first, last, or both endpoints. The final endpoint
+              follows clip duration.
+            </template>
           </p>
         </div>
         <span class="h3-authoring__mode" data-test="h3-mode">{{ mode }}</span>
@@ -315,7 +328,10 @@ function durationLabel(
       <div class="h3-authoring__endpoints">
         <label class="h3-authoring__endpoint">
           <span>First frame · frame 0</span>
-          <small>{{ modelValue.firstFrame?.filename ?? "Optional" }}</small>
+          <small>{{
+            modelValue.firstFrame?.filename ??
+            (requiredEndpoint === "first" ? "Required" : "Optional")
+          }}</small>
           <input
             type="file"
             accept="image/*"
@@ -334,13 +350,24 @@ function durationLabel(
             Remove
           </button>
         </label>
-        <label class="h3-authoring__endpoint">
+        <label
+          v-if="requiredEndpoint !== 'first' || modelValue.lastFrame"
+          class="h3-authoring__endpoint"
+          :class="{
+            'h3-authoring__endpoint--incompatible':
+              requiredEndpoint === 'first',
+          }"
+        >
           <span>Last frame · final frame</span>
-          <small>{{ modelValue.lastFrame?.filename ?? "Optional" }}</small>
+          <small>{{
+            requiredEndpoint === "first"
+              ? `${modelValue.lastFrame?.filename ?? "Last frame"} · incompatible; remove`
+              : (modelValue.lastFrame?.filename ?? "Optional")
+          }}</small>
           <input
             type="file"
             accept="image/*"
-            :disabled="disabled || busy"
+            :disabled="disabled || busy || requiredEndpoint === 'first'"
             data-test="h3-last-file"
             @change="pickBoundary('lastFrame', $event)"
           />

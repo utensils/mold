@@ -1265,6 +1265,11 @@ describe("CreatePage layout and behavior", () => {
     await wrapper.get("[data-test='sequence-generate']").trigger("click");
     await flushPromises();
 
+    expect(fetchChainLimitsMock).toHaveBeenCalledWith(
+      "ltx-2-19b-distilled:fp8",
+      expect.anything(),
+      24,
+    );
     expect(createChainJobMock).toHaveBeenCalledTimes(1);
     expect(createChainJobMock).toHaveBeenCalledWith(
       expect.objectContaining({

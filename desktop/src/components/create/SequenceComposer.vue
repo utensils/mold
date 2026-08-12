@@ -17,6 +17,7 @@ import {
   formatFrameDuration,
   sequenceDuration,
   sequenceFrameOptions,
+  sequenceFrameStep,
   sequenceMotionTailFrames,
   sequenceValidation,
   transitionLabel,
@@ -179,6 +180,9 @@ const validation = computed(() =>
   sequenceValidation(stages.value, {
     maxStages: maxStages.value,
     maxTotalFrames: props.chainLimits?.max_total_frames ?? Number.MAX_SAFE_INTEGER,
+    ...(props.chainLimits ? { maxFramesPerClip: props.chainLimits.frames_per_clip_cap } : {}),
+    frameStep: sequenceFrameStep(props.selectedModel?.family ?? props.form.family),
+    frameOffset: 1,
     motionTailFrames: motionTail.value,
     promptOptional: clipPromptOptional.value,
   }),

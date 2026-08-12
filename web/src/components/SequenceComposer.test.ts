@@ -88,6 +88,80 @@ describe("SequenceComposer", () => {
     expect(wrapper.text()).toContain("Describe clip 1");
   });
 
+  it("resets model-owned clip lengths and fetches limits at the active fps", async () => {
+    const wrapper = mountComposer();
+    await flushPromises();
+    const store = useSequenceDraftStore();
+    store.clips[0]!.frames = 481;
+    store.clips[1]!.frames = 53;
+
+    fetchChainLimitsMock.mockResolvedValueOnce(
+      ltx2Limits({
+        model: "wan22-i2v-a14b:q5",
+        frames_per_clip_cap: 257,
+        frames_per_clip_recommended: 53,
+      }),
+    );
+    await wrapper.setProps({
+      model: "wan22-i2v-a14b:q5",
+      family: "wan",
+      modelDefaultFrames: 53,
+      shared: {
+        ...shared(),
+        model: "wan22-i2v-a14b:q5",
+        family: "wan",
+        fps: 16,
+      },
+    });
+    await flushPromises();
+
+    expect(fetchChainLimitsMock).toHaveBeenLastCalledWith(
+      "wan22-i2v-a14b:q5",
+      undefined,
+      16,
+    );
+    expect(store.clips.map((clip) => clip.frames)).toEqual([53, 53]);
+  });
+
+  it("detaches an amend session before switching its model authority", async () => {
+    const wrapper = mountComposer();
+    await flushPromises();
+    const store = useSequenceDraftStore();
+    store.loadFromJob(
+      {
+        jobId: "job-model-a",
+        hostId: "origin",
+        baseline: store.clips.map((clip) => ({ ...clip })),
+        completedStages: 0,
+      },
+      store.clips.map((clip) => ({ ...clip })),
+      false,
+    );
+
+    fetchChainLimitsMock.mockResolvedValueOnce(
+      ltx2Limits({
+        model: "wan22-i2v-a14b:q5",
+        frames_per_clip_cap: 257,
+        frames_per_clip_recommended: 53,
+      }),
+    );
+    await wrapper.setProps({
+      model: "wan22-i2v-a14b:q5",
+      family: "wan",
+      modelDefaultFrames: 53,
+      shared: {
+        ...shared(),
+        model: "wan22-i2v-a14b:q5",
+        family: "wan",
+        fps: 16,
+      },
+    });
+    await flushPromises();
+
+    expect(store.editing).toBeNull();
+    expect(store.clips.map((clip) => clip.frames)).toEqual([53, 53]);
+  });
+
   // An opening image conditions clip 1 and every later clip inherits the
   // previous clip's motion tail, so a promptless-capable family can render an
   // undescribed sequence — the same rule the one-shot composer applies.
@@ -616,15 +690,7 @@ describe("SequenceComposer — wan", () => {
     );
   });
 
-  /**
-   * Making the grid family-dependent made it possible for a loaded clip to sit
-   * off the current model's ladder — wan's 53 is not an LTX `8k+1` value, and
-   * a sequence reused or edited across a model switch carries it in. A select
-   * whose `:value` matches no option renders blank and silently rewrites the
-   * clip on the next change, so the loaded value stays listed. Desktop and
-   * iPhone already guard this; web did not.
-   */
-  it("keeps an off-grid loaded duration selectable", async () => {
+  it("resets stale off-grid durations when the model authority changes", async () => {
     fetchChainLimitsMock.mockResolvedValue(ltx2Limits());
     const store = useSequenceDraftStore();
     store.clearSequence(53);
@@ -634,12 +700,12 @@ describe("SequenceComposer — wan", () => {
 
     const wrapper = mountComposer();
     await flushPromises();
-    const select = wrapper.get("[data-test='clip-frames']");
-    const frames = select
+    const frames = wrapper
+      .get("[data-test='clip-frames']")
       .findAll("option")
       .map((option) => Number(option.attributes("value")));
-    expect(frames).toContain(53);
-    // Still sorted, and the LTX grid is otherwise untouched.
+    expect(store.clips.map((clip) => clip.frames)).toEqual([97, 97]);
+    expect(frames).not.toContain(53);
     expect(frames).toEqual([...frames].sort((a, b) => a - b));
     expect(frames).toContain(97);
   });

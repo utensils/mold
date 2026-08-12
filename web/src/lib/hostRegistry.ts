@@ -15,6 +15,7 @@
 export const ORIGIN_HOST_ID = "origin";
 export const HOSTS_STORAGE_KEY = "mold.web.hosts.v1";
 export const HOSTS_CHANGED_EVENT = "mold:hosts-changed";
+export const GENERATE_TARGET_CHANGED_EVENT = "mold:generate-target-changed";
 
 export interface HostEntry {
   /** Slug of the host URL, or "origin" for the serving host. */
@@ -227,4 +228,7 @@ export function getGenerateTargetId(): string {
 
 export function setGenerateTargetId(id: string): void {
   localStorage.setItem(GENERATE_TARGET_STORAGE_KEY, id);
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(GENERATE_TARGET_CHANGED_EVENT));
+  }
 }

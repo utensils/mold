@@ -27,6 +27,7 @@ import type { GenerateFormState, ModelInfoExtended } from "../../types";
 import {
   closestResolutionPreset,
   megapixelLabel,
+  presetsForAspectGroup,
   presetsForModel,
   presetsNearRatio,
 } from "@studio/lib/resolutions";
@@ -203,12 +204,19 @@ function patch(patch: Partial<GenerateFormState>) {
   emit("update:modelValue", { ...props.modelValue, ...patch });
 }
 
-const resolutionPresets = computed(() =>
-  presetsNearRatio(
-    presetsForModel(props.model ?? props.family, props.modelValue.pipeline),
-    currentRatio.value,
-  ),
-);
+const resolutionPresets = computed(() => {
+  const exactGroup = presetsForAspectGroup(
+    props.model,
+    props.modelValue.pipeline,
+    aspectId.value,
+  );
+  return exactGroup.length > 0
+    ? exactGroup
+    : presetsNearRatio(
+        presetsForModel(props.model ?? props.family, props.modelValue.pipeline),
+        currentRatio.value,
+      );
+});
 const resolutionOptions = computed(() => {
   const presets = resolutionPresets.value.map((preset, index, all) => ({
     mp: (preset.width * preset.height) / 1_000_000,
@@ -270,11 +278,21 @@ function setAspect(id: string) {
   }
   const a = shapeOptions.value.find((x) => x.id === id);
   if (!a) return;
+  const exactGroup = presetsForAspectGroup(
+    props.model,
+    props.modelValue.pipeline,
+    id,
+  );
   const preset = closestResolutionPreset(
-    presetsNearRatio(
-      presetsForModel(props.model ?? props.family, props.modelValue.pipeline),
-      a.ratio,
-    ),
+    exactGroup.length > 0
+      ? exactGroup
+      : presetsNearRatio(
+          presetsForModel(
+            props.model ?? props.family,
+            props.modelValue.pipeline,
+          ),
+          a.ratio,
+        ),
     props.modelValue.width,
     props.modelValue.height,
   );

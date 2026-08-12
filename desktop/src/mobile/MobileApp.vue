@@ -2125,25 +2125,24 @@ function setOutputMode(mode: string | number): void {
 
 let chainLimitsFetch = 0;
 async function loadChainLimits(): Promise<void> {
+  const version = ++chainLimitsFetch;
   const host = selectedHost.value;
   const entry = selectedGenerationModel.value;
   if (!host || !entry) {
     chainLimits.value = null;
     return;
   }
-  const version = ++chainLimitsFetch;
   try {
     const limits = await apiJsonTo<ChainLimits>(
       mobileHostTarget(host),
-      `/api/capabilities/chain-limits?model=${encodeURIComponent(entry.name)}`,
+      `/api/capabilities/chain-limits?model=${encodeURIComponent(entry.name)}&fps=${encodeURIComponent(Math.max(1, Math.floor(form.fps)))}`,
     );
     if (version !== chainLimitsFetch) return;
     chainLimits.value = limits;
     if (!limits.supports_audio) draft.enableAudio = false;
-    // A clip longer than the routed host's per-clip cap would be rejected on
-    // submit; shrink it here rather than failing the whole sequence.
-    for (const clip of draft.clips) {
-      if (clip.frames > limits.frames_per_clip_cap) clip.frames = limits.frames_per_clip_cap;
+    if (!draft.editing) {
+      const frames = defaultClipFrames(entry, limits, sequenceMotionTail.value);
+      draft.adoptSequenceModel(entry.name, frames);
     }
   } catch {
     if (version === chainLimitsFetch) chainLimits.value = null;
@@ -2153,7 +2152,15 @@ async function loadChainLimits(): Promise<void> {
 // Chain limits are per model AND per host — refetch when either moves, and
 // keep the two-clip floor stocked once Sequence is the active output.
 watch(
-  [isSequence, () => form.model, selectedHostId],
+  () => form.model,
+  (next, previous) => {
+    if (isSequence.value && previous && next !== previous) {
+      if (draft.editing) draft.stopEditing();
+    }
+  },
+);
+watch(
+  [isSequence, () => form.model, () => form.fps, selectedHostId],
   () => {
     if (!isSequence.value) return;
     draft.ensureClips(sequenceDefaultFrames.value);
@@ -3890,6 +3897,7 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       draft.clips.splice(0, draft.clips.length, ...reuse.sequence.clips);
       draft.activeClipId = reuse.sequence.clips[0]?.id ?? null;
       draft.enableAudio = print.metadata.enable_audio === true;
+      draft.bindSequenceModel(form.model);
     }
     const notes: string[] = [];
     if (reuse.substitutedModel) {
