@@ -27,6 +27,11 @@ cd "$repo_root"
 keep_going=0
 list_only=0
 dirty=0
+# A step that hangs must end the run with a named TIMEOUT rather than sitting
+# there: `cargo test --workspace` currently blocks forever on this repo's
+# mold-ai-server route tests on some hosts, and an unbounded wait looks
+# identical to slow progress.
+step_timeout=${CI_LOCAL_STEP_TIMEOUT:-2400}
 suites=()
 
 usage() {
@@ -47,6 +52,8 @@ Options:
   -k, --keep-going  run every step even after a failure, then summarise
       --list        print the steps that would run
       --dirty       keep the ambient environment (skips the hermetic HOME)
+      --timeout N   per-step limit in seconds (default 2400, 0 disables;
+                    a step that exceeds it is reported as TIME, not left to hang)
   -h, --help        this text
 EOF
 }
@@ -56,6 +63,7 @@ while [ $# -gt 0 ]; do
     -k|--keep-going) keep_going=1 ;;
     --list) list_only=1 ;;
     --dirty) dirty=1 ;;
+    --timeout) shift; step_timeout="${1:-0}" ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     *) suites+=("$1") ;;
@@ -133,17 +141,28 @@ step() {
     return 0
   fi
   printf '\n\033[1m==> %s\033[0m\n' "$name"
-  local started elapsed
+  local started elapsed status
   started=$(date +%s)
-  if "$@"; then
-    elapsed=$(( $(date +%s) - started ))
-    results+=("$(printf 'PASS  %-42s %4ds' "$name" "$elapsed")")
+  if [ "$step_timeout" -gt 0 ] && command -v timeout >/dev/null 2>&1; then
+    timeout --foreground "$step_timeout" "$@"
   else
-    elapsed=$(( $(date +%s) - started ))
-    results+=("$(printf 'FAIL  %-42s %4ds' "$name" "$elapsed")")
-    failed=$((failed + 1))
-    printf '\033[31m--- %s failed\033[0m\n' "$name"
+    "$@"
   fi
+  status=$?
+  elapsed=$(( $(date +%s) - started ))
+  case "$status" in
+    0) results+=("$(printf 'PASS  %-42s %4ds' "$name" "$elapsed")") ;;
+    124)
+      results+=("$(printf 'TIME  %-42s %4ds (exceeded %ss)' "$name" "$elapsed" "$step_timeout")")
+      failed=$((failed + 1))
+      printf '\033[31m--- %s timed out after %ss\033[0m\n' "$name" "$step_timeout"
+      ;;
+    *)
+      results+=("$(printf 'FAIL  %-42s %4ds' "$name" "$elapsed")")
+      failed=$((failed + 1))
+      printf '\033[31m--- %s failed\033[0m\n' "$name"
+      ;;
+  esac
 }
 
 skip() {
@@ -154,12 +173,6 @@ skip() {
   fi
   results+=("$(printf 'SKIP  %-42s %s' "$name" "$reason")")
   skipped=$((skipped + 1))
-}
-
-in_dir() {
-  local dir="$1"
-  shift
-  (cd "$dir" && "$@")
 }
 
 # ---------------------------------------------------------------------------
@@ -264,18 +277,26 @@ if wants web; then
   # Two prettier scopes: the root script only checks `studio/`, and CI runs the
   # web workspace's own from `web/`.
   step "web: prettier (studio)" bun run fmt:check
-  step "web: prettier (web)" in_dir web bun run fmt:check
+  step "web: prettier (web)" bash -c 'cd web && exec bun run fmt:check'
+
   step "web: studio tests" bun run test:studio
-  step "web: web tests" in_dir web bun run test
-  step "web: SPA build (vue-tsc)" in_dir web bun run build
-  step "web: desktop tests" in_dir desktop bun run test
+  step "web: web tests" bash -c 'cd web && exec bun run test'
+
+  step "web: SPA build (vue-tsc)" bash -c 'cd web && exec bun run build'
+
+  step "web: desktop tests" bash -c 'cd desktop && exec bun run test'
+
 fi
 
 if wants docs; then
-  step "docs: install" in_dir website bun install
-  step "docs: prettier" in_dir website bun run fmt:check
-  step "docs: reference verification" in_dir website bun run verify
-  step "docs: build" in_dir website bun run build
+  step "docs: install" bash -c 'cd website && exec bun install'
+
+  step "docs: prettier" bash -c 'cd website && exec bun run fmt:check'
+
+  step "docs: reference verification" bash -c 'cd website && exec bun run verify'
+
+  step "docs: build" bash -c 'cd website && exec bun run build'
+
 fi
 
 if wants gpu; then
