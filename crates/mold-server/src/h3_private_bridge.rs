@@ -302,7 +302,7 @@ pub(crate) fn advertised_h3_private_capability(
         {
             return None;
         }
-        return build_fl2va_capability(models_root);
+        build_fl2va_capability(models_root)
     }
     #[cfg(not(feature = "h3-private-uat"))]
     {
