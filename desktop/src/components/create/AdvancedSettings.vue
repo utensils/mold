@@ -91,6 +91,7 @@ import { AUDIO_ONLY_PIPELINE, isAudioOnlyPipeline } from "@studio/lib/ltx2Pipeli
 import SourceImageWell from "../generate/SourceImageWell.vue";
 import LoraStack from "../generate/LoraStack.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
+import { attachPickedVideo } from "../../lib/sourceAttachment";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
 import {
   emptyMinimaxH3AuthoringState,
@@ -388,7 +389,7 @@ function removeKeyframe(index: number) {
 async function setSourceVideo(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0];
   if (!file) return;
-  props.form.sourceVideo = { filename: file.name, base64: await fileToBase64(file) };
+  attachPickedVideo(props.form, { filename: file.name, base64: await fileToBase64(file) });
 }
 function clearSourceVideo() {
   props.form.sourceVideo = null;

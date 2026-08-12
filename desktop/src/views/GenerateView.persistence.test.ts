@@ -7,6 +7,7 @@ import { useModelStore } from "../stores/models";
 import { useConnectionStore } from "../stores/connection";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
+import { useGenerationStore } from "../stores/generation";
 import type { ModelEntry } from "../lib/api/types";
 
 vi.mock("vue-router", () => ({
@@ -42,7 +43,14 @@ function mountView() {
   return mount(GenerateView, {
     shallow: true,
     attachTo: document.body,
-    global: { stubs: { ComposerCard: false, InspectorPanel: false, ModelPicker: false } },
+    global: {
+      stubs: {
+        ComposerCard: false,
+        InspectorPanel: false,
+        ModelPicker: false,
+        ActionBlocker: false,
+      },
+    },
   });
 }
 
@@ -132,6 +140,44 @@ describe("GenerateView form persistence", () => {
     const wrapper = mountView();
     await flushPromises();
 
+    expect(wrapper.get('[data-test="generate-button"]').attributes("disabled")).toBeUndefined();
+  });
+
+  it("shows the exact LTX blocker and enables a valid conditioned request", async () => {
+    const ltx = {
+      ...model,
+      name: "ltx-2.3-22b-distilled:fp8",
+      family: "ltx2",
+      default_frames: 97,
+      default_fps: 24,
+      dimension_alignment: 32,
+    } as ModelEntry;
+    useModelStore().all = [ltx];
+    const form = useGenerateFormStore().form;
+    form.model = ltx.name;
+    form.family = ltx.family;
+    form.prompt = "";
+    form.width = 768;
+    form.height = 512;
+    form.frames = 97;
+    form.fps = 24;
+    form.sourceVideo = { filename: "guide.mp4", base64: "" };
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch");
+
+    const wrapper = mountView();
+    await flushPromises();
+
+    expect(wrapper.get('[data-test="action-blocker"]').text()).toContain(
+      "Source video cannot be empty.",
+    );
+    expect(wrapper.get('[data-test="generate-button"]').attributes("disabled")).toBeDefined();
+    await wrapper.get('[data-test="generate-button"]').trigger("click");
+    expect(submit).not.toHaveBeenCalled();
+
+    form.sourceVideo = { filename: "guide.mp4", base64: "video-bytes" };
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="action-blocker"]').exists()).toBe(false);
     expect(wrapper.get('[data-test="generate-button"]').attributes("disabled")).toBeUndefined();
   });
 

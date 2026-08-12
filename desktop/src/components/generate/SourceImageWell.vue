@@ -18,6 +18,7 @@ import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
+import { attachPickedImage } from "../../lib/sourceAttachment";
 import ImagePickerModal from "./ImagePickerModal.vue";
 import MaskEditorModal from "./MaskEditorModal.vue";
 
@@ -52,12 +53,7 @@ const maskOpen = ref(false);
 
 function onSourcePicked(picked: PickedImage[]) {
   const first = picked[0];
-  if (first) {
-    props.form.sourceImage = first.base64;
-    // Provenance label for Reuse-settings source restore.
-    props.form.sourceImageName = first.filename || null;
-    props.form.sourceFit = { mode: "lanczos-resize" };
-  }
+  if (first) attachPickedImage(props.form, first);
 }
 function onEndFramePicked(picked: PickedImage[]) {
   const first = picked[0];

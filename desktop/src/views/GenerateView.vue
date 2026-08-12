@@ -548,17 +548,17 @@ const formValidationError = computed(
     advancedVideoValidationError(form) ??
     wanRecipeValidationError(form),
 );
-/** Over-budget video frames on a non-chainable model would fail server-side —
- *  the drawer shows the reason under Frames; this blocks the submit. */
-const chainReject = computed(() => {
-  if (formValidationError.value) return true;
-  if (!caps.value.supportsVideo) return false;
+/** Exact submit blocker for request-shape and automatic-chain validation. */
+const chainValidationError = computed<string | null>(() => {
+  if (formValidationError.value) return formValidationError.value;
+  if (!caps.value.supportsVideo) return null;
   const request = buildRequest(form);
   const decision = decideGenerateRequestRouting(request, form.family);
-  return (
-    decision.kind === "reject" ||
-    (decision.kind === "chain" && unsupportedAutoChainFields(buildRequest(form)).length > 0)
-  );
+  if (decision.kind === "reject") return decision.reason;
+  const unsupported = decision.kind === "chain" ? unsupportedAutoChainFields(request) : [];
+  return unsupported.length
+    ? "This long video uses options automatic sequencing cannot preserve. Reduce Duration or remove the incompatible Advanced options."
+    : null;
 });
 const installedModels = computed(() =>
   mergeInstalledModels(
@@ -2380,6 +2380,31 @@ const h3AuthoringError = computed(() =>
   minimaxH3AuthoringError(form.family, form.model, form.h3Authoring, h3RequireFirstFrame.value),
 );
 
+/**
+ * One visible blocker authority drives both the button and the submit guard.
+ * Keep transient in-flight states on the button label; this list is only for
+ * conditions the user can correct or explicitly resolve.
+ */
+const generationInputBlockerReason = computed<string | null>(() => {
+  if (promptMissing.value) return "Add a prompt before generating.";
+  if (h3AuthoringError.value) return h3AuthoringError.value;
+  if (!form.model) return "Choose an installed model before generating.";
+  if (chainValidationError.value) return chainValidationError.value;
+  if (quickStaleReasons.value.length > 0) {
+    return "The prepared rewrite no longer matches this model or machine. Choose a recovery action above.";
+  }
+  if (expansionRunning.value) return "Wait for prompt preparation to finish.";
+  return null;
+});
+
+const composerBlockerReason = computed<string | null>(() => {
+  if (generationInputBlockerReason.value) return generationInputBlockerReason.value;
+  if (preparedBatch.value) {
+    return "Use the reviewed variations panel to generate this prepared batch, or discard it to return to one-shot generation.";
+  }
+  return null;
+});
+
 const emptyCanvasGuidance = computed(() =>
   promptRequired(form)
     ? "Describe an image below, pick a look, and press Generate. Everything runs on your own machine."
@@ -2387,15 +2412,7 @@ const emptyCanvasGuidance = computed(() =>
 );
 
 async function generate() {
-  if (
-    promptMissing.value ||
-    h3AuthoringError.value ||
-    !form.model ||
-    chainReject.value ||
-    expansionRunning.value ||
-    preparedSubmitting.value ||
-    submissionPlanning.value
-  )
+  if (generationInputBlockerReason.value || preparedSubmitting.value || submissionPlanning.value)
     return;
   const prepared = preparedBatch.value;
   if (
@@ -3510,14 +3527,12 @@ onBeforeUnmount(() => {
             :expansion-host-label="expansionHostLabel"
             :can-undo="quickExpansionOriginal !== null"
             :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
-            :has-prepared="!!preparedBatch"
-            :chain-reject="chainReject"
+            :disabled-reason="composerBlockerReason"
             :submitting="submissionPlanning"
             :button-label="buttonLabel"
             :estimate-request="estimateRequest"
             :estimate-target="estimateTarget"
             :preprocessing-status="preprocessingStatus"
-            :h3-require-first-frame="h3RequireFirstFrame"
             :history="promptHistory"
             :remix-source="remixSource"
             @generate="generate"
