@@ -289,13 +289,17 @@ public capability. Published-binary verification rejects its dedicated claim
 marker as well as the underlying private artifact reader.
 
 The capture manifest uses
-[`mold.minimax-h3.private-runtime-bound-capture.v3`](./minimax-h3-private-runtime-capture.schema.json).
+[`mold.minimax-h3.private-runtime-bound-capture.v4`](./minimax-h3-private-runtime-capture.schema.json).
 It binds the exact 40-character Mold source SHA, the stable runtime-code
 identity, the measured server executable, artifact/authorization identities,
 stable `cuda:<32 lowercase UUID hex>` route plus its process-local ordinal, compute capability, attention
 runtime/kernel/qualification identities, and a sorted list of relative
-evidence paths. Version 3 binds the exact campaign bootstrap record and its
-runtime identity in addition to the reviewed smaller-route envelope:
+evidence paths. Version 4 retains the exact campaign bootstrap record and its
+runtime identity and adds the serving Linux PID/start-time/boot identity,
+executing ELF device/inode/size/SHA-256, domain-separated launch argument and
+sorted-environment hashes, and live CUDA driver plus compiled toolkit
+versions. Raw arguments and environment values are not serialized. These
+authorities accompany the reviewed smaller-route envelope:
 960×544, 124 frames at 24 fps, batch one, no more than two requested grid
 points/API steps, one first-frame FL2VA endpoint, and explicit ceilings for Qwen text/vision,
 condition visual, target video/audio, and total packed rows. Admission checks
@@ -333,22 +337,21 @@ part of this rule because the root itself prevents traversal. The measured
 server executable must be one of those files. Paths must be sorted, unique, and
 canonical.
 
-The producer authenticates and retains that ELF, but it does not itself prove
-that external profiler or log samples came from the process executing that
-file. The live campaign must therefore retain process/executable attestation
-alongside each sample, and the independent review must verify that binding
-before accepting any measured bound. Version 3 does not bind the serving PID
-to that executable, the launch invocation/environment, or the active
-driver/toolkit; independently hashed and correlated evidence for all of those
-remains mandatory before allowlisting.
+The server records process/executable authority from `/proc/self` and the live
+CUDA driver API in the same terminal observation as the synchronized memory
+measurements. Candidate production exact-crosses those fields with the capture
+manifest and requires the observed executable size and SHA-256 to equal the
+retained measured ELF. Independent review must still inspect the complete
+campaign and its proposed bounds before allowlisting.
 
 The private campaign server emits one structured
-`mold.minimax-h3.private-uat-runtime-bound-observation.v3` record only after a
+`mold.minimax-h3.private-uat-runtime-bound-observation.v4` record only after a
 successful terminal attempt. The record includes the actual request geometry,
 requested grid-point count, endpoint count/anchor, and prepared row counts.
 It also records the exact bootstrap runtime-record file/identity, stable CUDA
 UUID, process-local ordinal, compute capability, and private attention
-runtime/kernel/qualification identities retained by the executing owner.
+runtime/kernel/qualification identities retained by the executing owner, plus
+the v4 process/executable/launch/driver authority described above.
 Candidate production reads this designated record through the same no-follow,
 size-bounded descriptor used to authenticate its bytes and requires exact
 equality with every manifest envelope field and all thirteen claimed

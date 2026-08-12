@@ -3,18 +3,158 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+use std::fs::File;
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+use std::io::Read;
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+use std::os::unix::fs::MetadataExt;
 
 use anyhow::{anyhow, bail, Context, Result};
 use candle_core::Device;
 use mold_candle::minimax_h3::{H3PrivateWorkspaceCapture, H3PrivateWorkspaceObservation};
 use serde::{Deserialize, Serialize};
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+use sha2::{Digest, Sha256};
 
 use crate::device::{PhaseVramProbe, PhaseVramReport};
 
 use super::pipeline::{H3PipelineEvent, H3PipelinePhase};
 
 pub(crate) const H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA: &str =
-    "mold.minimax-h3.private-uat-runtime-bound-observation.v3";
+    "mold.minimax-h3.private-uat-runtime-bound-observation.v4";
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct H3PrivateRuntimeProcessObservation {
+    pub(crate) process_id: u32,
+    pub(crate) process_start_time_ticks: u64,
+    pub(crate) linux_boot_id_sha256: String,
+    pub(crate) executable_device: u64,
+    pub(crate) executable_inode: u64,
+    pub(crate) executable_bytes: u64,
+    pub(crate) executable_sha256: String,
+    pub(crate) launch_argv_sha256: String,
+    pub(crate) launch_environment_sha256: String,
+    pub(crate) cuda_driver_version: u32,
+    pub(crate) cuda_toolkit_version: u32,
+}
+
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+pub(crate) fn capture_process_observation() -> Result<H3PrivateRuntimeProcessObservation> {
+    use candle_core::cuda_backend::cudarc::driver::sys;
+
+    let stat = fs::read_to_string("/proc/self/stat")
+        .context("private H3 process attestation requires Linux process identity")?;
+    let comm_end = stat
+        .rfind(')')
+        .ok_or_else(|| anyhow!("private H3 process stat has no command terminator"))?;
+    let process_start_time_ticks = stat[comm_end + 1..]
+        .split_ascii_whitespace()
+        .nth(19)
+        .ok_or_else(|| anyhow!("private H3 process stat omits its start time"))?
+        .parse::<u64>()
+        .context("private H3 process start time is not an integer")?;
+    if process_start_time_ticks == 0 {
+        bail!("private H3 process start time is zero")
+    }
+
+    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .context("private H3 process attestation requires a Linux boot identity")?;
+    let boot_id = boot_id.trim();
+    if boot_id.len() != 36
+        || !boot_id.bytes().enumerate().all(|(index, byte)| {
+            matches!(index, 8 | 13 | 18 | 23) && byte == b'-'
+                || !matches!(index, 8 | 13 | 18 | 23)
+                    && (byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        bail!("private H3 process attestation has an invalid Linux boot identity")
+    }
+
+    let mut executable = File::open("/proc/self/exe")
+        .context("private H3 process attestation could not open its executing image")?;
+    let metadata = executable
+        .metadata()
+        .context("private H3 process attestation could not stat its executing image")?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.dev() == 0 || metadata.ino() == 0 {
+        bail!("private H3 process attestation has an invalid executing image")
+    }
+    let mut executable_digest = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let read = executable
+            .read(&mut buffer)
+            .context("private H3 process attestation could not hash its executing image")?;
+        if read == 0 {
+            break;
+        }
+        executable_digest.update(&buffer[..read]);
+    }
+
+    let mut driver_version = 0_i32;
+    // SAFETY: CUDA writes one integer to the supplied live pointer.
+    unsafe { sys::cuDriverGetVersion(&mut driver_version) }
+        .result()
+        .context("private H3 process attestation could not query the CUDA driver")?;
+    let cuda_driver_version =
+        u32::try_from(driver_version).context("private H3 CUDA driver version is negative")?;
+    if cuda_driver_version == 0 || sys::CUDA_VERSION == 0 {
+        bail!("private H3 process attestation has an invalid CUDA version")
+    }
+
+    Ok(H3PrivateRuntimeProcessObservation {
+        process_id: std::process::id(),
+        process_start_time_ticks,
+        linux_boot_id_sha256: format!("{:x}", Sha256::digest(boot_id.as_bytes())),
+        executable_device: metadata.dev(),
+        executable_inode: metadata.ino(),
+        executable_bytes: metadata.len(),
+        executable_sha256: format!("{:x}", executable_digest.finalize()),
+        launch_argv_sha256: hash_os_values(
+            b"mold.minimax-h3.private-launch-argv.v1\0",
+            std::env::args_os().map(|value| value.into_encoded_bytes()),
+        ),
+        launch_environment_sha256: hash_os_values(
+            b"mold.minimax-h3.private-launch-environment.v1\0",
+            sorted_environment(),
+        ),
+        cuda_driver_version,
+        cuda_toolkit_version: sys::CUDA_VERSION,
+    })
+}
+
+#[cfg(not(all(feature = "cuda", target_os = "linux")))]
+pub(crate) fn capture_process_observation() -> Result<H3PrivateRuntimeProcessObservation> {
+    bail!("private H3 process attestation requires the Linux CUDA runtime")
+}
+
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+fn sorted_environment() -> impl Iterator<Item = Vec<u8>> {
+    let mut values = std::env::vars_os()
+        .map(|(key, value)| {
+            let mut bytes = key.as_os_str().as_bytes().to_vec();
+            bytes.push(b'=');
+            bytes.extend_from_slice(value.as_os_str().as_bytes());
+            bytes
+        })
+        .collect::<Vec<_>>();
+    values.sort();
+    values.into_iter()
+}
+
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+fn hash_os_values(domain: &[u8], values: impl Iterator<Item = Vec<u8>>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    for value in values {
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value);
+    }
+    format!("{:x}", digest.finalize())
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +167,7 @@ pub(crate) struct H3PrivateRuntimeAuthorityObservation {
     pub(crate) attention_runtime_identity_sha256: String,
     pub(crate) attention_kernel_identity: String,
     pub(crate) attention_qualification_sha256: String,
+    pub(crate) process: H3PrivateRuntimeProcessObservation,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]

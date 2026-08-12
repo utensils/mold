@@ -69,10 +69,11 @@ use super::private_qwen::{
 };
 #[cfg(feature = "mp4")]
 use super::private_qwen_support::{load_qualified_private_qwen_support, H3PrivateQwenSupport};
+use super::private_runtime_observer::H3PrivateRuntimeProcessObservation;
 #[cfg(feature = "mp4")]
 use super::private_runtime_observer::{
-    H3PrivateRuntimeAuthorityObservation, H3PrivateRuntimeBoundCapture,
-    H3PrivateRuntimeEnvelopeObservation,
+    capture_process_observation, H3PrivateRuntimeAuthorityObservation,
+    H3PrivateRuntimeBoundCapture, H3PrivateRuntimeEnvelopeObservation,
 };
 #[cfg(feature = "mp4")]
 use super::vae_runtime::{
@@ -98,7 +99,7 @@ use crate::{
 };
 
 pub(crate) const RUNTIME_QUALIFICATION_SCHEMA: &str =
-    "mold.minimax-h3.private-runtime-qualification.v3";
+    "mold.minimax-h3.private-runtime-qualification.v4";
 pub(crate) const RUNTIME_QUALIFICATION_DECISION: &str = "qualified-private-fl2va-runtime";
 pub(crate) const MAX_RUNTIME_QUALIFICATION_BYTES: u64 = 128 * 1024;
 
@@ -372,6 +373,7 @@ pub(crate) struct H3PrivateRuntimeQualificationRecord {
     pub(crate) attention_runtime_identity_sha256: String,
     pub(crate) attention_kernel_identity: String,
     pub(crate) attention_qualification_sha256: String,
+    pub(crate) campaign_process: H3PrivateRuntimeProcessObservation,
     pub(crate) envelope: H3PrivateRuntimeEnvelopeRecord,
     pub(crate) bounds: H3PrivateRuntimeBoundRecord,
     pub(crate) evidence_artifacts: Vec<H3PrivateRuntimeEvidenceArtifact>,
@@ -2873,6 +2875,7 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
             attention_runtime_identity_sha256: attention.identity_sha256().into(),
             attention_kernel_identity: attention.kernel().identity().into(),
             attention_qualification_sha256: artifact_lease.attention_qualification_sha256.clone(),
+            process: capture_process_observation()?,
         };
         with_private_h3_cuda_execution_attempt(|| {
             consumption_binding.revalidate(&owner, &activation.scheduler_ledger)?;
@@ -3919,6 +3922,10 @@ pub(crate) fn validate_runtime_qualification_record_shape(
         record.artifact_qualification_identity_sha256.as_str(),
         record.attention_runtime_identity_sha256.as_str(),
         record.attention_qualification_sha256.as_str(),
+        record.campaign_process.linux_boot_id_sha256.as_str(),
+        record.campaign_process.executable_sha256.as_str(),
+        record.campaign_process.launch_argv_sha256.as_str(),
+        record.campaign_process.launch_environment_sha256.as_str(),
         record.identity_sha256.as_str(),
     ];
     if !valid_lower_hex(&record.campaign_source_sha, 40)
@@ -3936,6 +3943,14 @@ pub(crate) fn validate_runtime_qualification_record_shape(
             .windows(2)
             .any(|pair| pair[0].relative_path >= pair[1].relative_path)
         || record.artifact_total_bytes == 0
+        || record.campaign_process.process_id == 0
+        || record.campaign_process.process_start_time_ticks == 0
+        || record.campaign_process.executable_device == 0
+        || record.campaign_process.executable_inode == 0
+        || record.campaign_process.executable_bytes == 0
+        || record.campaign_process.executable_sha256 != record.measured_server_executable_sha256
+        || record.campaign_process.cuda_driver_version == 0
+        || record.campaign_process.cuda_toolkit_version == 0
         || !valid_stable_cuda_device_id(&record.device_id)
         || !(1..=99).contains(&record.compute_capability[0])
         || record.compute_capability[1] > 99
@@ -3946,6 +3961,7 @@ pub(crate) fn validate_runtime_qualification_record_shape(
             .filter(|evidence| {
                 evidence.relative_path == record.measured_server_executable_relative_path
                     && evidence.sha256 == record.measured_server_executable_sha256
+                    && evidence.bytes == record.campaign_process.executable_bytes
             })
             .count()
             != 1
@@ -3967,7 +3983,7 @@ pub(crate) fn runtime_qualification_identity(
     record: &H3PrivateRuntimeQualificationRecord,
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"mold.minimax-h3.private-runtime-qualification.v3\0");
+    digest.update(b"mold.minimax-h3.private-runtime-qualification.v4\0");
     for value in [
         record.schema.as_str(),
         record.decision.as_str(),
@@ -3993,6 +4009,25 @@ pub(crate) fn runtime_qualification_identity(
     update_string(&mut digest, &record.attention_runtime_identity_sha256);
     update_string(&mut digest, &record.attention_kernel_identity);
     update_string(&mut digest, &record.attention_qualification_sha256);
+    digest.update(record.campaign_process.process_id.to_le_bytes());
+    digest.update(
+        record
+            .campaign_process
+            .process_start_time_ticks
+            .to_le_bytes(),
+    );
+    update_string(&mut digest, &record.campaign_process.linux_boot_id_sha256);
+    digest.update(record.campaign_process.executable_device.to_le_bytes());
+    digest.update(record.campaign_process.executable_inode.to_le_bytes());
+    digest.update(record.campaign_process.executable_bytes.to_le_bytes());
+    update_string(&mut digest, &record.campaign_process.executable_sha256);
+    update_string(&mut digest, &record.campaign_process.launch_argv_sha256);
+    update_string(
+        &mut digest,
+        &record.campaign_process.launch_environment_sha256,
+    );
+    digest.update(record.campaign_process.cuda_driver_version.to_le_bytes());
+    digest.update(record.campaign_process.cuda_toolkit_version.to_le_bytes());
     record.envelope.update_identity(&mut digest);
     record.bounds.update_identity(&mut digest);
     digest.update((record.evidence_artifacts.len() as u64).to_le_bytes());
@@ -4165,6 +4200,19 @@ mod tests {
             attention_runtime_identity_sha256: sha('1'),
             attention_kernel_identity: "qualified-kernel".into(),
             attention_qualification_sha256: sha('2'),
+            campaign_process: H3PrivateRuntimeProcessObservation {
+                process_id: 42,
+                process_start_time_ticks: 99,
+                linux_boot_id_sha256: sha('8'),
+                executable_device: 7,
+                executable_inode: 8,
+                executable_bytes: 1_024,
+                executable_sha256: sha('4'),
+                launch_argv_sha256: sha('9'),
+                launch_environment_sha256: sha('0'),
+                cuda_driver_version: 12_080,
+                cuda_toolkit_version: 12_080,
+            },
             envelope: H3PrivateRuntimeEnvelopeRecord {
                 width: 960,
                 height: 544,
