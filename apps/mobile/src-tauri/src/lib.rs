@@ -10,8 +10,20 @@ fn app_context() -> tauri::Context<tauri::Wry> {
     tauri::generate_context!()
 }
 
+#[cfg(target_os = "ios")]
+fn install_network_crypto_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("the iPhone app must install its rustls crypto provider before networking");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "ios")]
+    install_network_crypto_provider();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_deep_link::init())
         .setup(|_app| {
@@ -98,5 +110,14 @@ mod tests {
         assert!(config.contains("\"scheme\": [\"mold\"]"));
         assert!(generated_plist.contains("<key>CFBundleURLTypes</key>"));
         assert!(generated_plist.contains("<string>mold</string>"));
+    }
+
+    #[cfg(target_os = "ios")]
+    #[test]
+    fn ios_installs_crypto_provider_before_building_network_clients() {
+        super::install_network_crypto_provider();
+        reqwest::Client::builder()
+            .build()
+            .expect("reqwest must be usable after iPhone startup installs the provider");
     }
 }
