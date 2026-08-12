@@ -2744,9 +2744,9 @@ mod tests {
         assert_eq!(short.audio_rows, 414);
 
         let long = reference_prepared_shape_for_target(&video, MAX_FRAMES).unwrap();
-        assert_eq!(long.normalized_video_frames, Some(360));
+        assert_eq!(long.normalized_video_frames, Some(MAX_FRAMES));
         assert_eq!(long.video_frames, Some(345));
-        assert_eq!(long.qwen_video_frames, Some(30));
+        assert_eq!(long.qwen_video_frames, Some(29));
     }
 
     #[test]

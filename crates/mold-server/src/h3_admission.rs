@@ -2446,7 +2446,7 @@ mod tests {
     }
 
     #[test]
-    fn target_rows_are_exact_for_124_and_362_frame_products() {
+    fn target_rows_are_exact_for_124_and_345_frame_products() {
         let (_, short) = prepared(minimax_h3::FL2VA_COMFY, 124);
         assert_eq!(short.video_latent_frames, 37);
         assert_eq!(short.rows.target_video_rows, 37_296);
@@ -2455,13 +2455,13 @@ mod tests {
         assert_eq!(short.audio_samples_per_channel, 165_333);
         assert_eq!(short.rows.total_packed_rows, 37_838);
 
-        let (_, long) = prepared(minimax_h3::FL2VA_COMFY, 362);
-        assert_eq!(long.video_latent_frames, 107);
-        assert_eq!(long.rows.target_video_rows, 107_856);
-        assert_eq!(long.audio_latents_per_channel, 603);
-        assert_eq!(long.rows.target_audio_rows, 1_206);
-        assert_eq!(long.audio_samples_per_channel, 482_667);
-        assert_eq!(long.rows.total_packed_rows, 109_190);
+        let (_, long) = prepared(minimax_h3::FL2VA_COMFY, 345);
+        assert_eq!(long.video_latent_frames, 102);
+        assert_eq!(long.rows.target_video_rows, 102_816);
+        assert_eq!(long.audio_latents_per_channel, 575);
+        assert_eq!(long.rows.target_audio_rows, 1_150);
+        assert_eq!(long.audio_samples_per_channel, 460_000);
+        assert_eq!(long.rows.total_packed_rows, 104_094);
     }
 
     #[test]
@@ -2579,13 +2579,13 @@ mod tests {
         short_request.references = Some(vec![reference.clone()]);
         let (_, short) =
             H3PreparedRequestShape::from_prepared_request(&short_request, 128, 512).unwrap();
-        let mut long_request = request(minimax_h3::REF2VA_COMFY, 362);
+        let mut long_request = request(minimax_h3::REF2VA_COMFY, 345);
         long_request.references = Some(vec![reference]);
         let (_, long) =
             H3PreparedRequestShape::from_prepared_request(&long_request, 128, 512).unwrap();
 
         assert_eq!(short.reference_shapes[0].normalized_video_frames, Some(124));
-        assert_eq!(long.reference_shapes[0].normalized_video_frames, Some(360));
+        assert_eq!(long.reference_shapes[0].normalized_video_frames, Some(345));
         assert!(short.rows.condition_visual_rows < long.rows.condition_visual_rows);
         assert!(short.rows.condition_audio_rows < long.rows.condition_audio_rows);
         assert_ne!(short.reference_fingerprint, long.reference_fingerprint);

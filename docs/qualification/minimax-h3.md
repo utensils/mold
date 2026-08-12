@@ -160,18 +160,18 @@ of the current evidence.
 The source contract currently freezes:
 
 - 24 fps output on the `17n+5` frame grid;
-- the representative grid points 124, 243, and 362 frames;
-- actual media durations of approximately 5.1667, 10.125, and 15.0833 seconds
+- the representative grid points 124, 243, and 345 frames;
+- actual media durations of approximately 5.1667, 10.125, and 14.375 seconds
   at those three points;
-- Mold's explicit acceptance of aligned 362-frame nominal-15-second output;
+- Mold's cap at the largest grid-aligned output under 15 seconds, 345 frames;
 - mandatory synchronized 32 kHz, two-channel stereo audio;
 - MP4 output for the synchronized audio-video path; and
 - one native output per generation request.
 
-The 362-frame decision is intentionally different from the pinned Diffusers
-path, which aligns 360 to 362 and then rejects the result for exceeding 15
-seconds. The [conformance guide](./minimax-h3-conformance.md) records the exact
-day-zero fixture and external evidence schema.
+The pinned Diffusers path aligns 360 to 362 and then rejects the result for
+exceeding 15 seconds. Mold therefore caps the selectable grid at 345. The
+[conformance guide](./minimax-h3-conformance.md) records the exact day-zero
+fixture and external evidence schema.
 
 ## Weight layouts and storage facts
 
@@ -579,11 +579,11 @@ and does not itself report a completed release gate.
 | Clean storage                 | Use the qualified isolated external campaign with its access-controlled absolute `MOLD_HOME`; never reuse an ordinary Mold home                                                        | Capacity and mount report, private ownership/mode, clean before/after inventory, and no H3 bytes in the checkout                                                                                          |
 | Artifact identity             | Fetch only the approved task/layout and every pinned companion                                                                                                                       | Exact repository/revision/path/byte count/full SHA-256, component-index hashes, license/NOTICE capture, and no unexpected file                                                                            |
 | Full-path numerical parity    | Run tokenizer/processor, Qwen layer 50, visual VAE, AudioVAE, token refiner, transformer block, packed layout, noise allocation, and dual sampler against pinned Diffusers BF16/FP32 | External fixture bundle passes schema/hash validation and every recorded tolerance; no approximate backend contributed a golden value                                                                     |
-| T2VA                          | Generate 1344x768 at 124 and 362 frames, plus the 243-frame grid control                                                                                                             | Decoded 24 fps MP4, exact frame count, synchronized 32 kHz stereo audio, stable seed/provenance, phase telemetry, and full-reference quality metrics                                                      |
+| T2VA                          | Generate 1344x768 at 124 and 345 frames, plus the 243-frame grid control                                                                                                             | Decoded 24 fps MP4, exact frame count, synchronized 32 kHz stereo audio, stable seed/provenance, phase telemetry, and full-reference quality metrics                                                      |
 | FL2VA                         | First-only, last-only, and first+last at the same grid points, including mismatched source aspects                                                                                   | Exact endpoint signatures/order, official resize/crop and fresh seed-42 posterior evidence, preserved boundary behavior, decoded A/V validation, and quality metrics                                      |
 | Ref2VA                        | Image-only; video with soundtrack; image+standalone audio; mixed ordered image/video/audio; swapped-order comparison; every count/duration/type failure                              | Exact packed order, modality tags, rotary clocks, soundtrack association, negative-case codes, decoded A/V validation, and order-sensitive quality comparison                                             |
 | Comfy deployment path         | Compare the approved pruned INT8/NVFP4 layout with the full path on the same prompts, sources, shapes, seeds, and hardware                                                           | Spatial/temporal perceptual metrics, audio spectral/loudness/channel metrics, exact A/V timing, measured deltas, named accuracy tier, and no exact-parity label unless actually proven                    |
-| Memory/performance            | Measure 960x544 and 1344x768 at 124 frames, then 362-frame feasibility, on both the declared high-memory tier and declared streamed consumer tier                                    | Exact GPU/driver/backend, CPU/RAM/storage, artifact identities, attention kernel, resident/prefetch plan, cold/warm setup, per-phase timing, peak VRAM/RAM, and output hashes                             |
+| Memory/performance            | Measure 960x544 and 1344x768 at 124 frames, then 345-frame feasibility, on both the declared high-memory tier and declared streamed consumer tier                                    | Exact GPU/driver/backend, CPU/RAM/storage, artifact identities, attention kernel, resident/prefetch plan, cold/warm setup, per-phase timing, peak VRAM/RAM, and output hashes                             |
 | Cancellation                  | Cancel during Qwen load/encode, visual/audio reference encode, block load/prefetch, denoise, visual decode, audio decode, mux, and gallery persistence                               | Typed terminal event, bounded cancellation latency, released Scheduler V2/device/host/staging ownership, no partial gallery row, and documented cleanup                                                   |
 | Fault recovery                | Exercise missing/partial/corrupt components, wrong task/layout, unavailable attention, host/VRAM pressure, instance change, network loss, and closed authorization                   | Early typed failure at the owning boundary, no silent fallback/reroute, no queued work after infeasible placement, no leaked path/key, and repeatable retry semantics                                     |
 | Single-device authority       | Attempt one valid request on each qualified CUDA target and negative zero/two-device admissions; distribute independent sibling jobs separately                                      | One immutable device/instance/artifact/execution lease per request, typed multi-device rejection, and no aggregate-VRAM feasibility claim                                                                 |

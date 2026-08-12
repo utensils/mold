@@ -966,7 +966,7 @@ impl GenerationReference {
 
     /// Redacted metadata for the exact generated duration that will consume
     /// this reference. Long reference video/audio is truncated to the target
-    /// duration, so its prepared shape must not inherit the 362-frame planning
+    /// duration, so its prepared shape must not inherit the 345-frame planning
     /// ceiling when a shorter request is queued or persisted.
     pub fn redacted_metadata_for_target(
         &self,

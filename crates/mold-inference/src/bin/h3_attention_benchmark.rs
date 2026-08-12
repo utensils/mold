@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! h3_attention_benchmark --scenario release-124-target --iterations 3
-//! h3_attention_benchmark --scenario release-362-target --iterations 1 --allow-long
+//! h3_attention_benchmark --scenario release-345-target --iterations 1 --allow-long
 //! h3_attention_benchmark --plan-only
 //! ```
 
@@ -48,7 +48,7 @@ Usage:\n\
                          [--allow-long]\n\
 \n\
 Execution requires at least one explicit --scenario and --iterations. The\n\
-362-frame scenarios additionally require --allow-long and are capped at one\n\
+345-frame scenarios additionally require --allow-long and are capped at one\n\
 warmup plus three measured iterations. Reports are JSON on stdout; redirect\n\
 stdout when a durable report is wanted. No model or media path is accepted.";
 
@@ -84,12 +84,12 @@ const SCENARIOS: &[ScenarioSpec] = &[
         reference_mix: ReferenceMix::VideoImageAudio,
     },
     ScenarioSpec {
-        id: "release-362-target",
+        id: "release-345-target",
         target_frames: MAX_FRAMES,
         reference_mix: ReferenceMix::None,
     },
     ScenarioSpec {
-        id: "release-362-mixed",
+        id: "release-345-mixed",
         target_frames: MAX_FRAMES,
         reference_mix: ReferenceMix::VideoImageAudio,
     },
@@ -417,14 +417,14 @@ fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<Command> {
         .iter()
         .any(|scenario| scenario.target_frames == MAX_FRAMES);
     if includes_long && !raw.allow_long {
-        bail!("362-frame scenarios require the explicit --allow-long opt-in");
+        bail!("345-frame scenarios require the explicit --allow-long opt-in");
     }
     if includes_long
         && (measured_iterations > MAX_LONG_MEASURED_ITERATIONS
             || warmup_iterations > MAX_LONG_WARMUP_ITERATIONS)
     {
         bail!(
-            "362-frame scenarios allow at most {MAX_LONG_WARMUP_ITERATIONS} warmup and {MAX_LONG_MEASURED_ITERATIONS} measured iterations"
+            "345-frame scenarios allow at most {MAX_LONG_WARMUP_ITERATIONS} warmup and {MAX_LONG_MEASURED_ITERATIONS} measured iterations"
         );
     }
     Ok(Command::Execute {
@@ -854,7 +854,7 @@ fn run_cuda(
         .map_err(|error| anyhow!(error))?;
 
     // Every invocation plans the complete fixed catalog so both released
-    // 124-frame and 362-frame boundaries remain visible even when execution is
+    // 124-frame and 345-frame boundaries remain visible even when execution is
     // deliberately narrowed to one scenario.
     let planned_scenarios = SCENARIOS
         .iter()
@@ -979,7 +979,7 @@ mod tests {
         assert_eq!(mixed.rows.condition_audio_rows, 320);
         assert_eq!(mixed.rows.total_packed_rows, 49_294);
 
-        let long = scenario_facts(scenario_spec("release-362-target").unwrap()).unwrap();
+        let long = scenario_facts(scenario_spec("release-345-target").unwrap()).unwrap();
         assert_eq!(long.target_latent_frames, 107);
         assert_eq!(long.rows.generated_video_rows, 107_856);
         assert_eq!(long.rows.generated_audio_rows, 1_206);
@@ -991,7 +991,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [256, 1_206, 107_856]
         );
-        let long_mixed = scenario_facts(scenario_spec("release-362-mixed").unwrap()).unwrap();
+        let long_mixed = scenario_facts(scenario_spec("release-345-mixed").unwrap()).unwrap();
         assert_eq!(long_mixed.rows.total_packed_rows, 120_646);
     }
 
@@ -1034,7 +1034,7 @@ mod tests {
         assert!(parse_args(strings(&["--scenario", "release-124-target"])).is_err());
         assert!(parse_args(strings(&[
             "--scenario",
-            "release-362-target",
+            "release-345-target",
             "--iterations",
             "1"
         ]))
@@ -1042,7 +1042,7 @@ mod tests {
         assert_eq!(
             parse_args(strings(&[
                 "--scenario",
-                "release-362-target",
+                "release-345-target",
                 "--iterations",
                 "3",
                 "--warmup",
@@ -1051,7 +1051,7 @@ mod tests {
             ]))
             .unwrap(),
             Command::Execute {
-                scenario_ids: vec!["release-362-target".into()],
+                scenario_ids: vec!["release-345-target".into()],
                 warmup_iterations: 1,
                 measured_iterations: 3,
                 allow_long: true,
@@ -1059,7 +1059,7 @@ mod tests {
         );
         assert!(parse_args(strings(&[
             "--scenario",
-            "release-362-target",
+            "release-345-target",
             "--iterations",
             "4",
             "--allow-long"

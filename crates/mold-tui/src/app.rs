@@ -11793,8 +11793,10 @@ mod tests {
 
         assert_eq!(h3_grid.snap_nearest(120), 124);
         assert_eq!(h3_grid.snap_nearest(240), 243);
+        // Grid rounding is independent from the model cap; the UI clamps the
+        // rounded value through `tui_max_video_frames` before storing it.
         assert_eq!(h3_grid.snap_nearest(360), 362);
-        assert_eq!(tui_max_video_frames(h3_grid, 24), 362);
+        assert_eq!(tui_max_video_frames(h3_grid, 24), 345);
     }
 
     #[tokio::test]
