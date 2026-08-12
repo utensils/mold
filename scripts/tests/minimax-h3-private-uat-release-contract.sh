@@ -186,16 +186,19 @@ require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.
   'H3PrivateRuntimeQualificationCandidate' \
   "the private H3 runtime-record producer does not emit a review-only candidate"
 require_text crates/mold-inference/src/minimax_h3/private_runtime_observer.rs \
-  'mold.minimax-h3.private-uat-runtime-bound-observation.v2' \
+  'mold.minimax-h3.private-uat-runtime-bound-observation.v3' \
   "the private H3 runtime-bound observer has no release-rejectable claim marker"
 require_text scripts/verify-h3-release-exclusion.sh \
   'mold.minimax-h3.private-uat-runtime-bound-observation.v1' \
   "shipping verification forgot the prior private H3 runtime-bound observer marker"
 require_text scripts/verify-h3-release-exclusion.sh \
   'mold.minimax-h3.private-uat-runtime-bound-observation.v2' \
+  "shipping verification forgot the prior v2 private H3 runtime-bound observer marker"
+require_text scripts/verify-h3-release-exclusion.sh \
+  'mold.minimax-h3.private-uat-runtime-bound-observation.v3' \
   "shipping verification does not reject the current private H3 runtime-bound observer marker"
 require_text crates/mold-inference/src/minimax_h3/private_server.rs \
-  'H3PrivateRuntimeBoundCapture::begin(&cuda_device, qwen_on_cpu, observed_envelope)' \
+  'H3PrivateRuntimeBoundCapture::begin(' \
   "the private H3 server does not synchronously own one runtime-bound capture"
 require_text crates/mold-inference/src/minimax_h3/private_server.rs \
   'runtime_bound_capture.finish()' \

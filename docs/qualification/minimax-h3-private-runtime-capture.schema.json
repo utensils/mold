@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://utensils.io/mold/schemas/minimax-h3-private-runtime-bound-capture-v2.json",
+  "$id": "https://utensils.io/mold/schemas/minimax-h3-private-runtime-bound-capture-v3.json",
   "title": "Mold private MiniMax H3 runtime-bound capture",
   "type": "object",
   "additionalProperties": false,
@@ -10,6 +10,8 @@
     "task",
     "source_sha",
     "runtime_code_identity_sha256",
+    "bootstrap_runtime_record_sha256",
+    "bootstrap_runtime_qualification_identity_sha256",
     "measured_server_executable",
     "authorization_record_sha256",
     "authorization_source_document_sha256",
@@ -27,7 +29,7 @@
   ],
   "properties": {
     "schema": {
-      "const": "mold.minimax-h3.private-runtime-bound-capture.v2"
+      "const": "mold.minimax-h3.private-runtime-bound-capture.v3"
     },
     "canonical_model": {
       "const": "minimax-h3-fl2va:comfy-pruned-int8"
@@ -35,6 +37,8 @@
     "task": { "const": "fl2va" },
     "source_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "runtime_code_identity_sha256": { "$ref": "#/$defs/sha256" },
+    "bootstrap_runtime_record_sha256": { "$ref": "#/$defs/sha256" },
+    "bootstrap_runtime_qualification_identity_sha256": { "$ref": "#/$defs/sha256" },
     "measured_server_executable": { "$ref": "#/$defs/relativePath" },
     "authorization_record_sha256": { "$ref": "#/$defs/sha256" },
     "authorization_source_document_sha256": { "$ref": "#/$defs/sha256" },

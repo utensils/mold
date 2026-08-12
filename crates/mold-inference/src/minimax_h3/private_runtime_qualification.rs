@@ -20,6 +20,8 @@ use sha2::{Digest, Sha256};
 use super::private_qualification::{
     qualify_private_artifacts, H3ArtifactHashProgress, H3PrivateArtifactQualificationReport,
 };
+#[cfg(test)]
+use super::private_runtime_observer::H3PrivateRuntimeAuthorityObservation;
 use super::private_runtime_observer::{
     H3PrivateRuntimeBoundObservation, H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA,
 };
@@ -34,7 +36,7 @@ use super::private_server::{
 pub const H3_PRIVATE_RUNTIME_RECORD_PRODUCER_MARKER: &str =
     "mold.minimax-h3.private-runtime-record-producer.v1";
 
-const CAPTURE_SCHEMA: &str = "mold.minimax-h3.private-runtime-bound-capture.v2";
+const CAPTURE_SCHEMA: &str = "mold.minimax-h3.private-runtime-bound-capture.v3";
 const MAX_CAPTURE_BYTES: u64 = 128 * 1024;
 const MAX_RUNTIME_OBSERVATION_BYTES: u64 = 128 * 1024;
 const MAX_EVIDENCE_ARTIFACTS: usize = 128;
@@ -223,6 +225,26 @@ fn validate_observed_envelope(
     Ok(())
 }
 
+fn validate_observed_authority(
+    capture: &H3PrivateRuntimeBoundCaptureManifest,
+    observation: &H3PrivateRuntimeBoundObservation,
+) -> Result<()> {
+    let authority = &observation.authority;
+    if authority.bootstrap_record_sha256 != capture.bootstrap_runtime_record_sha256
+        || authority.runtime_qualification_identity_sha256
+            != capture.bootstrap_runtime_qualification_identity_sha256
+        || authority.device_id != capture.device_id
+        || authority.device_ordinal != capture.device_ordinal
+        || authority.compute_capability != capture.compute_capability
+        || authority.attention_runtime_identity_sha256 != capture.attention_runtime_identity_sha256
+        || authority.attention_kernel_identity != capture.attention_kernel_identity
+        || authority.attention_qualification_sha256 != capture.attention_qualification_sha256
+    {
+        bail!("private H3 runtime authority differs from its structured observation")
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct H3PrivateRuntimeBoundCaptureManifest {
@@ -231,6 +253,8 @@ struct H3PrivateRuntimeBoundCaptureManifest {
     task: String,
     source_sha: String,
     runtime_code_identity_sha256: String,
+    bootstrap_runtime_record_sha256: String,
+    bootstrap_runtime_qualification_identity_sha256: String,
     measured_server_executable: String,
     authorization_record_sha256: String,
     authorization_source_document_sha256: String,
@@ -272,6 +296,11 @@ impl H3PrivateRuntimeBoundCaptureManifest {
             || self.runtime_code_identity_sha256 != embedded_runtime_code_identity_sha256
         {
             bail!("private H3 runtime capture differs from the embedded campaign build")
+        }
+        if !valid_lower_sha256(&self.bootstrap_runtime_record_sha256)
+            || !valid_lower_sha256(&self.bootstrap_runtime_qualification_identity_sha256)
+        {
+            bail!("private H3 runtime capture has no exact bootstrap record")
         }
         if !valid_stable_cuda_device_id(&self.device_id)
             || self.compute_capability[0] == 0
@@ -467,6 +496,7 @@ fn build_candidate(
     let observation = observation
         .ok_or_else(|| anyhow!("private H3 runtime capture lost its structured observation"))?;
     validate_observed_envelope(&capture.envelope, &observation)?;
+    validate_observed_authority(&capture, &observation)?;
     capture.bounds.validate_observation(&observation)?;
     evidence_artifacts.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     let measured_server_executable = evidence_artifacts
@@ -481,6 +511,10 @@ fn build_candidate(
         task: artifact.task.into(),
         campaign_source_sha: capture.source_sha.clone(),
         campaign_runtime_code_identity_sha256: capture.runtime_code_identity_sha256.clone(),
+        campaign_bootstrap_record_sha256: capture.bootstrap_runtime_record_sha256.clone(),
+        campaign_bootstrap_identity_sha256: capture
+            .bootstrap_runtime_qualification_identity_sha256
+            .clone(),
         measured_server_executable_relative_path: measured_server_executable.relative_path.clone(),
         measured_server_executable_sha256: measured_server_executable.sha256.clone(),
         authorization_record_sha256: artifact.authorization_record_sha256.clone(),
@@ -946,6 +980,8 @@ mod tests {
             task: "fl2va".into(),
             source_sha: source_sha(),
             runtime_code_identity_sha256: runtime_code_identity(),
+            bootstrap_runtime_record_sha256: sha('f'),
+            bootstrap_runtime_qualification_identity_sha256: sha('9'),
             measured_server_executable: "bin/mold-server".into(),
             authorization_record_sha256: sha('a'),
             authorization_source_document_sha256: sha('b'),
@@ -998,6 +1034,20 @@ mod tests {
     ) -> H3PrivateRuntimeBoundObservation {
         H3PrivateRuntimeBoundObservation {
             schema: H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA.into(),
+            authority: H3PrivateRuntimeAuthorityObservation {
+                bootstrap_record_sha256: capture.bootstrap_runtime_record_sha256.clone(),
+                runtime_qualification_identity_sha256: capture
+                    .bootstrap_runtime_qualification_identity_sha256
+                    .clone(),
+                device_id: capture.device_id.clone(),
+                device_ordinal: capture.device_ordinal,
+                compute_capability: capture.compute_capability,
+                attention_runtime_identity_sha256: capture
+                    .attention_runtime_identity_sha256
+                    .clone(),
+                attention_kernel_identity: capture.attention_kernel_identity.clone(),
+                attention_qualification_sha256: capture.attention_qualification_sha256.clone(),
+            },
             envelope: super::super::private_runtime_observer::H3PrivateRuntimeEnvelopeObservation {
                 width: capture.envelope.width,
                 height: capture.envelope.height,
@@ -1103,6 +1153,33 @@ mod tests {
         reject_measurement_change!(thumbnail_host_bytes_bound);
         reject_measurement_change!(mux_output_host_bytes_bound);
         reject_measurement_change!(aac_mux_staging_host_bytes);
+    }
+
+    #[test]
+    fn structured_observation_binds_every_runtime_authority_axis() {
+        let capture = capture("logs/runtime-observation.json");
+        let observation = observation(&capture);
+        validate_observed_authority(&capture, &observation).unwrap();
+
+        macro_rules! reject_string_change {
+            ($field:ident) => {{
+                let mut changed = observation.clone();
+                changed.authority.$field = sha('0');
+                assert!(validate_observed_authority(&capture, &changed).is_err());
+            }};
+        }
+        reject_string_change!(bootstrap_record_sha256);
+        reject_string_change!(runtime_qualification_identity_sha256);
+        reject_string_change!(device_id);
+        reject_string_change!(attention_runtime_identity_sha256);
+        reject_string_change!(attention_kernel_identity);
+        reject_string_change!(attention_qualification_sha256);
+        let mut changed = observation.clone();
+        changed.authority.device_ordinal += 1;
+        assert!(validate_observed_authority(&capture, &changed).is_err());
+        let mut changed = observation;
+        changed.authority.compute_capability[0] += 1;
+        assert!(validate_observed_authority(&capture, &changed).is_err());
     }
 
     #[cfg(unix)]
