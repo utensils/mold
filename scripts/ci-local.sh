@@ -128,6 +128,43 @@ declare -a results=()
 failed=0
 skipped=0
 
+# Run one command under the step timeout, killing everything it started.
+#
+# `timeout --foreground` is not enough: it signals the command it launched and
+# explicitly leaves that command's children alone, so a hung `cargo test` would
+# be reported as a timeout while its test binary kept running, holding ports
+# and CPU for every later step. Enabling job control around the launch puts the
+# command in its own process group whose id is `$!`, so the watcher can signal
+# the whole tree — `setsid` is not usable here because it re-forks when it is
+# already a group leader, which leaves `$!` pointing at the wrong group (and
+# macOS does not ship it at all).
+run_bounded() {
+  if [ "$step_timeout" -le 0 ]; then
+    "$@"
+    return $?
+  fi
+  local pid watcher status monitor=0
+  case "$-" in *m*) monitor=1 ;; esac
+  set -m
+  "$@" &
+  pid=$!
+  [ "$monitor" -eq 1 ] || set +m
+  (
+    sleep "$step_timeout"
+    kill -TERM -"$pid" 2>/dev/null
+    sleep 10
+    kill -KILL -"$pid" 2>/dev/null
+  ) &
+  watcher=$!
+  wait "$pid"
+  status=$?
+  kill "$watcher" 2>/dev/null
+  wait "$watcher" 2>/dev/null
+  # 128+SIGTERM: the watcher fired, which is a timeout rather than a failure.
+  [ "$status" -eq 143 ] && status=124
+  return "$status"
+}
+
 step() {
   local name="$1"
   shift
@@ -143,11 +180,7 @@ step() {
   printf '\n\033[1m==> %s\033[0m\n' "$name"
   local started elapsed status
   started=$(date +%s)
-  if [ "$step_timeout" -gt 0 ] && command -v timeout >/dev/null 2>&1; then
-    timeout --foreground "$step_timeout" "$@"
-  else
-    "$@"
-  fi
+  run_bounded "$@"
   status=$?
   elapsed=$(( $(date +%s) - started ))
   case "$status" in
@@ -194,14 +227,22 @@ if wants rust; then
   # newer than the declared minimum passes every step below on the ambient
   # toolchain and fails the required job.
   msrv=$(msrv_toolchain || true)
-  if [ -n "${msrv:-}" ] && rustup toolchain list 2>/dev/null | grep -q "^$msrv"; then
+  if [ -z "${msrv:-}" ]; then
+    # An unreadable `rust-version` is a failure, not a skip: the gate exists and
+    # this run cannot honour it.
+    step "rust: MSRV (unreadable rust-version in Cargo.toml)" false
+  else
+    if ! rustup toolchain list 2>/dev/null | grep -q "^$msrv"; then
+      # CI installs it rather than assuming it, and so does this: skipping the
+      # gate would let a post-MSRV API pass here and fail the required job.
+      step "rust: install MSRV $msrv" \
+        rustup toolchain install "$msrv" --profile minimal
+    fi
     step "rust: MSRV $msrv check" \
       cargo "+$msrv" check --workspace --all-targets --locked
     step "rust: MSRV $msrv feature check" \
       cargo "+$msrv" check -p mold-ai --locked \
       --features preview,discord,expand,tui,metrics,webp,mp4,mdns
-  else
-    skip "rust: MSRV check" "toolchain ${msrv:-unknown} not installed (rustup toolchain install ${msrv:-…})"
   fi
   step "rust: fmt" cargo fmt --all -- --check
   step "rust: generated generation profiles" \
