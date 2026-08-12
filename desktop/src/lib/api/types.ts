@@ -12,6 +12,7 @@ import type {
 import type { Ltx2GuidanceOverrides } from "@studio/lib/guidanceOverrides";
 import type { GenerationScheduler } from "@studio/lib/generationCapabilities";
 import type { MiniMaxH3Capability } from "@studio/lib/minimaxH3Inventory";
+import type { GenerationProfileSet } from "@studio/lib/generationProfile";
 
 export interface GpuSnapshot {
   ordinal: number;
@@ -83,6 +84,7 @@ export interface ExpandCapabilities {
 }
 
 export interface ServerCapabilities {
+  generation_profile_v1?: boolean;
   gallery: { can_delete: boolean };
   /** Server-enforced model families that are not activated in this build. */
   model_access?: {
@@ -198,6 +200,8 @@ export interface ModelEntry {
     supports_negative_prompt: boolean;
     fixed_scale?: number | null;
   } | null;
+  /** Versioned server-authoritative generation controls and recipes. */
+  generation_profile?: GenerationProfileSet | null;
   /** Tuned default negative prompt the engine applies when a request omits
    * `negative_prompt` entirely (additive; wan today). Absent on older
    * servers and on families without one. An explicit `""` in a request

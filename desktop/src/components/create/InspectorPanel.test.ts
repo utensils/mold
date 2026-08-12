@@ -113,6 +113,7 @@ describe("InspectorPanel — shape + resolution projection", () => {
     const model = {
       name: "wan22-i2v-a14b:q5",
       family: "wan",
+      downloaded: true,
       recommended_dimensions: [
         { width: 832, height: 480 },
         { width: 480, height: 832 },
@@ -129,9 +130,43 @@ describe("InspectorPanel — shape + resolution projection", () => {
     const wrapper = mount(InspectorPanel, { props: { form } });
 
     expect(wrapper.getComponent(ShapePicker).props("options")).toEqual([
-      expect.objectContaining({ id: "wide", label: "16:9" }),
-      expect.objectContaining({ id: "tall", label: "9:16" }),
+      expect.objectContaining({ id: "26:15", label: "26:15" }),
+      expect.objectContaining({ id: "15:26", label: "15:26" }),
     ]);
+  });
+
+  it("exposes and applies Z-Image's exact 16:9 and 9:16 buckets", async () => {
+    const model = {
+      name: "z-image-turbo:q4",
+      family: "z-image",
+      downloaded: true,
+      recommended_dimensions: [
+        { width: 1024, height: 1024 },
+        { width: 1280, height: 720 },
+        { width: 720, height: 1280 },
+      ],
+      dimension_alignment: 16,
+      max_pixels: 1_800_000,
+    } as ModelEntry;
+    useModelStore().all = [model];
+    const form = formFor("z-image");
+    form.model = model.name;
+    form.width = 1024;
+    form.height = 1024;
+
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    expect(wrapper.getComponent(ShapePicker).props("options")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "16:9", label: "16:9" }),
+        expect.objectContaining({ id: "9:16", label: "9:16" }),
+      ]),
+    );
+    wrapper.getComponent(ShapePicker).vm.$emit("update:modelValue", "16:9");
+    await flushPromises();
+    expect([form.width, form.height]).toEqual([1280, 720]);
+    wrapper.getComponent(ShapePicker).vm.$emit("update:modelValue", "9:16");
+    await flushPromises();
+    expect([form.width, form.height]).toEqual([720, 1280]);
   });
 
   it("applies a picked shape to the form dimensions at the current budget", async () => {

@@ -141,13 +141,13 @@ import { isUpscaledImage } from "../lib/gallery/upscaled";
 import { percent } from "../lib/format";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import {
-  guidanceValidationError,
+  profileGuidanceValidationError,
+  profileStepsValidationError,
   inlineGenerationMediaBytes,
   MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
   MOBILE_MEDIA_BUDGET_ERROR,
   mobileMediaBudgetValidationError,
   sourceConditioningValidationError,
-  stepsValidationError,
 } from "../lib/generateValidation";
 import { blobToBase64, isStillImageFile } from "../lib/image";
 import { parseMissingExpandModel } from "../lib/expandErrors";
@@ -960,6 +960,7 @@ function applyMobileSourceResolution(
   const resolution = resolveSourceResolution(
     dimensions,
     selectedGenerationModel.value ?? form.family,
+    form.pipeline,
   );
   const replaced = base64 !== previous.base64;
   const wasFollowing =
@@ -979,7 +980,10 @@ watch(
         ? (form.imageAttachments[0] ?? null)
         : form.sourceImage,
     () => selectedGenerationModel.value?.name ?? form.model,
+    () => form.pipeline ?? null,
+    () => selectedGenerationModel.value?.generation_profile?.profile_hash ?? null,
     () => selectedGenerationModel.value?.max_pixels ?? null,
+    () => selectedGenerationModel.value?.max_axis_pixels ?? null,
     () => selectedGenerationModel.value?.dimension_alignment ?? null,
     () =>
       selectedGenerationModel.value?.recommended_dimensions
@@ -1013,7 +1017,10 @@ watch(
   [
     () => draft.openingImage?.base64 ?? null,
     () => selectedGenerationModel.value?.name ?? form.model,
+    () => form.pipeline ?? null,
+    () => selectedGenerationModel.value?.generation_profile?.profile_hash ?? null,
     () => selectedGenerationModel.value?.max_pixels ?? null,
+    () => selectedGenerationModel.value?.max_axis_pixels ?? null,
     () => selectedGenerationModel.value?.dimension_alignment ?? null,
     () =>
       selectedGenerationModel.value?.recommended_dimensions
@@ -1051,8 +1058,12 @@ const sourceControlsValid = computed(() => !caps.value.supportsImg2img || source
  * advertised text-to-video checkpoint hides the well entirely.
  */
 const sourceConditioningError = computed(() => sourceConditioningValidationError(form));
-const stepsError = computed(() => stepsValidationError(form.steps));
-const guidanceError = computed(() => guidanceValidationError(form.guidance));
+const stepsError = computed(() =>
+  profileStepsValidationError(form.steps, selectedGenerationModel.value, form.pipeline),
+);
+const guidanceError = computed(() =>
+  profileGuidanceValidationError(form.guidance, selectedGenerationModel.value, form.pipeline),
+);
 const basicParametersValid = computed(() => !stepsError.value && !guidanceError.value);
 const mobileMediaBudgetError = computed(() => mobileMediaBudgetValidationError(form));
 // Desktop parity: a conditioned LTX-2 render may go out undescribed, so the

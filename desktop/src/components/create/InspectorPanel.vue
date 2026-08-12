@@ -34,7 +34,12 @@ import { normalizeTargetHost } from "../../lib/hosts";
 import { modelDisplayName } from "../../lib/models";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { advancedActiveCount } from "../../lib/advancedCount";
-import { ASPECTS, aspectsSupportedByPresets } from "@ui/lib/resolution";
+import { aspectsSupportedByPresets } from "@ui/lib/resolution";
+import {
+  effectiveGenerationRecipe,
+  profileAspectIdForResolution,
+  profileAspectOptions,
+} from "@studio/lib/generationProfile";
 import {
   aspectIdFor,
   closestResolutionPreset,
@@ -47,7 +52,10 @@ import {
   resolveSourceResolution,
   sourceResolutionStatus,
 } from "@studio/lib/sourceResolution";
-import { resolutionValidationError, stepsValidationError } from "../../lib/generateValidation";
+import {
+  profileStepsValidationError,
+  resolutionValidationError,
+} from "../../lib/generateValidation";
 import { randomSeed } from "../../stores/generation";
 import { useGenerateFormStore } from "../../stores/generateForm";
 import { useModelStore } from "../../stores/models";
@@ -192,6 +200,9 @@ const caps = computed(() =>
     selectedModel.value?.guidance_capabilities,
   ),
 );
+const activeRecipe = computed(() =>
+  effectiveGenerationRecipe(selectedModel.value, props.form.pipeline),
+);
 const advancedCount = computed(() =>
   isSequence.value
     ? Number(Boolean(draft.openingImage)) +
@@ -319,7 +330,11 @@ const sourceDimensions = computed(() => {
 });
 const sourceResolution = computed(() =>
   sourceDimensions.value
-    ? resolveSourceResolution(sourceDimensions.value, selectedModel.value ?? props.form.family)
+    ? resolveSourceResolution(
+        sourceDimensions.value,
+        selectedModel.value ?? props.form.family,
+        props.form.pipeline,
+      )
     : null,
 );
 const followsSource = computed(
@@ -334,9 +349,10 @@ const sourceStatus = computed(() =>
   sourceResolution.value ? sourceResolutionStatus(sourceResolution.value) : null,
 );
 const canonicalShapeOptions = computed(() => {
-  const options = ASPECTS;
-  if (props.form.family.trim().toLowerCase() !== "wan") return options;
-  return aspectsSupportedByPresets(presetsForModel(selectedModel.value ?? props.form.family));
+  const model = selectedModel.value;
+  return model
+    ? profileAspectOptions(model, props.form.pipeline)
+    : aspectsSupportedByPresets(presetsForModel(props.form.family));
 });
 const shapeOptions = computed(() => {
   const source = sourceResolution.value;
@@ -352,12 +368,21 @@ const shapeOptions = computed(() => {
     : canonicalShapeOptions.value;
 });
 const shapeId = computed(() =>
-  followsSource.value ? "source" : (aspectIdFor(props.form.width, props.form.height) ?? ""),
+  followsSource.value
+    ? "source"
+    : ((selectedModel.value
+        ? profileAspectIdForResolution(
+            selectedModel.value,
+            props.form.pipeline,
+            props.form.width,
+            props.form.height,
+          )
+        : aspectIdFor(props.form.width, props.form.height)) ?? ""),
 );
 const resolutionRatio = computed(() => props.form.width / props.form.height);
 const resolutionPresets = computed(() =>
   presetsNearRatio(
-    presetsForModel(selectedModel.value ?? props.form.family),
+    presetsForModel(selectedModel.value ?? props.form.family, props.form.pipeline),
     resolutionRatio.value,
   ),
 );
@@ -412,17 +437,22 @@ const resolutionError = computed(() =>
     props.form.pipeline,
   ),
 );
-const stepsError = computed(() => stepsValidationError(props.form.steps));
+const stepsError = computed(() =>
+  profileStepsValidationError(props.form.steps, selectedModel.value, props.form.pipeline),
+);
 
 function onShape(id: string) {
   if (id === "source") {
     matchSource();
     return;
   }
-  const aspect = ASPECTS.find((option) => option.id === id);
+  const aspect = shapeOptions.value.find((option) => option.id === id);
   if (!aspect) return;
   const preset = closestResolutionPreset(
-    presetsNearRatio(presetsForModel(selectedModel.value ?? props.form.family), aspect.ratio),
+    presetsNearRatio(
+      presetsForModel(selectedModel.value ?? props.form.family, props.form.pipeline),
+      aspect.ratio,
+    ),
     props.form.width,
     props.form.height,
   );
@@ -596,8 +626,10 @@ function resetSettings() {
       <div class="ms-field">
         <SliderRow
           :model-value="form.steps"
-          :min="1"
-          :max="60"
+          :min="activeRecipe?.steps.min ?? 1"
+          :max="activeRecipe?.steps.max ?? 100"
+          :step="activeRecipe?.steps.step ?? 1"
+          :disabled="activeRecipe?.steps.mode === 'fixed'"
           label="Detail"
           :value-label="`${form.steps} steps`"
           @update:model-value="form.steps = $event"
@@ -609,12 +641,12 @@ function resetSettings() {
       <div class="ms-field">
         <SliderRow
           :model-value="caps.fixedGuidance ?? form.guidance"
-          :min="0"
-          :max="12"
-          :step="0.1"
+          :min="activeRecipe?.guidance.min ?? 0"
+          :max="activeRecipe?.guidance.max ?? 100"
+          :step="activeRecipe?.guidance.step ?? 0.1"
           label="Prompt strength"
           :value-label="(caps.fixedGuidance ?? form.guidance).toFixed(1)"
-          :disabled="!caps.guidanceAdjustable"
+          :disabled="activeRecipe?.guidance.mode === 'fixed' || !caps.guidanceAdjustable"
           @update:model-value="form.guidance = $event"
         />
         <p v-if="!caps.guidanceAdjustable" class="ms-hint" data-test="fixed-guidance-hint">
@@ -638,8 +670,16 @@ function resetSettings() {
         <span class="ms-field__label ms-field__label--inline">Frame rate</span>
         <Stepper
           :model-value="form.fps"
-          :min="1"
-          :max="60"
+          :min="
+            activeRecipe?.temporal?.fps.mode === 'adjustable' ? activeRecipe.temporal.fps.min : 1
+          "
+          :max="
+            activeRecipe?.temporal?.fps.mode === 'adjustable' ? activeRecipe.temporal.fps.max : 60
+          "
+          :step="
+            activeRecipe?.temporal?.fps.mode === 'adjustable' ? activeRecipe.temporal.fps.step : 1
+          "
+          :disabled="activeRecipe?.temporal?.fps.mode === 'fixed'"
           label="Frames per second"
           :format="(v: number) => `${v} fps`"
           @update:model-value="form.fps = $event"

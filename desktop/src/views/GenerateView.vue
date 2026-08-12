@@ -105,10 +105,10 @@ import {
   audioOutputValidationError,
   cameraControlValidationError,
   fpsValidationError,
-  guidanceValidationError,
+  profileGuidanceValidationError,
+  profileStepsValidationError,
   resolutionValidationError,
   sourceConditioningValidationError,
-  stepsValidationError,
   wanRecipeValidationError,
 } from "../lib/generateValidation";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
@@ -530,8 +530,8 @@ const formValidationError = computed(
       selectedEntry.value ?? null,
       form.pipeline,
     ) ??
-    stepsValidationError(form.steps) ??
-    guidanceValidationError(form.guidance) ??
+    profileStepsValidationError(form.steps, selectedEntry.value, form.pipeline) ??
+    profileGuidanceValidationError(form.guidance, selectedEntry.value, form.pipeline) ??
     (caps.value.supportsVideo
       ? videoFramesError(form.frames, selectedEntry.value ?? { family: form.family })
       : null) ??
@@ -748,7 +748,11 @@ function applyDecodedSourceResolution(
     return { base64, resolution: null };
   }
   setDimensions(dimensions.width, dimensions.height);
-  const resolution = resolveSourceResolution(dimensions, selectedEntry.value ?? form.family);
+  const resolution = resolveSourceResolution(
+    dimensions,
+    selectedEntry.value ?? form.family,
+    form.pipeline,
+  );
   const replaced = base64 !== previous.base64;
   const wasFollowing =
     previous.resolution !== null &&
@@ -767,7 +771,10 @@ watch(
         ? (form.imageAttachments[0] ?? null)
         : form.sourceImage,
     () => selectedEntry.value?.name ?? form.model,
+    () => form.pipeline ?? null,
+    () => selectedEntry.value?.generation_profile?.profile_hash ?? null,
     () => selectedEntry.value?.max_pixels ?? null,
+    () => selectedEntry.value?.max_axis_pixels ?? null,
     () => selectedEntry.value?.dimension_alignment ?? null,
     () =>
       selectedEntry.value?.recommended_dimensions
@@ -800,7 +807,10 @@ watch(
   [
     () => draft.openingImage?.base64 ?? null,
     () => selectedEntry.value?.name ?? form.model,
+    () => form.pipeline ?? null,
+    () => selectedEntry.value?.generation_profile?.profile_hash ?? null,
     () => selectedEntry.value?.max_pixels ?? null,
+    () => selectedEntry.value?.max_axis_pixels ?? null,
     () => selectedEntry.value?.dimension_alignment ?? null,
     () =>
       selectedEntry.value?.recommended_dimensions

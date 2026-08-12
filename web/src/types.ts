@@ -12,6 +12,7 @@ import type {
 } from "@studio/lib/guidanceOverrides";
 import type { GenerationScheduler } from "@studio/lib/generationCapabilities";
 import type { WanRecipeState } from "@studio/lib/wanRecipe";
+import type { GenerationProfileSet } from "@studio/lib/generationProfile";
 
 export type { SourceFitPolicy } from "@studio/lib/sourceFit";
 
@@ -150,6 +151,7 @@ export interface GalleryCapabilities {
 
 // Mirror of `mold_core::ServerCapabilities`.
 export interface ServerCapabilities {
+  generation_profile_v1?: boolean;
   gallery?: GalleryCapabilities;
   /** Server-enforced model families that are not activated in this build. */
   model_access?: {
@@ -384,6 +386,8 @@ export interface ModelInfoExtended extends ModelDefaults {
     supports_negative_prompt: boolean;
     fixed_scale?: number | null;
   } | null;
+  /** Versioned server-authoritative generation controls and recipes. */
+  generation_profile?: GenerationProfileSet | null;
   /** Tuned default negative prompt the engine applies when a request omits
    * `negative_prompt` entirely (`/api/models`, additive; wan today). Absent
    * on older servers and on families without one. An explicit `""` in a

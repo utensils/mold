@@ -86,6 +86,7 @@ import {
   type MinimaxH3AuthoringState,
 } from "@studio/lib/minimaxH3Authoring";
 import { sourceImageValidationError } from "@studio/lib/sourceImageCapability";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 
 const props = withDefaults(
   defineProps<{
@@ -432,10 +433,18 @@ function clearControl() {
 // ltx-video keeps just frames/fps/GIF.
 const showLtx2 = computed(() => caps.value.supportsAudio && !h3Family.value);
 
-// ── Output & seed: exact size (snap to the 16px grid, like desktop) ───
+// ── Output & seed: exact size follows the active recipe grid ──────────
+const resolutionAlignment = computed(
+  () =>
+    effectiveGenerationRecipe(selectedModel.value, props.modelValue.pipeline)
+      ?.resolution.alignment ??
+    selectedModel.value?.dimension_alignment ??
+    16,
+);
 function snapDim(v: number): number {
-  if (!Number.isFinite(v) || v <= 0) return 16;
-  return Math.max(16, Math.round(v / 16) * 16);
+  const alignment = resolutionAlignment.value;
+  if (!Number.isFinite(v) || v <= 0) return Math.max(64, alignment);
+  return Math.max(64, Math.round(v / alignment) * alignment);
 }
 function setWidth(raw: string) {
   patch({ width: snapDim(Number(raw)) });
@@ -1266,8 +1275,8 @@ function setSequenceCameraMode(mode: string) {
               <input
                 class="adv__input"
                 type="number"
-                min="16"
-                step="16"
+                min="64"
+                :step="resolutionAlignment"
                 data-test="exact-width"
                 aria-label="Width in pixels"
                 :value="modelValue.width"
@@ -1286,15 +1295,17 @@ function setSequenceCameraMode(mode: string) {
               <input
                 class="adv__input"
                 type="number"
-                min="16"
-                step="16"
+                min="64"
+                :step="resolutionAlignment"
                 data-test="exact-height"
                 aria-label="Height in pixels"
                 :value="modelValue.height"
                 @change="setHeight(($event.target as HTMLInputElement).value)"
               />
             </div>
-            <p class="adv__hint">snaps to the nearest 16px.</p>
+            <p class="adv__hint">
+              snaps to the nearest {{ resolutionAlignment }}px.
+            </p>
           </div>
           <div class="adv__field">
             <label class="adv__label">Seed</label>

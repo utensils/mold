@@ -16,6 +16,7 @@ import {
   sourceResolutionStatus,
   type SourceDimensions,
 } from "@studio/lib/sourceResolution";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
   aspectsForOrientation,
   closestResolutionPreset,
@@ -44,13 +45,17 @@ const height = defineModel<number>("height", { required: true });
 const emit = defineEmits<{ "validity-change": [valid: boolean] }>();
 
 const manualOpen = ref(false);
-const presets = computed(() => presetsForModel(props.model ?? props.family));
+const recipe = computed(() => effectiveGenerationRecipe(props.model, props.pipeline));
+const alignment = computed(
+  () => recipe.value?.resolution.alignment ?? props.model?.dimension_alignment ?? 16,
+);
+const presets = computed(() => presetsForModel(props.model ?? props.family, props.pipeline));
 const currentPreset = computed(() =>
-  matchPreset(width.value, height.value, props.model ?? props.family),
+  matchPreset(width.value, height.value, props.model ?? props.family, props.pipeline),
 );
 const currentOrientation = computed(() => orientationLabel(width.value, height.value));
 const currentAspect = computed(() =>
-  aspectRatioLabel(width.value, height.value, props.model ?? props.family),
+  aspectRatioLabel(width.value, height.value, props.model ?? props.family, props.pipeline),
 );
 const customVisible = computed(() => manualOpen.value || !currentPreset.value);
 const resolutionError = computed(() =>
@@ -58,7 +63,7 @@ const resolutionError = computed(() =>
 );
 const sourceResolution = computed(() =>
   props.sourceDimensions
-    ? resolveSourceResolution(props.sourceDimensions, props.model ?? props.family)
+    ? resolveSourceResolution(props.sourceDimensions, props.model ?? props.family, props.pipeline)
     : null,
 );
 const followsSource = computed(
@@ -164,7 +169,7 @@ const tierSegments = computed(() =>
 );
 
 function changedDimension(event: Event): number {
-  return snapMobileDimension(Number((event.target as HTMLInputElement).value));
+  return snapMobileDimension(Number((event.target as HTMLInputElement).value), 64, alignment.value);
 }
 
 function snapWidth(event: Event): void {
@@ -305,7 +310,7 @@ function matchSource(): void {
           type="number"
           inputmode="numeric"
           min="64"
-          step="16"
+          :step="alignment"
           aria-label="Custom width"
           @change="snapWidth"
         />
@@ -326,14 +331,14 @@ function matchSource(): void {
           type="number"
           inputmode="numeric"
           min="64"
-          step="16"
+          :step="alignment"
           aria-label="Custom height"
           @change="snapHeight"
         />
       </label>
     </div>
     <p v-if="customVisible" class="mobile-resolution-note">
-      Custom dimensions snap to multiples of 16 for model compatibility.
+      Custom dimensions snap to multiples of {{ alignment }} for model compatibility.
     </p>
     <p
       v-if="resolutionError"

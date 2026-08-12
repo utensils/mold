@@ -40,10 +40,11 @@ export function closestResolutionPreset(
 }
 
 /** Desktop generation also snaps manual dimensions to the engine's latent stride. */
-export function snapMobileDimension(value: number, minimum = 64): number {
+export function snapMobileDimension(value: number, minimum = 64, alignment = 16): number {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return minimum;
-  return Math.max(minimum, Math.round(numeric / 16) * 16);
+  const grid = Math.max(1, Math.round(alignment));
+  return Math.max(minimum, Math.round(numeric / grid) * grid);
 }
 
 export function resolutionTierLabel(index: number, total: number): string {

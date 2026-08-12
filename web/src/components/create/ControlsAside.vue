@@ -17,7 +17,12 @@ import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Stepper from "@ui/components/Stepper.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
-import { ASPECTS, aspectsSupportedByPresets } from "@ui/lib/resolution";
+import { aspectsSupportedByPresets } from "@ui/lib/resolution";
+import {
+  effectiveGenerationRecipe,
+  profileAspectIdForResolution,
+  profileAspectOptions,
+} from "@studio/lib/generationProfile";
 import type { GenerateFormState, ModelInfoExtended } from "../../types";
 import {
   closestResolutionPreset,
@@ -90,6 +95,9 @@ const capabilities = computed(() =>
     props.model?.source_image ?? props.modelValue.sourceImageCapability,
   ),
 );
+const activeRecipe = computed(() =>
+  effectiveGenerationRecipe(props.model, props.modelValue.pipeline),
+);
 const sequenceMode = computed(() => props.output === "sequence");
 // Edit families (Qwen image edit) render one print at a time; a sequence
 // renders one timeline.
@@ -132,6 +140,7 @@ const sourceResolution = computed(() =>
     ? resolveSourceResolution(
         props.sourceDimensions,
         props.model ?? props.family,
+        props.modelValue.pipeline,
       )
     : null,
 );
@@ -152,10 +161,9 @@ const sourceStatus = computed(() =>
     : null,
 );
 const canonicalShapeOptions = computed(() => {
-  if (props.family.trim().toLowerCase() !== "wan") return ASPECTS;
-  return aspectsSupportedByPresets(
-    presetsForModel(props.model ?? props.family),
-  );
+  return props.model
+    ? profileAspectOptions(props.model, props.modelValue.pipeline)
+    : aspectsSupportedByPresets(presetsForModel(props.family));
 });
 const shapeOptions = computed(() => {
   const source = sourceResolution.value;
@@ -171,12 +179,21 @@ const shapeOptions = computed(() => {
     : canonicalShapeOptions.value;
 });
 const aspectId = computed(() =>
-  followsSource.value ? "source" : (projection.value.aspectId ?? ""),
+  followsSource.value
+    ? "source"
+    : ((props.model
+        ? profileAspectIdForResolution(
+            props.model,
+            props.modelValue.pipeline,
+            props.modelValue.width,
+            props.modelValue.height,
+          )
+        : projection.value.aspectId) ?? ""),
 );
 const mp = computed(() => projection.value.mp);
 
 const currentRatio = computed(() => {
-  const a = ASPECTS.find((x) => x.id === projection.value.aspectId);
+  const a = shapeOptions.value.find((x) => x.id === aspectId.value);
   if (a) return a.ratio;
   const { width, height } = props.modelValue;
   return height ? width / height : 1;
@@ -188,7 +205,7 @@ function patch(patch: Partial<GenerateFormState>) {
 
 const resolutionPresets = computed(() =>
   presetsNearRatio(
-    presetsForModel(props.model ?? props.family),
+    presetsForModel(props.model ?? props.family, props.modelValue.pipeline),
     currentRatio.value,
   ),
 );
@@ -251,10 +268,13 @@ function setAspect(id: string) {
     matchSource();
     return;
   }
-  const a = ASPECTS.find((x) => x.id === id);
+  const a = shapeOptions.value.find((x) => x.id === id);
   if (!a) return;
   const preset = closestResolutionPreset(
-    presetsNearRatio(presetsForModel(props.model ?? props.family), a.ratio),
+    presetsNearRatio(
+      presetsForModel(props.model ?? props.family, props.modelValue.pipeline),
+      a.ratio,
+    ),
     props.modelValue.width,
     props.modelValue.height,
   );
@@ -375,8 +395,10 @@ function lockLastSeed() {
       <SliderRow
         label="Detail"
         :model-value="modelValue.steps"
-        :min="1"
-        :max="60"
+        :min="activeRecipe?.steps.min ?? 1"
+        :max="activeRecipe?.steps.max ?? 100"
+        :step="activeRecipe?.steps.step ?? 1"
+        :disabled="activeRecipe?.steps.mode === 'fixed'"
         :value-label="`${modelValue.steps} steps`"
         @update:model-value="patch({ steps: $event })"
       />
@@ -398,13 +420,16 @@ function lockLastSeed() {
       <SliderRow
         label="Prompt strength"
         :model-value="capabilities.fixedGuidance ?? modelValue.guidance"
-        :min="0"
-        :max="12"
-        :step="0.1"
+        :min="activeRecipe?.guidance.min ?? 0"
+        :max="activeRecipe?.guidance.max ?? 100"
+        :step="activeRecipe?.guidance.step ?? 0.1"
         :value-label="
           (capabilities.fixedGuidance ?? modelValue.guidance).toFixed(1)
         "
-        :disabled="!capabilities.guidanceAdjustable"
+        :disabled="
+          activeRecipe?.guidance.mode === 'fixed' ||
+          !capabilities.guidanceAdjustable
+        "
         @update:model-value="patch({ guidance: $event })"
       />
       <p

@@ -77,11 +77,12 @@ describe("shared resolution contract", () => {
     expect(megapixelLabel(1328, 1328)).toBe("1.8 MP");
   });
 
-  it("offers wan video buckets rather than falling through to square FLUX ones", () => {
+  it("keeps the conservative legacy Wan buckets instead of FLUX image shapes", () => {
     // Wan had no entry, so `presetsForFamily` returned the FLUX list: a video
     // family offered 1024x1024 image buckets on any host that does not
-    // advertise `recommended_dimensions`. These mirror `WAN_DIMS` in
-    // crates/mold-core/src/validation.rs.
+    // advertise `recommended_dimensions`. TI2V-5B is deliberately absent:
+    // its /32 pair is checkpoint-specific and cannot be inferred from a bare
+    // family string.
     const wan = presetsForFamily("wan").map((preset) => [
       preset.width,
       preset.height,
@@ -91,22 +92,15 @@ describe("shared resolution contract", () => {
       [480, 832],
       [1280, 720],
       [720, 1280],
-      [1280, 704],
-      [704, 1280],
     ]);
     expect(wan).not.toContainEqual([1024, 1024]);
   });
 
-  it("keeps wan's family fallback a union no single checkpoint has to satisfy", () => {
-    // The family list unions 2.1/A14B's 16px-grid buckets with TI2V-5B's
-    // 1280x704 on its 2.2 VAE's 32px grid. That is deliberate: the server
-    // narrows it per model via `wan_recommended_dimensions`, and a client
-    // that only has the family string should offer the superset rather than
-    // guess which checkpoint it is talking to.
+  it("uses the advertised checkpoint contract for Wan TI2V-5B", () => {
+    // A bare legacy family cannot safely guess TI2V-5B. The per-model path
+    // still exposes the exact /32 pair when the old host advertises it.
     const wan = presetsForFamily("wan");
     expect(wan.some((preset) => preset.width % 32 !== 0)).toBe(true);
-    expect(wan.some((preset) => preset.width % 32 === 0)).toBe(true);
-    // The per-model path still wins outright when the host advertises.
     expect(
       presetsForModel({
         family: "wan",

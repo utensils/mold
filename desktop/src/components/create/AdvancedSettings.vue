@@ -29,6 +29,7 @@ import {
   outputFormatsForFamily,
 } from "../../lib/capabilities";
 import { schedulerLabel } from "@studio/lib/generationCapabilities";
+import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
   MAX_WAN_DISTILL_STRENGTH,
   emptyWanRecipe,
@@ -183,12 +184,21 @@ function addNegative(word: string) {
 const formatOptions = computed<SegmentOption<OutputFormat>[]>(() =>
   formats.value.map((f) => ({ value: f, label: f })),
 );
-const snap16 = (v: number) => Math.max(64, Math.round(v / 16) * 16);
+const resolutionAlignment = computed(
+  () =>
+    effectiveGenerationRecipe(props.selectedModel, props.form.pipeline)?.resolution.alignment ??
+    props.selectedModel?.dimension_alignment ??
+    16,
+);
+const snapDimension = (v: number) => {
+  const alignment = resolutionAlignment.value;
+  return Math.max(64, Math.round(v / alignment) * alignment);
+};
 function snapWidth() {
-  props.form.width = snap16(props.form.width);
+  props.form.width = snapDimension(props.form.width);
 }
 function snapHeight() {
-  props.form.height = snap16(props.form.height);
+  props.form.height = snapDimension(props.form.height);
 }
 function swapSize() {
   [props.form.width, props.form.height] = [props.form.height, props.form.width];
@@ -714,7 +724,7 @@ function reset() {
           <input
             v-model.number="form.width"
             type="number"
-            step="16"
+            :step="resolutionAlignment"
             min="64"
             aria-label="Width"
             class="ms-input data-mono"
@@ -732,7 +742,7 @@ function reset() {
           <input
             v-model.number="form.height"
             type="number"
-            step="16"
+            :step="resolutionAlignment"
             min="64"
             aria-label="Height"
             class="ms-input data-mono"

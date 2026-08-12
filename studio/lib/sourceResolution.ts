@@ -1,9 +1,10 @@
 import {
   dimensionAlignmentForFamily,
   maxAxisPixelsForModel,
-  maxPixelsForFamily,
+  maxPixelsForModel,
   type ModelResolutionContract,
 } from "./resolutions";
+import { effectiveGenerationRecipe } from "./generationProfile";
 
 export interface SourceDimensions {
   width: number;
@@ -70,22 +71,26 @@ function familyAlignment(model: ModelResolutionContract | string): number {
 export function resolveSourceResolution(
   source: SourceDimensions,
   model: ModelResolutionContract | string,
+  pipeline?: string | null,
 ): SourceResolutionResult {
   const sourceWidth = positiveInteger(source.width, 1);
   const sourceHeight = positiveInteger(source.height, 1);
   const contract = typeof model === "string" ? null : model;
+  const recipe = contract
+    ? effectiveGenerationRecipe(contract, pipeline)
+    : null;
   const alignment = positiveInteger(
-    contract?.dimension_alignment,
+    recipe?.resolution.alignment ?? contract?.dimension_alignment,
     familyAlignment(model),
   );
-  const minimumDimension = minimumAligned(alignment);
+  const minimumDimension = Math.max(
+    minimumAligned(alignment),
+    recipe?.resolution.min_width ?? 0,
+    recipe?.resolution.min_height ?? 0,
+  );
   const advertisedMaxPixels = positiveInteger(
-    contract?.max_pixels,
-    // Family-aware fallback: clamping an LTX-2 source to the shared 1.8 MP
-    // limit would shrink a canvas the server would have accepted. Read the
-    // family from whichever form the caller passed — when `model` is a bare
-    // string it *is* the family, so keying off `contract` alone would miss it.
-    maxPixelsForFamily(familyOf(model)),
+    recipe?.resolution.max_pixels ?? contract?.max_pixels,
+    maxPixelsForModel(model, pipeline),
   );
   const maxPixels = advertisedMaxPixels;
   const sourcePixels = sourceWidth * sourceHeight;
@@ -93,7 +98,7 @@ export function resolveSourceResolution(
   // extreme aspect ratio: an 8000x600 source is under any pixel budget once
   // scaled, and its long edge would still land far outside the span LTX-2
   // normalizes RoPE positions by.
-  const maxAxis = maxAxisPixelsForModel(model);
+  const maxAxis = maxAxisPixelsForModel(model, pipeline);
   const longestSourceAxis = Math.max(sourceWidth, sourceHeight);
   const scale = Math.min(
     1,

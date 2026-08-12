@@ -132,22 +132,22 @@ describe("ControlsAside", () => {
     expect(next).toMatchObject(sourceDimensions);
   });
 
-  it("matches the desktop inspector's Detail range (1–60 steps)", () => {
+  it("renders the profile-compatible Detail admission range", () => {
     const wrapper = factory({}, "sdxl");
     const detail = wrapper
       .findAllComponents(SliderRow)
       .find((row) => row.props("label") === "Detail");
     expect(detail?.props("min")).toBe(1);
-    expect(detail?.props("max")).toBe(60);
+    expect(detail?.props("max")).toBe(100);
   });
 
-  it("matches the desktop inspector's Prompt strength range (0–12, step 0.1)", () => {
+  it("renders the profile-compatible guidance admission range", () => {
     const wrapper = factory({}, "sdxl");
     const strength = wrapper
       .findAllComponents(SliderRow)
       .find((row) => row.props("label") === "Prompt strength");
     expect(strength?.props("min")).toBe(0);
-    expect(strength?.props("max")).toBe(12);
+    expect(strength?.props("max")).toBe(100);
     expect(strength?.props("step")).toBe(0.1);
   });
 
@@ -214,9 +214,61 @@ describe("ControlsAside", () => {
     });
 
     expect(wrapper.getComponent(ShapePicker).props("options")).toEqual([
-      expect.objectContaining({ id: "wide", label: "16:9" }),
-      expect.objectContaining({ id: "tall", label: "9:16" }),
+      expect.objectContaining({ id: "26:15", label: "26:15" }),
+      expect.objectContaining({ id: "15:26", label: "15:26" }),
     ]);
+  });
+
+  it("exposes and applies Z-Image's exact 16:9 and 9:16 buckets", async () => {
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm({
+          model: "z-image-turbo:q4",
+          modelFamily: "z-image",
+          width: 1024,
+          height: 1024,
+        }),
+        family: "z-image",
+        model: {
+          name: "z-image-turbo:q4",
+          family: "z-image",
+          recommended_dimensions: [
+            { width: 1024, height: 1024 },
+            { width: 1280, height: 720 },
+            { width: 720, height: 1280 },
+          ],
+          dimension_alignment: 16,
+          max_pixels: 1_800_000,
+        } as never,
+      },
+    });
+    const picker = wrapper.getComponent(ShapePicker);
+    expect(picker.props("options")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "16:9", label: "16:9" }),
+        expect.objectContaining({ id: "9:16", label: "9:16" }),
+      ]),
+    );
+    picker.vm.$emit("update:modelValue", "16:9");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.emitted("update:modelValue")?.at(-1)?.[0]).toMatchObject({
+      width: 1280,
+      height: 720,
+    });
+    await wrapper.setProps({
+      modelValue: baseForm({
+        model: "z-image-turbo:q4",
+        modelFamily: "z-image",
+        width: 1280,
+        height: 720,
+      }),
+    });
+    picker.vm.$emit("update:modelValue", "9:16");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.emitted("update:modelValue")?.at(-1)?.[0]).toMatchObject({
+      width: 720,
+      height: 1280,
+    });
   });
 
   it("applies the projected dims when resolution changes", async () => {

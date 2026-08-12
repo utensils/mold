@@ -252,6 +252,22 @@ describe("AdvancedSettings — output & seed", () => {
     expect(form.height).toBe(1024);
   });
 
+  it("snaps exact dimensions to the selected model's advertised grid", async () => {
+    const form = formFor("ltx2");
+    form.width = 1000;
+    const wrapper = mountSettings(form, {
+      selectedModel: {
+        name: "ltx-2-19b-distilled:fp8",
+        family: "ltx2",
+        dimension_alignment: 32,
+      } as ModelEntry,
+    });
+    const width = wrapper.get("input[aria-label='Width']");
+    expect(width.attributes("step")).toBe("32");
+    await width.trigger("change");
+    expect(form.width).toBe(992);
+  });
+
   it("shows the fixed-seed value only when the seed is locked", async () => {
     const form = formFor("flux");
     const wrapper = mountSettings(form);

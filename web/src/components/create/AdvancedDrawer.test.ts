@@ -728,6 +728,28 @@ describe("AdvancedDrawer interactions", () => {
     expect(swapped.height).toBe(1216);
   });
 
+  it("snaps exact dimensions to the selected model's advertised grid", async () => {
+    const wrapper = factory(
+      "ltx2",
+      { model: "ltx-2-19b-distilled:fp8", width: 1000 },
+      {
+        models: [
+          {
+            name: "ltx-2-19b-distilled:fp8",
+            family: "ltx2",
+            dimension_alignment: 32,
+          },
+        ],
+      },
+    );
+    const width = wrapper.get("[data-test='exact-width']");
+    expect(width.attributes("step")).toBe("32");
+    await width.trigger("change");
+    expect(wrapper.emitted("update:modelValue")?.at(-1)?.[0]).toMatchObject({
+      width: 992,
+    });
+  });
+
   it("round-trips 'Upscale after generate' into the generate request", async () => {
     // The always-visible picker must survive into the wire request and the
     // explicit Off option must remove it again.
