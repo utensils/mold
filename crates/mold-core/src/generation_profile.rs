@@ -224,6 +224,59 @@ pub struct GenerationProfileInput<'a> {
     pub supports_audio: bool,
 }
 
+/// Resolve the canonical shipped profile for a built-in manifest.
+///
+/// Catalog advertisement, generated documentation, and registry invariants
+/// all call this function so they cannot independently reinterpret manifest
+/// defaults or capabilities.
+pub fn generation_profile_for_manifest(
+    manifest: &crate::manifest::ModelManifest,
+) -> GenerationProfileSet {
+    let family = manifest.family.as_str();
+    generation_profile_for_manifest_with_defaults(
+        manifest,
+        GenerationDefaultsProfile {
+            width: manifest.defaults.width,
+            height: manifest.defaults.height,
+            steps: manifest.defaults.steps,
+            guidance: manifest.defaults.guidance,
+            frames: manifest.defaults.frames,
+            fps: manifest.defaults.fps,
+            negative_prompt: crate::manifest::default_negative_prompt_for_family(family)
+                .map(str::to_string),
+        },
+    )
+}
+
+/// Resolve a built-in manifest while preserving validated local default
+/// overlays. Identity and capabilities still come exclusively from the
+/// manifest; callers may replace only user-owned defaults.
+pub fn generation_profile_for_manifest_with_defaults(
+    manifest: &crate::manifest::ModelManifest,
+    defaults: GenerationDefaultsProfile,
+) -> GenerationProfileSet {
+    let family = manifest.family.as_str();
+    resolve_generation_profile(GenerationProfileInput {
+        model: &manifest.name,
+        family,
+        sub_family: None,
+        default_width: defaults.width,
+        default_height: defaults.height,
+        default_steps: defaults.steps,
+        default_guidance: defaults.guidance,
+        default_frames: defaults.frames,
+        default_fps: defaults.fps,
+        default_negative_prompt: defaults.negative_prompt,
+        source_image: manifest.defaults.source_image,
+        supports_sequence: crate::catalog::chain_capable_family(family),
+        supports_extend: crate::catalog::extend_capable_model(
+            family,
+            manifest.defaults.source_image,
+        ),
+        supports_audio: family == "ltx2",
+    })
+}
+
 const SD15: &[(u32, u32)] = &[(512, 512), (512, 768), (768, 512), (384, 512), (512, 384)];
 const SDXL: &[(u32, u32)] = &[
     (1024, 1024),
@@ -793,5 +846,107 @@ mod tests {
         let right = resolve_generation_profile(input("flux-dev:q4", "flux"));
         assert_eq!(left.profile_hash, right.profile_hash);
         assert_eq!(left.profile_hash.len(), 64);
+    }
+
+    #[test]
+    fn every_shipped_manifest_profile_is_internally_admissible() {
+        for manifest in crate::manifest::known_manifests()
+            .iter()
+            .filter(|manifest| manifest.is_generation_model())
+        {
+            let profile = generation_profile_for_manifest(manifest);
+            assert_eq!(profile.schema_version, GENERATION_PROFILE_SCHEMA_VERSION);
+            assert_eq!(profile.profile_hash.len(), 64, "{}", manifest.name);
+            assert!(profile.default_recipe().is_some(), "{}", manifest.name);
+
+            for recipe in &profile.recipes {
+                let context = format!("{} recipe {}", manifest.name, recipe.id);
+                assert!(
+                    (recipe.steps.min..=recipe.steps.max).contains(&recipe.steps.default),
+                    "{context}: step default is outside its control"
+                );
+                assert!(
+                    (recipe.guidance.min..=recipe.guidance.max).contains(&recipe.guidance.default),
+                    "{context}: guidance default is outside its control"
+                );
+
+                if let Some(temporal) = &recipe.temporal {
+                    assert!(
+                        (temporal.frames.min..=temporal.frames.max)
+                            .contains(&temporal.frames.default),
+                        "{context}: frame default is outside its control"
+                    );
+                    assert_eq!(
+                        (temporal.frames.default - temporal.frame_offset) % temporal.frames.step,
+                        0,
+                        "{context}: frame default is off-grid"
+                    );
+                }
+
+                if recipe.resolution.domain == ResolutionDomain::None {
+                    assert!(recipe.resolution.aspect_groups.is_empty(), "{context}");
+                    continue;
+                }
+                assert_resolution(
+                    &context,
+                    recipe,
+                    recipe.defaults.width,
+                    recipe.defaults.height,
+                );
+                let mut preset_ids = std::collections::HashSet::new();
+                for group in &recipe.resolution.aspect_groups {
+                    for preset in &group.presets {
+                        assert!(preset_ids.insert(&preset.id), "{context}: duplicate preset");
+                        assert_resolution(&context, recipe, preset.width, preset.height);
+                    }
+                }
+                if recipe.resolution.domain == ResolutionDomain::Buckets {
+                    assert!(
+                        recipe
+                            .resolution
+                            .aspect_groups
+                            .iter()
+                            .flat_map(|group| &group.presets)
+                            .any(|preset| {
+                                preset.width == recipe.defaults.width
+                                    && preset.height == recipe.defaults.height
+                            }),
+                        "{context}: bucket default is not advertised"
+                    );
+                }
+            }
+        }
+    }
+
+    fn assert_resolution(context: &str, recipe: &GenerationRecipeProfile, width: u32, height: u32) {
+        let resolution = &recipe.resolution;
+        assert!(width >= resolution.min_width, "{context}: width too small");
+        assert!(
+            height >= resolution.min_height,
+            "{context}: height too small"
+        );
+        assert_eq!(width % resolution.alignment, 0, "{context}: width off-grid");
+        assert_eq!(
+            height % resolution.alignment,
+            0,
+            "{context}: height off-grid"
+        );
+        assert!(
+            u64::from(width) * u64::from(height) <= resolution.max_pixels,
+            "{context}: pixel ceiling exceeded"
+        );
+        if let Some(max_axis) = resolution.max_axis_pixels {
+            assert!(
+                width <= max_axis && height <= max_axis,
+                "{context}: axis exceeded"
+            );
+        }
+        let aspect = f64::from(width) / f64::from(height);
+        if let Some(min) = resolution.min_aspect_ratio {
+            assert!(aspect >= min, "{context}: aspect below minimum");
+        }
+        if let Some(max) = resolution.max_aspect_ratio {
+            assert!(aspect <= max, "{context}: aspect above maximum");
+        }
     }
 }

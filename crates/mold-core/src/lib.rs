@@ -56,6 +56,7 @@ pub use control::{
 };
 pub use error::{MoldError, Result as MoldResult};
 pub use generation_profile::{
+    generation_profile_for_manifest, generation_profile_for_manifest_with_defaults,
     resolve_generation_profile, AspectGroup, ControlMode, FloatControl, FpsControl,
     GenerationCapabilitiesProfile, GenerationDefaultsProfile, GenerationProfileInput,
     GenerationProfileSet, GenerationRecipeProfile, IntegerControl, ProfileProvenance,

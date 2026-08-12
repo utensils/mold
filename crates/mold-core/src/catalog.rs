@@ -160,22 +160,18 @@ pub fn build_model_catalog(
         let supports_extend =
             extend_capable_model(&manifest.family, manifest.defaults.source_image);
         let supports_sequence = chain_capable_family(&manifest.family);
-        let generation_profile = crate::resolve_generation_profile(crate::GenerationProfileInput {
-            model: &manifest.name,
-            family: &manifest.family,
-            sub_family: None,
-            default_width,
-            default_height,
-            default_steps,
-            default_guidance,
-            default_frames,
-            default_fps,
-            default_negative_prompt: default_negative_prompt.clone(),
-            source_image: manifest.defaults.source_image,
-            supports_sequence,
-            supports_extend,
-            supports_audio: manifest.family == "ltx2",
-        });
+        let generation_profile = crate::generation_profile_for_manifest_with_defaults(
+            manifest,
+            crate::GenerationDefaultsProfile {
+                width: default_width,
+                height: default_height,
+                steps: default_steps,
+                guidance: default_guidance,
+                frames: default_frames,
+                fps: default_fps,
+                negative_prompt: default_negative_prompt.clone(),
+            },
+        );
         let resolution = resolution_defaults_from_profile(&generation_profile);
 
         models.push(ModelInfoExtended {

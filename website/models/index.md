@@ -165,6 +165,11 @@ for more options.
 Each family page lists recommended dimensions for non-square aspect ratios.
 Using non-recommended dimensions will trigger a warning.
 
+Maintainers should use the
+[model resolution and aspect-ratio matrix](https://github.com/utensils/mold/blob/main/docs/model-resolution-matrix.md)
+for exact reduced ratios, checkpoint and pipeline exceptions, Mold admission
+bounds, profile hashes, and pinned upstream provenance.
+
 ::: warning Backend qualification
 All image families and `LTX Video` run on CUDA, Apple Metal, and CPU. LTX-2 /
 LTX-2.3 is performance-qualified on CUDA; its CPU and Apple Metal paths are

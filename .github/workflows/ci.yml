@@ -89,6 +89,8 @@ jobs:
               - 'docs/qualification/README.md'
             rust_format:
               - 'crates/**/*.rs'
+              - 'docs/model-resolution-matrix.md'
+              - 'docs/generated/generation-profiles-v1.json'
             # Forced-local checks exist to compile backend-specific code that
             # the ordinary workspace gate cannot see. Backend-neutral crates
             # (catalog, DB, Discord, scheduler) are already covered by `rust`.
@@ -455,6 +457,9 @@ jobs:
       - name: Format
         if: env.RUN_RUST_FORMAT == 'true'
         run: cargo fmt --all -- --check
+      - name: Check generated generation profiles
+        if: env.RUN_RUST_FORMAT == 'true'
+        run: cargo run -p mold-ai-core --bin generate_generation_profiles -- --check
       - name: Clippy
         if: env.RUN_RUST_SUITE == 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings
