@@ -294,14 +294,15 @@ generation UAT, public authorization, or release activation.
 
 The reviewed runtime-record allowlist contains one independently reviewed
 candidate for the exact compact FL2VA quality envelope described below:
-`ddab00ae326d0526c1dbab02e110790fe8a5baca3f457b6dc7f34e5465932ca8`.
-The candidate binds source `ab955c910f153d1ad9c36b6da9ac0bda7b396642`,
+`6ddb831b38294c2920d1df7cc984bd617e61840dc1b132cd9374cf374cbbf6ce`.
+The candidate binds source `1bc961cf572192bc4a168828ebade61fc4fa865c`,
 runtime-code identity
-`4dc1bd8ef2b518ccd1d293d6dc3d31720d62432fbf650733999f01cdfeae5353`,
+`d9c1c89bbda4df09312b5c84ca40d383cd4c16d3d716e6f59773576992d18105`,
 and a successful L40S campaign whose H.264/AAC output hash is
 `dc5d9907fc95851edf701f07437c3413a8c77ec2a5842f49c352a20d4aea21e5`.
 The campaign authenticated all 42,482,090,318 artifact bytes and retained
-all thirteen synchronized runtime observations. This authority is FL2VA-only
+all thirteen synchronized runtime observations plus 18,694 external telemetry
+samples. This authority is FL2VA-only
 and does not extend to Ref2VA, other envelopes, devices, artifacts, attention
 implementations, runtime builds, public release, or broader license scope.
 
@@ -326,6 +327,18 @@ states are informational. Generation still opens and authenticates all artifact
 bytes before admission. The family-wide model-access restriction remains for
 legacy clients; H3-aware clients may override it only with this exact additive
 FL2VA partition. Ordinary builds omit the field, while Ref2VA remains absent.
+
+The same authenticated presentation boundary may add one exact compact FL2VA
+row to `GET /api/models`, but only when all five referenced component groups
+are already installed. The row carries no Hugging Face repository or download
+recipe. Its generation profile fixes width 1344, height 768, 124 frames at 24
+fps, 21 terminal-inclusive grid points, batch one, MP4 delivery, and a required
+first-frame source. Web, desktop, and iPhone remove the family-wide denial only
+when that exact model name and request envelope agree with the complete
+additive component graph. A missing component, widened axis, absent first
+frame, supplied last frame, unavailable MP4 encoder, or legacy/partial
+capability keeps the model unavailable. This does not advertise Ref2VA,
+authorize a public download, or broaden the CUDA-only private qualification.
 
 The next capture manifest must use
 [`mold.minimax-h3.private-runtime-bound-capture.v5`](./minimax-h3-private-runtime-capture.schema.json).

@@ -128,7 +128,7 @@ pub(crate) fn valid_stable_cuda_device_id(value: &str) -> bool {
 /// The first record covers only the exact compact FL2VA quality envelope and
 /// artifact/device/runtime/kernel identities retained by its v5 campaign.
 const REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256: &[&str] =
-    &["ddab00ae326d0526c1dbab02e110790fe8a5baca3f457b6dc7f34e5465932ca8"];
+    &["6ddb831b38294c2920d1df7cc984bd617e61840dc1b132cd9374cf374cbbf6ce"];
 
 /// Report whether this binary contains at least one reviewed private-runtime
 /// qualification record. This performs no filesystem access and is suitable

@@ -271,6 +271,7 @@ function accessRestrictionForHost(hostId: string, model: string) {
   return modelAccessRestrictionFor(capabilitiesByHost.value[hostId], {
     model,
     family: entry?.family,
+    generation_profile_sha256: entry?.generation_profile?.profile_hash ?? null,
   });
 }
 

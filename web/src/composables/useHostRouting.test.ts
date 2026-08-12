@@ -20,6 +20,10 @@ import type {
 import type { DeviceInfo, DeviceListResponse } from "@studio/api/devices";
 import type { GenerationPlacementPreview } from "@studio/api/generationPlacement";
 import { ApiError } from "@studio/api/client";
+import {
+  AUTHENTICATED_MINIMAX_H3_PROFILE_SHA256,
+  authenticatedMiniMaxH3Capabilities,
+} from "@studio/lib/minimaxH3Inventory.testFixtures";
 
 /** Per-host canned `/api/status` + `/api/models` responses, keyed by host id. */
 const statuses = new Map<string, unknown>();
@@ -254,6 +258,86 @@ describe("useHostRouting", () => {
     });
     expect(placementCall).not.toHaveBeenCalled();
   });
+
+  it("routes the exact authenticated private FL2VA model row", async () => {
+    const h3 = "minimax-h3-fl2va:comfy-pruned-int8";
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, [
+      model(h3, {
+        family: "minimax-h3",
+        generation_profile: {
+          profile_hash: AUTHENTICATED_MINIMAX_H3_PROFILE_SHA256,
+        } as never,
+      }),
+    ]);
+    capabilities.set(ORIGIN_HOST_ID, {
+      gallery: { can_delete: true },
+      ...authenticatedMiniMaxH3Capabilities(),
+    } as ServerCapabilities);
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    expect(routing.targetModels.value.map((entry) => entry.name)).toEqual([h3]);
+    expect(routing.modelOwnerIds(h3)).toEqual([ORIGIN_HOST_ID]);
+    expect(routing.resolve(h3)?.hostId).toBe(ORIGIN_HOST_ID);
+  });
+
+  it.each(
+    ["missing", "unbound", "mismatched"].flatMap((rowKind) =>
+      [ORIGIN_HOST_ID, AUTO_TARGET_ID].map(
+        (target) => [rowKind, target] as const,
+      ),
+    ),
+  )(
+    "keeps H3 closed for an exact capability with a %s model row on target %s",
+    async (rowKind, target) => {
+      const h3 = "minimax-h3-fl2va:comfy-pruned-int8";
+      statuses.set(ORIGIN_HOST_ID, status());
+      models.set(
+        ORIGIN_HOST_ID,
+        rowKind === "missing"
+          ? []
+          : [
+              model(h3, {
+                family: "minimax-h3",
+                ...(rowKind === "mismatched"
+                  ? {
+                      generation_profile: {
+                        profile_hash: "b".repeat(64),
+                      } as never,
+                    }
+                  : {}),
+              }),
+            ],
+      );
+      capabilities.set(ORIGIN_HOST_ID, {
+        gallery: { can_delete: true },
+        ...authenticatedMiniMaxH3Capabilities(),
+      } as ServerCapabilities);
+      setGenerateTargetId(target);
+      const routing = useHostRouting();
+      await routing.refresh();
+
+      expect(routing.targetModels.value).toEqual([]);
+      expect(routing.modelOwnerIds(h3)).toEqual([]);
+      expect(routing.resolve(h3)).toBeNull();
+      await expect(
+        routing.resolveFeasible({
+          prompt: "blocked",
+          model: h3,
+          width: 1344,
+          height: 768,
+          steps: 21,
+          guidance: 0,
+          seed: 42,
+          batch_size: 1,
+          frames: 124,
+          fps: 24,
+        }),
+      ).resolves.toMatchObject({ kind: "infeasible" });
+      expect(placementCall).not.toHaveBeenCalled();
+    },
+  );
 
   it("ignores an older same-host poll after a newer refresh settles", async () => {
     statuses.set(ORIGIN_HOST_ID, status({ queue_depth: 0 }));

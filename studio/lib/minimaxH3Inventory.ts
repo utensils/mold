@@ -33,6 +33,19 @@ export interface MiniMaxH3PartitionCapability {
   runtime_available: boolean;
   tier: string;
   component_ids: string[];
+  request?: MiniMaxH3RequestCapability | null;
+}
+
+export interface MiniMaxH3RequestCapability {
+  width: number;
+  height: number;
+  frames: number;
+  fps: number;
+  steps: number;
+  batch_size: number;
+  output_format: "mp4";
+  required_endpoint: "first";
+  generation_profile_sha256: string;
 }
 
 export interface MiniMaxH3QualificationCapability {
@@ -108,6 +121,7 @@ export interface MiniMaxH3TaskPresentation {
   remainingBytes: number;
   readiness: MiniMaxH3ComponentState;
   components: MiniMaxH3ComponentPresentation[];
+  request: MiniMaxH3RequestCapability | null;
 }
 
 export interface MiniMaxH3HostPresentation {
@@ -176,6 +190,40 @@ function stateValue(value: unknown): value is MiniMaxH3ComponentState {
 
 function roleValue(value: unknown): value is MiniMaxH3ComponentRole {
   return COMPONENT_ROLES.includes(value as MiniMaxH3ComponentRole);
+}
+
+function parseRequest(value: unknown): MiniMaxH3RequestCapability | null {
+  if (
+    !isRecord(value) ||
+    !byteCount(value.width) ||
+    value.width === 0 ||
+    !byteCount(value.height) ||
+    value.height === 0 ||
+    !byteCount(value.frames) ||
+    value.frames === 0 ||
+    !byteCount(value.fps) ||
+    value.fps === 0 ||
+    !byteCount(value.steps) ||
+    value.steps === 0 ||
+    value.batch_size !== 1 ||
+    value.output_format !== "mp4" ||
+    value.required_endpoint !== "first" ||
+    typeof value.generation_profile_sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(value.generation_profile_sha256)
+  ) {
+    return null;
+  }
+  return {
+    width: value.width,
+    height: value.height,
+    frames: value.frames,
+    fps: value.fps,
+    steps: value.steps,
+    batch_size: 1,
+    output_format: "mp4",
+    required_endpoint: "first",
+    generation_profile_sha256: value.generation_profile_sha256,
+  };
 }
 
 function parseDownload(
@@ -341,6 +389,7 @@ export function presentMiniMaxH3Host(
       runtime_available: true,
       tier: candidate.tier.trim(),
       component_ids: [...candidate.component_ids],
+      request: parseRequest(candidate.request),
     });
   }
   if (partitionsByTask.size === 0) return null;
@@ -398,6 +447,7 @@ export function presentMiniMaxH3Host(
       ),
       readiness: readiness(resolved),
       components: resolved,
+      request: parseRequest(partition.request),
     });
   }
 
@@ -420,6 +470,48 @@ export function presentMiniMaxH3Host(
       (component) => component.state !== "installed",
     ),
   };
+}
+
+/**
+ * Return the exact request envelope that may override the legacy family-wide
+ * H3 restriction for one model row. The complete capability graph must parse,
+ * every referenced component must already be installed, and only the reviewed
+ * compact FL2VA identity is eligible. Malformed or older capability payloads
+ * stay read-only inventory and cannot become generation authority.
+ */
+export function reviewedMiniMaxH3ModelAccess(
+  capabilities: MiniMaxH3CapabilityRecord | null | undefined,
+  model: string | null | undefined,
+  generationProfileSha256: string | null | undefined,
+): MiniMaxH3RequestCapability | null {
+  if (model !== "minimax-h3-fl2va:comfy-pruned-int8") return null;
+  const presented = presentMiniMaxH3Host({
+    id: "model-access",
+    label: "model access",
+    capabilities,
+  });
+  const task = presented?.tasks.find(
+    (candidate) =>
+      candidate.task === "fl2va" &&
+      candidate.model === model &&
+      candidate.readiness === "installed",
+  );
+  const request = task?.request;
+  if (
+    !request ||
+    request.width !== 1344 ||
+    request.height !== 768 ||
+    request.frames !== 124 ||
+    request.fps !== 24 ||
+    request.steps !== 21 ||
+    request.batch_size !== 1 ||
+    request.output_format !== "mp4" ||
+    request.required_endpoint !== "first" ||
+    generationProfileSha256 !== request.generation_profile_sha256
+  ) {
+    return null;
+  }
+  return request;
 }
 
 /** Keep mixed-fleet snapshots independent; one denied or stale host vanishes. */

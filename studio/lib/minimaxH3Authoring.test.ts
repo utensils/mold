@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { GenerationReference } from "./generationReferences";
 import {
   MINIMAX_H3_FIXED_FPS,
+  MINIMAX_H3_FL2VA_COMFY,
   MINIMAX_H3_REF2VA_COMFY,
   MINIMAX_H3_RESYNTHESIS_GUIDANCE,
   appendMinimaxH3GalleryImageReference,
@@ -114,6 +115,40 @@ describe("MiniMax H3 Studio authority", () => {
     expect(request).not.toHaveProperty("references");
     expect(minimaxH3AuthoringError(null, model, null)).toContain(
       "explicit FL2VA or Ref2VA",
+    );
+  });
+
+  it("requires exactly one first endpoint for the reviewed compact profile", () => {
+    const model = MINIMAX_H3_FL2VA_COMFY;
+    expect(
+      minimaxH3AuthoringError(
+        "minimax-h3",
+        model,
+        emptyMinimaxH3AuthoringState(),
+        true,
+      ),
+    ).toContain("requires a first frame");
+
+    const state = emptyMinimaxH3AuthoringState();
+    state.firstFrame = {
+      filename: "first.png",
+      mimeType: "image/png",
+      width: 1344,
+      height: 768,
+      data: "AQ==",
+    };
+    expect(
+      minimaxH3AuthoringError("minimax-h3", model, state, true),
+    ).toBeNull();
+    state.lastFrame = {
+      filename: "last.png",
+      mimeType: "image/png",
+      width: 1344,
+      height: 768,
+      data: "Ag==",
+    };
+    expect(minimaxH3AuthoringError("minimax-h3", model, state, true)).toContain(
+      "only one first-frame endpoint",
     );
   });
 
