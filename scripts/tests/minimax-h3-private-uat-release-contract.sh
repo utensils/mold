@@ -19,6 +19,17 @@ require_text() {
 require_text crates/mold-candle/Cargo.toml \
   'h3-private-uat = []' \
   "mold-candle does not keep the private H3 runtime behind its own feature"
+require_text crates/mold-candle/Cargo.toml \
+  'license = "MIT AND Apache-2.0"' \
+  "mold-candle does not declare the combined license of its packaged sources"
+require_text crates/mold-candle/THIRD_PARTY_NOTICES.md \
+  'comfy-kitchen INT8 CUDA reference' \
+  "mold-candle omits the packaged INT8 CUDA attribution notice"
+package_files=$(cargo package -p mold-ai-candle --allow-dirty --no-verify --list)
+for packaged_notice in LICENSE-MIT LICENSE-APACHE-2.0 THIRD_PARTY_NOTICES.md; do
+  grep -Fxq "$packaged_notice" <<<"$package_files" \
+    || fail "mold-candle package omits ${packaged_notice}"
+done
 require_text crates/mold-inference/Cargo.toml \
   'h3-private-uat = ["mold-candle/h3-private-uat"]' \
   "mold-inference does not narrowly forward the private H3 runtime feature"

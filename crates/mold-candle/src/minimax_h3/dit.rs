@@ -1490,12 +1490,14 @@ impl H3ComfyInt8Attention {
                 candle::Error::Msg("MiniMax H3 attention row count overflows".into())
             })?;
             let dtype = hidden.dtype();
+            let native_cuda = cfg!(feature = "cuda") && hidden.device().is_cuda();
             let qkv_workspace = self.qkv.reference_workspace_upper_bound(
                 rows,
                 dtype,
                 dtype,
                 H3_COMFY_PORTABLE_ROW_CHUNK,
                 false,
+                native_cuda,
             )?;
             let out_workspace = self.out.reference_workspace_upper_bound(
                 rows,
@@ -1503,6 +1505,7 @@ impl H3ComfyInt8Attention {
                 dtype,
                 H3_COMFY_PORTABLE_ROW_CHUNK,
                 false,
+                native_cuda,
             )?;
             let qkv_width = self
                 .inner_dim
@@ -1600,6 +1603,7 @@ impl H3ComfyInt8Mlp {
                 dtype,
                 H3_COMFY_PORTABLE_ROW_CHUNK,
                 false,
+                cfg!(feature = "cuda") && hidden.device().is_cuda(),
             )?;
             let fc2 = self.fc2.reference_workspace_upper_bound(
                 input_rows,
@@ -1607,6 +1611,7 @@ impl H3ComfyInt8Mlp {
                 dtype,
                 H3_COMFY_PORTABLE_ROW_CHUNK,
                 false,
+                cfg!(feature = "cuda") && hidden.device().is_cuda(),
             )?;
             let retained_fc2 = projected
                 .checked_add(gated.saturating_mul(2))

@@ -1,7 +1,8 @@
 # MiniMax H3 Comfy quantization source audit
 
-Status: authorized bounded artifact contract plus portable primitives; runtime
-activation remains blocked.
+Status: authorized compact acquisition plus one exact private CUDA FL2VA
+runtime envelope. Any executable-path change, including the native INT8 kernel
+described below, requires a fresh exact-source campaign before allowlisting.
 
 The source-derived quantization math remains pinned to public implementation
 source. After the project received authorization for private qualification,
@@ -10,9 +11,9 @@ safetensors header and its small per-layer `comfy_quant` marker tensors. The
 complete artifact digest was verified independently against the pinned
 manifest identity; no weight payload or generated output is committed. The
 model's public-product license gate in `mold-core` remains authoritative.
-Frozen H3 factory authority and FL2VA/Ref2VA dispatch seams exist, but
-`runtime_available` remains false and the Comfy checkpoint candidate continues
-to reject every production runtime backend.
+Frozen H3 factory authority and FL2VA/Ref2VA dispatch seams remain separate
+from acquisition. Only the independently reviewed compact FL2VA envelope is
+admissible; Ref2VA and broader runtime routes remain closed.
 
 ## Pinned implementation sources
 
@@ -28,7 +29,9 @@ to reject every production runtime backend.
 The relevant ComfyUI authorities are `comfy/quant_ops.py`, `comfy/ops.py`,
 `comfy/sd1_clip.py`, and `comfy/text_encoders/minimax.py`. The relevant
 comfy-kitchen authorities are `tensor/int8.py`, `tensor/int8_utils.py`,
-`tensor/nvfp4.py`, `backends/eager/quantization.py`, and `float_utils.py`.
+`tensor/nvfp4.py`, `backends/eager/quantization.py`,
+`backends/cuda/ops/int8_linear.cu`,
+`backends/cuda/ops/cublas_gemm_int8.cu`, and `float_utils.py`.
 
 ## Pruned DiT INT8 ConvRot
 
@@ -47,23 +50,42 @@ Q_w[row] = round(W_rot[row] / s_w[row])
 ```
 
 The accelerated forward rotates activations online, dynamically quantizes each
-activation row, performs an INT8 accumulation, and applies the activation and
-weight scales. The portable Mold path deliberately uses the source-defined
-dequantized alternative instead:
+activation row, performs an INT8-to-INT32 accumulation, and applies the
+activation and weight scales. Mold's CUDA path now follows that boundary:
+
+```text
+x_rot = bf16_or_f16_or_f32(x * H)
+s_x = f32(max(abs(x_rot))) / 127
+Q_x = i8(round_ties_even(x_rot / cast_input_dtype(s_x)))
+A = int32(Q_x * Q_w^T)
+y = cast_output_dtype(f32(A) * s_x * s_w)
+```
+
+The CUDA implementation retains exact checkpoint bytes as U8 Candle storage,
+passes their unchanged device pointer to signed-INT8 cuBLASLt layouts, caches
+the dimension/device-specific plan, and uses source-matched row-quantization
+and dequantization kernels. F32 and BF16 regression cases are pinned against
+the released operation order. A representative
+`[4096,5376] x [7168,5376]^T` BF16 projection measured about 42 ms after plan
+warmup on the qualification L40S; this is a focused operator measurement, not
+a full-render timing claim.
+
+CPU and Metal retain the source-defined portable fallback:
 
 ```text
 y = (x * H) * (Q_w * s_w)^T + bias
 ```
 
-Because `H` is symmetric and orthonormal, this equals a full-precision linear
-operation with the reconstructed `W = (Q_w * s_w) * H`. Output-row chunking
-keeps the dense F32 staging bound explicit. It does not claim numerical parity
-with Comfy's additional lossy activation quantization or fused CUDA kernel.
+Because `H` is symmetric and orthonormal, the fallback equals a full-precision
+linear operation with reconstructed `W = (Q_w * s_w) * H`. Output-row chunking
+keeps its dense F32 staging bound explicit. It intentionally does not claim
+numerical parity with the lossy CUDA W8A8 path.
 
 Candle has no signed-I8 tensor dtype. Mold retains checkpoint INT8 data as
-unaltered two's-complement bytes in CPU U8 storage and widens each byte through
-signed interpretation when staging a chunk. A numeric U8 cast would corrupt
-negative weights and is never used.
+unaltered two's-complement bytes in CPU U8 storage. Portable execution widens
+each byte through signed interpretation; CUDA transfers the same U8 bytes and
+binds them to a signed-I8 matrix layout without numeric conversion. A numeric
+U8 cast would corrupt negative weights and is never used.
 
 ## Pruned DiT scaled FP8
 

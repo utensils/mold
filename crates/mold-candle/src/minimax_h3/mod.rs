@@ -10,6 +10,8 @@ mod comfy_dit;
 mod comfy_quant;
 mod config;
 mod dit;
+#[cfg(feature = "cuda")]
+mod int8_cuda;
 mod loader;
 mod model;
 mod presentation;
