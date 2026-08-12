@@ -184,9 +184,10 @@ pub enum H3FactoryTargetLoadDropPolicy {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum H3FactoryTargetDenoiseCopyPolicy {
-    /// Conservative six-full-state-copy ceiling for the paired FP32 Euler
-    /// update, including model output and intermediate blend tensors.
-    CandleF32PairedEulerV1,
+    /// Conservative nine-full-state-copy ceiling for the paired FP32 RES
+    /// multistep update, including model output, the prior clean estimates,
+    /// the continuously carried audio state, and intermediate blend tensors.
+    CandleF32PairedResMultistepV2,
     /// Test-only marker proving that the policy discriminator participates in
     /// the target-budget identity without advertising another executable plan.
     #[cfg(test)]
@@ -501,8 +502,8 @@ impl H3FactoryTargetBudgetInput {
             hash.update(value.to_le_bytes());
         }
         hash.update(match denoise_copy_policy {
-            H3FactoryTargetDenoiseCopyPolicy::CandleF32PairedEulerV1 => {
-                b"candle-f32-paired-euler-v1".as_slice()
+            H3FactoryTargetDenoiseCopyPolicy::CandleF32PairedResMultistepV2 => {
+                b"candle-f32-paired-res-multistep-v2".as_slice()
             }
             #[cfg(test)]
             H3FactoryTargetDenoiseCopyPolicy::IdentityMutationSentinel => {
@@ -1327,8 +1328,8 @@ fn validate_target_budget(
     let denoise_copy_workspace = memory
         .packed_video_state_device_bytes
         .checked_add(memory.packed_audio_state_device_bytes)
-        .and_then(|bytes| bytes.checked_mul(6))
-        .ok_or_else(|| anyhow!("H3 paired Euler copy budget overflow"))?;
+        .and_then(|bytes| bytes.checked_mul(9))
+        .ok_or_else(|| anyhow!("H3 paired RES multistep copy budget overflow"))?;
     let denoise = checked_u64_sum(
         [
             memory.fixed_runtime_device_bytes,
@@ -1524,7 +1525,8 @@ fn validate_target_budget(
                 .and_then(|samples| samples.checked_mul(4))
                 .ok_or_else(|| anyhow!("H3 waveform host bytes overflow"))?
         || memory.audio_waveform_device_bytes != memory.waveform_host_bytes
-        || memory.denoise_copy_policy != H3FactoryTargetDenoiseCopyPolicy::CandleF32PairedEulerV1
+        || memory.denoise_copy_policy
+            != H3FactoryTargetDenoiseCopyPolicy::CandleF32PairedResMultistepV2
         || memory.denoise_tensor_copy_workspace_device_bytes != denoise_copy_workspace
         || memory.vae_peak_host_io_buffer_bytes == 0
         || memory.vae_peak_host_mapped_file_bytes == 0
@@ -2785,7 +2787,7 @@ mod tests {
         let packed_audio_state_device_bytes = target_audio_latent_device_bytes;
         let packed_layout_device_bytes = request.rows.total_packed_rows * 24;
         let denoise_tensor_copy_workspace_device_bytes =
-            (packed_video_state_device_bytes + packed_audio_state_device_bytes) * 6;
+            (packed_video_state_device_bytes + packed_audio_state_device_bytes) * 9;
         let waveform_host_bytes =
             request.audio_samples_per_channel * u64::from(contract::AUDIO_CHANNELS) * 4;
         let retained_vaes = 900;
@@ -3003,7 +3005,7 @@ mod tests {
             packed_layout_device_bytes,
             packed_video_state_device_bytes,
             packed_audio_state_device_bytes,
-            denoise_copy_policy: H3FactoryTargetDenoiseCopyPolicy::CandleF32PairedEulerV1,
+            denoise_copy_policy: H3FactoryTargetDenoiseCopyPolicy::CandleF32PairedResMultistepV2,
             denoise_tensor_copy_workspace_device_bytes,
             audio_waveform_device_bytes: waveform_host_bytes,
             attention_workspace_device_bytes,

@@ -29,7 +29,7 @@ use rand::SeedableRng;
 use rand_distr::{Distribution, StandardNormal};
 use serde::Serialize;
 
-use super::sampler::{euler_step_pair, H3DualSchedule, H3_VISUAL_CONDITION_TIMESTEP};
+use super::sampler::{H3DualSampler, H3DualSchedule, H3SamplerKind, H3_VISUAL_CONDITION_TIMESTEP};
 use crate::engine::rand_seed;
 use crate::ltx_video::video_enc::{self, Mp4StreamEncoder};
 #[cfg(feature = "mp4")]
@@ -372,6 +372,10 @@ pub(crate) trait H3Fl2VaBackend {
     fn identity(&self) -> H3PipelineBackendIdentity;
     fn device(&self) -> &Device;
 
+    fn sampler_kind(&self) -> H3SamplerKind {
+        H3SamplerKind::OfficialEuler
+    }
+
     fn encode_text(
         &mut self,
         prompt: &str,
@@ -444,6 +448,7 @@ pub(crate) struct H3PipelineProvenance {
     pub audio_channels: u32,
     pub requested_grid_points: usize,
     pub transformer_evaluations: usize,
+    pub sampler: &'static str,
     pub endpoint_anchors: Vec<H3EndpointAnchor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<H3ReferenceProvenance>,
@@ -735,7 +740,9 @@ pub(crate) fn execute_staged(
     };
     validate_packed_rows(&video_rows, &audio_rows, &text.states, &packed)?;
 
-    let schedule = H3DualSchedule::new(prepared.grid_points)?;
+    let sampler_kind = backend.sampler_kind();
+    let schedule = H3DualSchedule::new_for_sampler(prepared.grid_points, sampler_kind)?;
+    let mut sampler = H3DualSampler::new(sampler_kind);
     let counts = schedule.counts();
     control.checkpoint(H3PipelineEvent {
         phase: H3PipelinePhase::Denoise,
@@ -772,7 +779,7 @@ pub(crate) fn execute_staged(
             output
                 .video
                 .narrow(1, packed.condition_video_rows, packed.generated_video_rows)?;
-        let (next_video, next_audio) = euler_step_pair(
+        let (next_video, next_audio) = sampler.step_pair(
             &generated,
             &audio_rows,
             &generated_velocity,
@@ -798,6 +805,9 @@ pub(crate) fn execute_staged(
             total: progress_after.total_evaluations,
         })?;
     }
+    // RES history is denoise-only workspace. Release previous clean estimates
+    // and the carried audio state before transformer teardown and VAE decode.
+    drop(sampler);
     // Text states are borrowed by every transformer forward but no decoder.
     // End their device residency at the exact denoise boundary on success;
     // ordinary unwinding provides the same guarantee for cancellation/errors.
@@ -866,6 +876,7 @@ pub(crate) fn execute_staged(
             audio_channels: AUDIO_CHANNELS,
             requested_grid_points: counts.requested_grid_points,
             transformer_evaluations: counts.transformer_evaluations,
+            sampler: sampler_kind.as_str(),
             endpoint_anchors: anchors,
             references: Vec::new(),
             reference_fingerprint: None,
@@ -1834,6 +1845,7 @@ mod tests {
     struct SyntheticBackend {
         device: Device,
         identity: H3PipelineBackendIdentity,
+        sampler_kind: H3SamplerKind,
         forwards: usize,
         decoded_video: bool,
         decoded_audio: bool,
@@ -1853,6 +1865,7 @@ mod tests {
                     device_id: "synthetic-cpu-0".into(),
                     execution_fingerprint: "synthetic-h3-v1".into(),
                 },
+                sampler_kind: H3SamplerKind::OfficialEuler,
                 forwards: 0,
                 decoded_video: false,
                 decoded_audio: false,
@@ -1878,6 +1891,10 @@ mod tests {
 
         fn device(&self) -> &Device {
             &self.device
+        }
+
+        fn sampler_kind(&self) -> H3SamplerKind {
+            self.sampler_kind
         }
 
         fn encode_text(
@@ -2249,8 +2266,26 @@ mod tests {
         assert_eq!(staged.provenance.endpoint_anchors.len(), 2);
         assert_eq!(staged.provenance.requested_grid_points, 4);
         assert_eq!(staged.provenance.transformer_evaluations, 3);
+        assert_eq!(staged.provenance.sampler, "official-euler");
         assert!(!staged.video_only_mp4.is_empty());
         assert!(!staged.thumbnail_png.is_empty());
+    }
+
+    #[test]
+    fn backend_selected_sampler_executes_and_is_retained_in_provenance() {
+        let prepared = prepared(&request());
+        let mut backend = SyntheticBackend::new();
+        backend.sampler_kind = H3SamplerKind::ComfyResMultistep;
+        let staged = execute_staged(
+            &prepared,
+            &mut backend,
+            &ProgressReporter::default(),
+            &mut NoopH3PipelineObserver,
+        )
+        .unwrap();
+
+        assert_eq!(backend.forwards, 3);
+        assert_eq!(staged.provenance.sampler, "comfy-res-multistep");
     }
 
     #[test]

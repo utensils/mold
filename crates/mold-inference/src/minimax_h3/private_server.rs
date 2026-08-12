@@ -76,6 +76,8 @@ use super::private_runtime_observer::{
     H3PrivateRuntimeBoundCapture, H3PrivateRuntimeEnvelopeObservation,
 };
 #[cfg(feature = "mp4")]
+use super::sampler::H3SamplerKind;
+#[cfg(feature = "mp4")]
 use super::vae_runtime::{
     open_h3_comfy_vae_authority, H3AuthenticatedComfyVaeAuthority, H3ComfyVaeLoadError,
     H3ComfyVaeLoadEvent, H3ComfyVaeLoadObserver,
@@ -2119,6 +2121,11 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         prepared_attempt_identity_sha256: prepared.prepared_attempt_identity_sha256().into(),
         target_budget_identity_sha256: prepared.target_budget_identity_sha256().into(),
         component_set_identity_sha256: enriched_factory.component_set_identity_sha256().into(),
+        requested_grid_points: prepared.factory_attempt_input().request.grid_points,
+        transformer_evaluations: prepared
+            .factory_attempt_input()
+            .request
+            .denoise_forward_count,
         predicted_device_peak_bytes: prepared.predicted_device_peak_bytes(),
         predicted_host_increment_bytes: prepared.predicted_host_increment_bytes(),
         media,
@@ -2985,6 +2992,12 @@ fn private_run_output(
         Mode::FirstAndLastFrameToAudioVideo => "first-last-frame-fl2va",
         Mode::ReferenceToAudioVideo => "ref2va",
     };
+    validate_private_sampler_provenance(
+        provenance.sampler,
+        provenance.requested_grid_points,
+        provenance.transformer_evaluations,
+        &owner,
+    )?;
     if echo.device_id != owner.device_id
         || echo.execution_fingerprint != owner.execution_fingerprint
         || echo.prepared_attempt_identity_sha256 != owner.prepared_attempt_identity_sha256
@@ -3073,6 +3086,22 @@ fn private_run_output(
     })
 }
 
+#[cfg(feature = "mp4")]
+fn validate_private_sampler_provenance(
+    sampler: &str,
+    requested_grid_points: usize,
+    transformer_evaluations: usize,
+    owner: &H3PrivateFl2VaOwnerFacts,
+) -> Result<()> {
+    if sampler != H3SamplerKind::ComfyResMultistep.as_str()
+        || requested_grid_points != usize::try_from(owner.requested_grid_points)?
+        || transformer_evaluations != usize::try_from(owner.transformer_evaluations)?
+    {
+        bail!("private H3 sampler provenance differs from the prepared attempt authority")
+    }
+    Ok(())
+}
+
 /// Exact payload-free owner facts captured inside the singular server attempt
 /// scope. This record is comparison data only; the prepared attempt and
 /// activation evidence that consume it are non-Clone.
@@ -3089,6 +3118,8 @@ pub struct H3PrivateFl2VaOwnerFacts {
     pub prepared_attempt_identity_sha256: String,
     pub target_budget_identity_sha256: String,
     pub component_set_identity_sha256: String,
+    pub requested_grid_points: u32,
+    pub transformer_evaluations: u32,
     pub predicted_device_peak_bytes: u64,
     pub predicted_host_increment_bytes: u64,
     pub media: H3PrivateFl2VaMediaContract,
@@ -3100,6 +3131,8 @@ impl H3PrivateFl2VaOwnerFacts {
         if self.device_id.trim().is_empty()
             || self.predicted_device_peak_bytes == 0
             || self.predicted_host_increment_bytes == 0
+            || self.requested_grid_points < 2
+            || self.transformer_evaluations != self.requested_grid_points - 1
             || [
                 self.work_identity_sha256.as_str(),
                 self.cancellation_scope_identity_sha256.as_str(),
@@ -4505,6 +4538,8 @@ mod tests {
             prepared_attempt_identity_sha256: sha('7'),
             target_budget_identity_sha256: sha('8'),
             component_set_identity_sha256: sha('9'),
+            requested_grid_points: 2,
+            transformer_evaluations: 1,
             predicted_device_peak_bytes: 7,
             predicted_host_increment_bytes: 8,
             media: media(),
@@ -4525,6 +4560,25 @@ mod tests {
             owner.component_set_identity_sha256.clone(),
         )
         .unwrap()
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn terminal_sampler_provenance_is_exactly_bound_to_the_owner() {
+        let owner = owner_facts();
+        validate_private_sampler_provenance("comfy-res-multistep", 2, 1, &owner).unwrap();
+        for (sampler, grid_points, evaluations) in [
+            ("official-euler", 2, 1),
+            ("comfy-res-multistep", 3, 1),
+            ("comfy-res-multistep", 2, 2),
+        ] {
+            assert!(
+                validate_private_sampler_provenance(sampler, grid_points, evaluations, &owner)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("sampler provenance")
+            );
+        }
     }
 
     #[test]

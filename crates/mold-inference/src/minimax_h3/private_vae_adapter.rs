@@ -28,6 +28,7 @@ use super::pipeline::{
     H3PipelineEvent, H3PipelinePhase, H3PreparedEndpoint, H3TextConditioning, H3VideoEncodeSink,
 };
 use super::private_fl2va_runtime::H3PrivateVaeFreeInnerAuthority;
+use super::sampler::H3SamplerKind;
 use super::vae_runtime::{H3ComfyVaeRuntimeBundle, H3ComfyVaeRuntimeMemory};
 
 /// Encode one already-normalized reference waveform while preserving typed
@@ -285,6 +286,10 @@ where
 
     fn device(&self) -> &Device {
         self.inner.device()
+    }
+
+    fn sampler_kind(&self) -> H3SamplerKind {
+        self.inner.sampler_kind()
     }
 
     fn encode_text(

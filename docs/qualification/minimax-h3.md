@@ -197,6 +197,20 @@ VAE, and an FP32 AudioVAE. The Comfy deployment layout uses one pruned task
 transformer, INT8 ConvRot-eligible block matrices, an NVFP4/AWQ layer-50 Qwen
 conditioner, an FP16 video VAE, and an FP32 AudioVAE.
 
+The sampler is also layout-specific. Official BF16 follows the pinned
+Diffusers terminal-inclusive rectified-flow Euler path with 50 grid points (49
+transformer evaluations). The released ComfyUI workflow pairs the compact
+checkpoint stack with deterministic RES multistep sampling and 20 transformer
+evaluations; Mold expresses that as 21 terminal-inclusive grid points. Its RES
+history and coefficients operate on Comfy's discrete shift-12 video-sigma
+table. Audio is carried in that coordinate for integration, while the mapped
+shift-3 sigma remains authoritative for the audio network timestep and native
+audio state. The
+retained 960×544, 124-frame campaign used two grid points and therefore only
+one transformer evaluation. It remains a memory/runtime smoke, not quality
+evidence. A fresh compact quality campaign must use the Comfy sampler and 21
+grid points before its output can support visual or audio acceptance.
+
 Comfy's curve-AdaLN representation replaces the official timestep MLP and
 full-width AdaLN projections. Its QKV packing also differs from the official
 layout. Ordinary CI uses synthetic headers and tiny zero-filled tensors.

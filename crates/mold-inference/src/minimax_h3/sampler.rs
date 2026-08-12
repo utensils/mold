@@ -4,7 +4,9 @@
 //! but the two modalities use different shifted sigma grids. The iterator in
 //! this module therefore yields one immutable descriptor per *coupled* forward;
 //! callers can check cancellation before requesting the next descriptor and
-//! only replace their two latent tensors after [`euler_step_pair`] succeeds.
+//! only replace their two latent tensors after the selected paired update
+//! succeeds. Official BF16 uses first-order Euler; the compact Comfy layout
+//! uses the deterministic RES multistep rule from its released workflow.
 //!
 //! `grid_points` deliberately includes the terminal zero. The official default
 //! is 50 grid points and thus 49 transformer evaluations, not 50 evaluations.
@@ -17,15 +19,37 @@ use candle_core::{DType, Tensor};
 pub(crate) const H3_DEFAULT_GRID_POINTS: usize = 50;
 pub(crate) const H3_VIDEO_SHIFT: f32 = 12.0;
 pub(crate) const H3_AUDIO_SHIFT: f32 = 3.0;
+const H3_COMFY_AUDIO_SCALE: f32 = H3_VIDEO_SHIFT / H3_AUDIO_SHIFT;
 pub(crate) const H3_VISUAL_CONDITION_TIMESTEP: f32 = 0.999;
 pub(crate) const H3_CLEAN_TIMESTEP: f32 = 1.0;
+
+/// Sampling integration selected by the authenticated checkpoint layout.
+///
+/// The released BF16 pipeline uses first-order Euler. The official ComfyUI
+/// deployment templates pair their pruned INT8 checkpoints with the
+/// deterministic second-order RES multistep integrator instead.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum H3SamplerKind {
+    #[default]
+    OfficialEuler,
+    ComfyResMultistep,
+}
+
+impl H3SamplerKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::OfficialEuler => "official-euler",
+            Self::ComfyResMultistep => "comfy-res-multistep",
+        }
+    }
+}
 
 /// One modality's authority for a coupled transformer evaluation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct H3FlowStep {
     /// Current noise level.
     pub sigma: f32,
-    /// Noise level after this deterministic Euler update.
+    /// Noise level after this deterministic update.
     pub next_sigma: f32,
     /// AdaLN timestep supplied to the transformer: `1 - sigma`.
     pub timestep: f32,
@@ -151,6 +175,30 @@ impl H3ModalitySchedule {
         Ok(Self { sigmas })
     }
 
+    fn new_comfy_simple(grid_points: usize, shift: f32) -> Result<Self> {
+        if grid_points < 2 {
+            bail!("MiniMax H3 schedule needs at least two grid points, got {grid_points}");
+        }
+        let evaluations = grid_points - 1;
+        let shifted = (0..evaluations).map(|index| {
+            // Comfy's BasicScheduler("simple") samples its 1000-entry flow
+            // table at integer floor(index * 1000 / evaluations), then appends
+            // terminal zero. Preserve that discrete table for every count.
+            let table_index = index.saturating_mul(1_000) / evaluations;
+            let base = (1_000 - table_index) as f32 / 1_000.0;
+            shift * base / (1.0 + (shift - 1.0) * base)
+        });
+        let sigmas = unique_consecutive(shifted.chain(std::iter::once(0.0)));
+        if sigmas.len() < 2
+            || sigmas.first().copied() != Some(1.0)
+            || sigmas.last().copied() != Some(0.0)
+            || !sigmas.windows(2).all(|pair| pair[1] < pair[0])
+        {
+            bail!("MiniMax H3 Comfy simple schedule produced an invalid sigma grid");
+        }
+        Ok(Self { sigmas })
+    }
+
     fn evaluations(&self) -> usize {
         self.sigmas.len() - 1
     }
@@ -193,6 +241,38 @@ impl H3DualSchedule {
         })
     }
 
+    pub fn new_for_sampler(grid_points: usize, kind: H3SamplerKind) -> Result<Self> {
+        if kind == H3SamplerKind::OfficialEuler {
+            return Self::new(grid_points);
+        }
+        let video = H3ModalitySchedule::new_comfy_simple(grid_points, H3_VIDEO_SHIFT)?;
+        let audio = H3ModalitySchedule {
+            // The released model derives native audio sigma from the already
+            // rounded video-table sigma, rather than independently sampling a
+            // shift-3 table. Preserve that f32 inversion/reapplication order.
+            sigmas: video
+                .sigmas
+                .iter()
+                .copied()
+                .map(|sigma| {
+                    if sigma == 0.0 {
+                        return 0.0;
+                    }
+                    let base = sigma / (H3_VIDEO_SHIFT + sigma * (1.0 - H3_VIDEO_SHIFT));
+                    H3_AUDIO_SHIFT * base / (1.0 + (H3_AUDIO_SHIFT - 1.0) * base)
+                })
+                .collect(),
+        };
+        if video.evaluations() != audio.evaluations() {
+            bail!("MiniMax H3 Comfy shifted grids cannot synchronize one-forward updates");
+        }
+        Ok(Self {
+            requested_grid_points: grid_points,
+            video,
+            audio,
+        })
+    }
+
     pub fn official_default() -> Self {
         Self::new(H3_DEFAULT_GRID_POINTS).expect("the official H3 schedule is valid")
     }
@@ -215,7 +295,8 @@ impl H3DualSchedule {
 
     /// Iterate one descriptor per coupled transformer forward. A caller checks
     /// cancellation before each `next()`/forward and never stores a partial AV
-    /// result: [`euler_step_pair`] returns both next tensors or an error.
+    /// result: [`H3DualSampler::step_pair`] returns both next tensors or an
+    /// error.
     pub fn steps(&self) -> H3DualScheduleIter<'_> {
         H3DualScheduleIter {
             schedule: self,
@@ -354,15 +435,229 @@ pub(crate) fn euler_step_pair(
     Ok((next_video, next_audio))
 }
 
+fn denoised_from_velocity(sample: &Tensor, velocity: &Tensor, step: H3FlowStep) -> Result<Tensor> {
+    if sample.dims() != velocity.dims() {
+        bail!(
+            "MiniMax H3 sample/velocity shape mismatch: {:?} versus {:?}",
+            sample.dims(),
+            velocity.dims()
+        );
+    }
+    let output_dtype = sample.dtype();
+    if !matches!(output_dtype, DType::F16 | DType::BF16 | DType::F32) {
+        bail!(
+            "MiniMax H3 latents must use f16, bf16, or f32, got {}",
+            output_dtype.as_str()
+        );
+    }
+    if !matches!(velocity.dtype(), DType::F16 | DType::BF16 | DType::F32) {
+        bail!(
+            "MiniMax H3 velocity must use f16, bf16, or f32, got {}",
+            velocity.dtype().as_str()
+        );
+    }
+
+    // The Comfy model negates the released checkpoint output before its CONST
+    // wrapper computes `x - output * sigma`. Mold retains the checkpoint's
+    // data-ward sign, so the same clean estimate is `x + velocity * sigma`.
+    let sigma = Tensor::new(step.sigma, sample.device())?;
+    sample
+        .to_dtype(DType::F32)?
+        .add(&velocity.to_dtype(DType::F32)?.broadcast_mul(&sigma)?)
+        .map_err(Into::into)
+}
+
+fn res_multistep_update(
+    sample: &Tensor,
+    denoised: &Tensor,
+    previous_denoised: Option<&Tensor>,
+    previous_sigma: Option<f32>,
+    step: H3FlowStep,
+) -> Result<Tensor> {
+    // ComfyUI deliberately uses the same eager-F32 Euler expression for the
+    // first and terminal updates. Spell out to_d and dt in its operation order
+    // instead of relying on an algebraically equivalent blend.
+    if previous_denoised.is_none() || step.next_sigma == 0.0 {
+        let sample_f32 = sample.to_dtype(DType::F32)?;
+        let sigma = Tensor::new(step.sigma, sample.device())?;
+        let dt = Tensor::new(step.next_sigma - step.sigma, sample.device())?;
+        let derivative = sample_f32.sub(denoised)?.broadcast_div(&sigma)?;
+        return sample_f32
+            .add(&derivative.broadcast_mul(&dt)?)?
+            .to_dtype(sample.dtype())
+            .map_err(Into::into);
+    }
+    let previous_denoised = previous_denoised.expect("history checked above");
+    let previous_sigma = previous_sigma
+        .ok_or_else(|| anyhow::anyhow!("MiniMax H3 RES multistep history lacks its sigma"))?;
+    if !(previous_sigma > step.sigma && step.sigma > step.next_sigma) {
+        bail!(
+            "MiniMax H3 RES multistep needs decreasing historical sigmas, got {previous_sigma} -> {} -> {}",
+            step.sigma,
+            step.next_sigma
+        );
+    }
+
+    // ComfyUI evaluates these scalar tensor expressions in float32 because
+    // the `simple` scheduler supplies float32 sigmas.
+    let t = -step.sigma.ln();
+    let t_previous = -previous_sigma.ln();
+    let t_next = -step.next_sigma.ln();
+    let h = t_next - t;
+    let c2 = (t_previous - t) / h;
+    let phi1 = (-h).exp_m1() / -h;
+    let phi2 = (phi1 - 1.0) / -h;
+    let b1 = phi1 - phi2 / c2;
+    let b2 = phi2 / c2;
+    if ![h, c2, b1, b2].into_iter().all(f32::is_finite) {
+        bail!("MiniMax H3 RES multistep produced non-finite integration coefficients");
+    }
+
+    let history = denoised
+        .affine(f64::from(b1), 0.0)?
+        .add(&previous_denoised.affine(f64::from(b2), 0.0)?)?
+        .affine(f64::from(h), 0.0)?;
+    sample
+        .to_dtype(DType::F32)?
+        .affine(f64::from((-h).exp()), 0.0)?
+        .add(&history)?
+        .to_dtype(sample.dtype())
+        .map_err(Into::into)
+}
+
+fn comfy_audio_carried_sample(sample: &Tensor, step: H3DualScheduleStep) -> Result<Tensor> {
+    let carry_scale = step.video.sigma / step.audio.sigma;
+    sample
+        .affine(f64::from(carry_scale), 0.0)
+        .map_err(Into::into)
+}
+
+fn comfy_audio_carried_velocity(
+    native_sample: &Tensor,
+    native_velocity: &Tensor,
+    step: H3DualScheduleStep,
+) -> Result<Tensor> {
+    // Comfy's ModelSamplingAV carries audio on the video sigma coordinate and
+    // converts the model's native d(audio)/d(sigma_a) back to d(carry)/d(sigma_v).
+    // Keep this expression in F32, matching its released wrapper.
+    native_sample
+        .to_dtype(DType::F32)?
+        .affine(f64::from(H3_COMFY_AUDIO_SCALE - 1.0), 0.0)?
+        .add(&native_velocity.to_dtype(DType::F32)?.affine(
+            f64::from(1.0 + (H3_COMFY_AUDIO_SCALE - 1.0) * step.audio.sigma),
+            0.0,
+        )?)
+        .map_err(Into::into)
+}
+
+fn comfy_audio_native_sample(carried: &Tensor, step: H3DualScheduleStep) -> Result<Tensor> {
+    let native_scale = if step.video.next_sigma == 0.0 {
+        // lim sigma_a/sigma_v as the shared base grid approaches zero.
+        H3_AUDIO_SHIFT / H3_VIDEO_SHIFT
+    } else {
+        step.audio.next_sigma / step.video.next_sigma
+    };
+    carried
+        .affine(f64::from(native_scale), 0.0)
+        .map_err(Into::into)
+}
+
+/// Stateful synchronized sampler for the video/audio pair.
+pub(crate) struct H3DualSampler {
+    kind: H3SamplerKind,
+    previous_video_denoised: Option<Tensor>,
+    previous_audio_denoised: Option<Tensor>,
+    current_audio_carried: Option<Tensor>,
+    previous_video_sigma: Option<f32>,
+    next_evaluation_index: usize,
+}
+
+impl H3DualSampler {
+    pub(crate) fn new(kind: H3SamplerKind) -> Self {
+        Self {
+            kind,
+            previous_video_denoised: None,
+            previous_audio_denoised: None,
+            current_audio_carried: None,
+            previous_video_sigma: None,
+            next_evaluation_index: 0,
+        }
+    }
+
+    pub(crate) fn step_pair(
+        &mut self,
+        video_sample: &Tensor,
+        audio_sample: &Tensor,
+        video_velocity: &Tensor,
+        audio_velocity: &Tensor,
+        step: H3DualScheduleStep,
+    ) -> Result<(Tensor, Tensor)> {
+        if step.evaluation_index != self.next_evaluation_index {
+            bail!(
+                "MiniMax H3 sampler expected evaluation {}, got {}",
+                self.next_evaluation_index,
+                step.evaluation_index
+            );
+        }
+        if self.kind == H3SamplerKind::OfficialEuler {
+            let next = euler_step_pair(
+                video_sample,
+                audio_sample,
+                video_velocity,
+                audio_velocity,
+                step,
+            )?;
+            self.next_evaluation_index += 1;
+            return Ok(next);
+        }
+
+        let video_denoised = denoised_from_velocity(video_sample, video_velocity, step.video)?;
+        let initial_audio_carried;
+        let audio_carried = if let Some(carried) = self.current_audio_carried.as_ref() {
+            carried
+        } else {
+            initial_audio_carried = comfy_audio_carried_sample(audio_sample, step)?;
+            &initial_audio_carried
+        };
+        let audio_carried_velocity =
+            comfy_audio_carried_velocity(audio_sample, audio_velocity, step)?;
+        let audio_denoised =
+            denoised_from_velocity(audio_carried, &audio_carried_velocity, step.video)?;
+        let next_video = res_multistep_update(
+            video_sample,
+            &video_denoised,
+            self.previous_video_denoised.as_ref(),
+            self.previous_video_sigma,
+            step.video,
+        )?;
+        let next_audio_carried = res_multistep_update(
+            audio_carried,
+            &audio_denoised,
+            self.previous_audio_denoised.as_ref(),
+            self.previous_video_sigma,
+            step.video,
+        )?;
+        let next_audio =
+            comfy_audio_native_sample(&next_audio_carried, step)?.to_dtype(audio_sample.dtype())?;
+
+        self.previous_video_denoised = Some(video_denoised);
+        self.previous_audio_denoised = Some(audio_denoised);
+        self.current_audio_carried = Some(next_audio_carried);
+        self.previous_video_sigma = Some(step.video.sigma);
+        self.next_evaluation_index += 1;
+        Ok((next_video, next_audio))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use candle_core::{DType, Device, Tensor};
     use serde::Deserialize;
 
     use super::{
-        euler_step, euler_step_pair, unique_consecutive, H3DualSchedule, H3FlowStep, H3StepCount,
-        H3_AUDIO_SHIFT, H3_CLEAN_TIMESTEP, H3_DEFAULT_GRID_POINTS, H3_VIDEO_SHIFT,
-        H3_VISUAL_CONDITION_TIMESTEP,
+        euler_step, euler_step_pair, unique_consecutive, H3DualSampler, H3DualSchedule, H3FlowStep,
+        H3SamplerKind, H3StepCount, H3_AUDIO_SHIFT, H3_CLEAN_TIMESTEP, H3_DEFAULT_GRID_POINTS,
+        H3_VIDEO_SHIFT, H3_VISUAL_CONDITION_TIMESTEP,
     };
 
     #[derive(Debug, Deserialize)]
@@ -549,6 +844,101 @@ mod tests {
         assert_eq!(schedule.video_sigmas().last(), Some(&0.0));
         assert_eq!(schedule.audio_sigmas().last(), Some(&0.0));
         assert_eq!(schedule.steps().len(), 49);
+    }
+
+    #[test]
+    fn comfy_res_multistep_matches_pinned_float32_reference() {
+        let device = Device::Cpu;
+        let mut video = Tensor::new(&[0.25f32, -0.5, 1.0], &device).unwrap();
+        let mut audio = video.clone();
+        let velocities = [
+            [0.1f32, -0.2, 0.3],
+            [-0.4, 0.5, -0.6],
+            [0.7, -0.8, 0.9],
+            [-1.0, 1.1, -1.2],
+        ];
+        let expected_video = [
+            [0.252_702_7f32, -0.505_405_4, 1.008_108_1],
+            [0.208_566_74, -0.446_608_84, 0.934_650_9],
+            [0.478_628_78, -0.761_437_65, 1.294_246_4],
+            [-0.321_371_23, 0.118_562_4, 0.334_246_4],
+        ];
+        let expected_audio = [
+            [0.259_999_96f32, -0.519_999_9, 1.029_999_9],
+            [0.127_316_2, -0.343_242_68, 0.809_169_2],
+            [0.651_277_3, -0.948_295_53, 1.495_313_6],
+            [0.151_277_3, -0.398_295_52, 0.895_313_6],
+        ];
+        let schedule =
+            H3DualSchedule::new_for_sampler(5, H3SamplerKind::ComfyResMultistep).unwrap();
+        let mut sampler = H3DualSampler::new(H3SamplerKind::ComfyResMultistep);
+
+        for (index, step) in schedule.steps().enumerate() {
+            let velocity = Tensor::new(&velocities[index], &device).unwrap();
+            (video, audio) = sampler
+                .step_pair(&video, &audio, &velocity, &velocity, step)
+                .unwrap();
+            assert_close(
+                &video.to_vec1::<f32>().unwrap(),
+                &expected_video[index],
+                8.0 * f32::EPSILON,
+            );
+            assert_close(
+                &audio.to_vec1::<f32>().unwrap(),
+                &expected_audio[index],
+                8.0 * f32::EPSILON,
+            );
+        }
+    }
+
+    #[test]
+    fn comfy_twenty_evaluation_simple_schedule_matches_upstream_f32_bits() {
+        let schedule =
+            H3DualSchedule::new_for_sampler(21, H3SamplerKind::ComfyResMultistep).unwrap();
+        let expected_video = [
+            0x3f800000, 0x3f7ee1d1, 0x3f7da6c0, 0x3f7c4a35, 0x3f7ac688, 0x3f7914c2, 0x3f772c23,
+            0x3f750192, 0x3f7286bc, 0x3f6fa8da, 0x3f6c4ec5, 0x3f68560c, 0x3f638e39, 0x3f5db0d3,
+            0x3f565359, 0x3f4ccccd, 0x3f400000, 0x3f2de305, 0x3f124925, 0x3ec6318d, 0x00000000,
+        ];
+        let expected_audio = [
+            0x3f800000, 0x3f7b9612, 0x3f76db6d, 0x3f71c71e, 0x3f6c4ec7, 0x3f666665, 0x3f600000,
+            0x3f590b1e, 0x3f51745b, 0x3f492493, 0x3f3fffff, 0x3f35e50a, 0x3f2aaaaa, 0x3f1e1e1e,
+            0x3f0fffff, 0x3f000001, 0x3edb6db8, 0x3eb13b15, 0x3e800000, 0x3e0ba2e9, 0x00000000,
+        ];
+        assert_eq!(
+            schedule
+                .video_sigmas()
+                .iter()
+                .map(|sigma| sigma.to_bits())
+                .collect::<Vec<_>>(),
+            expected_video
+        );
+        assert_eq!(
+            schedule
+                .audio_sigmas()
+                .iter()
+                .map(|sigma| sigma.to_bits())
+                .collect::<Vec<_>>(),
+            expected_audio
+        );
+    }
+
+    #[test]
+    fn sampler_rejects_replayed_or_out_of_order_steps() {
+        let device = Device::Cpu;
+        let sample = Tensor::new(&[0.0f32], &device).unwrap();
+        let velocity = Tensor::new(&[1.0f32], &device).unwrap();
+        let schedule = H3DualSchedule::new(4).unwrap();
+        let first = schedule.steps().next().unwrap();
+        let mut sampler = H3DualSampler::new(H3SamplerKind::ComfyResMultistep);
+        sampler
+            .step_pair(&sample, &sample, &velocity, &velocity, first)
+            .unwrap();
+        assert!(sampler
+            .step_pair(&sample, &sample, &velocity, &velocity, first)
+            .unwrap_err()
+            .to_string()
+            .contains("expected evaluation 1"));
     }
 
     #[test]
