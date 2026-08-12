@@ -20,18 +20,23 @@ use sha2::{Digest, Sha256};
 use super::private_qualification::{
     qualify_private_artifacts, H3ArtifactHashProgress, H3PrivateArtifactQualificationReport,
 };
+use super::private_runtime_observer::{
+    H3PrivateRuntimeBoundObservation, H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA,
+};
 use super::private_server::{
     runtime_qualification_identity, valid_stable_cuda_device_id,
     validate_runtime_qualification_record_shape, H3PrivateRuntimeBoundRecord,
-    H3PrivateRuntimeEvidenceArtifact, H3PrivateRuntimeQualificationRecord,
-    MAX_RUNTIME_QUALIFICATION_BYTES, RUNTIME_QUALIFICATION_DECISION, RUNTIME_QUALIFICATION_SCHEMA,
+    H3PrivateRuntimeEnvelopeRecord, H3PrivateRuntimeEvidenceArtifact,
+    H3PrivateRuntimeQualificationRecord, MAX_RUNTIME_QUALIFICATION_BYTES,
+    RUNTIME_QUALIFICATION_DECISION, RUNTIME_QUALIFICATION_SCHEMA,
 };
 
 pub const H3_PRIVATE_RUNTIME_RECORD_PRODUCER_MARKER: &str =
     "mold.minimax-h3.private-runtime-record-producer.v1";
 
-const CAPTURE_SCHEMA: &str = "mold.minimax-h3.private-runtime-bound-capture.v1";
+const CAPTURE_SCHEMA: &str = "mold.minimax-h3.private-runtime-bound-capture.v2";
 const MAX_CAPTURE_BYTES: u64 = 128 * 1024;
+const MAX_RUNTIME_OBSERVATION_BYTES: u64 = 128 * 1024;
 const MAX_EVIDENCE_ARTIFACTS: usize = 128;
 const MAX_EVIDENCE_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_EVIDENCE_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
@@ -160,6 +165,62 @@ impl H3PrivateRuntimeBoundCaptureSet {
             aac_mux_staging_host_bytes: self.aac_mux_staging_host_bytes.bound_bytes,
         })
     }
+
+    fn validate_observation(&self, observation: &H3PrivateRuntimeBoundObservation) -> Result<()> {
+        let observed = [
+            observation.fixed_runtime_host_bytes,
+            observation.fixed_runtime_device_bytes,
+            observation.qwen_activation_workspace_bytes,
+            observation.vae_construction_device_workspace_bytes,
+            observation.condition_vae_workspace_device_bytes,
+            observation.attention_workspace_device_bytes,
+            observation.ffn_workspace_device_bytes,
+            observation.decoder_tile_workspace_device_bytes,
+            observation.audio_decode_workspace_device_bytes,
+            observation.encoded_video_host_bytes_bound,
+            observation.thumbnail_host_bytes_bound,
+            observation.mux_output_host_bytes_bound,
+            observation.aac_mux_staging_host_bytes,
+        ];
+        for (((label, capture), observed), index) in
+            self.entries().into_iter().zip(observed).zip(0_usize..)
+        {
+            if capture.observed_bytes != observed {
+                bail!(
+                    "private H3 runtime bound {label} differs from structured observation field {index}"
+                )
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_observed_envelope(
+    reviewed: &H3PrivateRuntimeEnvelopeRecord,
+    observation: &H3PrivateRuntimeBoundObservation,
+) -> Result<()> {
+    if observation.schema != H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA {
+        bail!("private H3 runtime observation has an unknown schema")
+    }
+    let observed = &observation.envelope;
+    if reviewed.width != observed.width
+        || reviewed.height != observed.height
+        || reviewed.frames != observed.frames
+        || reviewed.fps != observed.fps
+        || reviewed.batch_size != observed.batch_size
+        || reviewed.max_steps != observed.steps
+        || reviewed.endpoint_count != observed.endpoint_count
+        || reviewed.endpoint_anchor != observed.endpoint_anchor
+        || reviewed.max_qwen_output_text_rows != observed.qwen_output_text_rows
+        || reviewed.max_qwen_vision_rows != observed.qwen_vision_rows
+        || reviewed.max_condition_visual_rows != observed.condition_visual_rows
+        || reviewed.max_target_video_rows != observed.target_video_rows
+        || reviewed.max_target_audio_rows != observed.target_audio_rows
+        || reviewed.max_total_packed_rows != observed.total_packed_rows
+    {
+        bail!("private H3 runtime envelope differs from its structured observation")
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -180,6 +241,8 @@ struct H3PrivateRuntimeBoundCaptureManifest {
     attention_runtime_identity_sha256: String,
     attention_kernel_identity: String,
     attention_qualification_sha256: String,
+    runtime_observation_artifact: String,
+    envelope: H3PrivateRuntimeEnvelopeRecord,
     bounds: H3PrivateRuntimeBoundCaptureSet,
     evidence_artifacts: Vec<String>,
 }
@@ -222,6 +285,11 @@ impl H3PrivateRuntimeBoundCaptureManifest {
         {
             bail!("private H3 runtime capture has invalid CUDA attention authority")
         }
+        self.envelope.validate()?;
+        validate_relative_path(
+            &self.runtime_observation_artifact,
+            "runtime observation evidence",
+        )?;
         if self.evidence_artifacts.is_empty()
             || self.evidence_artifacts.len() > MAX_EVIDENCE_ARTIFACTS
             || self
@@ -233,6 +301,12 @@ impl H3PrivateRuntimeBoundCaptureManifest {
         }
         for relative_path in &self.evidence_artifacts {
             validate_relative_path(relative_path, "runtime evidence")?;
+        }
+        if !self
+            .evidence_artifacts
+            .contains(&self.runtime_observation_artifact)
+        {
+            bail!("private H3 runtime capture does not retain its structured observation")
         }
         validate_relative_path(
             &self.measured_server_executable,
@@ -298,14 +372,8 @@ pub fn produce_h3_private_runtime_qualification_candidate(
     }
     let evidence_root = canonical_private_evidence_root(evidence_root)?;
     let capture_relative = relative_evidence_path(&evidence_root, capture_manifest)?;
-    let capture_artifact =
-        hash_evidence_artifact(&evidence_root, &capture_relative, Some(MAX_CAPTURE_BYTES))?;
-    let capture_bytes = read_evidence_bytes(&evidence_root, &capture_relative, MAX_CAPTURE_BYTES)?;
-    if capture_artifact.bytes != capture_bytes.len() as u64
-        || capture_artifact.sha256 != format!("{:x}", Sha256::digest(&capture_bytes))
-    {
-        bail!("private H3 runtime capture changed between authentication and parsing")
-    }
+    let (capture_artifact, capture_bytes) =
+        read_authenticated_evidence_artifact(&evidence_root, &capture_relative, MAX_CAPTURE_BYTES)?;
     let capture: H3PrivateRuntimeBoundCaptureManifest = serde_json::from_slice(&capture_bytes)
         .context("private H3 runtime capture manifest is not exact-schema JSON")?;
     let artifact = qualify_private_artifacts(
@@ -359,12 +427,14 @@ fn build_candidate(
     {
         bail!("private H3 runtime capture manifest must not list itself as bound evidence")
     }
+    let observation_relative = capture.runtime_observation_artifact.clone();
     let bounds = capture
         .bounds
         .validate(&capture.evidence_artifacts.iter().cloned().collect())?;
     let mut evidence_artifacts = Vec::with_capacity(capture.evidence_artifacts.len() + 1);
     evidence_artifacts.push(capture_artifact);
     let mut total_bytes = evidence_artifacts[0].bytes;
+    let mut observation = None;
     for relative_path in &capture.evidence_artifacts {
         let evidence = if relative_path == &capture.measured_server_executable {
             hash_measured_server_executable(
@@ -373,6 +443,16 @@ fn build_candidate(
                 &capture.source_sha,
                 &capture.runtime_code_identity_sha256,
             )?
+        } else if relative_path == &observation_relative {
+            let (evidence, bytes) = read_authenticated_evidence_artifact(
+                evidence_root,
+                relative_path,
+                MAX_RUNTIME_OBSERVATION_BYTES,
+            )?;
+            let parsed = serde_json::from_slice(&bytes)
+                .context("private H3 runtime observation is not exact-schema JSON")?;
+            observation = Some(parsed);
+            evidence
         } else {
             hash_evidence_artifact(evidence_root, relative_path, None)?
         };
@@ -384,6 +464,10 @@ fn build_candidate(
         }
         evidence_artifacts.push(evidence);
     }
+    let observation = observation
+        .ok_or_else(|| anyhow!("private H3 runtime capture lost its structured observation"))?;
+    validate_observed_envelope(&capture.envelope, &observation)?;
+    capture.bounds.validate_observation(&observation)?;
     evidence_artifacts.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     let measured_server_executable = evidence_artifacts
         .iter()
@@ -409,6 +493,7 @@ fn build_candidate(
         attention_runtime_identity_sha256: capture.attention_runtime_identity_sha256,
         attention_kernel_identity: capture.attention_kernel_identity,
         attention_qualification_sha256: capture.attention_qualification_sha256,
+        envelope: capture.envelope,
         bounds,
         evidence_artifacts,
         identity_sha256: String::new(),
@@ -624,8 +709,14 @@ fn marker_prefix(marker: &[u8]) -> Vec<usize> {
     prefix
 }
 
-fn read_evidence_bytes(root: &Path, relative_path: &str, limit: u64) -> Result<Vec<u8>> {
+fn read_authenticated_evidence_artifact(
+    root: &Path,
+    relative_path: &str,
+    limit: u64,
+) -> Result<(H3PrivateRuntimeEvidenceArtifact, Vec<u8>)> {
+    validate_relative_path(relative_path, "runtime evidence")?;
     let path = root.join(relative_path);
+    validate_private_parent_chain(root, &path)?;
     let mut file = open_regular_file_no_follow(&path)?;
     let before = require_private_file(&file, relative_path)?;
     if before.len == 0 || before.len > limit {
@@ -633,10 +724,21 @@ fn read_evidence_bytes(root: &Path, relative_path: &str, limit: u64) -> Result<V
     }
     let mut bytes = Vec::with_capacity(before.len as usize);
     file.read_to_end(&mut bytes)?;
-    if EvidenceFileIdentity::from_metadata(&file.metadata()?) != before {
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let after = EvidenceFileIdentity::from_metadata(&file.metadata()?);
+    let current = open_regular_file_no_follow(&path)?;
+    let current_identity = EvidenceFileIdentity::from_metadata(&current.metadata()?);
+    if before != after || before != current_identity || sha256_open_file(&current)? != sha256 {
         bail!("private H3 runtime evidence {relative_path} changed while reading")
     }
-    Ok(bytes)
+    Ok((
+        H3PrivateRuntimeEvidenceArtifact {
+            relative_path: relative_path.into(),
+            bytes: before.len,
+            sha256,
+        },
+        bytes,
+    ))
 }
 
 fn validate_private_parent_chain(root: &Path, path: &Path) -> Result<()> {
@@ -806,6 +908,25 @@ mod tests {
         }
     }
 
+    fn envelope() -> H3PrivateRuntimeEnvelopeRecord {
+        H3PrivateRuntimeEnvelopeRecord {
+            width: 960,
+            height: 544,
+            frames: minimax_h3::MIN_FRAMES,
+            fps: minimax_h3::FIXED_FPS,
+            batch_size: 1,
+            max_steps: 2,
+            endpoint_count: 1,
+            endpoint_anchor: "first".into(),
+            max_qwen_output_text_rows: 128,
+            max_qwen_vision_rows: 1_024,
+            max_condition_visual_rows: 1_024,
+            max_target_video_rows: 16_384,
+            max_target_audio_rows: 1_024,
+            max_total_packed_rows: 19_560,
+        }
+    }
+
     fn capture(path: &str) -> H3PrivateRuntimeBoundCaptureManifest {
         H3PrivateRuntimeBoundCaptureManifest {
             schema: CAPTURE_SCHEMA.into(),
@@ -823,6 +944,8 @@ mod tests {
             attention_runtime_identity_sha256: sha('d'),
             attention_kernel_identity: "h3-flash-attention-sm89".into(),
             attention_qualification_sha256: sha('e'),
+            runtime_observation_artifact: path.into(),
+            envelope: envelope(),
             bounds: H3PrivateRuntimeBoundCaptureSet {
                 fixed_runtime_host_bytes: bound(path, 1),
                 fixed_runtime_device_bytes: bound(path, 2),
@@ -840,6 +963,118 @@ mod tests {
             },
             evidence_artifacts: vec!["bin/mold-server".into(), path.into()],
         }
+    }
+
+    fn observation(
+        capture: &H3PrivateRuntimeBoundCaptureManifest,
+    ) -> H3PrivateRuntimeBoundObservation {
+        H3PrivateRuntimeBoundObservation {
+            schema: H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA.into(),
+            envelope: super::super::private_runtime_observer::H3PrivateRuntimeEnvelopeObservation {
+                width: capture.envelope.width,
+                height: capture.envelope.height,
+                frames: capture.envelope.frames,
+                fps: capture.envelope.fps,
+                batch_size: capture.envelope.batch_size,
+                steps: capture.envelope.max_steps,
+                endpoint_count: capture.envelope.endpoint_count,
+                endpoint_anchor: capture.envelope.endpoint_anchor.clone(),
+                qwen_output_text_rows: capture.envelope.max_qwen_output_text_rows,
+                qwen_vision_rows: capture.envelope.max_qwen_vision_rows,
+                condition_visual_rows: capture.envelope.max_condition_visual_rows,
+                target_video_rows: capture.envelope.max_target_video_rows,
+                target_audio_rows: capture.envelope.max_target_audio_rows,
+                total_packed_rows: capture.envelope.max_total_packed_rows,
+            },
+            fixed_runtime_host_bytes: capture.bounds.fixed_runtime_host_bytes.observed_bytes,
+            fixed_runtime_device_bytes: capture.bounds.fixed_runtime_device_bytes.observed_bytes,
+            qwen_activation_workspace_bytes: capture
+                .bounds
+                .qwen_activation_workspace_bytes
+                .observed_bytes,
+            vae_construction_device_workspace_bytes: capture
+                .bounds
+                .vae_construction_device_workspace_bytes
+                .observed_bytes,
+            condition_vae_workspace_device_bytes: capture
+                .bounds
+                .condition_vae_workspace_device_bytes
+                .observed_bytes,
+            attention_workspace_device_bytes: capture
+                .bounds
+                .attention_workspace_device_bytes
+                .observed_bytes,
+            ffn_workspace_device_bytes: capture.bounds.ffn_workspace_device_bytes.observed_bytes,
+            decoder_tile_workspace_device_bytes: capture
+                .bounds
+                .decoder_tile_workspace_device_bytes
+                .observed_bytes,
+            audio_decode_workspace_device_bytes: capture
+                .bounds
+                .audio_decode_workspace_device_bytes
+                .observed_bytes,
+            encoded_video_host_bytes_bound: capture
+                .bounds
+                .encoded_video_host_bytes_bound
+                .observed_bytes,
+            thumbnail_host_bytes_bound: capture.bounds.thumbnail_host_bytes_bound.observed_bytes,
+            mux_output_host_bytes_bound: capture.bounds.mux_output_host_bytes_bound.observed_bytes,
+            aac_mux_staging_host_bytes: capture.bounds.aac_mux_staging_host_bytes.observed_bytes,
+        }
+    }
+
+    #[test]
+    fn structured_observation_binds_every_envelope_axis_and_runtime_measurement() {
+        let capture = capture("logs/runtime-observation.json");
+        let reviewed = &capture.envelope;
+        let observation = observation(&capture);
+        validate_observed_envelope(reviewed, &observation).unwrap();
+        capture.bounds.validate_observation(&observation).unwrap();
+
+        macro_rules! reject_envelope_change {
+            ($field:ident) => {{
+                let mut changed = observation.clone();
+                changed.envelope.$field += 1;
+                assert!(validate_observed_envelope(reviewed, &changed).is_err());
+            }};
+        }
+        reject_envelope_change!(width);
+        reject_envelope_change!(height);
+        reject_envelope_change!(frames);
+        reject_envelope_change!(fps);
+        reject_envelope_change!(batch_size);
+        reject_envelope_change!(steps);
+        reject_envelope_change!(endpoint_count);
+        reject_envelope_change!(qwen_output_text_rows);
+        reject_envelope_change!(qwen_vision_rows);
+        reject_envelope_change!(condition_visual_rows);
+        reject_envelope_change!(target_video_rows);
+        reject_envelope_change!(target_audio_rows);
+        reject_envelope_change!(total_packed_rows);
+        let mut changed = observation.clone();
+        changed.envelope.endpoint_anchor = "last".into();
+        assert!(validate_observed_envelope(reviewed, &changed).is_err());
+
+        macro_rules! reject_measurement_change {
+            ($field:ident) => {{
+                let mut changed = observation.clone();
+                changed.$field += 1;
+                assert!(capture.bounds.validate_observation(&changed).is_err());
+            }};
+        }
+        reject_measurement_change!(fixed_runtime_host_bytes);
+        reject_measurement_change!(fixed_runtime_device_bytes);
+        reject_measurement_change!(qwen_activation_workspace_bytes);
+        reject_measurement_change!(vae_construction_device_workspace_bytes);
+        reject_measurement_change!(condition_vae_workspace_device_bytes);
+        reject_measurement_change!(attention_workspace_device_bytes);
+        reject_measurement_change!(ffn_workspace_device_bytes);
+        reject_measurement_change!(decoder_tile_workspace_device_bytes);
+        reject_measurement_change!(audio_decode_workspace_device_bytes);
+        reject_measurement_change!(encoded_video_host_bytes_bound);
+        reject_measurement_change!(thumbnail_host_bytes_bound);
+        reject_measurement_change!(mux_output_host_bytes_bound);
+        reject_measurement_change!(aac_mux_staging_host_bytes);
     }
 
     #[cfg(unix)]
@@ -862,11 +1097,15 @@ mod tests {
         let logs = root.path().join("logs");
         fs::create_dir(&logs).unwrap();
         fs::set_permissions(&logs, fs::Permissions::from_mode(0o700)).unwrap();
-        let evidence = logs.join("runtime.log");
-        fs::write(&evidence, b"measured runtime evidence").unwrap();
+        let evidence = logs.join("runtime-observation.json");
+        let capture = capture("logs/runtime-observation.json");
+        fs::write(
+            &evidence,
+            serde_json::to_vec_pretty(&observation(&capture)).unwrap(),
+        )
+        .unwrap();
         fs::set_permissions(&evidence, fs::Permissions::from_mode(0o600)).unwrap();
         let capture_path = root.path().join("capture.json");
-        let capture = capture("logs/runtime.log");
         fs::write(&capture_path, serde_json::to_vec_pretty(&capture).unwrap()).unwrap();
         fs::set_permissions(&capture_path, fs::Permissions::from_mode(0o600)).unwrap();
         (root, capture_path, evidence, executable)
@@ -989,7 +1228,7 @@ mod tests {
         let (root, capture_path, evidence, _) = private_fixture();
         fs::set_permissions(&evidence, fs::Permissions::from_mode(0o640)).unwrap();
         assert!(
-            hash_evidence_artifact(root.path(), "logs/runtime.log", None)
+            hash_evidence_artifact(root.path(), "logs/runtime-observation.json", None)
                 .unwrap_err()
                 .to_string()
                 .contains("owner-only")
@@ -1008,7 +1247,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn capture_rejects_unembedded_source_or_invalid_cuda_authority() {
-        let mut manifest = capture("logs/runtime.log");
+        let mut manifest = capture("logs/runtime-observation.json");
         assert!(manifest
             .validate(
                 &artifact_report(),
@@ -1033,6 +1272,14 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("CUDA attention authority"));
+
+        manifest.device_id = DEVICE_0.into();
+        manifest.envelope.frames += 1;
+        assert!(manifest
+            .validate(&artifact_report(), &source_sha(), &runtime_code_identity())
+            .unwrap_err()
+            .to_string()
+            .contains("small-route envelope"));
     }
 
     #[cfg(unix)]

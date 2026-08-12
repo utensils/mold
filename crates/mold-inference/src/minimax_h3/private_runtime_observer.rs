@@ -7,38 +7,59 @@ use std::fs;
 use anyhow::{anyhow, bail, Context, Result};
 use candle_core::Device;
 use mold_candle::minimax_h3::{H3PrivateWorkspaceCapture, H3PrivateWorkspaceObservation};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::device::{PhaseVramProbe, PhaseVramReport};
 
 use super::pipeline::{H3PipelineEvent, H3PipelinePhase};
 
 pub(crate) const H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA: &str =
-    "mold.minimax-h3.private-uat-runtime-bound-observation.v1";
+    "mold.minimax-h3.private-uat-runtime-bound-observation.v2";
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct H3PrivateRuntimeEnvelopeObservation {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) frames: u32,
+    pub(crate) fps: u32,
+    pub(crate) batch_size: u32,
+    pub(crate) steps: u32,
+    pub(crate) endpoint_count: u32,
+    pub(crate) endpoint_anchor: String,
+    pub(crate) qwen_output_text_rows: u64,
+    pub(crate) qwen_vision_rows: u64,
+    pub(crate) condition_visual_rows: u64,
+    pub(crate) target_video_rows: u64,
+    pub(crate) target_audio_rows: u64,
+    pub(crate) total_packed_rows: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct H3PrivateRuntimeBoundObservation {
-    schema: &'static str,
-    fixed_runtime_host_bytes: u64,
-    fixed_runtime_device_bytes: u64,
-    qwen_activation_workspace_bytes: u64,
-    vae_construction_device_workspace_bytes: u64,
-    condition_vae_workspace_device_bytes: u64,
-    attention_workspace_device_bytes: u64,
-    ffn_workspace_device_bytes: u64,
-    decoder_tile_workspace_device_bytes: u64,
-    audio_decode_workspace_device_bytes: u64,
-    encoded_video_host_bytes_bound: u64,
-    thumbnail_host_bytes_bound: u64,
-    mux_output_host_bytes_bound: u64,
-    aac_mux_staging_host_bytes: u64,
+    pub(crate) schema: String,
+    pub(crate) envelope: H3PrivateRuntimeEnvelopeObservation,
+    pub(crate) fixed_runtime_host_bytes: u64,
+    pub(crate) fixed_runtime_device_bytes: u64,
+    pub(crate) qwen_activation_workspace_bytes: u64,
+    pub(crate) vae_construction_device_workspace_bytes: u64,
+    pub(crate) condition_vae_workspace_device_bytes: u64,
+    pub(crate) attention_workspace_device_bytes: u64,
+    pub(crate) ffn_workspace_device_bytes: u64,
+    pub(crate) decoder_tile_workspace_device_bytes: u64,
+    pub(crate) audio_decode_workspace_device_bytes: u64,
+    pub(crate) encoded_video_host_bytes_bound: u64,
+    pub(crate) thumbnail_host_bytes_bound: u64,
+    pub(crate) mux_output_host_bytes_bound: u64,
+    pub(crate) aac_mux_staging_host_bytes: u64,
 }
 
 #[derive(Default)]
 struct ObservationState {
     device: Option<Device>,
     qwen_on_cpu: bool,
+    envelope: Option<H3PrivateRuntimeEnvelopeObservation>,
     first_error: Option<String>,
     fixed_runtime_host_bytes: u64,
     overall: Option<PhaseVramProbe>,
@@ -62,7 +83,11 @@ pub(crate) struct H3PrivateRuntimeBoundCapture {
 }
 
 impl H3PrivateRuntimeBoundCapture {
-    pub(crate) fn begin(device: &Device, qwen_on_cpu: bool) -> Result<Self> {
+    pub(crate) fn begin(
+        device: &Device,
+        qwen_on_cpu: bool,
+        envelope: H3PrivateRuntimeEnvelopeObservation,
+    ) -> Result<Self> {
         device
             .synchronize()
             .context("private H3 runtime-bound capture could not fence its entry")?;
@@ -73,6 +98,7 @@ impl H3PrivateRuntimeBoundCapture {
             *active.borrow_mut() = Some(ObservationState {
                 device: Some(device.clone()),
                 qwen_on_cpu,
+                envelope: Some(envelope),
                 fixed_runtime_host_bytes: process_resident_bytes()?,
                 overall: Some(PhaseVramProbe::enter("h3.private.complete-attempt")),
                 ..ObservationState::default()
@@ -353,7 +379,11 @@ fn build_observation(
         routed_qwen_workspace(state.qwen_on_cpu, host_qwen, device_qwen)
             .ok_or_else(|| anyhow!("private H3 Qwen encode has no routed workspace peak"))?;
     let observation = H3PrivateRuntimeBoundObservation {
-        schema: H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA,
+        schema: H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA.into(),
+        envelope: state
+            .envelope
+            .clone()
+            .ok_or_else(|| anyhow!("private H3 runtime envelope observation disappeared"))?,
         fixed_runtime_host_bytes: state.fixed_runtime_host_bytes,
         fixed_runtime_device_bytes,
         qwen_activation_workspace_bytes,

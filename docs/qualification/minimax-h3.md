@@ -289,12 +289,18 @@ public capability. Published-binary verification rejects its dedicated claim
 marker as well as the underlying private artifact reader.
 
 The capture manifest uses
-[`mold.minimax-h3.private-runtime-bound-capture.v1`](./minimax-h3-private-runtime-capture.schema.json).
+[`mold.minimax-h3.private-runtime-bound-capture.v2`](./minimax-h3-private-runtime-capture.schema.json).
 It binds the exact 40-character Mold source SHA, the stable runtime-code
 identity, the measured server executable, artifact/authorization identities,
 stable `cuda:<32 lowercase UUID hex>` route plus its process-local ordinal, compute capability, attention
 runtime/kernel/qualification identities, and a sorted list of relative
-evidence paths. The candidate producer requires its own embedded source SHA and
+evidence paths. Version 2 also binds the exact reviewed smaller-route envelope:
+960×544, 124 frames at 24 fps, batch one, no more than two requested grid
+points/API steps, one first-frame FL2VA endpoint, and explicit ceilings for Qwen text/vision,
+condition visual, target video/audio, and total packed rows. Admission checks
+that envelope after source preprocessing, the prepared attempt checks it again,
+and final dispatch repeats the check before any model execution. The candidate
+producer requires its own embedded source SHA and
 runtime-code identity to equal the capture and proves that both exact values
 occur in the retained ELF server executable before recording that executable's
 independently measured SHA-256. Each of these bounds has an
@@ -309,10 +315,12 @@ its proposed bound:
   workspaces;
 - encoded-video, thumbnail, mux-output, and AAC-staging host bounds.
 
-The evidence root and every parent directory must be mode `0700`; the capture
-and evidence files must be mode `0600`, process-owned, regular, non-symlink
-files outside the checkout. The measured server executable must be one of those
-files. Paths must be sorted, unique, and canonical.
+The evidence root and every directory below that root must be mode `0700`; the
+capture and evidence files must be mode `0600`, process-owned, regular,
+non-symlink files outside the checkout. Ancestors above the private root are not
+part of this rule because the root itself prevents traversal. The measured
+server executable must be one of those files. Paths must be sorted, unique, and
+canonical.
 
 The producer authenticates and retains that ELF, but it does not itself prove
 that external profiler or log samples came from the process executing that
@@ -321,8 +329,13 @@ alongside each sample, and the independent review must verify that binding
 before accepting any measured bound.
 
 The private campaign server emits one structured
-`mold.minimax-h3.private-uat-runtime-bound-observation.v1` record only after a
-successful terminal attempt. It samples Mold's CUDA allocation-pool high-water
+`mold.minimax-h3.private-uat-runtime-bound-observation.v2` record only after a
+successful terminal attempt. The record includes the actual request geometry,
+requested grid-point count, endpoint count/anchor, and prepared row counts.
+Candidate production reads this designated record through the same no-follow,
+size-bounded descriptor used to authenticate its bytes and requires exact
+equality with every manifest envelope field and all thirteen claimed
+observations. It samples Mold's CUDA allocation-pool high-water
 marks synchronously at the VAE construction, Qwen encode, condition VAE,
 visual decode, audio decode, and whole-attempt boundaries. Attention and FFN
 workspaces are counted by the exact production operators from their actual

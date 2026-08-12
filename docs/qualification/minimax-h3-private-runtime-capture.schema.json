@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://utensils.io/mold/schemas/minimax-h3-private-runtime-bound-capture-v1.json",
+  "$id": "https://utensils.io/mold/schemas/minimax-h3-private-runtime-bound-capture-v2.json",
   "title": "Mold private MiniMax H3 runtime-bound capture",
   "type": "object",
   "additionalProperties": false,
@@ -20,12 +20,14 @@
     "attention_runtime_identity_sha256",
     "attention_kernel_identity",
     "attention_qualification_sha256",
+    "runtime_observation_artifact",
+    "envelope",
     "bounds",
     "evidence_artifacts"
   ],
   "properties": {
     "schema": {
-      "const": "mold.minimax-h3.private-runtime-bound-capture.v1"
+      "const": "mold.minimax-h3.private-runtime-bound-capture.v2"
     },
     "canonical_model": {
       "const": "minimax-h3-fl2va:comfy-pruned-int8"
@@ -57,6 +59,43 @@
       "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
     },
     "attention_qualification_sha256": { "$ref": "#/$defs/sha256" },
+    "runtime_observation_artifact": { "$ref": "#/$defs/relativePath" },
+    "envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height",
+        "frames",
+        "fps",
+        "batch_size",
+        "max_steps",
+        "endpoint_count",
+        "endpoint_anchor",
+        "max_qwen_output_text_rows",
+        "max_qwen_vision_rows",
+        "max_condition_visual_rows",
+        "max_target_video_rows",
+        "max_target_audio_rows",
+        "max_total_packed_rows"
+      ],
+      "properties": {
+        "width": { "const": 960 },
+        "height": { "const": 544 },
+        "frames": { "const": 124 },
+        "fps": { "const": 24 },
+        "batch_size": { "const": 1 },
+        "max_steps": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "endpoint_count": { "const": 1 },
+        "endpoint_anchor": { "const": "first" },
+        "max_qwen_output_text_rows": { "$ref": "#/$defs/positiveRows" },
+        "max_qwen_vision_rows": { "$ref": "#/$defs/positiveRows" },
+        "max_condition_visual_rows": { "$ref": "#/$defs/positiveRows" },
+        "max_target_video_rows": { "$ref": "#/$defs/positiveRows" },
+        "max_target_audio_rows": { "$ref": "#/$defs/positiveRows" },
+        "max_total_packed_rows": { "$ref": "#/$defs/positiveRows" }
+      }
+    },
     "bounds": {
       "type": "object",
       "additionalProperties": false,
@@ -101,6 +140,7 @@
   },
   "$defs": {
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "positiveRows": { "type": "integer", "minimum": 1 },
     "relativePath": {
       "type": "string",
       "minLength": 1,

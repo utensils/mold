@@ -834,6 +834,10 @@ impl H3PrivatePreparedFl2VaFactoryInputs {
         &self.factory_attempt
     }
 
+    pub(crate) fn prepared_request_input(&self) -> &H3FactoryPreparedRequestInput {
+        &self.factory_attempt.request
+    }
+
     pub(crate) fn budget_echo_input(&self) -> &H3FactoryExecutionBudgetEchoInput {
         &self.budget_echo
     }

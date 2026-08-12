@@ -11,7 +11,10 @@ claim_marker='mold.minimax-h3.attention-rc.kernel-compiled.v1'
 private_uat_marker='mold.minimax-h3.private-uat-artifact-reader.v1'
 private_qwen_support_marker='mold.minimax-h3.private-uat-qwen-support-loader.v1'
 private_runtime_record_marker='mold.minimax-h3.private-runtime-record-producer.v1'
-private_runtime_observation_marker='mold.minimax-h3.private-uat-runtime-bound-observation.v1'
+private_runtime_observation_markers=(
+  'mold.minimax-h3.private-uat-runtime-bound-observation.v1'
+  'mold.minimax-h3.private-uat-runtime-bound-observation.v2'
+)
 private_qwen_capture_marker='mold.minimax-h3.private-uat-exact-bf16-qwen-layer50-capture.v1'
 private_visual_vae_capture_marker='mold.minimax-h3.private-uat-visual-vae-f32-fp16-capture.v1'
 private_audio_capture_marker='mold.minimax-h3.private-uat-exact-fp32-audio-vae-capture.v1'
@@ -64,10 +67,12 @@ if grep -aFq "$private_runtime_record_marker" "$binary"; then
   exit 1
 fi
 
-if grep -aFq "$private_runtime_observation_marker" "$binary"; then
-  echo "published binary contains the forbidden MiniMax H3 runtime-bound observer" >&2
-  exit 1
-fi
+for private_runtime_observation_marker in "${private_runtime_observation_markers[@]}"; do
+  if grep -aFq "$private_runtime_observation_marker" "$binary"; then
+    echo "published binary contains the forbidden MiniMax H3 runtime-bound observer" >&2
+    exit 1
+  fi
+done
 
 if grep -aFq "$private_qwen_capture_marker" "$binary"; then
   echo "published binary contains the forbidden MiniMax H3 exact-BF16 Qwen capture adapter" >&2
