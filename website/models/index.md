@@ -160,6 +160,7 @@ for more options.
 | [Qwen-Image-Edit](/models/qwen-image) | Derived from first edit image | Qwen2.5-VL multimodal edit, flow-matching, CFG |
 | [LTX-2](/models/ltx2)                 | 1216x704                      | Gemma 3, joint audio-video transformer         |
 | [LTX Video](/models/ltx-video)        | 768x512                       | T5-XXL, DiT, 3D causal VAE                     |
+| [MiniMax H3](/models/minimax-h3)      | 1344x768                      | Qwen3-VL, joint audio-video DiT, dual VAEs     |
 | [Wan Video](/models/wan)              | 832x480 / 1280x704            | UMT5-XXL, flow DiT, causal 3D VAE, A14B MoE    |
 
 Each family page lists recommended dimensions for non-square aspect ratios.
@@ -175,5 +176,7 @@ All image families and `LTX Video` run on CUDA, Apple Metal, and CPU. LTX-2 /
 LTX-2.3 is performance-qualified on CUDA; its CPU and Apple Metal paths are
 correctness-oriented and can be extremely slow. Metal checkpoint-backed UAT
 remains pending. Wan is CUDA-only for real generation; its CPU path is
-correctness-oriented and Metal is unsupported.
+correctness-oriented and Metal is unsupported. MiniMax H3 compact checkpoints
+are downloadable, but only the exact reviewed FL2VA route can execute on an
+authenticated CUDA server; Ref2VA execution, Metal, and CPU are unsupported.
 :::

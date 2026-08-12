@@ -119,11 +119,35 @@ const requiredVisibleDocs = [
   'guide/video.md',
   'guide/iphone.md',
   'docs/catalog.md',
+  'models/minimax-h3.md',
 ]
 for (const relPath of requiredVisibleDocs) {
   const route = routeForDoc(relPath)
   if (!visibleLinks.has(route)) {
     fail(`published docs page is not linked from sidebar: ${route}`)
+  }
+}
+
+const h3ModelDoc = readRel('models/minimax-h3.md')
+const requiredH3DownloadFacts = [
+  'minimax-h3-fl2va:comfy-pruned-int8',
+  'minimax-h3-ref2va:comfy-pruned-int8',
+  '42,482,090,318',
+  '63,452,470,480',
+  '20,970,379,616',
+  '15,687,142,551',
+  '5,207,808,496',
+  '605,254,808',
+  '11,504,847',
+  '1344x768',
+  'exactly 124 frames at 24 fps',
+  '21 terminal-inclusive sampler grid points',
+  'Ref2VA, Metal, CPU',
+  'Mold-hosted weight redistribution',
+]
+for (const fact of requiredH3DownloadFacts) {
+  if (!h3ModelDoc.includes(fact)) {
+    fail(`MiniMax H3 model guide missing required scoped fact: ${fact}`)
   }
 }
 
@@ -148,6 +172,7 @@ try {
 const ignoredEnvVars = new Set([
   'MOLD_BUILD_DATE',
   'MOLD_GIT_SHA',
+  'MOLD_GIT_SHA_SHORT',
   'MOLD_VERSION',
   // Build-time only — consumed by crates/mold-server/build.rs to stage
   // the web SPA bundle for rust-embed. Not user-facing runtime config.
@@ -160,6 +185,8 @@ const ignoredEnvVars = new Set([
   // is a unit-test fixture path. Surfacing them in docs would invite users
   // to set them in normal operation, which is wrong.
   'MOLD_FLUX2_DUMP_LATENT',
+  'MOLD_DIFF_BF16',
+  'MOLD_DIFF_GGUF',
   'MOLD_NVFP4_PROBE_PATH',
   // Batch transaction subprocess fixtures and their stdout marker. These are
   // compiled only for Rust tests and are not supported runtime configuration.
@@ -176,6 +203,29 @@ const ignoredEnvVars = new Set([
   'MOLD_TEST_INCOMPLETE_PARENT_TAIL',
   'MOLD_TEST_PREDECESSOR_MODE',
   'MOLD_TEST_CLIP_TOKENIZER',
+  // Private H3 qualification/capture inputs. These are feature-gated evidence
+  // authorities, not supported configuration for ordinary Mold releases.
+  'MOLD_H3_AUTHORIZATION_RECORD',
+  'MOLD_H3_CANONICAL_SERVER_FEATURES',
+  'MOLD_H3_HOST_COMPILER_PATH',
+  'MOLD_H3_HOST_COMPILER_VERSION',
+  'MOLD_H3_MODEL',
+  'MOLD_H3_MODELS_ROOT',
+  'MOLD_H3_NATIVE_CUDA_TOOLCHAIN',
+  'MOLD_H3_NVCC_PATH',
+  'MOLD_H3_NVCC_VERSION',
+  'MOLD_H3_PRIVATE_UAT_ROOT',
+  'MOLD_H3_PRIVATE_VAE_ARTIFACT_ROOT',
+  'MOLD_H3_PRIVATE_VAE_STAGING_ROOT',
+  'MOLD_H3_QWEN_HEADER_SHA256',
+  'MOLD_H3_QWEN_NVFP4_PATH',
+  'MOLD_H3_QWEN_PATH',
+  'MOLD_H3_RUNTIME_CODE_IDENTITY_SHA256',
+  'MOLD_H3_RUNTIME_QUALIFICATION_RECORD',
+  'MOLD_H3_STAGING_ROOT',
+  // Internal desktop migration bootstrap override, not a supported end-user
+  // configuration knob.
+  'MOLD_HOME_POINTER_PATH',
   // Execution-plan classifier/error-display sentinels, not real settings.
   'MOLD_NOT_A_SHAPING_VARIABLE',
   'MOLD_X',
