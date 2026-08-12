@@ -1279,8 +1279,9 @@ pub struct GenerateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extend_video_path: Option<String>,
     /// Pixel frames of the source tail re-encoded as motion conditioning for
-    /// the continuation. Must be `8k+1` (the LTX-2 VAE's causal temporal grid)
-    /// and strictly less than `frames`. `None` uses the chain default.
+    /// the continuation. Must land on the family's own temporal grid — `8k+1`
+    /// for LTX-2's causal VAE, `4k+1` for wan — and be strictly less than
+    /// `frames`. `None` resolves to that family's carryover default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extend_overlap_frames: Option<u32>,
     /// Optional keyframe conditioning images for LTX-2 keyframe interpolation.

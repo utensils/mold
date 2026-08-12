@@ -1408,9 +1408,11 @@ fn validate_guidance_overrides(overrides: &Ltx2GuidanceOverrides) -> Result<(), 
 /// Admission rules for `extend_video` / `extend_video_path`.
 ///
 /// Extend reuses the chain motion-tail machinery, so it inherits the same two
-/// hard constraints: the overlap has to land on the LTX-2 VAE's `8k+1` causal
-/// temporal grid to re-encode cleanly, and it has to be strictly shorter than
-/// the rendered clip or the continuation contributes no new frames at all.
+/// hard constraints: the overlap has to land on the family's own temporal grid
+/// to re-encode cleanly — `8k+1` for the LTX-2 VAE's causal grid, `4k+1` for
+/// wan, resolved through [`frame_step_for_family`] rather than assumed — and it
+/// has to be strictly shorter than the rendered clip or the continuation
+/// contributes no new frames at all.
 fn validate_extend(req: &GenerateRequest, family: Option<&str>) -> Result<(), String> {
     if let Some(video) = &req.extend_video {
         require_extend_capable_family(family, "extend_video")?;

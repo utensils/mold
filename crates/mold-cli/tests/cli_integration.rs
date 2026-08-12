@@ -567,6 +567,78 @@ fn run_extend_on_a_family_without_a_continuation_path_names_extend() {
         .stderr(predicate::str::contains("source image").not());
 }
 
+/// The overlap the CLI *sends* is the family's, not LTX-2's (#783).
+///
+/// `mold run` materializes `extend_overlap_frames` into the request it builds,
+/// so a wan continuation that named no overlap carries 1 — the frame the
+/// continuation is seeded with — rather than inheriting a family-blind 17 that
+/// clears wan's `4k+1` grid check and then fails inside the engine, after the
+/// expert load has been paid for. The recorded value is also what saved
+/// provenance reports, and an installed `cv:` / `hf:` wan checkpoint has no
+/// manifest for metadata to resolve a family from later.
+///
+/// This drives the real binary against a mock host, so deleting the
+/// materialization call in `commands::generate::run` fails it.
+#[tokio::test]
+async fn run_extend_sends_the_familys_own_carryover_overlap() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let env = TestEnv::new();
+    let clip = env.home.join("clip.mp4");
+    std::fs::write(&clip, b"\0\0\0\x20ftypisom").unwrap();
+
+    let server = MockServer::start().await;
+    // Refuse the render outright: this test is about the request the CLI
+    // composes, and a 422 is a hard error, so nothing falls back to local
+    // inference or tries to pull a checkpoint.
+    Mock::given(method("POST"))
+        .and(path("/api/generate/stream"))
+        .respond_with(
+            ResponseTemplate::new(422).set_body_json(serde_json::json!({"error": "mock refusal"})),
+        )
+        .mount(&server)
+        .await;
+
+    let overlap_of = |model: &str| {
+        env.cmd()
+            .args(["run", model, "a cat keeps walking", "--extend"])
+            .arg(&clip)
+            .args([
+                "--host",
+                &server.uri(),
+                "--frames",
+                "49",
+                "--output",
+                "out.mp4",
+            ])
+            .assert()
+            .failure();
+    };
+
+    overlap_of("wan22-i2v-a14b:q8");
+    overlap_of("ltx-2-19b-dev:fp8");
+
+    let sent: Vec<serde_json::Value> = server
+        .received_requests()
+        .await
+        .expect("the mock server records requests")
+        .iter()
+        .map(|request| serde_json::from_slice(&request.body).expect("the CLI posts JSON"))
+        .collect();
+    assert_eq!(sent.len(), 2, "one generate request per run");
+    assert_eq!(
+        sent[0]["extend_overlap_frames"],
+        serde_json::json!(mold_core::validation::WAN_HANDOFF_DUPLICATED_FRAMES),
+        "wan's continuation carries its own one-frame carryover"
+    );
+    assert_eq!(
+        sent[1]["extend_overlap_frames"],
+        serde_json::json!(mold_core::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
+        "the same seam resolves LTX-2's 17 from the resolved family"
+    );
+}
+
 // ── mold pull (error paths) ───────────────────────────────────────────────
 
 #[test]

@@ -7676,6 +7676,64 @@ mod tests {
         );
     }
 
+    /// …and admission is where that materialization actually happens.
+    ///
+    /// The test above only proves the helper works; this one drives
+    /// `prepare_generation` itself, which is the single server-side seam
+    /// between a client that named no overlap and every downstream consumer
+    /// (queue, worker, saved metadata). Admission still fails afterwards — no
+    /// checkpoint is installed — but the mutation is already on the request by
+    /// then, so deleting the call at the seam fails this test.
+    ///
+    /// Both families run through it because the seam has to pass the resolved
+    /// family through: a call that hardcoded either constant would satisfy one
+    /// assertion and break the other.
+    #[tokio::test]
+    async fn admission_materializes_the_resolved_familys_extend_carryover() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::for_tests();
+        state.config.write().await.models_dir = temp.path().display().to_string();
+
+        // Inline bytes rather than a server-local path: the path form is
+        // resolved against the media roots later in admission, and this test
+        // is about the seam, not about media resolution.
+        let mut wan = wan_continuation("wan22-i2v-a14b:q8");
+        wan.extend_video_path = None;
+        wan.extend_video = Some(b"\0\0\0\x20ftypisom".to_vec());
+        assert_eq!(wan.extend_overlap_frames, None);
+        let _ = prepare_generation(&state, &mut wan, None).await;
+        assert_eq!(
+            wan.extend_overlap_frames,
+            Some(mold_core::validation::WAN_HANDOFF_DUPLICATED_FRAMES),
+            "admission must write wan's own one-frame carryover into the request"
+        );
+
+        let mut ltx2 = wan_continuation("ltx-2-19b-dev:fp8");
+        ltx2.extend_video_path = None;
+        ltx2.extend_video = Some(b"\0\0\0\x20ftypisom".to_vec());
+        assert_eq!(ltx2.extend_overlap_frames, None);
+        let _ = prepare_generation(&state, &mut ltx2, None).await;
+        assert_eq!(
+            ltx2.extend_overlap_frames,
+            Some(mold_core::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
+            "the same seam must resolve LTX-2's 17 from the resolved family"
+        );
+
+        // An explicit overlap is authoritative, and an ordinary render is
+        // never handed one — so the seam is a fill-in, not a rewrite.
+        let mut explicit = wan_continuation("wan22-i2v-a14b:q8");
+        explicit.extend_video_path = None;
+        explicit.extend_video = Some(b"\0\0\0\x20ftypisom".to_vec());
+        explicit.extend_overlap_frames = Some(5);
+        let _ = prepare_generation(&state, &mut explicit, None).await;
+        assert_eq!(explicit.extend_overlap_frames, Some(5));
+
+        let mut plain = wan_continuation("wan22-t2v-a14b:q8");
+        plain.extend_video_path = None;
+        let _ = prepare_generation(&state, &mut plain, None).await;
+        assert_eq!(plain.extend_overlap_frames, None);
+    }
+
     #[tokio::test]
     async fn production_pairing_handlers_issue_claim_and_reject_replay() {
         let mut state = AppState::for_tests();
