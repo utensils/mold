@@ -299,12 +299,79 @@ fn synchronize_generation_profile_capabilities(catalog: &mut [ModelInfoExtended]
             }
             if let Some(source_image) = entry.source_image {
                 recipe.capabilities.source_image = Some(source_image);
+                if entry.info.family == "wan" {
+                    let accepts_source =
+                        source_image != mold_core::SourceImageCapability::Unsupported;
+                    recipe.capabilities.wan_recipe.supports_first_last_frame = accepts_source;
+                    recipe.capabilities.keyframes.mode = if accepts_source {
+                        mold_core::ControlMode::Adjustable
+                    } else {
+                        mold_core::ControlMode::Hidden
+                    };
+                    recipe.capabilities.keyframes.required = false;
+                    recipe.capabilities.keyframes.reason = (!accepts_source)
+                        .then(|| "This Wan checkpoint does not accept keyframes.".to_string());
+                }
             }
             if let Some(supports_extend) = entry.supports_extend {
                 recipe.capabilities.supports_extend = supports_extend;
             }
         }
+        qualify_profile_delivery_for_build(profile, cfg!(feature = "mp4"), cfg!(feature = "webp"));
         profile.refresh_hash();
+    }
+}
+
+/// Narrow authored output contracts to encoders linked into this server.
+///
+/// The core registry records Mold's complete qualified contract. `/api/models`
+/// describes this concrete binary, so it must not advertise a container the
+/// server cannot deliver. Recipes with no viable container (notably H3 in a
+/// build without MP4) remain unselectable instead of falling back to an
+/// unrelated format.
+fn qualify_profile_delivery_for_build(
+    profile: &mut mold_core::GenerationProfileSet,
+    mp4_built: bool,
+    webp_built: bool,
+) {
+    for recipe in &mut profile.recipes {
+        recipe
+            .capabilities
+            .output
+            .formats
+            .retain(|format| match format {
+                mold_core::OutputFormat::Mp4 => mp4_built,
+                mold_core::OutputFormat::Webp => webp_built,
+                _ => true,
+            });
+        if !recipe
+            .capabilities
+            .output
+            .formats
+            .contains(&recipe.capabilities.output.default_format)
+        {
+            if let Some(format) = recipe.capabilities.output.formats.first().copied() {
+                recipe.capabilities.output.default_format = format;
+            }
+        }
+        if recipe.capabilities.output.audio_requires_mp4 && !mp4_built {
+            recipe.capabilities.supports_audio = false;
+        }
+    }
+
+    profile
+        .recipes
+        .retain(|recipe| !recipe.capabilities.output.formats.is_empty());
+    if !profile
+        .recipes
+        .iter()
+        .any(|recipe| recipe.id == profile.default_recipe_id)
+    {
+        profile.default_recipe_id = profile
+            .recipes
+            .first()
+            .map(|recipe| recipe.id.clone())
+            .unwrap_or_default();
     }
 }
 
@@ -3118,6 +3185,93 @@ mod tests {
             !recipe.capabilities.supports_audio
                 && recipe.request_selector.pipeline != Some(mold_core::Ltx2PipelineMode::T2a)
         }));
+    }
+
+    #[test]
+    fn delivery_qualification_filters_formats_and_repairs_defaults() {
+        let mut video = mold_core::resolve_generation_profile(mold_core::GenerationProfileInput {
+            model: "wan22-t2v-a14b:fp8",
+            family: "wan",
+            sub_family: Some("wan22-t2v-a14b"),
+            default_width: 1280,
+            default_height: 720,
+            default_steps: 4,
+            default_guidance: 1.0,
+            default_frames: Some(81),
+            default_fps: Some(16),
+            default_negative_prompt: None,
+            source_image: Some(mold_core::SourceImageCapability::Unsupported),
+            supports_sequence: true,
+            supports_extend: false,
+            supports_audio: false,
+        });
+        qualify_profile_delivery_for_build(&mut video, false, false);
+        let output = &video.default_recipe().unwrap().capabilities.output;
+        assert_eq!(output.default_format, mold_core::OutputFormat::Gif);
+        assert_eq!(
+            output.formats,
+            vec![mold_core::OutputFormat::Gif, mold_core::OutputFormat::Apng]
+        );
+
+        let mut h3 = mold_core::resolve_generation_profile(mold_core::GenerationProfileInput {
+            model: "minimax-h3",
+            family: "minimax-h3",
+            sub_family: None,
+            default_width: 1280,
+            default_height: 720,
+            default_steps: 30,
+            default_guidance: 0.0,
+            default_frames: Some(345),
+            default_fps: Some(24),
+            default_negative_prompt: None,
+            source_image: None,
+            supports_sequence: false,
+            supports_extend: false,
+            supports_audio: true,
+        });
+        qualify_profile_delivery_for_build(&mut h3, false, false);
+        assert!(h3.recipes.is_empty());
+        assert!(h3.default_recipe_id.is_empty());
+    }
+
+    #[test]
+    fn wan_runtime_probe_recomputes_dependent_profile_controls() {
+        let mut catalog = mold_core::catalog::build_model_catalog(&Config::default(), None, false);
+        {
+            let entry = catalog
+                .iter_mut()
+                .find(|entry| entry.info.family == "wan")
+                .expect("built-in Wan model");
+            entry.source_image = Some(mold_core::SourceImageCapability::Unsupported);
+            entry.supports_extend = Some(false);
+        }
+
+        synchronize_generation_profile_capabilities(&mut catalog);
+        let entry = catalog
+            .iter_mut()
+            .find(|entry| entry.info.family == "wan")
+            .expect("built-in Wan model");
+        let profile = entry.generation_profile.as_ref().unwrap();
+        let recipe = profile.default_recipe().unwrap();
+        assert!(!recipe.capabilities.wan_recipe.supports_first_last_frame);
+        assert_eq!(
+            recipe.capabilities.keyframes.mode,
+            mold_core::ControlMode::Hidden
+        );
+        let unsupported_hash = profile.profile_hash.clone();
+
+        entry.source_image = Some(mold_core::SourceImageCapability::Optional);
+        entry.supports_extend = Some(true);
+        synchronize_generation_profile_capabilities(std::slice::from_mut(entry));
+        let profile = entry.generation_profile.as_ref().unwrap();
+        let recipe = profile.default_recipe().unwrap();
+        assert!(recipe.capabilities.wan_recipe.supports_first_last_frame);
+        assert_eq!(
+            recipe.capabilities.keyframes.mode,
+            mold_core::ControlMode::Adjustable
+        );
+        assert!(recipe.capabilities.supports_extend);
+        assert_ne!(profile.profile_hash, unsupported_hash);
     }
 
     /// #787: an installed wan checkpoint (cv:/hf:, no manifest) advertises

@@ -1,145 +1,41 @@
 /** Versioned generation-control contract emitted by `/api/models`. */
+import type {
+  AdapterControlProfile,
+  FeatureControlProfile,
+  GenerationRecipeProfile as WireGenerationRecipeProfile,
+  GenerationProfileSet,
+  IntegerControl,
+  OutputCapabilitiesProfile,
+  FloatControl,
+  ProfileAspectGroup,
+  ProfileFpsControl,
+  ProfileResolutionPreset,
+  ResolutionProfile,
+  TemporalProfile,
+  WanRecipeCapabilitiesProfile,
+} from "./generated/generationProfileV1";
 
-export type ResolutionDomain = "dynamic" | "buckets" | "source-driven" | "none";
-export type ControlMode = "adjustable" | "fixed" | "hidden";
+export type {
+  AdapterControlProfile,
+  ControlMode,
+  FeatureControlProfile,
+  FloatControl,
+  GenerationProfileSet,
+  IntegerControl,
+  OutputCapabilitiesProfile,
+  ProfileAspectGroup,
+  ProfileFpsControl,
+  ProfileResolutionPreset,
+  ResolutionDomain,
+  ResolutionProfile,
+  TemporalProfile,
+  WanRecipeCapabilitiesProfile,
+} from "./generated/generationProfileV1";
 
-export interface ProfileResolutionPreset {
-  id: string;
-  width: number;
-  height: number;
-  tier: string;
-}
-
-export interface ProfileAspectGroup {
-  id: string;
-  label: string;
-  presets: ProfileResolutionPreset[];
-}
-
-export interface ResolutionProfile {
-  domain: ResolutionDomain;
-  alignment: number;
-  min_width: number;
-  min_height: number;
-  max_pixels: number;
-  max_axis_pixels?: number | null;
-  min_aspect_ratio?: number | null;
-  max_aspect_ratio?: number | null;
-  aspect_groups: ProfileAspectGroup[];
-}
-
-export interface IntegerControl {
-  default: number;
-  min: number;
-  max: number;
-  step: number;
-  recommended?: number[];
-  mode: ControlMode;
-}
-
-export interface FloatControl {
-  default: number;
-  min: number;
-  max: number;
-  step: number;
-  mode: ControlMode;
-}
-
-export type ProfileFpsControl =
-  | { mode: "fixed"; value: number }
-  | {
-      mode: "adjustable";
-      default: number;
-      min: number;
-      max: number;
-      step: number;
-    };
-
-export interface TemporalProfile {
-  frames: IntegerControl;
-  frame_offset: number;
-  fps: ProfileFpsControl;
-  max_duration_seconds?: number | null;
-}
-
-export interface GenerationRecipeProfile {
-  /** Client-only marker for the one-release pre-v1 compatibility projection. */
+/** Wire recipe plus the contained Release-N legacy-adapter marker. */
+export type GenerationRecipeProfile = WireGenerationRecipeProfile & {
   legacy_adapter?: true;
-  id: string;
-  label: string;
-  request_selector: { pipeline?: string | null };
-  defaults: {
-    width: number;
-    height: number;
-    steps: number;
-    guidance: number;
-    frames?: number | null;
-    fps?: number | null;
-    negative_prompt?: string | null;
-  };
-  resolution: ResolutionProfile;
-  steps: IntegerControl;
-  guidance: FloatControl;
-  temporal?: TemporalProfile | null;
-  capabilities: {
-    guidance: {
-      adjustable: boolean;
-      supports_negative_prompt: boolean;
-      fixed_scale?: number | null;
-    };
-    source_image?: "unsupported" | "optional" | "required" | null;
-    negative_prompt: FeatureControlProfile;
-    supports_lora: boolean;
-    supports_controlnet: boolean;
-    supports_sequence: boolean;
-    supports_extend: boolean;
-    supports_audio: boolean;
-    source_video: FeatureControlProfile;
-    mask: FeatureControlProfile;
-    keyframes: FeatureControlProfile;
-    audio: FeatureControlProfile;
-    lora: AdapterControlProfile;
-    controlnet: AdapterControlProfile;
-    output: OutputCapabilitiesProfile;
-    wan_recipe: WanRecipeCapabilitiesProfile;
-    schedulers: string[];
-  };
-}
-
-export interface FeatureControlProfile {
-  mode: ControlMode;
-  required: boolean;
-  reason?: string | null;
-}
-
-export interface AdapterControlProfile {
-  mode: ControlMode;
-  max_count: number;
-  reason?: string | null;
-}
-
-export interface OutputCapabilitiesProfile {
-  default_format: "png" | "jpeg" | "gif" | "apng" | "webp" | "mp4" | "wav";
-  formats: ("png" | "jpeg" | "gif" | "apng" | "webp" | "mp4" | "wav")[];
-  audio_requires_mp4: boolean;
-  delivery_reason?: string | null;
-}
-
-export interface WanRecipeCapabilitiesProfile {
-  mode: ControlMode;
-  supports_distill_strength: boolean;
-  supports_first_last_frame: boolean;
-  first_last_frame_min_frames?: number | null;
-  reason?: string | null;
-}
-
-export interface GenerationProfileSet {
-  schema_version: 1;
-  profile_id: string;
-  profile_hash: string;
-  default_recipe_id: string;
-  recipes: GenerationRecipeProfile[];
-}
+};
 
 export interface GenerationProfileModel {
   name?: string;
@@ -527,7 +423,7 @@ function isGenerationProfileSetV1(
   const ids = value.recipes.map((recipe) => recipe.id);
   const pipelines = value.recipes
     .map((recipe) => recipe.request_selector.pipeline)
-    .filter((pipeline): pipeline is string => typeof pipeline === "string");
+    .filter((pipeline) => typeof pipeline === "string");
   return (
     new Set(ids).size === ids.length &&
     new Set(pipelines).size === pipelines.length &&

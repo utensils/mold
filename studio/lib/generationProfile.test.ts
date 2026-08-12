@@ -7,10 +7,18 @@ import {
   resolutionProfileError,
   type GenerationProfileModel,
   type GenerationProfileSet,
+  type GenerationRecipeProfile,
 } from "./generationProfile";
 
 function profileModel(): GenerationProfileModel {
-  const recipe = (id: string, pipeline: string | null, alignment: number) => ({
+  const recipe = (
+    id: string,
+    pipeline: Exclude<
+      GenerationRecipeProfile["request_selector"]["pipeline"],
+      undefined
+    >,
+    alignment: number,
+  ): GenerationRecipeProfile => ({
     id,
     label: id,
     request_selector: { pipeline },

@@ -6788,14 +6788,11 @@ mod tests {
     }
 
     #[test]
-    fn dimension_warning_qwen_image_has_native_resolution() {
-        let dims = recommended_dimensions("qwen-image");
-        assert!(
-            dims.contains(&(1328, 1328)),
-            "must include native 1328x1328"
-        );
-        assert!(dims.contains(&(512, 512)), "must include 512x512");
-        assert!(dims.contains(&(1024, 1024)), "must include 1024x1024");
+    fn dimension_warning_qwen_image_withholds_unqualified_candidates() {
+        assert!(recommended_dimensions("qwen-image").is_empty());
+        // No recommendation warning is emitted when Mold has not qualified a
+        // recommendation set. The ordinary dynamic canvas constraints remain
+        // the admission authority.
         assert_eq!(dimension_warning(1328, 1328, "qwen-image"), None);
         assert_eq!(dimension_warning(512, 512, "qwen-image"), None);
     }
@@ -6820,17 +6817,15 @@ mod tests {
 
     #[test]
     fn every_family_native_in_recommendations() {
-        // Each family's native resolution (from ManifestDefaults) should appear
-        // in its recommended list.
+        // Each family with a qualified recommendation set includes its native
+        // resolution. Z-Image and Qwen remain dynamic-only until their pinned
+        // upstream candidates pass a recorded runtime-and-delivery campaign.
         let families = &[
             ("sd15", 512, 512),
             ("sdxl", 1024, 1024),
             ("sd3", 1024, 1024),
             ("flux", 1024, 1024),
             ("flux2", 1024, 1024),
-            ("z-image", 1024, 1024),
-            ("qwen-image", 1024, 1024),
-            ("qwen-image-edit", 1024, 1024),
             ("wuerstchen", 1024, 1024),
             ("ltx-video", 768, 512),
             ("minimax-h3", 1344, 768),
@@ -6841,6 +6836,9 @@ mod tests {
                 dims.contains(&(*w, *h)),
                 "{family} native {w}x{h} missing from recommended list"
             );
+        }
+        for family in ["z-image", "qwen-image", "qwen-image-edit"] {
+            assert!(recommended_dimensions(family).is_empty());
         }
     }
 

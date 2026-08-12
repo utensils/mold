@@ -1,5 +1,97 @@
 {
   "schema_version": 1,
+  "resolution_candidates": [
+    {
+      "family": "z-image",
+      "source": "https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py",
+      "revision": "768cb50d847cdbba97c89533ae976be69cf5a5b8",
+      "qualified": false,
+      "evidence": "static-contract: upstream app.py RES_CHOICES[1024] oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded",
+      "candidates": [
+        [
+          1024,
+          1024
+        ],
+        [
+          1152,
+          896
+        ],
+        [
+          896,
+          1152
+        ],
+        [
+          1152,
+          864
+        ],
+        [
+          864,
+          1152
+        ],
+        [
+          1248,
+          832
+        ],
+        [
+          832,
+          1248
+        ],
+        [
+          1280,
+          720
+        ],
+        [
+          720,
+          1280
+        ],
+        [
+          1344,
+          576
+        ],
+        [
+          576,
+          1344
+        ]
+      ]
+    },
+    {
+      "family": "qwen-image",
+      "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
+      "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
+      "qualified": false,
+      "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded",
+      "candidates": [
+        [
+          1328,
+          1328
+        ],
+        [
+          1664,
+          928
+        ],
+        [
+          928,
+          1664
+        ],
+        [
+          1472,
+          1104
+        ],
+        [
+          1104,
+          1472
+        ],
+        [
+          1584,
+          1056
+        ],
+        [
+          1056,
+          1584
+        ]
+      ]
+    }
+  ],
   "profiles": [
     {
       "models": [
@@ -15898,7 +15990,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image-2512",
-        "profile_hash": "d644e92e2160bb66bd727e9fc47cd19fb8ff3a5067655a652c2768b8d4b697ec",
+        "profile_hash": "f4d5fcaebd91648143a47b44ae77971a82a2be6e6e2493887151ca7d528c6992",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -15917,92 +16009,7 @@
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1800000,
-              "aspect_groups": [
-                {
-                  "id": "1:1",
-                  "label": "1:1",
-                  "presets": [
-                    {
-                      "id": "1328x1328",
-                      "width": 1328,
-                      "height": 1328,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "52:29",
-                  "label": "52:29",
-                  "presets": [
-                    {
-                      "id": "1664x928",
-                      "width": 1664,
-                      "height": 928,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "29:52",
-                  "label": "29:52",
-                  "presets": [
-                    {
-                      "id": "928x1664",
-                      "width": 928,
-                      "height": 1664,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "4:3",
-                  "label": "4:3",
-                  "presets": [
-                    {
-                      "id": "1472x1104",
-                      "width": 1472,
-                      "height": 1104,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:4",
-                  "label": "3:4",
-                  "presets": [
-                    {
-                      "id": "1104x1472",
-                      "width": 1104,
-                      "height": 1472,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:2",
-                  "label": "3:2",
-                  "presets": [
-                    {
-                      "id": "1584x1056",
-                      "width": 1584,
-                      "height": 1056,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "2:3",
-                  "label": "2:3",
-                  "presets": [
-                    {
-                      "id": "1056x1584",
-                      "width": 1056,
-                      "height": 1584,
-                      "tier": "recommended"
-                    }
-                  ]
-                }
-              ]
+              "aspect_groups": []
             },
             "steps": {
               "default": 50,
@@ -16085,8 +16092,8 @@
                 "kind": "upstream",
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-                "qualified": true,
-                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded"
+                "qualified": false,
+                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded"
               }
             ]
           }
@@ -16104,7 +16111,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image-lightning",
-        "profile_hash": "a99195cf3bc0525cbcc97de62fdf0819b4e4e8e77310603348b956153397e89c",
+        "profile_hash": "5f8ce16d397d82442a72d709b40877c9c3c75f2c437c4bdae7f307c8ef739d3d",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16123,92 +16130,7 @@
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1800000,
-              "aspect_groups": [
-                {
-                  "id": "1:1",
-                  "label": "1:1",
-                  "presets": [
-                    {
-                      "id": "1328x1328",
-                      "width": 1328,
-                      "height": 1328,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "52:29",
-                  "label": "52:29",
-                  "presets": [
-                    {
-                      "id": "1664x928",
-                      "width": 1664,
-                      "height": 928,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "29:52",
-                  "label": "29:52",
-                  "presets": [
-                    {
-                      "id": "928x1664",
-                      "width": 928,
-                      "height": 1664,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "4:3",
-                  "label": "4:3",
-                  "presets": [
-                    {
-                      "id": "1472x1104",
-                      "width": 1472,
-                      "height": 1104,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:4",
-                  "label": "3:4",
-                  "presets": [
-                    {
-                      "id": "1104x1472",
-                      "width": 1104,
-                      "height": 1472,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:2",
-                  "label": "3:2",
-                  "presets": [
-                    {
-                      "id": "1584x1056",
-                      "width": 1584,
-                      "height": 1056,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "2:3",
-                  "label": "2:3",
-                  "presets": [
-                    {
-                      "id": "1056x1584",
-                      "width": 1056,
-                      "height": 1584,
-                      "tier": "recommended"
-                    }
-                  ]
-                }
-              ]
+              "aspect_groups": []
             },
             "steps": {
               "default": 4,
@@ -16291,8 +16213,8 @@
                 "kind": "upstream",
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-                "qualified": true,
-                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded"
+                "qualified": false,
+                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded"
               }
             ]
           }
@@ -16310,7 +16232,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image-lightning",
-        "profile_hash": "0667199f0d7d3f4242062122433353c6b105239ea9eb51d7e076224f20d55a8a",
+        "profile_hash": "3bc6cc213ffad6ecd9e91b9e33385f9e896f1ce79104b6f287b8df7bcfd14fcc",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16329,92 +16251,7 @@
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1800000,
-              "aspect_groups": [
-                {
-                  "id": "1:1",
-                  "label": "1:1",
-                  "presets": [
-                    {
-                      "id": "1328x1328",
-                      "width": 1328,
-                      "height": 1328,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "52:29",
-                  "label": "52:29",
-                  "presets": [
-                    {
-                      "id": "1664x928",
-                      "width": 1664,
-                      "height": 928,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "29:52",
-                  "label": "29:52",
-                  "presets": [
-                    {
-                      "id": "928x1664",
-                      "width": 928,
-                      "height": 1664,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "4:3",
-                  "label": "4:3",
-                  "presets": [
-                    {
-                      "id": "1472x1104",
-                      "width": 1472,
-                      "height": 1104,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:4",
-                  "label": "3:4",
-                  "presets": [
-                    {
-                      "id": "1104x1472",
-                      "width": 1104,
-                      "height": 1472,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:2",
-                  "label": "3:2",
-                  "presets": [
-                    {
-                      "id": "1584x1056",
-                      "width": 1584,
-                      "height": 1056,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "2:3",
-                  "label": "2:3",
-                  "presets": [
-                    {
-                      "id": "1056x1584",
-                      "width": 1056,
-                      "height": 1584,
-                      "tier": "recommended"
-                    }
-                  ]
-                }
-              ]
+              "aspect_groups": []
             },
             "steps": {
               "default": 8,
@@ -16497,8 +16334,8 @@
                 "kind": "upstream",
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-                "qualified": true,
-                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded"
+                "qualified": false,
+                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded"
               }
             ]
           }
@@ -16551,7 +16388,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image",
-        "profile_hash": "afc66bfc8cd4d1267fcf6473d751cd3a2a59bed572bbc51c79ee9deced77c873",
+        "profile_hash": "937d87cd33d58722f402a6c14a01946c08145ad5fc77ee8985fb4f7fd3608ef6",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16570,92 +16407,7 @@
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1800000,
-              "aspect_groups": [
-                {
-                  "id": "1:1",
-                  "label": "1:1",
-                  "presets": [
-                    {
-                      "id": "1328x1328",
-                      "width": 1328,
-                      "height": 1328,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "52:29",
-                  "label": "52:29",
-                  "presets": [
-                    {
-                      "id": "1664x928",
-                      "width": 1664,
-                      "height": 928,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "29:52",
-                  "label": "29:52",
-                  "presets": [
-                    {
-                      "id": "928x1664",
-                      "width": 928,
-                      "height": 1664,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "4:3",
-                  "label": "4:3",
-                  "presets": [
-                    {
-                      "id": "1472x1104",
-                      "width": 1472,
-                      "height": 1104,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:4",
-                  "label": "3:4",
-                  "presets": [
-                    {
-                      "id": "1104x1472",
-                      "width": 1104,
-                      "height": 1472,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:2",
-                  "label": "3:2",
-                  "presets": [
-                    {
-                      "id": "1584x1056",
-                      "width": 1584,
-                      "height": 1056,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "2:3",
-                  "label": "2:3",
-                  "presets": [
-                    {
-                      "id": "1056x1584",
-                      "width": 1056,
-                      "height": 1584,
-                      "tier": "recommended"
-                    }
-                  ]
-                }
-              ]
+              "aspect_groups": []
             },
             "steps": {
               "default": 50,
@@ -16738,8 +16490,8 @@
                 "kind": "upstream",
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-                "qualified": true,
-                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded"
+                "qualified": false,
+                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded"
               }
             ]
           }
@@ -16787,7 +16539,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image-edit.qwen-image-edit-2511",
-        "profile_hash": "af66a1baa1fe2aebcf25ab9f14a6ac19e2e2e5cc7d450e7e0e097b8c7d69434d",
+        "profile_hash": "92a923d0572aa6bbd057968c52971ba1424676e6f370212e628394d757085fcc",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16806,92 +16558,7 @@
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1800000,
-              "aspect_groups": [
-                {
-                  "id": "1:1",
-                  "label": "1:1",
-                  "presets": [
-                    {
-                      "id": "1328x1328",
-                      "width": 1328,
-                      "height": 1328,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "52:29",
-                  "label": "52:29",
-                  "presets": [
-                    {
-                      "id": "1664x928",
-                      "width": 1664,
-                      "height": 928,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "29:52",
-                  "label": "29:52",
-                  "presets": [
-                    {
-                      "id": "928x1664",
-                      "width": 928,
-                      "height": 1664,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "4:3",
-                  "label": "4:3",
-                  "presets": [
-                    {
-                      "id": "1472x1104",
-                      "width": 1472,
-                      "height": 1104,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:4",
-                  "label": "3:4",
-                  "presets": [
-                    {
-                      "id": "1104x1472",
-                      "width": 1104,
-                      "height": 1472,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:2",
-                  "label": "3:2",
-                  "presets": [
-                    {
-                      "id": "1584x1056",
-                      "width": 1584,
-                      "height": 1056,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "2:3",
-                  "label": "2:3",
-                  "presets": [
-                    {
-                      "id": "1056x1584",
-                      "width": 1056,
-                      "height": 1584,
-                      "tier": "recommended"
-                    }
-                  ]
-                }
-              ]
+              "aspect_groups": []
             },
             "steps": {
               "default": 50,
@@ -16974,8 +16641,8 @@
                 "kind": "upstream",
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-                "qualified": true,
-                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded"
+                "qualified": false,
+                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded"
               }
             ]
           }
@@ -22114,7 +21781,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "z-image.z-image-turbo",
-        "profile_hash": "0e857cfa43f4423ded4bbd53b0d5dbfaa48c31655f9ae85d1fede3452c7296d7",
+        "profile_hash": "dd06318814fc5648f3250dcc9e715b5d02ca3eee2a7c16e336f62768cd28004f",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -22133,140 +21800,7 @@
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1800000,
-              "aspect_groups": [
-                {
-                  "id": "1:1",
-                  "label": "1:1",
-                  "presets": [
-                    {
-                      "id": "1024x1024",
-                      "width": 1024,
-                      "height": 1024,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "9:7",
-                  "label": "9:7",
-                  "presets": [
-                    {
-                      "id": "1152x896",
-                      "width": 1152,
-                      "height": 896,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "7:9",
-                  "label": "7:9",
-                  "presets": [
-                    {
-                      "id": "896x1152",
-                      "width": 896,
-                      "height": 1152,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "4:3",
-                  "label": "4:3",
-                  "presets": [
-                    {
-                      "id": "1152x864",
-                      "width": 1152,
-                      "height": 864,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:4",
-                  "label": "3:4",
-                  "presets": [
-                    {
-                      "id": "864x1152",
-                      "width": 864,
-                      "height": 1152,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:2",
-                  "label": "3:2",
-                  "presets": [
-                    {
-                      "id": "1248x832",
-                      "width": 1248,
-                      "height": 832,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "2:3",
-                  "label": "2:3",
-                  "presets": [
-                    {
-                      "id": "832x1248",
-                      "width": 832,
-                      "height": 1248,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "16:9",
-                  "label": "16:9",
-                  "presets": [
-                    {
-                      "id": "1280x720",
-                      "width": 1280,
-                      "height": 720,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "9:16",
-                  "label": "9:16",
-                  "presets": [
-                    {
-                      "id": "720x1280",
-                      "width": 720,
-                      "height": 1280,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "7:3",
-                  "label": "7:3",
-                  "presets": [
-                    {
-                      "id": "1344x576",
-                      "width": 1344,
-                      "height": 576,
-                      "tier": "recommended"
-                    }
-                  ]
-                },
-                {
-                  "id": "3:7",
-                  "label": "3:7",
-                  "presets": [
-                    {
-                      "id": "576x1344",
-                      "width": 576,
-                      "height": 1344,
-                      "tier": "recommended"
-                    }
-                  ]
-                }
-              ]
+              "aspect_groups": []
             },
             "steps": {
               "default": 9,
@@ -22349,8 +21883,8 @@
                 "kind": "upstream",
                 "source": "https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py",
                 "revision": "768cb50d847cdbba97c89533ae976be69cf5a5b8",
-                "qualified": true,
-                "evidence": "static-contract: upstream app.py RES_CHOICES[1024] oracle + exact profile/admission tests; runtime smoke not recorded"
+                "qualified": false,
+                "evidence": "static-contract: upstream app.py RES_CHOICES[1024] oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded"
               }
             ]
           }

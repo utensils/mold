@@ -17,7 +17,7 @@ import { MAX_LORA_STACK } from "./capabilities";
 import { WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT } from "@studio/lib/negativePrompt";
 import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
 import type { ModelEntry, OutputMetadata } from "./api/types";
-import type { GenerationProfileSet } from "@studio/lib/generationProfile";
+import type { GenerationProfileSet, GenerationRecipeProfile } from "@studio/lib/generationProfile";
 
 function ltx2Model(): ModelEntry {
   return {
@@ -38,9 +38,9 @@ function ltx2Model(): ModelEntry {
 function profiledLtx2Model(): ModelEntry {
   const recipe = (
     id: string,
-    pipeline: string,
+    pipeline: NonNullable<GenerationRecipeProfile["request_selector"]["pipeline"]>,
     defaults: { width: number; height: number; steps: number; guidance: number },
-  ) => ({
+  ): GenerationRecipeProfile => ({
     id,
     label: id,
     request_selector: { pipeline },

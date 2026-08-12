@@ -15,7 +15,9 @@ use crate::{
 
 pub const GENERATION_PROFILE_SCHEMA_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum ResolutionDomain {
     Dynamic,
@@ -24,7 +26,9 @@ pub enum ResolutionDomain {
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum ControlMode {
     Adjustable,
@@ -32,7 +36,9 @@ pub enum ControlMode {
     Hidden,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProvenanceKind {
     Upstream,
@@ -41,7 +47,7 @@ pub enum ProvenanceKind {
     DeliveryLimit,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct ProfileProvenance {
     pub kind: ProvenanceKind,
     pub source: String,
@@ -52,7 +58,25 @@ pub struct ProfileProvenance {
     pub evidence: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+/// Server-side qualification record for upstream resolution candidates.
+///
+/// Candidate dimensions are deliberately separate from `ResolutionProfile`:
+/// only dimensions backed by a passing Mold runtime-and-delivery campaign may
+/// enter `aspect_groups` and therefore become UI recommendations. The
+/// generator includes these records in maintainer artifacts so an upstream
+/// candidate cannot be mistaken for a shipped contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolutionQualificationRecord {
+    pub family: &'static str,
+    pub source: &'static str,
+    pub revision: &'static str,
+    pub qualified: bool,
+    pub evidence: &'static str,
+    pub candidates: &'static [(u32, u32)],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
+#[ts(rename = "ProfileResolutionPreset")]
 pub struct ResolutionPreset {
     pub id: String,
     pub width: u32,
@@ -60,19 +84,21 @@ pub struct ResolutionPreset {
     pub tier: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
+#[ts(rename = "ProfileAspectGroup")]
 pub struct AspectGroup {
     pub id: String,
     pub label: String,
     pub presets: Vec<ResolutionPreset>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct ResolutionProfile {
     pub domain: ResolutionDomain,
     pub alignment: u32,
     pub min_width: u32,
     pub min_height: u32,
+    #[ts(type = "number")]
     pub max_pixels: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_axis_pixels: Option<u32>,
@@ -83,7 +109,7 @@ pub struct ResolutionProfile {
     pub aspect_groups: Vec<AspectGroup>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct IntegerControl {
     pub default: u32,
     pub min: u32,
@@ -94,7 +120,7 @@ pub struct IntegerControl {
     pub mode: ControlMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct FloatControl {
     pub default: f64,
     pub min: f64,
@@ -103,8 +129,9 @@ pub struct FloatControl {
     pub mode: ControlMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
+#[ts(rename = "ProfileFpsControl")]
 pub enum FpsControl {
     Fixed {
         value: u32,
@@ -117,7 +144,7 @@ pub enum FpsControl {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct TemporalProfile {
     pub frames: IntegerControl,
     pub frame_offset: u32,
@@ -126,7 +153,7 @@ pub struct TemporalProfile {
     pub max_duration_seconds: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct GenerationDefaultsProfile {
     pub width: u32,
     pub height: u32,
@@ -140,14 +167,14 @@ pub struct GenerationDefaultsProfile {
     pub negative_prompt: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct RecipeSelector {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<Ltx2PipelineMode>,
 }
 
 /// A non-numeric request field's complete UI/admission contract.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct FeatureControlProfile {
     pub mode: ControlMode,
     pub required: bool,
@@ -156,7 +183,7 @@ pub struct FeatureControlProfile {
 }
 
 /// A repeatable adapter input and its immutable stack limit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct AdapterControlProfile {
     pub mode: ControlMode,
     pub max_count: u32,
@@ -164,7 +191,7 @@ pub struct AdapterControlProfile {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct OutputCapabilitiesProfile {
     pub default_format: OutputFormat,
     pub formats: Vec<OutputFormat>,
@@ -173,7 +200,7 @@ pub struct OutputCapabilitiesProfile {
     pub delivery_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct WanRecipeCapabilitiesProfile {
     pub mode: ControlMode,
     pub supports_distill_strength: bool,
@@ -184,7 +211,7 @@ pub struct WanRecipeCapabilitiesProfile {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct GenerationCapabilitiesProfile {
     pub guidance: GuidanceCapabilities,
     pub negative_prompt: FeatureControlProfile,
@@ -207,7 +234,7 @@ pub struct GenerationCapabilitiesProfile {
     pub schedulers: Vec<Scheduler>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct GenerationRecipeProfile {
     pub id: String,
     pub label: String,
@@ -223,7 +250,7 @@ pub struct GenerationRecipeProfile {
     pub provenance: Vec<ProfileProvenance>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct GenerationProfileSet {
     pub schema_version: u32,
     pub profile_id: String,
@@ -297,6 +324,14 @@ pub fn validate_request_against_recipe(
         if !advertised.contains(&scheduler) {
             return Err(format!(
                 "scheduler '{scheduler}' is not available for this recipe"
+            ));
+        }
+    }
+    if let Some(output_format) = request.output_format {
+        if !recipe.capabilities.output.formats.contains(&output_format) {
+            return Err(format!(
+                "output format '{}' is not available for this recipe",
+                output_format.extension()
             ));
         }
     }
@@ -558,9 +593,10 @@ const FLUX: &[(u32, u32)] = &[
     (576, 1024),
     (768, 768),
 ];
-/// Official Z-Image-Turbo 1024-tier buckets. Every entry fits Mold's current
-/// 1.8 MP resource ceiling and /16 runtime grid.
-const Z_IMAGE: &[(u32, u32)] = &[
+/// Official Z-Image-Turbo 1024-tier candidates. These remain withheld from
+/// `family_presets` until an exact-size runtime-and-delivery campaign is
+/// checked in.
+const Z_IMAGE_UPSTREAM_CANDIDATES: &[(u32, u32)] = &[
     (1024, 1024),
     (1152, 896),
     (896, 1152),
@@ -573,8 +609,9 @@ const Z_IMAGE: &[(u32, u32)] = &[
     (1344, 576),
     (576, 1344),
 ];
-/// Current official Qwen-Image standard buckets.
-const QWEN: &[(u32, u32)] = &[
+/// Current official Qwen-Image standard candidates. Static contract tests
+/// prove the oracle transcription, not runtime generation or output delivery.
+const QWEN_UPSTREAM_CANDIDATES: &[(u32, u32)] = &[
     (1328, 1328),
     (1664, 928),
     (928, 1664),
@@ -621,14 +658,47 @@ const H3: &[(u32, u32)] = &[
     (768, 1344),
 ];
 
+const Z_IMAGE_QUALIFICATION: ResolutionQualificationRecord =
+    ResolutionQualificationRecord {
+        family: "z-image",
+        source: "https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py",
+        revision: "768cb50d847cdbba97c89533ae976be69cf5a5b8",
+        qualified: false,
+        evidence: "static-contract: upstream app.py RES_CHOICES[1024] oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded",
+        candidates: Z_IMAGE_UPSTREAM_CANDIDATES,
+    };
+
+const QWEN_IMAGE_QUALIFICATION: ResolutionQualificationRecord =
+    ResolutionQualificationRecord {
+        family: "qwen-image",
+        source: "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
+        revision: "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
+        qualified: false,
+        evidence: "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded",
+        candidates: QWEN_UPSTREAM_CANDIDATES,
+    };
+
+/// Return a pinned upstream candidate record when the family has candidates
+/// awaiting Mold runtime-and-delivery qualification.
+pub fn resolution_qualification_record(
+    family: &str,
+) -> Option<&'static ResolutionQualificationRecord> {
+    match canonical_family(family) {
+        "z-image" => Some(&Z_IMAGE_QUALIFICATION),
+        "qwen-image" | "qwen-image-edit" => Some(&QWEN_IMAGE_QUALIFICATION),
+        _ => None,
+    }
+}
+
 pub fn family_presets(family: &str) -> &'static [(u32, u32)] {
     match canonical_family(family) {
         "sd15" => SD15,
         "sdxl" => SDXL,
         "sd3" => SD3,
         "flux" | "flux2" => FLUX,
-        "z-image" => Z_IMAGE,
-        "qwen-image" | "qwen-image-edit" => QWEN,
+        // Upstream candidates are not recommendations until a checked-in
+        // runtime-and-delivery campaign qualifies their exact dimensions.
+        "z-image" | "qwen-image" | "qwen-image-edit" => &[],
         "wuerstchen" => WUERSTCHEN,
         "ltx-video" => LTX_VIDEO,
         "ltx2" => LTX2,
@@ -1123,17 +1193,16 @@ fn pipeline_label(pipeline: Ltx2PipelineMode) -> String {
 }
 
 fn provenance(family: &str) -> Vec<ProfileProvenance> {
+    if let Some(record) = resolution_qualification_record(family) {
+        return vec![ProfileProvenance {
+            kind: ProvenanceKind::Upstream,
+            source: record.source.to_string(),
+            revision: Some(record.revision.to_string()),
+            qualified: record.qualified,
+            evidence: Some(record.evidence.to_string()),
+        }];
+    }
     let (source, revision, evidence) = match family {
-        "z-image" => (
-            "https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py",
-            Some("768cb50d847cdbba97c89533ae976be69cf5a5b8"),
-            "static-contract: upstream app.py RES_CHOICES[1024] oracle + exact profile/admission tests; runtime smoke not recorded",
-        ),
-        "qwen-image" | "qwen-image-edit" => (
-            "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
-            Some("6b5e1f5cec987d404be5ac6657db3b9aacb56a89"),
-            "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded",
-        ),
         "ltx-video" => (
             "https://github.com/Lightricks/LTX-Video",
             Some("4b2d053057623ddd4d0a1d3e9cd28890e9ef487f"),
@@ -1197,23 +1266,14 @@ mod tests {
     }
 
     #[test]
-    fn z_image_profile_contains_exact_wide_and_tall_buckets() {
+    fn unqualified_z_image_candidates_are_not_profile_recommendations() {
         let profile = resolve_generation_profile(input("z-image-turbo:q4", "z-image"));
         let recipe = profile.default_recipe().unwrap();
-        assert!(recipe.resolution.aspect_groups.iter().any(|group| {
-            group.id == "16:9"
-                && group
-                    .presets
-                    .iter()
-                    .any(|preset| preset.width == 1280 && preset.height == 720)
-        }));
-        assert!(recipe.resolution.aspect_groups.iter().any(|group| {
-            group.id == "9:16"
-                && group
-                    .presets
-                    .iter()
-                    .any(|preset| preset.width == 720 && preset.height == 1280)
-        }));
+        assert!(recipe.resolution.aspect_groups.is_empty());
+        let candidates = resolution_qualification_record("z-image").unwrap();
+        assert!(!candidates.qualified);
+        assert!(candidates.candidates.contains(&(1280, 720)));
+        assert!(candidates.candidates.contains(&(720, 1280)));
     }
 
     #[test]
@@ -1374,27 +1434,27 @@ mod tests {
         ] {
             let profile = resolve_generation_profile(input(model, family));
             let provenance = &profile.default_recipe().unwrap().provenance[0];
+            assert!(!provenance.qualified);
             assert_eq!(provenance.revision.as_deref(), Some(revision));
             assert!(provenance.source.contains(revision));
             let evidence = provenance.evidence.as_deref().unwrap();
             assert!(evidence.contains(oracle));
-            assert!(evidence.contains("runtime smoke not recorded"));
+            assert!(evidence.contains("runtime generation and decoded delivery smoke not recorded"));
         }
     }
 
     #[test]
-    fn qwen_profile_matches_the_pinned_upstream_aspect_ratio_oracle() {
+    fn qwen_candidates_match_oracle_but_are_not_profile_recommendations() {
         let profile = resolve_generation_profile(input("qwen-image:q4", "qwen-image"));
-        let actual = profile
+        assert!(profile
             .default_recipe()
             .unwrap()
             .resolution
             .aspect_groups
-            .iter()
-            .flat_map(|group| group.presets.iter())
-            .map(|preset| (preset.width, preset.height))
-            .collect::<Vec<_>>();
-        assert_eq!(actual, QWEN);
+            .is_empty());
+        let candidates = resolution_qualification_record("qwen-image").unwrap();
+        assert!(!candidates.qualified);
+        assert_eq!(candidates.candidates, QWEN_UPSTREAM_CANDIDATES);
     }
 
     #[test]
@@ -1586,6 +1646,18 @@ mod tests {
         assert!(validate_request_against_generation_profile(&wan, &invalid)
             .unwrap_err()
             .contains("not an available bucket"));
+    }
+
+    #[test]
+    fn profile_admission_rejects_unadvertised_output_format() {
+        let profile = resolve_generation_profile(input("flux-dev:q4", "flux"));
+        let mut request = request_for(&profile, 1024, 1024);
+        request.output_format = Some(OutputFormat::Mp4);
+        assert!(
+            validate_request_against_generation_profile(&profile, &request)
+                .unwrap_err()
+                .contains("output format 'mp4' is not available")
+        );
     }
 
     #[test]

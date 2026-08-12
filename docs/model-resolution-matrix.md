@@ -12,6 +12,26 @@ Regenerate with `cargo run -p mold-ai-core --bin generate_generation_profiles`. 
 - **Source driven** derives its canvas from the source; listed presets are guidance for source fitting.
 - Limits in this document are effective Mold admission limits. Provenance records whether their authored source is upstream or Mold policy.
 
+## Upstream candidates awaiting qualification
+
+These pinned upstream dimensions are **not supported presets** and are absent from the wire profile's `aspect_groups`. They become selectable only after an exact-size Mold generation smoke and decoded output-delivery check is recorded.
+
+### `z-image`
+
+Status: qualified `false`. Evidence: `static-contract: upstream app.py RES_CHOICES[1024] oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.
+
+Pinned source: [https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py](https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py) at `768cb50d847cdbba97c89533ae976be69cf5a5b8`.
+
+Candidates: `1024x1024`, `1152x896`, `896x1152`, `1152x864`, `864x1152`, `1248x832`, `832x1248`, `1280x720`, `720x1280`, `1344x576`, `576x1344`.
+
+### `qwen-image`
+
+Status: qualified `false`. Evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.
+
+Pinned source: [https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`.
+
+Candidates: `1328x1328`, `1664x928`, `928x1664`, `1472x1104`, `1104x1472`, `1584x1056`, `1056x1584`.
+
 ## `flux`
 
 ### Profile `flux.flux-dev`
@@ -1413,7 +1433,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `qwen-image.qwen-image-2512`
 
-Schema 1 · hash `d644e92e2160bb66bd727e9fc47cd19fb8ff3a5067655a652c2768b8d4b697ec` · default recipe `default`
+Schema 1 · hash `f4d5fcaebd91648143a47b44ae77971a82a2be6e6e2493887151ca7d528c6992` · default recipe `default`
 
 Models: `qwen-image-2512:bf16`, `qwen-image-2512:q2`, `qwen-image-2512:q3`, `qwen-image-2512:q4`, `qwen-image-2512:q5`, `qwen-image-2512:q6`, `qwen-image-2512:q8`.
 
@@ -1422,22 +1442,13 @@ Models: `qwen-image-2512:bf16`, `qwen-image-2512:q2`, `qwen-image-2512:q3`, `qwe
 - Resolution: dynamic; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `1328x1328`, 50 steps, guidance 4.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
 
-| Exact ratio | Qualified presets |
-|---|---|
-| `1:1` | `1328x1328` (recommended) |
-| `52:29` | `1664x928` (recommended) |
-| `29:52` | `928x1664` (recommended) |
-| `4:3` | `1472x1104` (recommended) |
-| `3:4` | `1104x1472` (recommended) |
-| `3:2` | `1584x1056` (recommended) |
-| `2:3` | `1056x1584` (recommended) |
-
-Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `true`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded`.
+Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `false`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.
 
 ### `qwen-image-lightning:fp8`
 
-Schema 1 · hash `a99195cf3bc0525cbcc97de62fdf0819b4e4e8e77310603348b956153397e89c` · default recipe `default`
+Schema 1 · hash `5f8ce16d397d82442a72d709b40877c9c3c75f2c437c4bdae7f307c8ef739d3d` · default recipe `default`
 
 Models: `qwen-image-lightning:fp8`.
 
@@ -1446,22 +1457,13 @@ Models: `qwen-image-lightning:fp8`.
 - Resolution: dynamic; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `1328x1328`, 4 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
 
-| Exact ratio | Qualified presets |
-|---|---|
-| `1:1` | `1328x1328` (recommended) |
-| `52:29` | `1664x928` (recommended) |
-| `29:52` | `928x1664` (recommended) |
-| `4:3` | `1472x1104` (recommended) |
-| `3:4` | `1104x1472` (recommended) |
-| `3:2` | `1584x1056` (recommended) |
-| `2:3` | `1056x1584` (recommended) |
-
-Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `true`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded`.
+Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `false`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.
 
 ### `qwen-image-lightning:fp8-8step`
 
-Schema 1 · hash `0667199f0d7d3f4242062122433353c6b105239ea9eb51d7e076224f20d55a8a` · default recipe `default`
+Schema 1 · hash `3bc6cc213ffad6ecd9e91b9e33385f9e896f1ce79104b6f287b8df7bcfd14fcc` · default recipe `default`
 
 Models: `qwen-image-lightning:fp8-8step`.
 
@@ -1470,22 +1472,13 @@ Models: `qwen-image-lightning:fp8-8step`.
 - Resolution: dynamic; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `1328x1328`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
 
-| Exact ratio | Qualified presets |
-|---|---|
-| `1:1` | `1328x1328` (recommended) |
-| `52:29` | `1664x928` (recommended) |
-| `29:52` | `928x1664` (recommended) |
-| `4:3` | `1472x1104` (recommended) |
-| `3:4` | `1104x1472` (recommended) |
-| `3:2` | `1584x1056` (recommended) |
-| `2:3` | `1056x1584` (recommended) |
-
-Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `true`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded`.
+Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `false`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.
 
 ### Profile `qwen-image.qwen-image`
 
-Schema 1 · hash `afc66bfc8cd4d1267fcf6473d751cd3a2a59bed572bbc51c79ee9deced77c873` · default recipe `default`
+Schema 1 · hash `937d87cd33d58722f402a6c14a01946c08145ad5fc77ee8985fb4f7fd3608ef6` · default recipe `default`
 
 Models: `qwen-image:bf16`, `qwen-image:fp8`, `qwen-image:q2`, `qwen-image:q3`, `qwen-image:q4`, `qwen-image:q5`, `qwen-image:q6`, `qwen-image:q8`.
 
@@ -1494,24 +1487,15 @@ Models: `qwen-image:bf16`, `qwen-image:fp8`, `qwen-image:q2`, `qwen-image:q3`, `
 - Resolution: dynamic; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `1328x1328`, 50 steps, guidance 4.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
 
-| Exact ratio | Qualified presets |
-|---|---|
-| `1:1` | `1328x1328` (recommended) |
-| `52:29` | `1664x928` (recommended) |
-| `29:52` | `928x1664` (recommended) |
-| `4:3` | `1472x1104` (recommended) |
-| `3:4` | `1104x1472` (recommended) |
-| `3:2` | `1584x1056` (recommended) |
-| `2:3` | `1056x1584` (recommended) |
-
-Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `true`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded`.
+Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `false`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.
 
 ## `qwen-image-edit`
 
 ### Profile `qwen-image-edit.qwen-image-edit-2511`
 
-Schema 1 · hash `af66a1baa1fe2aebcf25ab9f14a6ac19e2e2e5cc7d450e7e0e097b8c7d69434d` · default recipe `default`
+Schema 1 · hash `92a923d0572aa6bbd057968c52971ba1424676e6f370212e628394d757085fcc` · default recipe `default`
 
 Models: `qwen-image-edit-2511:bf16`, `qwen-image-edit-2511:q2`, `qwen-image-edit-2511:q3`, `qwen-image-edit-2511:q4`, `qwen-image-edit-2511:q5`, `qwen-image-edit-2511:q6`, `qwen-image-edit-2511:q8`.
 
@@ -1520,18 +1504,9 @@ Models: `qwen-image-edit-2511:bf16`, `qwen-image-edit-2511:q2`, `qwen-image-edit
 - Resolution: source driven; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `1024x1024`, 50 steps, guidance 4.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
 
-| Exact ratio | Qualified presets |
-|---|---|
-| `1:1` | `1328x1328` (recommended) |
-| `52:29` | `1664x928` (recommended) |
-| `29:52` | `928x1664` (recommended) |
-| `4:3` | `1472x1104` (recommended) |
-| `3:4` | `1104x1472` (recommended) |
-| `3:2` | `1584x1056` (recommended) |
-| `2:3` | `1056x1584` (recommended) |
-
-Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `true`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime smoke not recorded`.
+Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `false`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.
 
 ## `sd15`
 
@@ -2125,7 +2100,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### Profile `z-image.z-image-turbo`
 
-Schema 1 · hash `0e857cfa43f4423ded4bbd53b0d5dbfaa48c31655f9ae85d1fede3452c7296d7` · default recipe `default`
+Schema 1 · hash `dd06318814fc5648f3250dcc9e715b5d02ca3eee2a7c16e336f62768cd28004f` · default recipe `default`
 
 Models: `z-image-turbo:bf16`, `z-image-turbo:q4`, `z-image-turbo:q6`, `z-image-turbo:q8`.
 
@@ -2134,19 +2109,6 @@ Models: `z-image-turbo:bf16`, `z-image-turbo:q4`, `z-image-turbo:q6`, `z-image-t
 - Resolution: dynamic; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `1024x1024`, 9 steps, guidance 0.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
 
-| Exact ratio | Qualified presets |
-|---|---|
-| `1:1` | `1024x1024` (recommended) |
-| `9:7` | `1152x896` (recommended) |
-| `7:9` | `896x1152` (recommended) |
-| `4:3` | `1152x864` (recommended) |
-| `3:4` | `864x1152` (recommended) |
-| `3:2` | `1248x832` (recommended) |
-| `2:3` | `832x1248` (recommended) |
-| `16:9` | `1280x720` (recommended) |
-| `9:16` | `720x1280` (recommended) |
-| `7:3` | `1344x576` (recommended) |
-| `3:7` | `576x1344` (recommended) |
-
-Provenance: [Upstream](https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py) at `768cb50d847cdbba97c89533ae976be69cf5a5b8`, qualified: `true`, evidence: `static-contract: upstream app.py RES_CHOICES[1024] oracle + exact profile/admission tests; runtime smoke not recorded`.
+Provenance: [Upstream](https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/app.py) at `768cb50d847cdbba97c89533ae976be69cf5a5b8`, qualified: `false`, evidence: `static-contract: upstream app.py RES_CHOICES[1024] oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.

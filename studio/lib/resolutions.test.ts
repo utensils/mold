@@ -112,8 +112,8 @@ describe("shared resolution contract", () => {
 
   it("keeps the runnable LTX-2 landscape bucket shared by every client", () => {
     expect(presetsForFamily("ltx2")).toContainEqual({
-      label: "16:9 · 1216×704",
-      aspect: "16:9",
+      label: "19:11 · 1216×704",
+      aspect: "19:11",
       width: 1216,
       height: 704,
     });

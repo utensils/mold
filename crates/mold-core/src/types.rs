@@ -130,7 +130,9 @@ mod base64_required {
 /// - `Euler` / `DpmPp` — Wan's flow-matching sample solvers (upstream
 ///   `--sample_solver`), alongside `UniPc` which doubles as Wan's default
 ///   FlowUniPC. Validation rejects them for every non-wan family (#795).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum Scheduler {
     #[default]
@@ -1464,7 +1466,9 @@ pub struct TimeRange {
     pub end_seconds: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum Ltx2PipelineMode {
     OneStage,
@@ -1553,7 +1557,7 @@ impl Ltx2PipelineMode {
 }
 
 /// User-facing guidance controls for a resolved model/pipeline recipe.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct GuidanceCapabilities {
     /// Whether the primary guidance scale changes the render.
     pub adjustable: bool,
@@ -2222,7 +2226,9 @@ impl OutputMetadata {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     #[default]
@@ -2485,7 +2491,9 @@ pub struct ModelInfoExtended {
 ///
 /// Derived from checkpoint structure — the engine's own conditioning
 /// classification — never from model names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum SourceImageCapability {
     /// The checkpoint has no image-conditioning input; a supplied source is

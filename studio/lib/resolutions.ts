@@ -4,6 +4,7 @@ import {
   effectiveGenerationRecipe,
   type GenerationProfileSet,
 } from "./generationProfile";
+import { LEGACY_RESOLUTION_PRESETS_V1 } from "./generated/generationProfileV1";
 
 export interface ResolutionPreset {
   label: string;
@@ -183,127 +184,13 @@ const p = (
   height,
 });
 
-const SD15 = [p(512, 512), p(512, 768), p(768, 512), p(384, 512), p(512, 384)];
-const SDXL = [
-  p(1024, 1024),
-  p(1152, 896),
-  p(896, 1152),
-  p(1216, 832),
-  p(832, 1216),
-  p(1344, 768),
-  p(768, 1344),
-  p(1536, 640),
-  p(640, 1536),
-];
-const SD3 = SDXL.slice(0, 7);
-const FLUX = [
-  p(1024, 1024),
-  p(1024, 768),
-  p(768, 1024),
-  p(1024, 576),
-  p(576, 1024),
-  p(768, 768),
-];
-const ZIMAGE = [
-  p(1024, 1024),
-  p(1152, 896),
-  p(896, 1152),
-  p(1152, 864),
-  p(864, 1152),
-  p(1248, 832),
-  p(832, 1248),
-  p(1280, 720),
-  p(720, 1280),
-  p(1344, 576),
-  p(576, 1344),
-];
-const QWEN_IMAGE = [
-  p(1328, 1328),
-  p(1664, 928, "≈16:9"),
-  p(928, 1664, "≈9:16"),
-  p(1472, 1104),
-  p(1104, 1472),
-  p(1584, 1056),
-  p(1056, 1584),
-];
-const VIDEO = [
-  p(704, 480, "22:15"),
-  p(768, 512),
-  p(512, 512),
-  p(1024, 576),
-  p(1216, 704, "16:9"),
-  p(576, 1024),
-  p(768, 768),
-  p(512, 768),
-];
-/**
- * LTX-2 adds upstream's 1080p HQ pair and a 9:16 transpose of the default.
- *
- * Single-pass shapes only. The composed rungs (1440p, 4K) reach a client
- * exclusively through the server's per-model `recommended_dimensions`, because
- * whether a checkpoint can render them is a property of that checkpoint.
- */
-const LTX2_VIDEO = [
-  p(704, 480, "22:15"),
-  p(768, 512),
-  p(512, 512),
-  p(1024, 576),
-  p(1216, 704, "16:9"),
-  p(704, 1216, "9:16"),
-  p(576, 1024),
-  p(768, 768),
-  p(512, 768),
-  p(1920, 1088, "16:9"),
-  p(1088, 1920, "9:16"),
-];
-
-/**
- * Wan's family-wide buckets, mirroring `WAN_DIMS` in
- * `crates/mold-core/src/validation.rs`.
- *
- * Deliberately a union no single checkpoint supports: 2.1 and the A14B pair
- * are 480p/720p on a 16px grid, while TI2V-5B's native pair is 1280x704 on
- * its 2.2 VAE's 32px grid. `/api/models` resolves the real list per model via
- * `wan_recommended_dimensions`, so this fallback only serves a host that
- * predates that field — and it is a strict improvement on what wan got
- * before, which was `FLUX`: square 1024x1024 image buckets offered for a
- * video family.
- */
-const WAN_VIDEO = [
-  p(832, 480, "16:9"),
-  p(480, 832, "9:16"),
-  p(1280, 720, "16:9"),
-  p(720, 1280, "9:16"),
-];
-const MINIMAX_H3 = [
-  p(1536, 672),
-  p(1344, 768),
-  p(1024, 768),
-  p(768, 768),
-  p(768, 1024),
-  p(768, 1344),
-];
-
-const BY_FAMILY: Record<string, ResolutionPreset[]> = {
-  sd15: SD15,
-  sdxl: SDXL,
-  sd3: SD3,
-  flux: FLUX,
-  flux2: FLUX,
-  zimage: ZIMAGE,
-  "z-image": ZIMAGE,
-  "qwen-image": QWEN_IMAGE,
-  "qwen-image-edit": QWEN_IMAGE,
-  wuerstchen: [p(1024, 1024)],
-  "ltx-video": VIDEO,
-  ltx2: LTX2_VIDEO,
-  "ltx-2": LTX2_VIDEO,
-  wan: WAN_VIDEO,
-  "minimax-h3": MINIMAX_H3,
-};
-
 export function presetsForFamily(family: string): ResolutionPreset[] {
-  return BY_FAMILY[canonicalFamily(family)] ?? [];
+  const canonical = canonicalFamily(
+    family,
+  ) as keyof typeof LEGACY_RESOLUTION_PRESETS_V1;
+  return (LEGACY_RESOLUTION_PRESETS_V1[canonical] ?? []).map(
+    ([width, height]) => p(width, height),
+  );
 }
 
 export function presetsForModel(
