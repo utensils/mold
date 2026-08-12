@@ -10,6 +10,10 @@ import type {
 } from "../lib/api/types";
 import type { ApiTarget } from "../lib/api/client";
 import type { MobileHost } from "./hosts";
+import {
+  AUTHENTICATED_MINIMAX_H3_PROFILE_SHA256,
+  authenticatedMiniMaxH3Capabilities,
+} from "@studio/lib/minimaxH3Inventory.testFixtures";
 
 const {
   apiFetchTo,
@@ -112,6 +116,23 @@ function model(
     downloaded,
     ...overrides,
   };
+}
+
+function h3Model(
+  task: "fl2va" | "ref2va",
+  downloaded: boolean,
+  overrides: Partial<ModelEntry> = {},
+): ModelEntry {
+  return model(`minimax-h3-${task}:comfy-pruned-int8`, "minimax-h3", downloaded, {
+    size_gb: 20.97,
+    hf_repo: "Comfy-Org/MiniMax-H3",
+    description: `MiniMax H3 ${task.toUpperCase()} compact acquisition`,
+    runtime_available: false,
+    modality: "video",
+    kind: "checkpoint",
+    remaining_download_bytes: 42_482_090_318,
+    ...overrides,
+  });
 }
 
 function entry(name: string, overrides: Partial<CatalogEntry> = {}): CatalogEntry {
@@ -270,6 +291,209 @@ afterEach(() => {
 });
 
 describe("MobileCatalogView", () => {
+  it("shows both compact H3 acquisition rows and pulls only to a host that advertised them", async () => {
+    searchCatalog.mockResolvedValue(
+      searchResponse([
+        entry("Aggregate H3 repo", {
+          family: "minimax-h3",
+          source_id: "Comfy-Org/MiniMax-H3",
+          bundling: "separated",
+          size_bytes: 498_000_000_000,
+        }),
+      ]),
+    );
+    apiFetchTo.mockImplementation((target: ApiTarget, path: string) => {
+      if (path === "/api/models") {
+        return Promise.resolve(
+          jsonResponse(
+            target.baseUrl === studio.baseUrl
+              ? [h3Model("fl2va", false), h3Model("ref2va", false)]
+              : [],
+          ),
+        );
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+
+    wrapper = mountCatalog();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("minimax-h3-fl2va:comfy-pruned-int8");
+    expect(wrapper.text()).toContain("minimax-h3-ref2va:comfy-pruned-int8");
+    expect(wrapper.text()).not.toContain("Aggregate H3 repo");
+
+    const ref2va = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("minimax-h3-ref2va"))!;
+    await ref2va.get(".mobile-catalog-pull").trigger("click");
+    await flushPromises();
+
+    expect(document.querySelector("[data-test='mobile-catalog-target-sheet']")).toBeNull();
+    expect(startCatalogDownload).toHaveBeenCalledWith(
+      "minimax-h3-ref2va:comfy-pruned-int8",
+      targets.studio,
+      false,
+    );
+
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify({
+        type: "started",
+        id: "download-1",
+        files_total: 5,
+        bytes_total: 100,
+      } satisfies DownloadEvent),
+    );
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify({
+        type: "progress",
+        id: "download-1",
+        files_done: 2,
+        bytes_done: 37,
+      } satisfies DownloadEvent),
+    );
+    await flushPromises();
+    expect(ref2va.get(".mobile-catalog-pull").text()).toBe("Pulling 37%");
+  });
+
+  it("keeps acquired H3 inventory repair and removal while hiding runtime load", async () => {
+    const installed = h3Model("ref2va", true, {
+      disk_usage_bytes: 42_482_090_318,
+      remaining_download_bytes: 0,
+    });
+    apiFetchTo.mockImplementation((target: ApiTarget, path: string) => {
+      if (path === "/api/models") {
+        return Promise.resolve(jsonResponse(target.baseUrl === studio.baseUrl ? [installed] : []));
+      }
+      if (path === "/api/capabilities") {
+        return Promise.resolve(
+          jsonResponse({
+            model_access: {
+              restrictions: [
+                {
+                  code: "MINIMAX_H3_AUTHORIZATION_REQUIRED",
+                  family: "minimax-h3",
+                  message: "Execution unavailable",
+                  license_url: "https://example.invalid/license",
+                  authorization_url: "https://example.invalid/authorization",
+                },
+              ],
+            },
+          }),
+        );
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    fetchCatalogDetail.mockRejectedValue(new Error("manifest detail unavailable"));
+    fetchModelComponents.mockResolvedValue({
+      model: installed.name,
+      components: [
+        { name: "transformer.safetensors", kind: "weights", present: true },
+        { name: "audio_vae.safetensors", kind: "companion", present: false },
+      ],
+    });
+
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const card = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes(installed.name))!;
+    expect(card.text()).toContain("Installed");
+    await card.get(".mobile-catalog-card-open").trigger("click");
+    await flushPromises();
+
+    const detail = document.querySelector<HTMLElement>("[data-test='mobile-catalog-detail']")!;
+    expect(detail.textContent).toContain("1/2 present");
+    expect(detail.textContent).toContain("Stored on this host. Runtime unavailable.");
+    expect(detail.textContent).not.toContain("Load on GPU");
+    expect(detail.querySelector("[data-test='mobile-catalog-runtime-unavailable']")).not.toBeNull();
+
+    detail.querySelector<HTMLButtonElement>(".mobile-catalog-detail-action button")!.click();
+    await flushPromises();
+    expect(startCatalogDownload).toHaveBeenCalledWith(installed.name, targets.studio, false);
+
+    const remove = detail.querySelector<HTMLButtonElement>(
+      ".mobile-catalog-installed-actions .danger-button",
+    )!;
+    remove.click();
+    remove.click();
+    await flushPromises();
+    expect(removeModel).toHaveBeenCalledWith(installed.name, targets.studio);
+  });
+
+  it("fails closed when an open H3 detail loses its advertised acquisition row", async () => {
+    let inventory: ModelEntry[] = [h3Model("ref2va", false)];
+    apiFetchTo.mockImplementation((_target: ApiTarget, path: string) => {
+      if (path === "/api/models") return Promise.resolve(jsonResponse(inventory));
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    fetchCatalogDetail.mockRejectedValue(new Error("manifest detail unavailable"));
+
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+    const card = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("minimax-h3-ref2va"))!;
+    await card.get(".mobile-catalog-card-open").trigger("click");
+    await flushPromises();
+
+    inventory = [];
+    await wrapper.setProps({ hosts: [{ ...studio, version: "0.18.1" }] });
+    await flushPromises();
+
+    document.querySelector<HTMLButtonElement>(".mobile-catalog-detail-action button")!.click();
+    await flushPromises();
+
+    expect(startCatalogDownload).not.toHaveBeenCalled();
+    const status = document.querySelector<HTMLElement>(
+      "[data-test='mobile-catalog-detail-action-status']",
+    )!;
+    expect(status.getAttribute("role")).toBe("alert");
+    expect(status.textContent).toContain("No reachable machine is available");
+  });
+
+  it("shows H3 Load only with an affirmative exact reviewed capability", async () => {
+    const runnable = h3Model("fl2va", true, {
+      remaining_download_bytes: 0,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "minimax-h3-fl2va.reviewed.v1",
+        profile_hash: AUTHENTICATED_MINIMAX_H3_PROFILE_SHA256,
+        default_recipe_id: "reviewed",
+        recipes: [],
+      },
+    });
+    delete runnable.runtime_available;
+    let capability: unknown = {};
+    apiFetchTo.mockImplementation((_target: ApiTarget, path: string) => {
+      if (path === "/api/models") return Promise.resolve(jsonResponse([runnable]));
+      if (path === "/api/capabilities") return Promise.resolve(jsonResponse(capability));
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    fetchCatalogDetail.mockRejectedValue(new Error("manifest detail unavailable"));
+
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+    const card = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("minimax-h3-fl2va"))!;
+    await card.get(".mobile-catalog-card-open").trigger("click");
+    await flushPromises();
+    let detail = document.querySelector<HTMLElement>("[data-test='mobile-catalog-detail']")!;
+    expect(detail.textContent).toContain("Runtime unavailable");
+    expect(detail.textContent).not.toContain("Load on GPU");
+
+    capability = authenticatedMiniMaxH3Capabilities();
+    await wrapper.setProps({ hosts: [{ ...studio, version: "0.18.1" }] });
+    await flushPromises();
+
+    detail = document.querySelector<HTMLElement>("[data-test='mobile-catalog-detail']")!;
+    expect(detail.textContent).toContain("Load on GPU");
+    expect(detail.textContent).not.toContain("Runtime unavailable");
+  });
+
   it("loads the next page when the end-of-list sentinel scrolls into view", async () => {
     const fullPage = (page: number) =>
       Array.from({ length: 24 }, (_, i) => entry(`catalog-${page}-${i}`));
