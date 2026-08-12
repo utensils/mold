@@ -906,7 +906,7 @@ pub(crate) async fn fetch_host_status(
     let client = client_for_host(&entry);
     let status = client.server_status().await.ok().map(Box::new);
     let devices = client.devices().await.ok();
-    let capabilities = client.server_capabilities().await.ok();
+    let capabilities = client.server_capabilities().await.ok().map(Box::new);
     let _ = tx.send(BackgroundEvent::HostStatusUpdate {
         host_id: entry.id.clone(),
         status,
@@ -992,7 +992,7 @@ pub(crate) async fn fetch_host_queue(entry: HostEntry, tx: mpsc::UnboundedSender
     });
     let _ = tx.send(BackgroundEvent::HostCapabilitiesUpdate {
         host_id,
-        capabilities: capabilities.ok(),
+        capabilities: capabilities.ok().map(Box::new),
     });
 }
 

@@ -162,14 +162,50 @@ impl ParkedBlock {
 /// Explicit block count from `MOLD_WAN_OFFLOAD_BLOCKS`, or `MOLD_OFFLOAD`.
 ///
 /// `MOLD_WAN_OFFLOAD_BLOCKS=N` pins the count exactly, including `0` to force
-/// the policy off. `MOLD_OFFLOAD=1` engages without naming a count, which the
-/// caller resolves against the real shortfall — the family-wide flag means
-/// "stream if you must", not a specific number of blocks.
+/// the policy off, and wins over the family-wide flag.
 pub(crate) fn forced_block_count() -> Option<usize> {
-    if let Some(raw) = crate::runtime_env::value("MOLD_WAN_OFFLOAD_BLOCKS") {
+    resolve_forced_block_count(
+        crate::runtime_env::value("MOLD_WAN_OFFLOAD_BLOCKS").as_deref(),
+        crate::runtime_env::value("MOLD_OFFLOAD").as_deref(),
+    )
+}
+
+/// [`forced_block_count`] over explicit strings, so the policy is testable
+/// without mutating process environment shared by parallel tests.
+///
+/// `--offload` / `MOLD_OFFLOAD=1` parks **every** block. That is the same
+/// contract `flux/offload.rs` gives the flag — the user is asking for the
+/// lowest-VRAM execution available and accepting the wall clock — and it is
+/// what this module's documentation promised from the start while nothing in
+/// the wan path read the variable (#776 item 3: "auto-engage under pressure,
+/// forceable via `--offload`/`MOLD_OFFLOAD`"). Resolving it here rather than
+/// through the factory's `block_offload` argument is deliberate: that argument
+/// now carries the scheduler plan's *predicted* disposition, so overloading it
+/// would turn an auto-parked render into a park-everything one.
+fn resolve_forced_block_count(blocks: Option<&str>, offload: Option<&str>) -> Option<usize> {
+    if let Some(raw) = blocks {
         return raw.trim().parse::<usize>().ok();
     }
-    None
+    // `plan_offload` clamps to the checkpoint's real block count.
+    forced_offload_requested(offload).then_some(usize::MAX)
+}
+
+fn forced_offload_requested(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("1" | "true" | "yes"))
+}
+
+/// Whether a render at this shape will park blocks at all.
+///
+/// The server needs the answer to name the disposition in its scheduler plan
+/// (#776) without restating the policy: [`plan_offload`] decides *how many*
+/// blocks from the shortfall, and this answers only whether that count is
+/// non-zero. Both read one authority, so a plan that says "block offload" and
+/// an engine that parks nothing cannot drift apart.
+pub fn will_park(predicted_peak_bytes: u64, available_bytes: u64) -> bool {
+    match forced_block_count() {
+        Some(blocks) => blocks > 0,
+        None => predicted_peak_bytes > available_bytes,
+    }
 }
 
 /// Usable VRAM actually returned per byte of parked weight, measured.
@@ -562,6 +598,55 @@ mod tests {
             plan_offload(99 * GIB, 24 * GIB, 270 * 1024 * 1024, 40, Some(999)),
             WanOffloadPlan::Park { blocks: 40 }
         );
+    }
+
+    /// `--offload` sets `MOLD_OFFLOAD=1`, and until this landed the wan path
+    /// read neither — the flag was documented three times in this module and
+    /// implemented nowhere, so the one lever a user has for "fit it at any
+    /// speed" was silently inert on the family that needed it most.
+    #[test]
+    fn the_family_wide_offload_flag_parks_every_block() {
+        // Park-everything, clamped by `plan_offload` to the real block count.
+        assert_eq!(
+            resolve_forced_block_count(None, Some("1")),
+            Some(usize::MAX)
+        );
+        for spelling in ["1", "true", "yes"] {
+            assert!(forced_offload_requested(Some(spelling)), "{spelling}");
+        }
+        for spelling in ["0", "false", "no", "", "maybe"] {
+            assert!(!forced_offload_requested(Some(spelling)), "{spelling}");
+        }
+        assert!(!forced_offload_requested(None));
+
+        // An explicit count wins over the family-wide flag in both directions:
+        // it is the more specific instruction, including `0` for "off".
+        assert_eq!(resolve_forced_block_count(Some("8"), Some("1")), Some(8));
+        assert_eq!(resolve_forced_block_count(Some("0"), Some("1")), Some(0));
+        // Neither set leaves the automatic shortfall policy in charge.
+        assert_eq!(resolve_forced_block_count(None, None), None);
+        // A malformed count is not silently read as "park everything".
+        assert_eq!(resolve_forced_block_count(Some("many"), None), None);
+    }
+
+    /// The server names the disposition in its plan from the same predicate the
+    /// engine parks by, so the two cannot disagree.
+    #[test]
+    fn will_park_matches_the_planners_own_fit_check() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        assert!(!will_park(20 * GIB, 24 * GIB));
+        // Exactly fitting is fitting — same boundary `plan_offload` applies.
+        assert!(!will_park(24 * GIB, 24 * GIB));
+        assert!(will_park(25 * GIB, 24 * GIB));
+        for (peak, available) in [(20 * GIB, 24 * GIB), (25 * GIB, 24 * GIB)] {
+            let parked =
+                plan_offload(peak, available, 270 * 1024 * 1024, 40, None) != WanOffloadPlan::None;
+            assert_eq!(
+                parked,
+                will_park(peak, available),
+                "{peak} against {available}"
+            );
+        }
     }
 
     #[test]

@@ -1159,6 +1159,18 @@ pub(crate) struct GenerationMemoryBudget {
     pub(crate) available_memory_bytes: Option<u64>,
     pub(crate) load_strategy: mold_inference::LoadStrategy,
     pub(crate) block_offload: bool,
+    /// Wan will park trailing transformer blocks for this render.
+    ///
+    /// Deliberately separate from [`Self::block_offload`], which means "stream
+    /// this transformer's blocks from host RAM" and drives both the component
+    /// load strategy and the plan's host-RAM reservation. Wan's parking is
+    /// neither: it keeps one expert's non-parked blocks resident, holds only
+    /// the parked subset on the host, and never streams the whole file — so
+    /// folding it into that flag would reserve every A14B expert at full size
+    /// (22-31 GB for the pair, of which the runtime holds one expert's tail)
+    /// and could reject a render whose real working set fits. This names the
+    /// disposition for the plan and nothing else.
+    pub(crate) wan_block_offload: bool,
     pub(crate) under_memory_pressure: bool,
     pub(crate) eager_peak_memory_bytes: u64,
     pub(crate) fits_available_memory: Option<bool>,
@@ -1220,6 +1232,10 @@ pub(crate) fn estimate_generation_memory_for_request(
         )
     }) && block_offload;
     let available_memory_bytes = available_memory_bytes.filter(|available| *available > 0);
+    // Weight bytes the wan arm below discounted because parking can free them.
+    // Kept so the plan can re-add them and ask the engine's own question — will
+    // this render park? — rather than inferring it from the discounted peak.
+    let mut wan_offload_relief = 0u64;
     // LTX-2: when the checkpoint's weight layout has already been read, the
     // adaptive-residency model in `ltx2_admission` is authoritative — it counts
     // the non-block transformer weights, the bundled VAE, the resident block
@@ -1253,7 +1269,8 @@ pub(crate) fn estimate_generation_memory_for_request(
                 // blocks in host RAM, so a shape that does not fit resident
                 // may still be feasible. Charging the full weight term would
                 // refuse it before the engine ever got the chance.
-                base_peak = base_peak.saturating_sub(wan_block_offload_relief(paths));
+                wan_offload_relief = wan_block_offload_relief(paths);
+                base_peak = base_peak.saturating_sub(wan_offload_relief);
             }
             // Carry the wan checkpoint geometry in here too. Wan is never
             // streaming, so this arm is the only one it takes — recomputing
@@ -1296,6 +1313,51 @@ pub(crate) fn estimate_generation_memory_for_request(
     // Admission still refuses 81 frames, which is the shape that actually
     // OOM'd.
     let wan_family = hint.is_some_and(|h| h.family == ActivationFamily::WanVideo);
+    // Name wan's block offload in the plan (#776 item 3's acceptance criterion).
+    //
+    // Every other family reaches `OffloadMode::Block` through the *request*
+    // flag above, which the wan factory arm does not read: wan decides its own
+    // residency at load time from the render's activation budget. So a wan
+    // render that parks half its blocks reported `OffloadMode::None`, and the
+    // execution descriptor fingerprinted two materially different executions
+    // the same. Asking `will_park` — the engine's own predicate, against the
+    // peak with the relief added back, which is what the engine sees before it
+    // parks anything — is what makes the plan describe what actually runs.
+    // Restricted to checkpoints that *can* park: fp8 and plain safetensors have
+    // no byte round trip, so claiming the disposition for them would be a
+    // promise the engine cannot keep.
+    // Derived, never OR'd with the generic flag: `MOLD_OFFLOAD=1` sets that
+    // flag for every family, but `MOLD_WAN_OFFLOAD_BLOCKS=0` still turns wan's
+    // parking off, and an fp8 checkpoint cannot park at all. OR-ing would put
+    // both cases in the plan as offloads the engine will not perform.
+    // `will_park` is the engine's own predicate and already resolves both
+    // variables, so asking it is what keeps the two in step.
+    //
+    // This is a *prediction* from the admission snapshot, and the engine asks
+    // the same question again against a fresh free-VRAM reading once the
+    // weights are resident — which is where the park count comes from, since
+    // that needs the checkpoint's own block size. So the two can disagree in
+    // one narrow window: free VRAM moving between admission and load. The
+    // engine's answer is the one that must win there, because it is the
+    // reading taken against the memory the denoise will actually run in, and
+    // freezing "do not park" from a staler snapshot trades a mislabelled
+    // fingerprint for an OOM. Naming the disposition is what this field is
+    // for; owning the count is not.
+    let wan_block_offload = wan_family
+        && wan_transformer_can_park(paths)
+        && available_memory_bytes.is_some_and(|available| {
+            mold_inference::wan::block_offload::will_park(
+                peak.saturating_add(wan_offload_relief),
+                available,
+            )
+        });
+    // `MOLD_OFFLOAD=1` sets the generic streaming flag for every family, but
+    // no wan arm streams a transformer from host RAM — the factory does not
+    // even read the flag. Leaving it set made the plan reserve the whole
+    // checkpoint on the host (both A14B experts) and label it `StreamedBlocks`
+    // for an execution that never happens, including on fp8, which cannot park
+    // at all. Wan's disposition is `wan_block_offload` and nothing else.
+    let block_offload = block_offload && !wan_family;
     let fits_available_memory = available_memory_bytes.map(|available| {
         if qwen_family || wan_family {
             peak <= available
@@ -1310,6 +1372,7 @@ pub(crate) fn estimate_generation_memory_for_request(
         available_memory_bytes,
         load_strategy,
         block_offload,
+        wan_block_offload,
         under_memory_pressure,
         eager_peak_memory_bytes: eager_peak,
         fits_available_memory,
@@ -1343,15 +1406,25 @@ fn request_sensitive_activation_memory(
 /// The fraction is measured and deliberately smaller than what parking
 /// achieved at its best - see `mold_inference::wan::block_offload`.
 fn wan_block_offload_relief(paths: &ModelPaths) -> u64 {
-    let transformer = &paths.transformer;
-    if !transformer
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
-    {
+    if !wan_transformer_can_park(paths) {
         return 0;
     }
-    let bytes = std::fs::metadata(transformer).map(|m| m.len()).unwrap_or(0);
+    let bytes = std::fs::metadata(&paths.transformer)
+        .map(|m| m.len())
+        .unwrap_or(0);
     mold_inference::wan::block_offload::max_block_offload_relief_bytes(bytes)
+}
+
+/// Whether this checkpoint's weights can park at all.
+///
+/// Parking is a raw-byte round trip through `QTensor::data`, so it exists only
+/// for GGUF. The fp8 and plain safetensors sources have no equivalent, which is
+/// why their envelopes are what fits resident.
+fn wan_transformer_can_park(paths: &ModelPaths) -> bool {
+    paths
+        .transformer
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
 }
 
 fn request_sensitive_activation_memory_with_wan_geometry(
@@ -1726,6 +1799,93 @@ mod fail_closed_tests {
         assert_eq!(
             source.load_strategy,
             mold_inference::LoadStrategy::Sequential
+        );
+    }
+
+    /// Wan never reaches `OffloadMode::Block` through the request-controlled
+    /// streaming flag — the factory arm does not read it — so the plan has to
+    /// derive the disposition from the engine's own predicate. It did not, and
+    /// a render that parked half its blocks reported no offload at all and
+    /// fingerprinted identically to one that parked nothing (#776).
+    #[test]
+    fn a_wan_render_that_will_park_names_block_offload_in_the_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let gguf = dir.path().join("Wan2.2-T2V-A14B-HighNoise-Q5_K_M.gguf");
+        std::fs::File::create(&gguf)
+            .unwrap()
+            .set_len(10_790_416_896)
+            .unwrap();
+        let mut model_paths = paths("/unused/transformer.gguf");
+        model_paths.transformer = gguf.clone();
+        let activation = Some(hint(ActivationFamily::WanVideo));
+
+        let request = |frames: u32| -> GenerateRequest {
+            serde_json::from_value(serde_json::json!({
+                "prompt": "a red sports car on a coast road",
+                "model": "wan22-t2v-a14b:q5",
+                "width": 832,
+                "height": 480,
+                "frames": frames,
+                "steps": 4,
+                "guidance": 1.0,
+                "batch_size": 1
+            }))
+            .unwrap()
+        };
+        let budget = |req: &GenerateRequest, paths: &ModelPaths| {
+            estimate_generation_memory_for_request(
+                req,
+                paths,
+                activation,
+                Some(24_000_000_000),
+                false,
+                false,
+                false,
+            )
+        };
+
+        // 81 frames is the shape block offload exists for: it does not fit
+        // resident, so the engine parks and the plan must say so.
+        let parks = budget(&request(81), &model_paths);
+        assert!(
+            parks.wan_block_offload,
+            "an 81-frame A14B render parks blocks, so the plan must name it"
+        );
+        // ...but only in the disposition. The generic flag additionally makes
+        // `build_plan` reserve every transformer file in host RAM as
+        // `StreamedBlocks`, which for the A14B pair is both experts at full
+        // size — 22-31 GB against a runtime that holds one expert's parked
+        // tail, and enough to reject a render whose real working set fits.
+        assert!(
+            !parks.block_offload,
+            "wan parks a subset of one expert; it must not be charged as a \
+             streamed transformer"
+        );
+
+        // A short clip fits with the weights resident and must keep exactly the
+        // execution it had before any of this existed.
+        let fits = budget(&request(17), &model_paths);
+        assert!(
+            !fits.wan_block_offload,
+            "a render that fits resident must not claim an offload it will not do"
+        );
+
+        // The same shape on a checkpoint that cannot park: fp8 has no raw-byte
+        // round trip, so claiming the disposition would be a promise the engine
+        // cannot keep — and its envelope is what fits resident.
+        let fp8 = dir
+            .path()
+            .join("wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors");
+        std::fs::File::create(&fp8)
+            .unwrap()
+            .set_len(14_300_000_000)
+            .unwrap();
+        let mut fp8_paths = model_paths.clone();
+        fp8_paths.transformer = fp8;
+        let fp8_budget = budget(&request(81), &fp8_paths);
+        assert!(
+            !fp8_budget.wan_block_offload && !fp8_budget.block_offload,
+            "fp8 cannot park, so no shape may report block offload for it"
         );
     }
 

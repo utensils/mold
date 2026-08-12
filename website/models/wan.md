@@ -156,19 +156,61 @@ smaller resident: 317.5 s at a 15,722 MiB peak.
 
 It engages by itself and a render that already fits parks nothing, so shorter
 clips are unchanged. `MOLD_WAN_OFFLOAD_BLOCKS=N` pins the block count and `0`
-disables it.
+disables it; `--offload` (`MOLD_OFFLOAD=1`) parks every block, which is the
+lowest-VRAM execution the family has and the slowest.
 
 Two caveats worth knowing. Parking is only available for **GGUF** checkpoints —
 the move is a raw-byte round trip that the plain and fp8 weight sources have no
 equivalent of — and parked blocks cost wall clock, roughly doubling the render
-above, because each is rebuilt on the device once per step. The Q8 and fp8
-tiers still default to 33 frames: their resident expert is several GB larger
-than Q5's, and those envelopes have not been measured.
+above, because each is rebuilt on the device once per step.
+
+The Q8 and fp8 tiers carry a larger resident expert, so parking does not reach
+81 for them. Their envelopes are measured now, on the same card and by the same
+protocol — the largest 4n+1 count admission accepts on an idle 4090, then a
+real render:
+
+| Tier   | Expert   | Parks | Default frames | Wall clock |       Peak | First refused |
+| ------ | -------- | ----- | -------------: | ---------: | ---------: | ------------: |
+| `:q5`  | ~10.8 GB | yes   |             81 |    316.3 s | 17,322 MiB |             — |
+| `:q4`  |  ~9.7 GB | yes   |             81 |    317.5 s | 15,722 MiB |             — |
+| `:q8`  | ~15.3 GB | yes   |         **73** |  2,235.0 s | 16,650 MiB |     77 frames |
+| `:fp8` | ~14.3 GB | no    |         **45** |    996.4 s | 19,082 MiB |     49 frames |
+
+Both raised defaults sit at the edge of what admission accepts with the card
+otherwise idle — 77 frames on `:q8` is refused at ~25.3 GB against ~24.8 GB
+usable, and 49 on `:fp8` at ~25.2 GB. That is the same posture the pre-offload
+53-frame default held (23,975 MiB of 24,564). On a card sharing VRAM with a
+desktop session, pass a smaller `--frames` rather than meet a refusal at the
+tier's own default.
+
+Note the shape of the `:q8` number: parking buys the frames and charges wall
+clock for them, so its 73-frame peak is *lower* than the 45-frame fp8 tier's
+while taking more than twice as long. fp8 cannot park at all, so its envelope
+is simply what fits resident.
 
 The auto-chain routing default follows the tier's own default, so running one
 of these models with no `--frames` renders a single clip rather than a stitched
 sequence. Ask for more than the tier's default and the CLI still chains, as it
 always has.
+
+### 720p on a 24 GB card is the 5B tier, not A14B
+
+Block offload returns **weight** bytes, so it moves an envelope that weights
+bind. At 720p the binding term is activations, and A14B's demand runs away from
+what parking can return: `wan22-t2v-a14b:q5` at 1280x720 estimates ~28.1 GB at
+49 frames and ~39.5 GB at 81, against ~24.8 GB usable, while parking every one
+of the 40 blocks is worth at most ~3.8 GB. Measured ceiling on an RTX 4090:
+**33 frames at 1280x720, 311.0 s at an 18,346 MiB peak.**
+
+That is not a mold limit. Upstream puts A14B at 1280x720 on "a GPU with at
+least 80GB VRAM" even with `--offload_model True --convert_model_dtype`
+([`Wan2.2/README.md`](https://github.com/Wan-Video/Wan2.2/blob/main/README.md)),
+and names the 5B TI2V as the 24 GB path. mold agrees: `wan22-ti2v-5b:fp16`
+renders **81 frames at 1280x704 in 470.7 s at a 19,402 MiB peak**, and its own
+121-frame default at 160.7 s / 18,986 MiB. The 5B's single expert and 2.2 VAE
+(a 16x spatial stride against the 2.1 VAE's 8x) make its 720p token grid a
+fraction of A14B's — that, not the quantization, is why it reaches the
+resolution.
 
 ### The LoRA branch runs at the activation dtype
 
@@ -304,9 +346,11 @@ its VAE turns into three latent slots of carryover — wan has no equivalent,
 and reusing the number would discard sixteen good frames at every seam.
 
 Clip lengths sit on wan's `4k+1` grid. The auto-chaining default is a VRAM
-envelope rather than a ceiling: 53 frames for the two-expert A14B, 121 for the
-single-expert 5B. `--clip-frames` overrides it, clamped to the real 257-frame
-request cap.
+envelope rather than a ceiling, and it is the selected tier's own default frame
+count — 81 on the Q5/Q4 A14B tiers, 73 on `:q8`, 45 on `:fp8`, 121 on the
+single-expert 5B — with a family floor of 53 for A14B and 121 for everything
+else, which is what an opaque `cv:` / `hf:` ID with no manifest gets.
+`--clip-frames` overrides it, clamped to the real 257-frame request cap.
 
 ```bash
 # Auto-chains into three 49-frame clips and stitches one MP4
@@ -392,7 +436,7 @@ across the join.
 | Property   | `wan21-t2v-1.3b`  | `wan21-t2v-14b:*` | `wan22-ti2v-5b`     | `wan22-*-a14b:q5` | `wan22-*-a14b:q8` |
 | ---------- | ----------------- | ----------------- | ------------------- | ----------------- | ----------------- |
 | Resolution | 832x480 / 480x832 | 832x480 / 480x832 | 1280x704 / 704x1280 | 832x480           | 832x480           |
-| Frames     | 81 @ 16 fps       | 81 @ 16 fps       | 121 @ 24 fps        | 53 @ 16 fps       | 33 @ 16 fps       |
+| Frames     | 81 @ 16 fps       | 81 @ 16 fps       | 121 @ 24 fps        | 81 @ 16 fps       | 73 @ 16 fps²      |
 | Steps      | 30                | 30                | 20                  | 4                 | 20                |
 | Guidance   | 6.0               | 6.0               | 5.0                 | 1.0 (no CFG pass) | per-expert¹       |
 | Flow shift | 8.0               | 8.0               | 8.0                 | 5.0               | 5.0               |
@@ -407,6 +451,11 @@ for the whole schedule — except an explicit 3.5 on the quality tier, which is
 indistinguishable from the default on the wire and selects the per-expert
 pair. The Lightning tiers (default 1.0) treat every value, 3.5 included, as
 an explicit uniform choice.
+
+² Each A14B frame default is that tier's measured 24 GB envelope: Q5/Q4 reach
+the checkpoint's trained 81 through block offload, `:q8` reaches 73, and
+`:fp8` — which cannot park — reaches 45. See
+[81 frames on a 24 GB card](#_81-frames-on-a-24-gb-card).
 
 ### The Turbo tier on 24 GB
 
@@ -424,13 +473,12 @@ weight class — `wan22-ti2v-5b:fp16` is refused at the identical estimate, so
 this is the fp16-weight envelope rather than anything the distill changes. Use
 `--frames 81`, or the `:q8` tier, which carries ~4.5 GB less of transformer.
 
-The A14B frame defaults are the measured 24 GB envelope, not the checkpoint's
-trained 81-frame clip length: on an RTX 4090 the `:q5` pair peaks at
-23,975 MiB rendering 53 frames at 832x480 (81 frames peaked at 23.0 GB and
-then ran out of memory), and the `:q8` pair's ~4.6 GB larger resident expert
-moves its edge to ~33 frames. Larger cards simply pass `--frames 81`.
-Reclaiming 81-frame clips on 24 GB is tracked in
-[#776](https://github.com/utensils/mold/issues/776).
+The A14B frame defaults are each a measured 24 GB envelope: 81 frames on the
+Q5/Q4 tiers, which partial block offload reaches, 73 on `:q8`, and 45 on
+`:fp8`, which cannot park. See
+[81 frames on a 24 GB card](#_81-frames-on-a-24-gb-card) for the measurements
+and the refusal points either side of them; larger cards simply pass a bigger
+`--frames`.
 
 The sampler schedule matches the one lightx2v's Lightning distills were
 trained against (diffusers' flow-UniPC grid), so the 4-step tier reproduces
