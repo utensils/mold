@@ -5,7 +5,7 @@ import { reactive } from "vue";
 import AdvancedSettings from "./AdvancedSettings.vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
-import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
+import { buildRequest, newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import type {
   Ltx2CameraControlInfo,
   Ltx2ControlAdapterInfo,
@@ -657,6 +657,101 @@ describe("AdvancedSettings — continue a video", () => {
     await wrapper.get("[data-test='ltx2-extend-clear']").trigger("click");
     expect(form.extendVideo).toBeNull();
     expect(form.extendOverlapFrames).toBeNull();
+  });
+
+  /**
+   * Wan continues too (#783) — its handoff is the source clip's final frame
+   * as image conditioning — but the field lived inside the LTX-2 suite, so no
+   * wan checkpoint could reach it however the host advertised the capability.
+   */
+  it("offers continuation for an image-conditioned wan checkpoint", async () => {
+    const form = formFor("wan");
+    form.model = "wan22-i2v-a14b:q5";
+    const wrapper = mountSettings(form, {
+      selectedModel: {
+        name: "wan22-i2v-a14b:q5",
+        family: "wan",
+        source_image: "required",
+        supports_extend: true,
+        extend_default_overlap_frames: 17,
+      },
+    });
+    await openSection(wrapper, "Video");
+    expect(wrapper.find("[data-test='ltx2-extend-video']").exists()).toBe(true);
+    // …without the LTX-2 pipeline suite coming with it.
+    expect(wrapper.find("[data-test='ltx2-controls']").exists()).toBe(false);
+  });
+
+  // Wan's engine refuses any overlap but the one frame it was seeded with,
+  // and the server's family-wide default of 17 is one of the rejected ones.
+  it("offers wan only the single overlap its engine accepts", async () => {
+    const form = formFor("wan");
+    form.model = "wan22-i2v-a14b:q5";
+    form.frames = 53;
+    form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
+    const wrapper = mountSettings(form, {
+      selectedModel: {
+        name: "wan22-i2v-a14b:q5",
+        family: "wan",
+        source_image: "required",
+        supports_extend: true,
+        extend_default_overlap_frames: 17,
+      },
+    });
+    await openSection(wrapper, "Video");
+
+    const select = wrapper.get("[data-test='ltx2-extend-overlap']");
+    expect(select.findAll("option").map((option) => option.text())).toEqual(["1"]);
+    expect((select.element as HTMLSelectElement).value).toBe("1");
+    expect(wrapper.get("[data-test='ltx2-extend-summary']").text()).toContain("52 new frames");
+  });
+
+  /**
+   * The clamp is only worth anything if the clamped value is the one that
+   * leaves the app. Wan's select carries a single option, so `@change` never
+   * fires and `extendOverlapFrames` stays null — an absent wire field handed
+   * the host its own family-wide default of 17, which `extend_inner` refuses.
+   */
+  it("submits the overlap it is showing for an untouched wan continuation", async () => {
+    const form = formFor("wan");
+    form.model = "wan22-i2v-a14b:q5";
+    form.frames = 53;
+    form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
+    // The host's advertised value travels on the form, exactly as the picker
+    // would have snapshotted it.
+    form.extendDefaultOverlapFrames = 17;
+    const wrapper = mountSettings(form, {
+      selectedModel: {
+        name: "wan22-i2v-a14b:q5",
+        family: "wan",
+        source_image: "required",
+        supports_extend: true,
+        extend_default_overlap_frames: 17,
+      },
+    });
+    await openSection(wrapper, "Video");
+
+    expect(form.extendOverlapFrames).toBeNull();
+    const shown = Number(
+      (wrapper.get("[data-test='ltx2-extend-overlap']").element as HTMLSelectElement).value,
+    );
+    expect(shown).toBe(1);
+    expect(buildRequest(form).extend_overlap_frames).toBe(shown);
+  });
+
+  it("stays hidden for a text-to-video wan checkpoint", async () => {
+    const form = formFor("wan");
+    form.model = "wan22-t2v-a14b:q5";
+    const wrapper = mountSettings(form, {
+      selectedModel: {
+        name: "wan22-t2v-a14b:q5",
+        family: "wan",
+        source_image: "unsupported",
+        supports_extend: false,
+      },
+    });
+    await openSection(wrapper, "Video");
+    expect(wrapper.find("[data-test='ltx2-extend-video']").exists()).toBe(false);
   });
 });
 

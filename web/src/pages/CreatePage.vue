@@ -1385,6 +1385,13 @@ const sequenceMotionTail = computed(() =>
   sequenceMotionTailFrames({
     name: form.state.value.model,
     family: currentFamily.value,
+    // Wan's seam carries context only for an image-conditioned checkpoint
+    // (#783); without the advertised contract every wan sequence read as a
+    // tail-free join. The persisted snapshot covers a form restored before
+    // the inventory lands, exactly as `capabilities` does.
+    source_image:
+      currentModel.value?.source_image ??
+      form.state.value.sourceImageCapability,
   }),
 );
 const sequenceDefaultFrames = computed(() =>
@@ -3534,6 +3541,10 @@ onBeforeUnmount(() => {
           <SequenceComposer
             :model="form.state.value.model"
             :family="currentFamily"
+            :source-image="
+              currentModel?.source_image ??
+              form.state.value.sourceImageCapability
+            "
             :shared="sharedParams"
             :model-default-frames="currentModel?.default_frames ?? null"
             :target="sequenceTarget"

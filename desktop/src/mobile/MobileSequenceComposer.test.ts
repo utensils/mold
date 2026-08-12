@@ -547,3 +547,36 @@ describe("MobileSequenceComposer guardrails", () => {
     expect(summary).toContain("14.8s");
   });
 });
+
+/**
+ * Wan's clip grid is its own: the family's VAE compresses time by 4, so its
+ * clips are `4k+1` and the LTX `8k+1` ladder hid every value wan actually
+ * routes to — including its 53-frame auto-chaining default (#783).
+ */
+describe("MobileSequenceComposer — wan clip grid", () => {
+  const wan: ModelEntry = {
+    ...ltx2,
+    name: "wan22-i2v-a14b:q5",
+    family: "wan",
+    source_image: "required",
+    default_frames: 53,
+  };
+
+  it("offers wan durations on the 4k+1 grid", () => {
+    const form = newGenerateForm();
+    form.family = "wan";
+    form.model = wan.name;
+    mountComposer({
+      selectedModel: wan,
+      form,
+      chainLimits: { ...limits, model: wan.name, frames_per_clip_cap: 121 },
+      shared: { ...shared, model: wan.name, family: "wan", fps: 16 },
+      fps: 16,
+    });
+
+    const select = wrapper!.get<HTMLSelectElement>("[data-test='mobile-sequence-frames']");
+    const values = Array.from(select.element.options).map((option) => Number(option.value));
+    expect(values).toContain(53);
+    for (const value of values) expect((value - 1) % 4).toBe(0);
+  });
+});

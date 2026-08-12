@@ -26,6 +26,7 @@ import {
 } from "./capabilities";
 import { coerceSourceFitForMaskless, type SourceFitPolicy } from "@studio/lib/sourceFit";
 import { defaultVideoFps } from "@studio/lib/sequence";
+import { familySupportsExtend, resolveExtendOverlapFrames } from "@studio/lib/extend";
 import { findInstalledModel } from "./generateModels";
 import {
   cameraMotionFromLoraPath,
@@ -174,6 +175,12 @@ export interface GenerateForm {
   extendVideo: PickedImage | null;
   /** Pixel-frame overlap; null takes the host's advertised default. */
   extendOverlapFrames: number | null;
+  /** The selected model's advertised `extend_default_overlap_frames`, snapshot
+   * from its `/api/models` row the same way `sourceImageCapability` is. The
+   * request builder takes only the form, and a continuation must submit the
+   * overlap the inspector is showing rather than leave the field absent — see
+   * `resolveExtendOverlapFrames`. Null = the host advertised none. */
+  extendDefaultOverlapFrames: number | null;
   keyframes: FormKeyframe[];
   pipeline: Ltx2PipelineMode | null;
   /** Official host-provided IC-LoRA control adapter ID. */
@@ -242,6 +249,7 @@ export function newGenerateForm(): GenerateForm {
     sourceVideo: null,
     extendVideo: null,
     extendOverlapFrames: null,
+    extendDefaultOverlapFrames: null,
     keyframes: [],
     pipeline: null,
     icLoraControl: null,
@@ -342,6 +350,7 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
   form.model = m.name;
   form.family = m.family;
   form.sourceImageCapability = m.source_image ?? null;
+  form.extendDefaultOverlapFrames = m.extend_default_overlap_frames ?? null;
   // #787: a Negative field still showing the previous model's advertised
   // default follows the new model (that is also how the default first
   // appears); typed text and an explicit clear are user authority. The
@@ -426,10 +435,16 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     form.controlModel = "";
   }
   if (!caps.supportsAudio || m.supports_audio === false) form.enableAudio = false;
-  if (!caps.supportsAdvancedVideo) {
-    form.sourceVideo = null;
+  // Continuation is per family, not part of the LTX-2 advanced-video suite
+  // (#783) — wan continues and is deliberately not an advanced-video family,
+  // so clearing it with that suite would drop a staged clip on every row
+  // refresh for the SAME model and quietly send a plain text-to-video job.
+  if (!familySupportsExtend(m.family)) {
     form.extendVideo = null;
     form.extendOverlapFrames = null;
+  }
+  if (!caps.supportsAdvancedVideo) {
+    form.sourceVideo = null;
     form.keyframes = [];
     form.pipeline = null;
     form.icLoraControl = null;
@@ -515,6 +530,22 @@ export function resetFormToModelDefaults(
  * `pruneRequestForFamily` is the final guard so no unsupported field ever
  * ships even if the form retained a stale value.
  */
+/**
+ * The overlap a continuation built from this form will submit.
+ *
+ * The desktop and iPhone inspectors render this so the number on screen is
+ * literally the number `buildRequest` puts on the wire — wan's select offers a
+ * single option, so it never fires `@change` and the form field stays null.
+ * The advertised default rides the form (`extendDefaultOverlapFrames`) because
+ * `buildRequest` takes only the form.
+ */
+export function formExtendOverlapFrames(form: GenerateForm): number {
+  return resolveExtendOverlapFrames(form.extendOverlapFrames, {
+    family: form.family,
+    extend_default_overlap_frames: form.extendDefaultOverlapFrames,
+  });
+}
+
 export function buildRequest(form: GenerateForm): GenerateRequest {
   const caps = generationCapabilitiesForFamily(
     form.family,
@@ -644,16 +675,22 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     if (caps.supportsAudio) req.enable_audio = form.enableAudio;
   }
 
+  // Continuation is per family, not part of the LTX-2 suite (#783): wan
+  // continues by seeding the render with the source clip's final frame, so
+  // its fields have to survive outside `supportsAdvancedVideo` or an offered
+  // wan continuation goes out as a plain text-to-video job.
+  if (familySupportsExtend(form.family) && form.extendVideo) {
+    req.extend_video = form.extendVideo.base64;
+    // Only travels with a clip to continue — the server rejects a bare
+    // overlap — but when it does travel it carries the value the inspector is
+    // showing, resolved by the one shared authority. Leaving it absent handed
+    // the host its own default, which for wan is the family-wide 17 that
+    // `wan/pipeline.rs`'s `extend_inner` refuses.
+    req.extend_overlap_frames = formExtendOverlapFrames(form);
+  }
+
   if (caps.supportsAdvancedVideo) {
     if (form.sourceVideo) req.source_video = form.sourceVideo.base64;
-    if (form.extendVideo) {
-      req.extend_video = form.extendVideo.base64;
-      // Only travels with a clip to continue; the server rejects a bare
-      // overlap, and omitting it takes the server's own default.
-      if (form.extendOverlapFrames) {
-        req.extend_overlap_frames = form.extendOverlapFrames;
-      }
-    }
     if (form.keyframes.length) {
       req.keyframes = form.keyframes.map<KeyframeConditionWire>((k) => ({
         frame: k.frame,

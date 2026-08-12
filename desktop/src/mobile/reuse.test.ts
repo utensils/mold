@@ -490,4 +490,41 @@ describe("applyMobileGalleryMetadata — sequence prints", () => {
     expect(result.sequence?.clips[0]!.negativePrompt).toBe("calm water");
     expect(result.sequence?.clips[1]!.negativePrompt).toBe("");
   });
+
+  /**
+   * Wan's seam carries context only for an image-conditioned checkpoint
+   * (#783), so the live tail the reused clips are clamped against belongs to
+   * the resolved model's advertised `source_image`, not to the family. Reuse
+   * passed bare name/family strings, which made every wan sequence look
+   * tail-free. A single-frame clip is the boundary the one-frame handoff
+   * moves.
+   */
+  it("clamps against an image-conditioned wan checkpoint's one-frame handoff", () => {
+    const wan = (name: string, sourceImage: string) =>
+      ({
+        ...sequenceModel,
+        name,
+        family: "wan",
+        source_image: sourceImage,
+      }) as ModelEntry;
+
+    const conditioned = wan("wan22-i2v-a14b:q5", "required");
+    expect(
+      applyMobileGalleryMetadata(
+        newGenerateForm(),
+        chainPrint([1, 53], { model: conditioned.name }),
+        [conditioned],
+      ).sequence?.raised,
+    ).toBe(1);
+
+    // A text-to-video checkpoint genuinely carries nothing across the seam.
+    const unconditioned = wan("wan22-t2v-a14b:q5", "unsupported");
+    expect(
+      applyMobileGalleryMetadata(
+        newGenerateForm(),
+        chainPrint([1, 53], { model: unconditioned.name }),
+        [unconditioned],
+      ).sequence?.raised,
+    ).toBe(0);
+  });
 });

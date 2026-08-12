@@ -1,7 +1,7 @@
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { defineComponent, reactive } from "vue";
 import { describe, expect, it, vi } from "vitest";
-import { newGenerateForm, type GenerateForm } from "../lib/generateForm";
+import { buildRequest, newGenerateForm, type GenerateForm } from "../lib/generateForm";
 import type { Ltx2CameraControlInfo, Ltx2ControlAdapterInfo, ModelEntry } from "../lib/api/types";
 import MobileGenerateParameters from "./MobileGenerateParameters.vue";
 
@@ -632,5 +632,81 @@ describe("MobileGenerateParameters — continue a video", () => {
     await wrapper.get("[data-test='mobile-ltx2-extend-clear']").trigger("click");
     expect(form.extendVideo).toBeNull();
     expect(form.extendOverlapFrames).toBeNull();
+  });
+
+  /**
+   * Wan continues too (#783), seeding the render with the source clip's final
+   * frame — but the field lived inside the LTX-2 pipeline disclosure, which
+   * no wan checkpoint renders.
+   */
+  it("offers continuation for an image-conditioned wan checkpoint", () => {
+    const wanExtendModel = {
+      name: "wan22-i2v-a14b:q5",
+      family: "wan",
+      source_image: "required",
+      supports_extend: true,
+      extend_default_overlap_frames: 17,
+    } as ModelEntry;
+    const form = formFor("wan", "wan22-i2v-a14b:q5");
+    form.frames = 53;
+    form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
+    const { wrapper } = mountParameters(form, [], true, [], [cameraControl], wanExtendModel);
+
+    expect(wrapper.find("[data-test='mobile-ltx2-extend-video']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-ltx2-extend-clear']").exists()).toBe(true);
+    // The LTX-2 pipeline disclosure stays away with it.
+    expect(wrapper.find("[data-test='mobile-ltx2-disclosure']").exists()).toBe(false);
+
+    // Wan's engine accepts exactly the one frame it carries, so the 8k+1
+    // ladder — and the server's family-wide 17 — would both be rejected.
+    const select = wrapper.get("[data-test='mobile-ltx2-extend-overlap']");
+    expect(select.findAll("option").map((option) => option.text())).toEqual(["1"]);
+    expect((select.element as HTMLSelectElement).value).toBe("1");
+    expect(wrapper.get("[data-test='mobile-ltx2-extend-summary']").text()).toContain(
+      "52 new frames",
+    );
+  });
+
+  it("stays hidden for a text-to-video wan checkpoint", () => {
+    const { wrapper } = mountParameters(
+      formFor("wan", "wan22-t2v-a14b:q5"),
+      [],
+      true,
+      [],
+      [cameraControl],
+      {
+        name: "wan22-t2v-a14b:q5",
+        family: "wan",
+        source_image: "unsupported",
+        supports_extend: false,
+      } as ModelEntry,
+    );
+    expect(wrapper.find("[data-test='mobile-ltx2-extend-video']").exists()).toBe(false);
+  });
+
+  /**
+   * The clamp is only worth anything if the clamped value is the one that
+   * leaves the phone. Wan's select carries a single option, so `@change` never
+   * fires and `extendOverlapFrames` stays null — an absent wire field handed
+   * the host its own family-wide default of 17, which `extend_inner` refuses.
+   */
+  it("submits the overlap it is showing for an untouched wan continuation", () => {
+    const form = formFor("wan", "wan22-i2v-a14b:q5");
+    form.frames = 53;
+    form.extendVideo = { filename: "clip.mp4", base64: "AAAA" };
+    const { wrapper, form: live } = mountParameters(form, [], true, [], [cameraControl], {
+      name: "wan22-i2v-a14b:q5",
+      family: "wan",
+      source_image: "required",
+      supports_extend: true,
+      extend_default_overlap_frames: 17,
+    } as ModelEntry);
+
+    expect(live.extendOverlapFrames).toBeNull();
+    const shown = Number(
+      (wrapper.get("[data-test='mobile-ltx2-extend-overlap']").element as HTMLSelectElement).value,
+    );
+    expect(shown).toBe(1);
+    expect(buildRequest(live).extend_overlap_frames).toBe(shown);
   });
 });

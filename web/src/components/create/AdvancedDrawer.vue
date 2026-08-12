@@ -22,6 +22,7 @@ import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import Chip from "@ui/components/Chip.vue";
 import LoraPicker from "../LoraPicker.vue";
 import PlacementPanel from "../PlacementPanel.vue";
+import ExtendVideoControls from "./advanced/ExtendVideoControls.vue";
 import Ltx2VideoControls from "./advanced/Ltx2VideoControls.vue";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
 import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
@@ -1375,12 +1376,19 @@ function setSequenceCameraMode(mode: string) {
               @update:model-value="patch({ gifPreview: $event })"
             />
           </div>
+          <!-- Continuation is per model, not per family (#783): wan reaches
+               it without the LTX-2 suite behind `showLtx2`. -->
+          <ExtendVideoControls
+            v-if="canExtend"
+            :model-value="modelValue"
+            :family="family"
+            :default-overlap-frames="extendDefaultOverlapFrames"
+            @update:model-value="emit('update:modelValue', $event)"
+          />
           <Ltx2VideoControls
             v-if="showLtx2"
             :model-value="modelValue"
             :audio-output-supported="audioOutputSupported"
-            :can-extend="canExtend"
-            :extend-default-overlap-frames="extendDefaultOverlapFrames"
             @update:model-value="emit('update:modelValue', $event)"
           />
         </AccordionSection>

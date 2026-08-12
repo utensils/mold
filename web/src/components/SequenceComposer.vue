@@ -46,6 +46,13 @@ const props = withDefaults(
   defineProps<{
     model: string;
     family: string;
+    /**
+     * Selected model's advertised `source_image` contract. Wan's seam carries
+     * context only for an image-conditioned checkpoint (#783), so the family
+     * alone cannot name the transition; absent reads as "unknown" and takes
+     * the conservative independent-clip path.
+     */
+    sourceImage?: string | null;
     /** LIVE shared params from the generate form (submit + TOML export). */
     shared: SequenceSharedParams;
     /** `/api/models` default_frames for the selected model, when known. */
@@ -61,6 +68,7 @@ const props = withDefaults(
     playingClipId?: string | null;
   }>(),
   {
+    sourceImage: null,
     modelDefaultFrames: null,
     chainLevelDirty: false,
     stageMediaByClipId: null,
@@ -106,7 +114,11 @@ async function clearSequence() {
 const importFileInput = ref<HTMLInputElement | null>(null);
 
 const motionTail = computed(() =>
-  sequenceMotionTailFrames({ name: props.model, family: props.family }),
+  sequenceMotionTailFrames({
+    name: props.model,
+    family: props.family,
+    source_image: props.sourceImage,
+  }),
 );
 const defaultFrames = computed(() =>
   defaultClipFrames(
@@ -220,12 +232,22 @@ const fitNote = computed(() => {
   return `${n} ${n === 1 ? "clip" : "clips"} · ${formatFrameDuration(duration.value.frames, props.shared.fps)} @ ${props.shared.fps}fps`;
 });
 
-const frameOptions = computed(() =>
-  sequenceFrameOptions(
+const frameOptions = computed(() => {
+  const options = sequenceFrameOptions(
     limits.value?.frames_per_clip_cap ?? 97,
     motionTail.value,
-  ),
-);
+    // Wan's VAE compresses time by 4, so its clips sit on `4k+1`; offering
+    // the LTX grid hid its own 53-frame routing default (#783).
+    props.family,
+  );
+  // A loaded value off the current model's grid must stay visible rather than
+  // leave the select rendering blank — a reused or edited sequence carries a
+  // clip length authored against another family's ladder. Same guard the
+  // desktop and iPhone composers keep.
+  const current = activeClip.value?.frames;
+  if (current != null && !options.includes(current)) options.push(current);
+  return options.sort((a, b) => a - b);
+});
 
 const sequenceUnsupported = computed(
   () => limits.value?.supports_sequence === false,

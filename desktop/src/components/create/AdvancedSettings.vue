@@ -7,6 +7,7 @@ import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import Chip from "@ui/components/Chip.vue";
 import {
   buildRequest,
+  formExtendOverlapFrames,
   resetFormToModelDefaults,
   seedMode,
   type GenerateForm,
@@ -70,7 +71,6 @@ import {
   extendNewFrames,
   extendOverlapOptions,
   extendValidationError,
-  serverExtendOverlapDefault,
 } from "@studio/lib/extend";
 import {
   emptyGuidanceOverrides,
@@ -389,15 +389,22 @@ function clearExtendVideo() {
   props.form.extendOverlapFrames = null;
 }
 const canExtend = computed(() => canOfferExtend(props.selectedModel));
-const extendOverlap = computed(
-  () => props.form.extendOverlapFrames ?? serverExtendOverlapDefault(props.selectedModel),
+// Exactly what `buildRequest` will submit, so the number on screen is the
+// number on the wire — wan offers one option, so `@change` never fires and
+// the form field stays null.
+const extendOverlap = computed(() => formExtendOverlapFrames(props.form));
+// The overlap grid belongs to the family: LTX-2 re-encodes an 8k+1 tail,
+// while wan carries the single frame it was seeded with (#783).
+const extendFamily = computed(() => props.selectedModel?.family ?? props.form.family);
+const extendOverlapChoices = computed(() =>
+  extendOverlapOptions(props.form.frames, extendFamily.value),
 );
-const extendOverlapChoices = computed(() => extendOverlapOptions(props.form.frames));
 const extendError = computed(() =>
   props.form.extendVideo
     ? extendValidationError({
         overlapFrames: extendOverlap.value,
         frames: props.form.frames,
+        family: extendFamily.value,
         hasSourceImage: props.form.sourceImage !== null || props.form.imageAttachments.length > 0,
         hasSourceVideo: props.form.sourceVideo !== null,
         hasKeyframes: props.form.keyframes.length > 0,
@@ -1156,55 +1163,6 @@ function reset() {
               @change="setSourceVideo"
             />
 
-            <template v-if="canExtend">
-              <label class="ms-label ms-label--mt">Continue a video</label>
-              <div v-if="form.extendVideo" class="ms-file-row">
-                <span class="data-mono ms-file-row__name" :title="form.extendVideo.filename">{{
-                  form.extendVideo.filename
-                }}</span>
-                <button
-                  type="button"
-                  class="ms-file-row__clear"
-                  data-test="ltx2-extend-clear"
-                  @click="clearExtendVideo"
-                >
-                  clear
-                </button>
-              </div>
-              <input
-                v-else
-                type="file"
-                accept="video/*"
-                aria-label="Video to continue"
-                class="ms-file"
-                data-test="ltx2-extend-video"
-                @change="setExtendVideo"
-              />
-              <template v-if="form.extendVideo">
-                <label class="ms-label ms-label--mt">Overlap (frames of motion context)</label>
-                <select
-                  class="ms-select"
-                  data-test="ltx2-extend-overlap"
-                  :value="String(extendOverlap)"
-                  @change="
-                    form.extendOverlapFrames = Number(($event.target as HTMLSelectElement).value)
-                  "
-                >
-                  <option
-                    v-for="option in extendOverlapChoices"
-                    :key="option"
-                    :value="String(option)"
-                  >
-                    {{ option }}
-                  </option>
-                </select>
-                <p v-if="extendError" class="ms-error" data-test="ltx2-extend-error">
-                  {{ extendError }}
-                </p>
-                <p v-else class="ms-hint" data-test="ltx2-extend-summary">{{ extendSummary }}</p>
-              </template>
-            </template>
-
             <div class="ms-kf-head ms-label--mt">
               <label class="ms-label">Keyframes</label>
               <button
@@ -1249,6 +1207,55 @@ function reset() {
             @pick="onKeyframePick"
             @close="keyframePickerOpen = false"
           />
+        </template>
+
+        <!-- Continuation is per model, not part of the LTX-2 suite (#783):
+             wan continues by seeding the render with the source clip's final
+             frame, and its checkpoints have no advanced-video block to nest
+             this inside. -->
+        <template v-if="canExtend">
+          <label class="ms-label ms-label--mt">Continue a video</label>
+          <div v-if="form.extendVideo" class="ms-file-row">
+            <span class="data-mono ms-file-row__name" :title="form.extendVideo.filename">{{
+              form.extendVideo.filename
+            }}</span>
+            <button
+              type="button"
+              class="ms-file-row__clear"
+              data-test="ltx2-extend-clear"
+              @click="clearExtendVideo"
+            >
+              clear
+            </button>
+          </div>
+          <input
+            v-else
+            type="file"
+            accept="video/*"
+            aria-label="Video to continue"
+            class="ms-file"
+            data-test="ltx2-extend-video"
+            @change="setExtendVideo"
+          />
+          <template v-if="form.extendVideo">
+            <label class="ms-label ms-label--mt">Overlap (frames of motion context)</label>
+            <select
+              class="ms-select"
+              data-test="ltx2-extend-overlap"
+              :value="String(extendOverlap)"
+              @change="
+                form.extendOverlapFrames = Number(($event.target as HTMLSelectElement).value)
+              "
+            >
+              <option v-for="option in extendOverlapChoices" :key="option" :value="String(option)">
+                {{ option }}
+              </option>
+            </select>
+            <p v-if="extendError" class="ms-error" data-test="ltx2-extend-error">
+              {{ extendError }}
+            </p>
+            <p v-else class="ms-hint" data-test="ltx2-extend-summary">{{ extendSummary }}</p>
+          </template>
         </template>
       </AccordionSection>
     </div>

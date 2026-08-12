@@ -75,9 +75,14 @@ pushed screen opened from the header.
   **Continue a video** appears only when the selected model advertises additive
   `supports_extend`, so a host that predates continuation shows nothing rather
   than offering a request it would reject. The attached clip counts toward the
-  combined mobile request-media budget, the overlap picker offers only valid
-  `8k+1` values below the clip length, and the sheet states how many new frames
-  the continuation appends before it is queued.
+  combined mobile request-media budget and the sheet states how many new frames
+  the continuation appends before it is queued. The overlap picker offers only
+  values below the clip length that the selected family's engine accepts: the
+  LTX families re-encode an `8k+1` tail through their video VAE, while wan
+  carries exactly the one frame its continuation was seeded with, so its picker
+  has a single entry. That entry is submitted explicitly — the request always
+  carries the overlap the picker is showing rather than leaving the field
+  absent for the host to default.
   Source-fit and Upscale then fit preprocessing use a per-Create-form cache, so
   unchanged Batch siblings and repeat submissions share one host upscale and
   fitted source while keeping the editable original intact. When the host

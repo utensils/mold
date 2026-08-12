@@ -145,8 +145,9 @@ surface powers it, so anything the app does maps to a documented endpoint.
 - **Sequences** (inside Create) — multi-clip video is a setting, not a place:
   switch the inspector's **Output** control to **Sequence** (File → New
   Sequence and the ⌘K palette land there too) and the composer becomes a clip
-  rail. Clip pills carry per-clip prompts and frame counts (validated `8n+1`,
-  defaulted from the selected model), and the seam pills between them name
+  rail. Clip pills carry per-clip prompts and frame counts (validated on the
+  family's own grid — `8n+1`, or `4n+1` for Wan — and defaulted from the
+  selected model), and the seam pills between them name
   each transition in words — **Smooth**, **Cut**, or **Fade 8f** (zero-tail
   joins say **Join**) — with a click opening the seam editor's teaching
   rows and fade-length stepper. A live fits/duration forecast runs against

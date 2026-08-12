@@ -137,8 +137,16 @@ export function applyMobileGalleryMetadata(
 
   let sequence: MobileSequenceReuse | null = null;
   if (plan) {
-    // The live tail belongs to the model resolved above, not the recorded one.
-    const tail = sequenceMotionTailFrames({ name: form.model, family: form.family });
+    // The live tail belongs to the model resolved above, not the recorded one
+    // — and for wan it belongs to that checkpoint's advertised `source_image`
+    // contract rather than to the family, because only an image-conditioned
+    // checkpoint carries anything across the seam (#783).
+    const resolvedModel = models.find((entry) => entry.name === form.model) ?? null;
+    const tail = sequenceMotionTailFrames({
+      name: form.model,
+      family: form.family,
+      source_image: resolvedModel?.source_image ?? null,
+    });
     const { clips, raised } = clampClipsToMotionTail(plan.clips, tail, 9);
     sequence = { clips, lossy: plan.lossy, raised };
     // Reusing a sequence must not overwrite the parked one-shot prompt.

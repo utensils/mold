@@ -14,6 +14,7 @@ import {
 } from "./generateForm";
 import { MAX_LORA_STACK } from "./capabilities";
 import { WAN_FAMILY_DEFAULT_NEGATIVE_PROMPT } from "@studio/lib/negativePrompt";
+import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
 import type { ModelEntry, OutputMetadata } from "./api/types";
 
 function ltx2Model(): ModelEntry {
@@ -1057,6 +1058,112 @@ function wanForm(name?: string) {
   applyModelDefaults(form, wanModel(name));
   return form;
 }
+
+/**
+ * Continuation is not part of the LTX-2 advanced-video suite (#783): wan
+ * continues by seeding the render with the source clip's final frame. The
+ * fields rode inside `caps.supportsAdvancedVideo`, so a wan continuation
+ * would have gone out as a plain text-to-video job with the clip dropped.
+ */
+describe("buildRequest — wan continuation", () => {
+  it("ships the clip to continue and its overlap", () => {
+    const form = wanForm("wan22-i2v-a14b:q5");
+    form.extendVideo = { filename: "clip.mp4", base64: "CLIP" };
+    form.extendOverlapFrames = 1;
+    const req = buildRequest(form);
+    expect(req.extend_video).toBe("CLIP");
+    expect(req.extend_overlap_frames).toBe(1);
+    // …without dragging the LTX-2 suite along.
+    expect("pipeline" in req).toBe(false);
+  });
+
+  it("keeps the overlap home when there is no clip to continue", () => {
+    const form = wanForm("wan22-i2v-a14b:q5");
+    form.extendOverlapFrames = 1;
+    const req = buildRequest(form);
+    expect("extend_video" in req).toBe(false);
+    expect("extend_overlap_frames" in req).toBe(false);
+  });
+
+  it("never ships a continuation for a family with no continuation path", () => {
+    const form = newGenerateForm();
+    form.family = "flux";
+    form.extendVideo = { filename: "clip.mp4", base64: "CLIP" };
+    expect("extend_video" in buildRequest(form)).toBe(false);
+  });
+
+  /**
+   * The overlap the inspector shows must be the overlap the request carries.
+   * Wan offers exactly one choice, so the select never fires `@change` and the
+   * form field stays null; leaving the wire field absent handed the host its
+   * own family-wide default of 17, which `wan/pipeline.rs`'s `extend_inner`
+   * refuses — every untouched wan continuation failed (#783 review).
+   */
+  it("submits wan's single carried frame from an untouched overlap control", () => {
+    const form = newGenerateForm();
+    // The host advertises the family-wide LTX-2 value; the clamp is the
+    // client's, so it has to survive all the way onto the wire.
+    applyModelDefaults(form, {
+      ...wanModel("wan22-i2v-a14b:q5"),
+      supports_extend: true,
+      extend_default_overlap_frames: 17,
+    });
+    form.extendVideo = { filename: "clip.mp4", base64: "CLIP" };
+    expect(form.extendOverlapFrames).toBeNull();
+    expect(buildRequest(form).extend_overlap_frames).toBe(1);
+  });
+
+  it("submits the host's advertised default for an untouched LTX-2 continuation", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, {
+      ...ltx2Model(),
+      supports_extend: true,
+      extend_default_overlap_frames: 25,
+    });
+    form.extendVideo = { filename: "clip.mp4", base64: "CLIP" };
+    expect(buildRequest(form).extend_overlap_frames).toBe(25);
+  });
+
+  it("falls back to the shared default when the host advertises none", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, { ...ltx2Model(), supports_extend: true });
+    form.extendVideo = { filename: "clip.mp4", base64: "CLIP" };
+    expect(buildRequest(form).extend_overlap_frames).toBe(DEFAULT_EXTEND_OVERLAP_FRAMES);
+  });
+
+  /**
+   * A staged continuation must survive a row refresh. `reconcileModelCapabilities`
+   * runs for the SAME model on every model-list reload (host poll, reconnect,
+   * template load), and it cleared the continuation as part of the LTX-2
+   * advanced-video suite — a suite wan is deliberately not in. The clip would
+   * have vanished under the user and the request gone out as plain
+   * text-to-video, which is exactly what moving the control out of that block
+   * was meant to stop.
+   */
+  it("keeps a staged wan continuation across a row refresh", () => {
+    const model = { ...wanModel("wan22-i2v-a14b:q5"), supports_extend: true };
+    const form = newGenerateForm();
+    applyModelDefaults(form, model);
+    form.extendVideo = { filename: "clip.mp4", base64: "CLIP" };
+    form.extendOverlapFrames = 1;
+
+    reconcileModelCapabilities(form, model);
+    expect(form.extendVideo?.base64).toBe("CLIP");
+    expect(form.extendOverlapFrames).toBe(1);
+    expect(buildRequest(form).extend_video).toBe("CLIP");
+  });
+
+  it("drops a staged continuation on a switch to a family that cannot continue", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, { ...wanModel("wan22-i2v-a14b:q5"), supports_extend: true });
+    form.extendVideo = { filename: "clip.mp4", base64: "CLIP" };
+    form.extendOverlapFrames = 1;
+
+    applyModelDefaults(form, { ...ltx2Model(), name: "flux2-klein:q4", family: "flux2" });
+    expect(form.extendVideo).toBeNull();
+    expect(form.extendOverlapFrames).toBeNull();
+  });
+});
 
 describe("buildRequest — wan sampler recipe", () => {
   it("omits every recipe field while the controls are untouched", () => {
