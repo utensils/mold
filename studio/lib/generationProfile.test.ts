@@ -31,8 +31,20 @@ function profileModel(): GenerationProfileModel {
         },
       ],
     },
-    steps: { default: 9, min: 1, max: 100, step: 1, mode: "adjustable" as const },
-    guidance: { default: 0, min: 0, max: 100, step: 0.1, mode: "fixed" as const },
+    steps: {
+      default: 9,
+      min: 1,
+      max: 100,
+      step: 1,
+      mode: "adjustable" as const,
+    },
+    guidance: {
+      default: 0,
+      min: 0,
+      max: 100,
+      step: 0.1,
+      mode: "fixed" as const,
+    },
     capabilities: {
       guidance: {
         adjustable: false,
@@ -58,7 +70,10 @@ function profileModel(): GenerationProfileModel {
       profile_id: "fixture.v1",
       profile_hash: "hash",
       default_recipe_id: "one-stage",
-      recipes: [recipe("one-stage", "one-stage", 32), recipe("two-stage", "two-stage", 64)],
+      recipes: [
+        recipe("one-stage", "one-stage", 32),
+        recipe("two-stage", "two-stage", 64),
+      ],
     },
   };
 }
@@ -66,8 +81,12 @@ function profileModel(): GenerationProfileModel {
 describe("generation profile contract", () => {
   it("resolves the complete recipe selected by pipeline", () => {
     const model = profileModel();
-    expect(effectiveGenerationRecipe(model, "one-stage")?.resolution.alignment).toBe(32);
-    expect(effectiveGenerationRecipe(model, "two-stage")?.resolution.alignment).toBe(64);
+    expect(
+      effectiveGenerationRecipe(model, "one-stage")?.resolution.alignment,
+    ).toBe(32);
+    expect(
+      effectiveGenerationRecipe(model, "two-stage")?.resolution.alignment,
+    ).toBe(64);
   });
 
   it("rejects unknown schemas instead of guessing their meaning", () => {
@@ -80,10 +99,17 @@ describe("generation profile contract", () => {
   });
 
   it("enforces bucket membership after grid and budget validation", () => {
-    const resolution = effectiveGenerationRecipe(profileModel(), "one-stage")?.resolution;
+    const resolution = effectiveGenerationRecipe(
+      profileModel(),
+      "one-stage",
+    )?.resolution;
     expect(resolutionProfileError(1024, 576, resolution)).toBeNull();
-    expect(resolutionProfileError(1008, 576, resolution)).toContain("multiples of 32");
-    expect(resolutionProfileError(1024, 1024, resolution)).toContain("supported resolution buckets");
+    expect(resolutionProfileError(1008, 576, resolution)).toContain(
+      "multiples of 32",
+    );
+    expect(resolutionProfileError(1024, 1024, resolution)).toContain(
+      "supported resolution buckets",
+    );
   });
 
   it("renders exactly the authored aspect groups", () => {
