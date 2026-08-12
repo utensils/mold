@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Stage MiniMax H3 compact INT8 transformer weight bytes directly on the execution device before exact signed widening, eliminating per-evaluation host scalar expansion and reducing each streamed weight transfer from four bytes per value to one without changing the portable W8A8 reference equations.
+
 - Fix the iPhone app aborting during native startup by installing its selected rustls cryptography provider before Tauri or any networking plugin can construct a reqwest client.
 
 - Fix web generation routing to react immediately when a machine is added or selected in the same tab, and make the qualified MiniMax H3 FL2VA editor visibly require its sole supported first-frame endpoint across web, desktop, and mobile surfaces.

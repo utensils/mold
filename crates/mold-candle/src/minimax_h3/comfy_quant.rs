@@ -88,6 +88,26 @@ fn flattened_input(input: &Tensor, in_features: usize) -> Result<(Tensor, Vec<us
     Ok((input.reshape((rows, in_features))?, output_shape))
 }
 
+#[cfg(feature = "h3-private-uat")]
+fn accelerator_signed_widening_workspace_upper_bound(elements: usize) -> Result<u64> {
+    let raw = elements
+        .checked_mul(std::mem::size_of::<u8>())
+        .ok_or_else(|| candle::Error::Msg("MiniMax H3 raw INT8 staging size overflows".into()))?;
+    let widened = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            candle::Error::Msg("MiniMax H3 widened INT8 staging size overflows".into())
+        })?;
+    raw.checked_mul(2)
+        .and_then(|bytes| {
+            widened
+                .checked_mul(4)
+                .and_then(|wide| bytes.checked_add(wide))
+        })
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| candle::Error::Msg("MiniMax H3 signed widening workspace overflows".into()))
+}
+
 fn finish_linear(
     chunks: Vec<Tensor>,
     bias: Option<&Tensor>,
@@ -481,7 +501,11 @@ impl H3ComfyInt8ConvRotLinear {
             H3_COMFY_CONVROT_GROUP_SIZE,
             input_bytes,
         ])?;
-        let quantized_weight = checked(&[chunk, self.in_features, std::mem::size_of::<f32>()])?;
+        let signed_widening_workspace = accelerator_signed_widening_workspace_upper_bound(
+            chunk.checked_mul(self.in_features).ok_or_else(|| {
+                candle::Error::Msg("MiniMax H3 signed widening element count overflows".into())
+            })?,
+        )?;
         let weight_scale = checked(&[chunk, std::mem::size_of::<f32>()])?;
         let chunk_f32 = checked(&[input_rows, chunk, std::mem::size_of::<f32>()])?;
         let chunk_output = checked(&[input_rows, chunk, output_bytes])?;
@@ -515,10 +539,11 @@ impl H3ComfyInt8ConvRotLinear {
             activation_input,
             activation_input,
             activation_f32,
-            // A chunk may retain original+contiguous weight, row scale,
-            // combined scale, matmul, scaled matmul, and cast output.
-            quantized_weight,
-            quantized_weight,
+            // Accelerator signed widening can retain the transferred raw U8,
+            // U8 comparison, F32 comparison cast, affine result, unsigned F32
+            // source, and returned F32 result. Charge that complete pipeline
+            // before the remaining linear intermediates.
+            signed_widening_workspace,
             weight_scale,
             chunk_f32,
             chunk_f32,
@@ -538,15 +563,28 @@ impl H3ComfyInt8ConvRotLinear {
     }
 
     fn signed_rows(&self, start: usize, rows: usize, device: &Device) -> Result<Tensor> {
-        let values = self
-            .weight
-            .narrow(0, start, rows)?
-            .flatten_all()?
-            .to_vec1::<u8>()?
-            .into_iter()
-            .map(|byte| i8::from_ne_bytes([byte]) as f32)
-            .collect::<Vec<_>>();
-        Tensor::from_vec(values, (rows, self.in_features), device)
+        let raw = self.weight.narrow(0, start, rows)?;
+        if device.is_cpu() {
+            let values = raw
+                .flatten_all()?
+                .to_vec1::<u8>()?
+                .into_iter()
+                .map(|byte| i8::from_ne_bytes([byte]) as f32)
+                .collect::<Vec<_>>();
+            return Tensor::from_vec(values, (rows, self.in_features), device);
+        }
+
+        // Preserve the checkpoint's exact two's-complement bytes during the
+        // host-to-device transfer, then widen on the execution device. The
+        // former path widened into a host Vec<f32> first, quadrupling PCIe
+        // traffic and doing one scalar CPU conversion for every weight byte
+        // on every H3 transformer evaluation.
+        let unsigned = raw.to_device(device)?.to_dtype(DType::F32)?;
+        let wrapped = unsigned
+            .gt(127.0)?
+            .to_dtype(DType::F32)?
+            .affine(-256.0, 0.0)?;
+        unsigned.broadcast_add(&wrapped)
     }
 
     fn dequantize_rows(
@@ -1634,15 +1672,51 @@ mod tests {
 
     #[test]
     fn int8_convrot_widens_raw_twos_complement_bytes_as_signed() -> Result<()> {
+        assert_signed_rows(&Device::Cpu)
+    }
+
+    #[cfg(feature = "h3-private-uat")]
+    #[test]
+    fn int8_convrot_workspace_charges_every_device_widening_intermediate() -> Result<()> {
+        let elements = 17 * H3_COMFY_CONVROT_GROUP_SIZE;
+        assert_eq!(
+            accelerator_signed_widening_workspace_upper_bound(elements)?,
+            u64::try_from(
+                elements * (2 * std::mem::size_of::<u8>() + 4 * std::mem::size_of::<f32>())
+            )
+            .unwrap()
+        );
+        Ok(())
+    }
+
+    fn assert_signed_rows(device: &Device) -> Result<()> {
         let mut bytes = vec![0u8; H3_COMFY_CONVROT_GROUP_SIZE];
         bytes[..4].copy_from_slice(&[0x80, 0xff, 0x00, 0x7f]);
         let linear = H3ComfyInt8ConvRotLinear::new(
             Tensor::from_vec(bytes, (1, H3_COMFY_CONVROT_GROUP_SIZE), &Device::Cpu)?,
             Tensor::ones((1, 1), DType::F32, &Device::Cpu)?,
         )?;
-        let signed = linear.signed_rows(0, 1, &Device::Cpu)?.to_vec2::<f32>()?;
+        let signed = linear.signed_rows(0, 1, device)?.to_vec2::<f32>()?;
         assert_eq!(&signed[0][..4], &[-128.0, -1.0, 0.0, 127.0]);
         Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn int8_convrot_device_staging_preserves_signed_bytes_on_metal() -> Result<()> {
+        let Ok(device) = Device::new_metal(0) else {
+            return Ok(());
+        };
+        assert_signed_rows(&device)
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn int8_convrot_device_staging_preserves_signed_bytes_on_cuda() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        assert_signed_rows(&device)
     }
 
     #[cfg(feature = "metal")]
