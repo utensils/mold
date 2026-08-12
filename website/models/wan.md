@@ -172,7 +172,7 @@ real render:
 | Tier   | Expert   | Parks | Default frames | Wall clock |       Peak | First refused |
 | ------ | -------- | ----- | -------------: | ---------: | ---------: | ------------: |
 | `:q5`  | ~10.8 GB | yes   |             81 |    316.3 s | 17,322 MiB |             — |
-| `:q4`  |  ~9.7 GB | yes   |             81 |    317.5 s | 15,722 MiB |             — |
+| `:q4`  | ~9.7 GB  | yes   |             81 |    317.5 s | 15,722 MiB |             — |
 | `:q8`  | ~15.3 GB | yes   |         **73** |  2,235.0 s | 16,650 MiB |     77 frames |
 | `:fp8` | ~14.3 GB | no    |         **45** |    996.4 s | 19,082 MiB |     49 frames |
 
@@ -184,7 +184,7 @@ desktop session, pass a smaller `--frames` rather than meet a refusal at the
 tier's own default.
 
 Note the shape of the `:q8` number: parking buys the frames and charges wall
-clock for them, so its 73-frame peak is *lower* than the 45-frame fp8 tier's
+clock for them, so its 73-frame peak is _lower_ than the 45-frame fp8 tier's
 while taking more than twice as long. fp8 cannot park at all, so its envelope
 is simply what fits resident.
 
