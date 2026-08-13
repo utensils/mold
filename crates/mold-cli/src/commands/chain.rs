@@ -1049,9 +1049,11 @@ pub async fn run_from_script(
     // otherwise be rejected for a seam that was never going to be applied,
     // and the dry-run totals below would describe a render that cannot happen.
     let mut built = build_request_from_script(&script)?;
-    let substitution = normalize_script_motion_tail(&mut built);
+    let authority =
+        resolve_chain_model_authority(&built.model, &mold_core::Config::load_or_default());
+    let substitution = normalize_script_motion_tail(&mut built, &authority);
     report_motion_tail_substitution(substitution, &built.model);
-    let req = built.normalise()?;
+    let req = built.normalise_with_family(authority.family_hint())?;
 
     if dry_run {
         print_dry_run_summary(&req);
@@ -1079,6 +1081,17 @@ pub async fn run_from_script(
         offload,
     )
     .await
+}
+
+/// Round a frame count down onto the family's own `step*k + offset` grid,
+/// never below the first renderable clip.
+fn snap_down_to_family_grid(frames: u32, family: &str) -> u32 {
+    let step = mold_core::validation::frame_step_for_family(family).unwrap_or(1);
+    let offset = mold_core::validation::frame_offset_for_family(family).unwrap_or(0);
+    if step == 0 || frames <= offset {
+        return frames;
+    }
+    offset + ((frames - offset) / step) * step
 }
 
 /// The generation recipe repeated `--prompt` renders a chain with.
@@ -1127,10 +1140,22 @@ pub(crate) fn sugar_recipe(model: &str, config: &mold_core::Config) -> SugarReci
         .and_then(|family| mold_core::validation::max_frames_for_family_at_fps(family, fps))
         .unwrap_or(LTX2_DEFAULT_CLIP_FRAMES);
 
-    // The clip default is the routing envelope, not the ceiling: wan's two
-    // -expert A14B measures near 24 GB well before its 257-frame cap.
+    // The clip default is the routing envelope, not the ceiling: wan's
+    // two-expert A14B measures near 24 GB well before its 257-frame cap.
+    //
+    // `wan_default_clip_frames` reads the tier name, which an opaque `cv:` /
+    // `hf:` ID does not carry — it would pick the 121-frame non-A14B floor
+    // for an installed A14B checkpoint and blow past the envelope its own
+    // sidecar records. Prefer the resolved default there, snapped onto the
+    // family's grid so the value stays submittable.
     let clip_frames = match family.as_deref() {
-        Some("wan") => wan_default_clip_frames(&resolved),
+        Some("wan") if mold_core::manifest::find_manifest(&resolved).is_some() => {
+            wan_default_clip_frames(&resolved)
+        }
+        Some("wan") => model_cfg
+            .effective_frames()
+            .map(|frames| snap_down_to_family_grid(frames, "wan"))
+            .unwrap_or_else(|| wan_default_clip_frames(&resolved)),
         _ => model_cfg
             .effective_frames()
             .unwrap_or(LTX2_DEFAULT_CLIP_FRAMES),
@@ -1166,21 +1191,20 @@ pub(crate) fn sugar_recipe(model: &str, config: &mold_core::Config) -> SugarReci
 /// applied, and a dry run would report frame totals for a seam that will not
 /// render.
 ///
-/// The contract comes from the manifest, which is what the CLI can resolve
-/// without the inference crate's header probe. An installed `cv:` / `hf:`
-/// checkpoint yields `None` — "unknown", which takes the conservative
-/// independent-clips path rather than assuming a handoff.
-pub(crate) fn normalize_script_motion_tail(req: &mut ChainRequest) -> Option<(u32, u32)> {
-    let resolved = mold_core::manifest::resolve_model_name(&req.model);
-    let manifest = mold_core::manifest::find_manifest(&resolved);
-    let family = manifest
-        .map(|model| model.family.to_string())
-        .unwrap_or_default();
-    let source_image = manifest.and_then(|model| model.defaults.source_image);
-
+/// The family and contract come from the same places the server reads them:
+/// the sidecar-derived `ModelConfig` an installed `cv:` / `hf:` checkpoint
+/// carries, then the checkpoint's own headers, then the manifest. A
+/// manifest-only lookup left every catalog wan checkpoint unclassified, which
+/// is not merely conservative — an unclassified family also means the LTX
+/// `8k+1` grid, so a valid 53-frame wan chain was rejected outright and a
+/// 97-frame one silently kept its 17-frame tail.
+pub(crate) fn normalize_script_motion_tail(
+    req: &mut ChainRequest,
+    authority: &ChainModelAuthority,
+) -> Option<(u32, u32)> {
     let applied = mold_core::validation::chain_motion_tail_frames_for_family(
-        &family,
-        source_image,
+        &authority.family,
+        authority.source_image,
         req.motion_tail_frames,
     );
     if applied == req.motion_tail_frames {
@@ -1189,6 +1213,64 @@ pub(crate) fn normalize_script_motion_tail(req: &mut ChainRequest) -> Option<(u3
     let original = req.motion_tail_frames;
     req.motion_tail_frames = applied;
     Some((original, applied))
+}
+
+/// What a chain needs to know about the selected checkpoint before it can
+/// validate or render: the family that owns the frame grid and per-clip cap,
+/// and the conditioning contract that decides the seam.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ChainModelAuthority {
+    /// Empty when neither the config nor the manifest can classify the model.
+    pub family: String,
+    pub source_image: Option<mold_core::SourceImageCapability>,
+}
+
+impl ChainModelAuthority {
+    /// `None` when the model is unclassified, which callers pass through to
+    /// `normalise_with_family` as "no hint".
+    pub fn family_hint(&self) -> Option<&str> {
+        (!self.family.is_empty()).then_some(self.family.as_str())
+    }
+}
+
+/// Resolve the family and conditioning contract for a chain's model.
+///
+/// Mirrors the server's `resolve_chain_family` plus its wan header probe, so
+/// a forced-local render and an HTTP submission classify the same checkpoint
+/// the same way.
+pub(crate) fn resolve_chain_model_authority(
+    model: &str,
+    config: &mold_core::Config,
+) -> ChainModelAuthority {
+    let resolved = mold_core::manifest::resolve_model_name(model);
+    let manifest = mold_core::manifest::find_manifest(&resolved);
+    // The installed sidecar's config wins: it is what an opaque catalog ID
+    // resolves to, and the manifest cannot classify one at all.
+    let family = config
+        .resolved_model_config(model)
+        .family
+        .clone()
+        .or_else(|| manifest.map(|model| model.family.to_string()))
+        .unwrap_or_default();
+
+    let manifest_contract = manifest.and_then(|model| model.defaults.source_image);
+    // Wan's contract is a property of the weights, so read the headers of the
+    // artifacts that will actually load; path overrides can point one manifest
+    // name at a different checkpoint.
+    let source_image = if family == "wan" {
+        mold_core::ModelPaths::resolve(model, config)
+            .and_then(|paths| {
+                mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
+            })
+            .or(manifest_contract)
+    } else {
+        manifest_contract
+    };
+
+    ChainModelAuthority {
+        family,
+        source_image,
+    }
 }
 
 /// Tell the user which seam actually rendered. A substituted tail changes the
@@ -1351,9 +1433,10 @@ pub async fn run_from_sugar(
     // honour. Resolve it before `normalise()` for the same reason the
     // script path does (#783).
     let mut built = req;
-    let substitution = normalize_script_motion_tail(&mut built);
+    let authority = resolve_chain_model_authority(&built.model, &config);
+    let substitution = normalize_script_motion_tail(&mut built, &authority);
     report_motion_tail_substitution(substitution, &built.model);
-    let req = built.normalise()?;
+    let req = built.normalise_with_family(authority.family_hint())?;
 
     if dry_run {
         print_dry_run_summary(&req);
@@ -1429,9 +1512,13 @@ mod tests {
             ..empty_chain_request()
         };
 
+        let config = mold_core::Config::default();
+        let authority_for = |model: &str| resolve_chain_model_authority(model, &config);
+
         // TI2V-5B is `Optional` — it can be seeded, so the seam is one frame.
         let mut ti2v = wan_script_request("wan22-ti2v-5b:q8", 17);
-        let substitution = normalize_script_motion_tail(&mut ti2v);
+        let substitution =
+            normalize_script_motion_tail(&mut ti2v, &authority_for("wan22-ti2v-5b:q8"));
         assert_eq!(
             ti2v.motion_tail_frames,
             mold_core::validation::WAN_HANDOFF_DUPLICATED_FRAMES,
@@ -1448,12 +1535,18 @@ mod tests {
         // A text-to-video checkpoint has no channel to be seeded through, so
         // its Smooth boundaries concatenate.
         let mut t2v = wan_script_request("wan21-t2v-1.3b:bf16", 17);
-        assert_eq!(normalize_script_motion_tail(&mut t2v), Some((17, 0)));
+        assert_eq!(
+            normalize_script_motion_tail(&mut t2v, &authority_for("wan21-t2v-1.3b:bf16")),
+            Some((17, 0))
+        );
         assert_eq!(t2v.motion_tail_frames, 0);
 
         // An already-correct script is left alone and reports nothing.
         let mut correct = wan_script_request("wan22-ti2v-5b:q8", 1);
-        assert_eq!(normalize_script_motion_tail(&mut correct), None);
+        assert_eq!(
+            normalize_script_motion_tail(&mut correct, &authority_for("wan22-ti2v-5b:q8")),
+            None
+        );
         assert_eq!(correct.motion_tail_frames, 1);
 
         // LTX-2's tail is a real latent window; the script still owns it.
@@ -1469,7 +1562,10 @@ mod tests {
             fps: 24,
             ..empty_chain_request()
         };
-        assert_eq!(normalize_script_motion_tail(&mut ltx2), None);
+        assert_eq!(
+            normalize_script_motion_tail(&mut ltx2, &authority_for("ltx-2-19b-distilled:fp8")),
+            None
+        );
         assert_eq!(ltx2.motion_tail_frames, 17);
     }
 
@@ -1587,6 +1683,81 @@ mod tests {
             source_image: None,
             enable_audio: None,
         }
+    }
+
+    /// An installed `cv:` / `hf:` wan checkpoint is classified from its
+    /// sidecar, not its name (#783).
+    ///
+    /// `find_manifest` cannot classify a catalog id, so a manifest-only
+    /// lookup left the family empty — and an empty family is not merely
+    /// "unknown", it is the LTX `8k+1` grid and a preserved 17-frame tail.
+    /// A valid 53-frame wan chain was rejected outright, and a 97-frame one
+    /// (which also clears `8k+1`) kept a seam that discards sixteen frames.
+    /// The tier name is likewise absent, so the routing default cannot be
+    /// sniffed from it either.
+    #[test]
+    fn an_opaque_catalog_wan_model_is_classified_from_its_sidecar() {
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            "cv:2041121".to_string(),
+            mold_core::ModelConfig {
+                family: Some("wan".to_string()),
+                default_frames: Some(81),
+                default_fps: Some(16),
+                default_width: Some(832),
+                default_height: Some(480),
+                ..Default::default()
+            },
+        );
+
+        // The family now comes from the sidecar, so wan's grid applies.
+        let authority = resolve_chain_model_authority("cv:2041121", &config);
+        assert_eq!(authority.family, "wan");
+        assert_eq!(authority.family_hint(), Some("wan"));
+
+        // A 53-frame chain is on wan's grid and must survive normalisation.
+        let mut req = ChainRequest {
+            model: "cv:2041121".into(),
+            stages: vec![
+                stage_with_frames("a paper boat", 53),
+                stage_with_frames("it reaches the drain", 53),
+            ],
+            motion_tail_frames: 17,
+            width: 832,
+            height: 480,
+            fps: 16,
+            ..empty_chain_request()
+        };
+        normalize_script_motion_tail(&mut req, &authority);
+        assert!(
+            req.normalise_with_family(authority.family_hint()).is_ok(),
+            "53 is 4k+1; the LTX fallback grid rejected it"
+        );
+
+        // Its routing default comes from the sidecar rather than the
+        // 121-frame non-A14B floor the tier name would have selected.
+        let recipe = sugar_recipe("cv:2041121", &config);
+        assert_eq!(recipe.family.as_deref(), Some("wan"));
+        assert_eq!(recipe.fps, 16);
+        assert_eq!(
+            recipe.clip_frames, 81,
+            "the sidecar records this checkpoint's measured envelope"
+        );
+        assert_eq!(
+            (recipe.clip_frames - 1) % mold_core::validation::WAN_TEMPORAL_SCALE,
+            0
+        );
+    }
+
+    /// An off-grid recorded default is snapped down, never submitted as-is.
+    #[test]
+    fn a_catalog_default_off_the_family_grid_snaps_down() {
+        assert_eq!(snap_down_to_family_grid(80, "wan"), 77);
+        assert_eq!(snap_down_to_family_grid(81, "wan"), 81);
+        assert_eq!(snap_down_to_family_grid(97, "ltx2"), 97);
+        assert_eq!(snap_down_to_family_grid(96, "ltx2"), 89);
+        // Never below the first renderable clip.
+        assert_eq!(snap_down_to_family_grid(1, "wan"), 1);
     }
 
     fn stage_with_frames(prompt: &str, frames: u32) -> mold_core::chain::ChainStage {

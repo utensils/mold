@@ -17,10 +17,12 @@ pub async fn run(path: &Path) -> Result<()> {
     // TOML asked for. Wan carries one frame across a seam, or none on a
     // text-to-video checkpoint — never LTX-2's 17, which sits on wan's own
     // `4k+1` grid and so would otherwise validate clean (#783).
+    let config = mold_core::Config::load_or_default();
     let mut built = super::chain::build_request_from_script(&script)?;
-    let substitution = super::chain::normalize_script_motion_tail(&mut built);
+    let authority = super::chain::resolve_chain_model_authority(&built.model, &config);
+    let substitution = super::chain::normalize_script_motion_tail(&mut built, &authority);
     let model = built.model.clone();
-    let req = built.normalise()?;
+    let req = built.normalise_with_family(authority.family_hint())?;
     if let Some((original, applied)) = substitution {
         println!(
             "note: {model} carries {applied} frame(s) across a seam, not {original}; \

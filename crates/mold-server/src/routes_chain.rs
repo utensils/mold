@@ -935,8 +935,13 @@ pub(crate) fn validate_and_normalize_chain_family(
     // was supplied anywhere the engine has no channel for, so a per-stage
     // image on a continuation has to count too; a script may attach one to
     // any stage (`source_image_path`).
-    let opening_image =
-        req.source_image.is_some() || req.stages.first().is_some_and(|s| s.source_image.is_some());
+    // The top-level `source_image` is the auto-expand form's opening image and
+    // `normalise` only projects it onto stage 0 when `stages` is empty — with
+    // explicit stages it is cleared. Counting it either way admitted a mixed
+    // form whose image is discarded before execution, so the I2V model loaded
+    // and then failed on an unseeded stage 0.
+    let opening_image = (req.stages.is_empty() && req.source_image.is_some())
+        || req.stages.first().is_some_and(|s| s.source_image.is_some());
     let any_image = opening_image || req.stages.iter().any(|s| s.source_image.is_some());
     let family_hint = (!family.is_empty()).then_some(family.as_str());
     let has_source = match contract {
@@ -2073,6 +2078,38 @@ mod tests {
         opening_image(&mut late_only, None);
         late_only.stages[1].source_image = Some(vec![1, 2, 3]);
         assert!(validate_and_normalize_chain_family(&config, &mut late_only).is_err());
+
+        // The top-level `source_image` belongs to the auto-expand form.
+        // `normalise` projects it onto stage 0 only when `stages` is empty and
+        // clears it otherwise, so counting it alongside explicit stages
+        // admitted a request whose image is discarded before execution — the
+        // I2V model loaded, then failed on an unseeded stage 0.
+        let mut mixed_form = req(OutputFormat::Mp4);
+        mixed_form.model = "wan22-i2v-a14b:q5".into();
+        mixed_form.width = 832;
+        mixed_form.height = 480;
+        opening_image(&mut mixed_form, None);
+        mixed_form.source_image = Some(vec![1, 2, 3]);
+        assert!(
+            !mixed_form.stages.is_empty(),
+            "the defect needs explicit stages beside the top-level image"
+        );
+        assert!(
+            validate_and_normalize_chain_family(&config, &mut mixed_form).is_err(),
+            "an image `normalise` is about to discard cannot satisfy the contract"
+        );
+
+        // The auto-expand form still seeds stage 0 from that same field.
+        let mut auto_expand = req(OutputFormat::Mp4);
+        auto_expand.model = "wan22-i2v-a14b:q5".into();
+        auto_expand.width = 832;
+        auto_expand.height = 480;
+        auto_expand.stages = Vec::new();
+        auto_expand.prompt = Some("a balloon lifts off".into());
+        auto_expand.total_frames = Some(106);
+        auto_expand.clip_frames = Some(53);
+        auto_expand.source_image = Some(vec![1, 2, 3]);
+        validate_and_normalize_chain_family(&config, &mut auto_expand).expect("admitted");
     }
 
     struct HandlerFailingExecutor;
