@@ -320,8 +320,18 @@ pub fn discover_gpus() -> Vec<DiscoveredGpu> {
     {
         if candle_core::utils::metal_is_available() {
             // Metal: single device on macOS (unified memory).
-            let total = available_system_memory_bytes().unwrap_or(0);
-            let free = free_system_memory_bytes().unwrap_or(0);
+            //
+            // Total is installed RAM — the fixed ceiling the GPU can address.
+            // Free is free + inactive, matching `free_vram_bytes`: macOS
+            // reclaims inactive pages with no I/O, so budgeting on free pages
+            // alone understated a 48 GB machine as ~7 GB and made the scheduler
+            // reject plans that fit comfortably.
+            let total = total_system_memory_bytes()
+                .or_else(available_system_memory_bytes)
+                .unwrap_or(0);
+            let free = available_system_memory_bytes()
+                .or_else(free_system_memory_bytes)
+                .unwrap_or(0);
             gpus.push(DiscoveredGpu {
                 ordinal: 0,
                 stable_id: Some("metal:default".to_string()),
@@ -1728,6 +1738,36 @@ pub fn free_system_memory_bytes() -> Option<u64> {
 #[cfg(target_os = "macos")]
 pub fn available_system_memory_bytes() -> Option<u64> {
     macos_vm_stats().map(|s| s.free + s.inactive)
+}
+
+/// Installed physical RAM on macOS (`hw.memsize`).
+///
+/// Unified memory has no separate VRAM total, so this is the ceiling the Metal
+/// device can address. It is a hardware constant: unlike
+/// [`available_system_memory_bytes`] it must not move as pages are dirtied,
+/// because the scheduler clamps a device's effective capacity to its total.
+#[cfg(target_os = "macos")]
+pub fn total_system_memory_bytes() -> Option<u64> {
+    let mut size: u64 = 0;
+    let mut len = std::mem::size_of::<u64>();
+    let name = c"hw.memsize";
+    // SAFETY: `name` is a NUL-terminated C string, and `size`/`len` are valid
+    // writable pointers to a u64 and its length for the duration of the call.
+    let ret = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            (&raw mut size).cast::<libc::c_void>(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (ret == 0 && size > 0).then_some(size)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn total_system_memory_bytes() -> Option<u64> {
+    None
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -3189,6 +3229,49 @@ mod tests {
         assert!(
             vram.abs_diff(available) < max_drift,
             "free_vram_bytes ({vram}) should approximately equal available_system_memory ({available})"
+        );
+    }
+
+    /// Metal discovery must budget on the same reclaimable-memory metric
+    /// `free_vram_bytes` already uses. It called `free_system_memory_bytes()`
+    /// instead, so a 48 GB M4 Max with 23 GB reclaimable advertised ~7 GB free.
+    /// The scheduler clamps `free + reclaimable_cache` to `total_vram_bytes`,
+    /// which discovery also set to a transient availability reading rather than
+    /// installed RAM, so every LTX-2 plan was rejected before a weight was read
+    /// ("metal:default needs ~13.9 GB of ~10.1 GB usable").
+    #[cfg(all(target_os = "macos", not(feature = "cuda")))]
+    #[test]
+    fn metal_discovery_budgets_on_reclaimable_memory() {
+        let gpus = discover_gpus();
+        let metal = gpus
+            .iter()
+            .find(|gpu| gpu.backend == GpuBackend::Metal)
+            .expect("macOS exposes a Metal device");
+        let available = available_system_memory_bytes().expect("macOS VM statistics");
+        let installed = total_system_memory_bytes().expect("macOS reports installed RAM");
+
+        // Separate syscalls sample live VM state, so compare with drift room.
+        let max_drift = 512 * 1024 * 1024;
+        assert!(
+            metal.free_vram_bytes.abs_diff(available) < max_drift,
+            "discovered free {} should track reclaimable {available}, not free pages alone",
+            metal.free_vram_bytes,
+        );
+        assert_eq!(
+            metal.total_vram_bytes, installed,
+            "total capacity is installed RAM, not a transient availability reading",
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installed_memory_is_reported_and_bounds_available() {
+        let installed = total_system_memory_bytes().expect("macOS reports installed RAM");
+        let available = available_system_memory_bytes().expect("macOS VM statistics");
+        assert!(installed > 0, "installed RAM should be positive");
+        assert!(
+            installed >= available,
+            "installed RAM ({installed}) must bound available ({available})"
         );
     }
 

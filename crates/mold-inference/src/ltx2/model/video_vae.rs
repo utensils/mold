@@ -30,7 +30,8 @@ impl PerChannelRmsNorm {
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let dtype = x.dtype();
         let x_f32 = x.to_dtype(DType::F32)?;
-        let mean_sq = x_f32.sqr()?.mean_keepdim(self.channel_dim)?;
+        let mean_sq =
+            crate::ltx2::metal_reduce::mean_keepdim_stable(&x_f32.sqr()?, self.channel_dim)?;
         let rms = mean_sq.affine(1.0, self.eps)?.sqrt()?;
         x_f32.broadcast_div(&rms)?.to_dtype(dtype)
     }
@@ -1603,12 +1604,71 @@ impl AutoencoderKLLtx2Video {
 mod tests {
     use super::{
         patchify_video, unpatchify_video, AutoencoderKLLtx2Video, AutoencoderKLLtx2VideoConfig,
-        Ltx2VideoDownsampler3d, Ltx2VideoResnetBlock3d, Ltx2VideoUpsampler3d, SpatialDecodeTiling,
-        SpatialPaddingMode, VaeBlockConfig,
+        Ltx2VideoCausalConv3d, Ltx2VideoDownsampler3d, Ltx2VideoResnetBlock3d,
+        Ltx2VideoUpsampler3d, PerChannelRmsNorm, SpatialDecodeTiling, SpatialPaddingMode,
+        VaeBlockConfig,
     };
     use candle_core::{DType, Device, Tensor};
+    use candle_nn::group_norm;
     use candle_nn::VarBuilder;
     use std::collections::HashMap;
+
+    /// Decode one fixed latent through the real VAE on Metal and on the CPU.
+    ///
+    /// A 512x512x9 distilled render produced healthy final latents (rms 1.393)
+    /// and an all-NaN decode on Metal, which clamps to a black clip with no
+    /// error. Forcing the decode to F32 did not change it, so the fault is not
+    /// precision. This isolates the decoder from the 19B transformer: point
+    /// `MOLD_TEST_LTX2_CHECKPOINT` at a combined LTX-2 checkpoint to run it.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_vae_decode_matches_the_cpu_reference() {
+        let Some(path) = std::env::var_os("MOLD_TEST_LTX2_CHECKPOINT") else {
+            return;
+        };
+        let decode_on = |device: Device, dtype: DType, spatial: usize| -> (f32, f32, usize) {
+            let vb = unsafe {
+                VarBuilder::from_mmaped_safetensors(
+                    std::slice::from_ref(&std::path::PathBuf::from(&path)),
+                    dtype,
+                    &device,
+                )
+            }
+            .unwrap()
+            .pp("vae");
+            let vae =
+                AutoencoderKLLtx2Video::new(AutoencoderKLLtx2VideoConfig::default(), vb).unwrap();
+            // Same values on both devices: seeded on the CPU, then moved.
+            let count = 128.0 * 2.0 * (spatial * spatial) as f32;
+            let latents = Tensor::arange(0f32, count, &Device::Cpu)
+                .unwrap()
+                .reshape((1usize, 128usize, 2usize, spatial, spatial))
+                .unwrap()
+                .affine(1.0 / 1024.0, -0.5)
+                .unwrap()
+                .to_device(&device)
+                .unwrap()
+                .to_dtype(dtype)
+                .unwrap();
+            let (_, video) = vae.decode(&latents, None, false, false).unwrap();
+            let flat = video.to_dtype(DType::F32).unwrap().flatten_all().unwrap();
+            let values = flat.to_vec1::<f32>().unwrap();
+            let nan = values.iter().filter(|value| value.is_nan()).count();
+            let finite = values.iter().filter(|value| value.is_finite());
+            let count = finite.clone().count().max(1);
+            let mean = finite.clone().sum::<f32>() / count as f32;
+            let max = finite.fold(0f32, |acc, value| acc.max(value.abs()));
+            (mean, max, nan)
+        };
+
+        // One load, several decode shapes: a size-dependent failure points at
+        // a kernel dispatch limit rather than the maths.
+        for spatial in [2usize, 4, 8, 16] {
+            let (_, _, cpu_nan) = decode_on(Device::Cpu, DType::F32, spatial);
+            let (_, _, metal_nan) = decode_on(Device::new_metal(0).unwrap(), DType::F32, spatial);
+            println!("latent {spatial}x{spatial}: cpu_nan={cpu_nan} metal_nan={metal_nan}");
+        }
+    }
 
     fn insert_conv(
         tensors: &mut HashMap<String, Tensor>,
@@ -1702,6 +1762,147 @@ mod tests {
                 channels,
                 channels,
                 (3, 3, 3),
+            );
+        }
+    }
+
+    /// `PerChannelRmsNorm` is the decoder's last normalization and touches
+    /// every output value, so a NaN here blackens the whole frame. It reduces
+    /// with `mean_keepdim` over the channel dim of a 5-D tensor and then takes
+    /// `sqrt`, so a reduction that returns a negative on Metal yields NaN.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn per_channel_rms_norm_agrees_between_metal_and_cpu() {
+        let metal = Device::new_metal(0).unwrap();
+        let shape = (1usize, 8usize, 3usize, 4usize, 4usize);
+        let count: usize = shape.0 * shape.1 * shape.2 * shape.3 * shape.4;
+
+        let build = |device: &Device| {
+            Tensor::arange(0f32, count as f32, device)
+                .unwrap()
+                .reshape(shape)
+                .unwrap()
+                .affine(0.01, -0.5)
+                .unwrap()
+        };
+        let cpu_input = build(&Device::Cpu);
+        let metal_input = build(&metal);
+
+        let norm = PerChannelRmsNorm::new(1, 1e-6);
+        let cpu_out = norm.forward(&cpu_input).unwrap();
+        let metal_out = norm.forward(&metal_input).unwrap();
+        let metal_v = metal_out.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let cpu_v = cpu_out.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let nan = metal_v.iter().filter(|value| value.is_nan()).count();
+        assert_eq!(
+            nan, 0,
+            "PerChannelRmsNorm produced {nan} NaN values on Metal"
+        );
+        for (cpu, metal) in cpu_v.iter().zip(metal_v.iter()) {
+            assert!(
+                (cpu - metal).abs() <= 1e-3 * cpu.abs().max(1.0),
+                "rms norm disagrees: cpu {cpu} metal {metal}"
+            );
+        }
+    }
+
+    /// Which VAE primitive returns NaN on Metal but not on the CPU.
+    ///
+    /// The full decoder returns 100% NaN on Metal from healthy latents. The
+    /// blocks below are the decoder's primitives, run with identical synthetic
+    /// weights on both devices, so a failure names the op instead of the
+    /// pipeline. Needs no checkpoint, so it runs in CI on any Metal host.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn vae_primitives_agree_between_metal_and_cpu() {
+        let metal = Device::new_metal(0).unwrap();
+        let nan_count = |tensor: &Tensor| -> usize {
+            tensor
+                .to_dtype(DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+                .iter()
+                .filter(|value| value.is_nan())
+                .count()
+        };
+
+        // A causal conv on its own.
+        for device in [Device::Cpu, metal.clone()] {
+            let vb = {
+                let mut tensors = HashMap::new();
+                insert_conv(&mut tensors, "conv", 4, 4, (3, 3, 3));
+                VarBuilder::from_tensors(tensors, DType::F32, &device)
+            };
+            let conv = Ltx2VideoCausalConv3d::new(
+                4,
+                4,
+                (3, 3, 3),
+                (1, 1, 1),
+                (1, 1, 1),
+                1,
+                true,
+                SpatialPaddingMode::Zeros,
+                vb.pp("conv"),
+            )
+            .unwrap();
+            let input = Tensor::ones((1, 4, 3, 8, 8), DType::F32, &device).unwrap();
+            let out = conv.forward(&input, true).unwrap();
+            assert_eq!(
+                nan_count(&out),
+                0,
+                "causal conv produced NaN on {:?}",
+                out.device()
+            );
+        }
+
+        // A resnet block, which adds the GroupNorm + SiLU path.
+        for device in [Device::Cpu, metal.clone()] {
+            let vb = {
+                let mut tensors = HashMap::new();
+                insert_conv(&mut tensors, "conv1", 4, 4, (3, 3, 3));
+                insert_conv(&mut tensors, "conv2", 4, 4, (3, 3, 3));
+                VarBuilder::from_tensors(tensors, DType::F32, &device)
+            };
+            let block =
+                Ltx2VideoResnetBlock3d::new(4, 4, 1e-6, false, SpatialPaddingMode::Zeros, vb)
+                    .unwrap();
+            let input = Tensor::ones((1, 4, 3, 8, 8), DType::F32, &device).unwrap();
+            let out = block.forward(&input, true).unwrap();
+            assert_eq!(
+                nan_count(&out),
+                0,
+                "resnet block produced NaN on {:?}",
+                out.device()
+            );
+        }
+
+        // A bare GroupNorm over a 5-D activation, reshaped the way the VAE does.
+        for device in [Device::Cpu, metal.clone()] {
+            let vb = VarBuilder::from_tensors(
+                HashMap::from([
+                    (
+                        "weight".to_string(),
+                        Tensor::ones(4, DType::F32, &device).unwrap(),
+                    ),
+                    (
+                        "bias".to_string(),
+                        Tensor::zeros(4, DType::F32, &device).unwrap(),
+                    ),
+                ]),
+                DType::F32,
+                &device,
+            );
+            let norm = group_norm(1, 4, 1e-6, vb).unwrap();
+            let input = Tensor::ones((1, 4, 3, 8, 8), DType::F32, &device).unwrap();
+            let out = candle_core::Module::forward(&norm, &input).unwrap();
+            assert_eq!(
+                nan_count(&out),
+                0,
+                "group norm produced NaN on {:?}",
+                out.device()
             );
         }
     }

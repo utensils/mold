@@ -9,6 +9,7 @@ mod guidance;
 mod hdr;
 mod lora;
 pub mod media;
+pub(crate) mod metal_reduce;
 mod model;
 mod nvfp4;
 mod pipeline;

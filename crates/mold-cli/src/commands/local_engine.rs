@@ -320,8 +320,25 @@ impl LocalBatchAdmission {
                     && candidate.predicted_host_ram_bytes <= host_headroom_bytes
             })
         {
+            // Name the shortfall the way `insufficient_vram_error` does — a bare
+            // "cannot admit" leaves the user guessing which of the two budgets
+            // was short, and by how much.
+            let shortfall = candidates
+                .iter()
+                .map(|candidate| {
+                    format!(
+                        "{}: needs ~{:.1} GB VRAM of ~{:.1} GB usable and ~{:.1} GB host RAM of ~{:.1} GB headroom",
+                        candidate.ordinal,
+                        candidate.predicted_vram_bytes as f64 / 1_000_000_000.0,
+                        candidate.available_vram_bytes as f64 / 1_000_000_000.0,
+                        candidate.predicted_host_ram_bytes as f64 / 1_000_000_000.0,
+                        host_headroom_bytes as f64 / 1_000_000_000.0,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
             anyhow::bail!(
-                "local scheduler cannot admit an engine within current GPU and host-memory headroom"
+                "local scheduler cannot admit an engine within current GPU and host-memory headroom ({shortfall})"
             );
         }
         Ok(Self {
