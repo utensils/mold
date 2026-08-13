@@ -60,7 +60,19 @@ describe("ModelTableRow", () => {
     const sizes = wrapper.get("[data-test='row-sizes']");
     expect(sizes.text()).toContain("11.8 GB weights");
     expect(sizes.text()).toContain("23.1 GB with shared runtime");
-    expect(wrapper.html()).toContain("width: 40%");
+    const footprint = wrapper.get("[data-test='model-footprint-bar']");
+    expect(footprint.html()).toContain("width: 40%");
+    expect(footprint.attributes("title")).toContain("23.1 GB with shared runtime");
+    expect(footprint.attributes("title")).toContain("largest model in this list");
+    expect(footprint.attributes("title")).toContain("not download progress");
+    expect(footprint.attributes("aria-label")).toBe(footprint.attributes("title"));
+    expect(footprint.attributes("role")).toBe("meter");
+    expect(footprint.attributes("aria-valuenow")).toBe("40");
+    const description = wrapper.get("[data-test='model-footprint-description']");
+    expect(wrapper.get("[data-test='model-table-row']").attributes("aria-describedby")).toBe(
+      description.attributes("id"),
+    );
+    expect(description.text()).toBe(footprint.attributes("title"));
   });
 
   it("opens the external model page without triggering the row's open action", async () => {
@@ -85,5 +97,13 @@ describe("ModelTableRow", () => {
   it("renders parent actions in the actions slot", () => {
     const wrapper = mountRow({}, { actions: "<button data-test='pull'>Pull</button>" });
     expect(wrapper.get("[data-test='pull']").text()).toBe("Pull");
+  });
+
+  it("marks the row that backs the open model detail", () => {
+    const wrapper = mountRow({ selected: true });
+    const row = wrapper.get("[data-test='model-table-row']");
+    expect(row.attributes("data-selected")).toBe("true");
+    expect(row.attributes("aria-current")).toBe("true");
+    expect(row.classes()).toContain("model-table-row--selected");
   });
 });

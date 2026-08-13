@@ -949,6 +949,19 @@ describe("HostDetailView loaded-chip unload", () => {
 });
 
 describe("HostDetailView layout", () => {
+  it("uses the full workspace width instead of preserving a fixed desktop cap", async () => {
+    const wrapper = await mountView();
+    const content = wrapper.get("[data-test='host-detail-content']");
+    expect(content.classes()).toContain("w-full");
+    expect(content.classes().some((name) => name.startsWith("max-w-"))).toBe(false);
+    expect(
+      wrapper
+        .get("[data-test='host-model-column']")
+        .classes()
+        .some((name) => name.includes("max-w-")),
+    ).toBe(false);
+  });
+
   it("shows uptime from /api/status in the telemetry header", async () => {
     installApi({ uptime_secs: 200_000 });
     const wrapper = await mountView();

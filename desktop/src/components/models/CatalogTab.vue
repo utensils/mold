@@ -31,6 +31,7 @@ import { installedModelToEntry } from "../../lib/catalogDetail";
 import type { CatalogEntry, ModelEntry } from "../../lib/api/types";
 
 type LibraryModelEntry = ModelEntry & { hostIds?: string[] };
+type CatalogListEntry = CatalogEntry & { hostIds?: string[] };
 
 const props = defineProps<{
   query: string;
@@ -84,7 +85,7 @@ const error = ref<string | null>(null);
 const pulling = ref<Set<string>>(new Set());
 const pendingEntry = ref<CatalogEntry | null>(null);
 /** Entry whose in-app detail drawer is open. */
-const detailEntry = ref<CatalogEntry | null>(null);
+const detailEntry = ref<CatalogListEntry | null>(null);
 
 let debounce: ReturnType<typeof setTimeout> | null = null;
 
@@ -104,7 +105,7 @@ const installedNames = computed(() => new Set((props.installedEntries ?? []).map
 
 /** Installed models as catalog-shaped rows for the unified list — the host
  *  chips are the visual "you have this" indicator. */
-const installedCatalogEntries = computed<(CatalogEntry & { hostIds?: string[] })[]>(() => {
+const installedCatalogEntries = computed<CatalogListEntry[]>(() => {
   const q = props.query.trim().toLowerCase();
   return (props.installedEntries ?? [])
     .filter(
@@ -121,12 +122,37 @@ const installedCatalogEntries = computed<(CatalogEntry & { hostIds?: string[] })
     );
 });
 
+/** Canonical catalog shape for one not-yet-installed manifest model. Keep
+ * this outside the filtered list so variant selection can resolve a sibling
+ * hidden by search/source/family controls without fabricating install state
+ * or dropping its shared-runtime footprint. */
+function manifestCatalogEntry(model: ModelEntry): CatalogEntry {
+  const weights = Math.round(model.size_gb * 1_000_000_000);
+  const fetch = model.remaining_download_bytes ?? weights;
+  const shared = Math.max(0, fetch - weights);
+  return {
+    id: model.name,
+    source: "hf",
+    source_id: model.hf_repo || null,
+    name: model.name,
+    family: model.family,
+    kind: "checkpoint",
+    nsfw: false,
+    installed: false,
+    size_bytes: weights,
+    thumbnail_url: null,
+    page_url: model.hf_repo ? `https://huggingface.co/${model.hf_repo}` : null,
+    companion_details:
+      shared > 0 ? [{ name: "shared runtime components", size_bytes: shared }] : [],
+  };
+}
+
 /** Preserve installed identity/host state while filling older `/api/models`
  * rows with richer metadata from the matching live catalog result. */
 function enrichInstalledEntry(
-  installed: CatalogEntry & { hostIds?: string[] },
+  installed: CatalogListEntry,
   live: CatalogEntry | undefined,
-): CatalogEntry & { hostIds?: string[] } {
+): CatalogListEntry {
   if (!live) return installed;
   const installedDescription = installed.description?.trim();
   const modality = installed.modality ?? live.modality;
@@ -146,7 +172,7 @@ function enrichInstalledEntry(
 }
 
 /** Host chip labels for an installed row (host ids → display labels). */
-function hostLabelsFor(entry: CatalogEntry & { hostIds?: string[] }): string[] {
+function hostLabelsFor(entry: CatalogListEntry): string[] {
   return (entry.hostIds ?? []).map(
     (id) =>
       hosts.all.find((host) => host.id === id)?.label ?? (id === "local" ? "This device" : id),
@@ -164,26 +190,7 @@ const manifestEntries = computed<CatalogEntry[]>(() => {
     .filter((model) => !installed.has(model.name))
     .filter((model) => !q || model.name.toLowerCase().includes(q))
     .filter((model) => !family.value || model.family === family.value)
-    .map((model) => {
-      const weights = Math.round(model.size_gb * 1_000_000_000);
-      const fetch = model.remaining_download_bytes ?? weights;
-      const shared = Math.max(0, fetch - weights);
-      return {
-        id: model.name,
-        source: "hf",
-        source_id: model.hf_repo || null,
-        name: model.name,
-        family: model.family,
-        kind: "checkpoint",
-        nsfw: false,
-        installed: false,
-        size_bytes: weights,
-        thumbnail_url: null,
-        page_url: model.hf_repo ? `https://huggingface.co/${model.hf_repo}` : null,
-        companion_details:
-          shared > 0 ? [{ name: "shared runtime components", size_bytes: shared }] : [],
-      };
-    });
+    .map(manifestCatalogEntry);
 });
 
 const combinedEntries = computed(() => {
@@ -421,9 +428,8 @@ const detailTarget = computed(() => catalogTarget());
 
 /**
  * Quantization variants for a manifest model (`base:tag`) — the sibling rows
- * the manifest already describes, so the drawer's variant chips repoint a Pull
- * without changing which runnable model it targets. Live HF/Civitai rows carry
- * no colon base and get no chips (their precedence is decided in the list).
+ * the manifest already describes. Live HF/Civitai rows carry no colon base
+ * and get no chips (their precedence is decided in the list).
  */
 function variantsFor(entry: CatalogEntry): DrawerVariant[] | undefined {
   // Catalog ids (`cv:252914`) contain a colon that is part of the
@@ -443,6 +449,30 @@ function variantsFor(entry: CatalogEntry): DrawerVariant[] | undefined {
 const detailVariants = computed(() =>
   detailEntry.value ? variantsFor(detailEntry.value) : undefined,
 );
+
+/** A variant chip selects the sibling as the drawer's real entry, not merely
+ * as a hidden download override. That keeps weights, footprint, installed
+ * state, repair components, and the eventual Pull target on one authority. */
+function selectDrawerVariant(id: string): void {
+  const listed = combinedEntries.value.find((entry) => entry.id === id);
+  if (listed) {
+    detailEntry.value = listed;
+    return;
+  }
+  const installed = (props.installedEntries ?? []).find((model) => model.name === id);
+  if (installed) {
+    detailEntry.value = {
+      ...installedModelToEntry(installed),
+      hostIds: [...(installed.hostIds ?? [])],
+    };
+    return;
+  }
+  const inventory = models.all.find((model) => model.name === id);
+  if (!inventory) return;
+  detailEntry.value = inventory.downloaded
+    ? installedModelToEntry(inventory)
+    : manifestCatalogEntry(inventory);
+}
 
 /** Pull vs Repair in the drawer follows the fleet, not this one row's flag. */
 const detailAction = computed(() =>
@@ -600,6 +630,7 @@ onMounted(async () => {
           :pulling="pulling.has(entry.id)"
           :hosts="hostLabelsFor(entry)"
           :installable="installable(entry)"
+          :selected="detailEntry?.id === entry.id"
           @pull="pull"
           @open="detailEntry = $event"
         />
@@ -609,6 +640,7 @@ onMounted(async () => {
           :pulling="pulling.has(entry.id)"
           :hosts="hostLabelsFor(entry)"
           :installable="installable(entry)"
+          :selected="detailEntry?.id === entry.id"
           class="px-3 py-2"
           @pull="pull"
           @open="detailEntry = $event"
@@ -644,6 +676,7 @@ onMounted(async () => {
       :action="detailAction"
       @close="detailEntry = null"
       @pull="pullFromDrawer"
+      @select-variant="selectDrawerVariant"
     />
   </div>
 </template>

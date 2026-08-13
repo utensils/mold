@@ -27,6 +27,7 @@ vi.mock("../../lib/catalogSizes", () => ({
 vi.mock("../../lib/openExternal", () => ({ openExternal: vi.fn() }));
 
 import CatalogTab from "./CatalogTab.vue";
+import CatalogDetailDrawer from "./CatalogDetailDrawer.vue";
 import { useConnectionStore } from "../../stores/connection";
 import { useDownloadsStore } from "../../stores/downloads";
 import { useHostModelsStore } from "../../stores/hostModels";
@@ -1118,13 +1119,17 @@ describe("CatalogTab variant chips", () => {
       },
     ];
     const wrapper = mount(CatalogTab, {
-      props: { query: "", layout: "grid" as const },
+      props: { query: "", layout: "table" as const },
       global: { plugins: [] },
     });
     await flushPromises();
 
-    await wrapper.findAll("[data-test='catalog-card']")[0]!.trigger("click");
+    const rows = wrapper.findAll("[data-test='catalog-table-row']");
+    const q4Row = rows.find((row) => row.text().includes("flux-dev:q4"))!;
+    const q8Row = rows.find((row) => row.text().includes("flux-dev:q8"))!;
+    await q4Row.trigger("click");
     await flushPromises();
+    expect(q4Row.attributes("data-selected")).toBe("true");
 
     const chips = wrapper
       .get("[data-test='drawer-variants']")
@@ -1134,5 +1139,123 @@ describe("CatalogTab variant chips", () => {
     expect(labels.some((t) => t.includes("q8"))).toBe(true);
     // Each variant advertises its footprint so the choice is informed.
     expect(labels.some((t) => t.includes("6.0 GB"))).toBe(true);
+
+    const q8 = chips.find((chip) => chip.text().includes("q8"))!;
+    await q8.trigger("click");
+    await flushPromises();
+
+    // The chosen variant becomes the drawer's actual entry; every detail and
+    // repair field now derives from q8 rather than changing only the Pull id,
+    // and the selected-list highlight follows that same authority.
+    expect(wrapper.getComponent(CatalogDetailDrawer).props("entry").id).toBe("flux-dev:q8");
+    expect(q8.attributes("aria-pressed")).toBe("true");
+    expect(q4Row.attributes("data-selected")).toBeUndefined();
+    expect(q8Row.attributes("data-selected")).toBe("true");
+  });
+
+  it("keeps a filtered non-installed sibling as a full manifest Pull entry", async () => {
+    setActivePinia(createPinia());
+    useModelStore().all = [
+      {
+        name: "flux-dev:q4",
+        family: "flux",
+        size_gb: 6,
+        is_loaded: false,
+        hf_repo: "org/flux-dev",
+        default_steps: 4,
+        default_guidance: 1,
+        default_width: 1024,
+        default_height: 1024,
+        description: "",
+        downloaded: false,
+      },
+      {
+        name: "flux-dev:q8",
+        family: "flux",
+        size_gb: 12,
+        remaining_download_bytes: 20_000_000_000,
+        is_loaded: false,
+        hf_repo: "org/flux-dev",
+        default_steps: 4,
+        default_guidance: 1,
+        default_width: 1024,
+        default_height: 1024,
+        description: "",
+        downloaded: false,
+      },
+    ];
+    const wrapper = mount(CatalogTab, {
+      props: { query: "q4", layout: "table" as const },
+      global: { plugins: [] },
+    });
+    await flushPromises();
+
+    await wrapper.get("[data-test='catalog-table-row']").trigger("click");
+    await flushPromises();
+    const q8 = wrapper
+      .get("[data-test='drawer-variants']")
+      .findAll("[data-test='variant-chip']")
+      .find((chip) => chip.text().includes("q8"))!;
+    await q8.trigger("click");
+    await flushPromises();
+
+    const chosen = wrapper.getComponent(CatalogDetailDrawer).props("entry") as CatalogEntry;
+    expect(chosen.id).toBe("flux-dev:q8");
+    expect(chosen.installed).toBe(false);
+    expect(chosen.size_bytes).toBe(12_000_000_000);
+    expect(chosen.companion_details).toEqual([
+      { name: "shared runtime components", size_bytes: 8_000_000_000 },
+    ]);
+    expect(wrapper.getComponent(CatalogDetailDrawer).props("action")).toBe("Pull");
+  });
+
+  it("preserves remote ownership when a filtered installed sibling is selected", async () => {
+    setActivePinia(createPinia());
+    const q4 = {
+      name: "flux-dev:q4",
+      family: "flux",
+      size_gb: 6,
+      is_loaded: false,
+      hf_repo: "org/flux-dev",
+      default_steps: 4,
+      default_guidance: 1,
+      default_width: 1024,
+      default_height: 1024,
+      description: "",
+      downloaded: false,
+    };
+    const q8 = {
+      ...q4,
+      name: "flux-dev:q8",
+      size_gb: 12,
+      downloaded: true,
+      hostIds: ["render-box"],
+    };
+    useModelStore().all = [q4, q8];
+    const wrapper = mount(CatalogTab, {
+      props: {
+        query: "q4",
+        layout: "table" as const,
+        installedEntries: [q8],
+      },
+      global: { plugins: [] },
+    });
+    await flushPromises();
+
+    await wrapper.get("[data-test='catalog-table-row']").trigger("click");
+    await flushPromises();
+    const q8Chip = wrapper
+      .get("[data-test='drawer-variants']")
+      .findAll("[data-test='variant-chip']")
+      .find((chip) => chip.text().includes("q8"))!;
+    await q8Chip.trigger("click");
+    await flushPromises();
+
+    const chosen = wrapper.getComponent(CatalogDetailDrawer).props("entry") as CatalogEntry & {
+      hostIds?: string[];
+    };
+    expect(chosen.id).toBe("flux-dev:q8");
+    expect(chosen.installed).toBe(true);
+    expect(chosen.hostIds).toEqual(["render-box"]);
   });
 });
