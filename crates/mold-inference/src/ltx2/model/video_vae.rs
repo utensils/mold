@@ -1604,11 +1604,15 @@ impl AutoencoderKLLtx2Video {
 mod tests {
     use super::{
         patchify_video, unpatchify_video, AutoencoderKLLtx2Video, AutoencoderKLLtx2VideoConfig,
-        Ltx2VideoCausalConv3d, Ltx2VideoDownsampler3d, Ltx2VideoResnetBlock3d,
-        Ltx2VideoUpsampler3d, PerChannelRmsNorm, SpatialDecodeTiling, SpatialPaddingMode,
-        VaeBlockConfig,
+        Ltx2VideoDownsampler3d, Ltx2VideoResnetBlock3d, Ltx2VideoUpsampler3d, SpatialDecodeTiling,
+        SpatialPaddingMode, VaeBlockConfig,
     };
+    // Only the Metal-gated tests below reach these, so the default
+    // `--workspace --all-targets` Clippy gate sees them as unused otherwise.
+    #[cfg(feature = "metal")]
+    use super::{Ltx2VideoCausalConv3d, PerChannelRmsNorm};
     use candle_core::{DType, Device, Tensor};
+    #[cfg(feature = "metal")]
     use candle_nn::group_norm;
     use candle_nn::VarBuilder;
     use std::collections::HashMap;
