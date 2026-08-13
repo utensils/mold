@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Run the development-only MiniMax H3 runtime-record producer Clippy gate in main's CUDA job, after the toolkit is installed, instead of failing the CPU Rust job on a missing `nvcc`; the local CI mirror and routing contract now enforce the same placement.
+
 - Updated the standalone catalog integration contract for public MiniMax H3 discovery while retaining its separate runtime-access restriction, restoring the main coverage gate after public H3 activation.
 
 - Restored deterministic server and coverage CI by giving preloaded mock engines a conservative synthetic recipe and preventing test-only catalog refreshes from importing or overwriting state through the runner's real Mold home.
