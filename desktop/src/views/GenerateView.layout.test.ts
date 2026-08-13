@@ -83,10 +83,11 @@ describe("GenerateView layout", () => {
   });
 
   // A conditioned LTX-2 render may go out undescribed. The view owns the
-  // shared blocker authority; the composer only renders and reflects it.
-  it("gates Generate on one visible blocker authority", () => {
+  // shared blocker authority; obvious required inputs can disable the button
+  // without taking over the composer with corrective guidance.
+  it("keeps Generate gating separate from visible blocker guidance", () => {
     expect(tagFor(composerCardSource, "generate-button")).toContain(':disabled="generateDisabled"');
-    expect(composerCardSource).toContain("props.disabledReason !== null");
+    expect(composerCardSource).toContain("props.disabled || props.submitting");
     expect(composerCardSource).toContain('<ActionBlocker v-if="disabledReason"');
     expect(composerCardSource).not.toContain("!form.prompt.trim() || !form.model");
 
@@ -96,6 +97,7 @@ describe("GenerateView layout", () => {
     );
     expect(viewSource).toContain("const generationInputBlockerReason = computed");
     expect(viewSource).toContain("if (generationInputBlockerReason.value ||");
+    expect(viewSource).toContain(':disabled="composerDisabled"');
     expect(viewSource).toContain(':disabled-reason="composerBlockerReason"');
   });
 

@@ -2414,12 +2414,17 @@ const generationInputBlockerReason = computed<string | null>(() => {
 });
 
 const composerBlockerReason = computed<string | null>(() => {
+  if (promptMissing.value) return null;
   if (generationInputBlockerReason.value) return generationInputBlockerReason.value;
   if (preparedBatch.value) {
     return "Use the reviewed variations panel to generate this prepared batch, or discard it to return to one-shot generation.";
   }
   return null;
 });
+
+const composerDisabled = computed(
+  () => generationInputBlockerReason.value !== null || preparedBatch.value !== null,
+);
 
 const emptyCanvasGuidance = computed(() =>
   promptRequired(form)
@@ -3544,6 +3549,7 @@ onBeforeUnmount(() => {
             :expansion-host-label="expansionHostLabel"
             :can-undo="quickExpansionOriginal !== null"
             :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
+            :disabled="composerDisabled"
             :disabled-reason="composerBlockerReason"
             :submitting="submissionPlanning"
             :button-label="buttonLabel"

@@ -28,6 +28,7 @@ const props = withDefaults(
     expansionHostLabel: string | null;
     canUndo: boolean;
     preparedBlocked: boolean;
+    disabled: boolean;
     disabledReason: string | null;
     submitting: boolean;
     buttonLabel: string;
@@ -49,9 +50,9 @@ const emit = defineEmits<{
   "update:remixSource": [value: "original" | "current"];
 }>();
 
-// The view owns one blocker authority shared with its submit guard. This card
-// only renders that reason and reflects it in the button state.
-const generateDisabled = computed(() => props.disabledReason !== null || props.submitting);
+// Disabled state and corrective guidance are intentionally separate: obvious
+// requirements such as an empty prompt do not need a persistent warning.
+const generateDisabled = computed(() => props.disabled || props.submitting);
 const placeholder = computed(() =>
   promptPlaceholder(props.form, "Describe the image you want to create…"),
 );
