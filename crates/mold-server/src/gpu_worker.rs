@@ -3263,12 +3263,13 @@ fn validate_h3_publication_contract(
         .request
         .frames
         .unwrap_or(mold_core::minimax_h3::MIN_FRAMES);
-    let expected_duration_ms = u64::from(expected_frames)
-        .checked_mul(1_000)
-        .ok_or_else(|| {
-            anyhow::anyhow!("private H3 terminal media provenance mismatch: request-duration")
-        })?
-        / u64::from(mold_core::minimax_h3::FIXED_FPS);
+    let expected_duration_ms = mold_inference::av_media::timeline_duration_ms(
+        u64::from(expected_frames),
+        mold_core::minimax_h3::FIXED_FPS,
+    )
+    .map_err(|_| {
+        anyhow::anyhow!("private H3 terminal media provenance mismatch: request-duration")
+    })?;
     let echo = &output.identity_echo;
     let video = output.response.video.as_ref().ok_or_else(|| {
         anyhow::anyhow!("private H3 terminal media provenance mismatch: response-video")
@@ -5863,7 +5864,9 @@ mod tests {
             thumbnail: vec![0x89, b'P', b'N', b'G'],
             gif_preview: Vec::new(),
             has_audio: true,
-            duration_ms: Some(u64::from(facts.media.frames) * 1_000 / u64::from(facts.media.fps)),
+            duration_ms: Some(
+                (u64::from(facts.media.frames) * 1_000).div_ceil(u64::from(facts.media.fps)),
+            ),
             audio_sample_rate: Some(mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ),
             audio_channels: Some(mold_core::minimax_h3::AUDIO_CHANNELS),
         });
@@ -5899,7 +5902,8 @@ mod tests {
                     .clone(),
                 consumption_identity_sha256: facts.consumption_identity_sha256.clone(),
                 media: facts.media.clone(),
-                duration_ms: u64::from(facts.media.frames) * 1_000 / u64::from(facts.media.fps),
+                duration_ms: (u64::from(facts.media.frames) * 1_000)
+                    .div_ceil(u64::from(facts.media.fps)),
                 audio_sample_rate: mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ,
                 audio_channels: u16::try_from(mold_core::minimax_h3::AUDIO_CHANNELS).unwrap(),
                 synchronized_audio_video: true,
@@ -6465,6 +6469,24 @@ mod tests {
                 .contains("cache-sentinel"));
             assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn claimed_h3_publication_accepts_container_rounded_duration() {
+        let (job, _result_rx, _progress_rx, _queue_rx, _queue, _registry) =
+            claimed_h3_job_fixture("claimed-h3-rounded-duration").await;
+        let facts = fake_h3_facts();
+        let claimed_output = fake_h3_output(&facts, true, false);
+        let duration_ms = claimed_output.identity_echo.duration_ms;
+        let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
+
+        assert_eq!(duration_ms, 5_167);
+        assert_ne!(
+            duration_ms,
+            u64::from(facts.media.frames) * 1_000 / u64::from(facts.media.fps)
+        );
+        validate_h3_publication_contract(&worker, &job, &facts, &claimed_output)
+            .expect("the MP4 timescale's rounded-up millisecond duration must publish");
     }
 
     #[tokio::test]

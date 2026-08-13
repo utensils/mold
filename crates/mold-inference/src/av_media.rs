@@ -192,6 +192,22 @@ pub struct MuxedMp4 {
     pub report: AacMuxReport,
 }
 
+/// Convert an exact media timeline to the smallest whole millisecond that
+/// contains it. Container timestamps describe a half-open interval, so floor
+/// division would report a duration shorter than a non-integral timeline.
+pub fn timeline_duration_ms(duration_ticks: u64, timescale: u32) -> Result<u64> {
+    if duration_ticks == 0 {
+        bail!("media timeline duration must be greater than zero");
+    }
+    if timescale == 0 {
+        bail!("media timeline timescale must be greater than zero");
+    }
+    duration_ticks
+        .checked_mul(1_000)
+        .context("media timeline millisecond duration overflow")
+        .map(|duration| duration.div_ceil(u64::from(timescale)))
+}
+
 /// Round a media timeline to the nearest whole PCM sample without accumulating
 /// a per-frame error.
 ///
@@ -753,6 +769,15 @@ mod tests {
         assert!(aligned_sample_count(0, 24, 32_000).is_err());
         assert!(aligned_sample_count(124, 0, 32_000).is_err());
         assert!(aligned_sample_count(124, 24, 0).is_err());
+        assert!(timeline_duration_ms(0, 24_000).is_err());
+        assert!(timeline_duration_ms(124_000, 0).is_err());
+        assert!(timeline_duration_ms(u64::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn timeline_duration_covers_non_integral_last_millisecond() {
+        assert_eq!(timeline_duration_ms(124_000, 24_000).unwrap(), 5_167);
+        assert_eq!(timeline_duration_ms(120_000, 24_000).unwrap(), 5_000);
     }
 
     #[cfg(feature = "mp4")]
