@@ -31,6 +31,7 @@ function mountComposer(form: GenerateForm, overrides: Record<string, unknown> = 
       expansionHostLabel: null,
       canUndo: false,
       preparedBlocked: false,
+      disabled: false,
       disabledReason: null,
       submitting: false,
       buttonLabel: "Generate",
@@ -69,18 +70,20 @@ describe("ComposerCard", () => {
     expect(form.prompt).toBe("a lighthouse"); // textarea untouched
   });
 
-  it("disables Generate and displays the shared corrective reason", () => {
+  it("can disable Generate without displaying obvious guidance", () => {
     const emptyForm = baseForm();
     emptyForm.prompt = "";
-    const missingPrompt = mountComposer(emptyForm, {
-      disabledReason: "Add a prompt before generating.",
-    });
+    const missingPrompt = mountComposer(emptyForm, { disabled: true });
     expect(missingPrompt.get("[data-test='generate-button']").attributes("disabled")).toBeDefined();
-    expect(missingPrompt.get("[data-test='action-blocker']").text()).toContain(
-      "Add a prompt before generating.",
-    );
+    expect(missingPrompt.find("[data-test='action-blocker']").exists()).toBe(false);
+  });
+
+  it("disables Generate and displays non-obvious corrective guidance", () => {
     expect(
-      mountComposer(baseForm(), { disabledReason: "Use the reviewed variations panel." })
+      mountComposer(baseForm(), {
+        disabled: true,
+        disabledReason: "Use the reviewed variations panel.",
+      })
         .get("[data-test='generate-button']")
         .attributes("disabled"),
     ).toBeDefined();
@@ -100,6 +103,7 @@ describe("ComposerCard", () => {
     const wrapper = mountComposer(baseForm(), {
       effectiveBatchSize: 3,
       expansionRunning: true,
+      disabled: true,
       disabledReason: "Wait for prompt preparation to finish.",
     });
     expect(wrapper.get("[data-test='generate-button']").attributes("disabled")).toBeDefined();
@@ -108,6 +112,7 @@ describe("ComposerCard", () => {
   it("does not submit from the shortcut while Generate is disabled", async () => {
     const wrapper = mountComposer(baseForm(), {
       effectiveBatchSize: 3,
+      disabled: true,
       disabledReason: "Use the reviewed variations panel.",
     });
     await wrapper

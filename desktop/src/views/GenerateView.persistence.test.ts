@@ -143,6 +143,20 @@ describe("GenerateView form persistence", () => {
     expect(wrapper.get('[data-test="generate-button"]').attributes("disabled")).toBeUndefined();
   });
 
+  it("disables an empty required prompt without showing an obvious blocker", async () => {
+    useModelStore().all = [model];
+    const form = useGenerateFormStore().form;
+    form.model = model.name;
+    form.family = model.family;
+    form.prompt = "";
+
+    const wrapper = mountView();
+    await flushPromises();
+
+    expect(wrapper.get('[data-test="generate-button"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.find('[data-test="action-blocker"]').exists()).toBe(false);
+  });
+
   it("shows the exact LTX blocker and enables a valid conditioned request", async () => {
     const ltx = {
       ...model,
