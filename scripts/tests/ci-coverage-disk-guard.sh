@@ -30,6 +30,10 @@ grep -Fq '/usr/local/lib/android' <<< "$coverage_job" \
   || fail "coverage cleanup does not remove the preinstalled Android SDK"
 grep -Fq 'df -h' <<< "$coverage_job" \
   || fail "coverage cleanup does not report disk capacity"
+grep -Fq 'timeout-minutes: 60' <<< "$coverage_job" \
+  || fail "coverage job does not have a bounded runtime"
+grep -Fq 'run: timeout --signal=TERM --kill-after=60s 45m cargo llvm-cov --workspace --lcov --output-path lcov.info' <<< "$coverage_job" \
+  || fail "coverage generation does not have a bounded runtime"
 
 fixture="$(mktemp)"
 trap 'rm -f "$fixture"' EXIT

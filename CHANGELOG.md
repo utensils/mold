@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Bound the main Rust and coverage jobs to one hour, cap their test commands at twenty and forty-five minutes respectively, and remove an unbounded scheduling race from the queued SSE position regression, so a stalled server test fails promptly instead of consuming a runner for hours.
+
 - Corrected public SM89 H3 release provenance so the authenticated Qwen support loader carries a public marker while private-UAT builds retain the release-rejected private marker.
 
 - Fixed CUDA container source-identity verification to authenticate the full embedded commit directly from the shipped binary while checking the intentionally abbreviated human-facing version separately.

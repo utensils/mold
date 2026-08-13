@@ -327,6 +327,8 @@ if grep -Fq 'name: Test (PR suite)' <<< "$rust_gate"; then
 fi
 grep -Fq 'name: Test (full main suite)' <<< "$rust_gate" \
   || fail "main Rust suite does not retain the complete workspace tests"
+grep -Fq 'run: timeout --signal=TERM --kill-after=60s 20m cargo test --workspace' <<< "$rust_gate" \
+  || fail "main Rust suite does not bound the complete workspace tests"
 if grep -Fq 'run: cargo check --workspace' "$ci"; then
   fail "root Rust CI still runs cargo check immediately before all-target Clippy"
 fi
