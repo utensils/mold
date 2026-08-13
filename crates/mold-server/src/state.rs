@@ -295,6 +295,10 @@ pub struct AppState {
     /// remain authoritative in production, while mock-generation fixtures
     /// must never inherit any process-level `MOLD_OUTPUT_DIR`.
     pub output_disabled_override: bool,
+    /// Test-only opt-in for cases that deliberately exercise config reloads.
+    /// Ordinary fixtures keep their in-memory recipe authority isolated from
+    /// process-global Mold home state.
+    pub(crate) reload_config_from_disk: bool,
     pub start_time: Instant,
     /// Guards concurrent model loads and hot-swaps.
     pub model_load_lock: Arc<Mutex<()>>,
@@ -542,10 +546,23 @@ impl AppState {
     /// Persistence tests opt back in with their own temporary output dir.
     #[cfg(test)]
     pub(crate) fn test_config() -> Config {
-        Config {
+        let mut config = Config {
             output_dir: Some(String::new()),
             ..Config::default()
-        }
+        };
+        config
+            .models
+            .insert("mock-model".to_string(), mold_core::ModelConfig::default());
+        config
+    }
+
+    #[cfg(test)]
+    fn test_config_with_model(model_name: &str) -> Config {
+        let mut config = Self::test_config();
+        config
+            .models
+            .insert(model_name.to_string(), mold_core::ModelConfig::default());
+        config
     }
 
     pub(crate) fn is_output_disabled(&self, config: &Config) -> bool {
@@ -575,6 +592,7 @@ impl AppState {
             config: Arc::new(tokio::sync::RwLock::new(config)),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: false,
+            reload_config_from_disk: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
@@ -644,6 +662,7 @@ impl AppState {
             config: Arc::new(tokio::sync::RwLock::new(config)),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: false,
+            reload_config_from_disk: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
@@ -706,6 +725,7 @@ impl AppState {
 
     #[cfg(test)]
     pub fn with_engine(engine: impl InferenceEngine + 'static) -> Self {
+        let model_name = engine.model_name().to_string();
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = QueueHandle::new(tx);
         let mut cache = ModelCache::new(resolve_max_cached_models());
@@ -720,9 +740,12 @@ impl AppState {
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
-            config: Arc::new(tokio::sync::RwLock::new(Self::test_config())),
+            config: Arc::new(tokio::sync::RwLock::new(Self::test_config_with_model(
+                &model_name,
+            ))),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: true,
+            reload_config_from_disk: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
@@ -752,6 +775,7 @@ impl AppState {
     pub fn with_engine_and_queue(
         engine: impl InferenceEngine + 'static,
     ) -> (Self, tokio::sync::mpsc::Receiver<GenerationJob>) {
+        let model_name = engine.model_name().to_string();
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         let queue = QueueHandle::new(tx);
         let mut cache = ModelCache::new(resolve_max_cached_models());
@@ -766,9 +790,12 @@ impl AppState {
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
-            config: Arc::new(tokio::sync::RwLock::new(Self::test_config())),
+            config: Arc::new(tokio::sync::RwLock::new(Self::test_config_with_model(
+                &model_name,
+            ))),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: true,
+            reload_config_from_disk: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
@@ -815,6 +842,7 @@ impl AppState {
             config: Arc::new(tokio::sync::RwLock::new(Config::default())),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: false,
+            reload_config_from_disk: false,
             start_time: Instant::now(),
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),

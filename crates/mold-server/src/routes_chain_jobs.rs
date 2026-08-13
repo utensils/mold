@@ -1677,10 +1677,11 @@ mod tests {
         std::fs::write(&transformer, b"transformer").unwrap();
         std::fs::write(&vae, b"vae").unwrap();
 
-        let state = state_with(
+        let mut state = state_with(
             Arc::new(Some(MetadataDb::open_in_memory().unwrap())),
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
+        state.reload_config_from_disk = true;
         assert!(!state
             .config
             .read()
