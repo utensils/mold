@@ -819,8 +819,11 @@ require_text crates/mold-server/src/h3_private_bridge.rs \
   'pub(crate) resolved_reference_fingerprint_sha256: Option<String>' \
   "the one-shot owner contract omits resolved reference artifact identity"
 require_text crates/mold-server/src/gpu_worker.rs \
-  'durable_reference_fingerprint != contract.reference_fingerprint_sha256' \
+  'durable_reference_fingerprint.as_deref()' \
   "terminal publication does not cross-check durable Ref2VA order metadata"
+require_text crates/mold-server/src/gpu_worker.rs \
+  '== contract.reference_fingerprint_sha256.as_deref()' \
+  "terminal publication does not bind durable Ref2VA order metadata to the prepared contract"
 require_text crates/mold-server/src/h3_attempt.rs \
   'mold_core::minimax_h3::Task::Ref2va => {' \
   "the one-shot attempt fence does not validate the Ref2VA task partition"
