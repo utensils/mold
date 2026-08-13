@@ -1954,7 +1954,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-i2v-a14b:fp8`
 
-Schema 1 · hash `1b25374233788728a736c10bb64f4120d7fd54d889525dbedb48952a6457bc38` · default recipe `default`
+Schema 1 · hash `b1b456db84441fbe2b68d5623ec330a0225db399ad46e19809fd67f79fada023` · default recipe `default`
 
 Models: `wan22-i2v-a14b:fp8`.
 
@@ -1963,7 +1963,7 @@ Models: `wan22-i2v-a14b:fp8`.
 - Resolution: buckets; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `832x480`, 20 steps, guidance 3.5.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–257 on `4n+1` (default 33); FPS 1–120 by 1, default 16; duration limit none.
+- Temporal: frames 1–257 on `4n+1` (default 45); FPS 1–120 by 1, default 16; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -1998,7 +1998,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-i2v-a14b:q8`
 
-Schema 1 · hash `336c247661f038abcdcfb6a8cd5445736356d98e6652c13bbf0c997dfe5b4c61` · default recipe `default`
+Schema 1 · hash `3a13c7774410f2cec5b92ab77d2502e95f14a8269217beb98ffa4ae8a1821810` · default recipe `default`
 
 Models: `wan22-i2v-a14b:q8`.
 
@@ -2007,7 +2007,7 @@ Models: `wan22-i2v-a14b:q8`.
 - Resolution: buckets; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `832x480`, 20 steps, guidance 3.5.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–257 on `4n+1` (default 33); FPS 1–120 by 1, default 16; duration limit none.
+- Temporal: frames 1–257 on `4n+1` (default 73); FPS 1–120 by 1, default 16; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -2020,7 +2020,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-t2v-a14b:fp8`
 
-Schema 1 · hash `b6b43fd3534f4c01921d141958be4b380216936a61ad4cd0c47860ad4f00081f` · default recipe `default`
+Schema 1 · hash `72bc0445be2151847f91d9db6645039d24a784229b9c0c21c9ac3174bb97d2a0` · default recipe `default`
 
 Models: `wan22-t2v-a14b:fp8`.
 
@@ -2029,7 +2029,7 @@ Models: `wan22-t2v-a14b:fp8`.
 - Resolution: buckets; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `832x480`, 20 steps, guidance 3.5.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–257 on `4n+1` (default 33); FPS 1–120 by 1, default 16; duration limit none.
+- Temporal: frames 1–257 on `4n+1` (default 45); FPS 1–120 by 1, default 16; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
@@ -2064,7 +2064,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-t2v-a14b:q8`
 
-Schema 1 · hash `f0ae6ec71175c832387067e71c38118c130275ae06c764e687d74aad30ff9443` · default recipe `default`
+Schema 1 · hash `350ae3e22cd7cd0b7c7db1f0a2f3954bb91a64b5b9a7326d6f698918193d9431` · default recipe `default`
 
 Models: `wan22-t2v-a14b:q8`.
 
@@ -2073,7 +2073,7 @@ Models: `wan22-t2v-a14b:q8`.
 - Resolution: buckets; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `832x480`, 20 steps, guidance 3.5.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Temporal: frames 1–257 on `4n+1` (default 33); FPS 1–120 by 1, default 16; duration limit none.
+- Temporal: frames 1–257 on `4n+1` (default 73); FPS 1–120 by 1, default 16; duration limit none.
 
 | Exact ratio | Qualified presets |
 |---|---|
