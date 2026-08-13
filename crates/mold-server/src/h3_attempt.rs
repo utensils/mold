@@ -11,7 +11,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) fn private_work_identity_sha256(work_id: &str) -> String {
     use sha2::{Digest, Sha256};
 
@@ -22,7 +22,7 @@ pub(crate) fn private_work_identity_sha256(work_id: &str) -> String {
     format!("{:x}", digest.finalize())
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn private_cancellation_scope_identity_sha256(
     work_identity_sha256: &str,
@@ -372,7 +372,7 @@ impl<'a> H3AttemptScope<'a> {
         self.cancellation.clone()
     }
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn private_run_context(
         &self,
     ) -> anyhow::Result<mold_inference::H3PrivateFl2VaRunContext> {
@@ -486,7 +486,7 @@ impl<'a> H3AttemptScopeFacts<'a> {
         self.predicted_host_increment_bytes
     }
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn matches_private_run_binding(
         self,
         work_identity_sha256: &str,
@@ -617,7 +617,7 @@ pub(crate) fn claim_generation_attempt(
         };
         let facts = prepared.facts();
         validate_prepared_facts_against_plan(&facts, plan, authority)?;
-        #[cfg(feature = "h3-private-uat")]
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         validate_private_prepared_binding(&facts, fence, job)?;
         (
             facts.prepared_attempt_identity_sha256,
@@ -713,7 +713,7 @@ pub(crate) fn rebuild_generation_current(
             .ok_or(H3AttemptError::IdentityMismatch)?;
         let facts = prepared.facts();
         validate_prepared_facts_against_plan(&facts, plan, authority)?;
-        #[cfg(feature = "h3-private-uat")]
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         validate_private_prepared_binding(&facts, lease, job)?;
         (
             facts.prepared_attempt_identity_sha256,
@@ -815,7 +815,7 @@ fn validate_prepared_facts_against_plan(
     Ok(())
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn validate_private_prepared_binding(
     facts: &crate::h3_private_bridge::H3PreparedAttemptFacts,
     fence: &crate::scheduler::LeaseFence,

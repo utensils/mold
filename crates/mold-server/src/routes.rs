@@ -801,7 +801,7 @@ struct PreparedGenerationRoute {
     warnings: RequestWarnings,
     preferred_gpu: Option<usize>,
     resolved_references: Option<crate::reference_uploads::ResolvedReferenceSet>,
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
 }
 
@@ -827,19 +827,19 @@ async fn prepare_generation(
              re-run the CLI with --local so the EXR sidecar is written on your machine",
         ));
     }
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
         request.normalise_output_format(Some(mold_core::minimax_h3::FAMILY));
     }
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let h3_private_ingress_grant = crate::h3_private_bridge::classify_h3_private_ingress(
         request,
         authenticated,
         state.instance_id.as_str(),
     )?;
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let private_h3_ingress = h3_private_ingress_grant.is_some();
-    #[cfg(not(feature = "h3-private-uat"))]
+    #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
     let private_h3_ingress = false;
 
     let family = if private_h3_ingress {
@@ -997,13 +997,13 @@ async fn prepare_generation(
                 .map_err(ApiError::validation)?;
         }
     }
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let validation = if private_h3_ingress {
         mold_core::validation::validate_h3_private_uat_request(validation_request)
     } else {
         validate_generate_request(validation_request, resolved_family.as_deref())
     };
-    #[cfg(not(feature = "h3-private-uat"))]
+    #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
     let validation = validate_generate_request(validation_request, resolved_family.as_deref());
     if let Err(e) = validation {
         return Err(ApiError::validation(e));
@@ -1061,7 +1061,7 @@ async fn prepare_generation(
     };
 
     warnings.dimension = dim_warning;
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let h3_private_ingress_grant = if h3_private_ingress_grant.is_some() {
         crate::h3_private_bridge::classify_h3_private_ingress(
             request,
@@ -1076,7 +1076,7 @@ async fn prepare_generation(
         warnings,
         preferred_gpu,
         resolved_references,
-        #[cfg(feature = "h3-private-uat")]
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant,
     })
 }
@@ -1781,7 +1781,7 @@ async fn generate(
         warnings,
         preferred_gpu,
         resolved_references,
-        #[cfg(feature = "h3-private-uat")]
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant,
     } = prepared;
     record_prompt_history(&state, &typed.0, typed.1.as_deref(), &typed.2);
@@ -1864,7 +1864,7 @@ async fn generate(
         result_tx,
         output_dir,
         batch_child: None,
-        #[cfg(feature = "h3-private-uat")]
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant,
     };
 
@@ -2862,7 +2862,7 @@ async fn generate_stream(
         warnings,
         preferred_gpu,
         resolved_references,
-        #[cfg(feature = "h3-private-uat")]
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant,
     } = prepared;
     if completion_payload == SseCompletionPayload::MetadataOnly && output_dir.is_none() {
@@ -2988,7 +2988,7 @@ async fn generate_stream(
         result_tx,
         output_dir,
         batch_child: None,
-        #[cfg(feature = "h3-private-uat")]
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant,
     };
 
@@ -3152,23 +3152,23 @@ async fn placement_preview_for_request_authenticated(
     copies: u32,
     authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
 ) -> Result<mold_core::GenerationPlacementPreview, ApiError> {
-    #[cfg(not(feature = "h3-private-uat"))]
+    #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
     let _ = authenticated;
     mold_core::minimax_h3::canonicalize_request_model(&mut request);
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
         request.normalise_output_format(Some(mold_core::minimax_h3::FAMILY));
         crate::h3_private_bridge::pin_private_preview_seed(&mut request)?;
     }
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let h3_private_ingress_grant = crate::h3_private_bridge::classify_h3_private_ingress(
         &request,
         authenticated,
         state.instance_id.as_str(),
     )?;
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let private_h3_ingress = h3_private_ingress_grant.is_some();
-    #[cfg(not(feature = "h3-private-uat"))]
+    #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
     let private_h3_ingress = false;
     let plan = state.scheduled_work.latest_plan();
     let unavailable = |outcome: &str, reason: String| mold_core::GenerationPlacementPreview {
@@ -3302,7 +3302,7 @@ async fn placement_preview_for_request_authenticated(
             "authoritative scheduler placement preview is unavailable".to_string(),
         ));
     }
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let dependency_context = crate::variant_dependencies::DependencyPreparationContext {
         h3_private_ingress_grant: if h3_private_ingress_grant.is_some() {
             crate::h3_private_bridge::classify_h3_private_ingress(
@@ -3314,7 +3314,7 @@ async fn placement_preview_for_request_authenticated(
             None
         },
     };
-    #[cfg(not(feature = "h3-private-uat"))]
+    #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
     let dependency_context = crate::variant_dependencies::DependencyPreparationContext::default();
     let prepared = match crate::variant_dependencies::prepare_execution_inputs_existing_only(
         state,
@@ -4976,7 +4976,7 @@ async fn server_capabilities(
     })
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn advertised_private_h3_capability(
     api_key_auth_enabled: bool,
     models_root: &std::path::Path,
@@ -4989,21 +4989,21 @@ fn advertised_private_h3_capability(
     )
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn authenticated_private_h3_model_row(
     capability: &mold_core::MiniMaxH3Capability,
 ) -> Option<mold_core::ModelInfoExtended> {
     crate::h3_private_bridge::authenticated_h3_private_model_row(capability)
 }
 
-#[cfg(not(feature = "h3-private-uat"))]
+#[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
 fn authenticated_private_h3_model_row(
     _capability: &mold_core::MiniMaxH3Capability,
 ) -> Option<mold_core::ModelInfoExtended> {
     None
 }
 
-#[cfg(not(feature = "h3-private-uat"))]
+#[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
 fn advertised_private_h3_capability(
     _api_key_auth_enabled: bool,
     _models_root: &std::path::Path,

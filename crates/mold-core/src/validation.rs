@@ -1700,7 +1700,7 @@ pub fn validate_generate_request_with_family(
 /// This feature-gated helper does not grant authorization or activate a model;
 /// it only prevents the already-authorized private route from re-entering the
 /// public compliance gate before applying the same field validation.
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub fn validate_h3_private_uat_request(req: &GenerateRequest) -> Result<(), String> {
     if !matches!(
         req.model.as_str(),
@@ -3454,7 +3454,7 @@ mod tests {
         req
     }
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     #[test]
     fn private_h3_validation_bypasses_only_activation_for_exact_reviewed_models() {
         let req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);

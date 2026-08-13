@@ -19,12 +19,13 @@ use sha2::{Digest, Sha256};
 
 use super::private_qualification::{
     qualify_private_artifacts, H3ArtifactHashProgress, H3PrivateArtifactQualificationReport,
+    H3_PRIVATE_AUTHORIZATION_SCOPE, H3_PRIVATE_UAT_CLAIM_MARKER, QUALIFICATION_SCHEMA,
 };
 #[cfg(test)]
 use super::private_runtime_observer::H3PrivateRuntimeAuthorityObservation;
 use super::private_runtime_observer::{
     H3PrivateRuntimeBoundObservation, H3PrivateRuntimeProcessObservation,
-    H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA,
+    H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA, H3_PUBLIC_RUNTIME_BOUND_OBSERVATION_SCHEMA,
 };
 use super::private_server::{
     runtime_qualification_identity, valid_stable_cuda_device_id,
@@ -202,7 +203,9 @@ fn validate_observed_envelope(
     reviewed: &H3PrivateRuntimeEnvelopeRecord,
     observation: &H3PrivateRuntimeBoundObservation,
 ) -> Result<()> {
-    if observation.schema != H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA {
+    if observation.schema != H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA
+        && observation.schema != H3_PUBLIC_RUNTIME_BOUND_OBSERVATION_SCHEMA
+    {
         bail!("private H3 runtime observation has an unknown schema")
     }
     let observed = &observation.envelope;
@@ -435,19 +438,7 @@ fn build_candidate(
     embedded_source_sha: &str,
     embedded_runtime_code_identity_sha256: &str,
 ) -> Result<H3PrivateRuntimeQualificationCandidate> {
-    if artifact.decision != "qualified-private-artifacts"
-        || artifact.canonical_model != minimax_h3::FL2VA_COMFY
-        || artifact.task != "fl2va"
-        || artifact.total_bytes == 0
-        || artifact.runtime_constructed
-        || artifact.generated_media
-        || artifact.public_activation != "rejected"
-        || !valid_lower_sha256(&artifact.authorization_record_sha256)
-        || !valid_lower_sha256(&artifact.authorization_source_document_sha256)
-        || !valid_lower_sha256(&artifact.qualification_identity_sha256)
-    {
-        bail!("private H3 runtime candidate lacks exact artifact qualification")
-    }
+    validate_candidate_artifact_qualification(artifact, cfg!(feature = "h3"))?;
     capture.validate(
         artifact,
         embedded_source_sha,
@@ -544,6 +535,45 @@ fn build_candidate(
     };
     record.identity_sha256 = runtime_qualification_identity(&record);
     finish_candidate(record)
+}
+
+fn validate_candidate_artifact_qualification(
+    artifact: &H3PrivateArtifactQualificationReport,
+    public_runtime: bool,
+) -> Result<()> {
+    let (expected_claim, expected_decision, expected_scope, expected_activation) = if public_runtime
+    {
+        (
+            "mold.minimax-h3.public-artifact-reader.v1",
+            "verified-public-artifacts",
+            "public-h3-integration",
+            "supported-compact-fl2va-cuda",
+        )
+    } else {
+        (
+            H3_PRIVATE_UAT_CLAIM_MARKER,
+            "qualified-private-artifacts",
+            H3_PRIVATE_AUTHORIZATION_SCOPE,
+            "rejected",
+        )
+    };
+    if artifact.schema != QUALIFICATION_SCHEMA
+        || artifact.claim_marker != expected_claim
+        || artifact.decision != expected_decision
+        || artifact.authorization_scope != expected_scope
+        || artifact.canonical_model != minimax_h3::FL2VA_COMFY
+        || artifact.task != "fl2va"
+        || artifact.total_bytes == 0
+        || artifact.runtime_constructed
+        || artifact.generated_media
+        || artifact.public_activation != expected_activation
+        || !valid_lower_sha256(&artifact.authorization_record_sha256)
+        || !valid_lower_sha256(&artifact.authorization_source_document_sha256)
+        || !valid_lower_sha256(&artifact.qualification_identity_sha256)
+    {
+        bail!("private H3 runtime candidate lacks exact artifact qualification")
+    }
+    Ok(())
 }
 
 fn finish_candidate(
@@ -942,9 +972,9 @@ mod tests {
     fn artifact_report() -> H3PrivateArtifactQualificationReport {
         H3PrivateArtifactQualificationReport {
             schema: "mold.minimax-h3.private-artifact-qualification.v2",
-            claim_marker: "test-private-marker",
+            claim_marker: H3_PRIVATE_UAT_CLAIM_MARKER,
             decision: "qualified-private-artifacts",
-            authorization_scope: "checkpoint-execution",
+            authorization_scope: H3_PRIVATE_AUTHORIZATION_SCOPE,
             authorization_schema: "mold.minimax-h3.authorization.v1",
             authorization_record_sha256: sha('a'),
             authorization_source_document_sha256: sha('b'),
@@ -963,6 +993,40 @@ mod tests {
             generated_media: false,
             public_activation: "rejected",
             remaining_release_requirements: vec!["private-cuda-runtime-qualification"],
+        }
+    }
+
+    #[test]
+    fn candidate_artifact_authority_matches_the_compiled_runtime() {
+        let mut private = artifact_report();
+        validate_candidate_artifact_qualification(&private, false).unwrap();
+        for field in ["decision", "claim", "scope", "activation"] {
+            let mut changed = private.clone();
+            match field {
+                "decision" => changed.decision = "verified-public-artifacts",
+                "claim" => changed.claim_marker = "mold.minimax-h3.public-artifact-reader.v1",
+                "scope" => changed.authorization_scope = "public-h3-integration",
+                "activation" => changed.public_activation = "supported-compact-fl2va-cuda",
+                _ => unreachable!(),
+            }
+            assert!(validate_candidate_artifact_qualification(&changed, false).is_err());
+        }
+
+        private.decision = "verified-public-artifacts";
+        private.claim_marker = "mold.minimax-h3.public-artifact-reader.v1";
+        private.authorization_scope = "public-h3-integration";
+        private.public_activation = "supported-compact-fl2va-cuda";
+        validate_candidate_artifact_qualification(&private, true).unwrap();
+        for field in ["decision", "claim", "scope", "activation"] {
+            let mut changed = private.clone();
+            match field {
+                "decision" => changed.decision = "qualified-private-artifacts",
+                "claim" => changed.claim_marker = H3_PRIVATE_UAT_CLAIM_MARKER,
+                "scope" => changed.authorization_scope = H3_PRIVATE_AUTHORIZATION_SCOPE,
+                "activation" => changed.public_activation = "rejected",
+                _ => unreachable!(),
+            }
+            assert!(validate_candidate_artifact_qualification(&changed, true).is_err());
         }
     }
 

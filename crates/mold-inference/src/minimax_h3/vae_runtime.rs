@@ -704,7 +704,7 @@ pub(crate) struct H3ComfyVaeRuntimeBundle<V = MiniMaxH3VisualVae, A = AudioVae> 
     canonical_model: String,
     artifact_plan_identity_sha256: String,
     plan_identity_sha256: String,
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     device: Device,
     pub(crate) artifact_lease: H3ComfyVaeArtifactLease,
 }
@@ -726,17 +726,17 @@ impl<V, A> H3ComfyVaeRuntimeBundle<V, A> {
         &self.plan_identity_sha256
     }
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn artifact_plan_identity_sha256(&self) -> &str {
         &self.artifact_plan_identity_sha256
     }
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn authority_identity_sha256(&self) -> &str {
         self.artifact_lease.authority_identity_sha256()
     }
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn device(&self) -> &Device {
         &self.device
     }
@@ -909,7 +909,7 @@ pub(crate) fn load_h3_comfy_vae_runtime_from_authority(
         canonical_model: plan.canonical_model,
         artifact_plan_identity_sha256: plan.artifact_plan_identity_sha256,
         plan_identity_sha256: plan.identity_sha256,
-        #[cfg(feature = "h3-private-uat")]
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         device: device.clone(),
         artifact_lease,
     })
@@ -1729,7 +1729,7 @@ fn load_with_factory<F: VaeFactory>(
         canonical_model: plan.canonical_model.clone(),
         artifact_plan_identity_sha256: plan.artifact_plan_identity_sha256.clone(),
         plan_identity_sha256: plan.identity_sha256.clone(),
-        #[cfg(feature = "h3-private-uat")]
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         device: device.clone(),
         artifact_lease,
     })

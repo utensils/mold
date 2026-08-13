@@ -138,7 +138,9 @@ RUN find crates/ -name "*.rs" -exec touch {} +
 ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}
 
 # Build the real binary.
-RUN cargo build --release -p mold-ai --features cuda,expand,discord,tui,webp,mp4,metrics
+RUN h3_feature=""; \
+    if [ "${CUDA_COMPUTE_CAP}" = "89" ]; then h3_feature=",h3"; fi; \
+    cargo build --release -p mold-ai --features "cuda${h3_feature},expand,discord,tui,webp,mp4,metrics"
 RUN scripts/seal-cuda-ptx-manifest.py /build/target/release/mold \
     "${CUDA_COMPUTE_CAP}" /build/target/release/build
 RUN scripts/probe-cuda-embedded-ptx.py /build/target/release/mold \

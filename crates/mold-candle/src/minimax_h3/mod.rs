@@ -15,7 +15,7 @@ mod int8_cuda;
 mod loader;
 mod model;
 mod presentation;
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 mod private_runtime_observation;
 mod processor;
 mod qwen_nvfp4;
@@ -122,7 +122,7 @@ pub use presentation::{
     H3Presentation, H3RawTokenizer, PresentationError, RefPresentation, RefPresentationKind,
     VideoPresentationBlock,
 };
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub use private_runtime_observation::{H3PrivateWorkspaceCapture, H3PrivateWorkspaceObservation};
 pub use processor::{
     create_mm_token_type_ids, pack_qwen_vision_u8, qwen_mrope_positions, sample_video_frames,
@@ -138,7 +138,7 @@ pub use qwen_nvfp4::{
     H3_QWEN_NVFP4_AWQ_TENSOR_COUNT, H3_QWEN_NVFP4_LINEAR_COUNT,
     H3_QWEN_NVFP4_PRE_QUANT_SCALE_COUNT, H3_QWEN_QUANT_MARKER_COUNT,
 };
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 #[doc(hidden)]
 pub use qwen_nvfp4_runtime::{
     load_h3_qwen_nvfp4_conditioner_after_authorization,

@@ -20,8 +20,18 @@ pub const CANONICAL_H3_SERVER_FEATURES: &[&str] = &[
     "CARGO_FEATURE_NVML",
 ];
 
+pub const PUBLIC_H3_SERVER_FEATURES: &[&str] = &[
+    "CARGO_FEATURE_CUDA",
+    "CARGO_FEATURE_H3",
+    "CARGO_FEATURE_H3_PRIVATE_BRIDGE",
+    "CARGO_FEATURE_MP4",
+    "CARGO_FEATURE_NVML",
+];
+
 pub fn validate_canonical_h3_server_features() -> Result<(), String> {
-    if std::env::var_os("CARGO_FEATURE_H3_PRIVATE_UAT").is_none() {
+    if std::env::var_os("CARGO_FEATURE_H3").is_none()
+        && std::env::var_os("CARGO_FEATURE_H3_PRIVATE_UAT").is_none()
+    {
         return Ok(());
     }
     let actual = std::env::vars_os()
@@ -33,13 +43,18 @@ pub fn validate_canonical_h3_server_features() -> Result<(), String> {
 
 pub fn validate_canonical_h3_server_feature_keys(actual: &[String]) -> Result<(), String> {
     let actual = actual.iter().cloned().collect::<BTreeSet<_>>();
-    let expected = CANONICAL_H3_SERVER_FEATURES
+    let expected_source = if actual.contains("CARGO_FEATURE_H3") {
+        PUBLIC_H3_SERVER_FEATURES
+    } else {
+        CANONICAL_H3_SERVER_FEATURES
+    };
+    let expected = expected_source
         .iter()
         .map(|key| (*key).to_string())
         .collect::<BTreeSet<_>>();
     if actual != expected {
         return Err(format!(
-            "private H3 server features differ from the canonical campaign build: expected {expected:?}, actual {actual:?}"
+            "H3 server features differ from the canonical build: expected {expected:?}, actual {actual:?}"
         ));
     }
     Ok(())
@@ -49,5 +64,6 @@ pub fn canonical_h3_server_feature_rerun_keys() -> impl Iterator<Item = &'static
     CANONICAL_H3_SERVER_FEATURES
         .iter()
         .copied()
+        .chain(PUBLIC_H3_SERVER_FEATURES.iter().copied())
         .chain(["CARGO_FEATURE_DEFAULT"])
 }

@@ -37,7 +37,7 @@ fn main() {
         println!("cargo:rerun-if-env-changed={key}");
     }
     h3_server_features::validate_canonical_h3_server_features()
-        .expect("invalid private H3 server campaign feature set");
+        .expect("invalid H3 server feature set");
     println!("cargo:rerun-if-env-changed=MOLD_WEB_DIST");
 
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));

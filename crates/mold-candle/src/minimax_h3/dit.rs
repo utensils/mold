@@ -1484,7 +1484,7 @@ impl H3ComfyInt8Attention {
         attention_plan: &H3FrozenAttentionPlan,
     ) -> Result<Tensor> {
         let (batch, seq_len, _) = hidden.dims3()?;
-        #[cfg(feature = "h3-private-uat")]
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         {
             let rows = batch.checked_mul(seq_len).ok_or_else(|| {
                 candle::Error::Msg("MiniMax H3 attention row count overflows".into())
@@ -1576,7 +1576,7 @@ struct H3ComfyInt8Mlp {
 
 impl H3ComfyInt8Mlp {
     fn forward(&self, hidden: &Tensor) -> Result<Tensor> {
-        #[cfg(feature = "h3-private-uat")]
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         {
             let input_rows = hidden.elem_count() / hidden.dim(D::Minus1)?;
             let dtype = hidden.dtype();

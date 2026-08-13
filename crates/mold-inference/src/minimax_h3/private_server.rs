@@ -13,6 +13,7 @@ const H3_CUDA_ATTEMPT_RETAINED_MARKER: &str =
 #[cfg(feature = "mp4")]
 use std::collections::BTreeMap;
 use std::fs::File;
+#[cfg(not(feature = "h3"))]
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 #[cfg(feature = "mp4")]
@@ -129,6 +130,9 @@ pub(crate) fn valid_stable_cuda_device_id(value: &str) -> bool {
 /// artifact/device/runtime/kernel identities retained by its v5 campaign.
 const REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256: &[&str] =
     &["f624f71ce1eba7ebb75a13801da855a92f5eec0fccbcb9783f547479c7abfce5"];
+
+const H3_ARTIFACT_VERIFICATION_PROGRESS: &str = "Verifying MiniMax H3 artifacts";
+const H3_VAE_ARTIFACT_VERIFICATION_PROGRESS: &str = "Verifying MiniMax H3 VAE artifacts";
 
 /// Report whether this binary contains at least one reviewed private-runtime
 /// qualification record. This performs no filesystem access and is suitable
@@ -990,7 +994,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         |hash| {
             progress.checkpoint()?;
             progress.weight_load(
-                "Authenticating private MiniMax H3 artifacts",
+                H3_ARTIFACT_VERIFICATION_PROGRESS,
                 hash.total_bytes_verified,
                 hash.total_bytes,
             );
@@ -1996,7 +2000,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         |hash| {
             progress.checkpoint()?;
             progress.weight_load(
-                "Authenticating private MiniMax H3 artifacts",
+                H3_ARTIFACT_VERIFICATION_PROGRESS,
                 hash.total_bytes_verified,
                 hash.total_bytes,
             );
@@ -2788,7 +2792,7 @@ impl H3ComfyVaeLoadObserver for H3PrivatePreparationVaeObserver<'_> {
             return false;
         }
         self.progress.weight_load(
-            "Authenticating private MiniMax H3 VAE artifacts",
+            H3_VAE_ARTIFACT_VERIFICATION_PROGRESS,
             event.completed,
             event.total,
         );
@@ -3638,11 +3642,13 @@ const fn activation_prerequisite_id(prerequisite: H3FactoryActivationPrerequisit
 /// re-hash the same file. Raw bounds are not exposed to the server; the private
 /// opened-evidence binder consumes them directly.
 pub struct H3PrivateRuntimeQualificationAuthority {
-    path: PathBuf,
-    file: File,
+    storage: RuntimeQualificationStorage,
     record_file_sha256: String,
     record: H3PrivateRuntimeQualificationRecord,
     bounds: H3PrivateQualifiedRuntimeBounds,
+    device_id: String,
+    device_ordinal: usize,
+    compute_capability: (u16, u16),
 }
 
 impl std::fmt::Debug for H3PrivateRuntimeQualificationAuthority {
@@ -3669,18 +3675,15 @@ impl H3PrivateRuntimeQualificationAuthority {
     }
 
     pub fn device_id(&self) -> &str {
-        &self.record.device_id
+        &self.device_id
     }
 
     pub const fn device_ordinal(&self) -> usize {
-        self.record.device_ordinal
+        self.device_ordinal
     }
 
     pub const fn compute_capability(&self) -> (u16, u16) {
-        (
-            self.record.compute_capability[0],
-            self.record.compute_capability[1],
-        )
+        self.compute_capability
     }
 
     pub(crate) fn bounds(&self) -> &H3PrivateQualifiedRuntimeBounds {
@@ -3693,12 +3696,41 @@ impl H3PrivateRuntimeQualificationAuthority {
     }
 
     pub(crate) fn revalidate(&self) -> Result<()> {
-        revalidate_runtime_qualification_file(
-            &self.path,
-            &self.file,
-            &self.record_file_sha256,
-            &self.record,
-        )
+        self.storage
+            .revalidate(&self.record_file_sha256, &self.record)
+    }
+}
+
+enum RuntimeQualificationStorage {
+    External {
+        path: PathBuf,
+        file: File,
+    },
+    #[cfg(feature = "h3")]
+    Embedded,
+}
+
+impl RuntimeQualificationStorage {
+    fn revalidate(
+        &self,
+        record_file_sha256: &str,
+        record: &H3PrivateRuntimeQualificationRecord,
+    ) -> Result<()> {
+        match self {
+            Self::External { path, file } => {
+                revalidate_runtime_qualification_file(path, file, record_file_sha256, record)
+            }
+            #[cfg(feature = "h3")]
+            Self::Embedded => {
+                let bytes = include_bytes!("../../assets/minimax-h3-runtime-qualification.json");
+                if format!("{:x}", Sha256::digest(bytes)) != record_file_sha256
+                    || runtime_qualification_identity(record) != record.identity_sha256
+                {
+                    bail!("embedded H3 runtime qualification changed after authentication")
+                }
+                record.bounds.validate()
+            }
+        }
     }
 }
 
@@ -3734,20 +3766,15 @@ fn revalidate_runtime_qualification_file(
 /// artifacts and live owner route happens only after the bulk qualification
 /// completes.
 struct H3PrivateReviewedRuntimeQualification {
-    path: PathBuf,
-    file: File,
+    storage: RuntimeQualificationStorage,
     record_file_sha256: String,
     record: H3PrivateRuntimeQualificationRecord,
 }
 
 impl H3PrivateReviewedRuntimeQualification {
     fn revalidate(&self) -> Result<()> {
-        revalidate_runtime_qualification_file(
-            &self.path,
-            &self.file,
-            &self.record_file_sha256,
-            &self.record,
-        )
+        self.storage
+            .revalidate(&self.record_file_sha256, &self.record)
     }
 
     /// Reject a reviewed record that cannot authorize this concrete route
@@ -3763,6 +3790,10 @@ impl H3PrivateReviewedRuntimeQualification {
             || self.record.device_ordinal != device_ordinal
             || self.record.compute_capability != [compute_capability.0, compute_capability.1]
         {
+            #[cfg(feature = "h3")]
+            if self.record.compute_capability == [compute_capability.0, compute_capability.1] {
+                return Ok(());
+            }
             bail!("private H3 reviewed runtime qualification cannot authorize this CUDA route")
         }
         Ok(())
@@ -3792,11 +3823,13 @@ impl H3PrivateReviewedRuntimeQualification {
         )?;
         let bounds = self.record.bounds.clone().into_authority();
         let authority = H3PrivateRuntimeQualificationAuthority {
-            path: self.path,
-            file: self.file,
+            storage: self.storage,
             record_file_sha256: self.record_file_sha256,
             record: self.record,
             bounds,
+            device_id: device_id.to_string(),
+            device_ordinal,
+            compute_capability,
         };
         authority.revalidate()?;
         Ok(authority)
@@ -3834,39 +3867,68 @@ fn open_reviewed_h3_private_runtime_qualification_for_source(
         executing_source_sha,
         executing_runtime_code_identity_sha256,
     )?;
-    if !path.is_absolute() {
-        bail!("private H3 runtime qualification path must be absolute")
+    #[cfg(feature = "h3")]
+    {
+        let _ = path;
+        let bytes = include_bytes!("../../assets/minimax-h3-runtime-qualification.json");
+        let record_file_sha256 = format!("{:x}", Sha256::digest(bytes));
+        if !reviewed_record_sha256.contains(&record_file_sha256.as_str()) {
+            bail!("embedded H3 runtime qualification is not in the reviewed evidence allowlist")
+        }
+        let record: H3PrivateRuntimeQualificationRecord = serde_json::from_slice(bytes)
+            .context("invalid embedded H3 runtime qualification record")?;
+        validate_runtime_qualification_record_shape(&record)?;
+        if record.campaign_runtime_code_identity_sha256 != executing_runtime_code_identity_sha256 {
+            bail!("embedded H3 runtime qualification was measured by different runtime code")
+        }
+        let reviewed = H3PrivateReviewedRuntimeQualification {
+            storage: RuntimeQualificationStorage::Embedded,
+            record_file_sha256,
+            record,
+        };
+        reviewed.revalidate()?;
+        Ok(reviewed)
     }
-    let mut file = open_regular_file_no_follow(path).with_context(|| {
-        format!(
-            "failed to open private H3 runtime qualification {}",
-            path.display()
-        )
-    })?;
-    let metadata = file.metadata()?;
-    if metadata.len() == 0 || metadata.len() > MAX_RUNTIME_QUALIFICATION_BYTES {
-        bail!("private H3 runtime qualification record has an invalid size")
+    #[cfg(not(feature = "h3"))]
+    {
+        if !path.is_absolute() {
+            bail!("private H3 runtime qualification path must be absolute")
+        }
+        let mut file = open_regular_file_no_follow(path).with_context(|| {
+            format!(
+                "failed to open private H3 runtime qualification {}",
+                path.display()
+            )
+        })?;
+        let metadata = file.metadata()?;
+        if metadata.len() == 0 || metadata.len() > MAX_RUNTIME_QUALIFICATION_BYTES {
+            bail!("private H3 runtime qualification record has an invalid size")
+        }
+        let record_file_sha256 = sha256_open_file(&file)?;
+        if !reviewed_record_sha256.contains(&record_file_sha256.as_str()) {
+            bail!(
+                "private H3 runtime qualification record is not in the reviewed evidence allowlist"
+            )
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.read_to_end(&mut bytes)?;
+        let record: H3PrivateRuntimeQualificationRecord = serde_json::from_slice(&bytes)
+            .context("invalid private H3 runtime qualification record")?;
+        validate_runtime_qualification_record_shape(&record)?;
+        if record.campaign_runtime_code_identity_sha256 != executing_runtime_code_identity_sha256 {
+            bail!("private H3 runtime qualification was measured by different runtime code")
+        }
+        let reviewed = H3PrivateReviewedRuntimeQualification {
+            storage: RuntimeQualificationStorage::External {
+                path: path.to_path_buf(),
+                file,
+            },
+            record_file_sha256,
+            record,
+        };
+        reviewed.revalidate()?;
+        Ok(reviewed)
     }
-    let record_file_sha256 = sha256_open_file(&file)?;
-    if !reviewed_record_sha256.contains(&record_file_sha256.as_str()) {
-        bail!("private H3 runtime qualification record is not in the reviewed evidence allowlist")
-    }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.read_to_end(&mut bytes)?;
-    let record: H3PrivateRuntimeQualificationRecord = serde_json::from_slice(&bytes)
-        .context("invalid private H3 runtime qualification record")?;
-    validate_runtime_qualification_record_shape(&record)?;
-    if record.campaign_runtime_code_identity_sha256 != executing_runtime_code_identity_sha256 {
-        bail!("private H3 runtime qualification was measured by different runtime code")
-    }
-    let reviewed = H3PrivateReviewedRuntimeQualification {
-        path: path.to_path_buf(),
-        file,
-        record_file_sha256,
-        record,
-    };
-    reviewed.revalidate()?;
-    Ok(reviewed)
 }
 
 /// Authenticate the small, presentation-only private H3 authority chain.
@@ -3900,6 +3962,58 @@ pub fn authenticate_h3_private_presentation(
         routes,
         None,
     )
+}
+
+/// Authenticate the embedded public H3 runtime profile against one live CUDA
+/// route. This is a compatibility and memory-safety gate, not a user
+/// authorization check, and it opens neither model weights nor external
+/// compliance files.
+#[cfg(feature = "h3")]
+pub fn authenticate_h3_public_presentation(
+    routes: &[H3PrivatePresentationRoute<'_>],
+) -> Result<H3PrivatePresentationAuthority> {
+    if routes.is_empty() {
+        bail!("MiniMax H3 presentation requires one live schedulable CUDA route")
+    }
+    let reviewed = open_reviewed_h3_private_runtime_qualification(
+        Path::new("/embedded/minimax-h3-runtime-qualification.json"),
+        REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256,
+    )?;
+    if reviewed.record.canonical_model != contract::FL2VA_COMFY || reviewed.record.task != "fl2va" {
+        bail!("embedded H3 runtime profile does not describe compact FL2VA")
+    }
+    let route = routes
+        .iter()
+        .find(|route| {
+            reviewed.record.compute_capability
+                == [route.compute_capability.0, route.compute_capability.1]
+        })
+        .ok_or_else(|| anyhow!("embedded H3 runtime profile does not match a live CUDA route"))?;
+    reviewed.validate_route(
+        route.device_id,
+        route.device_ordinal,
+        route.compute_capability,
+    )?;
+    let attention = H3AttentionRuntimeAuthority::qualify_flash_attention_v2(
+        H3AttentionDevice::Cuda {
+            compute_capability: Some(route.compute_capability),
+        },
+        H3AttentionModelContract::released_bf16(),
+    )
+    .map_err(|error| anyhow!(error.to_string()))?;
+    if reviewed.record.attention_runtime_identity_sha256 != attention.identity_sha256()
+        || reviewed.record.attention_kernel_identity != attention.kernel().identity()
+    {
+        bail!("embedded H3 runtime profile does not match the executable attention runtime")
+    }
+    reviewed.revalidate()?;
+    Ok(H3PrivatePresentationAuthority {
+        canonical_model: reviewed.record.canonical_model.clone(),
+        task: Task::Fl2va,
+        device_id: route.device_id.to_string(),
+        device_ordinal: route.device_ordinal,
+        compute_capability: route.compute_capability,
+    })
 }
 
 fn authenticate_h3_private_presentation_with_scope(
@@ -4099,6 +4213,14 @@ fn validate_runtime_qualification_record_binding(
     attention_qualification_sha256: &str,
 ) -> Result<()> {
     validate_runtime_qualification_record_shape(record)?;
+    #[cfg(feature = "h3")]
+    let route_matches = record.compute_capability == [compute_capability.0, compute_capability.1];
+    #[cfg(not(feature = "h3"))]
+    let route_matches = record.device_id == device_id
+        && record.device_ordinal == device_ordinal
+        && record.compute_capability == [compute_capability.0, compute_capability.1];
+    #[cfg(feature = "h3")]
+    let _ = (device_id, device_ordinal);
     if artifact.canonical_model != contract::FL2VA_COMFY
         || artifact.task != "fl2va"
         || record.authorization_record_sha256 != artifact.authorization_record_sha256
@@ -4106,9 +4228,7 @@ fn validate_runtime_qualification_record_binding(
             != artifact.authorization_source_document_sha256
         || record.artifact_qualification_identity_sha256 != artifact.qualification_identity_sha256
         || record.artifact_total_bytes != artifact.total_bytes
-        || record.device_id != device_id
-        || record.device_ordinal != device_ordinal
-        || record.compute_capability != [compute_capability.0, compute_capability.1]
+        || !route_matches
         || record.attention_runtime_identity_sha256 != attention_runtime_identity_sha256
         || record.attention_kernel_identity != attention_kernel_identity
         || record.attention_qualification_sha256 != attention_qualification_sha256
@@ -5558,5 +5678,32 @@ mod tests {
         struct Marker;
         impl<T: Clone> AmbiguousIfClone<Marker> for T {}
         <H3PrivateRuntimeQualificationAuthority as AmbiguousIfClone<_>>::assert_not_implemented();
+    }
+
+    #[cfg(feature = "h3")]
+    #[test]
+    fn public_presentation_fails_closed_without_an_embedded_reviewed_record() {
+        let route = H3PrivatePresentationRoute {
+            device_id: "cuda:00000000000000000000000000000000",
+            device_ordinal: 0,
+            compute_capability: (8, 9),
+        };
+        let error = authenticate_h3_public_presentation(&[route]).unwrap_err();
+        assert!(error.to_string().contains(
+            "embedded H3 runtime qualification is not in the reviewed evidence allowlist"
+        ));
+    }
+
+    #[cfg(feature = "h3")]
+    #[test]
+    fn public_progress_labels_describe_artifact_verification_without_private_claims() {
+        for label in [
+            H3_ARTIFACT_VERIFICATION_PROGRESS,
+            H3_VAE_ARTIFACT_VERIFICATION_PROGRESS,
+        ] {
+            assert!(label.starts_with("Verifying MiniMax H3"));
+            assert!(!label.to_ascii_lowercase().contains("private"));
+            assert!(!label.to_ascii_lowercase().contains("authenticat"));
+        }
     }
 }

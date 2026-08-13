@@ -4,8 +4,11 @@ mod h3_runtime_code_identity;
 use std::path::PathBuf;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_H3");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_H3_PRIVATE_UAT");
-    if std::env::var_os("CARGO_FEATURE_H3_PRIVATE_UAT").is_none() {
+    if std::env::var_os("CARGO_FEATURE_H3").is_none()
+        && std::env::var_os("CARGO_FEATURE_H3_PRIVATE_UAT").is_none()
+    {
         return;
     }
     let manifest_dir = PathBuf::from(

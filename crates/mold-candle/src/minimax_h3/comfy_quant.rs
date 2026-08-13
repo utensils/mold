@@ -93,7 +93,7 @@ fn flattened_input(input: &Tensor, in_features: usize) -> Result<(Tensor, Vec<us
     Ok((input.reshape((rows, in_features))?, output_shape))
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn accelerator_signed_widening_workspace_upper_bound(elements: usize) -> Result<u64> {
     let raw = elements
         .checked_mul(std::mem::size_of::<u8>())
@@ -468,7 +468,7 @@ impl H3ComfyInt8ConvRotLinear {
     /// Conservative peak bytes allocated by one production W8A8 reference
     /// call, excluding its borrowed input. This mirrors the tensors and chunk
     /// accumulation in `forward_reference` and is capture-only authority.
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn reference_workspace_upper_bound(
         &self,
         input_rows: usize,

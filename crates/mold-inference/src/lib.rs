@@ -32,27 +32,30 @@ pub mod ltx_video;
 // future pipeline to consume.
 #[allow(dead_code)]
 pub(crate) mod minimax_h3;
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(all(feature = "h3", feature = "dev-bins"), feature = "h3-private-uat"))]
 pub use minimax_h3::private_qualification;
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 #[doc(hidden)]
 pub use minimax_h3::private_qwen::{
     released_h3_private_qwen_loader_memory_authority, released_h3_private_qwen_output_tensor_bytes,
     validate_h3_private_qwen_loader_memory_authority, H3PrivateQwenLoaderMemoryAuthority,
     H3PrivateQwenLoaderMemoryRoute,
 };
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(all(feature = "h3", feature = "dev-bins"), feature = "h3-private-uat"))]
 #[doc(hidden)]
 pub use minimax_h3::private_runtime_qualification::{
     produce_h3_private_runtime_qualification_candidate, H3PrivateRuntimeQualificationCandidate,
     H3_PRIVATE_RUNTIME_RECORD_PRODUCER_MARKER,
 };
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 #[doc(hidden)]
 pub const fn h3_private_runtime_code_identity_sha256() -> &'static str {
     minimax_h3::PRIVATE_RUNTIME_CODE_IDENTITY_SHA256
 }
-#[cfg(feature = "h3-private-uat")]
+#[cfg(feature = "h3")]
+#[doc(hidden)]
+pub use minimax_h3::private_server::authenticate_h3_public_presentation;
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 #[doc(hidden)]
 pub use minimax_h3::private_server::{
     authenticate_h3_private_presentation, authenticate_h3_private_runtime_qualification,
