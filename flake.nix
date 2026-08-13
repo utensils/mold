@@ -96,11 +96,11 @@
           src = craneLib.path ./.;
 
           h3CutlassCommit = "7d49e6c7e2f8896c47f586706e67e1fb215529dc";
-          h3CutlassSource = pkgs.fetchgit {
-            url = "https://github.com/NVIDIA/cutlass.git";
+          h3CutlassSource = pkgs.fetchFromGitHub {
+            owner = "NVIDIA";
+            repo = "cutlass";
             rev = h3CutlassCommit;
-            hash = "sha256-aOfw4x3efNOFUNL4LNL0+p28TYYGrd1t9/UTZAfzrEM=";
-            leaveDotGit = true;
+            hash = "sha256-D/s7eYsa5l/mfx73tE4mnFcTQdYqGmXa9d9TCryw4e4=";
           };
           prepareCudaforgeCache = ''
             export CUDAFORGE_HOME="$TMPDIR/cudaforge"
@@ -108,6 +108,12 @@
             mkdir -p "$cutlass_checkout"
             cp -R ${h3CutlassSource}/. "$cutlass_checkout/"
             chmod -R u+w "$CUDAFORGE_HOME"
+            git -C "$cutlass_checkout" init --quiet
+            base64 --decode ${./nix/cutlass-7d49e6c.commit.b64} > "$CUDAFORGE_HOME/cutlass.commit"
+            cutlass_commit="$(git -C "$cutlass_checkout" hash-object -t commit -w "$CUDAFORGE_HOME/cutlass.commit")"
+            test "$cutlass_commit" = ${h3CutlassCommit}
+            git -C "$cutlass_checkout" update-ref refs/heads/cudaforge "$cutlass_commit"
+            git -C "$cutlass_checkout" symbolic-ref HEAD refs/heads/cudaforge
           '';
 
           commonArgs = {

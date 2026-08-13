@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Made hermetic CUTLASS staging reproducible across Nix builders by fetching a content-only GitHub archive and reconstructing only the exact pinned commit object required by cudaforge, avoiding platform-dependent `.git` metadata in the fixed-output hash.
+
 - Completed the public H3 distribution CI repair by retaining `.cargo/config.toml` and its Clang/LLD toolchain in Docker's manifest-first source layer for runtime-identity hashing and updating the desktop packaging contract to recognize the SM89 `cuda,h3` AppImage build.
 
 - Fixed `main` distribution CI after public MiniMax H3 activation by teaching the CUDA Docker contract to recognize the conditional SM89 production build, synchronizing the standalone desktop lockfile with `mold-core`'s TypeScript binding dependency, permitting only the reviewed orthogonal desktop/server features alongside the canonical public H3 feature set, and supplying the pinned CUTLASS checkout to cudaforge inside hermetic Nix builds.
