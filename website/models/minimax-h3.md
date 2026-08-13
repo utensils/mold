@@ -73,6 +73,8 @@ Mold rejects rather than silently resizing, rerouting, changing steps, dropping
 the source image, or falling back to another backend. A downloaded checkpoint
 can remain stored on an unsupported host; Create and request routing become
 available only when that host advertises the matching CUDA runtime capability.
+The public SM89 runtime uses a source-controlled conservative memory profile;
+it does not require private authorization or qualification-record files.
 
 ## License and support boundary
 

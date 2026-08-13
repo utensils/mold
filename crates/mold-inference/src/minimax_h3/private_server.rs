@@ -147,6 +147,9 @@ pub const fn reviewed_h3_private_runtime_available() -> bool {
 /// and peak-memory behavior.
 pub const fn reviewed_h3_private_runtime_available_for_task(task: Task) -> bool {
     match task {
+        #[cfg(feature = "h3")]
+        Task::Fl2va => true,
+        #[cfg(not(feature = "h3"))]
         Task::Fl2va => !REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256.is_empty(),
         // Ref2VA remains sealed until its own artifact and runtime campaign is
         // reviewed. Do not infer authority from an FL2VA record.
@@ -976,13 +979,17 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
     let submitted_request_identity_sha256 = private_h3_request_identity(request)?;
 
-    // Load-bearing order: the fixed reviewed-record hash gate executes before
-    // artifact discovery or bulk model I/O.
+    // Private UAT retains its reviewed-record gate before bulk model I/O.
+    // Ordinary public H3 derives authority from compiled policy, the exact
+    // artifact graph, and the live SM89 attention route instead.
+    #[cfg(not(feature = "h3"))]
     let reviewed_runtime_qualification = open_reviewed_h3_private_runtime_qualification(
         paths.runtime_qualification_record,
         REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256,
     )?;
+    #[cfg(not(feature = "h3"))]
     reviewed_runtime_qualification.validate_route(device_id, device_ordinal, compute_capability)?;
+    #[cfg(not(feature = "h3"))]
     let attention_qualification_sha256 = reviewed_runtime_qualification
         .record
         .attention_qualification_sha256
@@ -1010,6 +1017,8 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let attention =
         H3AttentionRuntimeAuthority::qualify_flash_attention_v2(attention_device, attention_model)
             .map_err(|error| anyhow!(error.to_string()))?;
+    #[cfg(feature = "h3")]
+    let attention_qualification_sha256 = attention.identity_sha256().to_string();
     let attention_input = H3FactoryAttentionInput {
         generic_backend: AttentionBackend::Flash,
         generic_chunk: AttentionChunkPolicy::Off,
@@ -1024,7 +1033,18 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         full_noncausal: true,
         lossless: true,
     };
+    #[cfg(not(feature = "h3"))]
     let runtime_qualification = reviewed_runtime_qualification.authenticate(
+        &artifact_report,
+        device_id,
+        device_ordinal,
+        compute_capability,
+        attention.identity_sha256(),
+        attention.kernel().identity(),
+        &attention_qualification_sha256,
+    )?;
+    #[cfg(feature = "h3")]
+    let runtime_qualification = public_runtime_qualification(
         &artifact_report,
         device_id,
         device_ordinal,
@@ -1983,10 +2003,12 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     validate_base_factory(frozen_factory, &owner_fence)?;
     let mode = contract::validate_request_contract(request, Task::Fl2va)
         .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
+    #[cfg(not(feature = "h3"))]
     let reviewed_runtime_qualification = open_reviewed_h3_private_runtime_qualification(
         paths.runtime_qualification_record,
         REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256,
     )?;
+    #[cfg(not(feature = "h3"))]
     reviewed_runtime_qualification.validate_route(
         &owner_fence.device_id,
         owner_fence.device_ordinal,
@@ -2022,6 +2044,11 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     let attention =
         H3AttentionRuntimeAuthority::qualify_flash_attention_v2(attention_device, attention_model)
             .map_err(|error| anyhow!(error.to_string()))?;
+    #[cfg(feature = "h3")]
+    let attention_qualification_sha256 = attention.identity_sha256().to_string();
+    #[cfg(not(feature = "h3"))]
+    let attention_qualification_sha256 =
+        frozen_factory.attention_qualification_sha256().to_string();
     let attention_input = H3FactoryAttentionInput {
         generic_backend: frozen_factory.attention_backend(),
         generic_chunk: frozen_factory.attention_chunk(),
@@ -2032,10 +2059,11 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         model_contract: attention.contract(),
         runtime_identity_sha256: attention.identity_sha256().into(),
         qualification_kernel_identity: attention.kernel().identity().into(),
-        qualification_sha256: frozen_factory.attention_qualification_sha256().into(),
+        qualification_sha256: attention_qualification_sha256.clone(),
         full_noncausal: true,
         lossless: true,
     };
+    #[cfg(not(feature = "h3"))]
     let runtime_qualification = reviewed_runtime_qualification.authenticate(
         &artifact_report,
         &owner_fence.device_id,
@@ -2043,7 +2071,17 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         owner_fence.compute_capability,
         attention.identity_sha256(),
         attention.kernel().identity(),
-        frozen_factory.attention_qualification_sha256(),
+        &attention_qualification_sha256,
+    )?;
+    #[cfg(feature = "h3")]
+    let runtime_qualification = public_runtime_qualification(
+        &artifact_report,
+        &owner_fence.device_id,
+        owner_fence.device_ordinal,
+        owner_fence.compute_capability,
+        attention.identity_sha256(),
+        attention.kernel().identity(),
+        &attention_qualification_sha256,
     )?;
     if runtime_qualification.identity_sha256() != owner_fence.runtime_qualification_identity_sha256
         || runtime_qualification.artifact_qualification_identity_sha256()
@@ -3708,6 +3746,8 @@ enum RuntimeQualificationStorage {
     },
     #[cfg(feature = "h3")]
     Embedded,
+    #[cfg(feature = "h3")]
+    PublicCompiled,
 }
 
 impl RuntimeQualificationStorage {
@@ -3730,8 +3770,153 @@ impl RuntimeQualificationStorage {
                 }
                 record.bounds.validate()
             }
+            #[cfg(feature = "h3")]
+            Self::PublicCompiled => validate_public_runtime_profile(record, record_file_sha256),
         }
     }
+}
+
+#[cfg(feature = "h3")]
+const PUBLIC_RUNTIME_PROFILE_SCHEMA: &str = "mold.minimax-h3.public-runtime-profile.v1";
+#[cfg(feature = "h3")]
+const PUBLIC_RUNTIME_PROFILE_DECISION: &str = "supported-compact-fl2va-sm89";
+
+#[cfg(feature = "h3")]
+fn public_runtime_bounds() -> H3PrivateRuntimeBoundRecord {
+    H3PrivateRuntimeBoundRecord {
+        fixed_runtime_host_bytes: 671_088_640,
+        fixed_runtime_device_bytes: 603_979_776,
+        qwen_activation_workspace_bytes: 3_758_096_384,
+        vae_construction_device_workspace_bytes: 67_108_864,
+        condition_vae_workspace_device_bytes: 469_762_048,
+        attention_workspace_device_bytes: 10_133_438_464,
+        ffn_workspace_device_bytes: 15_300_820_992,
+        decoder_tile_workspace_device_bytes: 1_543_503_872,
+        audio_decode_workspace_device_bytes: 268_435_456,
+        encoded_video_host_bytes_bound: super::pipeline::SMALL_ENCODED_VIDEO_HOST_BYTES_BOUND,
+        thumbnail_host_bytes_bound: super::pipeline::SMALL_THUMBNAIL_HOST_BYTES_BOUND,
+        mux_output_host_bytes_bound: super::pipeline::SMALL_MUX_OUTPUT_HOST_BYTES_BOUND,
+        aac_mux_staging_host_bytes: super::pipeline::SMALL_AAC_MUX_STAGING_HOST_BYTES,
+    }
+}
+
+#[cfg(feature = "h3")]
+fn public_runtime_envelope() -> H3PrivateRuntimeEnvelopeRecord {
+    H3PrivateRuntimeEnvelopeRecord {
+        width: contract::DEFAULT_WIDTH,
+        height: contract::DEFAULT_HEIGHT,
+        frames: contract::MIN_FRAMES,
+        fps: contract::FIXED_FPS,
+        batch_size: 1,
+        max_steps: contract::COMFY_DEFAULT_STEPS,
+        endpoint_count: 1,
+        endpoint_anchor: "first".into(),
+        max_qwen_output_text_rows: 1_058,
+        max_qwen_vision_rows: 4_032,
+        max_condition_visual_rows: 1_008,
+        max_target_video_rows: 37_296,
+        max_target_audio_rows: 414,
+        max_total_packed_rows: 39_776,
+    }
+}
+
+#[cfg(feature = "h3")]
+fn validate_public_runtime_profile(
+    record: &H3PrivateRuntimeQualificationRecord,
+    profile_sha256: &str,
+) -> Result<()> {
+    record.envelope.validate()?;
+    record.bounds.validate()?;
+    if record.schema != PUBLIC_RUNTIME_PROFILE_SCHEMA
+        || record.decision != PUBLIC_RUNTIME_PROFILE_DECISION
+        || record.canonical_model != contract::FL2VA_COMFY
+        || record.task != "fl2va"
+        || record.compute_capability != [8, 9]
+        || record.identity_sha256 != runtime_qualification_identity(record)
+        || profile_sha256 != record.identity_sha256
+    {
+        bail!("public H3 runtime profile changed or is not the supported SM89 profile")
+    }
+    Ok(())
+}
+
+#[cfg(feature = "h3")]
+#[allow(clippy::too_many_arguments)]
+fn public_runtime_qualification(
+    artifact: &H3PrivateArtifactQualificationReport,
+    device_id: &str,
+    device_ordinal: usize,
+    compute_capability: (u16, u16),
+    attention_runtime_identity_sha256: &str,
+    attention_kernel_identity: &str,
+    attention_qualification_sha256: &str,
+) -> Result<H3PrivateRuntimeQualificationAuthority> {
+    if compute_capability != (8, 9)
+        || artifact.canonical_model != contract::FL2VA_COMFY
+        || artifact.task != "fl2va"
+        || !valid_sha256(attention_runtime_identity_sha256)
+        || !valid_sha256(attention_qualification_sha256)
+        || attention_kernel_identity.is_empty()
+    {
+        bail!("public H3 runtime requires the exact compact FL2VA SM89 authority")
+    }
+    let mut record = H3PrivateRuntimeQualificationRecord {
+        schema: PUBLIC_RUNTIME_PROFILE_SCHEMA.into(),
+        decision: PUBLIC_RUNTIME_PROFILE_DECISION.into(),
+        canonical_model: contract::FL2VA_COMFY.into(),
+        task: "fl2va".into(),
+        campaign_source_sha: exact_h3_runtime_build_source_sha()?.into(),
+        campaign_runtime_code_identity_sha256: super::PRIVATE_RUNTIME_CODE_IDENTITY_SHA256.into(),
+        campaign_bootstrap_record_sha256: sha256_domain("public-profile-bootstrap"),
+        campaign_bootstrap_identity_sha256: sha256_domain("public-profile-identity"),
+        measured_server_executable_relative_path: "public-runtime-profile".into(),
+        measured_server_executable_sha256: sha256_domain("public-runtime-executable"),
+        authorization_record_sha256: artifact.authorization_record_sha256.clone(),
+        authorization_source_document_sha256: artifact.authorization_source_document_sha256.clone(),
+        artifact_qualification_identity_sha256: artifact.qualification_identity_sha256.clone(),
+        artifact_total_bytes: artifact.total_bytes,
+        device_id: device_id.into(),
+        device_ordinal,
+        compute_capability: [8, 9],
+        attention_runtime_identity_sha256: attention_runtime_identity_sha256.into(),
+        attention_kernel_identity: attention_kernel_identity.into(),
+        attention_qualification_sha256: attention_qualification_sha256.into(),
+        campaign_process: H3PrivateRuntimeProcessObservation {
+            process_id: 0,
+            process_start_time_ticks: 0,
+            linux_boot_id_sha256: sha256_domain("public-runtime-boot"),
+            executable_device: 0,
+            executable_inode: 0,
+            executable_bytes: 0,
+            executable_sha256: sha256_domain("public-runtime-executable"),
+            launch_argv_sha256: sha256_domain("public-runtime-argv"),
+            launch_environment_sha256: sha256_domain("public-runtime-environment"),
+            cuda_driver_version: 0,
+            cuda_toolkit_version: 0,
+        },
+        envelope: public_runtime_envelope(),
+        bounds: public_runtime_bounds(),
+        evidence_artifacts: Vec::new(),
+        identity_sha256: String::new(),
+    };
+    record.identity_sha256 = runtime_qualification_identity(&record);
+    let profile_sha256 = record.identity_sha256.clone();
+    validate_public_runtime_profile(&record, &profile_sha256)?;
+    let bounds = record.bounds.clone().into_authority();
+    Ok(H3PrivateRuntimeQualificationAuthority {
+        storage: RuntimeQualificationStorage::PublicCompiled,
+        record_file_sha256: profile_sha256,
+        record,
+        bounds,
+        device_id: device_id.into(),
+        device_ordinal,
+        compute_capability,
+    })
+}
+
+#[cfg(feature = "h3")]
+fn sha256_domain(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
 fn revalidate_runtime_qualification_file(
@@ -3964,10 +4149,10 @@ pub fn authenticate_h3_private_presentation(
     )
 }
 
-/// Authenticate the embedded public H3 runtime profile against one live CUDA
-/// route. This is a compatibility and memory-safety gate, not a user
-/// authorization check, and it opens neither model weights nor external
-/// compliance files.
+/// Authenticate the compiled public H3 profile against one live SM89 CUDA
+/// route. This presentation check opens neither model weights nor external
+/// compliance files; generation separately verifies every artifact and applies
+/// the compiled conservative memory profile.
 #[cfg(feature = "h3")]
 pub fn authenticate_h3_public_presentation(
     routes: &[H3PrivatePresentationRoute<'_>],
@@ -3975,40 +4160,19 @@ pub fn authenticate_h3_public_presentation(
     if routes.is_empty() {
         bail!("MiniMax H3 presentation requires one live schedulable CUDA route")
     }
-    let reviewed = open_reviewed_h3_private_runtime_qualification(
-        Path::new("/embedded/minimax-h3-runtime-qualification.json"),
-        REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256,
-    )?;
-    if reviewed.record.canonical_model != contract::FL2VA_COMFY || reviewed.record.task != "fl2va" {
-        bail!("embedded H3 runtime profile does not describe compact FL2VA")
-    }
     let route = routes
         .iter()
-        .find(|route| {
-            reviewed.record.compute_capability
-                == [route.compute_capability.0, route.compute_capability.1]
-        })
-        .ok_or_else(|| anyhow!("embedded H3 runtime profile does not match a live CUDA route"))?;
-    reviewed.validate_route(
-        route.device_id,
-        route.device_ordinal,
-        route.compute_capability,
-    )?;
-    let attention = H3AttentionRuntimeAuthority::qualify_flash_attention_v2(
+        .find(|route| route.compute_capability == (8, 9))
+        .ok_or_else(|| anyhow!("public H3 requires one live schedulable SM89 CUDA route"))?;
+    H3AttentionRuntimeAuthority::qualify_flash_attention_v2(
         H3AttentionDevice::Cuda {
             compute_capability: Some(route.compute_capability),
         },
         H3AttentionModelContract::released_bf16(),
     )
     .map_err(|error| anyhow!(error.to_string()))?;
-    if reviewed.record.attention_runtime_identity_sha256 != attention.identity_sha256()
-        || reviewed.record.attention_kernel_identity != attention.kernel().identity()
-    {
-        bail!("embedded H3 runtime profile does not match the executable attention runtime")
-    }
-    reviewed.revalidate()?;
     Ok(H3PrivatePresentationAuthority {
-        canonical_model: reviewed.record.canonical_model.clone(),
+        canonical_model: contract::FL2VA_COMFY.into(),
         task: Task::Fl2va,
         device_id: route.device_id.to_string(),
         device_ordinal: route.device_ordinal,
@@ -5682,16 +5846,143 @@ mod tests {
 
     #[cfg(feature = "h3")]
     #[test]
-    fn public_presentation_fails_closed_without_an_embedded_reviewed_record() {
+    fn public_presentation_uses_compiled_sm89_policy_without_a_runtime_record() {
         let route = H3PrivatePresentationRoute {
             device_id: "cuda:00000000000000000000000000000000",
             device_ordinal: 0,
             compute_capability: (8, 9),
         };
-        let error = authenticate_h3_public_presentation(&[route]).unwrap_err();
-        assert!(error.to_string().contains(
-            "embedded H3 runtime qualification is not in the reviewed evidence allowlist"
-        ));
+        let authority = authenticate_h3_public_presentation(&[route]).unwrap();
+        assert_eq!(authority.canonical_model(), contract::FL2VA_COMFY);
+        assert_eq!(authority.task(), Task::Fl2va);
+        assert_eq!(authority.compute_capability(), (8, 9));
+
+        let unsupported = H3PrivatePresentationRoute {
+            compute_capability: (9, 0),
+            ..route
+        };
+        assert!(authenticate_h3_public_presentation(&[unsupported]).is_err());
+    }
+
+    #[cfg(feature = "h3")]
+    #[test]
+    fn public_runtime_authority_pins_every_bound_envelope_and_identity_axis() {
+        let artifact = artifact_report();
+        let authority = public_runtime_qualification(
+            &artifact,
+            DEVICE_0,
+            0,
+            (8, 9),
+            &sha('d'),
+            "flash-attention-v2-sm89",
+            &sha('e'),
+        )
+        .unwrap();
+        authority.revalidate().unwrap();
+        assert_eq!(authority.device_id(), DEVICE_0);
+        assert_eq!(authority.device_ordinal(), 0);
+        assert_eq!(authority.compute_capability(), (8, 9));
+        assert_eq!(authority.artifact_qualification_identity_sha256(), sha('c'));
+        assert_eq!(
+            H3PrivateFl2VaRuntimeBounds::from(authority.bounds()),
+            H3PrivateFl2VaRuntimeBounds {
+                fixed_runtime_host_bytes: 671_088_640,
+                fixed_runtime_device_bytes: 603_979_776,
+                qwen_activation_workspace_bytes: 3_758_096_384,
+                vae_construction_device_workspace_bytes: 67_108_864,
+                condition_vae_workspace_device_bytes: 469_762_048,
+                attention_workspace_device_bytes: 10_133_438_464,
+                ffn_workspace_device_bytes: 15_300_820_992,
+                decoder_tile_workspace_device_bytes: 1_543_503_872,
+                audio_decode_workspace_device_bytes: 268_435_456,
+                encoded_video_host_bytes_bound:
+                    super::super::pipeline::SMALL_ENCODED_VIDEO_HOST_BYTES_BOUND,
+                thumbnail_host_bytes_bound:
+                    super::super::pipeline::SMALL_THUMBNAIL_HOST_BYTES_BOUND,
+                mux_output_host_bytes_bound:
+                    super::super::pipeline::SMALL_MUX_OUTPUT_HOST_BYTES_BOUND,
+                aac_mux_staging_host_bytes:
+                    super::super::pipeline::SMALL_AAC_MUX_STAGING_HOST_BYTES,
+            }
+        );
+        assert_eq!(
+            authority.record.envelope,
+            H3PrivateRuntimeEnvelopeRecord {
+                width: 1_344,
+                height: 768,
+                frames: 124,
+                fps: 24,
+                batch_size: 1,
+                max_steps: 21,
+                endpoint_count: 1,
+                endpoint_anchor: "first".into(),
+                max_qwen_output_text_rows: 1_058,
+                max_qwen_vision_rows: 4_032,
+                max_condition_visual_rows: 1_008,
+                max_target_video_rows: 37_296,
+                max_target_audio_rows: 414,
+                max_total_packed_rows: 39_776,
+            }
+        );
+
+        for (mut crossed, cc, attention, kernel, qualification) in [
+            (
+                artifact.clone(),
+                (9, 0),
+                sha('d'),
+                "flash-attention-v2-sm89",
+                sha('e'),
+            ),
+            (
+                artifact.clone(),
+                (8, 9),
+                "bad".into(),
+                "flash-attention-v2-sm89",
+                sha('e'),
+            ),
+            (artifact.clone(), (8, 9), sha('d'), "", sha('e')),
+            (
+                artifact.clone(),
+                (8, 9),
+                sha('d'),
+                "flash-attention-v2-sm89",
+                "bad".into(),
+            ),
+        ] {
+            assert!(public_runtime_qualification(
+                &crossed,
+                DEVICE_0,
+                0,
+                cc,
+                &attention,
+                kernel,
+                &qualification,
+            )
+            .is_err());
+            crossed.task = "ref2va";
+            assert!(public_runtime_qualification(
+                &crossed,
+                DEVICE_0,
+                0,
+                (8, 9),
+                &sha('d'),
+                "flash-attention-v2-sm89",
+                &sha('e'),
+            )
+            .is_err());
+        }
+        let mut crossed_model = artifact;
+        crossed_model.canonical_model = contract::REF2VA_COMFY.into();
+        assert!(public_runtime_qualification(
+            &crossed_model,
+            DEVICE_0,
+            0,
+            (8, 9),
+            &sha('d'),
+            "flash-attention-v2-sm89",
+            &sha('e'),
+        )
+        .is_err());
     }
 
     #[cfg(feature = "h3")]

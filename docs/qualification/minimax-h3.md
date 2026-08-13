@@ -1,7 +1,7 @@
 # MiniMax H3 qualification and authorization status
 
 - Public acquisition status: **compact FL2VA and Ref2VA available by upstream-direct download**
-- Runtime status: **compact FL2VA available only on the exact qualified CUDA route**
+- Runtime status: **compact FL2VA publicly available on the supported SM89 CUDA route**
 - Private qualification status: **authorized under the external private-UAT record**
 - Evidence snapshot: **2026-08-08, Mold main `12bbad65`**
 - Authorization owner: [issue #831](https://github.com/utensils/mold/issues/831)
@@ -10,8 +10,9 @@
 This is an engineering status record, not legal advice. Mold lists the two
 compact Comfy manifests and may download their pinned artifacts directly from
 the reviewed upstream repositories. Downloaded weights are not bundled in Mold
-releases. Execution remains fail-closed unless an exact independently reviewed
-CUDA runtime, artifact graph, task, and request envelope authenticate.
+releases. Execution remains fail-closed unless the live SM89 CUDA route, exact
+artifact graph, task, fixed request envelope, and conservative memory admission
+profile all validate. Public activation does not require a private campaign record.
 
 The research used public implementation source and small textual repository
 metadata only. The reviewed
