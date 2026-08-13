@@ -39,6 +39,19 @@ extract_filter() {
   ' "$file"
 }
 
+rust_job=$(extract_job "$ci" rust)
+cuda_job=$(extract_job "$ci" cuda-check)
+producer_command='cargo clippy -p mold-ai-inference --features dev-bins,h3 --bin h3_runtime_qualification_record -- -D warnings'
+if grep -Fq -- "$producer_command" <<< "$rust_job"; then
+  fail "the CUDA-backed H3 runtime-record producer runs in the CPU Rust job"
+fi
+grep -Fq -- "$producer_command" <<< "$cuda_job" \
+  || fail "the CUDA job does not compile the public H3 runtime-record producer"
+toolkit_line=$(grep -nF -- 'name: Install CUDA toolkit' <<< "$cuda_job" | cut -d: -f1)
+producer_line=$(grep -nF -- "$producer_command" <<< "$cuda_job" | cut -d: -f1)
+[[ -n "$toolkit_line" && -n "$producer_line" && "$toolkit_line" -lt "$producer_line" ]] \
+  || fail "the H3 runtime-record producer is compiled before the CUDA toolkit is installed"
+
 require_text "$ci" \
   "cancel-in-progress: \${{ github.event_name == 'pull_request' }}" \
   "root CI does not cancel superseded PR runs"

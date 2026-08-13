@@ -498,9 +498,6 @@ jobs:
       - name: Clippy the private MiniMax H3 artifact qualifier
         if: env.RUN_RUST_SUITE == 'true'
         run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_artifact_qualification -- -D warnings
-      - name: Clippy the development-only MiniMax H3 runtime-record producer
-        if: env.RUN_RUST_SUITE == 'true'
-        run: cargo clippy -p mold-ai-inference --features dev-bins,h3 --bin h3_runtime_qualification_record -- -D warnings
       - name: Clippy the private exact-BF16 Qwen capture adapter
         if: env.RUN_RUST_SUITE == 'true'
         run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_qwen_layer50_capture -- -D warnings
@@ -553,6 +550,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy CUDA forced-local, public H3, and server paths
         run: cargo clippy -p mold-ai --features cuda,h3,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings
+      - name: Clippy the development-only MiniMax H3 runtime-record producer
+        run: cargo clippy -p mold-ai-inference --features dev-bins,h3 --bin h3_runtime_qualification_record -- -D warnings
       - name: Clippy the CUDA private H3 server bridge
         run: cargo clippy -p mold-ai-server --features h3-private-uat --all-targets -- -D warnings
       - name: Clippy private exact-BF16 Qwen capture adapter
