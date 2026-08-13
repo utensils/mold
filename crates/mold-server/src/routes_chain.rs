@@ -928,14 +928,26 @@ pub(crate) fn validate_and_normalize_chain_family(
     // not this path — so a wan I2V sequence with no opening image was
     // admitted and then died after the UMT5 encode and both expert loads had
     // been paid for, and a T2V sequence carrying one was admitted too (#783).
+    //
+    // The two arms read different sets on purpose. `Required` asks whether
+    // stage 0 can be seeded at all, so only the opening image counts — every
+    // continuation is seeded by the seam. `Unsupported` asks whether an image
+    // was supplied anywhere the engine has no channel for, so a per-stage
+    // image on a continuation has to count too; a script may attach one to
+    // any stage (`source_image_path`).
+    let opening_image =
+        req.source_image.is_some() || req.stages.first().is_some_and(|s| s.source_image.is_some());
+    let any_image = opening_image || req.stages.iter().any(|s| s.source_image.is_some());
+    let family_hint = (!family.is_empty()).then_some(family.as_str());
+    let has_source = match contract {
+        Some(mold_core::SourceImageCapability::Unsupported) => any_image,
+        _ => opening_image,
+    };
     if let Some(message) = mold_core::validation::source_image_contract_violation(
-        (!family.is_empty()).then_some(family.as_str()),
+        family_hint,
         &req.model,
         contract,
-        req.stages
-            .first()
-            .is_some_and(|stage| stage.source_image.is_some())
-            || req.source_image.is_some(),
+        has_source,
     ) {
         return Err(ApiError::validation(message));
     }
@@ -2033,6 +2045,34 @@ mod tests {
         opening_image(&mut plain_t2v, None);
         validate_and_normalize_chain_family(&config, &mut plain_t2v).expect("admitted");
         assert_eq!(plain_t2v.motion_tail_frames, 0);
+
+        // A script can attach an image to any stage, so an unsupported
+        // checkpoint is refused for one on a continuation too — the two arms
+        // read different sets: `Required` asks only whether stage 0 can be
+        // seeded, because every continuation is seeded by the seam.
+        let mut late_image = req(OutputFormat::Mp4);
+        late_image.model = "wan21-t2v-1.3b".into();
+        late_image.width = 832;
+        late_image.height = 480;
+        assert!(
+            late_image.stages.len() > 1,
+            "this case needs a continuation to attach to"
+        );
+        late_image.stages[1].source_image = Some(vec![1, 2, 3]);
+        assert!(
+            validate_and_normalize_chain_family(&config, &mut late_image).is_err(),
+            "an image on a continuation is still an image the engine cannot take"
+        );
+
+        // The mirror: a Required checkpoint seeded only on a continuation is
+        // still unseeded where it matters.
+        let mut late_only = req(OutputFormat::Mp4);
+        late_only.model = "wan22-i2v-a14b:q5".into();
+        late_only.width = 832;
+        late_only.height = 480;
+        opening_image(&mut late_only, None);
+        late_only.stages[1].source_image = Some(vec![1, 2, 3]);
+        assert!(validate_and_normalize_chain_family(&config, &mut late_only).is_err());
     }
 
     struct HandlerFailingExecutor;
