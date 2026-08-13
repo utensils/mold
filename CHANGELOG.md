@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Make the private MiniMax H3 terminal publication gate identify the mismatched non-secret contract axis while continuing to fail closed, so a successful expensive render cannot collapse model, media, source-fingerprint, or provenance failures into one unactionable message.
+
 - Restore CUDA distribution builds after the H3 native INT8 kernel landed by including the Candle build script and its CUDA source in Docker's dependency-cache context, with a release-contract regression for the compiled input.
 
 - Run compact MiniMax H3 DiT INT8 projections through the source-matched CUDA path: BF16/F16/F32 ConvRot activations are dynamically quantized by row, multiplied as signed INT8 into INT32 with cached cuBLASLt plans, and dequantized in the pinned F32 scale order. A representative 4096x5376 by 7168 BF16 projection on the qualification L40S measured about 42 ms after plan warmup; the portable CPU/Metal and Qwen weight-only paths are unchanged. This optimization changes the qualified executable identity, so a fresh exact-source campaign remains required before the private allowlist can use it.

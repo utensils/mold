@@ -3212,11 +3212,12 @@ fn finish_claimed_h3_success(
             crate::h3_attempt::H3AttemptError::IdentityMismatch.to_string(),
         );
     }
-    if validate_h3_publication_contract(worker, &job, prepared, &output).is_err() {
+    if let Err(error) = validate_h3_publication_contract(worker, &job, prepared, &output) {
         return reject_claimed_h3_generation_message(
             job,
-            "generation error: MiniMax H3 terminal output differs from the frozen publication contract"
-                .to_string(),
+            format!(
+                "generation error: MiniMax H3 terminal output differs from the frozen publication contract: {error}"
+            ),
         );
     }
     output.response.gpu = Some(worker.gpu.ordinal);
@@ -3246,32 +3247,32 @@ fn validate_h3_publication_contract(
     output: &crate::h3_private_bridge::H3ClaimedRunOutput,
 ) -> anyhow::Result<()> {
     let contract = &prepared.media;
-    contract
-        .validate_for_request(
-            &job.request,
-            job.resolved_references
-                .as_ref()
-                .map(crate::reference_uploads::ResolvedReferenceSet::fingerprint),
-        )
-        .map_err(anyhow::Error::msg)?;
-    let expected_seed = job
-        .request
-        .seed
-        .ok_or_else(|| anyhow::anyhow!("private H3 request has no frozen seed"))?;
+    let expected_contract = crate::h3_private_bridge::H3PreparedMediaContract::from_request(
+        &job.request,
+        job.resolved_references
+            .as_ref()
+            .map(crate::reference_uploads::ResolvedReferenceSet::fingerprint),
+    )
+    .map_err(|_| {
+        anyhow::anyhow!("private H3 terminal media provenance mismatch: request-contract")
+    })?;
+    let expected_seed = job.request.seed.ok_or_else(|| {
+        anyhow::anyhow!("private H3 terminal media provenance mismatch: request-seed")
+    })?;
     let expected_frames = job
         .request
         .frames
         .unwrap_or(mold_core::minimax_h3::MIN_FRAMES);
     let expected_duration_ms = u64::from(expected_frames)
         .checked_mul(1_000)
-        .ok_or_else(|| anyhow::anyhow!("private H3 duration overflow"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("private H3 terminal media provenance mismatch: request-duration")
+        })?
         / u64::from(mold_core::minimax_h3::FIXED_FPS);
     let echo = &output.identity_echo;
-    let video = output
-        .response
-        .video
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("private H3 response has no video"))?;
+    let video = output.response.video.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("private H3 terminal media provenance mismatch: response-video")
+    })?;
     let durable_metadata = mold_core::OutputMetadata::from_generate_request(
         &job.request,
         expected_seed,
@@ -3282,45 +3283,116 @@ fn validate_h3_publication_contract(
         .references
         .as_deref()
         .map(mold_core::generation_reference_fingerprint);
-    if contract.canonical_model != job.request.model
-        || contract.seed != expected_seed
-        || contract.width != job.request.width
-        || contract.height != job.request.height
-        || contract.frames != expected_frames
-        || contract.fps != mold_core::minimax_h3::FIXED_FPS
-        || echo.device_ordinal != worker.gpu.ordinal
-        || echo.media != *contract
-        || echo.duration_ms != expected_duration_ms
-        || echo.audio_sample_rate != mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ
-        || u32::from(echo.audio_channels) != mold_core::minimax_h3::AUDIO_CHANNELS
-        || !echo.synchronized_audio_video
-        || echo.pipeline_provenance_sha256.len() != 64
-        || !echo
-            .pipeline_provenance_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-        || !output.response.images.is_empty()
-        || output.response.audio.is_some()
-        || output.response.model != contract.canonical_model
-        || output.response.seed_used != expected_seed
-        || durable_reference_fingerprint != contract.reference_fingerprint_sha256
-        || video.data.is_empty()
-        || video.thumbnail.is_empty()
-        || video.format != OutputFormat::Mp4
-        || video.width != contract.width
-        || video.height != contract.height
-        || video.frames != contract.frames
-        || video.fps != mold_core::minimax_h3::FIXED_FPS
-        || video.pipeline.is_some()
-        || video.pipeline_provenance_sha256.as_deref()
-            != Some(echo.pipeline_provenance_sha256.as_str())
-        || !video.has_audio
-        || video.duration_ms != Some(expected_duration_ms)
-        || video.audio_sample_rate != Some(mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ)
-        || video.audio_channels != Some(mold_core::minimax_h3::AUDIO_CHANNELS)
-    {
-        anyhow::bail!("private H3 terminal media provenance mismatch")
+    macro_rules! require_axis {
+        ($condition:expr, $axis:literal) => {
+            if !$condition {
+                anyhow::bail!(concat!(
+                    "private H3 terminal media provenance mismatch: ",
+                    $axis
+                ))
+            }
+        };
     }
+    require_axis!(
+        contract.canonical_model == expected_contract.canonical_model,
+        "contract-model"
+    );
+    require_axis!(contract.task == expected_contract.task, "contract-task");
+    require_axis!(contract.mode == expected_contract.mode, "contract-mode");
+    require_axis!(contract.seed == expected_contract.seed, "contract-seed");
+    require_axis!(contract.width == expected_contract.width, "contract-width");
+    require_axis!(
+        contract.height == expected_contract.height,
+        "contract-height"
+    );
+    require_axis!(
+        contract.frames == expected_contract.frames,
+        "contract-frames"
+    );
+    require_axis!(contract.fps == expected_contract.fps, "contract-fps");
+    require_axis!(
+        contract.reference_fingerprint_sha256 == expected_contract.reference_fingerprint_sha256,
+        "contract-reference-fingerprint"
+    );
+    require_axis!(
+        contract.resolved_reference_fingerprint_sha256
+            == expected_contract.resolved_reference_fingerprint_sha256,
+        "contract-resolved-source-fingerprint"
+    );
+    require_axis!(
+        contract.reference_count == expected_contract.reference_count,
+        "contract-reference-count"
+    );
+    require_axis!(
+        contract.canonical_model == job.request.model,
+        "request-model"
+    );
+    require_axis!(contract.seed == expected_seed, "request-seed");
+    require_axis!(contract.width == job.request.width, "request-width");
+    require_axis!(contract.height == job.request.height, "request-height");
+    require_axis!(contract.frames == expected_frames, "request-frames");
+    require_axis!(
+        contract.fps == mold_core::minimax_h3::FIXED_FPS,
+        "request-fps"
+    );
+    require_axis!(echo.device_ordinal == worker.gpu.ordinal, "echo-device");
+    require_axis!(echo.media == *contract, "echo-media");
+    require_axis!(echo.duration_ms == expected_duration_ms, "echo-duration");
+    require_axis!(
+        echo.audio_sample_rate == mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ,
+        "echo-audio-rate"
+    );
+    require_axis!(
+        u32::from(echo.audio_channels) == mold_core::minimax_h3::AUDIO_CHANNELS,
+        "echo-audio-channels"
+    );
+    require_axis!(echo.synchronized_audio_video, "echo-synchronization");
+    require_axis!(
+        echo.pipeline_provenance_sha256.len() == 64
+            && echo
+                .pipeline_provenance_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()),
+        "echo-provenance"
+    );
+    require_axis!(output.response.images.is_empty(), "response-images");
+    require_axis!(output.response.audio.is_none(), "response-audio");
+    require_axis!(
+        output.response.model == contract.canonical_model,
+        "response-model"
+    );
+    require_axis!(output.response.seed_used == expected_seed, "response-seed");
+    require_axis!(
+        durable_reference_fingerprint.as_deref()
+            == contract.reference_fingerprint_sha256.as_deref(),
+        "reference-fingerprint"
+    );
+    require_axis!(!video.data.is_empty(), "video-data");
+    require_axis!(!video.thumbnail.is_empty(), "video-thumbnail");
+    require_axis!(video.format == OutputFormat::Mp4, "video-format");
+    require_axis!(video.width == contract.width, "video-width");
+    require_axis!(video.height == contract.height, "video-height");
+    require_axis!(video.frames == contract.frames, "video-frames");
+    require_axis!(video.fps == mold_core::minimax_h3::FIXED_FPS, "video-fps");
+    require_axis!(video.pipeline.is_none(), "video-pipeline");
+    require_axis!(
+        video.pipeline_provenance_sha256.as_deref()
+            == Some(echo.pipeline_provenance_sha256.as_str()),
+        "video-provenance"
+    );
+    require_axis!(video.has_audio, "video-has-audio");
+    require_axis!(
+        video.duration_ms == Some(expected_duration_ms),
+        "video-duration"
+    );
+    require_axis!(
+        video.audio_sample_rate == Some(mold_core::minimax_h3::AUDIO_SAMPLE_RATE_HZ),
+        "video-audio-rate"
+    );
+    require_axis!(
+        video.audio_channels == Some(mold_core::minimax_h3::AUDIO_CHANNELS),
+        "video-audio-channels"
+    );
     Ok(())
 }
 
@@ -5584,6 +5656,47 @@ mod tests {
         Provenance,
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum FakeH3ContractFault {
+        Model,
+        Task,
+        Mode,
+        Seed,
+        Width,
+        Height,
+        Frames,
+        Fps,
+        ReferenceFingerprint,
+        ResolvedSourceFingerprint,
+        ReferenceCount,
+    }
+
+    fn apply_fake_h3_contract_fault(
+        media: &mut crate::h3_private_bridge::H3PreparedMediaContract,
+        fault: FakeH3ContractFault,
+    ) {
+        const SENTINEL: &str = "sensitive-publication-sentinel";
+        match fault {
+            FakeH3ContractFault::Model => media.canonical_model = SENTINEL.to_string(),
+            FakeH3ContractFault::Task => media.task = mold_core::minimax_h3::Task::Ref2va,
+            FakeH3ContractFault::Mode => {
+                media.mode = mold_core::minimax_h3::Mode::FirstFrameToAudioVideo
+            }
+            FakeH3ContractFault::Seed => media.seed += 1,
+            FakeH3ContractFault::Width => media.width += 32,
+            FakeH3ContractFault::Height => media.height += 32,
+            FakeH3ContractFault::Frames => media.frames += 17,
+            FakeH3ContractFault::Fps => media.fps += 1,
+            FakeH3ContractFault::ReferenceFingerprint => {
+                media.reference_fingerprint_sha256 = Some(SENTINEL.to_string())
+            }
+            FakeH3ContractFault::ResolvedSourceFingerprint => {
+                media.resolved_reference_fingerprint_sha256 = Some(SENTINEL.to_string())
+            }
+            FakeH3ContractFault::ReferenceCount => media.reference_count += 1,
+        }
+    }
+
     struct FakeH3PreparedAttempt {
         facts: crate::h3_private_bridge::H3PreparedAttemptFacts,
         outcome: Option<FakeH3Outcome>,
@@ -6306,15 +6419,18 @@ mod tests {
 
     #[tokio::test]
     async fn claimed_h3_publication_gate_rejects_every_independent_media_axis() {
-        for (index, fault) in [
-            FakeH3PublicationFault::Model,
-            FakeH3PublicationFault::Seed,
-            FakeH3PublicationFault::Width,
-            FakeH3PublicationFault::Fps,
-            FakeH3PublicationFault::Duration,
-            FakeH3PublicationFault::AudioRate,
-            FakeH3PublicationFault::Synchronization,
-            FakeH3PublicationFault::Provenance,
+        for (index, (fault, expected_axis)) in [
+            (FakeH3PublicationFault::Model, "response-model"),
+            (FakeH3PublicationFault::Seed, "response-seed"),
+            (FakeH3PublicationFault::Width, "video-width"),
+            (FakeH3PublicationFault::Fps, "video-fps"),
+            (FakeH3PublicationFault::Duration, "video-duration"),
+            (FakeH3PublicationFault::AudioRate, "video-audio-rate"),
+            (
+                FakeH3PublicationFault::Synchronization,
+                "echo-synchronization",
+            ),
+            (FakeH3PublicationFault::Provenance, "video-provenance"),
         ]
         .into_iter()
         .enumerate()
@@ -6336,6 +6452,7 @@ mod tests {
             };
 
             assert!(error.contains("frozen publication contract"));
+            assert!(error.contains(expected_axis), "unexpected error: {error}");
             assert_eq!(runs.load(Ordering::SeqCst), 1);
             assert_eq!(drops.load(Ordering::SeqCst), 1);
             assert_eq!(settlements.load(Ordering::SeqCst), 1);
@@ -6348,6 +6465,78 @@ mod tests {
                 .contains("cache-sentinel"));
             assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn claimed_h3_publication_diagnostics_cover_every_frozen_contract_axis() {
+        const SENTINEL: &str = "sensitive-publication-sentinel";
+        for (index, (fault, expected_axis)) in [
+            (FakeH3ContractFault::Model, "contract-model"),
+            (FakeH3ContractFault::Task, "contract-task"),
+            (FakeH3ContractFault::Mode, "contract-mode"),
+            (FakeH3ContractFault::Seed, "contract-seed"),
+            (FakeH3ContractFault::Width, "contract-width"),
+            (FakeH3ContractFault::Height, "contract-height"),
+            (FakeH3ContractFault::Frames, "contract-frames"),
+            (FakeH3ContractFault::Fps, "contract-fps"),
+            (
+                FakeH3ContractFault::ReferenceFingerprint,
+                "contract-reference-fingerprint",
+            ),
+            (
+                FakeH3ContractFault::ResolvedSourceFingerprint,
+                "contract-resolved-source-fingerprint",
+            ),
+            (
+                FakeH3ContractFault::ReferenceCount,
+                "contract-reference-count",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("claimed-h3-contract-fault-{index}");
+            let (job, _result_rx, _progress_rx, _queue_rx, _queue, _registry) =
+                claimed_h3_job_fixture(&id).await;
+            let mut facts = fake_h3_facts();
+            apply_fake_h3_contract_fault(&mut facts.media, fault);
+            let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
+            let claimed_output = fake_h3_output(&facts, true, false);
+            let error = validate_h3_publication_contract(&worker, &job, &facts, &claimed_output)
+                .expect_err("contract-drifted H3 output must be rejected")
+                .to_string();
+
+            assert!(error.contains(expected_axis), "unexpected error: {error}");
+            assert!(
+                !error.contains(SENTINEL),
+                "error leaked contract value: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn claimed_h3_publication_diagnostics_redact_invalid_request_values() {
+        const SENTINEL: &str = "sensitive-publication-sentinel";
+        let id = "claimed-h3-invalid-request-contract";
+        let (mut job, _result_rx, _progress_rx, _queue_rx, _queue, _registry) =
+            claimed_h3_job_fixture(id).await;
+        let facts = fake_h3_facts();
+        let claimed_output = fake_h3_output(&facts, true, false);
+        job.request.model = SENTINEL.to_string();
+        job.model = SENTINEL.to_string();
+        let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
+        let error = validate_h3_publication_contract(&worker, &job, &facts, &claimed_output)
+            .expect_err("invalid H3 request contract must be rejected")
+            .to_string();
+
+        assert!(
+            error.contains("request-contract"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !error.contains(SENTINEL),
+            "error leaked request value: {error}"
+        );
     }
 
     #[tokio::test]
