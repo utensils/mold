@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Refresh the generated Wan 2.2 A14B capability profiles after the measured RTX 4090 frame-envelope defaults changed, restoring the deterministic generation-profile CI gate.
+
 - Make the private MiniMax H3 terminal publication gate identify the mismatched non-secret contract axis while continuing to fail closed, so a successful expensive render cannot collapse model, media, source-fingerprint, or provenance failures into one unactionable message.
 
 - Restore CUDA distribution builds after the H3 native INT8 kernel landed by including the Candle build script and its CUDA source in Docker's dependency-cache context, with a release-contract regression for the compiled input.
