@@ -97,6 +97,7 @@ mod tests {
 
     /// Minimal mock engine for testing routes without loading models.
     struct MockEngine {
+        model_name: &'static str,
         loaded: bool,
         fail: bool,
         empty_images: bool,
@@ -112,7 +113,12 @@ mod tests {
 
     impl MockEngine {
         fn ready() -> Self {
+            Self::ready_for_model("mock-model")
+        }
+
+        fn ready_for_model(model_name: &'static str) -> Self {
             Self {
+                model_name,
                 loaded: true,
                 fail: false,
                 empty_images: false,
@@ -127,6 +133,7 @@ mod tests {
         }
         fn failing() -> Self {
             Self {
+                model_name: "mock-model",
                 loaded: true,
                 fail: true,
                 empty_images: false,
@@ -141,6 +148,7 @@ mod tests {
         }
         fn empty_images() -> Self {
             Self {
+                model_name: "mock-model",
                 loaded: true,
                 fail: false,
                 empty_images: true,
@@ -155,6 +163,7 @@ mod tests {
         }
         fn unloaded(load_count: Arc<AtomicUsize>, load_delay: Duration) -> Self {
             Self {
+                model_name: "mock-model",
                 loaded: false,
                 fail: false,
                 empty_images: false,
@@ -173,6 +182,7 @@ mod tests {
             progress_clear_count: Arc<AtomicUsize>,
         ) -> Self {
             Self {
+                model_name: "mock-model",
                 loaded: true,
                 fail: false,
                 empty_images: false,
@@ -188,6 +198,7 @@ mod tests {
 
         fn blocking_generate(blocker: Arc<GenerateBlocker>) -> Self {
             Self {
+                model_name: "mock-model",
                 loaded: true,
                 fail: false,
                 empty_images: false,
@@ -205,6 +216,7 @@ mod tests {
         /// simulating FP8→Q8 conversion status messages.
         fn unloaded_with_progress() -> Self {
             Self {
+                model_name: "mock-model",
                 loaded: false,
                 fail: false,
                 empty_images: false,
@@ -255,7 +267,7 @@ mod tests {
         }
 
         fn model_name(&self) -> &str {
-            "mock-model"
+            self.model_name
         }
 
         fn is_loaded(&self) -> bool {
@@ -825,8 +837,12 @@ mod tests {
 
     fn generate_body(prompt: &str, width: u32, height: u32) -> String {
         // Use "mock-model" to match MockEngine::model_name() — avoids hot-swap path.
+        generate_body_for_model(prompt, "mock-model", width, height)
+    }
+
+    fn generate_body_for_model(prompt: &str, model: &str, width: u32, height: u32) -> String {
         format!(
-            r#"{{"prompt":"{prompt}","model":"mock-model","width":{width},"height":{height},"steps":4,"batch_size":1,"output_format":"png"}}"#
+            r#"{{"prompt":"{prompt}","model":"{model}","width":{width},"height":{height},"steps":4,"batch_size":1,"output_format":"png"}}"#
         )
     }
 
@@ -7178,59 +7194,77 @@ mod tests {
     /// and close their SSE streams.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn queued_stream_receives_position_event() {
-        let (state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let model = "sd15:fp16";
+        let (state, rx) = AppState::with_engine_and_queue(MockEngine::ready_for_model(model));
         let queue = state.queue.clone();
         let worker_state = state.clone();
         let app = app_with_state(state);
 
-        // Submit first request (worker not started — handler completes fast)
-        let _resp1 = {
-            let app = app.clone();
-            tokio::spawn(async move {
-                app.oneshot(
-                    Request::post("/api/generate/stream")
-                        .header("content-type", "application/json")
-                        .body(Body::from(generate_body("first", 768, 768)))
-                        .unwrap(),
-                )
+        // The SSE route submits while its body is polled, so retain a task that
+        // consumes the first response while waiting for the queue transition.
+        let resp1 = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body_for_model(
+                        "first", model, 768, 768,
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if resp1.status() != StatusCode::OK {
+            let status = resp1.status();
+            let body = axum::body::to_bytes(resp1.into_body(), 1024 * 1024)
                 .await
-            })
-        };
-
-        // Wait for the first request to be queued before submitting the second,
-        // guaranteeing the second request sees pending_count == 1 (position 1).
-        while queue.pending() < 1 {
-            tokio::time::sleep(Duration::from_millis(1)).await;
+                .unwrap();
+            panic!(
+                "first streaming request returned {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
         }
+        let body1 =
+            tokio::spawn(async move { axum::body::to_bytes(resp1.into_body(), 1024 * 1024).await });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while queue.pending() < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first streaming request should enter the queue");
 
         // Submit second request — should be queued at position 1
-        let resp2 = {
-            let app = app.clone();
-            tokio::spawn(async move {
-                let resp = app
-                    .oneshot(
-                        Request::post("/api/generate/stream")
-                            .header("content-type", "application/json")
-                            .body(Body::from(generate_body("second", 768, 768)))
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
-                    .await
-                    .unwrap();
-                String::from_utf8_lossy(&body).to_string()
-            })
-        };
+        let resp2 = app
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body_for_model(
+                        "second", model, 768, 768,
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body2 =
+            tokio::spawn(async move { axum::body::to_bytes(resp2.into_body(), 1024 * 1024).await });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while queue.pending() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second streaming request should enter the queue");
 
-        // Wait for both requests to be queued, then start the worker so
-        // both jobs are processed and their SSE streams close.
-        while queue.pending() < 2 {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
+        // Start the worker so both jobs are processed and the streams close.
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
 
-        let text2 = resp2.await.unwrap();
+        let body2 = tokio::time::timeout(Duration::from_secs(10), body2)
+            .await
+            .expect("second queued stream should close")
+            .expect("second queued stream task should complete")
+            .unwrap();
+        let text2 = String::from_utf8_lossy(&body2).to_string();
         assert!(
             text2.contains(r#""type":"queued""#),
             "second request should receive a queued event, got: {text2}"
@@ -7240,6 +7274,12 @@ mod tests {
             text2.contains(r#""position":1"#),
             "second request should be at position 1, got: {text2}"
         );
+
+        tokio::time::timeout(Duration::from_secs(10), body1)
+            .await
+            .expect("first queued stream should close")
+            .expect("first queued stream task should complete")
+            .unwrap();
     }
 
     /// Verify that both streaming and non-streaming requests are properly
