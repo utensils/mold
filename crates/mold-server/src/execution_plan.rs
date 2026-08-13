@@ -1927,6 +1927,23 @@ fn concrete_artifacts_for_family(
     if let Some(path) = &paths.clip_tokenizer_2 {
         artifacts.insert(ComponentRole::ClipGTokenizer, path.clone());
     }
+    /// Whether a Gemma text-encoder file holds *weights* rather than a
+    /// companion artifact.
+    ///
+    /// Mirrors the patterns `variant_dependencies::materialize_gemma` selects
+    /// on: BF16 arrives as `model.safetensors` or `model-<i>-of-<n>.safetensors`
+    /// shards, Q4 as a single `.gguf`. Everything else in `text_encoder_files`
+    /// — the tokenizer anchor, the LTX-2.3 text projection — belongs to every
+    /// variant and must survive the filter.
+    fn is_gemma_weight_file(path: &Path) -> bool {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        name.ends_with(".gguf")
+            || name == "model.safetensors"
+            || (name.starts_with("model-") && name.ends_with(".safetensors"))
+    }
+
     let selected_text_paths = if !engine_config.selected_qwen3_paths.is_empty() {
         engine_config.selected_qwen3_paths.clone()
     } else if let Some(path) = engine_config.selected_qwen2_path.as_ref() {
@@ -1944,12 +1961,27 @@ fn concrete_artifacts_for_family(
     } else if !engine_config.selected_gemma_paths.is_empty() {
         // `text_encoder_files` also carries the Gemma tokenizer anchor and
         // optional LTX-2.3 text projection. Keep those host artifacts beside
-        // the exact selected Gemma weight files.
+        // the exact selected Gemma weight files — but never the weights of the
+        // variant that was not selected. Chaining the whole list made a Q4
+        // selection plan the GGUF *and* the five BF16 shards, so the quantized
+        // fallback raised predicted host memory instead of lowering it.
+        let selected = engine_config
+            .selected_gemma_paths
+            .iter()
+            .collect::<BTreeSet<_>>();
         engine_config
             .selected_gemma_paths
             .iter()
             .cloned()
-            .chain(paths.text_encoder_files.iter().cloned())
+            .chain(
+                paths
+                    .text_encoder_files
+                    .iter()
+                    .filter(|candidate| {
+                        !selected.contains(*candidate) && !is_gemma_weight_file(candidate)
+                    })
+                    .cloned(),
+            )
             .collect()
     } else if let Some(path) = engine_config.selected_umt5_path.as_ref() {
         // Wan's selected UMT5 GGUF fully replaces the manifest's FP16 shard:
@@ -4908,6 +4940,87 @@ mod tests {
             role,
             ComponentRole::T5 | ComponentRole::ClipL | ComponentRole::ClipG
         )));
+    }
+
+    /// Selecting the Q4 Gemma must replace the BF16 shards, not join them.
+    ///
+    /// `text_encoder_files` carries every Gemma weight variant plus the
+    /// tokenizer anchor and the optional LTX-2.3 text projection. Chaining the
+    /// whole list onto the selection made a Q4 pick cost the GGUF *and* the
+    /// BF16 shards, so `predicted_host_increment_bytes` rose from 24.7 GB to
+    /// 32.8 GB — the quantized fallback made memory pressure worse and LTX-2
+    /// stayed unadmittable on a 48 GB unified-memory Mac.
+    #[test]
+    fn a_selected_gemma_variant_replaces_the_other_variants_weights() {
+        let root = tempfile::tempdir().unwrap();
+        let at = |name: &str| root.path().join(name);
+        let bf16 = (1..=5)
+            .map(|index| at(&format!("model-0000{index}-of-00005.safetensors")))
+            .collect::<Vec<_>>();
+        let gguf = at("gemma-3-12b-it-q4_0.gguf");
+        let tokenizer = at("tokenizer.model");
+        let projection = at("ltx-2.3-text-projection.safetensors");
+        for path in bf16
+            .iter()
+            .chain(std::iter::once(&gguf))
+            .chain(std::iter::once(&tokenizer))
+            .chain(std::iter::once(&projection))
+        {
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        let mut text_encoder_files = bf16.clone();
+        text_encoder_files.push(gguf.clone());
+        text_encoder_files.push(tokenizer.clone());
+        text_encoder_files.push(projection.clone());
+
+        let transformer = at("transformer.safetensors");
+        let vae = at("vae.safetensors");
+        std::fs::write(&transformer, b"x").unwrap();
+        std::fs::write(&vae, b"x").unwrap();
+        let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
+            transformer,
+            transformer_shards: Vec::new(),
+            vae,
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files,
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let mut frozen = mold_inference::FrozenEngineConfig::resolve("unused", &Config::default());
+        frozen.ltx2_gemma_variant = Some("q4".to_string());
+        frozen.selected_gemma_paths = vec![gguf.clone()];
+
+        let artifacts = concrete_artifacts_for_family(&paths, "ltx2", &[], &frozen);
+        let planned = artifacts
+            .values()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(
+            planned.contains(&gguf),
+            "selected Q4 weights must be planned"
+        );
+        assert!(
+            planned.contains(&tokenizer) && planned.contains(&projection),
+            "tokenizer anchor and text projection are companions, not weights"
+        );
+        for shard in &bf16 {
+            assert!(
+                !planned.contains(&shard),
+                "unselected BF16 shard {} must not be planned beside the Q4 weights",
+                shard.display()
+            );
+        }
     }
 
     /// Both halves of a two-expert pair must be in the plan's artifact set.
