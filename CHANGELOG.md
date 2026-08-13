@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Corrected public SM89 H3 release provenance so the authenticated Qwen support loader carries a public marker while private-UAT builds retain the release-rejected private marker.
+
 - Fixed CUDA container source-identity verification to authenticate the full embedded commit directly from the shipped binary while checking the intentionally abbreviated human-facing version separately.
 
 - Made hermetic CUTLASS staging reproducible across Nix builders by fetching a content-only GitHub archive and reconstructing only the exact pinned commit object required by cudaforge, avoiding platform-dependent `.git` metadata in the fixed-output hash.
