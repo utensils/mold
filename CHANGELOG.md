@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed CUDA container source-identity verification to authenticate the full embedded commit directly from the shipped binary while checking the intentionally abbreviated human-facing version separately.
+
 - Made hermetic CUTLASS staging reproducible across Nix builders by fetching a content-only GitHub archive and reconstructing only the exact pinned commit object required by cudaforge, avoiding platform-dependent `.git` metadata in the fixed-output hash.
 
 - Completed the public H3 distribution CI repair by retaining `.cargo/config.toml` and its Clang/LLD toolchain in Docker's manifest-first source layer for runtime-identity hashing and updating the desktop packaging contract to recognize the SM89 `cuda,h3` AppImage build.

@@ -230,9 +230,11 @@ require_release_job_text "docker" \
 require_release_job_text "docker" \
   '-e LD_LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/cuda/lib64'
 require_release_job_text "docker" \
-  "-c 'exec mold version'"
+  '-e EXPECTED_SOURCE_SHA="$GITHUB_SHA"'
 require_release_job_text "docker" \
-  'grep -Fq "$GITHUB_SHA"'
+  '-c '\''grep -aFq "$EXPECTED_SOURCE_SHA" "$(command -v mold)" && exec mold version'\'''
+require_release_job_text "docker" \
+  'grep -Fq "${GITHUB_SHA:0:7}" <<<"$version"'
 require_text "Dockerfile" 'ARG MOLD_GIT_SHA'
 require_text "Dockerfile" 'ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}'
 
