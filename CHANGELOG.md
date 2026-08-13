@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Apple Silicon no longer refuses LTX-2 for memory it actually has.** Metal device discovery budgeted on free pages alone while reporting *available* memory as the device total, so a 48 GB M4 Max with 23 GB reclaimable advertised about 7 GB free and roughly 10 GB of schedulable capacity. Every LTX-2 execution plan was rejected before a weight was read (`metal:default needs ~13.9 GB of ~10.1 GB usable`). Discovery now reports installed RAM as the total and free-plus-inactive as free, matching the reclaimable-memory metric `free_vram_bytes` and the memory preflight already used; the same request is now admitted with ~25 GB usable. Selecting a quantized Gemma encoder also planned the GGUF *beside* the five BF16 shards rather than instead of them, so asking for the smaller encoder raised predicted host memory from 24.7 GB to 32.8 GB; the unselected variant's weights are now dropped while the tokenizer anchor and LTX-2.3 text projection are kept, which lowers the same plan to 8.4 GB. Forced-local admission refusals now name the shortfall instead of reporting only that one occurred.
 
+- Fix the H3 qualification fixed point by compiling the development-only runtime-record producer with the exact public `h3` feature identity it reviews. Development capture and record-producer executables plus private-UAT observer markers remain excluded; the shipping runtime retains its synchronous public bounds check.
+- Keep the H3 runtime-record producer's artifact-activation assertion aligned with the compiled public or private qualification feature, while preserving exact artifact hashing and fail-closed scope checks.
+- Normalize Cargo's development-binary token from both individual and aggregate feature axes so the review-only record producer and the otherwise identical public H3 server share one runtime identity.
+- Present H3 artifact and VAE verification with neutral public progress labels while retaining the same exact hash and cancellation authority.
+
+- Promote compact MiniMax H3 FL2VA generation into Mold's SM89 CUDA release,
+  using the same pinned upstream install flow as other models and an
+  embedded reviewed runtime profile instead of per-user authorization files;
+  document the MiniMax H3 Community License and keep Ref2VA, other CUDA
+  architectures, Metal, and CPU execution unavailable until those runtimes are
+  implemented and qualified.
+
 - Fix private MiniMax H3 terminal publication to compare the MP4 container's
   frame duration with ceiling millisecond rounding, matching the retained
   124-frame, 24 fps mux result instead of rejecting it one millisecond early;

@@ -38,13 +38,13 @@ impl InferenceCancellationToken {
 /// Cached runtimes may retain this view only while an explicit attempt guard
 /// is active. The view deliberately exposes no cancellation mutator, so model
 /// code cannot cancel its caller or replace the current attempt authority.
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 #[derive(Clone, Debug)]
 pub(crate) struct InferenceCancellationObserver {
     token: InferenceCancellationToken,
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 impl InferenceCancellationObserver {
     pub(crate) fn is_cancelled(&self) -> bool {
         self.token.is_cancelled()
@@ -209,7 +209,7 @@ impl ProgressReporter {
     /// token installed for every progress checkpoint. Any previously installed
     /// token is restored even when the attempt panics; callers cannot supply a
     /// second token for the reporter and diverge the two cancellation paths.
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn with_attempt_cancellation_token<T>(
         &mut self,
         token: InferenceCancellationToken,
@@ -228,7 +228,7 @@ impl ProgressReporter {
     /// Callers must not retain it across `clear_cancellation_token` or a later
     /// `set_cancellation_token`; cached runtimes should install it behind an
     /// attempt-scoped guard.
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn cancellation_observer(&self) -> Option<InferenceCancellationObserver> {
         self.cancellation
             .clone()

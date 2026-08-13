@@ -1,4 +1,4 @@
-//! Synchronous private-UAT runtime-bound evidence from one real H3 attempt.
+//! Synchronous runtime-bound evidence from one real H3 attempt.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -23,8 +23,16 @@ use crate::device::{PhaseVramProbe, PhaseVramReport};
 
 use super::pipeline::{H3PipelineEvent, H3PipelinePhase};
 
+pub(crate) const H3_PUBLIC_RUNTIME_BOUND_OBSERVATION_SCHEMA: &str =
+    "mold.minimax-h3.runtime-bound-observation.v1";
+
+#[cfg(feature = "h3-private-uat")]
 pub(crate) const H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA: &str =
     "mold.minimax-h3.private-uat-runtime-bound-observation.v5";
+
+#[cfg(all(feature = "h3", not(feature = "h3-private-uat")))]
+pub(crate) const H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA: &str =
+    H3_PUBLIC_RUNTIME_BOUND_OBSERVATION_SCHEMA;
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -613,6 +621,16 @@ mod tests {
         assert!(captured_phase(H3PipelinePhase::VisualConditionEncode));
         assert!(!captured_phase(H3PipelinePhase::Denoise));
         assert!(!captured_phase(H3PipelinePhase::Complete));
+    }
+
+    #[test]
+    #[cfg(all(feature = "h3", not(feature = "h3-private-uat")))]
+    fn public_runtime_emits_only_the_public_observation_schema() {
+        assert_eq!(
+            H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA,
+            H3_PUBLIC_RUNTIME_BOUND_OBSERVATION_SCHEMA
+        );
+        assert!(!H3_PRIVATE_RUNTIME_BOUND_OBSERVATION_SCHEMA.contains("private-uat"));
     }
 
     #[test]

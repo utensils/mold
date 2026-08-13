@@ -498,7 +498,7 @@ impl<'a> H3EngineProgressObserver<'a> {
 
 impl H3PipelineObserver for H3EngineProgressObserver<'_> {
     fn observe(&mut self, event: H3PipelineEvent) {
-        #[cfg(feature = "h3-private-uat")]
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         super::private_runtime_observer::observe_event(event);
         let now = Instant::now();
         let previous = self.last_completed.get(&event.phase).copied();

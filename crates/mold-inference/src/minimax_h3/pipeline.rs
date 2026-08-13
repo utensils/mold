@@ -854,7 +854,7 @@ pub(crate) fn execute_staged(
         completed: 1,
         total: 1,
     })?;
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     super::private_runtime_observer::observe_staged_host_bytes(
         encoded_video.mp4.capacity(),
         encoded_video.thumbnail_png.capacity(),
@@ -929,13 +929,13 @@ pub(crate) fn finalize_av(
             error
         }
     })?;
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     super::private_runtime_observer::observe_aac_staging_capacity(
         samples.capacity(),
         muxed.report.peak_aac_staging_host_bytes,
     )?;
     phase_boundary(&mut control, H3PipelinePhase::Mux, true)?;
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     super::private_runtime_observer::observe_mux_output_capacity(muxed.bytes.capacity())?;
     control.checkpoint(H3PipelineEvent {
         phase: H3PipelinePhase::Complete,

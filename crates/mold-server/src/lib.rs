@@ -12,7 +12,12 @@ mod gallery_authority;
 #[allow(dead_code)]
 mod h3_admission;
 mod h3_attempt;
-#[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
+#[cfg(any(
+    test,
+    feature = "h3",
+    feature = "h3-private-bridge",
+    feature = "h3-private-uat"
+))]
 mod h3_private_bridge;
 pub mod test_support;
 // Agent A (downloads)

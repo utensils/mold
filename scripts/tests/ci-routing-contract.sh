@@ -250,7 +250,7 @@ if release_change_allowed M src/production.rs; then
 fi
 
 require_text "$ci" \
-  "cargo clippy -p mold-ai --features cuda,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings" \
+  "cargo clippy -p mold-ai --features cuda,h3,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings" \
   "CUDA-gated production code is not linted"
 require_text "$ci" \
   "cargo clippy -p mold-ai --features metal,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings" \

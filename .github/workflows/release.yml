@@ -232,7 +232,7 @@ jobs:
         env:
           CUDA_COMPUTE_CAP: "89"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-        run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns
+        run: cargo build --release -p mold-ai --features cuda,h3,preview,discord,expand,tui,webp,mp4,metrics,mdns
 
       - name: Seal generated CUDA PTX manifest
         run: scripts/seal-cuda-ptx-manifest.py target/release/mold 89 target/release/build
@@ -863,7 +863,7 @@ jobs:
 
             # From source with GPU support
             cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features metal,preview,discord,expand,tui,webp,mp4,metrics,mdns  # macOS
-            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns   # Linux
+            cargo install --git https://github.com/utensils/mold --tag ${{ github.ref_name }} --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns   # Linux; use the SM89 artifact for H3
 
             # Nix
             nix run github:utensils/mold/${{ github.ref_name }}

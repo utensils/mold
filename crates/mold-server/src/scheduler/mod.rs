@@ -678,7 +678,7 @@ fn compose_prepared_generation(pending: &mut PendingGeneration, prepared: Prepar
         pending.job.request.original_prompt = Some(pending.job.request.prompt.clone());
         pending.job.request.prompt = expanded_prompt;
     }
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if let Some(grant) = prepared
         .execution_inputs
         .as_ref()
@@ -724,13 +724,13 @@ impl DependencyPreparer for PostUpscalePreparer {
                 context,
             )
             .await?;
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             let resolved_seed = execution_inputs
                 .h3_private_admission_by_device
                 .values()
                 .next()
                 .map(mold_inference::H3PrivateFl2VaAdmissionEvidence::seed);
-            #[cfg(not(feature = "h3-private-uat"))]
+            #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
             let resolved_seed = None;
             if request.expand != Some(true) {
                 return Ok(PreparedGeneration {
@@ -1619,11 +1619,11 @@ impl Coordinator {
             let state = self.state.clone();
             let request = pending.job.request.clone();
             let progress = pending.job.progress_tx.clone();
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             let context = crate::variant_dependencies::DependencyPreparationContext {
                 h3_private_ingress_grant: pending.job.h3_private_ingress_grant.clone(),
             };
-            #[cfg(not(feature = "h3-private-uat"))]
+            #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
             let context = crate::variant_dependencies::DependencyPreparationContext::default();
             let preparer = self.preparer.clone();
             let tx = self.preparation_tx.clone();
@@ -5302,7 +5302,7 @@ fn generation_and_prepared_from_gpu_job(
     Option<crate::execution_plan::PreparedExecutionInputs>,
 ) {
     let prepared = job.prepared_execution_inputs;
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let h3_private_ingress_grant = prepared
         .as_ref()
         .and_then(|inputs| inputs.h3_private_ingress_grant.clone());
@@ -5316,7 +5316,7 @@ fn generation_and_prepared_from_gpu_job(
             result_tx: job.result_tx,
             output_dir: job.output_dir,
             batch_child: job.batch_child,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant,
         },
         prepared,
@@ -6403,7 +6403,7 @@ mod tests {
                 result_tx,
                 output_dir: None,
                 batch_child: None,
-                #[cfg(feature = "h3-private-uat")]
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
             },
             result_rx,

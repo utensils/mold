@@ -5244,7 +5244,7 @@ mod tests {
             result_tx,
             output_dir: None,
             batch_child: None,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
@@ -5295,7 +5295,7 @@ mod tests {
             result_tx,
             output_dir: None,
             batch_child: None,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
         };
         queue.submit(job, 8).await.unwrap();
@@ -5377,7 +5377,7 @@ mod tests {
             result_tx: tx,
             output_dir: None,
             batch_child: None,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
         })
     }
@@ -5393,7 +5393,7 @@ mod tests {
             result_tx: tx,
             output_dir: None,
             batch_child: None,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
         })
     }
@@ -5652,7 +5652,7 @@ mod tests {
                 result_tx: tx,
                 output_dir: None,
                 batch_child: None,
-                #[cfg(feature = "h3-private-uat")]
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
             };
             queue.submit(job, 8).await.unwrap();
@@ -5726,7 +5726,7 @@ mod tests {
                 result_tx: tx,
                 output_dir: None,
                 batch_child: None,
-                #[cfg(feature = "h3-private-uat")]
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
             };
             queue.submit(job, 8).await.unwrap();
@@ -5785,7 +5785,7 @@ mod tests {
                 result_tx: tx,
                 output_dir: None,
                 batch_child: None,
-                #[cfg(feature = "h3-private-uat")]
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
             };
             job_tx.send(job).await.unwrap();
@@ -5891,7 +5891,7 @@ mod tests {
                 result_tx: tx,
                 output_dir: None,
                 batch_child: None,
-                #[cfg(feature = "h3-private-uat")]
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
             };
             queue.submit(job, 32).await.unwrap();
@@ -6026,7 +6026,7 @@ mod tests {
             result_tx,
             output_dir: None,
             batch_child: None,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
@@ -6068,7 +6068,7 @@ mod tests {
             result_tx,
             output_dir: None,
             batch_child: None,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
@@ -6119,7 +6119,7 @@ mod tests {
             result_tx,
             output_dir: None,
             batch_child: None,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();
@@ -6179,7 +6179,7 @@ mod tests {
                         result_tx,
                         output_dir: None,
                         batch_child: None,
-                        #[cfg(feature = "h3-private-uat")]
+                        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                         h3_private_ingress_grant: None,
                     },
                     8,
@@ -6241,7 +6241,7 @@ mod tests {
             result_tx,
             output_dir: None,
             batch_child: None,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
         };
         let _position = queue.submit(job, 8).await.unwrap();

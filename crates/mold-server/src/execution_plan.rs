@@ -878,12 +878,12 @@ pub struct PreparedExecutionInputs {
     /// Payload-free authenticated authority for the private H3 ingress. This
     /// is only a transport seam; per-device admission evidence is attached by
     /// dependency preparation before generic execution planning may consume it.
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
     /// One immutable inference-derived admission record per eligible device.
     /// These DTOs contain identities/capacities only; opened artifacts and
     /// executable authority remain inside the inference owner boundary.
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) h3_private_admission_by_device:
         BTreeMap<String, mold_inference::H3PrivateFl2VaAdmissionEvidence>,
 }
@@ -1123,7 +1123,7 @@ pub fn eligible_devices_for_request(
 /// inference preflight owns that authority. The canonical private runtime
 /// keeps Qwen on the host and requires transformer/VAE execution on one CUDA
 /// owner, while preserving the generic explicit-device conflict semantics.
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) fn eligible_devices_for_private_h3(
     config: &Config,
     request: &GenerateRequest,
@@ -1242,7 +1242,7 @@ fn resolve_execution_plans_with_policy(
     prepared: Option<&PreparedExecutionInputs>,
     fact_policy: EquivalenceFactPolicy,
 ) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if let Some(prepared) = prepared.filter(|prepared| prepared.h3_private_ingress_grant.is_some())
     {
         return resolve_private_h3_execution_plans(config, request, devices, prepared);
@@ -1347,7 +1347,7 @@ fn resolve_execution_plans_with_policy(
     Ok(candidates)
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn resolve_private_h3_execution_plans(
     config: &Config,
     request: &GenerateRequest,
@@ -1681,7 +1681,7 @@ pub fn validate_before_cuda(
     request: &GenerateRequest,
     prepared: Option<&PreparedExecutionInputs>,
 ) -> Result<(), ExecutionPlanError> {
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if let Some(prepared) = prepared.filter(|prepared| prepared.h3_private_ingress_grant.is_some())
     {
         return validate_private_h3_before_cuda(
@@ -1736,7 +1736,7 @@ pub fn validate_before_cuda(
     Ok(())
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn validate_private_h3_before_cuda(
     plan: &ResolvedExecutionPlan,
     worker_device_id: &str,
@@ -1858,7 +1858,7 @@ pub fn materialized_placement(plan: &ResolvedExecutionPlan) -> DevicePlacement {
 /// ordered default/request LoRA stack in the payload actually consumed by the
 /// engine; later config edits cannot inject or reorder adapters.
 pub fn materialize_request(plan: &ResolvedExecutionPlan, request: &mut GenerateRequest) {
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if plan.engine_config.h3_factory_authority.is_some()
         && mold_core::minimax_h3::is_family(&plan.model_family)
     {
@@ -5326,9 +5326,9 @@ mod tests {
             )]),
             retryable_device_failures: BTreeMap::new(),
             model_config_overlay: None,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_admission_by_device: BTreeMap::new(),
         };
 
@@ -5412,9 +5412,9 @@ mod tests {
             )]),
             retryable_device_failures: BTreeMap::new(),
             model_config_overlay: Some(Arc::new(model_config)),
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_admission_by_device: BTreeMap::new(),
         };
 
@@ -5470,9 +5470,9 @@ mod tests {
             )]),
             retryable_device_failures: BTreeMap::new(),
             model_config_overlay: None,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_admission_by_device: BTreeMap::new(),
         };
 
@@ -5936,9 +5936,9 @@ mod tests {
             )]),
             retryable_device_failures: BTreeMap::new(),
             model_config_overlay: None,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_admission_by_device: BTreeMap::new(),
         };
         warm_execution_equivalence_cache(&config, &request, &prepared);

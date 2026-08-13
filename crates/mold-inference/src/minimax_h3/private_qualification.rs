@@ -38,7 +38,10 @@ const HASH_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const AUTHORIZATION_SCHEMA: &str = "mold.minimax-h3.authorization.v1";
 const REVIEWED_AUTHORIZATION_EVIDENCE_SHA256: &str =
     "8cd4d6e52cff34d7d39721ebab13b8c1187aa87aafc1c4ae2a16609186f22f1d";
-const QUALIFICATION_SCHEMA: &str = "mold.minimax-h3.private-artifact-qualification.v2";
+const REVIEWED_AUTHORIZATION_RECORD_SHA256: &str =
+    "009f7e46d2cee11542fe17476b01ef232d19812d3a54a514569a6715048eb233";
+const PUBLIC_INTEGRATION_REVIEW_REFERENCE: &str = "https://github.com/utensils/mold/issues/831";
+pub(crate) const QUALIFICATION_SCHEMA: &str = "mold.minimax-h3.private-artifact-qualification.v2";
 const REQUIRED_AUTHORIZATION_SCOPES: [&str; 3] = [
     "checkpoint-execution",
     "fixture-capture",
@@ -274,7 +277,12 @@ pub(crate) fn qualify_private_artifacts_with_control(
     authorization_record: &Path,
     mut progress: impl FnMut(H3ArtifactHashProgress) -> Result<()>,
 ) -> Result<H3PrivateArtifactQualificationReport> {
+    #[cfg(feature = "h3")]
+    let private_scope = public_integration_scope(models_root)?;
+    #[cfg(not(feature = "h3"))]
     let private_scope = validate_private_scope(models_root, authorization_record)?;
+    #[cfg(feature = "h3")]
+    let _ = authorization_record;
     let (manifest, task, published_transformer) = qualification_manifest(model)?;
     let root = private_scope.models_root.clone();
     let artifacts = manifest
@@ -340,9 +348,21 @@ pub(crate) fn qualify_private_artifacts_with_control(
     );
     Ok(H3PrivateArtifactQualificationReport {
         schema: QUALIFICATION_SCHEMA,
-        claim_marker: H3_PRIVATE_UAT_CLAIM_MARKER,
-        decision: "qualified-private-artifacts",
-        authorization_scope: H3_PRIVATE_AUTHORIZATION_SCOPE,
+        claim_marker: if cfg!(feature = "h3") {
+            "mold.minimax-h3.public-artifact-reader.v1"
+        } else {
+            H3_PRIVATE_UAT_CLAIM_MARKER
+        },
+        decision: if cfg!(feature = "h3") {
+            "verified-public-artifacts"
+        } else {
+            "qualified-private-artifacts"
+        },
+        authorization_scope: if cfg!(feature = "h3") {
+            "public-h3-integration"
+        } else {
+            H3_PRIVATE_AUTHORIZATION_SCOPE
+        },
         authorization_schema: AUTHORIZATION_SCHEMA,
         authorization_record_sha256: private_scope.authorization_record_sha256,
         authorization_source_document_sha256: private_scope.authorization_source_document_sha256,
@@ -359,13 +379,38 @@ pub(crate) fn qualify_private_artifacts_with_control(
         qualification_identity_sha256,
         runtime_constructed: false,
         generated_media: false,
-        public_activation: "rejected",
-        remaining_release_requirements: vec![
-            "real-numerical-conformance",
-            "private-cuda-runtime-qualification",
-            "public-authorization-expansion",
-            "shipping-runtime-review",
-        ],
+        public_activation: if cfg!(feature = "h3") {
+            "supported-compact-fl2va-cuda"
+        } else {
+            "rejected"
+        },
+        remaining_release_requirements: if cfg!(feature = "h3") {
+            vec!["ref2va-runtime", "metal-runtime", "cpu-runtime"]
+        } else {
+            vec![
+                "real-numerical-conformance",
+                "private-cuda-runtime-qualification",
+                "public-authorization-expansion",
+                "shipping-runtime-review",
+            ]
+        },
+    })
+}
+
+#[cfg(feature = "h3")]
+fn public_integration_scope(models_root: &Path) -> Result<ValidatedPrivateScope> {
+    let models_root = models_root
+        .canonicalize()
+        .context("failed to resolve the MiniMax H3 models root")?;
+    if !models_root.is_dir() {
+        bail!("MiniMax H3 models root is not a directory")
+    }
+    Ok(ValidatedPrivateScope {
+        models_root,
+        authorization_record_sha256: REVIEWED_AUTHORIZATION_RECORD_SHA256.to_string(),
+        authorization_source_document_sha256: REVIEWED_AUTHORIZATION_EVIDENCE_SHA256.to_string(),
+        authorization_review_reference: PUBLIC_INTEGRATION_REVIEW_REFERENCE.to_string(),
+        protected_paths: Vec::new(),
     })
 }
 

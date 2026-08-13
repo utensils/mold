@@ -253,11 +253,14 @@ if wants rust; then
     cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns
   step "rust: MiniMax H3 private foundations" \
     cargo test -p mold-ai-inference --lib --features h3-private-uat minimax_h3
-  for bin in h3_artifact_qualification h3_runtime_qualification_record \
-             h3_qwen_layer50_capture h3_transformer_capture; do
+  for bin in h3_artifact_qualification h3_qwen_layer50_capture \
+             h3_transformer_capture; do
     step "rust: clippy $bin" \
       cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin "$bin" -- -D warnings
   done
+  step "rust: clippy h3_runtime_qualification_record" \
+    cargo clippy -p mold-ai-inference --features dev-bins,h3 \
+    --bin h3_runtime_qualification_record -- -D warnings
 fi
 
 if wants contracts; then
@@ -349,7 +352,7 @@ if wants gpu; then
     *)
       if command -v nvcc >/dev/null 2>&1; then
         step "gpu: CUDA forced-local clippy" \
-          cargo clippy -p mold-ai --features cuda,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings
+          cargo clippy -p mold-ai --features cuda,h3,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings
         step "gpu: CUDA private H3 server bridge" \
           cargo clippy -p mold-ai-server --features h3-private-uat --all-targets -- -D warnings
         # The capture adapters compile only under `cuda`, so the CPU rust suite

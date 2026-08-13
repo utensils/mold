@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
                 log_dir,
             );
 
-            #[cfg(feature = "h3-private-uat")]
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             tracing::info!(
                 h3_runtime_code_identity_sha256 =
                     mold_inference::h3_private_runtime_code_identity_sha256(),

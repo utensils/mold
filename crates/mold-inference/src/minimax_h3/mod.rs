@@ -8,28 +8,28 @@ pub(crate) mod backend;
 pub(crate) mod engine;
 pub(crate) mod offload;
 pub(crate) mod pipeline;
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) mod private_fl2va_runtime;
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) mod private_opened_evidence;
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub mod private_qualification;
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) mod private_qwen;
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) mod private_qwen_support;
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) mod private_runtime;
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) mod private_runtime_observer;
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) const PRIVATE_RUNTIME_CODE_IDENTITY_SHA256: &str =
     env!("MOLD_H3_RUNTIME_CODE_IDENTITY_SHA256");
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(all(feature = "h3", feature = "dev-bins"), feature = "h3-private-uat"))]
 pub mod private_runtime_qualification;
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) mod private_server;
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) mod private_vae_adapter;
 pub(crate) mod reference_media;
 pub(crate) mod sampler;

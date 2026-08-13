@@ -864,7 +864,7 @@ async fn submit_child(
             execution_equivalence_fingerprint: plan.equivalence.clone(),
             prepared_inputs: plan.prepared_inputs.clone(),
         }),
-        #[cfg(feature = "h3-private-uat")]
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant: None,
     };
     state
@@ -1932,9 +1932,9 @@ mod tests {
                 by_device: BTreeMap::new(),
                 retryable_device_failures: BTreeMap::new(),
                 model_config_overlay: None,
-                #[cfg(feature = "h3-private-uat")]
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
-                #[cfg(feature = "h3-private-uat")]
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_admission_by_device: BTreeMap::new(),
             },
         };

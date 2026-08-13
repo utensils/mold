@@ -1,6 +1,8 @@
 use std::fmt;
 use std::path::Path;
 
+use crate::minimax_h3;
+
 use serde::{Deserialize, Serialize};
 
 /// Stable machine-readable reason returned while MiniMax H3 authorization is absent.
@@ -81,7 +83,9 @@ fn minimax_h3_restriction() -> ModelAccessRestriction {
 /// The family is required when the public identifier is opaque (for example a
 /// `cv:` catalog ID). Callers that have resolved catalog metadata must pass it.
 pub fn model_activation(identifier: &str, family: Option<&str>) -> ModelActivation {
-    if is_minimax_h3_identity(identifier) || family.is_some_and(is_minimax_h3_identity) {
+    if cfg!(feature = "h3") && identifier.eq_ignore_ascii_case(minimax_h3::FL2VA_COMFY) {
+        ModelActivation::Available
+    } else if is_minimax_h3_identity(identifier) || family.is_some_and(is_minimax_h3_identity) {
         ModelActivation::ComplianceGated
     } else {
         ModelActivation::Available
@@ -108,6 +112,10 @@ pub fn model_activation_available(identifier: &str, family: Option<&str>) -> boo
 pub fn model_acquisition(identifier: &str, family: Option<&str>) -> ModelActivation {
     if is_reviewed_minimax_h3_acquisition_identity(identifier) {
         ModelActivation::Available
+    } else if cfg!(feature = "h3")
+        && (is_minimax_h3_identity(identifier) || family.is_some_and(is_minimax_h3_identity))
+    {
+        ModelActivation::ComplianceGated
     } else {
         model_activation(identifier, family)
     }
@@ -156,9 +164,11 @@ pub fn model_artifact_activation(
     let identity_path = artifact_root
         .and_then(|root| path.strip_prefix(root).ok())
         .unwrap_or(path);
-    if is_minimax_h3_identity(&identity_path.to_string_lossy())
-        || family.is_some_and(is_minimax_h3_identity)
-    {
+    let is_h3 = is_minimax_h3_identity(&identity_path.to_string_lossy())
+        || family.is_some_and(is_minimax_h3_identity);
+    if cfg!(feature = "h3") && is_h3 {
+        ModelActivation::Available
+    } else if is_h3 {
         ModelActivation::ComplianceGated
     } else {
         ModelActivation::Available
@@ -223,6 +233,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(feature = "h3"))]
     fn minimax_h3_aliases_and_task_variants_are_compliance_gated() {
         for identifier in [
             "minimax-h3",
@@ -271,6 +282,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "h3"))]
     fn discovery_availability_is_a_view_of_the_activation_authority() {
         assert!(!model_activation_available(
             "minimax-h3",
@@ -280,6 +292,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "h3"))]
     fn reviewed_h3_acquisition_does_not_activate_execution() {
         for identifier in [
             "minimax-h3",
@@ -312,6 +325,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "h3"))]
     fn artifact_policy_ignores_h3_named_storage_root_but_not_nested_identity() {
         let artifact_root = Path::new("/Volumes/ExternalStorage/mold-uat/minimax-h3/models");
         let flux = artifact_root.join("flux-dev/transformer/model.safetensors");
@@ -328,6 +342,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "h3"))]
     fn artifact_policy_inspects_full_paths_outside_its_trusted_root() {
         let artifact_root = Path::new("/srv/mold/models");
         let external = Path::new("/Volumes/MiniMax-H3/weights.safetensors");
@@ -339,6 +354,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "h3"))]
     fn rejection_is_stable_and_does_not_echo_the_supplied_identifier() {
         let secretish_identifier = "hf:MiniMaxAI/MiniMax-H3?token=do-not-echo";
         let error = require_model_activation(secretish_identifier, None).unwrap_err();
@@ -349,6 +365,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "h3"))]
     fn capabilities_advertise_the_same_fail_closed_authority() {
         let capabilities = model_access_capabilities();
         assert_eq!(capabilities.restrictions.len(), 1);
@@ -365,5 +382,55 @@ mod tests {
         let round_trip: ModelAccessCapabilities =
             serde_json::from_str(&serde_json::to_string(&capabilities).unwrap()).unwrap();
         assert_eq!(round_trip, capabilities);
+    }
+
+    #[test]
+    #[cfg(feature = "h3")]
+    fn public_h3_feature_activates_only_the_exact_runtime_partition() {
+        assert_eq!(
+            model_activation(minimax_h3::FL2VA_COMFY, Some("minimax-h3")),
+            ModelActivation::Available
+        );
+        for identifier in [
+            "minimax-h3",
+            "hf:Comfy-Org/MiniMax-H3",
+            "MiniMaxH3Transformer3DModel",
+            minimax_h3::REF2VA_COMFY,
+        ] {
+            assert_eq!(
+                model_activation(identifier, Some("minimax-h3")),
+                ModelActivation::ComplianceGated,
+                "{identifier}"
+            );
+        }
+        assert_eq!(model_access_capabilities().restrictions.len(), 1);
+        assert_eq!(
+            model_artifact_activation(
+                Path::new("/models/minimax-h3/transformer.safetensors"),
+                Some(Path::new("/models")),
+                Some("minimax-h3")
+            ),
+            ModelActivation::Available
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "h3")]
+    fn public_h3_feature_keeps_acquisition_on_reviewed_manifests() {
+        for reviewed in [
+            "minimax-h3-fl2va:comfy-pruned-int8",
+            "minimax-h3-ref2va:comfy-pruned-int8",
+        ] {
+            assert_eq!(
+                model_acquisition(reviewed, Some("minimax-h3")),
+                ModelActivation::Available
+            );
+        }
+        for unreviewed in ["hf:Comfy-Org/MiniMax-H3", "minimax-h3:custom"] {
+            assert_eq!(
+                model_acquisition(unreviewed, Some("minimax-h3")),
+                ModelActivation::ComplianceGated
+            );
+        }
     }
 }

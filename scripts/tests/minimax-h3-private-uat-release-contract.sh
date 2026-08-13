@@ -37,8 +37,8 @@ require_text crates/mold-server/Cargo.toml \
   '"mold-core/h3-private-uat"' \
   "the private H3 server does not activate its validation-only core edge"
 require_text crates/mold-core/src/validation.rs \
-  '#[cfg(feature = "h3-private-uat")]' \
-  "the private H3 post-authorization validator is not feature-gated"
+  '#[cfg(any(feature = "h3", feature = "h3-private-uat"))]' \
+  "the H3 request-profile validator is not feature-gated"
 require_text crates/mold-server/src/routes.rs \
   'validate_h3_private_uat_request(validation_request)' \
   "authenticated private H3 ingress re-enters the public compliance validator"
@@ -74,7 +74,7 @@ done
 audio_encode_checkpoint=$(sed -n \
   '/This developer-only seam lets a private Ref2VA runtime/,/fn encode_with_checkpoint/p' \
   crates/mold-candle/src/minimax_h3/audio.rs)
-if ! grep -Fq '#[cfg(feature = "h3-private-uat")]' <<<"$audio_encode_checkpoint" \
+if ! grep -Fq '#[cfg(any(feature = "h3", feature = "h3-private-uat"))]' <<<"$audio_encode_checkpoint" \
   || ! grep -Fq 'pub fn encode_with_phase_checkpoint(' <<<"$audio_encode_checkpoint"; then
   fail "the typed H3 audio encode checkpoint is not private-feature-gated"
 fi
@@ -184,6 +184,9 @@ require_text crates/mold-inference/src/minimax_h3/private_qwen_support.rs \
 require_text crates/mold-inference/Cargo.toml \
   'name = "h3_runtime_qualification_record"' \
   "the private H3 runtime-record producer is not an explicit development binary"
+require_text crates/mold-inference/Cargo.toml \
+  'required-features = ["dev-bins", "h3"]' \
+  "the runtime-record producer does not bind the exact public H3 runtime identity"
 require_text crates/mold-inference/src/minimax_h3/private_runtime_qualification.rs \
   '"mold.minimax-h3.private-runtime-record-producer.v1"' \
   "the private H3 runtime-record producer has no release-rejectable claim marker"
@@ -261,8 +264,8 @@ require_text crates/mold-inference/build.rs \
   'cargo:rerun-if-env-changed={key}' \
   "the private H3 runtime code identity does not track build-environment changes"
 require_text crates/mold-inference/build.rs \
-  'if std::env::var_os("CARGO_FEATURE_H3_PRIVATE_UAT").is_none()' \
-  "ordinary builds are not isolated from the private H3 identity collector"
+  '&& std::env::var_os("CARGO_FEATURE_H3_PRIVATE_UAT").is_none()' \
+  "ordinary non-H3 builds are not isolated from the H3 identity collector"
 require_text crates/mold-server/Cargo.toml \
   '"mold-inference/dev-bins",' \
   "the measured private server does not match the producer inference feature set"
