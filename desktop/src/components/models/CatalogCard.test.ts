@@ -166,6 +166,17 @@ describe("CatalogCard", () => {
     expect(card.attributes("tabindex")).toBe("0");
   });
 
+  it("marks the card that backs the open model detail", async () => {
+    const wrapper = mount(CatalogCard, {
+      props: { entry: entry(), pulling: false, selected: true },
+    });
+    await flushPromises();
+    const card = wrapper.get('[data-test="catalog-card"]');
+    expect(card.attributes("data-selected")).toBe("true");
+    expect(card.attributes("aria-current")).toBe("true");
+    expect(card.classes()).toContain("catalog-card-contained--selected");
+  });
+
   it("opens the drawer from Enter and Space on the focused card", async () => {
     const wrapper = mount(CatalogCard, { props: { entry: entry(), pulling: false } });
     await flushPromises();

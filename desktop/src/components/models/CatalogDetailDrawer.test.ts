@@ -371,7 +371,7 @@ describe("CatalogDetailDrawer", () => {
     expect(wrapper.emitted("pull")?.[0]?.[0]).toMatchObject({ id: "cv:8001" });
   });
 
-  it("makes the selected variant the exact pull target", async () => {
+  it("selects the variant context and makes it the exact pull target", async () => {
     const wrapper = await mountDrawer(summary(), {
       variants: [
         { id: "flux-dev:q4", label: "q4" },
@@ -387,8 +387,10 @@ describe("CatalogDetailDrawer", () => {
     await wrapper.get("[data-test='drawer-pull']").trigger("click");
     expect(wrapper.emitted("pull")?.[0]?.[0]).toMatchObject({ id: "flux-dev:q4" });
 
-    // Selecting q8 repoints the pull without re-opening the drawer.
+    // Selection is surfaced to the owner so it can replace every detail field,
+    // while the drawer also repoints Pull immediately for responsive feedback.
     await chips[1]!.trigger("click");
+    expect(wrapper.emitted("select-variant")?.[0]).toEqual(["flux-dev:q8"]);
     await wrapper.get("[data-test='drawer-pull']").trigger("click");
     expect(wrapper.emitted("pull")?.[1]?.[0]).toMatchObject({ id: "flux-dev:q8" });
   });

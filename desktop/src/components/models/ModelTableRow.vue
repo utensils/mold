@@ -36,6 +36,8 @@ const props = withDefaults(
     barPercent?: number | null;
     /** Row and name become buttons that emit `open` (catalog detail drawer). */
     clickable?: boolean;
+    /** The row currently backing an open detail drawer. */
+    selected?: boolean;
     /** Rich accessible name when visible metadata adds context to the row. */
     accessibilityLabel?: string | null;
   }>(),
@@ -49,6 +51,7 @@ const props = withDefaults(
     sizeSecondary: null,
     barPercent: null,
     clickable: false,
+    selected: false,
     accessibilityLabel: null,
   },
 );
@@ -83,11 +86,14 @@ function onRowKeydown(event: KeyboardEvent): void {
       clickable ? 'cursor-pointer focus-visible:outline-2 focus-visible:outline-safelight' : '',
       barPercent != null ? 'model-table-row--has-footprint' : '',
       $slots.actions ? 'model-table-row--has-actions' : '',
+      selected ? 'model-table-row--selected' : '',
     ]"
     :role="clickable ? 'button' : undefined"
     :tabindex="clickable ? 0 : undefined"
     :aria-label="clickable ? (accessibilityLabel ?? `${name} — view details`) : undefined"
     :aria-describedby="barPercent != null ? footprintDescriptionId : undefined"
+    :aria-current="selected ? 'true' : undefined"
+    :data-selected="selected ? 'true' : undefined"
     data-test="model-table-row"
     @click="clickable && emit('open')"
     @keydown.enter="onRowKeydown"
@@ -228,6 +234,12 @@ function onRowKeydown(event: KeyboardEvent): void {
 .model-table-row__title {
   min-width: 48px;
   flex: 1 1 10rem;
+}
+
+.model-table-row--selected,
+.model-table-row--selected:hover {
+  background: var(--sel-bg);
+  box-shadow: inset 3px 0 var(--sel-border);
 }
 
 .model-table-row__footprint {

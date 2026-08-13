@@ -37,9 +37,11 @@ const props = withDefaults(
      *  keeps its Pull action until every reachable machine has it; the parent
      *  decides, because only it knows the fleet. */
     installable?: boolean | undefined;
+    /** The card currently backing the open detail drawer. */
+    selected?: boolean;
   }>(),
   // Explicit so Vue's boolean casting doesn't turn "not supplied" into false.
-  { installable: undefined },
+  { installable: undefined, selected: false },
 );
 const emit = defineEmits<{
   (e: "pull", entry: CatalogEntry): void;
@@ -115,11 +117,14 @@ function onCardKeydown(event: KeyboardEvent): void {
 <template>
   <div
     class="catalog-card-contained border-edge flex cursor-pointer flex-col rounded-chrome border bg-bath transition-colors duration-150 hover:bg-bench focus-visible:outline-2 focus-visible:outline-safelight"
+    :class="selected ? 'catalog-card-contained--selected' : ''"
     role="button"
     tabindex="0"
     data-test="catalog-card"
     data-layout="grid"
     :aria-label="accessibilityLabel"
+    :aria-current="selected ? 'true' : undefined"
+    :data-selected="selected ? 'true' : undefined"
     @click="emit('open', entry)"
     @keydown.enter="onCardKeydown"
     @keydown.space="onCardKeydown"
@@ -260,6 +265,13 @@ function onCardKeydown(event: KeyboardEvent): void {
 <style scoped>
 .catalog-card-contained {
   contain: layout paint style;
+}
+
+.catalog-card-contained--selected,
+.catalog-card-contained--selected:hover {
+  border-color: var(--sel-border);
+  background: var(--sel-bg);
+  box-shadow: inset 0 0 0 1px var(--sel-border);
 }
 
 /* Model previews are overwhelmingly portrait subjects, and a centred cover

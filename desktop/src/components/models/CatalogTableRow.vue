@@ -27,9 +27,11 @@ const props = withDefaults(
      *  keeps its Pull action until every reachable machine has it; the parent
      *  decides, because only it knows the fleet. */
     installable?: boolean | undefined;
+    /** The row currently backing the open detail drawer. */
+    selected?: boolean;
   }>(),
   // Explicit so Vue's boolean casting doesn't turn "not supplied" into false.
-  { installable: undefined },
+  { installable: undefined, selected: false },
 );
 const emit = defineEmits<{
   (e: "pull", entry: CatalogEntry): void;
@@ -96,6 +98,7 @@ const counts = computed(() => {
     :size-primary="sizePrimary"
     :size-secondary="sizeSecondary"
     :accessibility-label="accessibilityLabel"
+    :selected="selected"
     clickable
     data-test="catalog-table-row"
     @open="emit('open', entry)"

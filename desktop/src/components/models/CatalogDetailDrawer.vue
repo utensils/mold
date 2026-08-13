@@ -59,6 +59,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "close"): void;
   (e: "pull", entry: CatalogEntry): void;
+  (e: "select-variant", id: string): void;
 }>();
 
 const detail = ref<CatalogEntry | null>(null);
@@ -273,6 +274,14 @@ watch(
  *  variant id so the selection is the download target. */
 const pullEntry = computed<CatalogEntry>(() => ({ ...merged.value, id: selectedVariantId.value }));
 
+/** Select immediately for responsive feedback, then let the catalog owner
+ * replace the drawer entry so every title, size, component, and action field
+ * follows the chosen runnable model instead of changing only the Pull id. */
+function selectVariant(id: string): void {
+  selectedVariantId.value = id;
+  emit("select-variant", id);
+}
+
 function formatSize(bytes: number | null): string {
   return bytes != null ? formatGB(bytes) : "—";
 }
@@ -464,7 +473,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
                   : 'border-edge text-ink-2 hover:text-ink'
               "
               :aria-pressed="variant.id === selectedVariantId"
-              @click="selectedVariantId = variant.id"
+              @click="selectVariant(variant.id)"
             >
               {{ variant.label }}
               <span v-if="variant.sizeBytes != null" class="text-ink-3">

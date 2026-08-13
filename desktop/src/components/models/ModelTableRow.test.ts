@@ -98,4 +98,12 @@ describe("ModelTableRow", () => {
     const wrapper = mountRow({}, { actions: "<button data-test='pull'>Pull</button>" });
     expect(wrapper.get("[data-test='pull']").text()).toBe("Pull");
   });
+
+  it("marks the row that backs the open model detail", () => {
+    const wrapper = mountRow({ selected: true });
+    const row = wrapper.get("[data-test='model-table-row']");
+    expect(row.attributes("data-selected")).toBe("true");
+    expect(row.attributes("aria-current")).toBe("true");
+    expect(row.classes()).toContain("model-table-row--selected");
+  });
 });
