@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Updated the standalone catalog integration contract for public MiniMax H3 discovery while retaining its separate runtime-access restriction, restoring the main coverage gate after public H3 activation.
+
 - Restored deterministic server and coverage CI by giving preloaded mock engines a conservative synthetic recipe and preventing test-only catalog refreshes from importing or overwriting state through the runner's real Mold home.
 
 - Bound the main Rust and coverage jobs to one hour, cap their test commands at twenty and forty-five minutes respectively, and remove an unbounded scheduling race from the queued SSE position regression, so a stalled server test fails promptly instead of consuming a runner for hours.
