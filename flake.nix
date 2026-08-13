@@ -95,6 +95,21 @@
 
           src = craneLib.path ./.;
 
+          h3CutlassCommit = "7d49e6c7e2f8896c47f586706e67e1fb215529dc";
+          h3CutlassSource = pkgs.fetchgit {
+            url = "https://github.com/NVIDIA/cutlass.git";
+            rev = h3CutlassCommit;
+            hash = "sha256-aOfw4x3efNOFUNL4LNL0+p28TYYGrd1t9/UTZAfzrEM=";
+            leaveDotGit = true;
+          };
+          prepareCudaforgeCache = ''
+            export CUDAFORGE_HOME="$TMPDIR/cudaforge"
+            cutlass_checkout="$CUDAFORGE_HOME/git/checkouts/cutlass-${builtins.substring 0 16 h3CutlassCommit}"
+            mkdir -p "$cutlass_checkout"
+            cp -R ${h3CutlassSource}/. "$cutlass_checkout/"
+            chmod -R u+w "$CUDAFORGE_HOME"
+          '';
+
           commonArgs = {
             inherit src;
             pname = "mold";
@@ -107,6 +122,7 @@
             cargoVendorDir = craneLib.vendorCargoDeps {
               inherit src;
             };
+            preBuild = lib.optionalString isLinux prepareCudaforgeCache;
             nativeBuildInputs = [
               pkgs.pkg-config
               pkgs.nasm
@@ -114,6 +130,7 @@
               pkgs.llvmPackages.libclang.lib
             ]
             ++ lib.optionals isLinux [
+              pkgs.gitMinimal
               pkgs.lld
               pkgs.cudaPackages.cuda_nvcc
             ];
@@ -180,11 +197,7 @@
           ];
 
           desktopFeatureFor =
-            computeCap:
-            if isLinux then
-              if computeCap == "89" then "cuda,h3" else "cuda"
-            else
-              "metal";
+            computeCap: if isLinux then if computeCap == "89" then "cuda,h3" else "cuda" else "metal";
           desktopFeature = desktopFeatureFor cudaComputeCap;
 
           gpuFeature =
@@ -201,7 +214,9 @@
           releaseFeaturesFor =
             computeCap:
             if isLinux then
-              "cuda${lib.optionalString (computeCap == "89") ",h3"},preview,discord,expand,tui,webp,mp4,metrics,mdns"
+              "cuda${
+                lib.optionalString (computeCap == "89") ",h3"
+              },preview,discord,expand,tui,webp,mp4,metrics,mdns"
             else if gpuFeature != "" then
               "${gpuFeature},preview,discord,expand,tui,webp,mp4,metrics,mdns"
             else
@@ -512,6 +527,7 @@
                 pkgs.autoPatchelfHook
                 pkgs.clang
                 pkgs.cudaPackages.cuda_nvcc
+                pkgs.gitMinimal
                 pkgs.lld
                 pkgs.wrapGAppsHook3
                 desktopDriverRunpathHook
@@ -540,6 +556,8 @@
                   desktop/src-tauri/tauri.conf.json > tauri.conf.tmp
                 mv tauri.conf.tmp desktop/src-tauri/tauri.conf.json
               '';
+
+              preBuild = lib.optionalString isLinux prepareCudaforgeCache;
 
               tauriBundleType = lib.optionalString isLinux "deb";
               tauriBuildFlags = lib.optionals isDarwin [

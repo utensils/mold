@@ -9,6 +9,13 @@ fail() {
   exit 1
 }
 
+h3_feature_test_bin="$(mktemp -t mold-h3-server-features.XXXXXX)"
+trap 'rm -f "$h3_feature_test_bin"' EXIT
+rustc --edition=2021 --test \
+  crates/mold-server/build_support/h3_server_features.rs \
+  -o "$h3_feature_test_bin"
+"$h3_feature_test_bin"
+
 require_text() {
   local file=$1
   local text=$2
