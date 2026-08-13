@@ -171,6 +171,7 @@ omitted_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:gl
 claim_marker='mold.minimax-h3.attention-rc.kernel-compiled.v1'
 private_qwen_support_marker='mold.minimax-h3.private-uat-qwen-support-loader.v1'
 h3_compiled_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=omitted'
+public_qwen_support_marker='mold.minimax-h3.qwen-support-loader.v1'
 global_compiled_markers=(
   'mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=compiled'
   'mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=compiled'
@@ -188,11 +189,19 @@ printf '%s\n%s\n' "$omitted_marker" "$claim_marker" > "$scratch_dir/claimed"
 if scripts/verify-h3-release-exclusion.sh "$scratch_dir/claimed" >/dev/null 2>&1; then
   fail "release verifier accepted an H3 claim without H3 provenance"
 fi
-printf '%s\n%s\n' "$h3_compiled_marker" "$claim_marker" > "$scratch_dir/public-h3"
+printf '%s\n%s\n' "$omitted_marker" "$public_qwen_support_marker" > "$scratch_dir/ordinary-with-support"
+if scripts/verify-h3-release-exclusion.sh "$scratch_dir/ordinary-with-support" >/dev/null 2>&1; then
+  fail "release verifier accepted public H3 Qwen support provenance without H3 provenance"
+fi
+printf '%s\n%s\n%s\n' "$h3_compiled_marker" "$claim_marker" "$public_qwen_support_marker" > "$scratch_dir/public-h3"
 scripts/verify-h3-release-exclusion.sh "$scratch_dir/public-h3" >/dev/null
 printf '%s\n' "$h3_compiled_marker" > "$scratch_dir/public-h3-missing-claim"
 if scripts/verify-h3-release-exclusion.sh "$scratch_dir/public-h3-missing-claim" >/dev/null 2>&1; then
   fail "release verifier accepted H3 provenance without its kernel claim"
+fi
+printf '%s\n%s\n' "$h3_compiled_marker" "$claim_marker" > "$scratch_dir/public-h3-missing-support"
+if scripts/verify-h3-release-exclusion.sh "$scratch_dir/public-h3-missing-support" >/dev/null 2>&1; then
+  fail "release verifier accepted H3 provenance without public Qwen support provenance"
 fi
 printf '%s\n%s\n' "$omitted_marker" "$private_qwen_support_marker" > "$scratch_dir/private-qwen-support"
 if scripts/verify-h3-release-exclusion.sh "$scratch_dir/private-qwen-support" >/dev/null 2>&1; then

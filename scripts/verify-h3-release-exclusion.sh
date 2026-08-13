@@ -10,6 +10,7 @@ binary=$1
 claim_marker='mold.minimax-h3.attention-rc.kernel-compiled.v1'
 private_uat_marker='mold.minimax-h3.private-uat-artifact-reader.v1'
 private_qwen_support_marker='mold.minimax-h3.private-uat-qwen-support-loader.v1'
+public_qwen_support_marker='mold.minimax-h3.qwen-support-loader.v1'
 private_runtime_record_marker='mold.minimax-h3.private-runtime-record-producer.v1'
 private_runtime_observation_markers=(
   'mold.minimax-h3.private-uat-runtime-bound-observation.v1'
@@ -58,8 +59,15 @@ if grep -aFq "$h3_compiled_marker" "$binary"; then
     echo "published H3 binary lacks its H3-scoped kernel claim" >&2
     exit 1
   }
+  grep -aFq "$public_qwen_support_marker" "$binary" || {
+    echo "published H3 binary lacks its public Qwen support-loader provenance" >&2
+    exit 1
+  }
 elif grep -aFq "$claim_marker" "$binary"; then
   echo "ordinary published binary contains an unexpected H3 kernel claim" >&2
+  exit 1
+elif grep -aFq "$public_qwen_support_marker" "$binary"; then
+  echo "ordinary published binary contains unexpected H3 Qwen support provenance" >&2
   exit 1
 fi
 

@@ -1,11 +1,10 @@
-//! Opened-file-bound Qwen support assets for private MiniMax H3 UAT.
+//! Opened-file-bound Qwen support assets for MiniMax H3.
 //!
-//! This module is compiled only with `h3-private-uat`. It resolves the five
-//! lightweight files consumed by the conditioner through the exact pinned H3
-//! manifest and `storage_path` contract, then parses only bytes read from
-//! authenticated, no-follow file descriptors. It does not register an engine,
-//! expose runtime capability, download anything, or relax H3 execution
-//! admission.
+//! Public `h3` and private `h3-private-uat` builds both resolve the five
+//! lightweight conditioner files through the exact pinned manifest and
+//! `storage_path` contract, then parse only bytes read from authenticated,
+//! no-follow file descriptors. It does not register an engine, expose runtime
+//! capability, download anything, or relax H3 execution admission.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, Metadata};
@@ -24,10 +23,15 @@ use tokenizers::Tokenizer;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
-/// Retained by every executable that reaches the private support loader and
-/// rejected by `scripts/verify-h3-release-exclusion.sh` in published binaries.
+/// Retained by every executable that reaches the support loader. Private UAT
+/// keeps a release-rejectable marker; the public H3 runtime uses a distinct
+/// non-private provenance marker for the same authenticated loader mechanics.
+#[cfg(feature = "h3-private-uat")]
 pub const H3_PRIVATE_QWEN_SUPPORT_CLAIM_MARKER: &str =
     "mold.minimax-h3.private-uat-qwen-support-loader.v1";
+
+#[cfg(all(feature = "h3", not(feature = "h3-private-uat")))]
+pub const H3_PRIVATE_QWEN_SUPPORT_CLAIM_MARKER: &str = "mold.minimax-h3.qwen-support-loader.v1";
 
 const SUPPORT_IDENTITY_SCHEMA: &str = "mold.minimax-h3.private-qwen-support.v1";
 const RELEASED_TOKENIZER_BASE_VOCAB_SIZE: usize = 151_643;
@@ -680,6 +684,20 @@ fn validate_tokenizer(tokenizer: &Tokenizer, config: &H3ConditionerConfig) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn support_loader_marker_matches_the_compiled_runtime_scope() {
+        #[cfg(feature = "h3-private-uat")]
+        assert_eq!(
+            H3_PRIVATE_QWEN_SUPPORT_CLAIM_MARKER,
+            "mold.minimax-h3.private-uat-qwen-support-loader.v1"
+        );
+        #[cfg(all(feature = "h3", not(feature = "h3-private-uat")))]
+        assert_eq!(
+            H3_PRIVATE_QWEN_SUPPORT_CLAIM_MARKER,
+            "mold.minimax-h3.qwen-support-loader.v1"
+        );
+    }
 
     const CONDITIONER_CONFIG: &str = r#"{
       "architectures":["Qwen3VLForConditionalGeneration"],
