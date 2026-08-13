@@ -554,11 +554,12 @@ jobs:
             docker run --rm \
               --entrypoint /bin/sh \
               -e LD_LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/cuda/lib64 \
+              -e EXPECTED_SOURCE_SHA="$GITHUB_SHA" \
               "$BUILT_IMAGE" \
-              -c 'exec mold version'
+              -c 'grep -aFq "$EXPECTED_SOURCE_SHA" "$(command -v mold)" && exec mold version'
           )"
-          grep -Fq "$GITHUB_SHA" <<<"$version" || {
-            echo "::error::container does not report exact source SHA $GITHUB_SHA: $version"
+          grep -Fq "${GITHUB_SHA:0:7}" <<<"$version" || {
+            echo "::error::container binary embeds exact source SHA but its human version does not report the matching abbreviation: $version"
             exit 1
           }
 
