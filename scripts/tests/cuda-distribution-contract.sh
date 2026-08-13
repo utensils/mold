@@ -247,10 +247,12 @@ docker_source_sha_env_line="$(
   grep -n -m1 'ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}' "$repo_root/Dockerfile" | cut -d: -f1
 )"
 docker_dependency_build_line="$(
-  grep -n -m1 'RUN cargo build --release -p mold-ai' "$repo_root/Dockerfile" | cut -d: -f1
+  grep -n -m1 -E '^RUN cargo build --release -p mold-ai([[:space:]]|$)' \
+    "$repo_root/Dockerfile" | cut -d: -f1
 )"
 docker_real_build_line="$(
-  grep -n 'RUN cargo build --release -p mold-ai' "$repo_root/Dockerfile" | tail -1 | cut -d: -f1
+  grep -n -m1 -E '^[[:space:]]+cargo build --release -p mold-ai([[:space:]]|$)' \
+    "$repo_root/Dockerfile" | cut -d: -f1
 )"
 [[ "$docker_source_sha_env_line" -gt "$docker_dependency_build_line" \
   && "$docker_source_sha_env_line" -lt "$docker_real_build_line" ]] \
