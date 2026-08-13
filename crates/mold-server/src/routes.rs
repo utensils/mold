@@ -939,12 +939,6 @@ async fn prepare_generation(
             .find(|entry| entry.info.name == request.model || entry.info.name == canonical_model)
             .and_then(|entry| entry.generation_profile)
     };
-    if !private_h3_ingress && resolved_profile.is_none() {
-        return Err(ApiError::validation(format!(
-            "model '{}' has no generation recipe deliverable by this server build",
-            request.model
-        )));
-    }
     // The effective, delivery-qualified recipe owns the output default. A
     // family heuristic here can select MP4 even when this binary did not link
     // the encoder, causing an omitted field to fail its own advertised profile.
@@ -972,6 +966,20 @@ async fn prepare_generation(
     // provenance equal to what actually rendered (#783).
     mold_core::validation::materialize_extend_overlap_frames(request, resolved_family.as_deref());
 
+    // A model with no deliverable recipe cannot reach media-dependent
+    // preparation. Preserve basic request/unknown-model diagnostics first,
+    // then fail before control planning, LipDub probing, reference resolution,
+    // or server-local media access.
+    if !private_h3_ingress && resolved_profile.is_none() {
+        validate_generate_request(request, resolved_family.as_deref())
+            .map_err(ApiError::validation)?;
+        let _ = model_manager::check_model_available(state, &request.model).await?;
+        return Err(ApiError::validation(format!(
+            "model '{}' has no generation recipe deliverable by this server build",
+            request.model
+        )));
+    }
+
     let planned_control = plan_builtin_ltx2_control(state, request).await?;
     let planned_camera_controls = plan_builtin_ltx2_camera_controls(state, request).await?;
 
@@ -991,12 +999,6 @@ async fn prepare_generation(
     } else {
         &*request
     };
-    if !private_h3_ingress {
-        if let Some(profile) = resolved_profile {
-            mold_core::validate_request_against_generation_profile(&profile, validation_request)
-                .map_err(ApiError::validation)?;
-        }
-    }
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let validation = if private_h3_ingress {
         mold_core::validation::validate_h3_private_uat_request(validation_request)
@@ -1007,6 +1009,13 @@ async fn prepare_generation(
     let validation = validate_generate_request(validation_request, resolved_family.as_deref());
     if let Err(e) = validation {
         return Err(ApiError::validation(e));
+    }
+    if !private_h3_ingress {
+        if let Some(profile) = resolved_profile.as_ref() {
+            mold_core::validate_request_against_generation_profile(profile, validation_request)
+                .map_err(ApiError::validation)?;
+        }
+        let _ = model_manager::check_model_available(state, &request.model).await?;
     }
     enforce_source_image_capability(state, request, resolved_family.as_deref()).await?;
 
@@ -1033,10 +1042,6 @@ async fn prepare_generation(
         materialize_builtin_ltx2_control(state, request, adapter, path).await?;
     }
     materialize_builtin_ltx2_camera_controls(state, &planned_camera_controls).await?;
-
-    if !private_h3_ingress {
-        let _ = model_manager::check_model_available(state, &request.model).await?;
-    }
 
     let (output_dir, dim_warning) = {
         let config = state.config.read().await;

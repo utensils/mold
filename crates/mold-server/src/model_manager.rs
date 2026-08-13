@@ -176,14 +176,25 @@ pub(crate) enum PullStatus {
 }
 
 pub(crate) async fn refresh_config(state: &AppState) -> mold_core::Config {
-    let fresh = {
-        let current = state.config.read().await;
-        current.reload_from_disk_preserving_runtime()
-    };
+    // Unit-test states intentionally carry isolated in-memory model and
+    // output authorities. Reloading is explicit per state so another
+    // parallel test's temporary process-global MOLD_HOME cannot erase
+    // synthetic recipes or import unrelated disk configuration. Production
+    // always takes the reload path because cfg!(test) is false.
+    if cfg!(test) && !state.reload_config_from_disk {
+        return state.config.read().await.clone();
+    }
 
-    let mut config = state.config.write().await;
-    *config = fresh.clone();
-    fresh
+    {
+        let fresh = {
+            let current = state.config.read().await;
+            current.reload_from_disk_preserving_runtime()
+        };
+
+        let mut config = state.config.write().await;
+        *config = fresh.clone();
+        fresh
+    }
 }
 
 pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
@@ -5340,8 +5351,18 @@ mod tests {
             ..Default::default()
         };
         let te_dir = models_dir.join("z-image-te");
-        config.models.insert(
-            "z-image-te".into(),
+        for path in [
+            te_dir.join("text_encoder/model-00001-of-00003.safetensors"),
+            te_dir.join("text_encoder/model-00002-of-00003.safetensors"),
+            te_dir.join("text_encoder/model-00003-of-00003.safetensors"),
+            te_dir.join("vae/diffusion_pytorch_model.safetensors"),
+            te_dir.join("tokenizer/tokenizer.json"),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"test fixture").unwrap();
+        }
+        config.install_frozen_model_config(
+            "z-image-te",
             mold_core::ModelConfig {
                 family: Some("companion".into()),
                 transformer: Some(

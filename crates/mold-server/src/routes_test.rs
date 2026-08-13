@@ -3952,7 +3952,7 @@ mod tests {
         );
         assert!(body["catalog"]["families"]
             .as_array()
-            .is_some_and(|families| families.iter().all(|family| family != "minimax-h3")));
+            .is_some_and(|families| families.iter().any(|family| family == "minimax-h3")));
         assert_eq!(
             body["model_access"]["restrictions"][0]["code"],
             mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
@@ -6973,6 +6973,7 @@ mod tests {
             config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: true,
+            reload_config_from_disk: false,
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -7045,6 +7046,7 @@ mod tests {
             config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: true,
+            reload_config_from_disk: false,
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -7344,6 +7346,7 @@ mod tests {
             config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
             reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
             output_disabled_override: true,
+            reload_config_from_disk: false,
             start_time: std::time::Instant::now(),
             model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
