@@ -3072,17 +3072,11 @@ fn private_run_output(
     {
         bail!("private H3 terminal output differs from the prepared attempt authority")
     }
-    let timescale = u64::from(output.mux_report.video_timescale);
-    if timescale == 0 {
-        bail!("private H3 mux returned a zero video timescale")
-    }
-    let duration_ms = 1_000_u64
-        .checked_mul(output.mux_report.video_duration_ticks)
-        .context("private H3 output duration overflow")?
-        / timescale;
-    if duration_ms == 0 {
-        bail!("private H3 mux returned a zero duration")
-    }
+    let duration_ms = crate::av_media::timeline_duration_ms(
+        output.mux_report.video_duration_ticks,
+        output.mux_report.video_timescale,
+    )
+    .context("private H3 mux returned an invalid duration")?;
     let pipeline_provenance_sha256 =
         format!("{:x}", Sha256::digest(serde_json::to_vec(provenance)?));
     let generation_time_ms = u64::try_from(started.elapsed().as_millis())

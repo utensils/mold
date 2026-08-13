@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix private MiniMax H3 terminal publication to compare the MP4 container's
+  frame duration with ceiling millisecond rounding, matching the retained
+  124-frame, 24 fps mux result instead of rejecting it one millisecond early;
+  the inference-source change alters the authenticated runtime identity, so a
+  fresh exact-source campaign and independent review remain required.
+
 - Refresh the generated Wan 2.2 A14B capability profiles after the measured RTX 4090 frame-envelope defaults changed, restoring the deterministic generation-profile CI gate.
 
 - Make the private MiniMax H3 terminal publication gate identify the mismatched non-secret contract axis while continuing to fail closed, so a successful expensive render cannot collapse model, media, source-fingerprint, or provenance failures into one unactionable message.

@@ -676,10 +676,11 @@ where
             let staged =
                 pipeline::execute_staged(&prepared, &mut runtime.backend, progress, observer)?;
             let output = pipeline::finalize_av(staged, progress, observer)?;
-            let duration_ms = u64::from(1_000_u16)
-                .checked_mul(output.mux_report.video_duration_ticks)
-                .context("MiniMax H3 output duration overflow")?
-                / u64::from(output.mux_report.video_timescale);
+            let duration_ms = crate::av_media::timeline_duration_ms(
+                output.mux_report.video_duration_ticks,
+                output.mux_report.video_timescale,
+            )
+            .context("MiniMax H3 output has an invalid duration")?;
             Ok(H3EngineOutput {
                 mp4: output.mp4,
                 thumbnail_png: output.thumbnail_png,
@@ -792,10 +793,11 @@ fn h3_engine_output_from_pipeline(
     mode: Mode,
     component_set_identity_sha256: &str,
 ) -> Result<H3EngineOutput> {
-    let duration_ms = u64::from(1_000_u16)
-        .checked_mul(output.mux_report.video_duration_ticks)
-        .context("MiniMax H3 output duration overflow")?
-        / u64::from(output.mux_report.video_timescale);
+    let duration_ms = crate::av_media::timeline_duration_ms(
+        output.mux_report.video_duration_ticks,
+        output.mux_report.video_timescale,
+    )
+    .context("MiniMax H3 output has an invalid duration")?;
     Ok(H3EngineOutput {
         mp4: output.mp4,
         thumbnail_png: output.thumbnail_png,
