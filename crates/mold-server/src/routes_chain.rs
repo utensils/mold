@@ -901,18 +901,13 @@ pub(crate) fn validate_and_normalize_chain_family(
             mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
         });
         let contract = probed.or_else(|| manifest.and_then(|model| model.defaults.source_image));
-        let carries_context = contract.is_some_and(|capability| {
-            matches!(
-                capability,
-                mold_core::SourceImageCapability::Required
-                    | mold_core::SourceImageCapability::Optional
-            )
-        });
-        let normalized = if carries_context {
-            mold_inference::wan::pipeline::WAN_HANDOFF_DUPLICATED_FRAMES
-        } else {
-            0
-        };
+        // One authority, shared with the forced-local CLI path: the two had
+        // drifted, and only this one normalized (#783).
+        let normalized = mold_core::validation::chain_motion_tail_frames_for_family(
+            &family,
+            contract,
+            req.motion_tail_frames,
+        );
         if req.motion_tail_frames != normalized {
             tracing::debug!(
                 model = %req.model,

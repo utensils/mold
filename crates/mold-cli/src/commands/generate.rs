@@ -90,7 +90,7 @@ fn qwen_image_edit_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
     Ok((width, height))
 }
 
-fn resolve_family(model: &str, config: &Config) -> Option<String> {
+pub(crate) fn resolve_family(model: &str, config: &Config) -> Option<String> {
     config
         .resolved_model_config(model)
         .family
