@@ -142,7 +142,7 @@ const requiredH3DownloadFacts = [
   '1344x768',
   'exactly 124 frames at 24 fps',
   '21 terminal-inclusive sampler grid points',
-  'Ref2VA, Metal, CPU',
+  'Ref2VA execution and the Metal and CPU backends',
   'Mold-hosted weight redistribution',
 ]
 for (const fact of requiredH3DownloadFacts) {

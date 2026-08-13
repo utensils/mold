@@ -179,7 +179,13 @@
             (lib.makeSearchPath "share/pkgconfig" (map lib.getDev desktopPkgConfigInputs))
           ];
 
-          desktopFeature = if isLinux then "cuda" else "metal";
+          desktopFeatureFor =
+            computeCap:
+            if isLinux then
+              if computeCap == "89" then "cuda,h3" else "cuda"
+            else
+              "metal";
+          desktopFeature = desktopFeatureFor cudaComputeCap;
 
           gpuFeature =
             if isLinux then
@@ -192,8 +198,11 @@
           devProfile = "dev-fast";
 
           # Full shipping feature set used for release builds and feature coverage.
-          releaseFeatures =
-            if gpuFeature != "" then
+          releaseFeaturesFor =
+            computeCap:
+            if isLinux then
+              "cuda${lib.optionalString (computeCap == "89") ",h3"},preview,discord,expand,tui,webp,mp4,metrics,mdns"
+            else if gpuFeature != "" then
               "${gpuFeature},preview,discord,expand,tui,webp,mp4,metrics,mdns"
             else
               "preview,discord,expand,tui,webp,mp4,metrics,mdns";
@@ -209,6 +218,7 @@
           # `mold`, `serve`, and `generate` commands without the user having
           # to know which features to flip. CI and `nix build` use the same
           # list via `releaseFeatures`, so there's a single feature matrix.
+          releaseFeatures = releaseFeaturesFor cudaComputeCap;
           devFeatures = releaseFeatures;
 
           cargoArtifacts = craneLib.buildDepsOnly (
@@ -482,7 +492,7 @@
                   "cudarc-0.19.8" = "sha256-ARnabIhBCzahrk/kVCt5084gftGDyCBme3jxg+mvkUA=";
                 };
               };
-              buildFeatures = [ desktopFeature ];
+              buildFeatures = [ (desktopFeatureFor computeCap) ];
 
               MOLD_GIT_SHA = gitRev;
               MOLD_BUILD_DATE = gitDate;
@@ -609,7 +619,7 @@
               // {
                 inherit cargoArtifacts meta;
                 MOLD_WEB_DIST = "${mold-web}";
-                cargoExtraArgs = "-p mold-ai --features ${releaseFeatures}";
+                cargoExtraArgs = "-p mold-ai --features ${releaseFeaturesFor computeCap}";
                 postInstall =
                   if isLinux then
                     ''

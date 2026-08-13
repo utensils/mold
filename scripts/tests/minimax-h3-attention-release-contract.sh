@@ -170,8 +170,8 @@ done
 omitted_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=omitted'
 claim_marker='mold.minimax-h3.attention-rc.kernel-compiled.v1'
 private_qwen_support_marker='mold.minimax-h3.private-uat-qwen-support-loader.v1'
-compiled_markers=(
-  'mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=omitted'
+h3_compiled_marker='mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=omitted'
+global_compiled_markers=(
   'mold.minimax-h3.attention-release-provenance.v2:h3-rc=omitted:global-flash=compiled'
   'mold.minimax-h3.attention-release-provenance.v2:h3-rc=compiled:global-flash=compiled'
 )
@@ -186,17 +186,23 @@ if scripts/verify-h3-release-exclusion.sh "$scratch_dir/missing-provenance" >/de
 fi
 printf '%s\n%s\n' "$omitted_marker" "$claim_marker" > "$scratch_dir/claimed"
 if scripts/verify-h3-release-exclusion.sh "$scratch_dir/claimed" >/dev/null 2>&1; then
-  fail "release exclusion verifier accepted an H3 release-candidate claim marker"
+  fail "release verifier accepted an H3 claim without H3 provenance"
+fi
+printf '%s\n%s\n' "$h3_compiled_marker" "$claim_marker" > "$scratch_dir/public-h3"
+scripts/verify-h3-release-exclusion.sh "$scratch_dir/public-h3" >/dev/null
+printf '%s\n' "$h3_compiled_marker" > "$scratch_dir/public-h3-missing-claim"
+if scripts/verify-h3-release-exclusion.sh "$scratch_dir/public-h3-missing-claim" >/dev/null 2>&1; then
+  fail "release verifier accepted H3 provenance without its kernel claim"
 fi
 printf '%s\n%s\n' "$omitted_marker" "$private_qwen_support_marker" > "$scratch_dir/private-qwen-support"
 if scripts/verify-h3-release-exclusion.sh "$scratch_dir/private-qwen-support" >/dev/null 2>&1; then
   fail "release exclusion verifier accepted the private H3 Qwen support loader"
 fi
-for index in "${!compiled_markers[@]}"; do
-  printf '%s\n%s\n' "$omitted_marker" "${compiled_markers[$index]}" \
+for index in "${!global_compiled_markers[@]}"; do
+  printf '%s\n%s\n' "$omitted_marker" "${global_compiled_markers[$index]}" \
     > "$scratch_dir/compiled-$index"
   if scripts/verify-h3-release-exclusion.sh "$scratch_dir/compiled-$index" >/dev/null 2>&1; then
-    fail "release exclusion verifier accepted compiled FlashAttention provenance"
+    fail "release verifier accepted global FlashAttention provenance"
   fi
 done
 

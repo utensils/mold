@@ -9,6 +9,8 @@ use sha2::{Digest, Sha256};
 
 const IDENTITY_DOMAIN: &[u8] = b"mold.minimax-h3.private-runtime-code.v1\0";
 const PRIVATE_SERVER_RELATIVE_PATH: &str = "crates/mold-inference/src/minimax_h3/private_server.rs";
+const EMBEDDED_RUNTIME_QUALIFICATION_RELATIVE_PATH: &str =
+    "crates/mold-inference/assets/minimax-h3-runtime-qualification.json";
 const REVIEWED_ALLOWLIST_DECLARATION: &[u8] = b"const REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256";
 const NORMALIZED_ALLOWLIST: &[u8] =
     b"const REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256: &[&str] = &[\n    /* reviewed values excluded from runtime-code identity */\n];";
@@ -121,7 +123,7 @@ pub fn collect_build_environment() -> Result<Vec<(String, String)>, String> {
         .map(|(key, value)| {
             value
                 .into_string()
-                .map(|value| (key.clone(), value))
+                .map(|value| (key.clone(), normalize_build_environment_value(&key, value)))
                 .map_err(|_| format!("runtime build environment {key} is not UTF-8"))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -149,6 +151,17 @@ pub fn collect_build_environment() -> Result<Vec<(String, String)>, String> {
         return Err("runtime build environment contains duplicate keys".into());
     }
     Ok(environment)
+}
+
+fn normalize_build_environment_value(key: &str, value: String) -> String {
+    if key != "CARGO_CFG_FEATURE" {
+        return value;
+    }
+    value
+        .split(',')
+        .filter(|feature| *feature != "dev-bins")
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Identity of the native compilers that turn this source into the measured
@@ -419,10 +432,20 @@ pub fn build_environment_rerun_keys() -> Vec<String> {
 fn should_capture_environment_key(key: &str) -> bool {
     BUILD_ENVIRONMENT_KEYS.contains(&key)
         || key.starts_with("CARGO_CFG_")
-        || key.starts_with("CARGO_FEATURE_")
+        || key.starts_with("CARGO_FEATURE_") && key != "CARGO_FEATURE_DEV_BINS"
         || key.starts_with("CARGO_PROFILE_")
         || key.starts_with("CARGO_TARGET_")
             && (key.ends_with("_LINKER") || key.ends_with("_RUNNER") || key.ends_with("_RUSTFLAGS"))
+}
+
+#[cfg(test)]
+pub fn captured_environment_key_for_test(key: &str) -> bool {
+    should_capture_environment_key(key)
+}
+
+#[cfg(test)]
+pub fn normalized_environment_value_for_test(key: &str, value: &str) -> String {
+    normalize_build_environment_value(key, value.to_string())
 }
 
 fn validate_local_dependency_closure(workspace_root: &Path) -> Result<(), String> {
@@ -663,6 +686,12 @@ pub fn identity_for_entries_and_environment(
 }
 
 fn normalize_input(relative_path: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if relative_path == EMBEDDED_RUNTIME_QUALIFICATION_RELATIVE_PATH {
+        return Ok(
+            b"reviewed embedded runtime qualification excluded from runtime-code identity\n"
+                .to_vec(),
+        );
+    }
     if relative_path != PRIVATE_SERVER_RELATIVE_PATH {
         return Ok(bytes.to_vec());
     }

@@ -74,9 +74,11 @@ build() {
   # --frozen + --offline pairs with `cargo fetch --locked` in prepare():
   #   --frozen  refuses to mutate Cargo.lock
   #   --offline refuses any network IO during build
+  local h3_feature=""
+  [[ "${CUDA_COMPUTE_CAP}" == "89" ]] && h3_feature=",h3"
   cargo build --release --frozen --offline \
     -p mold-ai \
-    --features cuda,preview,expand,tui,webp,mp4,metrics,mdns
+    --features "cuda${h3_feature},preview,expand,tui,webp,mp4,metrics,mdns"
 }
 
 check() {

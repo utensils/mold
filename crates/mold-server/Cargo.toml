@@ -27,6 +27,15 @@ cuda = ["mold-inference/cuda", "nvml", "dep:cudarc"]
 metal = ["mold-inference/metal"]
 expand = ["mold-inference/expand"]
 mp4 = ["mold-inference/mp4"]
+# Public compact MiniMax H3 CUDA runtime. Unlike the qualification feature,
+# this carries no capture binaries or external authorization-record surface.
+h3 = [
+    "cuda",
+    "h3-private-bridge",
+    "mp4",
+    "mold-core/h3",
+    "mold-inference/h3",
+]
 # Structural seam for opaque, one-shot H3 owner attempts. This compiles the
 # scheduler/server contract without making the private runtime runnable.
 h3-private-bridge = []

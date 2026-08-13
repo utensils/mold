@@ -5,6 +5,8 @@ use std::fs;
 use std::path::Path;
 
 const PRIVATE_SERVER_PATH: &str = "crates/mold-inference/src/minimax_h3/private_server.rs";
+const EMBEDDED_RUNTIME_QUALIFICATION_PATH: &str =
+    "crates/mold-inference/assets/minimax-h3-runtime-qualification.json";
 
 fn identity(private_server: &str, runtime: &str) -> String {
     h3_runtime_code_identity::identity_for_entries(&[
@@ -43,6 +45,41 @@ fn runtime_owner() { consume(); }
 }
 
 #[test]
+fn runtime_identity_excludes_only_the_embedded_reviewed_record_bytes() {
+    let code = r#"const REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256: &[&str] = &[];
+fn runtime_owner() { consume(); }
+"#;
+    let identity_for_record = |record: &[u8]| {
+        h3_runtime_code_identity::identity_for_entries(&[
+            (PRIVATE_SERVER_PATH.to_string(), code.as_bytes().to_vec()),
+            (
+                EMBEDDED_RUNTIME_QUALIFICATION_PATH.to_string(),
+                record.to_vec(),
+            ),
+        ])
+        .unwrap()
+    };
+    assert_eq!(
+        identity_for_record(b"bootstrap"),
+        identity_for_record(b"reviewed")
+    );
+    assert_ne!(
+        identity_for_record(b"reviewed"),
+        h3_runtime_code_identity::identity_for_entries(&[
+            (
+                PRIVATE_SERVER_PATH.to_string(),
+                code.replace("consume", "execute").into_bytes()
+            ),
+            (
+                EMBEDDED_RUNTIME_QUALIFICATION_PATH.to_string(),
+                b"reviewed".to_vec(),
+            ),
+        ])
+        .unwrap()
+    );
+}
+
+#[test]
 fn runtime_identity_changes_for_a_build_axis() {
     let entries = [("crates/mold-server/src/lib.rs".into(), b"runtime".to_vec())];
     let linux = [("TARGET".into(), "x86_64-unknown-linux-gnu".into())];
@@ -71,6 +108,46 @@ fn runtime_identity_captures_the_resolved_linker_axis() {
     let lld_identity =
         h3_runtime_code_identity::identity_for_entries_and_environment(&entries, &lld).unwrap();
     assert_ne!(system_identity, lld_identity);
+}
+
+#[test]
+fn development_binaries_do_not_change_the_public_runtime_identity() {
+    assert!(h3_runtime_code_identity::captured_environment_key_for_test(
+        "CARGO_FEATURE_H3"
+    ));
+    assert!(!h3_runtime_code_identity::captured_environment_key_for_test("CARGO_FEATURE_DEV_BINS"));
+    assert_eq!(
+        h3_runtime_code_identity::normalized_environment_value_for_test(
+            "CARGO_CFG_FEATURE",
+            "cuda,dev-bins,h3,mp4"
+        ),
+        "cuda,h3,mp4"
+    );
+
+    let entries = [("crates/mold-server/src/lib.rs".into(), b"runtime".to_vec())];
+    let public: [(String, String); 1] = [("CARGO_FEATURE_H3".into(), "1".into())];
+    let producer: [(String, String); 2] = [
+        ("CARGO_FEATURE_H3".into(), "1".into()),
+        ("CARGO_FEATURE_DEV_BINS".into(), "1".into()),
+    ];
+    let normalized_producer = producer
+        .into_iter()
+        .filter(|(key, _)| h3_runtime_code_identity::captured_environment_key_for_test(key))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        h3_runtime_code_identity::identity_for_entries_and_environment(&entries, &public).unwrap(),
+        h3_runtime_code_identity::identity_for_entries_and_environment(
+            &entries,
+            &normalized_producer
+        )
+        .unwrap()
+    );
+
+    let private: [(String, String); 1] = [("CARGO_FEATURE_H3_PRIVATE_UAT".into(), "1".into())];
+    assert_ne!(
+        h3_runtime_code_identity::identity_for_entries_and_environment(&entries, &public).unwrap(),
+        h3_runtime_code_identity::identity_for_entries_and_environment(&entries, &private).unwrap()
+    );
 }
 
 #[test]

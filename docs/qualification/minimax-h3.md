@@ -502,7 +502,7 @@ capture_manifest="$evidence_root/runtime-bound-capture.json"
 nix develop --offline --no-write-lock-file -c \
   cargo run --locked --offline --release \
   -p mold-ai-inference \
-  --features dev-bins,h3-private-uat,h3-attention-rc,mp4,cuda \
+  --features dev-bins,h3 \
   --bin h3_runtime_qualification_record -- \
   --models-root "$MOLD_HOME/models" \
   --authorization-record "$authorization_record" \

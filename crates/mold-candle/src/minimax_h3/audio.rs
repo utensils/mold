@@ -1072,7 +1072,7 @@ impl AudioVae {
     /// This developer-only seam lets a private Ref2VA runtime retain the
     /// original request-scoped cancellation error instead of reducing it to
     /// the string-only [`AudioVaeCancellation`] transport.
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     #[doc(hidden)]
     pub fn encode_with_phase_checkpoint(
         &self,
@@ -1109,7 +1109,7 @@ impl AudioVae {
     /// request-scoped cancellation and phase-accounting authority without
     /// placing a non-`Send` pipeline checkpoint behind the public
     /// [`AudioVaeCancellation`] trait.
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     #[doc(hidden)]
     pub fn decode_with_phase_checkpoint(
         &self,

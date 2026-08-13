@@ -1074,7 +1074,7 @@ async fn prepare_inputs_for_devices(
     policy: DependencyMaterializationPolicy,
     context: DependencyPreparationContext,
 ) -> Result<PreparedExecutionInputs, String> {
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if let Some(grant) = context.h3_private_ingress_grant.clone() {
         let live_state = state.ok_or_else(|| {
             "MiniMax H3 private dependency preparation has no server instance authority".to_string()
@@ -1085,7 +1085,7 @@ async fn prepare_inputs_for_devices(
         )
         .await;
     }
-    #[cfg(not(feature = "h3-private-uat"))]
+    #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
     let _ = &context;
     let resolution = crate::model_manager::resolve_existing_model_paths(&request.model, config)
         .map_err(|error| error.error)?
@@ -1315,9 +1315,9 @@ async fn prepare_inputs_for_devices(
         by_device,
         retryable_device_failures: failures,
         model_config_overlay,
-        #[cfg(feature = "h3-private-uat")]
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant: context.h3_private_ingress_grant,
-        #[cfg(feature = "h3-private-uat")]
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_admission_by_device: BTreeMap::new(),
     };
     let warm_config = config.clone();
@@ -1335,7 +1335,7 @@ async fn prepare_inputs_for_devices(
     Ok(prepared)
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 #[allow(clippy::too_many_arguments)]
 async fn prepare_h3_private_inputs_for_devices(
     state: Option<&AppState>,
@@ -1494,7 +1494,7 @@ async fn prepare_h3_private_inputs_for_devices(
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DependencyPreparationContext {
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
 }
 

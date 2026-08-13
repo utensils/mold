@@ -20,7 +20,7 @@ use crate::minimax_h3::backend::{
     H3ValidatedComponentSet,
 };
 use crate::minimax_h3::offload::FrozenH3BlockStreamingPlan;
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 use crate::minimax_h3::private_server::H3PrivateFactoryActivationEvidence;
 use crate::minimax_h3::sampler::H3DualSchedule;
 use crate::minimax_h3::vae_runtime::expected_h3_comfy_vae_artifact_plan_identity;
@@ -728,7 +728,7 @@ pub struct FrozenH3FactoryAuthority {
 
 /// Private-only projection of the exact admission record needed to compose
 /// the opened-file Comfy VAEs with one already-authorized component backend.
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct H3PrivateVaeFactoryAuthority {
     pub(crate) factory_identity_sha256: String,
@@ -744,7 +744,7 @@ pub(crate) struct H3PrivateVaeFactoryAuthority {
 /// Complete private projection consumed by the VAE-free streamed core. It is
 /// still contract-only: no artifact path, opened descriptor, runtime object,
 /// or public dispatch authority crosses this boundary.
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct H3PrivateFl2VaFactoryAuthority {
     pub(crate) factory_identity_sha256: String,
@@ -2017,7 +2017,7 @@ impl FrozenH3FactoryAuthority {
     /// Atomically enrich one already-validated scheduler authority with the
     /// opened/preprocessed attempt triad. The base authority remains
     /// immutable; the returned authority receives a new canonical identity.
-    #[cfg(all(feature = "h3-private-uat", feature = "mp4"))]
+    #[cfg(all(any(feature = "h3", feature = "h3-private-uat"), feature = "mp4"))]
     pub(crate) fn with_private_prepared_attempt(
         &self,
         prepared_attempt: H3FactoryPreparedAttemptInput,
@@ -2064,12 +2064,12 @@ impl FrozenH3FactoryAuthority {
         self.backend_plan.component_set_identity()
     }
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn backend_plan_identity_sha256(&self) -> &str {
         self.backend_plan.identity_sha256()
     }
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn private_vae_adapter_authority(&self) -> Result<H3PrivateVaeFactoryAuthority> {
         self.validate_frozen()?;
         let vae_artifact_plan_identity_sha256 = self
@@ -2091,7 +2091,7 @@ impl FrozenH3FactoryAuthority {
         })
     }
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     #[allow(dead_code)]
     pub(crate) fn private_fl2va_runtime_authority(&self) -> Result<H3PrivateFl2VaFactoryAuthority> {
         self.validate_frozen()?;
@@ -2120,7 +2120,7 @@ impl FrozenH3FactoryAuthority {
     /// opened, prepared, scheduler-ledger, owner-scope, and runtime-record
     /// authorities. The public prerequisite list remains intact and is part
     /// of the token identity.
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn private_fl2va_runtime_authority_with_activation(
         &self,
         activation: &H3PrivateFactoryActivationEvidence,
@@ -2144,7 +2144,7 @@ impl FrozenH3FactoryAuthority {
 
     /// Test-only projection for preserving schema-neutral synthetic runtime
     /// unit coverage. Production and integration paths cannot call this seam.
-    #[cfg(all(test, feature = "h3-private-uat"))]
+    #[cfg(all(test, any(feature = "h3", feature = "h3-private-uat")))]
     pub(crate) fn private_fl2va_runtime_authority_for_schema_tests(
         &self,
     ) -> Result<H3PrivateFl2VaFactoryAuthority> {
@@ -2185,7 +2185,7 @@ impl FrozenH3FactoryAuthority {
         self.private_fl2va_runtime_authority_record(attention)
     }
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     fn private_fl2va_runtime_authority_record(
         &self,
         attention: H3FactoryAttentionInput,
@@ -2235,7 +2235,7 @@ impl FrozenH3FactoryAuthority {
     /// Private runtime adapters use this to cross-check the independently
     /// authenticated Qwen/support lease. It deliberately exposes only
     /// digests, never artifact paths or bytes.
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn conditioner_component_authority(&self) -> (&str, &str) {
         self.private_component_authority(H3FactoryComponentRole::Conditioner)
     }
@@ -2243,7 +2243,7 @@ impl FrozenH3FactoryAuthority {
     /// Exact payload-free authority for independently reopening one private
     /// component. This comparison seam prevents an attempt-local artifact
     /// object from inheriting admission digests without recomputing them.
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn private_component_authority(&self, role: H3FactoryComponentRole) -> (&str, &str) {
         let role = match role {
             H3FactoryComponentRole::Conditioner => H3ComponentRole::Conditioner,
@@ -2254,7 +2254,7 @@ impl FrozenH3FactoryAuthority {
         self.component_authority(role)
     }
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     fn component_authority(&self, role: H3ComponentRole) -> (&str, &str) {
         let authority = self
             .backend_plan

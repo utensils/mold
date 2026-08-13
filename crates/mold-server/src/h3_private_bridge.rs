@@ -6,16 +6,16 @@
 
 use crate::h3_attempt::H3AttemptScope;
 
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 pub(crate) const H3_PRIVATE_PARTITION_REJECTED: &str = "MINIMAX_H3_PRIVATE_PARTITION_REJECTED";
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 pub(crate) const H3_PRIVATE_RUNTIME_UNAVAILABLE: &str = "MINIMAX_H3_PRIVATE_RUNTIME_UNAVAILABLE";
 
 /// Payload-free proof that one authenticated request crossed the deliberately
 /// narrow private ingress partition. This value may be cloned through queue
 /// and dependency-preparation state; it contains neither the API key/auth
 /// marker nor prompt, media, reference, or filesystem payloads.
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct H3PrivateIngressGrant {
     canonical_model: String,
@@ -27,7 +27,7 @@ pub(crate) struct H3PrivateIngressGrant {
     request_authority_sha256: String,
 }
 
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 impl H3PrivateIngressGrant {
     #[cfg(test)]
     pub(crate) fn canonical_model(&self) -> &str {
@@ -57,7 +57,7 @@ impl H3PrivateIngressGrant {
     ) -> Result<(), String> {
         self.validate_bound_request(request)?;
         if self.instance_identity_sha256 != private_instance_identity_sha256(instance_id) {
-            return Err("MiniMax H3 private ingress server instance changed".into());
+            return Err("MiniMax H3 ingress server instance changed".into());
         }
         Ok(())
     }
@@ -84,10 +84,10 @@ impl H3PrivateIngressGrant {
             || self.partition_identity_sha256
                 != private_ingress_partition_identity_sha256(self.task)
         {
-            return Err("MiniMax H3 private ingress route or instance identity changed".into());
+            return Err("MiniMax H3 ingress route or instance identity changed".into());
         }
         if self.policy_identity_sha256 != private_ingress_policy_identity_sha256(self.task) {
-            return Err("MiniMax H3 private ingress policy identity changed".into());
+            return Err("MiniMax H3 ingress policy identity changed".into());
         }
         Ok(())
     }
@@ -146,7 +146,7 @@ impl H3PrivateIngressGrant {
 /// Classify the only private H3 HTTP partition before activation, artifact
 /// discovery, path resolution, or scheduler mutation. Non-H3 requests return
 /// `None` and retain the existing public ingress gates unchanged.
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 #[cfg_attr(all(test, not(feature = "h3-private-uat")), allow(dead_code))]
 pub(crate) fn classify_h3_private_ingress(
     request: &mold_core::GenerateRequest,
@@ -161,7 +161,7 @@ pub(crate) fn classify_h3_private_ingress(
     )
 }
 
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn classify_h3_private_ingress_with_runtime(
     request: &mold_core::GenerateRequest,
     authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
@@ -174,13 +174,29 @@ fn classify_h3_private_ingress_with_runtime(
     else {
         return Ok(None);
     };
-    let authenticated = authenticated.ok_or_else(|| {
-        crate::routes::ApiError::with_code(
-            "API key authentication is required for MiniMax H3 private generation",
-            "UNAUTHORIZED",
-            StatusCode::UNAUTHORIZED,
-        )
-    })?;
+    #[cfg(not(feature = "h3"))]
+    let authenticated_identity_sha256 = authenticated.map_or_else(
+        || {
+            Err(crate::routes::ApiError::with_code(
+                "API key authentication is required for MiniMax H3 private generation",
+                "UNAUTHORIZED",
+                StatusCode::UNAUTHORIZED,
+            ))
+        },
+        |authenticated| {
+            Ok(ingress_digest(
+                b"mold.minimax-h3.private-authenticated-identity.v1\0",
+                &[authenticated.identity.as_bytes()],
+            ))
+        },
+    )?;
+    #[cfg(feature = "h3")]
+    let authenticated_identity_sha256 = ingress_digest(
+        b"mold.minimax-h3.public-ingress-identity.v1\0",
+        &[instance_id.as_bytes()],
+    );
+    #[cfg(feature = "h3")]
+    let _ = authenticated;
 
     let output_format = request
         .output_format
@@ -205,14 +221,14 @@ fn classify_h3_private_ingress_with_runtime(
         && references_match_task;
     if !exact_partition {
         return Err(crate::routes::ApiError::with_code(
-            "MiniMax H3 private ingress accepts only an exact authenticated Comfy task partition with its required conditioning contract",
+            "MiniMax H3 accepts only its supported compact task partition and conditioning contract",
             H3_PRIVATE_PARTITION_REJECTED,
             StatusCode::UNPROCESSABLE_ENTITY,
         ));
     }
     if !runtime_available(contract.task) {
         return Err(crate::routes::ApiError::with_code(
-            "MiniMax H3 private runtime has no reviewed server admission implementation",
+            "MiniMax H3 runtime is unavailable for this task or server build",
             H3_PRIVATE_RUNTIME_UNAVAILABLE,
             StatusCode::SERVICE_UNAVAILABLE,
         ));
@@ -229,10 +245,7 @@ fn classify_h3_private_ingress_with_runtime(
     Ok(Some(H3PrivateIngressGrant {
         canonical_model: contract.canonical_model.to_string(),
         task: contract.task,
-        authenticated_identity_sha256: ingress_digest(
-            b"mold.minimax-h3.private-authenticated-identity.v1\0",
-            &[authenticated.identity.as_bytes()],
-        ),
+        authenticated_identity_sha256,
         instance_identity_sha256: private_instance_identity_sha256(instance_id),
         partition_identity_sha256,
         policy_identity_sha256: private_ingress_policy_identity_sha256(contract.task),
@@ -242,18 +255,24 @@ fn classify_h3_private_ingress_with_runtime(
 
 /// Fail closed until the inference facade contains at least one exact reviewed
 /// private-runtime qualification record. This check performs no path access.
-#[cfg(feature = "h3-private-uat")]
+#[cfg(feature = "h3")]
+fn reviewed_h3_private_runtime_available(task: mold_core::minimax_h3::Task) -> bool {
+    task == mold_core::minimax_h3::Task::Fl2va
+        && mold_inference::reviewed_h3_private_runtime_available_for_task(task)
+}
+
+#[cfg(all(not(feature = "h3"), feature = "h3-private-uat"))]
 fn reviewed_h3_private_runtime_available(task: mold_core::minimax_h3::Task) -> bool {
     mold_inference::reviewed_h3_private_runtime_available_for_task(task)
 }
 
-#[cfg(all(test, not(feature = "h3-private-uat")))]
+#[cfg(all(test, not(any(feature = "h3", feature = "h3-private-uat"))))]
 #[allow(dead_code)]
 fn reviewed_h3_private_runtime_available(_task: mold_core::minimax_h3::Task) -> bool {
     false
 }
 
-/// Build the presentation-only capability for the one reviewed private task.
+/// Build the presentation-only capability for the one supported task.
 ///
 /// This deliberately performs no artifact hashing and grants no runtime
 /// authority. Generation admission separately authenticates the authorization
@@ -266,12 +285,12 @@ pub(crate) fn advertised_h3_private_capability(
     models_root: &std::path::Path,
     device_state: &mold_core::DeviceState,
 ) -> Option<mold_core::MiniMaxH3Capability> {
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(feature = "h3")]
     {
-        if !api_key_auth_enabled || !cfg!(feature = "mp4") {
+        let _ = api_key_auth_enabled;
+        if !cfg!(feature = "mp4") {
             return None;
         }
-        let paths = H3PrivateUatPathSet::resolve(models_root.to_path_buf());
         let routes = device_state
             .devices
             .iter()
@@ -290,13 +309,7 @@ pub(crate) fn advertised_h3_private_capability(
                 })
             })
             .collect::<Vec<_>>();
-        let authority = mold_inference::authenticate_h3_private_presentation(
-            models_root,
-            &paths.authorization_record,
-            &paths.runtime_qualification_record,
-            &routes,
-        )
-        .ok()?;
+        let authority = mold_inference::authenticate_h3_public_presentation(&routes).ok()?;
         if authority.task() != mold_core::minimax_h3::Task::Fl2va
             || authority.canonical_model() != mold_core::minimax_h3::FL2VA_COMFY
         {
@@ -304,14 +317,55 @@ pub(crate) fn advertised_h3_private_capability(
         }
         build_fl2va_capability(models_root)
     }
-    #[cfg(not(feature = "h3-private-uat"))]
+    #[cfg(not(feature = "h3"))]
     {
-        let _ = (api_key_auth_enabled, models_root, device_state);
-        None
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+        {
+            if !api_key_auth_enabled || !cfg!(feature = "mp4") {
+                return None;
+            }
+            let paths = H3PrivateUatPathSet::resolve(models_root.to_path_buf());
+            let routes = device_state
+                .devices
+                .iter()
+                .filter(|device| {
+                    device.backend == mold_core::GpuBackend::Cuda
+                        && device.schedulable
+                        && device.ordinal.is_some()
+                        && device.compute_capability.is_some()
+                })
+                .filter_map(|device| {
+                    let (major, minor) = device.compute_capability.as_deref()?.split_once('.')?;
+                    Some(mold_inference::H3PrivatePresentationRoute {
+                        device_id: &device.id,
+                        device_ordinal: device.ordinal?,
+                        compute_capability: (major.parse().ok()?, minor.parse().ok()?),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let authority = mold_inference::authenticate_h3_private_presentation(
+                models_root,
+                &paths.authorization_record,
+                &paths.runtime_qualification_record,
+                &routes,
+            )
+            .ok()?;
+            if authority.task() != mold_core::minimax_h3::Task::Fl2va
+                || authority.canonical_model() != mold_core::minimax_h3::FL2VA_COMFY
+            {
+                return None;
+            }
+            build_fl2va_capability(models_root)
+        }
+        #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
+        {
+            let _ = (api_key_auth_enabled, models_root, device_state);
+            None
+        }
     }
 }
 
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::MiniMaxH3Capability> {
     use mold_core::manifest::{find_manifest, storage_path, ModelComponent};
 
@@ -435,8 +489,7 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
             // The reviewed 38.7 GB peak is advertised as a conservative 40 GiB
             // hardware tier rather than as false byte-level precision.
             minimum_vram_bytes: 40 * 1024 * 1024 * 1024,
-            attention_profile: "FlashAttention v2 BF16, SM80-compatible (qualified on CUDA SM89)"
-                .into(),
+            attention_profile: "FlashAttention v2 BF16 on exact CUDA SM89".into(),
             quantization_profile: "Comfy pruned INT8-convrot + Qwen NVFP4-AWQ".into(),
         },
         partitions: vec![mold_core::MiniMaxH3PartitionCapability {
@@ -478,7 +531,7 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
     })
 }
 
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn reviewed_h3_private_generation_profile() -> Option<(mold_core::GenerationProfileSet, u32, u64)> {
     use mold_core::generation_profile::{
         AspectGroup, ControlMode, FpsControl, ResolutionDomain, ResolutionPreset,
@@ -554,11 +607,10 @@ fn reviewed_h3_private_generation_profile() -> Option<(mold_core::GenerationProf
     (profile.recipes.len() == 1).then_some((profile, alignment, pixels))
 }
 
-/// Convert the authenticated presentation graph into the sole private model
-/// row clients may submit. Hidden manifests remain absent from ordinary
-/// inventory; a row exists only when every exact component is already landed
-/// and the reviewed partition carries the one admitted request envelope.
-#[cfg(feature = "h3-private-uat")]
+/// Convert the authenticated presentation graph into the sole executable model
+/// row clients may submit. A row exists only when every exact component is
+/// already landed and the supported partition carries the admitted envelope.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) fn authenticated_h3_private_model_row(
     capability: &mold_core::MiniMaxH3Capability,
 ) -> Option<mold_core::ModelInfoExtended> {
@@ -614,7 +666,8 @@ pub(crate) fn authenticated_h3_private_model_row(
             size_gb: disk_usage_bytes as f32 / 1_000_000_000.0,
             is_loaded: false,
             last_used: None,
-            // This private row is not a public download recipe.
+            // Acquisition is represented by the registered public manifest;
+            // this installed runtime row must not introduce another recipe.
             hf_repo: String::new(),
         },
         defaults: mold_core::ModelDefaults {
@@ -622,7 +675,7 @@ pub(crate) fn authenticated_h3_private_model_row(
             default_guidance: 0.0,
             default_width: request.width,
             default_height: request.height,
-            description: "Authenticated compact FL2VA runtime with synchronized audio; exact reviewed first-frame quality envelope.".into(),
+            description: "Compact FL2VA CUDA runtime with synchronized audio; supported first-frame quality profile.".into(),
             default_frames: Some(request.frames),
             default_fps: Some(request.fps),
             min_frames: Some(request.frames),
@@ -661,7 +714,7 @@ pub(crate) fn authenticated_h3_private_model_row(
     })
 }
 
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn ingress_digest(domain: &[u8], values: &[&[u8]]) -> String {
     use sha2::{Digest, Sha256};
 
@@ -674,7 +727,7 @@ fn ingress_digest(domain: &[u8], values: &[&[u8]]) -> String {
     format!("{:x}", digest.finalize())
 }
 
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn h3_task_label(task: mold_core::minimax_h3::Task) -> &'static [u8] {
     match task {
         mold_core::minimax_h3::Task::Fl2va => b"fl2va",
@@ -682,7 +735,7 @@ fn h3_task_label(task: mold_core::minimax_h3::Task) -> &'static [u8] {
     }
 }
 
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn private_instance_identity_sha256(instance_id: &str) -> String {
     ingress_digest(
         b"mold.minimax-h3.private-server-instance.v1\0",
@@ -690,7 +743,7 @@ fn private_instance_identity_sha256(instance_id: &str) -> String {
     )
 }
 
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn private_ingress_policy_identity_sha256(task: mold_core::minimax_h3::Task) -> String {
     let (model, references) = match task {
         mold_core::minimax_h3::Task::Fl2va => (
@@ -718,7 +771,7 @@ fn private_ingress_policy_identity_sha256(task: mold_core::minimax_h3::Task) -> 
     )
 }
 
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn private_ingress_partition_identity_sha256(task: mold_core::minimax_h3::Task) -> String {
     let (model, references) = match task {
         mold_core::minimax_h3::Task::Fl2va => (
@@ -745,7 +798,7 @@ fn private_ingress_partition_identity_sha256(task: mold_core::minimax_h3::Task) 
     )
 }
 
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn request_authority_sha256(request: &mold_core::GenerateRequest) -> Result<String, String> {
     let serialized = serde_json::to_vec(request).map_err(|error| {
         format!("MiniMax H3 request authority could not be serialized: {error}")
@@ -756,7 +809,7 @@ fn request_authority_sha256(request: &mold_core::GenerateRequest) -> Result<Stri
     ))
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) fn pin_private_preview_seed(
     request: &mut mold_core::GenerateRequest,
 ) -> Result<(), crate::routes::ApiError> {
@@ -985,7 +1038,7 @@ impl H3AllocationCommit {
         callback()
     }
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn into_inference(self) -> mold_inference::H3PrivateAllocationCommit {
         let mut commit = self;
         mold_inference::H3PrivateAllocationCommit::new(move || commit.commit_once())
@@ -1007,7 +1060,7 @@ pub(crate) trait H3PreparedAttempt: Send {
 
 pub(crate) type BoxedH3PreparedAttempt = Box<dyn H3PreparedAttempt>;
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 #[derive(Clone, Debug)]
 pub(crate) struct H3PrivateUatPathSet {
     pub(crate) models_root: std::path::PathBuf,
@@ -1016,16 +1069,20 @@ pub(crate) struct H3PrivateUatPathSet {
     pub(crate) runtime_qualification_record: std::path::PathBuf,
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 impl H3PrivateUatPathSet {
     pub(crate) fn resolve(models_root: std::path::PathBuf) -> Self {
+        #[cfg(feature = "h3")]
+        let default_runtime_root = mold_core::Config::mold_dir()
+            .unwrap_or_else(|| models_root.clone())
+            .join("h3-runtime");
+        #[cfg(not(feature = "h3"))]
+        let default_runtime_root = mold_core::Config::mold_dir()
+            .unwrap_or_else(|| models_root.clone())
+            .join("h3-private-uat");
         let uat_root = std::env::var_os("MOLD_H3_PRIVATE_UAT_ROOT")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                mold_core::Config::mold_dir()
-                    .unwrap_or_else(|| models_root.clone())
-                    .join("h3-private-uat")
-            });
+            .unwrap_or(default_runtime_root);
         Self {
             models_root,
             staging_root: private_uat_path("MOLD_H3_STAGING_ROOT", uat_root.join("staging")),
@@ -1050,12 +1107,12 @@ impl H3PrivateUatPathSet {
     }
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) struct InferenceH3PreparedAttempt {
     inner: mold_inference::H3PrivateFl2VaPreparedAttempt,
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 impl InferenceH3PreparedAttempt {
     pub(crate) fn boxed(
         inner: mold_inference::H3PrivateFl2VaPreparedAttempt,
@@ -1064,7 +1121,7 @@ impl InferenceH3PreparedAttempt {
     }
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 impl H3PreparedAttempt for InferenceH3PreparedAttempt {
     fn facts(&self) -> H3PreparedAttemptFacts {
         inference_facts(self.inner.facts())
@@ -1112,7 +1169,7 @@ impl H3PreparedAttempt for InferenceH3PreparedAttempt {
     }
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn inference_facts(facts: &mold_inference::H3PrivateFl2VaAttemptFacts) -> H3PreparedAttemptFacts {
     H3PreparedAttemptFacts {
         device_id: facts.device_id.clone(),
@@ -1138,7 +1195,7 @@ fn inference_facts(facts: &mold_inference::H3PrivateFl2VaAttemptFacts) -> H3Prep
     }
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn inference_media(media: mold_inference::H3PrivateFl2VaMediaContract) -> H3PreparedMediaContract {
     H3PreparedMediaContract {
         canonical_model: media.canonical_model,
@@ -1159,7 +1216,7 @@ fn inference_media(media: mold_inference::H3PrivateFl2VaMediaContract) -> H3Prep
 /// owner. The scheduler only ever carried an empty slot; every opened file,
 /// prepared tensor, and final attempt identity originates in the hidden
 /// inference facade after the second plan fence.
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) fn prepare_for_owner(
     worker: &crate::gpu_pool::GpuWorker,
     fence: &crate::scheduler::LeaseFence,
@@ -1173,24 +1230,24 @@ pub(crate) fn prepare_for_owner(
     if mold_core::minimax_h3::task_for_model(&job.request.model)
         != Some(mold_core::minimax_h3::Task::Fl2va)
     {
-        return Err("MiniMax H3 private UAT accepts only the sealed FL2VA partition".into());
+        return Err("MiniMax H3 accepts only the supported FL2VA partition".into());
     }
     let plan = job
         .execution_plan
         .as_ref()
-        .ok_or_else(|| "MiniMax H3 private preparation lacked an execution plan".to_string())?;
+        .ok_or_else(|| "MiniMax H3 preparation lacked an execution plan".to_string())?;
     let frozen_factory = plan
         .engine_config
         .h3_factory_authority
         .as_ref()
-        .ok_or_else(|| "MiniMax H3 private preparation lacked factory authority".to_string())?;
+        .ok_or_else(|| "MiniMax H3 preparation lacked factory authority".to_string())?;
     let prepared_inputs = job.prepared_execution_inputs.as_ref().ok_or_else(|| {
-        "MiniMax H3 private preparation lost its allocation-free admission evidence".to_string()
+        "MiniMax H3 preparation lost its allocation-free admission evidence".to_string()
     })?;
     let ingress_grant = prepared_inputs
         .h3_private_ingress_grant
         .as_ref()
-        .ok_or_else(|| "MiniMax H3 private preparation lost its ingress grant".to_string())?;
+        .ok_or_else(|| "MiniMax H3 preparation lost its ingress grant".to_string())?;
     ingress_grant.validate_bound_request(&job.request)?;
     let expected_media = H3PreparedMediaContract::from_request(
         &job.request,
@@ -1199,14 +1256,14 @@ pub(crate) fn prepare_for_owner(
             .map(crate::reference_uploads::ResolvedReferenceSet::fingerprint),
     )?;
     let compute_capability = worker.gpu.compute_capability.ok_or_else(|| {
-        "MiniMax H3 private preparation requires exact CUDA compute capability".to_string()
+        "MiniMax H3 preparation requires exact CUDA compute capability".to_string()
     })?;
     let device_id = crate::scheduler::worker_device_id(worker);
     let admission_evidence = prepared_inputs
         .h3_private_admission_by_device
         .get(&device_id)
         .ok_or_else(|| {
-            format!("MiniMax H3 private preparation has no admission evidence for '{device_id}'")
+            format!("MiniMax H3 preparation has no admission evidence for '{device_id}'")
         })?;
     validate_private_h3_live_owner_route(
         admission_evidence.device_id(),
@@ -1222,12 +1279,13 @@ pub(crate) fn prepare_for_owner(
         || frozen_factory.device_id() != device_id
         || frozen_factory.device_ordinal() != worker.gpu.ordinal
     {
-        return Err("MiniMax H3 private preparation no longer owns the accepted fence".into());
+        return Err("MiniMax H3 preparation no longer owns the accepted fence".into());
     }
 
-    let prepared_route = prepared_inputs.by_device.get(&device_id).ok_or_else(|| {
-        format!("MiniMax H3 private preparation has no prepared route for '{device_id}'")
-    })?;
+    let prepared_route = prepared_inputs
+        .by_device
+        .get(&device_id)
+        .ok_or_else(|| format!("MiniMax H3 preparation has no prepared route for '{device_id}'"))?;
     if prepared_route.engine_paths != plan.engine_paths
         || prepared_route.engine_config != plan.engine_config
         || frozen_factory != admission_evidence.base_factory_authority()
@@ -1239,9 +1297,7 @@ pub(crate) fn prepare_for_owner(
         || plan.predicted_host_increment_bytes
             != admission_evidence.predicted_host_increment_bytes()
     {
-        return Err(
-            "MiniMax H3 owner plan differs from immutable private admission evidence".into(),
-        );
+        return Err("MiniMax H3 owner plan differs from immutable admission evidence".into());
     }
     let (available_device_bytes, available_host_headroom_bytes) =
         crate::gpu_worker::prepare_private_h3_allocation_boundary(
@@ -1357,28 +1413,28 @@ pub(crate) fn prepare_for_owner(
     Ok(())
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) fn private_prepare_error_message(
     error: mold_inference::H3PrivateFl2VaPrepareError,
 ) -> String {
     match error {
         mold_inference::H3PrivateFl2VaPrepareError::MissingReviewedRuntimeQualification => {
-            "MiniMax H3 private runtime has no reviewed runtime qualification".to_string()
+            "MiniMax H3 runtime has no reviewed runtime qualification".to_string()
         }
         mold_inference::H3PrivateFl2VaPrepareError::InvalidEvidence(reason) => {
-            format!("MiniMax H3 private preparation evidence was rejected: {reason}")
+            format!("MiniMax H3 preparation evidence was rejected: {reason}")
         }
     }
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn private_uat_path(name: &str, fallback: std::path::PathBuf) -> std::path::PathBuf {
     std::env::var_os(name)
         .map(std::path::PathBuf::from)
         .unwrap_or(fallback)
 }
 
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn validate_private_h3_live_owner_route(
     expected_device_id: &str,
     expected_device_ordinal: usize,
@@ -1391,14 +1447,12 @@ fn validate_private_h3_live_owner_route(
         || expected_device_ordinal != actual_device_ordinal
         || expected_compute_capability != actual_compute_capability
     {
-        return Err(
-            "MiniMax H3 CUDA route changed after allocation-free private admission".to_string(),
-        );
+        return Err("MiniMax H3 CUDA route changed after allocation-free admission".to_string());
     }
     Ok(())
 }
 
-#[cfg(all(test, feature = "h3-private-uat"))]
+#[cfg(all(test, any(feature = "h3", feature = "h3-private-uat")))]
 mod tests {
     use std::fs::{self, OpenOptions};
     use std::os::unix::fs::PermissionsExt;
@@ -1570,7 +1624,7 @@ mod tests {
             super::private_prepare_error_message(
                 mold_inference::H3PrivateFl2VaPrepareError::MissingReviewedRuntimeQualification,
             ),
-            "MiniMax H3 private runtime has no reviewed runtime qualification",
+            "MiniMax H3 runtime has no reviewed runtime qualification",
         );
     }
 }
@@ -1723,6 +1777,7 @@ mod structural_tests {
     }
 
     #[test]
+    #[cfg(not(feature = "h3"))]
     fn exact_h3_partition_requires_api_key_authentication_before_runtime_lookup() {
         use axum::response::IntoResponse;
 
@@ -1744,6 +1799,28 @@ mod structural_tests {
             axum::http::StatusCode::UNAUTHORIZED
         );
         assert!(!runtime_checked.get());
+    }
+
+    #[test]
+    #[cfg(feature = "h3")]
+    fn public_h3_partition_requires_runtime_but_not_api_key_authentication() {
+        let runtime_checked = std::cell::Cell::new(false);
+        let grant = super::classify_h3_private_ingress_with_runtime(
+            &request(mold_core::minimax_h3::FL2VA_COMFY),
+            None,
+            INSTANCE_ID,
+            |_| {
+                runtime_checked.set(true);
+                true
+            },
+        )
+        .expect("public H3 classification")
+        .expect("public H3 grant");
+
+        assert!(runtime_checked.get());
+        grant
+            .validate_for_request(&request(mold_core::minimax_h3::FL2VA_COMFY), INSTANCE_ID)
+            .expect("public grant binds the exact request and server");
     }
 
     #[test]

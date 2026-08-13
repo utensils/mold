@@ -109,12 +109,12 @@ impl H3ValidatedComponentAuthority {
         require_sha256(&self.validation_sha256, "H3 component validation")
     }
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn content_sha256(&self) -> &str {
         &self.content_sha256
     }
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn validation_sha256(&self) -> &str {
         &self.validation_sha256
     }
@@ -157,7 +157,7 @@ impl H3ValidatedComponentSet {
         &self.identity_sha256
     }
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) fn authority(
         &self,
         role: H3ComponentRole,

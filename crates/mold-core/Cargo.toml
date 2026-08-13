@@ -15,6 +15,10 @@ name = "mold_core"
 
 [features]
 default = []
+# Public MiniMax H3 policy edge. Runtime crates forward this only from their
+# explicit H3 feature; it removes the historical family-wide compliance denial
+# while retaining the two reviewed, revision-pinned acquisition manifests.
+h3 = []
 # Validation-only edge consumed by the authenticated private H3 server. This
 # does not expose artifacts, loaders, or model activation.
 h3-private-uat = []

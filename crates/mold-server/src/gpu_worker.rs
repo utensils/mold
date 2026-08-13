@@ -37,7 +37,7 @@ thread_local! {
         }) };
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 const H3_CUDA_ATTEMPT_RETAINED_MARKER: &str =
     "CUDA execution attempt retained resources; server restart required";
 
@@ -1184,7 +1184,7 @@ fn process_owner_work(
         }
         _ => None,
     };
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let h3_prepare_error = match (&mut grant.work, h3_cancellation.as_ref()) {
         (OwnerWork::Generation(job), Some(cancellation)) => {
             request_private_h3_host_headroom(scheduler_tx, &grant.fence)
@@ -1206,7 +1206,7 @@ fn process_owner_work(
         }
         _ => None,
     };
-    #[cfg(not(feature = "h3-private-uat"))]
+    #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
     let h3_prepare_error: Option<String> = None;
     let h3_claim = if h3_prepare_error.is_none() {
         match (&grant.work, h3_cancellation) {
@@ -1351,7 +1351,7 @@ fn complete_h3_claim_failure(grant: LeaseGrant, error: String) -> OwnerProcessOu
     }
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn request_private_h3_host_headroom(
     scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
     fence: &crate::scheduler::LeaseFence,
@@ -1377,7 +1377,7 @@ fn request_private_h3_host_headroom(
         .map_err(crate::routes::ApiError::internal)
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn with_private_h3_cuda_preparation_attempt<T>(
     worker: &GpuWorker,
     operation: impl FnOnce() -> Result<T, crate::routes::ApiError>,
@@ -2207,7 +2207,7 @@ fn progress_to_sse(event: mold_inference::ProgressEvent) -> SseProgressEvent {
     event.into()
 }
 
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) fn record_h3_progress(
     event: mold_inference::ProgressEvent,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
@@ -2947,7 +2947,7 @@ fn run_claimed_h3_generation(
         }
     };
 
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let _private_load_lock = match worker.model_load_lock.lock() {
         Ok(lock) => lock,
         Err(error) => {
@@ -2957,13 +2957,13 @@ fn run_claimed_h3_generation(
             );
         }
     };
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let available_host_headroom_bytes = match request_private_h3_host_headroom(scheduler_tx, &lease)
     {
         Ok(headroom) => headroom,
         Err(error) => return reject_claimed_h3_generation_message(job, error.error),
     };
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if let Err(error) = with_private_h3_cuda_preparation_attempt(worker, || {
         prepare_private_h3_allocation_boundary(
             worker,
@@ -3139,7 +3139,7 @@ fn validate_h3_prepared_attempt_facts(
     scope: crate::h3_attempt::H3AttemptScopeFacts<'_>,
     prepared: &crate::h3_private_bridge::H3PreparedAttemptFacts,
 ) -> anyhow::Result<()> {
-    #[cfg(feature = "h3-private-uat")]
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if !scope.matches_private_run_binding(
         &prepared.work_identity_sha256,
         &prepared.cancellation_scope_identity_sha256,
@@ -4405,7 +4405,7 @@ pub(crate) fn planned_recheck_peak_bytes(
 /// the owner-known active cache entry before sampling also avoids inventing
 /// reusable capacity from missing or zero process-attribution telemetry: the
 /// post-drop driver reading is the sole device-capacity authority.
-#[cfg(feature = "h3-private-uat")]
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 pub(crate) fn prepare_private_h3_allocation_boundary(
     worker: &GpuWorker,
     model_name: &str,
@@ -4434,7 +4434,7 @@ pub(crate) fn prepare_private_h3_allocation_boundary(
     Ok((available_device_bytes, available_host_headroom_bytes))
 }
 
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn private_h3_memory_sample_error(
     worker: &GpuWorker,
     error: device::DeviceMemoryError,
@@ -4448,7 +4448,7 @@ fn private_h3_memory_sample_error(
     api_error
 }
 
-#[cfg(any(test, feature = "h3-private-uat"))]
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn validate_private_h3_physical_capacity(
     model_name: &str,
     predicted_device_peak_bytes: u64,
@@ -5595,7 +5595,7 @@ mod tests {
                         result_tx: placeholder_tx,
                         output_dir: None,
                         batch_child: None,
-                        #[cfg(feature = "h3-private-uat")]
+                        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                         h3_private_ingress_grant: None,
                     },
                     2,
@@ -10003,7 +10003,7 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
-                    #[cfg(feature = "h3-private-uat")]
+                    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
                 },
                 1,
@@ -10192,7 +10192,7 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
-                    #[cfg(feature = "h3-private-uat")]
+                    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
                 },
                 1,
@@ -10285,7 +10285,7 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
-                    #[cfg(feature = "h3-private-uat")]
+                    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
                 },
                 1,
@@ -10356,7 +10356,7 @@ mod tests {
                     result_tx: placeholder_tx,
                     output_dir: None,
                     batch_child: None,
-                    #[cfg(feature = "h3-private-uat")]
+                    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
                 },
                 1,
@@ -10796,7 +10796,7 @@ mod tests {
                     result_tx: dummy_tx,
                     output_dir: None,
                     batch_child: None,
-                    #[cfg(feature = "h3-private-uat")]
+                    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
                 },
                 1,

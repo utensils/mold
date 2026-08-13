@@ -284,7 +284,7 @@ jobs:
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - if: github.event_name == 'push'
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features cuda -- -D warnings
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features cuda,h3 -- -D warnings
       - name: Prepare linuxdeploy and the CI driver stub
         if: github.event_name == 'push'
         shell: bash
@@ -300,7 +300,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bunx tauri build --features cuda --bundles appimage --ci -v
+          bunx tauri build --features cuda,h3 --bundles appimage --ci -v
       - name: Verify bundled CUDA libraries
         if: github.event_name == 'push'
         shell: bash
