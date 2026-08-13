@@ -246,6 +246,13 @@ docker_seal_line="$(
 docker_source_sha_env_line="$(
   grep -n -m1 'ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}' "$repo_root/Dockerfile" | cut -d: -f1
 )"
+grep -Fq 'COPY .cargo/config.toml .cargo/config.toml' "$repo_root/Dockerfile" \
+  || fail "Docker H3 runtime identity build omits .cargo/config.toml"
+docker_builder_packages="$(sed -n '/apt-get update && apt-get install/,/&& break/p' "$repo_root/Dockerfile")"
+for package in clang lld; do
+  grep -Eq "^[[:space:]]+${package}[[:space:]]*\\\\$" <<< "$docker_builder_packages" \
+    || fail "Docker builder omits ${package} required by .cargo/config.toml"
+done
 docker_dependency_build_line="$(
   grep -n -m1 -E '^RUN cargo build --release -p mold-ai([[:space:]]|$)' \
     "$repo_root/Dockerfile" | cut -d: -f1

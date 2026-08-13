@@ -54,6 +54,8 @@ RUN set -eux; \
     for attempt in 1 2 3 4 5; do \
         apt-get update && apt-get install -y --no-install-recommends \
             build-essential \
+            clang \
+            lld \
             pkg-config \
             libssl-dev \
             libwebp-dev \
@@ -78,6 +80,7 @@ WORKDIR /build
 # Must include every workspace member listed in the root Cargo.toml — cargo
 # fails to resolve the workspace if any member's manifest is missing.
 COPY Cargo.toml Cargo.lock ./
+COPY .cargo/config.toml .cargo/config.toml
 COPY crates/mold-core/Cargo.toml crates/mold-core/Cargo.toml
 COPY crates/mold-catalog/Cargo.toml crates/mold-catalog/Cargo.toml
 COPY crates/mold-db/Cargo.toml crates/mold-db/Cargo.toml

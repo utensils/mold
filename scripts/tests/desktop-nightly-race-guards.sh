@@ -27,7 +27,7 @@ grep -Fq 'run: cargo test --manifest-path src-tauri/Cargo.toml' <<< "$rust_job" 
   || fail "the native desktop gate no longer runs the test suite"
 
 linux_job="$(sed -n '/^  desktop-linux:/,/^  desktop-nightly:/p' "$workflow")"
-grep -Fq 'bunx tauri build --features cuda --bundles appimage --ci -v' <<< "$linux_job" \
+grep -Fq 'bunx tauri build --features cuda,h3 --bundles appimage --ci -v' <<< "$linux_job" \
   || fail "main pushes have no Linux packaging proof"
 grep -Fq "if: github.event_name != 'pull_request'" <<< "$linux_job" \
   || fail "Linux packaging is not reserved for main pushes"
