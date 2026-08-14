@@ -36,38 +36,32 @@ mod tests {
         crate::test_support::env_lock()
     }
 
-    struct UnsetEnvGuard {
+    struct EnvVarGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
-        previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
     }
 
-    impl UnsetEnvGuard {
-        fn new(names: &[&'static str]) -> Self {
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &std::ffi::OsStr) -> Self {
             let lock = env_lock()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let previous = names
-                .iter()
-                .map(|name| {
-                    let previous = std::env::var_os(name);
-                    std::env::remove_var(name);
-                    (*name, previous)
-                })
-                .collect();
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
             Self {
                 _lock: lock,
+                name,
                 previous,
             }
         }
     }
 
-    impl Drop for UnsetEnvGuard {
+    impl Drop for EnvVarGuard {
         fn drop(&mut self) {
-            for (name, previous) in &self.previous {
-                match previous {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
-                }
+            match &self.previous {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
             }
         }
     }
@@ -677,7 +671,9 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn chain_validation_surfaces_normalization_errors_without_queueing() {
         let response = {
-            let _models_root = UnsetEnvGuard::new(&["MOLD_MODELS_DIR", "MOLD_HOME"]);
+            let models_dir = tempfile::tempdir().unwrap();
+            let _models_root = EnvVarGuard::set("MOLD_MODELS_DIR", models_dir.path().as_os_str());
+            populate_manifest_files(models_dir.path(), "ltx-2-19b-distilled:fp8");
             let app = app_empty();
             let mut request = route_chain_request();
             request.stages[0].frames = 10;
@@ -694,7 +690,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = json_body(response).await;
         assert_eq!(body["code"], "VALIDATION_ERROR");
-        assert!(body["error"].as_str().unwrap().contains("8k+1"));
+        assert!(
+            body["error"].as_str().unwrap().contains("8k+1"),
+            "response body: {body}"
+        );
     }
 
     fn seed_chain_job(
@@ -1272,7 +1271,9 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn chain_validation_rejects_19b_camera_preset_on_ltx23_without_downloading() {
         let response = {
-            let _models_root = UnsetEnvGuard::new(&["MOLD_MODELS_DIR", "MOLD_HOME"]);
+            let models_dir = tempfile::tempdir().unwrap();
+            let _models_root = EnvVarGuard::set("MOLD_MODELS_DIR", models_dir.path().as_os_str());
+            populate_manifest_files(models_dir.path(), "ltx-2.3-22b-distilled:fp8");
             app_empty()
                 .oneshot(
                     Request::post("/api/generate/chain/validate")
@@ -1309,10 +1310,14 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(json_body(response).await["error"]
-            .as_str()
-            .unwrap()
-            .contains("published for LTX-2 19B only"));
+        let body = json_body(response).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("published for LTX-2 19B only"),
+            "response body: {body}"
+        );
     }
 
     #[tokio::test]
