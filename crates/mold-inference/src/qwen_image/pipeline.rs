@@ -82,8 +82,19 @@ const QWEN_CFG_BATCH: u64 = 2;
 /// output plus its transpose/reshape/narrow copies (4), and the block's own
 /// hidden states and normalized attention inputs (3).
 const QWEN_DIT_ATTENTION_LIVE_STREAMS: u64 = 20;
-/// Score buffers alive inside one query chunk: `QK^T` and its softmax.
-const QWEN_DIT_ATTENTION_SCORE_BUFFERS: u64 = 2;
+/// Score buffers alive inside one query chunk.
+///
+/// Three, not two, because this estimate prices *batched* CFG specifically —
+/// and putting two different prompt lengths in one forward is exactly when
+/// `qwen_image::attention::joint_key_bias` returns `Some`, which routes to
+/// `attention::attention_with_bias` → `math_attention_biased_impl`. That
+/// closure is `let attn_weights = QK^T * scale; let attn_weights =
+/// attn_weights.broadcast_add(bias); softmax(&attn_weights).matmul(v)`, and by
+/// the same no-drop rule the live-stream count above relies on, the shadowed
+/// scaled matrix stays alive alongside the biased one and the softmax. The
+/// unbiased path (equal prompt lengths) peaks at two, so this is the
+/// conservative side of the one decision the estimate makes.
+const QWEN_DIT_ATTENTION_SCORE_BUFFERS: u64 = 3;
 /// Joint-stream buffers alive at the MLP peak: both hidden states, both
 /// normalized MLP inputs, and the modulation temporaries around them.
 const QWEN_DIT_MLP_LIVE_STREAMS: u64 = 8;
@@ -1535,13 +1546,13 @@ impl QwenImageEngine {
     }
 
     /// What one block's joint attention holds while it runs: the live joint
-    /// streams, the score matrix for one query chunk plus its softmax, and a
-    /// dequantized projection weight.
+    /// streams, the score buffers for one query chunk, and a dequantized
+    /// projection weight.
     ///
     /// `query_chunk_rows` is what `crate::attention` would actually chunk the
     /// query axis by — `None` means it materializes the whole score matrix,
-    /// which is the pre-#1043 behaviour and is what the retired 14 GB constant
-    /// was priced against.
+    /// which is the pre-#1043 behaviour the retired 14 GB constant was aimed
+    /// at.
     fn qwen_dit_attention_phase_bytes(joint_tokens: u64, query_chunk_rows: Option<u64>) -> u64 {
         let rows = query_chunk_rows.unwrap_or(joint_tokens).min(joint_tokens);
         let streams = QWEN_DIT_ATTENTION_LIVE_STREAMS
@@ -1587,13 +1598,17 @@ impl QwenImageEngine {
     /// their sum, exactly as the VAE decode reserve treats its phases (#1046).
     ///
     /// This replaces a flat `14 GB scaled by pixel count`, which priced the
-    /// pre-#1043 attention: an unchunked `[batch, heads, seq, seq]` BF16 score
-    /// matrix plus its softmax is 10.5 GB at 1328² with batched CFG, and this
-    /// same derivation with `query_chunk_rows = None` returns 12.5 GB — the
-    /// old constant, recovered. Chunking the query axis 512 rows at a time
-    /// (`attention::CUDA_AUTO_QUERY_CHUNK`) drops that term to 0.73 GB and the
-    /// whole estimate to ~4.0 GB at 1328², which is what makes batched CFG
-    /// admissible for a q4 checkpoint on a 24 GB card at native resolution.
+    /// pre-#1043 attention. That is where the order of magnitude came from:
+    /// unchunked `[batch, heads, seq, seq]` BF16 score buffers are 15.8 GB at
+    /// 1328² with batched CFG, and this same derivation with
+    /// `query_chunk_rows = None` returns 17.7 GB. The derivation deliberately
+    /// makes **no claim to reproduce** the retired constant — it does not, and
+    /// the two are not even the same quantity: 17.7 GB is a phase, which only
+    /// becomes a headroom after the 1.5x margin (26.6 GB). Chunking the query
+    /// axis 512 rows at a time (`attention::CUDA_AUTO_QUERY_CHUNK`) drops the
+    /// score term to 1.09 GB and the whole estimate to 4.59 GB at 1328², which
+    /// is what makes batched CFG admissible for a q4 checkpoint on a 24 GB
+    /// card at native resolution.
     ///
     /// The chunk is read from `crate::attention` rather than restated, so
     /// `MOLD_ATTN_CHUNK` moves the estimate with the allocation — including
@@ -4983,10 +4998,10 @@ mod tests {
         // 1328²: 6889 image + 512 text = 7401 joint tokens, chunked 512 rows.
         assert_eq!(
             QwenImageEngine::quantized_cuda_cfg_headroom_for_chunk(7401, Some(512)),
-            4_046_118_912
+            4_591_779_840
         );
         // 1024²: 4096 + 512 = 4608 joint tokens. The derivation lands at
-        // 2.60 GB, under the floor, so the floor is what ships.
+        // 2.94 GB, under the floor, so the floor is what ships.
         assert_eq!(
             QwenImageEngine::quantized_cuda_cfg_headroom_for_chunk(4608, Some(512)),
             QWEN_GGUF_MIN_CFG_HEADROOM
@@ -5000,22 +5015,31 @@ mod tests {
         assert_eq!(QwenImageEngine::qwen_dit_joint_tokens(1024, 1024), 4608);
     }
 
-    /// The derivation reproduces the constant it replaces when it is asked the
-    /// question that constant was answering: an unchunked score matrix.
+    /// The query chunk is the whole reason the estimate moved, and the
+    /// unchunked figure is pinned exactly.
+    ///
+    /// It is deliberately NOT asserted to reproduce the retired 14 GB
+    /// constant: it does not (17.7 GB), and it is not the same quantity — a
+    /// phase becomes a headroom only after the 1.5x margin, which puts the
+    /// comparable number at 26.6 GB. A range assertion wide enough to make the
+    /// old claim look true is how the misstatement survived, so this pins the
+    /// value.
     #[test]
-    fn unchunked_attention_recovers_the_retired_fourteen_gigabyte_estimate() {
+    fn the_query_chunk_is_what_moved_the_attention_estimate() {
         let chunked = QwenImageEngine::qwen_dit_attention_phase_bytes(7401, Some(512));
         let unchunked = QwenImageEngine::qwen_dit_attention_phase_bytes(7401, None);
 
-        // The retired constant was 14 GB at this shape; the pre-#1043 score
-        // matrix plus its softmax accounts for essentially all of it.
+        assert_eq!(chunked, 3_061_186_560);
+        assert_eq!(unchunked, 17_745_007_392);
         assert!(
-            (12_000_000_000..14_000_000_000).contains(&unchunked),
-            "unchunked attention phase was {unchunked}"
-        );
-        assert!(
-            chunked < unchunked / 4,
+            chunked < unchunked / 5,
             "chunking must be the reason the estimate moved: {chunked} vs {unchunked}"
+        );
+        // The comparable headroom is the phase plus the margin, and it is
+        // nowhere near the constant this replaced.
+        assert_eq!(
+            QwenImageEngine::quantized_cuda_cfg_headroom_for_chunk(7401, None),
+            26_617_511_088
         );
     }
 

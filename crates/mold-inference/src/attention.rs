@@ -342,8 +342,10 @@ fn math_attention_chunk_size(q: &Tensor) -> Option<usize> {
         return cuda_query_chunk_rows(q_len);
     }
     match resolved_chunk_policy() {
-        AttentionChunkPolicy::Off | AttentionChunkPolicy::Auto => None,
-        AttentionChunkPolicy::Size(size) => (size < q_len).then_some(size),
+        AttentionChunkPolicy::Off => return None,
+        AttentionChunkPolicy::Size(size) => return (size < q_len).then_some(size),
+        AttentionChunkPolicy::Auto => {}
+    }
 
     // Metal chunks for the same reason CUDA does, but harder: there is no
     // flash path there, so an unchunked math attention materializes the full
@@ -351,8 +353,8 @@ fn math_attention_chunk_size(q: &Tensor) -> Option<usize> {
     // shape, 71 GB at TI2V-5B 720p — as a single buffer past every Mac's
     // `maxBufferLength`. CPU stays unchunked: its allocator handles the
     // shape, and the chunk loop only adds overhead there.
-    if matches!(q.device(), Device::Cuda(_) | Device::Metal(_)) && q_len > 1024 {
-        Some(512)
+    if matches!(q.device(), Device::Metal(_)) && q_len > CUDA_AUTO_CHUNK_MIN_QUERY_ROWS {
+        Some(CUDA_AUTO_QUERY_CHUNK)
     } else {
         None
     }
