@@ -72,6 +72,11 @@ const QWEN_DIT_BF16_BYTES: u64 = 2;
 /// exists to answer "can this request afford *batched* CFG", so it is always
 /// priced at two rows.
 const QWEN_CFG_BATCH: u64 = 2;
+
+/// Largest image-token count at which batched CFG measured neutral-or-better
+/// against split CFG (4096 = 1024x1024). See `should_split_cfg_quantized_cuda`
+/// for the 4090 measurements; raise only with new measurements.
+const QWEN_CFG_BATCH_MAX_IMAGE_TOKENS: u64 = 4096;
 /// Joint-stream (`[batch, text + image, inner_dim]`) BF16 buffers alive at the
 /// attention peak of one block.
 ///
@@ -1654,9 +1659,25 @@ impl QwenImageEngine {
             // instead of assuming batched CFG will fit.
             return true;
         }
+        // Batching stops being a win as the sequence grows: measured on an
+        // RTX 4090 (2026-08-14, qwen-image-2512:q4, 20 steps, seed 42, this
+        // branch's chunked attention), batched CFG is exactly split parity at
+        // 1024² (71.4 s vs 71.5 s denoise, 4096 image tokens) and 24% SLOWER
+        // at 1328² (164.9 s vs 133.2 s, 6889 tokens) — the doubled per-chunk
+        // score transients outweigh the shared per-step work. Above the
+        // measured-neutral point the two sequential passes win regardless of
+        // how much VRAM is free.
+        if Self::image_tokens(width, height) > QWEN_CFG_BATCH_MAX_IMAGE_TOKENS {
+            return true;
+        }
         let estimated_peak =
             transformer_size.saturating_add(Self::quantized_cuda_cfg_headroom(width, height));
         estimated_peak > free_vram
+    }
+
+    /// Image-token count of a request: latent grid (`/8`) then `2x2` patchify.
+    fn image_tokens(width: usize, height: usize) -> u64 {
+        ((width / 16) as u64) * ((height / 16) as u64)
     }
 
     /// Transformer weight bytes on disk.
@@ -5043,15 +5064,29 @@ mod tests {
         );
     }
 
-    /// The headline outcome: 1328² q4 on a 24 GB card now batches CFG.
+    /// Native 1328² splits CFG by the MEASURED token cap even with the whole
+    /// card free: batched CFG ran 24% slower there (164.9 s vs 133.2 s on the
+    /// 4090), so free VRAM is not the deciding input past 4096 image tokens.
     #[test]
-    fn qwen_quantized_native_resolution_batches_cfg_on_24gb_cuda() {
-        assert!(!QwenImageEngine::should_split_cfg_quantized_cuda(
+    fn qwen_quantized_native_resolution_splits_cfg_by_the_measured_token_cap() {
+        assert!(QwenImageEngine::should_split_cfg_quantized_cuda(
             false,
             12_300_000_000,
             24_600_000_000,
             1328,
             1328,
+        ));
+    }
+
+    /// 1024² (4096 image tokens, measured split-parity) batches when it fits.
+    #[test]
+    fn qwen_quantized_1024_batches_cfg_on_24gb_cuda() {
+        assert!(!QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
+            12_300_000_000,
+            24_600_000_000,
+            1024,
+            1024,
         ));
     }
 
@@ -5091,15 +5126,24 @@ mod tests {
 
     #[test]
     fn qwen_quantized_cfg_split_boundary_does_not_split_when_estimate_exactly_fits() {
-        let headroom = QwenImageEngine::quantized_cuda_cfg_headroom(1328, 1328);
+        // At 1024² — inside the measured token cap — the memory boundary is
+        // what decides, and an exactly-fitting estimate batches.
+        let headroom = QwenImageEngine::quantized_cuda_cfg_headroom(1024, 1024);
         let transformer_size = 12_300_000_000;
         let free_vram = transformer_size + headroom;
         assert!(!QwenImageEngine::should_split_cfg_quantized_cuda(
             false,
             transformer_size,
             free_vram,
-            1328,
-            1328,
+            1024,
+            1024,
+        ));
+        assert!(QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
+            transformer_size,
+            free_vram - 1,
+            1024,
+            1024,
         ));
     }
 
