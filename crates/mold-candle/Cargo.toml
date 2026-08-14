@@ -44,5 +44,8 @@ thiserror = "2"
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 tracing = "0.1"
 
+[dev-dependencies]
+tempfile = "3"
+
 [build-dependencies]
 cudaforge = "=0.1.6"
