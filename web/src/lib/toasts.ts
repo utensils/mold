@@ -1,4 +1,6 @@
 import { reactive, readonly } from "vue";
+import { getActivePinia } from "pinia";
+import { useNotificationsStore } from "@studio/stores/notifications";
 
 /*
  * Web-surface notification store feeding @ui ToastShelf, plus the shared
@@ -86,6 +88,12 @@ export function toast(
   options: ToastOptions = {},
 ): string {
   const id = nextId();
+  // Toasts vanish in seconds; the notifications bell keeps the record so a
+  // long error the user never caught in time stays readable in full. Best
+  // effort — a toast raised before pinia installs must not throw.
+  if (getActivePinia()) {
+    useNotificationsStore().record({ kind, text });
+  }
   const entry: Toast = { id, kind, text };
   if (options.actionLabel) entry.actionLabel = options.actionLabel;
   if (options.onAction) entry.onAction = options.onAction;

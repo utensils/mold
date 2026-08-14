@@ -13,6 +13,7 @@ import { useRoute, useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import MobileNavSheet from "./MobileNavSheet.vue";
+import NotificationsCenter from "@studio/components/NotificationsCenter.vue";
 import NowDevelopingPopover from "./NowDevelopingPopover.vue";
 import { useDownloads } from "../../composables/useDownloads";
 import {
@@ -216,6 +217,8 @@ const menuOpen = ref(false);
         </span>
       </button>
 
+      <NotificationsCenter />
+
       <router-link to="/settings" class="avatar" aria-label="Settings"
         >M</router-link
       >
@@ -252,6 +255,8 @@ const menuOpen = ref(false);
           <BadgePill tone="accent">{{ badgeCount }}</BadgePill>
         </span>
       </button>
+
+      <NotificationsCenter />
 
       <button
         type="button"
@@ -432,6 +437,12 @@ const menuOpen = ref(false);
  * fill the bar; drop the search box there rather than overflow the header. */
 @media (max-width: 899px) {
   .search-box {
+    display: none;
+  }
+
+  /* The bell joined the trailing controls; drop the Downloads wordmark at
+     the widths where the wide bar is already tight so nothing overflows. */
+  .dl-chip__label {
     display: none;
   }
 }

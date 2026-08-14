@@ -65,4 +65,19 @@ describe("toast store", () => {
     expect(toasts.has(sticky)).toBe(true);
     expect(toasts.has(undo)).toBe(true);
   });
+
+  it("records every toast in the notifications center so missed ones stay readable", async () => {
+    const { useNotificationsStore } = await import("@studio/stores/notifications");
+    const toasts = useToastStore();
+    const notifications = useNotificationsStore();
+
+    toasts.push("Generation failed", "error", { description: "CUDA out of memory on plato" });
+    vi.advanceTimersByTime(10_000); // The toast is long gone…
+
+    expect(notifications.entries[0]).toMatchObject({
+      kind: "error",
+      text: "Generation failed",
+      description: "CUDA out of memory on plato",
+    });
+  });
 });
