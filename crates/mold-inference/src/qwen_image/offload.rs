@@ -15,7 +15,7 @@
 
 use anyhow::Result;
 use candle_core::{DType, Device, Module, Tensor, D};
-use candle_nn::{linear, Linear, VarBuilder};
+use candle_nn::{Linear, VarBuilder};
 use candle_transformers::models::z_image::transformer::apply_rotary_emb;
 
 use super::quantized_transformer::{
@@ -26,6 +26,37 @@ use crate::adaptive_offload::{plan_adaptive_residency, ADAPTIVE_OFFLOAD_RUNTIME_
 use crate::progress::ProgressReporter;
 
 // ── Device-transfer helpers ──────────────────────────────────────────────────
+
+/// Widen an FP8 checkpoint's weight to the `VarBuilder`'s dtype, folding
+/// `scale_weight` in as it goes; anything already dense is returned untouched.
+///
+/// The FP8 offload `VarBuilder` is a `NativeFp8Backend`, which deliberately
+/// hands back F8E4M3 regardless of the requested dtype so the in-memory
+/// transformer can widen per forward. Nothing in this file has that arm:
+/// `candle_nn::Linear` would matmul an F8E4M3 weight against a BF16 activation
+/// — a dtype-mismatch error after the whole checkpoint had been loaded — and
+/// would drop `scale_weight` on the floor. Streamed blocks widen once at load
+/// instead: the block is copied host-to-device every step anyway, so a
+/// per-forward cast would be paid on top of that traffic rather than instead
+/// of it.
+fn widened_weight(vb: &VarBuilder, weight: Tensor) -> Result<Tensor> {
+    if weight.dtype() != DType::F8E4M3 {
+        return Ok(weight);
+    }
+    let dtype = vb.dtype();
+    let widened = weight.to_dtype(dtype)?;
+    Ok(match vb.get_unchecked("scale_weight") {
+        Ok(scale) => widened.broadcast_mul(&scale.to_dtype(dtype)?)?,
+        Err(_) => widened,
+    })
+}
+
+/// FP8-aware replacement for `candle_nn::linear` (see [`widened_weight`]).
+fn linear(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Linear> {
+    let weight = widened_weight(&vb, vb.get((out_dim, in_dim), "weight")?)?;
+    let bias = vb.get(out_dim, "bias")?.to_dtype(weight.dtype())?;
+    Ok(Linear::new(weight, Some(bias)))
+}
 
 fn linear_to_device(l: &Linear, dev: &Device) -> Result<Linear> {
     let w = l.weight().to_device(dev)?;
@@ -833,5 +864,120 @@ impl OffloadedQwenImageTransformer {
             temb
         };
         self.output_layer.forward(&img, &out_temb)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Shape;
+    use std::collections::HashMap;
+
+    /// Stand-in for `weight_loader::NativeFp8Backend`: hands back whatever
+    /// dtype the checkpoint stored, ignoring the requested one. That is the
+    /// property this file has to survive.
+    struct NativeDtypeBackend(HashMap<String, Tensor>);
+
+    impl candle_nn::var_builder::SimpleBackend for NativeDtypeBackend {
+        fn get(
+            &self,
+            _: Shape,
+            name: &str,
+            _: candle_nn::Init,
+            _: DType,
+            dev: &Device,
+        ) -> candle_core::Result<Tensor> {
+            self.get_unchecked(name, DType::BF16, dev)
+        }
+
+        fn get_unchecked(&self, name: &str, _: DType, dev: &Device) -> candle_core::Result<Tensor> {
+            match self.0.get(name) {
+                Some(t) => t.to_device(dev),
+                None => Err(candle_core::Error::CannotFindTensor {
+                    path: name.to_string(),
+                }
+                .bt()),
+            }
+        }
+
+        fn contains_tensor(&self, name: &str) -> bool {
+            self.0.contains_key(name)
+        }
+    }
+
+    fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
+        (a - b)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
+    }
+
+    /// An FP8 checkpoint on the offload path used to reach `candle_nn::linear`
+    /// unchanged: the layer kept an F8E4M3 weight that cannot matmul a BF16
+    /// activation, and `scale_weight` was never applied at all.
+    #[test]
+    fn offloaded_fp8_weights_are_widened_and_scaled_at_load() {
+        let dev = Device::Cpu;
+        let (in_dim, out_dim) = (4usize, 3usize);
+        let stored = Tensor::randn(0f32, 1f32, (out_dim, in_dim), &dev)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let scale = Tensor::new(&[0.25f32], &dev).unwrap();
+
+        let mut tensors = HashMap::new();
+        tensors.insert("weight".to_string(), stored.clone());
+        tensors.insert("scale_weight".to_string(), scale.clone());
+        tensors.insert(
+            "bias".to_string(),
+            Tensor::zeros(out_dim, DType::F32, &dev).unwrap(),
+        );
+        let vb = VarBuilder::from_backend(
+            Box::new(NativeDtypeBackend(tensors)),
+            DType::F32,
+            dev.clone(),
+        );
+
+        let layer = linear(in_dim, out_dim, vb).unwrap();
+        assert_eq!(layer.weight().dtype(), DType::F32);
+
+        let expected = stored
+            .to_dtype(DType::F32)
+            .unwrap()
+            .broadcast_mul(&scale)
+            .unwrap();
+        let diff = max_abs_diff(layer.weight(), &expected);
+        assert!(diff < 1e-6, "FP8 widening changed the weight by {diff}");
+
+        let x = Tensor::randn(0f32, 1f32, (2, in_dim), &dev).unwrap();
+        assert_eq!(layer.forward(&x).unwrap().dims(), &[2, out_dim]);
+    }
+
+    /// A dense checkpoint must not acquire a phantom scale.
+    #[test]
+    fn dense_offload_weights_are_left_alone() {
+        let dev = Device::Cpu;
+        let dense = Tensor::randn(0f32, 1f32, (3, 4), &dev).unwrap();
+        let mut tensors = HashMap::new();
+        tensors.insert("weight".to_string(), dense.clone());
+        tensors.insert(
+            "bias".to_string(),
+            Tensor::zeros(3, DType::F32, &dev).unwrap(),
+        );
+        let vb = VarBuilder::from_backend(
+            Box::new(NativeDtypeBackend(tensors)),
+            DType::F32,
+            dev.clone(),
+        );
+
+        let layer = linear(4, 3, vb).unwrap();
+        assert_eq!(layer.weight().dtype(), DType::F32);
+        assert_eq!(max_abs_diff(layer.weight(), &dense), 0.0);
     }
 }

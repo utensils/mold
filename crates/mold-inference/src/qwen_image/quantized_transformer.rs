@@ -1,14 +1,23 @@
 //! Quantized (GGUF) Qwen-Image transformer with device-specific linear dispatch.
 //!
-//! **CUDA**: either keeps GGUF weights on GPU or loads them CPU-staged for
-//! low-VRAM offload, dequantizing each linear layer to BF16 per forward call.
-//! All computation stays in BF16 matching the model's training dtype.
+//! **CUDA**: GPU-resident weights whose GGML dtype candle's MMQ/MMVQ kernels
+//! accept run through `QMatMul`, so the checkpoint is never dequantized — the
+//! int8 kernels consume the BF16 activation and return BF16. Weights the
+//! kernels cannot take (an `IQ*` or float-stored tensor, or a row width the
+//! MMQ kernel's block size does not divide), CPU-staged weights, a process
+//! already forced onto candle's dequant fallback, and `MOLD_QWEN_QMATMUL=0`
+//! keep the per-forward dequant-to-BF16 arm, because candle's
+//! `dequantize_matmul` fallback reads the activation as `f32` and therefore
+//! errors on BF16. All computation stays in BF16 matching the model's training
+//! dtype, and the `QMatMul` arm normalizes its activation to that dtype exactly
+//! as the dequant arm does — the CUDA kernels return the dtype they were fed,
+//! so an F32 activation would meet a BF16 bias.
 //!
 //! **Metal**: uses candle's `QMatMul`-backed `Linear` which avoids per-forward
 //! full dequantization (faster on Metal). Computation in F32 since Metal's QMatMul
 //! dequantizes to F32 internally.
 
-use candle_core::quantized::QTensor;
+use candle_core::quantized::{GgmlDType, QTensor};
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_transformers::models::z_image::transformer::apply_rotary_emb;
 use mold_candle::quantized::VarBuilder;
@@ -37,9 +46,156 @@ fn debug_stage(stage: &str) {
     }
 }
 
+/// Device class a `VarBuilder` resolves to, so the linear-arm decision stays a
+/// pure function that can be exercised for CUDA without a CUDA device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LinearDevice {
+    Cuda,
+    Metal,
+    Other,
+}
+
+impl LinearDevice {
+    fn of(device: &Device) -> Self {
+        if device.is_cuda() {
+            Self::Cuda
+        } else if device.is_metal() {
+            Self::Metal
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// Which implementation a quantized linear resolves to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QwenLinearKind {
+    /// Weight stays quantized; candle's kernels consume it directly.
+    QMatMul,
+    /// Full per-forward dequantization to the working dtype.
+    Dequant,
+}
+
+/// `qk` — the block quantization size candle's MMQ kernel requires the
+/// activation's `k` (the weight's `in_features`) to be a multiple of
+/// (`candle-core/src/quantized/fast_mmq.rs`, `qk_for` plus the `k % qk != 0`
+/// decline). `None` for a GGML dtype `fast_mmq::supports` does not accept at
+/// all, which is the same answer: anything the kernels decline falls through to
+/// `dequantize_matmul`, which reads the activation as `f32` and so errors on
+/// the BF16 activations this engine runs — those weights must keep the
+/// per-forward dequant arm.
+///
+/// This is candle's *weight-side* table only. Both fast paths also require a
+/// contiguous, rank-2-or-3 activation, and `fast_mmvq` declines past 8 rows.
+/// Every one of those declines lands in the same BF16-hostile fallback, so each
+/// is gated somewhere — the weight-side ones here through
+/// [`select_linear_kind`], the activation-shaped ones per forward through
+/// [`qmatmul_forward_supported`].
+pub(crate) fn cuda_mmq_block_size(dtype: GgmlDType) -> Option<usize> {
+    match dtype {
+        GgmlDType::Q4_0 | GgmlDType::Q4_1 | GgmlDType::Q5_0 | GgmlDType::Q5_1 | GgmlDType::Q8_0 => {
+            Some(32)
+        }
+        GgmlDType::Q2K | GgmlDType::Q3K | GgmlDType::Q4K | GgmlDType::Q5K | GgmlDType::Q6K => {
+            Some(256)
+        }
+        _ => None,
+    }
+}
+
+/// `MOLD_QWEN_QMATMUL`: a falsey value restores the per-forward dequantization
+/// arm on CUDA. Unset — or a value we do not understand — keeps the quantized
+/// fast path, so a typo degrades to the shipped behavior rather than to the
+/// slow one. The falsey set is spelled out rather than left as literal `0`
+/// because `false`/`off`/`no` are what a user reaching for a kill switch
+/// actually types, and silently ignoring those would leave them measuring the
+/// path they meant to disable.
+pub(crate) fn parse_qwen_qmatmul(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "on" | "yes")
+    )
+}
+
+/// Process-frozen `MOLD_QWEN_QMATMUL`, read once per process through the
+/// admission-frozen environment.
+fn qwen_qmatmul_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let enabled = parse_qwen_qmatmul(crate::runtime_env::value("MOLD_QWEN_QMATMUL").as_deref());
+        if enabled {
+            tracing::warn!(
+                "qwen-image: MOLD_QWEN_QMATMUL=1 — experimental QMatMul fast path enabled; \
+                 the boundary validator aborts the render if it produces non-finite values"
+            );
+        }
+        enabled
+    })
+}
+
+/// Every shape-fixed half of the linear-arm decision, as a pure function.
+///
+/// Metal has always used `QMatMul`. CUDA joins it only when every kernel
+/// precondition a weight can settle holds: the weight's GGML dtype is one the
+/// MMQ/MMVQ kernels accept, its row width is a multiple of that dtype's MMQ
+/// block size, it is resident on the device the activations live on (a
+/// CPU-staged weight would hit candle's `unreachable!` in the CUDA matmul),
+/// candle's process-global `FORCE_DMMV` switch is not already routing every
+/// quantized matmul into the fallback, and the escape hatch is not forcing the
+/// old arm. Everything else — CPU included — dequantizes per forward.
+///
+/// `FORCE_DMMV` is a *process* switch that mold itself flips
+/// (`MOLD_WAN_FORCE_DMMV=1`, from Wan's denoise loop) and never clears, so it
+/// can also flip after this decision is made; [`qmatmul_forward_supported`] is
+/// the per-forward half that catches an engine built before the flip.
+pub(crate) fn select_linear_kind(
+    device: LinearDevice,
+    weight_dtype: GgmlDType,
+    weight_in_features: usize,
+    weight_on_target_device: bool,
+    qmatmul_enabled: bool,
+    force_dmmv: bool,
+) -> QwenLinearKind {
+    match device {
+        LinearDevice::Metal => QwenLinearKind::QMatMul,
+        LinearDevice::Cuda
+            if qmatmul_enabled
+                && !force_dmmv
+                && weight_on_target_device
+                && cuda_mmq_block_size(weight_dtype)
+                    .is_some_and(|qk| weight_in_features.is_multiple_of(qk)) =>
+        {
+            QwenLinearKind::QMatMul
+        }
+        _ => QwenLinearKind::Dequant,
+    }
+}
+
+/// The activation-shaped half of the same decision, asked once per forward.
+///
+/// Candle's CUDA fast paths decline an activation whose rank is neither 2 nor 3
+/// (`fast_mmq.rs` / `fast_mmvq.rs`, `match rhs_l.shape().dims()`), and skip both
+/// kernels outright while `FORCE_DMMV` is set. Either decline lands in
+/// `dequantize_matmul`, which reads the activation as `f32` and rejects the
+/// BF16 this engine runs — so the `QMatMul` arm degrades to a dequantized
+/// forward for that call rather than handing candle a matmul it will refuse.
+/// Metal and CPU are unaffected: neither reads `FORCE_DMMV`, and candle's CPU
+/// `QMatMul` takes any rank ≥ 2.
+pub(crate) fn qmatmul_forward_supported(
+    device: LinearDevice,
+    activation_rank: usize,
+    force_dmmv: bool,
+) -> bool {
+    match device {
+        LinearDevice::Cuda => !force_dmmv && matches!(activation_rank, 2 | 3),
+        _ => true,
+    }
+}
+
 /// Device-dispatched quantized linear layer.
 ///
-/// CUDA: dequantizes weight to BF16 per forward (temporary ~72MB peak).
+/// CUDA: `QMatMul` when the weight is MMQ-eligible, otherwise dequantizes the
+/// weight to BF16 per forward (temporary ~72MB peak).
 /// Metal: uses QMatMul (weight stays quantized, dequant inside kernel).
 enum QwenLinear {
     /// Per-forward BF16 dequantization — correct dtype for CUDA.
@@ -48,30 +204,84 @@ enum QwenLinear {
         bias: Option<Tensor>,
     },
     /// QMatMul-backed — avoids full dequant, faster on Metal.
-    QMatMul(QMatMulLinear),
+    QMatMul {
+        inner: QMatMulLinear,
+        /// Retained only where candle can still decline a forward the
+        /// load-time gate admitted, which is CUDA alone — see
+        /// [`DequantFallback`].
+        fallback: Option<DequantFallback>,
+    },
+}
+
+/// The weight and bias a [`QwenLinear::QMatMul`] falls back on for one forward
+/// candle's CUDA kernels decline (rank, or `FORCE_DMMV`).
+///
+/// It is `Option`al on the variant rather than unconditional because retaining
+/// it is not always free: for a float-stored GGML dtype `QMatMul::from_arc`
+/// dequantizes eagerly and drops the `QTensor`, so holding the `Arc` anyway
+/// would keep bytes candle had just released. That case is Metal's — CUDA
+/// sends float-stored weights down the dequant arm — and Metal never declines
+/// a forward, so it never needs the fallback either.
+struct DequantFallback {
+    weight: Arc<QTensor>,
+    bias: Option<Tensor>,
+}
+
+/// Dequantize `weight` to the activation's working dtype and apply it densely.
+/// Shared by the `Dequant` arm and by a `QMatMul` layer whose forward candle
+/// would decline.
+fn dequant_forward(weight: &QTensor, bias: Option<&Tensor>, x: &Tensor) -> Result<Tensor> {
+    let dtype = working_dtype(x.device());
+    let x = x.to_dtype(dtype)?;
+    let w = if weight.device().is_cpu() && !x.device().is_cpu() {
+        weight
+            .dequantize(&Device::Cpu)?
+            .to_dtype(dtype)?
+            .to_device(x.device())?
+    } else {
+        weight.dequantize(x.device())?.to_dtype(dtype)?
+    };
+    let bias = bias
+        .map(|b| b.to_device(x.device())?.to_dtype(dtype))
+        .transpose()?;
+    candle_nn::Linear::new(w, bias).forward(&x)
 }
 
 impl Module for QwenLinear {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         match self {
-            Self::Dequant { weight, bias } => {
-                let dtype = working_dtype(x.device());
-                let x = x.to_dtype(dtype)?;
-                let w = if weight.device().is_cpu() && !x.device().is_cpu() {
-                    weight
-                        .dequantize(&Device::Cpu)?
-                        .to_dtype(dtype)?
-                        .to_device(x.device())?
+            Self::Dequant { weight, bias } => dequant_forward(weight, bias.as_ref(), x),
+            Self::QMatMul { inner, fallback } => {
+                if !qmatmul_forward_supported(
+                    LinearDevice::of(x.device()),
+                    x.rank(),
+                    crate::quantized_dmmv::force_dmmv_enabled(),
+                ) {
+                    let Some(fallback) = fallback else {
+                        // Unreachable: only CUDA declines, and only CUDA
+                        // retains a fallback. Naming it beats an `unwrap`.
+                        candle_core::bail!(
+                            "qwen-image: candle declined a quantized forward on \
+                             {:?}, which kept no dequant fallback",
+                            x.device()
+                        );
+                    };
+                    return dequant_forward(&fallback.weight, fallback.bias.as_ref(), x);
+                }
+                // The CUDA kernels return the dtype they were handed, and
+                // `qlinear` materialized the bias at `working_dtype` — so an
+                // activation in any other dtype (`TimestepProjEmbeddings`
+                // builds its own in F32) would meet a BF16 bias at the add.
+                // Normalize exactly as the dequant arm does.
+                let x = x.to_dtype(working_dtype(x.device()))?;
+                // Both CUDA fast paths decline a non-contiguous rhs, and the
+                // fallback they decline into cannot read a BF16 activation.
+                if x.is_contiguous() {
+                    inner.forward(&x)
                 } else {
-                    weight.dequantize(x.device())?.to_dtype(dtype)?
-                };
-                let bias = bias
-                    .as_ref()
-                    .map(|b| b.to_device(x.device())?.to_dtype(dtype))
-                    .transpose()?;
-                candle_nn::Linear::new(w, bias).forward(&x)
+                    inner.forward(&x.contiguous()?)
+                }
             }
-            Self::QMatMul(inner) => inner.forward(x),
         }
     }
 }
@@ -79,17 +289,37 @@ impl Module for QwenLinear {
 fn qlinear(vb: &VarBuilder, name: &str) -> Result<QwenLinear> {
     let vb = vb.pp(name);
     let weight = vb.get_no_shape("weight")?;
-    let dtype = working_dtype(vb.device());
+    let device = vb.device();
+    // Metal: F32 bias matches QMatMul's F32 output.
+    // CUDA: BF16 bias matches both the dequant arm and MMQ's BF16 output.
+    let dtype = working_dtype(device);
     let bias = match vb.get_no_shape("bias") {
-        Ok(b) => Some(b.dequantize(vb.device())?.to_dtype(dtype)?),
+        Ok(b) => Some(b.dequantize(device)?.to_dtype(dtype)?),
         Err(_) => None,
     };
-    if vb.device().is_metal() {
-        // F32 bias matches QMatMul's F32 output on Metal.
-        Ok(QwenLinear::QMatMul(QMatMulLinear::from_arc(weight, bias)?))
-    } else {
-        // BF16 bias for CUDA dequant path.
-        Ok(QwenLinear::Dequant { weight, bias })
+    // `in_features` is the weight's last dim — the `k` candle's MMQ kernel
+    // requires its block size to divide.
+    let in_features = weight.shape().dims().last().copied().unwrap_or_default();
+    let linear_device = LinearDevice::of(device);
+    match select_linear_kind(
+        linear_device,
+        weight.dtype(),
+        in_features,
+        weight.device().same_device(device),
+        qwen_qmatmul_enabled(),
+        crate::quantized_dmmv::force_dmmv_enabled(),
+    ) {
+        QwenLinearKind::QMatMul => {
+            let fallback = (linear_device == LinearDevice::Cuda).then(|| DequantFallback {
+                weight: weight.clone(),
+                bias: bias.clone(),
+            });
+            Ok(QwenLinear::QMatMul {
+                inner: QMatMulLinear::from_arc(weight, bias)?,
+                fallback,
+            })
+        }
+        QwenLinearKind::Dequant => Ok(QwenLinear::Dequant { weight, bias }),
     }
 }
 
@@ -1210,10 +1440,313 @@ impl QuantizedQwenImageTransformer2DModel {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_edit_modulation_index, select_modulation_params, ImageRopeKey, QwenRopeEmbedder,
-        RopeCacheDevice, TextRopeKey,
+        build_edit_modulation_index, cuda_mmq_block_size, parse_qwen_qmatmul,
+        qmatmul_forward_supported, select_linear_kind, select_modulation_params, DequantFallback,
+        ImageRopeKey, LinearDevice, QwenLinear, QwenLinearKind, QwenRopeEmbedder, RopeCacheDevice,
+        TextRopeKey,
     };
-    use candle_core::{DType, Device, Tensor};
+    use candle_core::quantized::{GgmlDType, QTensor};
+    use candle_core::{DType, Device, Module, Tensor};
+    use std::sync::Arc;
+
+    /// Builds the arm as `qlinear` builds it on CUDA — with the dequant
+    /// fallback retained, which is the shape the fallback tests exercise.
+    fn qmatmul_layer(weight: Arc<QTensor>, bias: Option<Tensor>) -> QwenLinear {
+        QwenLinear::QMatMul {
+            inner: mold_candle::quantized_nn::Linear::from_arc(weight.clone(), bias.clone())
+                .unwrap(),
+            fallback: Some(DequantFallback { weight, bias }),
+        }
+    }
+
+    /// The ten types `fast_mmq::supports` accepts, and the ones it does not,
+    /// with each accepted type's `qk_for` block size. A weight outside the
+    /// accepted set reaches `dequantize_matmul`, which cannot read the BF16
+    /// activation, so it must never select `QMatMul`.
+    ///
+    /// This is candle's *weight-side* table, not its whole kernel contract —
+    /// the activation-shaped conditions are pinned by
+    /// [`qmatmul_forward_declines_what_candles_kernels_decline`].
+    #[test]
+    fn cuda_mmq_block_size_matches_candles_weight_side_table() {
+        for (dtype, qk) in [
+            (GgmlDType::Q4_0, 32),
+            (GgmlDType::Q4_1, 32),
+            (GgmlDType::Q5_0, 32),
+            (GgmlDType::Q5_1, 32),
+            (GgmlDType::Q8_0, 32),
+            (GgmlDType::Q2K, 256),
+            (GgmlDType::Q3K, 256),
+            (GgmlDType::Q4K, 256),
+            (GgmlDType::Q5K, 256),
+            (GgmlDType::Q6K, 256),
+        ] {
+            assert_eq!(
+                cuda_mmq_block_size(dtype),
+                Some(qk),
+                "{dtype:?} must reach MMQ with candle's own qk_for"
+            );
+        }
+        for dtype in [
+            GgmlDType::F16,
+            GgmlDType::F32,
+            GgmlDType::BF16,
+            GgmlDType::Q8_1,
+            GgmlDType::Q8K,
+        ] {
+            assert_eq!(
+                cuda_mmq_block_size(dtype),
+                None,
+                "{dtype:?} must keep the dequant arm"
+            );
+        }
+    }
+
+    #[test]
+    fn qwen_qmatmul_env_parses() {
+        // Experimental and OFF by default: the fork's MMQ kernels currently
+        // NaN on Qwen's shapes (2026-08-14, RTX 4090, first forward), so only
+        // an explicit truthy opt-in enables them.
+        assert!(!parse_qwen_qmatmul(None));
+        assert!(!parse_qwen_qmatmul(Some("")));
+        // A value we do not understand keeps the safe default.
+        assert!(!parse_qwen_qmatmul(Some("garbage")));
+        assert!(!parse_qwen_qmatmul(Some("0")));
+        assert!(!parse_qwen_qmatmul(Some(" 0 ")));
+        for off in ["false", "FALSE", "off", "Off", "no", " No "] {
+            assert!(
+                !parse_qwen_qmatmul(Some(off)),
+                "{off:?} must keep the fast path disabled"
+            );
+        }
+        for on in ["1", " 1 ", "true", "TRUE", "on", "On", "yes", " Yes "] {
+            assert!(
+                parse_qwen_qmatmul(Some(on)),
+                "{on:?} must opt into the fast path"
+            );
+        }
+    }
+
+    #[test]
+    fn cuda_selects_qmatmul_only_when_every_kernel_precondition_holds() {
+        let choose = |dtype, k, same_device, enabled, force_dmmv| {
+            select_linear_kind(
+                LinearDevice::Cuda,
+                dtype,
+                k,
+                same_device,
+                enabled,
+                force_dmmv,
+            )
+        };
+        assert_eq!(
+            choose(GgmlDType::Q6K, 3072, true, true, false),
+            QwenLinearKind::QMatMul,
+            "an MMQ dtype resident on the CUDA device is the whole point"
+        );
+        assert_eq!(
+            choose(GgmlDType::Q6K, 3072, true, false, false),
+            QwenLinearKind::Dequant,
+            "MOLD_QWEN_QMATMUL=0 must restore the old arm"
+        );
+        assert_eq!(
+            choose(GgmlDType::Q6K, 3072, false, true, false),
+            QwenLinearKind::Dequant,
+            "a CPU-staged weight would hit candle's unreachable! in the CUDA matmul"
+        );
+        assert_eq!(
+            choose(GgmlDType::F16, 3072, true, true, false),
+            QwenLinearKind::Dequant,
+            "a float-stored tensor falls through to a fallback that rejects BF16"
+        );
+        assert_eq!(
+            choose(GgmlDType::Q6K, 3072, true, true, true),
+            QwenLinearKind::Dequant,
+            "MOLD_WAN_FORCE_DMMV=1 disables both fast kernels process-wide"
+        );
+        // `fast_mmq` declines `k % qk != 0` and lands in the same fallback.
+        assert_eq!(
+            choose(GgmlDType::Q6K, 64, true, true, false),
+            QwenLinearKind::Dequant,
+            "a K-quantized row width 256 does not divide cannot reach MMQ"
+        );
+        assert_eq!(
+            choose(GgmlDType::Q8_0, 64, true, true, false),
+            QwenLinearKind::QMatMul,
+            "the same width is fine for a 32-block dtype"
+        );
+    }
+
+    /// The per-forward half of the gate. `FORCE_DMMV` is a process switch mold
+    /// itself flips from Wan's denoise loop and never clears, so a Qwen-Image
+    /// engine built before that job ran would otherwise hand candle a matmul
+    /// whose only remaining path reads the activation as `f32`.
+    #[test]
+    fn qmatmul_forward_declines_what_candles_kernels_decline() {
+        assert!(qmatmul_forward_supported(LinearDevice::Cuda, 3, false));
+        assert!(qmatmul_forward_supported(LinearDevice::Cuda, 2, false));
+        assert!(
+            !qmatmul_forward_supported(LinearDevice::Cuda, 4, false),
+            "candle's fast paths match only [b, m, k] and [b, k]"
+        );
+        assert!(
+            !qmatmul_forward_supported(LinearDevice::Cuda, 3, true),
+            "with FORCE_DMMV set, neither fast kernel is reachable"
+        );
+        // Neither condition belongs to Metal or CPU.
+        for device in [LinearDevice::Metal, LinearDevice::Other] {
+            for force in [true, false] {
+                assert!(qmatmul_forward_supported(device, 4, force));
+            }
+        }
+    }
+
+    #[test]
+    fn metal_keeps_qmatmul_and_cpu_keeps_dequant_regardless_of_the_switch() {
+        for enabled in [true, false] {
+            assert_eq!(
+                select_linear_kind(
+                    LinearDevice::Metal,
+                    GgmlDType::Q4K,
+                    3072,
+                    true,
+                    enabled,
+                    false
+                ),
+                QwenLinearKind::QMatMul,
+            );
+            assert_eq!(
+                select_linear_kind(
+                    LinearDevice::Other,
+                    GgmlDType::Q4K,
+                    3072,
+                    true,
+                    enabled,
+                    false
+                ),
+                QwenLinearKind::Dequant,
+            );
+        }
+    }
+
+    fn max_abs(t: &Tensor) -> f32 {
+        t.abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
+    }
+
+    /// The flip must be the same operation, not a different one: both arms
+    /// wrap the same quantized weight and must agree to quantization error.
+    /// The tolerance is relative because the quantized arm also quantizes the
+    /// activation (Q8 vec-dot on CPU, int8 MMQ on CUDA) — this pins that the
+    /// two arms compute the same linear layer, not that they are bit-equal.
+    #[test]
+    fn qmatmul_and_dequant_agree_on_cpu() {
+        let device = Device::Cpu;
+        let weight = Tensor::randn(0f32, 1f32, (64, 128), &device).unwrap();
+        let bias = Tensor::randn(0f32, 1f32, 64, &device).unwrap();
+        let quantized = Arc::new(QTensor::quantize(&weight, GgmlDType::Q8_0).unwrap());
+
+        let dequant = QwenLinear::Dequant {
+            weight: quantized.clone(),
+            bias: Some(bias.clone()),
+        };
+        let qmatmul = qmatmul_layer(quantized, Some(bias));
+
+        let x = Tensor::randn(0f32, 1f32, (2, 5, 128), &device).unwrap();
+        let a = dequant.forward(&x).unwrap();
+        let b = qmatmul.forward(&x).unwrap();
+        let scale = max_abs(&a);
+        let diff = max_abs(&(a - b).unwrap());
+        assert!(
+            diff < 0.05 * scale,
+            "arms disagree by {diff} against an output scale of {scale}"
+        );
+    }
+
+    /// A transposed activation must not reach candle's kernels un-materialized:
+    /// both CUDA fast paths decline a non-contiguous rhs and the fallback they
+    /// decline into cannot read a BF16 activation.
+    #[test]
+    fn qmatmul_arm_materializes_a_non_contiguous_activation() {
+        let device = Device::Cpu;
+        let weight = Tensor::randn(0f32, 1f32, (8, 64), &device).unwrap();
+        let quantized = Arc::new(QTensor::quantize(&weight, GgmlDType::Q8_0).unwrap());
+        let layer = qmatmul_layer(quantized, None);
+
+        let x = Tensor::randn(0f32, 1f32, (64, 3), &device)
+            .unwrap()
+            .t()
+            .unwrap();
+        assert!(!x.is_contiguous());
+        assert_eq!(layer.forward(&x).unwrap().dims(), &[3, 8]);
+    }
+
+    /// `qlinear` materializes the bias at `working_dtype`, and the CUDA kernels
+    /// hand back whatever dtype they were fed — so a `QMatMul` layer that does
+    /// not normalize its activation errors at the bias add for any caller that
+    /// builds one in another dtype. `TimestepProjEmbeddings::forward` is
+    /// exactly such a caller (`cos`/`sin` in F32), and only a checkpoint
+    /// convention — every shipped GGUF stores those non-block tensors as a
+    /// float type, which the MMQ gate rejects — keeps it off this arm today.
+    #[test]
+    fn qmatmul_arm_normalizes_an_activation_in_another_dtype() {
+        let device = Device::Cpu;
+        let weight = Tensor::randn(0f32, 1f32, (8, 64), &device).unwrap();
+        let quantized = Arc::new(QTensor::quantize(&weight, GgmlDType::Q8_0).unwrap());
+        // The bias is built at `working_dtype`, as `qlinear` builds it.
+        let bias = Tensor::randn(0f32, 1f32, 8, &device)
+            .unwrap()
+            .to_dtype(super::working_dtype(&device))
+            .unwrap();
+        let layer = qmatmul_layer(quantized, Some(bias));
+
+        let x = Tensor::randn(0f32, 1f32, (2, 64), &device)
+            .unwrap()
+            .to_dtype(DType::F64)
+            .unwrap();
+        let out = layer
+            .forward(&x)
+            .expect("a foreign activation dtype must not error");
+        assert_eq!(out.dtype(), super::working_dtype(&device));
+        assert_eq!(out.dims(), &[2, 8]);
+    }
+
+    /// The `QMatMul` arm keeps the weight and bias beside the `QMatMul` so a
+    /// forward candle's kernels decline can still be answered. Pin that the
+    /// retained pair is the same layer the dequant arm would build — a handle
+    /// that had drifted would make the fallback quietly wrong rather than loud.
+    #[test]
+    fn qmatmul_arm_retains_the_weight_its_fallback_needs() {
+        let device = Device::Cpu;
+        let weight = Tensor::randn(0f32, 1f32, (8, 64), &device).unwrap();
+        let bias = Tensor::randn(0f32, 1f32, 8, &device).unwrap();
+        let quantized = Arc::new(QTensor::quantize(&weight, GgmlDType::Q8_0).unwrap());
+        let layer = qmatmul_layer(quantized.clone(), Some(bias.clone()));
+        let QwenLinear::QMatMul {
+            fallback: Some(retained),
+            ..
+        } = &layer
+        else {
+            panic!("qmatmul_layer must build the QMatMul arm with a fallback");
+        };
+
+        let x = Tensor::randn(0f32, 1f32, (2, 64), &device).unwrap();
+        let expected = QwenLinear::Dequant {
+            weight: quantized,
+            bias: Some(bias),
+        }
+        .forward(&x)
+        .unwrap();
+        let fallback =
+            super::dequant_forward(&retained.weight, retained.bias.as_ref(), &x).unwrap();
+        assert_eq!(max_abs(&(expected - fallback).unwrap()), 0.0);
+    }
 
     #[test]
     fn rope_cache_device_detects_cpu() {

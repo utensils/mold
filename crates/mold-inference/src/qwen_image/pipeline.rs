@@ -1205,6 +1205,18 @@ impl QwenImageEngine {
         Ok(text_tokenizer_path.clone())
     }
 
+    /// Non-weight VRAM the quantized CUDA denoise needs on top of the resident
+    /// transformer, scaled from a measurement at the native 1328² shape.
+    ///
+    /// It is deliberately pixel-proportional rather than weight-proportional:
+    /// since the linears run through candle's MMQ kernels, the dominant
+    /// transient is no longer a dequantized weight but the F32 copy
+    /// `fast_mmq::try_fwd` makes of the *activation* before quantizing it to
+    /// Q8_1 (`tokens x in_features x 4` — every image-stream linear takes that
+    /// path, since the BF16-native MMVQ kernel caps at 8 rows). That is the
+    /// same axis this function already scales on, so the shape of the estimate
+    /// still holds; the constant itself is empirical and only a measurement on
+    /// hardware should move it.
     fn quantized_cuda_cfg_headroom(width: usize, height: usize) -> u64 {
         let native_pixels = (QWEN_NATIVE_WIDTH * QWEN_NATIVE_HEIGHT) as f64;
         let pixels = (width.max(1) * height.max(1)) as f64;
@@ -1313,11 +1325,23 @@ impl QwenImageEngine {
             // FP8 weights stay as F8E4M3 in VRAM (~19.5GB, 1 byte/param).
             // Per-layer dequant to BF16 during forward adds ~113MB transient.
             // BF16 weights are 2 bytes/param (~40GB).
-            let mem_size: u64 = xformer_paths
+            let mut mem_size: u64 = xformer_paths
                 .iter()
                 .filter_map(|p| std::fs::metadata(p).ok())
                 .map(|m| m.len())
                 .sum();
+            // `MOLD_QWEN_FP8_CACHE=1` retains a BF16 copy of every widened
+            // FP8 layer (2 bytes/param on top of the 1-byte artifact), so the
+            // budget admission and `should_offload` reason about must include
+            // it — otherwise a card that fits plain FP8 is admitted
+            // non-offloaded and OOMs on the first forward.
+            if is_fp8
+                && super::transformer::parse_qwen_fp8_cache(
+                    crate::runtime_env::value("MOLD_QWEN_FP8_CACHE").as_deref(),
+                )
+            {
+                mem_size = mem_size.saturating_mul(3);
+            }
             // Reserve-adjusted reading: should_offload budgets against this.
             let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             // Qwen-Image runs CFG by default; activation budget scales with

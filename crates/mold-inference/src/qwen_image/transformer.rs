@@ -24,19 +24,99 @@ use super::quantized_transformer::{
 
 // ==================== FP8 Linear (per-layer dequant) ====================
 
-/// Linear layer supporting both standard BF16 and FP8 with per-layer dequantization.
+/// Where a checkpoint's `scale_weight` is applied.
 ///
-/// For FP8 models, weights stay as F8E4M3 in VRAM (~1 byte/param). On each
-/// forward call, the weight is cast to the activation dtype (BF16), optionally
-/// multiplied by a scale factor, used for matmul, and the transient BF16 copy
-/// is immediately freed. This matches ComfyUI's "manual_cast" FP8 inference.
+/// Multiplying the widened weight was a second pass over the full
+/// `out_dim x in_dim` tensor on every forward. A scalar or per-output-row
+/// scale factors straight out of the matmul — `x @ (w * s)^T == (x @ w^T) * s`
+/// — so it can ride on the (far smaller) output instead and the forward keeps
+/// exactly one full-size pass, the widening cast itself.
+#[derive(Debug, Clone)]
+enum Fp8Scale {
+    None,
+    /// Broadcast over the output's last axis: `[1]` or `[out_dim]`.
+    Output(Tensor),
+    /// Per-input-channel (or an unrecognised shape) — the factorisation above
+    /// does not hold, so keep the original weight-side multiply.
+    Weight(Tensor),
+}
+
+/// Classify `scale_weight` against the weight it scales.
+///
+/// Broadcasting aligns trailing dimensions, so against a `[out_dim, in_dim]`
+/// weight only a single element or a `[out_dim, 1]` column is per-output-row;
+/// a bare `[in_dim]` vector is per-input-channel and must stay on the weight.
+fn classify_fp8_scale(scale: Tensor, out_dim: usize) -> candle_core::Result<Fp8Scale> {
+    let dims = scale.dims().to_vec();
+    if scale.elem_count() == 1 {
+        return Ok(Fp8Scale::Output(scale.reshape(1)?));
+    }
+    if scale.elem_count() == out_dim && dims.last() == Some(&1) {
+        return Ok(Fp8Scale::Output(scale.reshape(out_dim)?));
+    }
+    Ok(Fp8Scale::Weight(scale))
+}
+
+/// `MOLD_QWEN_FP8_CACHE=1` keeps the widened weights instead of re-casting
+/// them every forward. Opt-in: it trades roughly a second copy of the
+/// checkpoint in VRAM for the cast, which only a card with the headroom the
+/// FP8 build was chosen to avoid needing can afford.
+pub(crate) fn parse_qwen_fp8_cache(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("1"))
+}
+
+fn qwen_fp8_cache_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let enabled =
+            parse_qwen_fp8_cache(crate::runtime_env::value("MOLD_QWEN_FP8_CACHE").as_deref());
+        if enabled {
+            tracing::info!("qwen-image: MOLD_QWEN_FP8_CACHE=1 — caching widened FP8 weights");
+        }
+        enabled
+    })
+}
+
+/// FP8 linear: the weight stays F8E4M3 in VRAM (~1 byte/param) and is widened
+/// to the activation dtype per forward, matching ComfyUI's "manual_cast".
+#[derive(Debug, Clone, Default)]
+struct Fp8Weight {
+    /// Widened weight retained under `MOLD_QWEN_FP8_CACHE=1`.
+    cached: std::sync::OnceLock<Tensor>,
+}
+
+impl Fp8Weight {
+    fn widen(
+        &self,
+        weight: &Tensor,
+        scale: &Fp8Scale,
+        dtype: DType,
+    ) -> candle_core::Result<Tensor> {
+        if let Some(cached) = self.cached.get() {
+            if cached.dtype() == dtype {
+                return Ok(cached.clone());
+            }
+        }
+        let widened = match scale {
+            Fp8Scale::Weight(s) => weight.to_dtype(dtype)?.broadcast_mul(&s.to_dtype(dtype)?)?,
+            Fp8Scale::None | Fp8Scale::Output(_) => weight.to_dtype(dtype)?,
+        };
+        if qwen_fp8_cache_enabled() {
+            let _ = self.cached.set(widened.clone());
+        }
+        Ok(widened)
+    }
+}
+
+/// Linear layer supporting both standard BF16 and FP8 with per-layer dequantization.
 #[derive(Debug, Clone)]
 enum QwenLinear {
     Standard(candle_nn::Linear),
     Fp8 {
         weight: Tensor,
-        scale: Option<Tensor>,
+        scale: Fp8Scale,
         bias: Option<Tensor>,
+        widened: Fp8Weight,
     },
 }
 
@@ -50,7 +130,10 @@ impl QwenLinear {
     ) -> candle_core::Result<Self> {
         let weight = vb.get((out_dim, in_dim), "weight")?;
         if weight.dtype() == DType::F8E4M3 {
-            let scale = vb.get_unchecked("scale_weight").ok();
+            let scale = match vb.get_unchecked("scale_weight").ok() {
+                Some(scale) => classify_fp8_scale(scale, out_dim)?,
+                None => Fp8Scale::None,
+            };
             let bias = if has_bias {
                 vb.get_unchecked("bias").ok()
             } else {
@@ -60,6 +143,7 @@ impl QwenLinear {
                 weight,
                 scale,
                 bias,
+                widened: Fp8Weight::default(),
             })
         } else {
             let bias = if has_bias {
@@ -80,15 +164,11 @@ impl Module for QwenLinear {
                 weight,
                 scale,
                 bias,
+                widened,
             } => {
                 let dtype = x.dtype();
-                let w = weight.to_dtype(dtype)?;
-                let w = match scale {
-                    Some(s) => w.broadcast_mul(&s.to_dtype(dtype)?)?,
-                    None => w,
-                };
                 // Handle multi-dim inputs like nn::Linear (reshape → matmul → reshape back)
-                let w = w.t()?;
+                let w = widened.widen(weight, scale, dtype)?.t()?;
                 let out = match *x.dims() {
                     [b1, b2, m, k] => {
                         x.reshape((b1 * b2 * m, k))?
@@ -101,6 +181,10 @@ impl Module for QwenLinear {
                             .reshape((bsize, m, ()))?
                     }
                     _ => x.matmul(&w)?,
+                };
+                let out = match scale {
+                    Fp8Scale::Output(s) => out.broadcast_mul(&s.to_dtype(dtype)?)?,
+                    Fp8Scale::None | Fp8Scale::Weight(_) => out,
                 };
                 match bias {
                     Some(b) => out.broadcast_add(&b.to_dtype(dtype)?),
@@ -1045,6 +1129,92 @@ impl QwenImageTransformer2DModel {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn qwen_fp8_cache_env_parses() {
+        assert!(parse_qwen_fp8_cache(Some("1")));
+        assert!(parse_qwen_fp8_cache(Some(" 1 ")));
+        assert!(!parse_qwen_fp8_cache(None));
+        assert!(!parse_qwen_fp8_cache(Some("0")));
+        assert!(!parse_qwen_fp8_cache(Some("yes")));
+    }
+
+    /// Only shapes whose weight-side broadcast is equivalent to an output-side
+    /// one may move; a per-input-channel vector must stay on the weight or the
+    /// factorisation is silently wrong.
+    #[test]
+    fn fp8_scale_moves_to_the_output_only_when_the_factorisation_holds() {
+        let dev = Device::Cpu;
+        let out_dim = 4;
+        let scalar = Tensor::new(&[0.5f32], &dev).unwrap();
+        assert!(matches!(
+            classify_fp8_scale(scalar, out_dim).unwrap(),
+            Fp8Scale::Output(_)
+        ));
+
+        let per_row = Tensor::randn(0f32, 1f32, (out_dim, 1), &dev).unwrap();
+        match classify_fp8_scale(per_row, out_dim).unwrap() {
+            Fp8Scale::Output(s) => assert_eq!(s.dims(), &[out_dim]),
+            other => panic!("expected an output-side scale, got {other:?}"),
+        }
+
+        let per_input_channel = Tensor::randn(0f32, 1f32, 6, &dev).unwrap();
+        assert!(matches!(
+            classify_fp8_scale(per_input_channel, out_dim).unwrap(),
+            Fp8Scale::Weight(_)
+        ));
+    }
+
+    /// Hoisting the scale out of the weight must not change the layer. Both
+    /// arms are compared against the same reference computed the old way:
+    /// widen, multiply the full weight, matmul, add bias.
+    #[test]
+    fn fp8_output_scale_matches_the_weight_side_multiply() {
+        let dev = Device::Cpu;
+        let (out_dim, in_dim) = (4usize, 6usize);
+        let weight = Tensor::randn(0f32, 1f32, (out_dim, in_dim), &dev)
+            .unwrap()
+            .to_dtype(DType::F8E4M3)
+            .unwrap();
+        let bias = Tensor::randn(0f32, 1f32, out_dim, &dev).unwrap();
+        let scale = Tensor::new(&[0.37f32], &dev).unwrap();
+        let x = Tensor::randn(0f32, 1f32, (2, 3, in_dim), &dev).unwrap();
+
+        let reference = {
+            let w = weight
+                .to_dtype(DType::F32)
+                .unwrap()
+                .broadcast_mul(&scale)
+                .unwrap();
+            candle_nn::Linear::new(w, Some(bias.clone()))
+                .forward(&x)
+                .unwrap()
+        };
+
+        for scale_kind in [
+            classify_fp8_scale(scale.clone(), out_dim).unwrap(),
+            Fp8Scale::Weight(scale.clone()),
+        ] {
+            let layer = QwenLinear::Fp8 {
+                weight: weight.clone(),
+                scale: scale_kind,
+                bias: Some(bias.clone()),
+                widened: Fp8Weight::default(),
+            };
+            let out = layer.forward(&x).unwrap();
+            let diff = (out - &reference)
+                .unwrap()
+                .abs()
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .max(0)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            assert!(diff < 1e-5, "scale placement changed the layer by {diff}");
+        }
+    }
 
     fn tiny_cfg() -> QwenImageConfig {
         QwenImageConfig {
