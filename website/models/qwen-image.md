@@ -92,6 +92,12 @@ roughly `1024x1024` area.
 These are step-distilled merges of the base transformers, so they reuse the
 same shared VAE / Qwen2.5-VL components and run CFG-free at guidance `1.0`.
 
+`qwen-image-flash:*` also runs its own packaged scheduler — NVIDIA ships
+`use_dynamic_shifting=false`, `shift=3.0`, `shift_terminal=null` for the
+four-step trajectory — rather than base Qwen-Image's resolution-dependent
+schedule. The Distill-Full and Rapid AIO merges are transformer-only exports
+with no scheduler of their own, so they keep the base contract.
+
 | Model                      | Steps | Guidance | Size    | Notes                                                     |
 | -------------------------- | ----- | -------- | ------- | --------------------------------------------------------- |
 | `qwen-image-flash:q8`      | 4     | 1.0      | 21.8 GB | NVIDIA DMD2 4-step distill of base Qwen-Image             |
@@ -100,8 +106,13 @@ same shared VAE / Qwen2.5-VL components and run CFG-free at guidance `1.0`.
 | `qwen-image-distill:q4`    | 15    | 1.0      | 13.1 GB | Same merge, the 24 GB-friendly tier                       |
 | `qwen-image-edit-rapid:q4` | 8     | 1.0      | 13.3 GB | 8-step edit merge; `qwen-image-edit` family, `--image` in |
 
+::: danger 18+ NSFW
 `qwen-image-edit-rapid:q4` tracks the `v23` release of Phr00t's Rapid AIO merge
-(`v23/Qwen-Rapid-NSFW-v23_Q4_K.gguf`). It is an uncensored community merge.
+(`v23/Qwen-Rapid-NSFW-v23_Q4_K.gguf`), which upstream classifies
+`not-for-all-audiences`. It is an uncensored community merge, and mold flags it
+as mature: `/api/models[].nsfw` is `true` for it, so every Models surface shows
+the `18+ NSFW` badge.
+:::
 
 ::: warning Distillation trade-off
 `qwen-image-flash:*` collapses the schedule to four steps. Dense small text,

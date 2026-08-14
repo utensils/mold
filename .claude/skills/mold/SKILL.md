@@ -534,7 +534,7 @@ Pick the right model for the task:
 | `qwen-image:q4`                     | Slow (50 steps)   | Good      | Stable base Qwen GGUF on 24 GB cards                    |
 | `qwen-image-2512:q4`                | Slow (50 steps)   | Good      | Stable 2512 GGUF on 24 GB cards                         |
 | `qwen-image:q8`                     | Slow (50 steps)   | Better    | Best base GGUF quality, validated at 768x768 on 24 GB   |
-| `qwen-image-flash:q4`               | Fast (4 steps)    | Good      | Fastest Qwen path; DMD2 distill, degrades on hard detail |
+| `qwen-image-flash:q4`               | Fast (4 steps)    | Good      | Fastest Qwen path; DMD2 distill, weak on hard detail    |
 | `qwen-image-distill:q4`             | Medium (15 steps) | Better    | Faster Qwen with more of the base model's fidelity      |
 | `qwen-image-edit-rapid:q4`          | Fast (8 steps)    | Good      | Fast image editing on the `qwen-image-edit` family      |
 | `ltx-video-0.9.6-distilled:bf16`    | Fast (8 steps)    | Good      | Text-to-video, 30fps                                    |
@@ -593,7 +593,9 @@ Default model if none specified: `flux2-klein:q8`
 
 **Qwen-Image-2512**: `qwen-image-2512:q8`, `qwen-image-2512:q6`, `qwen-image-2512:q5`, `qwen-image-2512:q4`, `qwen-image-2512:q3`, `qwen-image-2512:q2`, `qwen-image-lightning:fp8`, `qwen-image-lightning:fp8-8step`, `qwen-image-2512:bf16`
 
-**Qwen-Image few-step distills** (all CFG-free at guidance 1.0): `qwen-image-flash:q8`, `qwen-image-flash:q4` (NVIDIA DMD2, 4 steps), `qwen-image-distill:q8`, `qwen-image-distill:q4` (DiffSynth Distill-Full, 15 steps), `qwen-image-edit-rapid:q4` (8-step edit merge, `qwen-image-edit` family)
+**Qwen-Image few-step distills** (all CFG-free at guidance 1.0): `qwen-image-flash:q8`, `qwen-image-flash:q4` (NVIDIA DMD2, 4 steps), `qwen-image-distill:q8`, `qwen-image-distill:q4` (DiffSynth Distill-Full, 15 steps), `qwen-image-edit-rapid:q4` (8-step edit merge, `qwen-image-edit` family, flagged `18+ NSFW`)
+
+Flash runs its own packaged scheduler — `use_dynamic_shifting=false`, `shift=3.0`, `shift_terminal=null` — not the base model's resolution-dependent schedule. Every other Qwen checkpoint (including the Distill-Full and Rapid AIO merges, which are transformer-only exports) keeps the base contract.
 
 **LTX Video**: `ltx-video-0.9.6:bf16`, `ltx-video-0.9.6-distilled:bf16`, `ltx-video-0.9.8-2b-distilled:bf16`, `ltx-video-0.9.8-13b-dev:bf16`, `ltx-video-0.9.8-13b-distilled:bf16`
 
