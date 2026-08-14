@@ -2681,6 +2681,7 @@ impl Coordinator {
                     crate::execution_plan::ResolvedExecutionPlan {
                         device_id: device.id,
                         device_ordinal: device.ordinal,
+                        device_backend: device.backend,
                         model_family,
                         model_fingerprint,
                         effective_placement: crate::execution_plan::EffectivePlacement {
