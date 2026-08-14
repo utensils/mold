@@ -441,11 +441,33 @@ describe("HostDetailView header", () => {
     expect(wrapper.get("[data-test='host-version']").text()).toContain("0.17.0");
     const instance = wrapper.get("[data-test='host-instance-id']");
     expect(instance.text()).toContain("0f7a2c31-instance-uuid");
-    expect(instance.attributes("title")).toBe("0f7a2c31-instance-uuid");
     // Remote hosts get the remote-only management actions.
     expect(wrapper.find("[data-test='rename-host']").exists()).toBe(true);
     expect(wrapper.find("[data-test='disconnect-host']").exists()).toBe(true);
     expect(wrapper.find("[data-test='forget-host']").exists()).toBe(true);
+  });
+
+  it("copies the full instance id on click even though the display truncates", async () => {
+    const wrapper = await mountView();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+
+    await wrapper.get("[data-test='host-instance-id']").trigger("click");
+    expect(writeText).toHaveBeenCalledWith("0f7a2c31-instance-uuid");
+  });
+
+  it("reports a clipboard failure instead of silently rejecting", async () => {
+    const wrapper = await mountView();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
+    });
+
+    await wrapper.get("[data-test='host-instance-id']").trigger("click");
+    await flushPromises();
+    const { useToastStore } = await import("../stores/toasts");
+    const toasts = useToastStore();
+    expect(toasts.items.some((t) => t.kind === "error" && t.message.includes("copy"))).toBe(true);
   });
 
   it("renders the local primary without remote-only actions", async () => {

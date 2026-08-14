@@ -3,6 +3,7 @@ import { computed, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 import CardSurface from "@ui/components/CardSurface.vue";
 import Chip from "@ui/components/Chip.vue";
+import Tooltip from "@ui/components/Tooltip.vue";
 import Icon from "@ui/components/Icon.vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
@@ -413,6 +414,17 @@ function toggleTarget() {
 
 const renameOpen = ref(false);
 
+async function copyInstanceId() {
+  const id = host.value?.instanceId;
+  if (!id) return;
+  try {
+    await navigator.clipboard.writeText(id);
+    toasts.push("Instance ID copied");
+  } catch {
+    toasts.push("Couldn't copy the instance ID", "error");
+  }
+}
+
 function onRenameSave(name: string) {
   renameOpen.value = false;
   const h = host.value;
@@ -501,19 +513,21 @@ async function forget() {
           </Chip>
         </div>
         <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 pl-7">
-          <span
-            v-if="host.instanceId"
-            class="edge-code max-w-40 truncate"
-            :title="host.instanceId"
-            data-test="host-instance-id"
-          >
-            {{ host.instanceId }}
-          </span>
+          <Tooltip v-if="host.instanceId" :text="`${host.instanceId} — click to copy`">
+            <button
+              type="button"
+              class="edge-code max-w-40 truncate hover:text-ink"
+              data-test="host-instance-id"
+              @click="copyInstanceId"
+            >
+              {{ host.instanceId }}
+            </button>
+          </Tooltip>
           <button
             v-if="host.kind === 'remote'"
             type="button"
             data-test="rename-host"
-            class="text-caption text-ink-3 transition-colors hover:text-ink"
+            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-ink"
             @click="renameOpen = true"
           >
             Rename…
@@ -521,7 +535,7 @@ async function forget() {
           <button
             type="button"
             data-test="open-web-ui"
-            class="text-caption text-ink-3 transition-colors hover:text-ink disabled:opacity-40"
+            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-ink disabled:opacity-40"
             :disabled="!host.baseUrl"
             @click="openHostUrl(host.baseUrl ?? '')"
           >
@@ -531,7 +545,7 @@ async function forget() {
             v-if="host.kind === 'remote'"
             type="button"
             data-test="disconnect-host"
-            class="text-caption text-ink-3 transition-colors hover:text-stop"
+            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-stop"
             @click="disconnect"
           >
             Disconnect
