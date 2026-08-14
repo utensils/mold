@@ -74,6 +74,29 @@ mold run flux-dev "an epic portrait" \
 The web UI's LoRA picker stacks up to **4** LoRAs per generation; each row
 gets its own scale slider and remove button.
 
+Repeating the same stack is cheap: FLUX and Qwen-Image fingerprint the adapters,
+their order, and their scales, and reuse the merged transformer when the next
+request asks for exactly that stack. Changing any of the three rebuilds it.
+
+## Step-Distilled LoRAs
+
+Some adapters change the sampling schedule rather than the style. Qwen-Image's
+Lightning LoRAs run the model in 4 or 8 CFG-free steps on any checkpoint you
+already have, instead of downloading a second pre-merged transformer:
+
+```bash
+mold run qwen-image-2512:q8 "a snowy mountain cabin at twilight" \
+  --lora ~/loras/Qwen-Image-2512-Lightning-8steps-V1.0-bf16.safetensors \
+  --steps 8 --guidance 1.0
+```
+
+Set `--steps` to the adapter's step count and `--guidance 1.0` — mold turns on
+classifier-free guidance above `1.0`, which costs a second forward pass per step
+that a CFG-free distilled adapter was not trained for. See
+[Qwen-Image](/models/qwen-image#lightning-loras-on-a-checkpoint-you-already-have)
+for the exact adapter files, which checkpoint line each belongs to, and the
+caveat that these recipes come from upstream rather than from a mold test run.
+
 ## Browsing & Installing LoRAs
 
 The web, desktop, and iPhone Models surfaces search Hugging Face and Civitai

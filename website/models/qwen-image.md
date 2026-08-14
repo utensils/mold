@@ -125,6 +125,62 @@ mold run qwen-image-distill:q4 "your prompt here"
 mold run qwen-image-edit-lightning:fp8 "make the sky stormy" --image input.png
 ```
 
+### Lightning LoRAs on a checkpoint you already have
+
+The merges above are whole transformers. The same distillation also ships as a
+LoRA, which applies the few-step schedule to any Qwen-Image checkpoint already
+on disk — including a quality tier like `:q8` — instead of downloading a second
+~20 GB transformer. Attach it with the ordinary repeatable `--lora` flag; there
+is no separate model entry to pull, because these are user-supplied adapter
+files rather than checkpoints.
+
+| Adapter                                                                                                                                                      | Base line           | Steps | Guidance |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------- | ----- | -------- |
+| [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) → `Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors`                | `qwen-image:*`      | 4     | 1.0      |
+| [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) → `Qwen-Image-Lightning-8steps-V2.0-bf16.safetensors`                | `qwen-image:*`      | 8     | 1.0      |
+| [`lightx2v/Qwen-Image-2512-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-2512-Lightning) → `Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors` | `qwen-image-2512:*` | 4     | 1.0      |
+| [`lightx2v/Qwen-Image-2512-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-2512-Lightning) → `Qwen-Image-2512-Lightning-8steps-V1.0-bf16.safetensors` | `qwen-image-2512:*` | 8     | 1.0      |
+
+```bash
+# 8-step Lightning on the Q8 quality tier, CFG-free
+mold run qwen-image-2512:q8 "a snowy mountain cabin at twilight" \
+  --lora ~/loras/Qwen-Image-2512-Lightning-8steps-V1.0-bf16.safetensors \
+  --steps 8 --guidance 1.0
+
+# The 4-step adapter for the base Qwen-Image line
+mold run qwen-image:q8 "a hot air balloon over a misty valley" \
+  --lora ~/loras/Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors \
+  --steps 4 --guidance 1.0
+```
+
+The adapters are authored by
+[ModelTC](https://github.com/ModelTC/LightX2V-Qwen-Image-Lightning) and
+published on Hugging Face under `lightx2v`. Match the adapter's line to the
+checkpoint's — a 2512 adapter belongs on `qwen-image-2512:*`, the base adapter on
+`qwen-image:*`. Use `--guidance 1.0`: upstream distils these adapters to run
+CFG-free, and mold enables classifier-free guidance for any `--guidance` above
+`1.0`, which runs a second forward pass per step that the adapter was not
+trained for.
+
+::: warning Untested on this family
+Mold's LoRA loader has no on-disk Qwen-Image adapter in its test suite, and these
+recipes are transcribed from the adapters' own upstream documentation rather than
+verified end-to-end on this engine. Treat the step/guidance values as upstream's,
+and please report a mismatch.
+:::
+
+::: tip What the merge costs
+Merging a LoRA into a GGUF transformer dequantizes, merges, and re-quantizes
+every affected tensor across all 60 blocks. Mold fingerprints the merged stack
+(adapters, their order, and their scales), so a transformer that is still
+resident is reused when the next request asks for exactly that stack, and
+rebuilt whenever anything about it changes. Only paths that keep the
+transformer resident can reuse it — a checkpoint loaded one component at a
+time, or a render whose VAE decode drops the transformer to free VRAM, pays the
+merge again on the next request. Block offloading (`--offload` /
+`MOLD_OFFLOAD=1`) refuses LoRAs on this family outright.
+:::
+
 ::: tip Edit Path
 `qwen-image-edit-2511` runs a real multimodal edit path: Qwen2.5-VL condition
 images are patchified through the vision tower, source-image latents are packed
