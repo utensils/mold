@@ -93,11 +93,42 @@ struct SequenceParams<'a> {
     seed: Option<u64>,
     audio: Option<bool>,
     defaults: Option<&'a ModelDefaults>,
+    /// Resolved family. The clip grid, the floor, and the seam are all its
+    /// properties, never LTX-2 constants (#783).
+    family: Option<&'a str>,
+    /// The checkpoint's own conditioning contract. Wan's seam is last-frame
+    /// image conditioning, so only an image-conditioned checkpoint carries
+    /// anything across a boundary.
+    source_image: Option<mold_core::SourceImageCapability>,
 }
 
 fn build_sequence_request(params: SequenceParams<'_>) -> Result<ChainRequest, String> {
-    if params.frames_per_clip < 25 || (params.frames_per_clip - 1) & 7 != 0 {
-        return Err("Frames per clip must be 25 or greater and satisfy 8n+1.".to_string());
+    // The grid is the family's: wan's VAE compresses time by 4 where the LTX
+    // families compress by 8. Hardcoding `8n+1` here rejected wan's own
+    // 53-frame routing default before the request was ever submitted.
+    let family = params.family.unwrap_or("ltx2");
+    let step = mold_core::validation::frame_step_for_family(family).unwrap_or(8);
+    let offset = mold_core::validation::frame_offset_for_family(family).unwrap_or(1);
+    // LTX-2's 25 is three latent frames under its 8x stride; the equivalent
+    // floor scales with the family's own stride rather than carrying over.
+    let min_frames = step * 3 + offset;
+    if params.frames_per_clip < min_frames || params.frames_per_clip % step != offset % step {
+        return Err(format!(
+            "Frames per clip must be {min_frames} or greater and satisfy {step}n+{offset}."
+        ));
+    }
+    if let Some(cap) = mold_core::validation::max_frames_for_family_at_fps(
+        family,
+        params
+            .fps
+            .or_else(|| params.defaults.and_then(|defaults| defaults.default_fps))
+            .unwrap_or(mold_core::validation::LTX2_DEFAULT_FPS),
+    ) {
+        if params.frames_per_clip > cap {
+            return Err(format!(
+                "Frames per clip must be {cap} or fewer for this model's family."
+            ));
+        }
     }
     let (default_width, default_height, default_fps, default_steps, default_guidance) =
         params.defaults.map_or((1216, 704, 24, 8, 3.0), |defaults| {
@@ -130,10 +161,18 @@ fn build_sequence_request(params: SequenceParams<'_>) -> Result<ChainRequest, St
             references: Vec::new(),
         })
         .collect();
+    // The seam a family and checkpoint can actually honour. Sending LTX-2's
+    // 17 for wan meant the server silently repaired it, so the bot advertised
+    // a boundary it was not submitting.
+    let motion_tail_frames = mold_core::validation::chain_motion_tail_frames_for_family(
+        family,
+        params.source_image,
+        mold_core::validation::DEFAULT_EXTEND_OVERLAP_FRAMES,
+    );
     Ok(ChainRequest {
         model: params.model,
         stages,
-        motion_tail_frames: 17,
+        motion_tail_frames,
         width,
         height,
         fps,
@@ -220,16 +259,17 @@ async fn send_completed_sequence(
     Ok(())
 }
 
-/// Render a durable multi-prompt LTX-2 sequence.
+/// Render a durable multi-prompt video sequence.
 #[allow(clippy::too_many_arguments)]
 #[poise::command(slash_command)]
 pub async fn sequence(
     ctx: Context<'_>,
     #[description = "Clip prompts separated by | (2–16 prompts)"] prompts: String,
-    #[description = "LTX-2 model to use"]
+    #[description = "Sequence-capable model (LTX-2, LTX Video, or Wan Video)"]
     #[autocomplete = "autocomplete_sequence_model"]
     model: Option<String>,
-    #[description = "Frames per clip (8n+1, minimum 25; default 97)"] frames_per_clip: Option<u32>,
+    #[description = "Frames per clip; must sit on the model family's frame grid"]
+    frames_per_clip: Option<u32>,
     #[description = "Output width"] width: Option<u32>,
     #[description = "Output height"] height: Option<u32>,
     #[description = "Output FPS (default 24)"] fps: Option<u32>,
@@ -260,7 +300,7 @@ pub async fn sequence(
         .await?;
         return Ok(());
     }
-    // The interaction token expires after 15 minutes, while a durable LTX-2
+    // The interaction token expires after 15 minutes, while a durable
     // sequence can legitimately run longer. Use it only for a private handoff;
     // all long-lived progress and delivery use a normal bot-authored message.
     ctx.defer_ephemeral().await?;
@@ -280,10 +320,32 @@ pub async fn sequence(
         .await?;
         return Ok(());
     }
+    let family = model_entry.map(|entry| entry.info.family.as_str());
+    // A wan I2V checkpoint cannot render stage 0 without an image, and this
+    // command has no attachment to give it. Refuse before spending the
+    // model load rather than after (#783).
+    if model_entry
+        .is_some_and(|entry| entry.source_image == Some(mold_core::SourceImageCapability::Required))
+    {
+        ctx.data().quotas.refund(user_id);
+        handler::send_error(
+            ctx,
+            "This checkpoint requires a source image for every clip, and `/sequence` \
+             has no image input. Pick a text-to-video or optionally-conditioned model.",
+        )
+        .await?;
+        return Ok(());
+    }
+    // The default clip length is the family's own, not LTX-2's 97: 97 is off
+    // wan's `4k+1` grid only by luck of arithmetic, and its routing envelope
+    // is smaller than its cap.
+    let default_clip_frames = model_entry
+        .and_then(|entry| entry.defaults.default_frames)
+        .unwrap_or(97);
     let request = match build_sequence_request(SequenceParams {
         prompts,
         model,
-        frames_per_clip: frames_per_clip.unwrap_or(97),
+        frames_per_clip: frames_per_clip.unwrap_or(default_clip_frames),
         width,
         height,
         fps,
@@ -292,6 +354,8 @@ pub async fn sequence(
         seed,
         audio,
         defaults: model_entry.map(|entry| &entry.defaults),
+        family,
+        source_image: model_entry.and_then(|entry| entry.source_image),
     }) {
         Ok(request) => request,
         Err(message) => {
@@ -420,6 +484,92 @@ mod tests {
         assert!(parse_prompts("one prompt").is_err());
     }
 
+    /// Discord builds a wan sequence on wan's own grid and seam (#783).
+    ///
+    /// Eligibility was de-`ltx2`-ed in #936, but request construction stayed
+    /// LTX-shaped: an `8n+1` grid with a minimum of 25, and a motion tail of
+    /// 17. Wan is `4k+1`, so **53** — the A14B routing default the CLI itself
+    /// picks — was rejected here before the request was ever submitted, while
+    /// 81/97/121 passed only by coincidence. The tail was repaired silently
+    /// by the server, so the bot advertised a seam it was not sending.
+    #[test]
+    fn a_wan_sequence_uses_wans_grid_and_seam() {
+        let wan = |frames_per_clip: u32, source_image| {
+            build_sequence_request(SequenceParams {
+                prompts: vec!["a paper boat".into(), "it reaches the drain".into()],
+                model: "wan22-ti2v-5b:q8".into(),
+                frames_per_clip,
+                width: None,
+                height: None,
+                fps: None,
+                steps: None,
+                guidance: None,
+                seed: None,
+                audio: None,
+                defaults: None,
+                family: Some("wan"),
+                source_image,
+            })
+        };
+
+        // The A14B routing default. Rejected outright before this.
+        let request = wan(53, Some(mold_core::SourceImageCapability::Optional))
+            .expect("53 is on wan's 4k+1 grid");
+        assert_eq!(request.stages[0].frames, 53);
+        assert_eq!(
+            request.motion_tail_frames,
+            mold_core::validation::WAN_HANDOFF_DUPLICATED_FRAMES,
+            "wan re-renders exactly the frame the continuation was seeded with"
+        );
+
+        // A text-to-video checkpoint cannot be seeded, so its seam carries
+        // nothing rather than a value the server has to repair.
+        let t2v = wan(53, Some(mold_core::SourceImageCapability::Unsupported)).unwrap();
+        assert_eq!(t2v.motion_tail_frames, 0);
+
+        // Off-grid for wan is still refused, and the message names wan's grid.
+        let error = wan(50, Some(mold_core::SourceImageCapability::Optional)).unwrap_err();
+        assert!(error.contains("4n+1"), "got: {error}");
+
+        // Below wan's own floor, which is not LTX-2's 25.
+        assert!(wan(1, Some(mold_core::SourceImageCapability::Optional)).is_err());
+
+        // LTX-2 is unchanged: 8n+1, minimum 25, tail 17.
+        let ltx2 = build_sequence_request(SequenceParams {
+            prompts: vec!["one".into(), "two".into()],
+            model: "ltx-2-19b-distilled:fp8".into(),
+            frames_per_clip: 97,
+            width: None,
+            height: None,
+            fps: None,
+            steps: None,
+            guidance: None,
+            seed: None,
+            audio: None,
+            defaults: None,
+            family: Some("ltx2"),
+            source_image: None,
+        })
+        .unwrap();
+        assert_eq!(ltx2.motion_tail_frames, 17);
+        assert!(build_sequence_request(SequenceParams {
+            prompts: vec!["one".into(), "two".into()],
+            model: "ltx-2-19b-distilled:fp8".into(),
+            frames_per_clip: 53,
+            width: None,
+            height: None,
+            fps: None,
+            steps: None,
+            guidance: None,
+            seed: None,
+            audio: None,
+            defaults: None,
+            family: Some("ltx2"),
+            source_image: None,
+        })
+        .is_err());
+    }
+
     #[test]
     fn request_has_one_smooth_stage_per_prompt() {
         let request = build_sequence_request(SequenceParams {
@@ -434,6 +584,8 @@ mod tests {
             seed: Some(42),
             audio: Some(true),
             defaults: None,
+            family: Some("ltx2"),
+            source_image: None,
         })
         .unwrap();
         assert_eq!(request.stages.len(), 2);
@@ -461,6 +613,8 @@ mod tests {
             seed: None,
             audio: None,
             defaults: None,
+            family: Some("ltx2"),
+            source_image: None,
         });
         assert!(result.is_err());
     }

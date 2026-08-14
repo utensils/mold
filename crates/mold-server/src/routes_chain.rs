@@ -312,8 +312,9 @@ async fn shim_start_job(state: &AppState, req: ChainRequest) -> Result<ShimJob, 
     validate_chain_build_features(&req)?;
     let authority = resolve_chain_model_authority(state, &req.model).await?;
     validate_and_normalize_chain_family(&authority.config, &mut req)?;
+    let family = resolve_chain_family(&authority.config, &req.model);
     let mut req = req
-        .normalise()
+        .normalise_with_family(Some(&family))
         .map_err(|e| ApiError::validation(e.to_string()))?;
     validate_and_normalize_chain_family(&authority.config, &mut req)?;
     crate::routes::materialize_chain_camera_controls(state, &authority.config, &req).await?;
@@ -779,6 +780,24 @@ pub(crate) fn validate_chain_build_features(_req: &ChainRequest) -> Result<(), A
     Ok(())
 }
 
+/// The family a chain request will actually render as.
+///
+/// The sidecar-derived `ModelConfig` an installed `cv:` / `hf:` checkpoint
+/// carries is the authority; the built-in manifest is the fallback. Reading
+/// only the manifest leaves a catalog wan checkpoint unclassified, and an
+/// unclassified family means the LTX `8k+1` grid (#783).
+pub(crate) fn resolve_chain_family(config: &mold_core::Config, model: &str) -> String {
+    let resolved_model = config.resolved_model_config(model);
+    let canonical_model = mold_core::manifest::resolve_model_name(model);
+    resolved_model
+        .family
+        .clone()
+        .or_else(|| {
+            mold_core::manifest::find_manifest(&canonical_model).map(|model| model.family.clone())
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) fn validate_and_normalize_chain_family(
     config: &mold_core::Config,
     req: &mut ChainRequest,
@@ -787,11 +806,7 @@ pub(crate) fn validate_and_normalize_chain_family(
     let resolved_model = config.resolved_model_config(&req.model);
     let canonical_model = mold_core::manifest::resolve_model_name(&req.model);
     let manifest = mold_core::manifest::find_manifest(&canonical_model);
-    let family = resolved_model
-        .family
-        .clone()
-        .or_else(|| manifest.map(|model| model.family.clone()))
-        .unwrap_or_default();
+    let family = resolve_chain_family(config, &req.model);
     mold_core::require_model_activation(
         &req.model,
         (!family.is_empty()).then_some(family.as_str()),
@@ -889,30 +904,71 @@ pub(crate) fn validate_and_normalize_chain_family(
             )));
         }
     }
+    // Wan probes the resolved checkpoint's own headers FIRST, exactly as
+    // `/api/models` and single-generation admission do: `ModelPaths` honors
+    // config/env path overrides, so the artifacts actually loaded can differ
+    // from the manifest's task structure. The manifest is the cold fallback
+    // for a model that is not downloaded yet. Other families have no header
+    // probe and their manifest contract binds directly.
+    let manifest_contract = manifest.and_then(|model| model.defaults.source_image);
+    let contract = if family == "wan" {
+        mold_core::ModelPaths::resolve(&req.model, config)
+            .and_then(|paths| {
+                mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
+            })
+            .or(manifest_contract)
+    } else {
+        manifest_contract
+    };
+
+    // Stage 0 is the only clip that can carry an opening image; every
+    // continuation is seeded by the seam. Admission never asked the
+    // checkpoint whether it could accept one — `enforce_source_image_
+    // capability` covered single generations and the placement preview but
+    // not this path — so a wan I2V sequence with no opening image was
+    // admitted and then died after the UMT5 encode and both expert loads had
+    // been paid for, and a T2V sequence carrying one was admitted too (#783).
+    //
+    // The two arms read different sets on purpose. `Required` asks whether
+    // stage 0 can be seeded at all, so only the opening image counts — every
+    // continuation is seeded by the seam. `Unsupported` asks whether an image
+    // was supplied anywhere the engine has no channel for, so a per-stage
+    // image on a continuation has to count too; a script may attach one to
+    // any stage (`source_image_path`).
+    // The top-level `source_image` is the auto-expand form's opening image and
+    // `normalise` only projects it onto stage 0 when `stages` is empty — with
+    // explicit stages it is cleared. Counting it either way admitted a mixed
+    // form whose image is discarded before execution, so the I2V model loaded
+    // and then failed on an unseeded stage 0.
+    let opening_image = (req.stages.is_empty() && req.source_image.is_some())
+        || req.stages.first().is_some_and(|s| s.source_image.is_some());
+    let any_image = opening_image || req.stages.iter().any(|s| s.source_image.is_some());
+    let family_hint = (!family.is_empty()).then_some(family.as_str());
+    let has_source = match contract {
+        Some(mold_core::SourceImageCapability::Unsupported) => any_image,
+        _ => opening_image,
+    };
+    if let Some(message) = mold_core::validation::source_image_contract_violation(
+        family_hint,
+        &req.model,
+        contract,
+        has_source,
+    ) {
+        return Err(ApiError::validation(message));
+    }
+
     if family == "wan" {
         // Wan has no latent motion tail. Its seam re-renders exactly the one
         // frame the continuation was seeded with, and only an image-conditioned
         // checkpoint can be seeded at all — so the tail is 1 or 0, never the
         // LTX-shaped value a client may have carried over.
-        // Probe the resolved checkpoint's own headers first, exactly as
-        // `/api/models` and generation admission do; the manifest is the cold
-        // fallback for a model that is not downloaded yet.
-        let probed = mold_core::ModelPaths::resolve(&req.model, config).and_then(|paths| {
-            mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
-        });
-        let contract = probed.or_else(|| manifest.and_then(|model| model.defaults.source_image));
-        let carries_context = contract.is_some_and(|capability| {
-            matches!(
-                capability,
-                mold_core::SourceImageCapability::Required
-                    | mold_core::SourceImageCapability::Optional
-            )
-        });
-        let normalized = if carries_context {
-            mold_inference::wan::pipeline::WAN_HANDOFF_DUPLICATED_FRAMES
-        } else {
-            0
-        };
+        // One authority, shared with the forced-local CLI path: the two had
+        // drifted, and only this one normalized (#783).
+        let normalized = mold_core::validation::chain_motion_tail_frames_for_family(
+            &family,
+            contract,
+            req.motion_tail_frames,
+        );
         if req.motion_tail_frames != normalized {
             tracing::debug!(
                 model = %req.model,
@@ -974,10 +1030,15 @@ pub async fn validate_chain(
     let requested_motion_tail = req.motion_tail_frames;
     let mut warnings = Vec::new();
 
-    {
-        let config = state.config.read().await;
-        validate_and_normalize_chain_family(&config, &mut req)?;
-    }
+    // The same authority submission uses. Reading `state.config` directly
+    // left an installed `cv:` / `hf:` wan checkpoint with an empty family,
+    // which skipped the wan tail normalization, the family cap, the grid
+    // check, and the sequence-support check — so "Validate plan" and the
+    // submission that follows it disagreed about exactly the models the
+    // sequence work targets (#783).
+    let authority = resolve_chain_model_authority(&state, &req.model).await?;
+    validate_and_normalize_chain_family(&authority.config, &mut req)?;
+    let family = resolve_chain_family(&authority.config, &req.model);
     if req.motion_tail_frames != requested_motion_tail {
         warnings.push(format!(
             "The selected model normalized motion_tail_frames from {requested_motion_tail} to {}.",
@@ -986,15 +1047,14 @@ pub async fn validate_chain(
     }
 
     let mut req = req
-        .normalise()
+        .normalise_with_family(Some(&family))
         .map_err(|error| ApiError::validation(error.to_string()))?;
     if opening_transition.is_some_and(|transition| transition != TransitionMode::Smooth) {
         warnings.push("The opening clip transition was normalized to smooth.".to_string());
     }
     {
-        let config = state.config.read().await;
         let before = req.motion_tail_frames;
-        validate_and_normalize_chain_family(&config, &mut req)?;
+        validate_and_normalize_chain_family(&authority.config, &mut req)?;
         if req.motion_tail_frames != before && req.motion_tail_frames != requested_motion_tail {
             warnings.push(format!(
                 "The selected model normalized motion_tail_frames from {before} to {}.",
@@ -1922,6 +1982,134 @@ mod tests {
         t2v.motion_tail_frames = 17;
         validate_and_normalize_chain_family(&config, &mut t2v).expect("admitted");
         assert_eq!(t2v.motion_tail_frames, 0);
+    }
+
+    /// Chain admission holds a checkpoint to its own conditioning contract
+    /// (#783).
+    ///
+    /// The tail was normalized here since #936, but the contract that decides
+    /// the tail was never enforced: `enforce_source_image_capability` lives on
+    /// the single-generation path and the placement preview, and nothing on
+    /// the chain path called it. So a wan A14B I2V sequence with no opening
+    /// image was admitted and then died after the UMT5 encode and both expert
+    /// loads were paid for, and a text-to-video sequence carrying an opening
+    /// image was admitted too. This is the acceptance criterion "T2V-only
+    /// checkpoints offer Cut/Crossfade only or are excluded, per advertised
+    /// capability".
+    #[test]
+    fn chain_preflight_holds_a_checkpoint_to_its_source_image_contract() {
+        let config = mold_core::Config::default();
+        let opening_image = |request: &mut ChainRequest, image: Option<Vec<u8>>| {
+            request.stages[0].source_image = image;
+        };
+
+        // A14B I2V denoises a 36-channel mask-plus-image concat: without an
+        // image there is nothing to seed stage 0 with.
+        let mut required = req(OutputFormat::Mp4);
+        required.model = "wan22-i2v-a14b:q5".into();
+        required.width = 832;
+        required.height = 480;
+        opening_image(&mut required, None);
+        let error = validate_and_normalize_chain_family(&config, &mut required)
+            .expect_err("a Required checkpoint cannot open a sequence unseeded");
+        assert!(
+            error.error.to_lowercase().contains("source image"),
+            "got: {}",
+            error.error
+        );
+
+        // The same checkpoint with an opening image is admitted.
+        let mut seeded = req(OutputFormat::Mp4);
+        seeded.model = "wan22-i2v-a14b:q5".into();
+        seeded.width = 832;
+        seeded.height = 480;
+        opening_image(&mut seeded, Some(vec![1, 2, 3]));
+        validate_and_normalize_chain_family(&config, &mut seeded).expect("admitted");
+        assert_eq!(
+            seeded.motion_tail_frames,
+            mold_inference::wan::pipeline::WAN_HANDOFF_DUPLICATED_FRAMES
+        );
+
+        // A text-to-video checkpoint has no conditioning channel at all, so
+        // an attached opening image is refused rather than ignored.
+        let mut unsupported = req(OutputFormat::Mp4);
+        unsupported.model = "wan21-t2v-1.3b".into();
+        unsupported.width = 832;
+        unsupported.height = 480;
+        opening_image(&mut unsupported, Some(vec![1, 2, 3]));
+        assert!(
+            validate_and_normalize_chain_family(&config, &mut unsupported).is_err(),
+            "a T2V checkpoint has no channel for an opening image"
+        );
+
+        // And without one it is admitted, carrying nothing across its seams.
+        let mut plain_t2v = req(OutputFormat::Mp4);
+        plain_t2v.model = "wan21-t2v-1.3b".into();
+        plain_t2v.width = 832;
+        plain_t2v.height = 480;
+        opening_image(&mut plain_t2v, None);
+        validate_and_normalize_chain_family(&config, &mut plain_t2v).expect("admitted");
+        assert_eq!(plain_t2v.motion_tail_frames, 0);
+
+        // A script can attach an image to any stage, so an unsupported
+        // checkpoint is refused for one on a continuation too — the two arms
+        // read different sets: `Required` asks only whether stage 0 can be
+        // seeded, because every continuation is seeded by the seam.
+        let mut late_image = req(OutputFormat::Mp4);
+        late_image.model = "wan21-t2v-1.3b".into();
+        late_image.width = 832;
+        late_image.height = 480;
+        assert!(
+            late_image.stages.len() > 1,
+            "this case needs a continuation to attach to"
+        );
+        late_image.stages[1].source_image = Some(vec![1, 2, 3]);
+        assert!(
+            validate_and_normalize_chain_family(&config, &mut late_image).is_err(),
+            "an image on a continuation is still an image the engine cannot take"
+        );
+
+        // The mirror: a Required checkpoint seeded only on a continuation is
+        // still unseeded where it matters.
+        let mut late_only = req(OutputFormat::Mp4);
+        late_only.model = "wan22-i2v-a14b:q5".into();
+        late_only.width = 832;
+        late_only.height = 480;
+        opening_image(&mut late_only, None);
+        late_only.stages[1].source_image = Some(vec![1, 2, 3]);
+        assert!(validate_and_normalize_chain_family(&config, &mut late_only).is_err());
+
+        // The top-level `source_image` belongs to the auto-expand form.
+        // `normalise` projects it onto stage 0 only when `stages` is empty and
+        // clears it otherwise, so counting it alongside explicit stages
+        // admitted a request whose image is discarded before execution — the
+        // I2V model loaded, then failed on an unseeded stage 0.
+        let mut mixed_form = req(OutputFormat::Mp4);
+        mixed_form.model = "wan22-i2v-a14b:q5".into();
+        mixed_form.width = 832;
+        mixed_form.height = 480;
+        opening_image(&mut mixed_form, None);
+        mixed_form.source_image = Some(vec![1, 2, 3]);
+        assert!(
+            !mixed_form.stages.is_empty(),
+            "the defect needs explicit stages beside the top-level image"
+        );
+        assert!(
+            validate_and_normalize_chain_family(&config, &mut mixed_form).is_err(),
+            "an image `normalise` is about to discard cannot satisfy the contract"
+        );
+
+        // The auto-expand form still seeds stage 0 from that same field.
+        let mut auto_expand = req(OutputFormat::Mp4);
+        auto_expand.model = "wan22-i2v-a14b:q5".into();
+        auto_expand.width = 832;
+        auto_expand.height = 480;
+        auto_expand.stages = Vec::new();
+        auto_expand.prompt = Some("a balloon lifts off".into());
+        auto_expand.total_frames = Some(106);
+        auto_expand.clip_frames = Some(53);
+        auto_expand.source_image = Some(vec![1, 2, 3]);
+        validate_and_normalize_chain_family(&config, &mut auto_expand).expect("admitted");
     }
 
     struct HandlerFailingExecutor;
