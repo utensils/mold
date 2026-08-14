@@ -64,7 +64,7 @@ impl ModelActivationError {
 
 pub fn model_access_capabilities() -> ModelAccessCapabilities {
     ModelAccessCapabilities {
-        restrictions: vec![minimax_h3_restriction()],
+        restrictions: Vec::new(),
     }
 }
 
@@ -83,7 +83,7 @@ fn minimax_h3_restriction() -> ModelAccessRestriction {
 /// The family is required when the public identifier is opaque (for example a
 /// `cv:` catalog ID). Callers that have resolved catalog metadata must pass it.
 pub fn model_activation(identifier: &str, family: Option<&str>) -> ModelActivation {
-    if cfg!(feature = "h3") && identifier.eq_ignore_ascii_case(minimax_h3::FL2VA_COMFY) {
+    if is_reviewed_minimax_h3_model(identifier) {
         ModelActivation::Available
     } else if is_minimax_h3_identity(identifier) || family.is_some_and(is_minimax_h3_identity) {
         ModelActivation::ComplianceGated
@@ -215,6 +215,12 @@ fn is_reviewed_minimax_h3_acquisition_identity(value: &str) -> bool {
     )
 }
 
+pub fn is_reviewed_minimax_h3_model(value: &str) -> bool {
+    let value = value.trim();
+    value.eq_ignore_ascii_case(minimax_h3::FL2VA_COMFY)
+        || value.eq_ignore_ascii_case(minimax_h3::REF2VA_COMFY)
+}
+
 fn is_minimax_h3_compact_alias(token: &str) -> bool {
     fn has_class_suffix(value: &str, prefix: &str) -> bool {
         value.strip_prefix(prefix).is_some_and(|suffix| {
@@ -293,9 +299,8 @@ mod tests {
 
     #[test]
     #[cfg(not(feature = "h3"))]
-    fn reviewed_h3_acquisition_does_not_activate_execution() {
+    fn reviewed_h3_models_are_ordinary_activation_identities() {
         for identifier in [
-            "minimax-h3",
             "minimax-h3-fl2va:comfy-pruned-int8",
             "minimax-h3-ref2va:comfy-pruned-int8",
         ] {
@@ -306,10 +311,15 @@ mod tests {
             );
             assert_eq!(
                 model_activation(identifier, Some("minimax-h3")),
-                ModelActivation::ComplianceGated,
+                ModelActivation::Available,
                 "{identifier}"
             );
         }
+
+        assert_eq!(
+            model_activation("minimax-h3", Some("minimax-h3")),
+            ModelActivation::ComplianceGated
+        );
 
         for unreviewed in [
             "hf:Comfy-Org/MiniMax-H3",
@@ -366,18 +376,9 @@ mod tests {
 
     #[test]
     #[cfg(not(feature = "h3"))]
-    fn capabilities_advertise_the_same_fail_closed_authority() {
+    fn capabilities_do_not_advertise_a_family_wide_h3_restriction() {
         let capabilities = model_access_capabilities();
-        assert_eq!(capabilities.restrictions.len(), 1);
-        let restriction = &capabilities.restrictions[0];
-        assert_eq!(restriction.code, MINIMAX_H3_AUTHORIZATION_REQUIRED);
-        assert_eq!(restriction.family, "minimax-h3");
-        assert_eq!(restriction.message, ModelActivationError.to_string());
-        assert_eq!(restriction.license_url, MINIMAX_H3_LICENSE_URL);
-        assert_eq!(
-            restriction.authorization_url,
-            MINIMAX_H3_AUTHORIZATION_ISSUE_URL
-        );
+        assert!(capabilities.restrictions.is_empty());
 
         let round_trip: ModelAccessCapabilities =
             serde_json::from_str(&serde_json::to_string(&capabilities).unwrap()).unwrap();
@@ -395,7 +396,6 @@ mod tests {
             "minimax-h3",
             "hf:Comfy-Org/MiniMax-H3",
             "MiniMaxH3Transformer3DModel",
-            minimax_h3::REF2VA_COMFY,
         ] {
             assert_eq!(
                 model_activation(identifier, Some("minimax-h3")),
@@ -403,7 +403,11 @@ mod tests {
                 "{identifier}"
             );
         }
-        assert_eq!(model_access_capabilities().restrictions.len(), 1);
+        assert_eq!(
+            model_activation(minimax_h3::REF2VA_COMFY, Some("minimax-h3")),
+            ModelActivation::Available
+        );
+        assert!(model_access_capabilities().restrictions.is_empty());
         assert_eq!(
             model_artifact_activation(
                 Path::new("/models/minimax-h3/transformer.safetensors"),

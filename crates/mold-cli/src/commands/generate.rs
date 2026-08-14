@@ -3617,15 +3617,8 @@ mod tests {
     #[test]
     fn h3_remote_auto_pull_respects_compiled_activation_policy() {
         let request = h3_request(mold_core::minimax_h3::FL2VA_COMFY);
-        let result = require_remote_auto_pull_activation(&request, &Config::default());
-        if cfg!(feature = "h3") {
-            result.expect("public H3 builds permit the canonical FL2VA auto-pull identity");
-        } else {
-            let error = result.expect_err("non-H3 builds must reject H3 auto-pull");
-            assert!(error
-                .to_string()
-                .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
-        }
+        require_remote_auto_pull_activation(&request, &Config::default())
+            .expect("the reviewed FL2VA model is an ordinary auto-pull identity");
     }
 
     #[tokio::test]

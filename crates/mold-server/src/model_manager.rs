@@ -251,16 +251,7 @@ fn retain_deliverable_generation_profiles(catalog: &mut Vec<ModelInfoExtended>) 
     catalog.retain(|entry| {
         entry.generation_profile.as_ref().is_none_or(|profile| {
             !profile.recipes.is_empty()
-                || (mold_core::require_model_acquisition(
-                    &entry.info.name,
-                    Some(&entry.info.family),
-                )
-                .is_ok()
-                    && mold_core::require_model_activation(
-                        &entry.info.name,
-                        Some(&entry.info.family),
-                    )
-                    .is_err())
+                || mold_core::model_policy::is_reviewed_minimax_h3_model(&entry.info.name)
         })
     });
 }

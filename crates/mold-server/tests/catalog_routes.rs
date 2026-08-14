@@ -52,14 +52,8 @@ async fn capabilities_includes_catalog_block() {
         .unwrap()
         .iter()
         .any(|family| family == "minimax-h3"));
-    // Catalog acquisition is public while runtime access remains an
-    // independently enforced capability.
-    assert!(v["model_access"]["restrictions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|restriction| {
-            restriction["family"] == "minimax-h3"
-                && restriction["code"] == mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
-        }));
+    // The reviewed compact H3 rows are ordinary model identities. Execution
+    // availability is advertised by the task/backend capability instead of a
+    // family-wide licensing restriction.
+    assert_eq!(v["model_access"]["restrictions"], serde_json::json!([]));
 }
