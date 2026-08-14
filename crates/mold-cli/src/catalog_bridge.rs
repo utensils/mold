@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cloud_activation_rejects_configured_family_and_path_without_catalog_io() {
+    async fn cloud_activation_respects_compiled_h3_policy_without_catalog_io() {
         let mut family_config = explicit_config("/tmp/mold-cloud-policy-family");
         family_config.models.insert(
             "renamed-model".into(),
@@ -318,12 +318,15 @@ mod tests {
                 ..Default::default()
             },
         );
-        let error = require_cloud_model_activation(&mut path_config, "renamed-model")
-            .await
-            .expect_err("configured H3 path must be rejected");
-        assert!(error
-            .to_string()
-            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        let path_result = require_cloud_model_activation(&mut path_config, "renamed-model").await;
+        if cfg!(feature = "h3") {
+            path_result.expect("public H3 builds accept trusted H3 artifact paths");
+        } else {
+            let error = path_result.expect_err("non-H3 builds must reject configured H3 paths");
+            assert!(error
+                .to_string()
+                .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        }
     }
 
     #[tokio::test]
