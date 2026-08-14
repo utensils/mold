@@ -23,6 +23,51 @@ const BLOCK_OUT_CHANNELS: [usize; 4] = [96, 192, 384, 384];
 const LATENT_CHANNELS: usize = 16;
 const NUM_RES_BLOCKS: usize = 2;
 
+/// Width the mid block runs at, in both the encoder and the decoder.
+///
+/// `QwenImageEncoder2d::new` and `QwenImageDecoder2d::new` both hand
+/// `BLOCK_OUT_CHANNELS[3]` to `QwenImageMidBlock2d::new`; this is that value,
+/// named so `qwen_image::pipeline`'s decode-workspace arithmetic can reach one
+/// authority instead of restating `384`.
+pub(crate) const VAE_MID_BLOCK_CHANNELS: usize = BLOCK_OUT_CHANNELS[3];
+
+/// Width of the decoder's last up-block, `norm_out`, and `conv_out` — the only
+/// stages that run at the full output resolution.
+pub(crate) const VAE_FINAL_BLOCK_CHANNELS: usize = BLOCK_OUT_CHANNELS[0];
+
+/// Input width of the upsampler that first reaches the full output resolution.
+///
+/// Up-block 2's `out_dim` is `BLOCK_OUT_CHANNELS[1]`, and `QwenImageUpBlock2d`
+/// gives its upsampler `in_dim = out_dim`, `out_dim = out_dim / 2`. Because
+/// `QwenImageUpsample2d::forward` upsamples *before* convolving, that
+/// `192 -> 96` 3x3 conv is the first one evaluated on the full pixel grid.
+pub(crate) const VAE_FULL_RES_UPSAMPLE_IN_CHANNELS: usize = BLOCK_OUT_CHANNELS[1];
+
+/// Elements in the VAE's 3x3 convolution kernels — the im2col column blow-up
+/// factor on top of the input channel count.
+pub(crate) const VAE_CONV_KERNEL_ELEMS: usize = 3 * 3;
+
+/// Spatial compression: every up-block except the last carries an upsampler,
+/// and each doubles both axes.
+pub(crate) const VAE_SPATIAL_COMPRESSION: usize = 1 << (BLOCK_OUT_CHANNELS.len() - 1);
+
+/// Query rows per pass in the mid-block attention.
+///
+/// The mid block attends over every latent token at once as a single head, so
+/// the score matrix is `[1, 1, N, N]` F32 with `N = (H/8) * (W/8)`. At a native
+/// 1328² render that is 27_556 tokens — a 3.0 GB buffer, materialised twice
+/// (scores, then the softmax of them), and the largest allocation the decode
+/// makes at *latent* resolution. Chunking the query axis replaces it with a
+/// `[chunk, N]` buffer (113 MB at 1328²) per pass and is arithmetically
+/// identical, because each chunk still softmaxes over the complete key axis.
+/// (The decode's true peak is a full-resolution im2col column buffer in the
+/// decoder's convolutions — see `qwen_vae_decode_workspace_bytes`.)
+///
+/// 1024 rows keeps the per-pass matmul large enough to stay compute-bound
+/// while capping the transient at ~1/27th of the full matrix at native size.
+/// `qwen_image::pipeline`'s decode-workspace reserve derives from this value.
+pub(crate) const VAE_ATTENTION_CHUNK_ROWS: usize = 1024;
+
 /// Load a 5D causal conv3d weight as a 2D conv by extracting the last temporal slice.
 ///
 /// For single-frame (T=1) inference with causal padding, only the last temporal kernel
@@ -128,13 +173,33 @@ impl Module for QwenImageAttentionBlock2d {
         let qkv = x.apply(&self.to_qkv)?;
         let qkv = qkv.reshape((b, 1, c * 3, h * w))?.transpose(2, 3)?;
         let chunks = qkv.chunk(3, D::Minus1)?;
-        let q = &chunks[0];
-        let k = &chunks[1];
-        let v = &chunks[2];
-        let scale = 1.0 / (c as f64).sqrt();
-        let attn = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
-        let attn = candle_nn::ops::softmax_last_dim(&attn)?;
-        let x = attn.matmul(v)?;
+        // `chunk` over a transposed tensor hands back strided views. Candle
+        // would copy them anyway — `flatten_to` reaches `Tensor::reshape`,
+        // whose non-contiguous arm allocates and `copy_strided_src`s — so this
+        // is not correctness, it just makes the copy explicit and local: one
+        // materialisation per operand, here, where the decode-workspace
+        // arithmetic in `qwen_image::pipeline` counts it, rather than three
+        // buried inside the attention helper (the same reason `wan`'s VAE
+        // `head()` closure calls `contiguous`).
+        let q = chunks[0].contiguous()?;
+        let k = chunks[1].contiguous()?;
+        let v = chunks[2].contiguous()?;
+        let scale = (1.0 / (c as f64).sqrt()) as f32;
+        let tokens = h * w;
+        // Route through `math_attention*` rather than `attention()`: a VAE
+        // reconstruction must not change depending on whether the binary was
+        // built with `flash-attn`.
+        let x = if tokens > VAE_ATTENTION_CHUNK_ROWS {
+            crate::attention::math_attention_with_chunk(
+                &q,
+                &k,
+                &v,
+                scale,
+                VAE_ATTENTION_CHUNK_ROWS,
+            )?
+        } else {
+            crate::attention::math_attention(&q, &k, &v, scale)?
+        };
         let x = x.transpose(2, 3)?.reshape((b, c, h, w))?;
         x.apply(&self.proj)? + residual
     }
@@ -563,12 +628,145 @@ mod tests {
     use candle_nn::{Module, VarBuilder};
     use std::collections::HashMap;
 
+    /// The decode-workspace constants `qwen_image::pipeline` reads are the
+    /// decoder's own channel plan, not numbers that happen to agree with it.
+    /// This re-derives them the way `QwenImageDecoder2d::new` does.
+    #[test]
+    fn decode_workspace_constants_track_the_decoder_channel_plan() {
+        let dims = [
+            BLOCK_OUT_CHANNELS[3],
+            BLOCK_OUT_CHANNELS[3],
+            BLOCK_OUT_CHANNELS[2],
+            BLOCK_OUT_CHANNELS[1],
+            BLOCK_OUT_CHANNELS[0],
+        ];
+        // `QwenImageDecoder2d::new` hands the mid block `BLOCK_OUT_CHANNELS[3]`.
+        assert_eq!(VAE_MID_BLOCK_CHANNELS, dims[0]);
+
+        // Up-blocks `0..len-1` carry an upsampler, so the last one is the first
+        // to run on the full pixel grid: `QwenImageUpBlock2d::new` gives it
+        // `in_dim = out_dim` and `out_dim = out_dim / 2`.
+        let last_upsampling_block = BLOCK_OUT_CHANNELS.len() - 2;
+        let upsampler_in = dims[last_upsampling_block + 1];
+        assert_eq!(VAE_FULL_RES_UPSAMPLE_IN_CHANNELS, upsampler_in);
+        assert_eq!(VAE_FINAL_BLOCK_CHANNELS, upsampler_in / 2);
+
+        // …and that is the width the last up-block and `conv_out` then run at.
+        assert_eq!(VAE_FINAL_BLOCK_CHANNELS, *dims.last().unwrap());
+
+        // One doubling per upsampler, and every up-block but the last has one.
+        let upsamplers = last_upsampling_block + 1;
+        assert_eq!(upsamplers, BLOCK_OUT_CHANNELS.len() - 1);
+        assert_eq!(VAE_SPATIAL_COMPRESSION, 1 << upsamplers);
+        assert_eq!(VAE_SPATIAL_COMPRESSION, 8);
+    }
+
     fn vb_from_tensors(tensors: Vec<(&str, Tensor)>) -> VarBuilder<'static> {
         let map = tensors
             .into_iter()
             .map(|(name, tensor)| (name.to_string(), tensor))
             .collect::<HashMap<_, _>>();
         VarBuilder::from_tensors(map, DType::F32, &Device::Cpu)
+    }
+
+    fn attention_block(dim: usize) -> QwenImageAttentionBlock2d {
+        let dev = Device::Cpu;
+        let vb = vb_from_tensors(vec![
+            (
+                "norm.gamma",
+                Tensor::ones((dim, 1, 1), DType::F32, &dev).unwrap(),
+            ),
+            (
+                "to_qkv.weight",
+                Tensor::randn(0f32, 0.5f32, (dim * 3, dim, 1, 1), &dev).unwrap(),
+            ),
+            (
+                "to_qkv.bias",
+                Tensor::randn(0f32, 0.5f32, dim * 3, &dev).unwrap(),
+            ),
+            (
+                "proj.weight",
+                Tensor::randn(0f32, 0.5f32, (dim, dim, 1, 1), &dev).unwrap(),
+            ),
+            ("proj.bias", Tensor::randn(0f32, 0.5f32, dim, &dev).unwrap()),
+        ]);
+        QwenImageAttentionBlock2d::new(dim, vb).unwrap()
+    }
+
+    /// The pre-chunking mid-block attention, inline: one full `[1, 1, N, N]`
+    /// score matrix, softmax, one matmul. This is the numerical contract the
+    /// chunked forward has to preserve exactly.
+    fn reference_attention_forward(block: &QwenImageAttentionBlock2d, x: &Tensor) -> Tensor {
+        let residual = x;
+        let (b, c, h, w) = x.dims4().unwrap();
+        let x = x.apply(&block.norm).unwrap();
+        let qkv = x.apply(&block.to_qkv).unwrap();
+        let qkv = qkv
+            .reshape((b, 1, c * 3, h * w))
+            .unwrap()
+            .transpose(2, 3)
+            .unwrap();
+        let chunks = qkv.chunk(3, D::Minus1).unwrap();
+        let (q, k, v) = (&chunks[0], &chunks[1], &chunks[2]);
+        let scale = 1.0 / (c as f64).sqrt();
+        let attn = (q.matmul(&k.transpose(2, 3).unwrap()).unwrap() * scale).unwrap();
+        let attn = candle_nn::ops::softmax_last_dim(&attn).unwrap();
+        let x = attn.matmul(v).unwrap();
+        let x = x
+            .transpose(2, 3)
+            .unwrap()
+            .reshape((b, c, h, w))
+            .unwrap()
+            .apply(&block.proj)
+            .unwrap();
+        (x + residual).unwrap()
+    }
+
+    fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
+        (a - b)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
+    }
+
+    /// A latent past `VAE_ATTENTION_CHUNK_ROWS` takes the chunked path, which
+    /// never materialises the full score matrix. It must still be the same
+    /// arithmetic as the single-pass version it replaced.
+    #[test]
+    fn mid_block_attention_chunked_matches_full_score_matrix() {
+        // 33 x 33 = 1089 tokens, one row past the 1024-row chunk.
+        let side = 33;
+        assert!(side * side > VAE_ATTENTION_CHUNK_ROWS);
+        let block = attention_block(8);
+        let x = Tensor::randn(0f32, 1.0f32, (1, 8, side, side), &Device::Cpu).unwrap();
+
+        let got = block.forward(&x).unwrap();
+        let want = reference_attention_forward(&block, &x);
+
+        assert_eq!(got.dims(), want.dims());
+        assert!(
+            max_abs_diff(&got, &want) < 1e-5,
+            "chunked mid-block attention diverged from the full score matrix"
+        );
+    }
+
+    /// Small latents stay on the single-pass path; the same equality holds.
+    #[test]
+    fn mid_block_attention_small_latent_matches_full_score_matrix() {
+        const { assert!(6 * 6 <= VAE_ATTENTION_CHUNK_ROWS) };
+        let block = attention_block(8);
+        let x = Tensor::randn(0f32, 1.0f32, (1, 8, 6, 6), &Device::Cpu).unwrap();
+
+        let got = block.forward(&x).unwrap();
+        let want = reference_attention_forward(&block, &x);
+
+        assert!(max_abs_diff(&got, &want) < 1e-5);
     }
 
     #[test]
