@@ -618,6 +618,50 @@ pub fn validate_h3_qwen_nvfp4_awq_schema(
     })
 }
 
+/// Process-lifetime record of Qwen artifacts that already passed the pinned
+/// full-content SHA-256 authentication, keyed by canonical path and reusable
+/// only while the opened-file metadata identity (dev/inode/size/mtime/ctime/
+/// nlink) is byte-for-byte unchanged. Every admission still runs both
+/// revalidation identity checks; only the redundant multi-gigabyte read is
+/// skipped, exactly like the private-qualification digest cache.
+static FULL_AUTHENTICATION_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, FileIdentity>>,
+> = std::sync::OnceLock::new();
+
+fn lookup_full_authentication(path: &Path, identity: &FileIdentity) -> bool {
+    FULL_AUTHENTICATION_CACHE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .map(|cache| cache.get(path) == Some(identity))
+        .unwrap_or(false)
+}
+
+fn store_full_authentication(path: &Path, identity: FileIdentity) {
+    if let Ok(mut cache) = FULL_AUTHENTICATION_CACHE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+    {
+        cache.insert(path.to_path_buf(), identity);
+    }
+}
+
+/// Per-path single-flight so concurrent cold authentications share one full
+/// read instead of duplicating it. A panicking winner stores no cache entry,
+/// so the next holder simply re-reads.
+static FULL_AUTHENTICATION_FLIGHTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>>,
+> = std::sync::OnceLock::new();
+
+fn full_authentication_flight(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let flights = FULL_AUTHENTICATION_FLIGHTS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut map = match flights.lock() {
+        Ok(map) => map,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    map.entry(path.to_path_buf()).or_default().clone()
+}
+
 fn parse_dtype(dtype: &str) -> Result<H3QwenTensorDType, H3QwenNvfp4AwqError> {
     match dtype {
         "BF16" => Ok(H3QwenTensorDType::Bf16),
@@ -727,6 +771,16 @@ impl OpenedH3QwenNvfp4AwqArtifact {
     ) -> Result<(), H3QwenNvfp4AwqError> {
         const READ_CHUNK_BYTES: usize = 1024 * 1024;
         self.revalidate("before full artifact authentication")?;
+        let flight = full_authentication_flight(&self.path);
+        let _flight_guard = match flight.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if lookup_full_authentication(&self.path, &self.identity) {
+            checkpoint(self.identity.len, self.identity.len)?;
+            self.revalidate("after full artifact authentication")?;
+            return Ok(());
+        }
         self.file
             .seek(SeekFrom::Start(0))
             .map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
@@ -751,6 +805,7 @@ impl OpenedH3QwenNvfp4AwqArtifact {
                 "artifact SHA-256 {actual}, expected {H3_QWEN_NVFP4_AWQ_SHA256}"
             )));
         }
+        store_full_authentication(&self.path, self.identity.clone());
         Ok(())
     }
 

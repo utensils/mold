@@ -575,7 +575,7 @@ impl ComponentLoadFacts {
 pub(crate) struct H3AuthenticatedComfyVaeAuthority {
     plan: FrozenH3ComfyVaeLoadPlan,
     opened: Vec<OpenedArtifact>,
-    staged: StagedWeights,
+    staged: std::sync::Arc<StagedWeights>,
     visual_config: Vec<u8>,
     audio_config: Vec<u8>,
     visual_facts: ComponentLoadFacts,
@@ -780,8 +780,7 @@ pub(crate) fn open_h3_comfy_vae_authority(
     let audio_config = opened_for_mut(&mut opened, H3ComfyVaeArtifactRole::AudioConfig)?
         .read_authenticated_config(observer)?;
     let required_staging_bytes = required_staging_bytes(plan)?;
-    ensure_staging_capacity(plan, required_staging_bytes)?;
-    let staged = StagedWeights::create(plan, &mut opened, observer)?;
+    let staged = staged_weights_for_plan(plan, &mut opened, observer)?;
     for artifact in &opened {
         artifact.validate_source("before VAE pre-allocation inspection")?;
     }
@@ -1775,6 +1774,89 @@ struct StagedWeight {
     file: File,
 }
 
+/// Process-lifetime reuse of the private authenticated staging copies.
+///
+/// Every production VAE open previously copied both weight files (~5.8 GB)
+/// into a fresh tempdir under the staging root — and admission opens the VAE
+/// once per candidate device, so a single placement preview on a multi-GPU
+/// host paid several full copies. A staged pair is reused only while BOTH the
+/// opened source metadata identities (the same identities `stage_weight`'s
+/// own held-descriptor fences trust) are byte-for-byte unchanged AND the
+/// staged files themselves still validate; any drift evicts and re-stages.
+/// The cross-attempt validation identity deliberately excludes staging facts,
+/// so reuse cannot leak between evidence domains. Per-root single-flight
+/// keeps concurrent cold opens from duplicating the copy.
+struct CachedStagedWeights {
+    visual_source: FileIdentity,
+    audio_source: FileIdentity,
+    staged: std::sync::Arc<StagedWeights>,
+}
+
+static STAGED_WEIGHTS_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, CachedStagedWeights>>,
+> = std::sync::OnceLock::new();
+
+static STAGING_FLIGHTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>>,
+> = std::sync::OnceLock::new();
+
+fn staging_flight(staging_root: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let flights =
+        STAGING_FLIGHTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut map = match flights.lock() {
+        Ok(map) => map,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    map.entry(staging_root.to_path_buf()).or_default().clone()
+}
+
+fn staged_weights_for_plan(
+    plan: &FrozenH3ComfyVaeLoadPlan,
+    opened: &mut [OpenedArtifact],
+    observer: &mut dyn H3ComfyVaeLoadObserver,
+) -> LoadResult<std::sync::Arc<StagedWeights>> {
+    let visual_source = opened_for_mut(opened, H3ComfyVaeArtifactRole::VisualWeights)?
+        .identity
+        .clone();
+    let audio_source = opened_for_mut(opened, H3ComfyVaeArtifactRole::AudioWeights)?
+        .identity
+        .clone();
+    let flight = staging_flight(&plan.staging_root);
+    let _flight_guard = match flight.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let cache = STAGED_WEIGHTS_CACHE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(mut entries) = cache.lock() {
+        if let Some(entry) = entries.get(&plan.staging_root) {
+            if entry.visual_source == visual_source
+                && entry.audio_source == audio_source
+                && entry
+                    .staged
+                    .validate("while reusing the cached private stage")
+                    .is_ok()
+            {
+                return Ok(entry.staged.clone());
+            }
+            entries.remove(&plan.staging_root);
+        }
+    }
+    ensure_staging_capacity(plan, required_staging_bytes(plan)?)?;
+    let staged = std::sync::Arc::new(StagedWeights::create(plan, opened, observer)?);
+    if let Ok(mut entries) = cache.lock() {
+        entries.insert(
+            plan.staging_root.clone(),
+            CachedStagedWeights {
+                visual_source,
+                audio_source,
+                staged: staged.clone(),
+            },
+        );
+    }
+    Ok(staged)
+}
+
 impl StagedWeights {
     fn create(
         plan: &FrozenH3ComfyVaeLoadPlan,
@@ -2691,7 +2773,8 @@ mod tests {
             .unwrap()
             .read_authenticated_config(&mut observer)
             .unwrap();
-        let staged = StagedWeights::create(plan, &mut opened, &mut observer).unwrap();
+        let staged =
+            std::sync::Arc::new(StagedWeights::create(plan, &mut opened, &mut observer).unwrap());
         let (_, visual_facts) = fake_load(
             H3ComfyVaeArtifactRole::VisualWeights,
             staged.path(H3ComfyVaeArtifactRole::VisualWeights).unwrap(),
@@ -2910,6 +2993,65 @@ mod tests {
         std::fs::write(&paths.visual_weights, b"replacement").unwrap();
         assert!(!bundle.artifact_lease.is_active());
         assert_eq!(bundle.visual_vae.decode(3), b'v'.wrapping_add(3));
+    }
+
+    #[test]
+    fn staged_weights_are_reused_across_opens_until_sources_drift() {
+        fn reopen(
+            plan: &FrozenH3ComfyVaeLoadPlan,
+            observer: &mut RecordingObserver,
+        ) -> Vec<OpenedArtifact> {
+            H3ComfyVaeArtifactRole::ALL
+                .into_iter()
+                .map(|role| {
+                    OpenedArtifact::open(
+                        plan.artifact(role).unwrap().clone(),
+                        plan.paths.get(role),
+                        observer,
+                    )
+                    .unwrap()
+                })
+                .collect()
+        }
+        fn stage_events(observer: &RecordingObserver) -> usize {
+            observer
+                .events
+                .iter()
+                .filter(|event| event.phase == H3ComfyVaeLoadPhase::Stage)
+                .count()
+        }
+
+        let source = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let (paths, artifacts) = write_artifacts(source.path(), b"\x08visual");
+        let plan = FrozenH3ComfyVaeLoadPlan::synthetic(
+            paths.clone(),
+            staging.path().to_path_buf(),
+            artifacts,
+        )
+        .unwrap();
+
+        let mut first_observer = RecordingObserver::default();
+        let mut opened = reopen(&plan, &mut first_observer);
+        let first = staged_weights_for_plan(&plan, &mut opened, &mut first_observer).unwrap();
+        assert!(stage_events(&first_observer) > 0);
+
+        // A second open with unchanged sources reuses the exact staged pair
+        // without copying a byte.
+        let mut second_observer = RecordingObserver::default();
+        let mut reopened = reopen(&plan, &mut second_observer);
+        let second = staged_weights_for_plan(&plan, &mut reopened, &mut second_observer).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert_eq!(stage_events(&second_observer), 0);
+
+        // Any source drift — here a rewrite bumping mtime/ctime with identical
+        // bytes — evicts the cached stage and re-stages.
+        std::fs::write(&paths.visual_weights, b"\x08visual").unwrap();
+        let mut third_observer = RecordingObserver::default();
+        let mut redrifted = reopen(&plan, &mut third_observer);
+        let third = staged_weights_for_plan(&plan, &mut redrifted, &mut third_observer).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&second, &third));
+        assert!(stage_events(&third_observer) > 0);
     }
 
     #[test]
