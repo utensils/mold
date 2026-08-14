@@ -1562,6 +1562,28 @@ impl AutoencoderKLLtx2Video {
             });
             start = end;
         }
+
+        // Each chunk widens its input by the decoder's causal context, and that
+        // context is a property of the decoder's depth rather than of the clip
+        // — the 22B decoder's is 84 latent frames, while a 97-frame clip is
+        // only 13. When it is the wider of the two, every chunk's window
+        // saturates to the whole clip: the peak this exists to bound is
+        // unchanged, and the decoder runs once per chunk over the entire thing.
+        // Decode once instead. The single-chunk path is literally
+        // `decoder.forward(latents)`, so the output is unchanged.
+        if chunks.len() > 1
+            && chunks
+                .iter()
+                .any(|chunk| chunk.input_end - chunk.input_start >= latent_frames)
+        {
+            return Ok(vec![TemporalDecodeChunk {
+                input_start: 0,
+                input_end: latent_frames,
+                output_start: 0,
+                output_end: temporal_output_frames_for_latents(latent_frames, temporal_scale),
+            }]);
+        }
+
         Ok(chunks)
     }
 
@@ -2305,18 +2327,19 @@ mod tests {
         assert_eq!(video.dims5().unwrap(), (1, 3, 3, 8, 8));
     }
 
-    #[test]
-    fn autoencoder_framewise_decode_matches_full_decode_across_chunk_boundaries() {
-        let config = AutoencoderKLLtx2VideoConfig {
+    /// A decoder shallow enough that its causal context is narrower than the
+    /// clip, so temporal chunking genuinely engages. The deeper config used
+    /// elsewhere has a context wider than any test-sized clip, which collapses
+    /// every chunk's input window onto the whole thing — the exact condition
+    /// `temporal_chunking_collapses_when_its_context_covers_the_whole_clip`
+    /// covers, and useless for testing chunk boundaries.
+    fn shallow_chunkable_config() -> AutoencoderKLLtx2VideoConfig {
+        AutoencoderKLLtx2VideoConfig {
             in_channels: 3,
             out_channels: 3,
             latent_channels: 4,
             encoder_blocks: vec![VaeBlockConfig::res_x(1)],
-            decoder_blocks: vec![
-                VaeBlockConfig::res_x(1),
-                VaeBlockConfig::compress("compress_all", 2, true),
-                VaeBlockConfig::res_x(1),
-            ],
+            decoder_blocks: vec![VaeBlockConfig::compress("compress_all", 2, true)],
             patch_size: 1,
             resnet_eps: 1e-6,
             scaling_factor: 1.0,
@@ -2331,7 +2354,83 @@ mod tests {
             decoder_causal: true,
             latents_mean: vec![0.0; 4],
             latents_std: vec![1.0; 4],
-        };
+        }
+    }
+
+    /// Temporal chunking exists to bound how many latent frames are decoded at
+    /// once. Each chunk widens its input by the decoder's causal context, and
+    /// that context is a property of the decoder's depth, not of the clip: the
+    /// 22B decoder's is 84 latent frames while a 97-frame clip is only 13. Every
+    /// chunk's window therefore saturated to the entire clip, so the peak was
+    /// never bounded and the decoder ran once per chunk over the whole thing —
+    /// four full decodes where one was needed.
+    ///
+    /// The old regression test could not catch it: its config had the same
+    /// context-exceeds-clip property, so it asserted that one full decode
+    /// equals three full decodes.
+    #[test]
+    fn temporal_chunking_collapses_when_its_context_covers_the_whole_clip() {
+        let config = shallow_chunkable_config();
+        let mut vae =
+            AutoencoderKLLtx2Video::new(config.clone(), tiny_autoencoder_var_builder(&config))
+                .unwrap();
+        vae.use_framewise_decoding = true;
+
+        let context = vae.decoder_temporal_context_latent_frames();
+        let latent_frames = context / 2;
+        assert!(
+            context >= latent_frames,
+            "test needs a clip shorter than the decoder's context"
+        );
+
+        let chunks = vae.temporal_decode_chunk_plan(latent_frames, 2).unwrap();
+        assert_eq!(
+            chunks.len(),
+            1,
+            "a plan whose chunks each need the whole clip must decode once, not {} times",
+            chunks.len()
+        );
+        assert_eq!(chunks[0].input_start, 0);
+        assert_eq!(chunks[0].input_end, latent_frames);
+    }
+
+    /// Where chunking does bound the window it must stay engaged — the collapse
+    /// above is a fallback for a degenerate plan, not a quiet disabling of the
+    /// feature.
+    #[test]
+    fn temporal_chunking_stays_engaged_when_it_actually_bounds_the_window() {
+        let config = shallow_chunkable_config();
+        let mut vae =
+            AutoencoderKLLtx2Video::new(config.clone(), tiny_autoencoder_var_builder(&config))
+                .unwrap();
+        vae.use_framewise_decoding = true;
+
+        let context = vae.decoder_temporal_context_latent_frames();
+        let latent_frames = context * 3 + 8;
+        let chunks = vae.temporal_decode_chunk_plan(latent_frames, 4).unwrap();
+
+        assert!(chunks.len() > 1, "chunking should engage on a long clip");
+        for chunk in &chunks {
+            assert!(
+                chunk.input_end - chunk.input_start < latent_frames,
+                "chunk {}..{} spans the whole {latent_frames}-frame clip, so it bounds nothing",
+                chunk.input_start,
+                chunk.input_end,
+            );
+        }
+    }
+
+    /// Chunked and unchunked decoding must agree across every seam.
+    ///
+    /// This needs a clip long enough that chunking actually engages — the
+    /// config it used to carry had a causal context wider than its nine-frame
+    /// clip, so all three "chunks" decoded the whole thing and the assertion
+    /// compared one full decode against three identical full decodes. It could
+    /// not have failed, and it did not notice the planner running the decoder
+    /// four times over a real clip.
+    #[test]
+    fn autoencoder_framewise_decode_matches_full_decode_across_chunk_boundaries() {
+        let config = shallow_chunkable_config();
         let full =
             AutoencoderKLLtx2Video::new(config.clone(), patterned_autoencoder_var_builder(&config))
                 .unwrap();
@@ -2339,13 +2438,26 @@ mod tests {
             AutoencoderKLLtx2Video::new(config.clone(), patterned_autoencoder_var_builder(&config))
                 .unwrap();
         chunked.use_framewise_decoding = true;
-        let values = (0..(4 * 9 * 3 * 3))
+
+        let latent_frames = chunked.decoder_temporal_context_latent_frames() * 3 + 8;
+        let values = (0..(4 * latent_frames * 3 * 3))
             .map(|idx| ((idx % 23) as f32 - 11.0) / 13.0)
             .collect::<Vec<_>>();
-        let latents = Tensor::from_vec(values, (1, 4, 9, 3, 3), &Device::Cpu).unwrap();
+        let latents = Tensor::from_vec(values, (1, 4, latent_frames, 3, 3), &Device::Cpu).unwrap();
 
-        let chunks = chunked.temporal_decode_chunk_plan(9, 4).unwrap();
-        assert_eq!(chunks.len(), 3);
+        let chunks = chunked
+            .temporal_decode_chunk_plan(latent_frames, 4)
+            .unwrap();
+        assert!(
+            chunks.len() > 1,
+            "the comparison is vacuous unless chunking engages"
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.input_start > 0 || chunk.input_end < latent_frames),
+            "at least one chunk must read less than the whole clip"
+        );
 
         let (_full_output, full_video) = full.decode(&latents, None, false, false).unwrap();
         let (_chunked_output, chunked_video) =
