@@ -121,6 +121,15 @@ other run, including img2img on an image family, still errors with
 | `--device-transformer <DEV>`, `--device-vae <DEV>`                                           | Advanced family placement overrides; accepts the same device forms                                                |
 | `--device-t5 <DEV>`, `--device-clip-l <DEV>`, `--device-clip-g <DEV>`, `--device-qwen <DEV>` | Per-encoder placement overrides                                                                                   |
 
+For video, the `--output` extension outranks the family's container default:
+`mold run <video-model> "…" -o clip.gif` writes a real GIF even where the family
+would have picked MP4. An extension this binary cannot encode — `.mp4` without
+the `mp4` feature, `.webp` without `webp` — is refused before any weight is read
+rather than filled with another container's bytes, as is a raster or audio
+extension on a video render, and an explicit `--format` that disagrees with the
+filename is reported instead of silently overriding it. `--output -` claims no
+extension, so stdout keeps whatever container the family resolved.
+
 ### Qwen Family Encoder Controls
 
 - `--qwen2-variant auto|bf16|q8|q6|q5|q4|q3|q2`

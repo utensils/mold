@@ -83,6 +83,14 @@ frame count and rate from the reference clip. Wan takes 4n+1 frame counts
 (49, 53, 81, ...) with dimensions in multiples of 16, except `wan22-ti2v-5b`,
 whose 2.2 VAE requires multiples of 32.
 
+The `--output` extension outranks those family defaults: `mold run … -o clip.gif`
+writes a real GIF even where the family would have picked MP4. An extension this
+binary cannot encode — `.mp4` without the `mp4` feature, `.webp` without `webp` —
+is refused before any weight is read rather than filled with another container's
+bytes, and an explicit `--format` that disagrees with the filename is reported
+instead of silently overriding it. `--output -` writes to stdout and claims no
+extension, so it keeps whatever container the family resolved.
+
 The recommended LTX default today is `ltx-video-0.9.6-distilled:bf16`. The
 `0.9.8` family is available, pulls its spatial upscaler asset, and now runs
 the full multiscale refinement path.

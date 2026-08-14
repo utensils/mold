@@ -428,6 +428,20 @@ pub async fn run_chain(
         );
     }
 
+    // A chain's container comes from the script (or the sugar's MP4 default)
+    // and has never seen the filename, so the stitched clip could be saved
+    // under an extension naming a different container. Reconcile the two
+    // before the first stage renders, exactly as the single-clip path does
+    // (#1050).
+    let mut req = req;
+    req.output_format = super::generate::reconcile_video_format_with_output_extension(
+        req.output_format,
+        output.as_deref(),
+        false,
+        super::generate::delivery_capabilities_for_run(local),
+    )
+    .map_err(anyhow::Error::msg)?;
+
     let stage_count = req.stages.len() as u32;
     let estimated_total = req.estimated_total_frames();
 

@@ -302,6 +302,8 @@ mold run ltx-video-0.9.6-distilled:bf16 "a waterfall" --frames 9 --format webp -
 
 **Output formats:** `apng` (default, lossless, metadata), `gif` (256 colors), `mp4` (H.264, requires `mp4` feature), `webp` (requires `webp` feature), `wav` (16-bit PCM, LTX-2 `--pipeline t2a` only).
 
+**`--output` extensions are authoritative for video.** A `.gif` / `.png` / `.apng` / `.webp` / `.mp4` name outranks the family's container default, and an extension this build cannot encode (`.mp4` without the `mp4` feature, `.webp` without `webp`) is refused before any weight is read instead of being written with another container's bytes. A raster or audio extension on a video render is refused the same way, an explicit `--format` that disagrees with the filename is reported rather than silently applied, and `--output -` (stdout) claims no extension so it keeps the resolved container.
+
 ### Joint Audio-Video Generation (LTX-2 / LTX-2.3)
 
 Generate synchronized MP4 clips with the LTX-2 family. This family defaults to
