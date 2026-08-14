@@ -47,6 +47,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   architectures, Metal, and CPU execution unavailable until those runtimes are
   implemented and qualified.
 
+||||||| parent of 15146993 (docs(changelog): record the Wan chain correctness fixes)
+- **Fix chained Wan renders silently losing sixteen frames at every seam.** `--motion-tail` defaults to LTX-2's 17 for every family, and `17 % 4 == 1` sits on Wan's own `4k+1` grid — so a script-authored or repeated-`--prompt` Wan chain validated clean and then discarded sixteen good frames at each Smooth boundary, because the engine seeds a continuation from one frame while the stitch drops seventeen. Only the server normalized this; `mold run --script`, `mold chain validate`, `--dry-run`, and the multi-prompt sugar path now read the same `mold-core` authority, applied before validation so a short clip is not rejected for a seam that was never going to render.
+
+- **Fix `mold run <model> --prompt A --prompt B` rendering every family with LTX-2's recipe.** The multi-prompt sugar path accepts any model but hardcoded 1216x704, 24 fps, 8 steps, and guidance 3.0, so `wan22-t2v-a14b:q5` was encoded at 24 fps instead of its own 16 and denoised for 8 steps against a 4-step Lightning recipe, which renders noise. Geometry, timing, and the denoise recipe now come from the selected model, as they already did for a single shot.
+
+- **Fix Discord `/sequence` rejecting Wan's own clip defaults.** The command validated an `8n+1` grid with a minimum of 25, so 53 — the A14B routing default — was refused before submission while 81/97/121 passed only by coincidence. Grid, floor, cap, per-clip default, and the seam now come from the model's family and checkpoint. `/sequence` also stops offering image-required Wan I2V checkpoints it has no image input to seed.
+
+- **Fix installed `cv:` / `hf:` Wan checkpoints being refused from every chain path.** `normalise` classified models from the built-in manifest alone, so a catalog checkpoint fell back to the LTX `8k+1` grid and its 53-frame stages were rejected as off-grid. `POST /api/generate/chain/validate` separately read a different config than submission did, so Validate plan and the submit that followed disagreed about those same models.
+
+- **Fix a Wan I2V sequence being admitted with no opening image.** Chain admission never applied the per-checkpoint source-image contract, so an image-required checkpoint failed only after the text encode and both expert loads were paid for, and a text-to-video checkpoint accepted an opening image it has no channel for. Both are now refused at admission.
+
 - Fix private MiniMax H3 terminal publication to compare the MP4 container's
   frame duration with ceiling millisecond rounding, matching the retained
   124-frame, 24 fps mux result instead of rejecting it one millisecond early;

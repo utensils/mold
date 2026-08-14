@@ -139,6 +139,51 @@ pub fn materialize_extend_overlap_frames(req: &mut GenerateRequest, family: Opti
     }
 }
 
+/// The motion-tail overlap a chain seam actually renders with.
+///
+/// The tail is a property of the family's carryover and, for wan, of the
+/// selected *checkpoint's* conditioning contract — never of what the caller
+/// asked for. Wan has no latent motion tail: its seam re-renders exactly the
+/// one frame the continuation was seeded with, and only an image-conditioned
+/// checkpoint can be seeded at all. LTX-Video has no img2vid path, so its
+/// Smooth boundaries collapse to clean concatenation.
+///
+/// This lives here, beside [`WAN_HANDOFF_DUPLICATED_FRAMES`], because the
+/// server had been the only caller that normalized it (#936). The forced-local
+/// `--script` path, `mold chain validate`, and `--dry-run` all ran the
+/// family-generic `ChainRequest::normalise` and passed the requested tail
+/// through untouched — and `17 % 4 == 1`, so LTX-2's default clears wan's own
+/// `4k+1` grid check and then discards sixteen good frames at every Smooth
+/// seam, with correct-looking validation output (#783).
+///
+/// `source_image` is the resolved contract — probed from the checkpoint's own
+/// headers where possible, the manifest as the cold fallback. `None` is
+/// "unknown", which takes the conservative path rather than assuming a
+/// handoff. Families with a real latent window keep what the caller asked for.
+pub fn chain_motion_tail_frames_for_family(
+    family: &str,
+    source_image: Option<crate::SourceImageCapability>,
+    requested: u32,
+) -> u32 {
+    match family {
+        "wan" => {
+            let carries_context = source_image.is_some_and(|capability| {
+                matches!(
+                    capability,
+                    crate::SourceImageCapability::Required | crate::SourceImageCapability::Optional
+                )
+            });
+            if carries_context {
+                WAN_HANDOFF_DUPLICATED_FRAMES
+            } else {
+                0
+            }
+        }
+        "ltx-video" => 0,
+        _ => requested,
+    }
+}
+
 /// Inline `extend_video` payloads share the source-video body budget.
 pub const MAX_INLINE_EXTEND_VIDEO_BYTES: usize = MAX_INLINE_SOURCE_VIDEO_BYTES;
 
@@ -4664,6 +4709,54 @@ mod tests {
             req.effective_extend_overlap_frames_for_family(Some("wan")),
             9
         );
+    }
+
+    /// A chain seam's carryover is the family's, never the caller's (#783).
+    ///
+    /// The server has normalized this since #936, but only the server: a
+    /// forced-local `--script` run, `mold chain validate`, and `--dry-run`
+    /// all called the family-generic `normalise()` and passed the requested
+    /// tail straight through. `17 % 4 == 1`, so LTX-2's default clears wan's
+    /// own `4k+1` grid check and then silently discards sixteen good frames
+    /// at every Smooth seam. One authority so the two cannot drift.
+    #[test]
+    fn chain_motion_tail_follows_the_checkpoints_carryover_not_the_request() {
+        use crate::SourceImageCapability::{Optional, Required, Unsupported};
+
+        // Wan's seam re-renders exactly the one frame it was seeded with, and
+        // only an image-conditioned checkpoint can be seeded at all.
+        for capability in [Required, Optional] {
+            assert_eq!(
+                chain_motion_tail_frames_for_family("wan", Some(capability), 17),
+                WAN_HANDOFF_DUPLICATED_FRAMES,
+                "{capability:?} carries context, so the tail is one frame"
+            );
+        }
+        assert_eq!(
+            chain_motion_tail_frames_for_family("wan", Some(Unsupported), 17),
+            0,
+            "a text-to-video checkpoint has no channel to be seeded through"
+        );
+        // Unclassified is "unknown", never an assumed handoff.
+        assert_eq!(chain_motion_tail_frames_for_family("wan", None, 17), 0);
+
+        // An already-correct request is left exactly as it is.
+        assert_eq!(
+            chain_motion_tail_frames_for_family("wan", Some(Required), 1),
+            WAN_HANDOFF_DUPLICATED_FRAMES
+        );
+
+        // LTX-Video has no img2vid path, so its Smooth seams concatenate.
+        assert_eq!(
+            chain_motion_tail_frames_for_family("ltx-video", None, 17),
+            0
+        );
+
+        // Every other family keeps what the caller asked for — LTX-2's tail
+        // is a real latent window and the request owns it.
+        assert_eq!(chain_motion_tail_frames_for_family("ltx2", None, 17), 17);
+        assert_eq!(chain_motion_tail_frames_for_family("ltx2", None, 9), 9);
+        assert_eq!(chain_motion_tail_frames_for_family("", None, 17), 17);
     }
 
     /// Saved provenance has to name the overlap that actually rendered.
