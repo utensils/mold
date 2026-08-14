@@ -60,6 +60,7 @@ vi.mock("../lib/api/models", async (importOriginal) => ({
 }));
 
 import HostDetailView from "./HostDetailView.vue";
+import { authenticatedMiniMaxH3Capabilities } from "@studio/lib/minimaxH3Inventory.testFixtures";
 import { useComposerStore } from "../stores/composer";
 import { useConnectionStore } from "../stores/connection";
 import { useHostModelsStore } from "../stores/hostModels";
@@ -553,6 +554,21 @@ describe("HostDetailView telemetry", () => {
     expect(stream.options.signal.aborted).toBe(false);
     wrapper.unmount();
     expect(stream.options.signal.aborted).toBe(true);
+  });
+});
+
+describe("HostDetailView H3 placement", () => {
+  it("renders the H3 capability panel below the primary instrument sections", async () => {
+    const wrapper = await mountView();
+    mountedHosts.capabilities[REMOTE_ID] =
+      authenticatedMiniMaxH3Capabilities() as unknown as ServerCapabilities;
+    await flushPromises();
+
+    const html = wrapper.html();
+    const h3At = html.indexOf('data-test="h3-inventory"');
+    expect(h3At).toBeGreaterThan(-1);
+    expect(html.indexOf("TELEMETRY")).toBeLessThan(h3At);
+    expect(html.indexOf("INSTALLED MODELS")).toBeLessThan(h3At);
   });
 });
 

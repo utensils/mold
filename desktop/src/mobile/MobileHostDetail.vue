@@ -598,8 +598,6 @@ onBeforeUnmount(() => {
     </div>
 
     <template v-if="status">
-      <MinimaxH3InventoryPanel :hosts="h3Host" heading="H3 on this machine" />
-
       <section class="mobile-detail-section" aria-labelledby="host-telemetry-title">
         <div class="mobile-section-head">
           <h2 id="host-telemetry-title">Telemetry</h2>
@@ -819,6 +817,9 @@ onBeforeUnmount(() => {
         </ul>
         <p v-else class="mobile-empty-note">No installed models reported.</p>
       </section>
+
+      <!-- Specialized capability detail reads below the live instruments. -->
+      <MinimaxH3InventoryPanel :hosts="h3Host" heading="H3 on this machine" />
     </template>
 
     <section class="mobile-danger-zone">

@@ -541,8 +541,6 @@ async function forget() {
           Unreachable — reconnect below or check the server.
         </p>
 
-        <MinimaxH3InventoryPanel :hosts="h3Host" heading="H3 on this machine" />
-
         <!-- Two-column instrument layout (stacks below on narrow widths). -->
         <div class="mt-6 flex flex-col gap-5 lg:flex-row lg:items-start">
           <!-- Left: telemetry, downloads, queue -->
@@ -840,6 +838,9 @@ async function forget() {
             </div>
           </div>
         </div>
+
+        <!-- Specialized capability detail reads below the live instruments. -->
+        <MinimaxH3InventoryPanel :hosts="h3Host" heading="H3 on this machine" />
 
         <!-- One consistent model-detail drawer, shared with the catalog. -->
         <CatalogDetailDrawer

@@ -554,8 +554,6 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <MinimaxH3InventoryPanel :hosts="h3Host" heading="H3 on this machine" />
-
       <div class="md-grid" :data-dimmed="offline ? 'true' : undefined">
         <CardSurface class="md-telemetry">
           <div class="md-label">Telemetry</div>
@@ -735,6 +733,9 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </CardSurface>
+
+      <!-- Specialized capability detail reads below the live instruments. -->
+      <MinimaxH3InventoryPanel :hosts="h3Host" heading="H3 on this machine" />
     </template>
   </div>
 </template>
