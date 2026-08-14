@@ -39,8 +39,10 @@
 #   --probe-distilled Also run each installed distilled model TWICE against the
 #                     probe server. The second request is the warm row, which
 #                     is the only warm distilled measurement this harness can
-#                     make, and the only thing gate (a) reads. Implies
-#                     --reload-probe.
+#                     make, and the row gate (a) times. Implies --reload-probe.
+#                     --skip-distilled wins over it: the two together run no
+#                     distilled work at all, rather than spending the GPU time
+#                     on a measurement gate (a) then reports as skipped.
 #   --probe-port N    Port for the server this harness starts. Default 7699.
 #   --gates           After running, assert the milestone exit gates and exit
 #                     non-zero listing the failures.
@@ -89,10 +91,13 @@
 #   model twice:
 #     distilled_cold  first request for that model, weights load  warm=false
 #     distilled_warm  same prompt again, engine resident          warm=true
-#   Gate (a) is a WARM budget, so it reads distilled_warm and nothing else. The
+#   Gate (a) is a WARM budget, so distilled_warm is the only row it TIMES. The
 #   matrix's own distilled rows stay cold `mold run --local` processes and are
 #   reported, but they are not what the gate is measured on: a cold row carries
-#   a 20 GB checkpoint load that a 25 s budget was never meant to include.
+#   a 20 GB checkpoint load that a 25 s budget was never meant to include. An
+#   ERROR still fails the gate wherever it lands, distilled_cold included — a
+#   failed cold request records the warm row as not_run, so a warm-only read
+#   would let the likeliest failure (OOM on weight load) pass silently.
 #
 # BASELINE — 2026-08-14, RTX 4090, worktree sha 7a115622, 20 steps, cold rows
 #   config                          s/step   total_s
@@ -110,7 +115,8 @@
 #
 # EXIT GATES (--gates) — these are the milestone's targets, not today's truth.
 #   (a) with --probe-distilled: every installed distilled model's WARM request
-#       (distilled_warm) finishes in <= 25s
+#       (distilled_warm) finishes in <= 25s, and neither of its probe requests
+#       errored
 #   (b) qwen-image-2512:q8 at 1328 CFG on completes (status ok, no OOM)
 #   (c) qwen-image-2512:q4 at 1328, 20 steps, CFG on: total_s <= 140
 #   (d) with --reload-probe: the probe_reload request pays <= 5s of text-encoder
@@ -526,6 +532,17 @@ qwen-image-2512:q8|1328|1328|$BENCH_STEPS|4.0
 EOF
 }
 
+# Whether the distilled probe actually runs.
+#
+# `--probe-distilled` asks for distilled work and `--skip-distilled` refuses
+# all of it, so the two together must mean "no distilled work" — otherwise the
+# harness spends the GPU time and then gate (a) reports itself skipped, which
+# is spending a measurement nobody reads. Plan, run, and the dead-server
+# fan-out all read this one predicate so they cannot disagree.
+distilled_probe_runs() {
+  [[ "$probe_distilled" -eq 1 && "$skip_distilled" -eq 0 ]]
+}
+
 emit_plan() {
   local model width height steps guidance spec i
   while IFS='|' read -r model width height steps guidance; do
@@ -552,7 +569,7 @@ emit_plan() {
         planned server "$role" "$i" "$warm"
     done
   fi
-  if [[ "$probe_distilled" -eq 1 ]]; then
+  if distilled_probe_runs; then
     for spec in "${BENCH_DISTILLED_MODELS[@]}"; do
       emit_distilled_probe_rows "$spec" planned
     done
@@ -675,7 +692,7 @@ record_probe_rows_as() {
       "$status" server "$role" "$i" "$warm"
   done
   # The distilled probe shares this server, so it shares its fate.
-  if [[ "$probe_distilled" -eq 1 ]]; then
+  if distilled_probe_runs; then
     for spec in "${BENCH_DISTILLED_MODELS[@]}"; do
       emit_distilled_probe_rows "$spec" "$status"
     done
@@ -687,7 +704,7 @@ record_probe_rows_as() {
 # encoder. This is the only place a warm engine or a reload can be observed —
 # a `mold run --local` process holds its engine for exactly one generation.
 run_probe() {
-  local started_here=0 i role warm probe_prompt
+  local started_here=0 server_died=0 i role warm probe_prompt
   if [[ -z "$probe_host" ]]; then
     if ! model_installed "qwen-image-2512:q4"; then
       echo "skip: reload probe needs qwen-image-2512:q4 installed" >&2
@@ -736,12 +753,25 @@ run_probe() {
         record_status "qwen-image-2512:q4" 1024 1024 "$BENCH_STEPS" 4.0 \
           not_run server "$rest_role" "$rest" "$rest_warm"
       done
+      server_died=1
       break
     fi
   done
 
-  if [[ "$probe_distilled" -eq 1 ]]; then
-    run_distilled_probe
+  if distilled_probe_runs; then
+    if [[ "$server_died" -eq 1 ]]; then
+      # The distilled probe's first act is a `/api/models` curl. Against a
+      # server this loop just concluded is dead that fails, and a failed
+      # inventory read is recorded as `model_missing` — reporting a crashed
+      # server as "the model is not installed". These rows never ran.
+      echo "probe: skipping the distilled probe, the probe server is gone" >&2
+      local spec
+      for spec in "${BENCH_DISTILLED_MODELS[@]}"; do
+        emit_distilled_probe_rows "$spec" not_run
+      done
+    else
+      run_distilled_probe
+    fi
   fi
 
   if [[ "$started_here" -eq 1 ]]; then
@@ -755,8 +785,9 @@ run_probe() {
 # second finds them resident and its prompt conditioning cached, which is the
 # measurement the gate reads.
 run_distilled_probe() {
-  local spec i role warm
-  for spec in "${BENCH_DISTILLED_MODELS[@]}"; do
+  local m spec i role warm
+  for ((m = 0; m < ${#BENCH_DISTILLED_MODELS[@]}; m++)); do
+    spec="${BENCH_DISTILLED_MODELS[$m]}"
     if ! probe_model_installed "$spec"; then
       echo "skip: $probe_host does not report $spec installed" >&2
       emit_distilled_probe_rows "$spec" model_missing
@@ -769,6 +800,10 @@ run_distilled_probe() {
       if ! run_case "$spec" 1024 1024 default 1.0 \
         server "$role" "$i" "$warm" "$prompt" "$(printf '%s-%s' "${spec//[:.]/_}" "$role")"; then
         # A dead server cannot answer what is left, for this model or the next.
+        # The fan-out covers the models AFTER this one only — iterating the
+        # whole array re-emits rows for models that already completed, and the
+        # plan-vs-run cardinality diff this function exists to protect then
+        # sees more rows than were planned.
         local rest rest_role rest_warm later
         for ((rest = i + 1; rest < ${#BENCH_DISTILLED_PROBE_ROLES[@]}; rest++)); do
           rest_role="${BENCH_DISTILLED_PROBE_ROLES[$rest]}"
@@ -777,9 +812,8 @@ run_distilled_probe() {
           record_status "$spec" 1024 1024 default 1.0 \
             not_run server "$rest_role" "$rest" "$rest_warm"
         done
-        for later in "${BENCH_DISTILLED_MODELS[@]}"; do
-          [[ "$later" != "$spec" ]] || continue
-          emit_distilled_probe_rows "$later" not_run
+        for ((later = m + 1; later < ${#BENCH_DISTILLED_MODELS[@]}; later++)); do
+          emit_distilled_probe_rows "${BENCH_DISTILLED_MODELS[$later]}" not_run
         done
         return 0
       fi
@@ -819,25 +853,32 @@ check_gates() {
 
   # (a) every installed distilled model's WARM request finishes in <= 25s.
   # A matrix row is a cold `mold run --local` process that pays a 20 GB
-  # checkpoint load the 25 s budget was never meant to cover, so the gate reads
-  # the probe's distilled_warm row and nothing else. Without --probe-distilled
-  # there is no warm measurement at all and the gate reports itself skipped.
+  # checkpoint load the 25 s budget was never meant to cover, so the *budget*
+  # is read off the probe's distilled_warm row and nothing else. But an error
+  # is a failure of the promise wherever it lands, and the likeliest failure
+  # (OOM on weight load) lands on the COLD request — which then records the
+  # warm row as `not_run`, so a warm-only gate would silently pass on whichever
+  # models happened to succeed. Both probe roles are therefore scanned for
+  # errors, while only the warm row is timed. Without --probe-distilled there
+  # is no warm measurement at all and the gate reports itself skipped.
   if [[ "$probe_distilled" -ne 1 ]]; then
     gate_skips+=("(a) distilled warm total_s <= 25: re-run with --probe-distilled to evaluate it")
   elif [[ "$skip_distilled" -eq 1 ]]; then
     gate_skips+=("(a) distilled warm total_s <= 25: re-run without --skip-distilled to evaluate it")
   else
     detail="$(jq -s -r '
-      [ .[] | select(.role == "distilled_warm")
-            | select(.status != "model_missing" and .status != "planned"
-                     and .status != "not_run") ] as $rows
-      | if ($rows | length) == 0 then
+      [ .[] | select(.role == "distilled_cold" or .role == "distilled_warm")
+            | select(.status != "model_missing" and .status != "planned") ] as $rows
+      | ($rows | map(select(.status != "ok" and .status != "not_run"))
+               | map("\(.model) \(.role) status=\(.status)")) as $errored
+      | ($rows | map(select(.role == "distilled_warm" and .status == "ok"))) as $warm
+      | ($warm | map(select(.total_s == null or .total_s > 25))
+               | map("\(.model) total_s=\(.total_s)")) as $slow
+      | if (($errored + $slow) | length) > 0 then
+          (($errored + $slow) | join(", "))
+        elif ($warm | length) == 0 then
           "no installed distilled model produced a warm run"
-        else
-          ($rows | map(select(.status != "ok" or .total_s == null or .total_s > 25))
-                 | map("\(.model) total_s=\(.total_s)")
-                 | join(", "))
-        end' "$rows_file")"
+        else "" end' "$rows_file")"
     if [[ -n "$detail" ]]; then
       gate_failures+=("(a) distilled warm total_s <= 25: $detail")
     fi

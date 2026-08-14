@@ -317,6 +317,22 @@ grep -q 'FAIL (a).*qwen-image-lightning:fp8 total_s=31' "$tmp/gate-stderr" \
 failed_distilled="$(jq -c '(.[] | select(.role == "distilled_warm")) |= (.status = "oom_or_error" | .total_s = null)' <<<"$passing_rows")"
 assert_eq "gate (a) fails on an errored warm distilled row" "$(run_gates "$failed_distilled")" "fail"
 
+# (a) the likeliest failure is an OOM on the COLD request — which records the
+# warm row as `not_run`. A warm-only read discards that model's only evidence
+# and passes on whichever models happened to succeed, so the fixture is a mixed
+# fleet: lightning finishes in budget, flash dies on its cold request.
+mixed_fleet="$(jq -cn \
+  --argjson base "$passing_rows" \
+  --argjson cold "$(distilled_probe_row "qwen-image-flash:q4" distilled_cold oom_or_error null)" \
+  --argjson warm "$(distilled_probe_row "qwen-image-flash:q4" distilled_warm not_run null)" \
+  '$base + [$cold, $warm]')"
+assert_json "the mixed fixture still has one healthy warm distilled row" "$mixed_fleet" '
+  any(.[]; .role == "distilled_warm" and .status == "ok" and .total_s <= 25)'
+assert_eq "gate (a) fails when another model's cold distilled request errored" \
+  "$(run_gates "$mixed_fleet")" "fail"
+grep -q 'FAIL (a).*qwen-image-flash:q4 distilled_cold status=oom_or_error' "$tmp/gate-stderr" \
+  || fail "gate (a) should name the errored cold row and its status"
+
 # (a) reads ONLY the warm row: the cold probe request pays the weight load and
 # must not be able to fail a warm budget.
 slow_cold="$(jq -c '(.[] | select(.role == "distilled_cold")).total_s = 90.0' <<<"$passing_rows")"
@@ -425,6 +441,16 @@ assert_json "the distilled warm row is flagged warm and the cold one is not" "$p
   all(.[] | select(.role == "distilled_warm"); .warm == true)
   and all(.[] | select(.role == "distilled_cold"); .warm == false)'
 
+# --skip-distilled wins over --probe-distilled. Planning the distilled probe
+# anyway spends the GPU time on a measurement gate (a) then reports as skipped.
+plan_skipped_probe="$(MOLD_BIN=/nonexistent/mold "$harness" --dry-run --probe-distilled --skip-distilled 2>/dev/null)"
+assert_json "--skip-distilled suppresses the distilled probe plan" "$plan_skipped_probe" '
+  ([.[] | select(.role == "distilled_cold" or .role == "distilled_warm")] | length) == 0'
+assert_json "--skip-distilled keeps the ordinary reload probe" "$plan_skipped_probe" '
+  any(.[]; .role == "probe_reload")'
+assert_json "--skip-distilled suppresses the distilled matrix rows too" "$plan_skipped_probe" '
+  ([.[] | select(.model | test("lightning|flash"))] | length) == 0'
+
 # --- plan vs real run: identical row cardinality against a stub binary --------
 # A plan-vs-result diff is only meaningful if a missing model or an early
 # failure still fills its rows in.
@@ -502,6 +528,76 @@ if grep -q 'FAIL (a)' "$tmp/stub-gate-stderr2"; then
 fi
 grep -q 'gate skipped: (a)' "$tmp/stub-gate-stderr2" \
   || fail "--skip-distilled should report gate (a) as skipped"
+
+# --- distilled probe: plan vs run cardinality against a stub server ----------
+# The probe path needs an inventory endpoint and a mold that answers server
+# requests. A `curl` shim ahead of the real one on PATH supplies the first
+# without a socket; the stub mold supplies the second. The stub fails the
+# SECOND distilled model, so the dead-server fan-out has an already-completed
+# model to (wrongly) re-emit rows for.
+probe_bin="$tmp/probe-bin"
+mkdir -p "$probe_bin"
+cat > "$probe_bin/curl" <<'CURL'
+#!/usr/bin/env bash
+# Only the harness's two probe reads reach here.
+for arg in "$@"; do
+  case "$arg" in
+    */api/models)
+      echo '[{"name":"qwen-image-2512:q4","installed":true},
+             {"name":"qwen-image-lightning:fp8","installed":true},
+             {"name":"qwen-image-flash:q4","installed":true}]'
+      exit 0
+      ;;
+    */api/status) exit 0 ;;
+  esac
+done
+exit 0
+CURL
+chmod +x "$probe_bin/curl"
+
+probe_stub="$tmp/probe-mold"
+cat > "$probe_stub" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  --version) echo "mold 0.0.0-stub"; exit 0 ;;
+  info) echo "Status: Installed"; exit 0 ;;
+  run)
+    # The second distilled model dies; everything before it succeeds.
+    if [[ "$*" == *qwen-image-flash:q4* ]]; then
+      echo "Error: CUDA error: out of memory" >&2
+      exit 1
+    fi
+    {
+      echo "  ✓ Loading Qwen2.5 text encoder (4 shards, GPU) [35.1s]"
+      echo "  ✓ Loading Qwen-Image transformer (quantized) [10.4s]"
+      echo "  ✓ Denoising (20 steps) [12.2s]"
+      echo "  ✓ VAE decode [0.7s]"
+      echo "✓ Done — stub in 19.8s (seed: 42)"
+    } >&2
+    exit 0
+    ;;
+esac
+exit 0
+STUB
+chmod +x "$probe_stub"
+
+probe_plan="$(PATH="$probe_bin:$PATH" "$harness" --mold-bin "$probe_stub" \
+  --probe-host http://127.0.0.1:1 --probe-distilled --dry-run 2>/dev/null)"
+probe_run="$(PATH="$probe_bin:$PATH" "$harness" --mold-bin "$probe_stub" \
+  --probe-host http://127.0.0.1:1 --probe-distilled \
+  --out-dir "$tmp/probe-out" 2>/dev/null)"
+assert_eq "the distilled probe records exactly the rows it planned" \
+  "$(jq -c '[.[] | select(.role | startswith("distilled_")) | {model, role}] | sort' <<<"$probe_run")" \
+  "$(jq -c '[.[] | select(.role | startswith("distilled_")) | {model, role}] | sort' <<<"$probe_plan")"
+assert_json "a completed distilled model is not re-emitted as not_run" "$probe_run" '
+  ([.[] | select(.role | startswith("distilled_"))
+        | select(.model == "qwen-image-lightning:fp8")] | length) == 2
+  and all(.[] | select(.role | startswith("distilled_"))
+               | select(.model == "qwen-image-lightning:fp8"); .status == "ok")'
+assert_json "the failing distilled model records the row it never ran" "$probe_run" '
+  ([.[] | select(.role | startswith("distilled_"))
+        | select(.model == "qwen-image-flash:q4") | .status] | sort)
+  == ["not_run","oom_or_error"]'
 
 if [[ "$failures" -ne 0 ]]; then
   echo "bench-qwen-parse: $failures assertion(s) failed" >&2
