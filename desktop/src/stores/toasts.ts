@@ -1,4 +1,5 @@
 import { defineStore } from "pinia";
+import { useNotificationsStore } from "@studio/stores/notifications";
 
 /** A labeled affordance rendered as a button on the toast (e.g. Undo, View). */
 export interface ToastAction {
@@ -44,6 +45,13 @@ export const useToastStore = defineStore("toasts", {
   actions: {
     /** Queue a toast; returns its id so callers can dismiss it early. */
     push(message: string, kind: Toast["kind"] = "info", options: ToastOptions = {}): number {
+      // Toasts vanish in seconds; the notifications bell keeps the record so
+      // a long error the user never caught in time stays readable in full.
+      useNotificationsStore().record({
+        kind,
+        text: message,
+        description: options.description ?? null,
+      });
       const toast: Toast = {
         id: nextId++,
         message,

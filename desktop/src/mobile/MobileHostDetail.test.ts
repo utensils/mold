@@ -1,6 +1,7 @@
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../lib/api/client";
+import { authenticatedMiniMaxH3Capabilities } from "@studio/lib/minimaxH3Inventory.testFixtures";
 import type { ModelEntry, ServerStatus } from "../lib/api/types";
 import type { QueueEntry } from "../stores/jobs";
 import type { MobileHost } from "./hosts";
@@ -868,6 +869,60 @@ describe("MobileHostDetail remote host data", () => {
     await vi.advanceTimersByTimeAsync(20_000);
     await flushPromises();
     expect(deviceCalls).toBe(2);
+  });
+
+  it("renders the H3 capability panel below the primary instrument sections", async () => {
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string): Promise<unknown> => {
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          devices: { available: true, lifecycle: true, restart_enable: false },
+          dispatch: { active_mode: "v2", v2_authoritative: true },
+          ...authenticatedMiniMaxH3Capabilities(),
+        });
+      }
+      return base(target, path) as Promise<unknown>;
+    });
+    const view = await mountDetail();
+
+    const html = view.html();
+    const h3At = html.indexOf('data-test="h3-inventory"');
+    expect(h3At).toBeGreaterThan(-1);
+    expect(html.indexOf("host-telemetry-title")).toBeLessThan(h3At);
+    expect(html.indexOf("host-models-title")).toBeLessThan(h3At);
+  });
+
+  it("collapses VRAM and RAM into one Memory row on a unified-memory Metal host", async () => {
+    const view = await mountDetail();
+    stream("/api/resources/stream").options.onEvent(
+      "snapshot",
+      JSON.stringify({
+        hostname: "studio",
+        timestamp: 1,
+        gpus: [
+          {
+            ordinal: 0,
+            name: "Apple Metal GPU",
+            backend: "metal",
+            vram_total: 51_500_000_000,
+            vram_used: 46_900_000_000,
+            gpu_utilization: null,
+          },
+        ],
+        system_ram: { total: 51_500_000_000, used: 46_900_000_000 },
+        cpu: { cores: 16, usage_percent: 44 },
+      }),
+    );
+    await flushPromises();
+
+    expect(
+      view.find("[role='meter'][aria-label='Unified memory usage for Apple Metal GPU']").exists(),
+    ).toBe(true);
+    expect(view.text()).toContain("MEMORY");
+    expect(view.text()).not.toContain("VRAM");
+    expect(view.find("[role='meter'][aria-label='RAM usage']").exists()).toBe(false);
+    expect(view.find("[role='meter'][aria-label='CPU usage']").exists()).toBe(true);
   });
 
   it("renders every status GPU before the resource stream produces a snapshot", async () => {

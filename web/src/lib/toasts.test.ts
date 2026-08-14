@@ -20,6 +20,24 @@ afterEach(() => {
 });
 
 describe("toast store", () => {
+  it("survives a toast raised before pinia is installed", () => {
+    // No active pinia yet in this file — recording is best-effort.
+    expect(() => toast("info", "early")).not.toThrow();
+  });
+
+  it("records every toast in the notifications center so missed ones stay readable", async () => {
+    const { createPinia, setActivePinia } = await import("pinia");
+    setActivePinia(createPinia());
+    const { useNotificationsStore } =
+      await import("@studio/stores/notifications");
+
+    toast("error", "Generation failed: CUDA out of memory");
+    expect(useNotificationsStore().entries[0]).toMatchObject({
+      kind: "error",
+      text: "Generation failed: CUDA out of memory",
+    });
+  });
+
   it("adds and auto-dismisses non-error toasts", () => {
     const state = useNotifications();
     toast("success", "Generated — saved to Gallery");

@@ -117,7 +117,7 @@ describe("InstalledModelRow", () => {
 
     const install = w.find("[data-test=install-elsewhere-btn]");
     expect(install.exists()).toBe(true);
-    expect(install.attributes("title")).toContain("studio");
+    expect(install.attributes("aria-label")).toContain("studio");
 
     await install.trigger("click");
     expect(w.emitted("install")).toBeTruthy();

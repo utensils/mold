@@ -19,6 +19,7 @@ import {
   updateHost,
 } from "../lib/hostRegistry";
 import HostDetailPage from "./HostDetailPage.vue";
+import { authenticatedMiniMaxH3Capabilities } from "@studio/lib/minimaxH3Inventory.testFixtures";
 import type { DeviceInfo, DeviceListResponse } from "@studio/api/devices";
 
 // Mutable fixtures the hostClient mock reads at call time.
@@ -468,6 +469,41 @@ describe("HostDetailPage — telemetry", () => {
     expect(w.get('[data-test="telemetry-storage"]').text()).toContain(
       "free of",
     );
+  });
+
+  it("renders the H3 capability panel below the primary instrument sections", async () => {
+    caps = {
+      ...caps,
+      ...(authenticatedMiniMaxH3Capabilities() as unknown as HostCapabilities),
+    };
+    const w = await mountDetail();
+
+    const html = w.html();
+    const h3At = html.indexOf('data-test="h3-inventory"');
+    expect(h3At).toBeGreaterThan(-1);
+    expect(html.indexOf("Telemetry")).toBeLessThan(h3At);
+    expect(html.indexOf("Downloads")).toBeLessThan(h3At);
+  });
+
+  it("collapses the RAM row into one unified-memory row on a Metal host", async () => {
+    poll.resources.value = makeResources({
+      gpus: [
+        {
+          ordinal: 0,
+          name: "Apple Metal GPU",
+          backend: "metal",
+          vram_total: 51_500_000_000,
+          vram_used: 46_900_000_000,
+          vram_used_by_mold: null,
+          vram_used_by_other: null,
+          gpu_utilization: null,
+        },
+      ],
+    });
+    const w = await mountDetail();
+    expect(w.text()).toContain("Unified memory");
+    expect(w.find('[data-test="telemetry-ram"]').exists()).toBe(false);
+    expect(w.get('[data-test="telemetry-cpu"]').text()).toBe("32%");
   });
 
   it("renders em-dash fallbacks for metrics the host does not expose", async () => {

@@ -21,15 +21,12 @@ import CatalogCardGrid from "../components/CatalogCardGrid.vue";
 import InstalledModelRow from "../components/models/InstalledModelRow.vue";
 import ModelDetailDrawer from "../components/models/ModelDetailDrawer.vue";
 import ModelInstallTargetDialog from "../components/models/ModelInstallTargetDialog.vue";
-import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
-import { useHostRouting } from "../composables/useHostRouting";
 import { toast } from "../lib/toasts";
 import { modelDisplayName } from "@studio/lib/modelDisplay";
 import type { CatalogKind, ModelInfoExtended } from "../types";
 
 const cat = useCatalog();
 const installTargets = useModelInstallTargets();
-const routing = useHostRouting();
 const route = useRoute();
 watch(
   () => route.query.tab,
@@ -71,16 +68,6 @@ const tabOptions: SegmentOption<ModelsTab>[] = [
 ];
 
 const installedQuery = ref("");
-
-const h3Hosts = computed(() =>
-  routing.hosts.value
-    .filter((host) => host.status === "ready")
-    .map((host) => ({
-      id: host.id,
-      label: host.label,
-      capabilities: routing.capabilitiesByHost.value[host.id],
-    })),
-);
 
 const filteredInstalled = computed(() => {
   const q = installedQuery.value.trim().toLowerCase();
@@ -131,8 +118,6 @@ onMounted(() => {
         @update:model-value="cat.setTab"
       />
     </header>
-
-    <MinimaxH3InventoryPanel :hosts="h3Hosts" />
 
     <!-- Installed -->
     <section v-if="cat.tab.value === 'installed'" data-test="installed-tab">

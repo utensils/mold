@@ -1,4 +1,5 @@
 import { mount } from "@vue/test-utils";
+import { createPinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AppNav from "./AppNav.vue";
 import MobileNavSheet from "./MobileNavSheet.vue";
@@ -72,6 +73,8 @@ vi.mock("../../lib/notifications", () => ({
 function mountNav() {
   return mount(AppNav, {
     global: {
+      // The notifications bell reads its Pinia store.
+      plugins: [createPinia()],
       stubs: {
         RouterLink: { template: "<a><slot /></a>" },
       },

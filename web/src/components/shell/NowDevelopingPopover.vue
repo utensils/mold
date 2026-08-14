@@ -9,17 +9,33 @@ defineProps<{ rows: FleetActiveWork[] }>();
 const emit = defineEmits<{ select: [row: FleetActiveWork] }>();
 
 const open = ref(false);
+const root = ref<HTMLElement | null>(null);
 
 function closeOnEscape(event: KeyboardEvent) {
   if (event.key === "Escape") open.value = false;
 }
 
-onMounted(() => window.addEventListener("keydown", closeOnEscape));
-onBeforeUnmount(() => window.removeEventListener("keydown", closeOnEscape));
+/** Any interaction outside the panel dismisses it — opening a sibling
+ *  popover (the notifications bell) must not leave both stacked. */
+function closeOnOutsidePointer(event: PointerEvent) {
+  if (!open.value) return;
+  if (event.target instanceof Node && root.value?.contains(event.target))
+    return;
+  open.value = false;
+}
+
+onMounted(() => {
+  window.addEventListener("keydown", closeOnEscape);
+  document.addEventListener("pointerdown", closeOnOutsidePointer, true);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", closeOnEscape);
+  document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+});
 </script>
 
 <template>
-  <div v-if="rows.length" class="now-developing">
+  <div v-if="rows.length" ref="root" class="now-developing">
     <button
       type="button"
       class="now-developing__trigger"

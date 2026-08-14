@@ -5,6 +5,7 @@
 import { computed } from "vue";
 import { useRoute } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
+import NotificationsCenter from "@studio/components/NotificationsCenter.vue";
 import { useUiStore } from "../../stores/ui";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { PLATFORM_UI, shortcutLabel } from "../../lib/platform";
@@ -55,5 +56,7 @@ function toggleSidebar() {
       <span>Search</span>
       <span class="text-[11px]">{{ shortcutLabel("K") }}</span>
     </button>
+
+    <NotificationsCenter />
   </header>
 </template>

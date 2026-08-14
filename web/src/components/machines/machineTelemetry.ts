@@ -5,6 +5,7 @@
  * expose (notably GPU temperature, which the resource aggregator omits)
  * renders as an em dash per spec §08 G4 rather than a fabricated zero.
  */
+import { unifiedMemoryHost } from "@studio/lib/telemetryMemory";
 import type { ResourceSnapshot, ServerStatus } from "../../types";
 import { formatGB } from "../../util/format";
 
@@ -38,6 +39,9 @@ export interface TelemetryView {
   cpuLabel: string;
   ramPct: number | null;
   ramLabel: string;
+  /** Apple Metal shares one physical pool — GPU memory IS system RAM, so
+   *  the panel renders one Memory row instead of duplicating the numbers. */
+  unifiedMemory: boolean;
   queue: string;
   uptime: string;
   storageLabel: string | null;
@@ -154,6 +158,8 @@ export function deriveTelemetry(
     ? `${formatGb(disk.free_bytes)} GB free of ${formatGb(disk.total_bytes)} GB`
     : null;
 
+  const unifiedMemory = unifiedMemoryHost(rGpus.length ? rGpus : sGpus);
+
   const cpuPct = resources?.cpu?.usage_percent ?? null;
   const cpuLabel = cpuPct != null ? `${Math.round(cpuPct)}%` : DASH;
   const ram = resources?.system_ram;
@@ -172,6 +178,7 @@ export function deriveTelemetry(
     cpuLabel,
     ramPct,
     ramLabel,
+    unifiedMemory,
     queue,
     uptime,
     storageLabel,

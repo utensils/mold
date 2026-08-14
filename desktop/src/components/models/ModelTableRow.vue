@@ -3,6 +3,8 @@ import { computed, useId } from "vue";
 
 import { familyLabel } from "@studio/lib/modelFamily";
 
+import Tooltip from "@ui/components/Tooltip.vue";
+
 import SourceGlyph from "../generate/SourceGlyph.vue";
 import ModelFootprintBar from "./ModelFootprintBar.vue";
 import { openExternal } from "../../lib/openExternal";
@@ -100,14 +102,14 @@ function onRowKeydown(event: KeyboardEvent): void {
     @keydown.space="onRowKeydown"
   >
     <div class="model-table-row__identity">
-      <span
-        v-if="loaded !== undefined"
-        class="h-1.5 w-1.5 shrink-0 rounded-full"
-        :class="loaded ? 'bg-safelight' : 'bg-transparent'"
-        role="img"
-        :title="loaded ? 'On GPU' : 'Cold'"
-        :aria-label="loaded ? 'On GPU' : 'Cold'"
-      />
+      <Tooltip v-if="loaded !== undefined" :text="loaded ? 'On GPU' : 'Cold'" class="shrink-0">
+        <span
+          class="h-1.5 w-1.5 rounded-full"
+          :class="loaded ? 'bg-safelight' : 'bg-transparent'"
+          role="img"
+          :aria-label="loaded ? 'On GPU' : 'Cold'"
+        />
+      </Tooltip>
       <SourceGlyph :source="source" class="shrink-0 text-ink-3" />
       <button
         v-if="clickable"
@@ -144,31 +146,31 @@ function onRowKeydown(event: KeyboardEvent): void {
       <span v-if="familyChip" class="edge-code shrink-0" data-test="row-family">{{
         familyChip
       }}</span>
-      <button
-        v-if="pageUrl"
-        type="button"
-        class="shrink-0 text-ink-3 transition-colors duration-100 hover:text-ink"
-        :aria-label="`Open ${name} model page`"
-        title="Open model page"
-        data-test="model-page-link"
-        @click.stop="pageUrl && void openExternal(pageUrl)"
-      >
-        <svg
-          viewBox="0 0 12 12"
-          width="11"
-          height="11"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
+      <Tooltip v-if="pageUrl" text="Open model page" class="shrink-0">
+        <button
+          type="button"
+          class="text-ink-3 transition-colors duration-100 hover:text-ink"
+          :aria-label="`Open ${name} model page`"
+          data-test="model-page-link"
+          @click.stop="pageUrl && void openExternal(pageUrl)"
         >
-          <path d="M8.5 6.75v2.75a1 1 0 0 1-1 1H2.5a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1h2.75" />
-          <path d="M7 1.5h3.5V5" />
-          <path d="M10.5 1.5 5.75 6.25" />
-        </svg>
-      </button>
+          <svg
+            viewBox="0 0 12 12"
+            width="11"
+            height="11"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M8.5 6.75v2.75a1 1 0 0 1-1 1H2.5a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1h2.75" />
+            <path d="M7 1.5h3.5V5" />
+            <path d="M10.5 1.5 5.75 6.25" />
+          </svg>
+        </button>
+      </Tooltip>
 
       <slot name="meta" />
     </div>

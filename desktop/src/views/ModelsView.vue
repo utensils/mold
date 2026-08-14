@@ -13,7 +13,6 @@ import { useHostsStore } from "../stores/hosts";
 import { primaryModifierPressed } from "../lib/platform";
 import { mediaTypeFromQuery, type MediaType } from "../lib/modelAvailability";
 import { mergeModelPresentationMetadata } from "../lib/models";
-import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 
 const conn = useConnectionStore();
 const models = useModelStore();
@@ -71,16 +70,6 @@ const installedModels = computed(() => {
   }
   return [...byName.values()];
 });
-
-const h3Hosts = computed(() =>
-  hosts.all
-    .filter((host) => host.status === "ready")
-    .map((host) => ({
-      id: host.id,
-      label: host.label,
-      capabilities: hosts.capabilities[host.id],
-    })),
-);
 
 function onKeydown(e: KeyboardEvent) {
   if (e.key === "f" && primaryModifierPressed(e) && !e.altKey) {
@@ -169,8 +158,6 @@ onUnmounted(() => {
     <div class="min-h-0 flex-1 overflow-y-auto">
       <!-- Downloads pinned above the list in BOTH segments -->
       <DownloadsTray />
-
-      <MinimaxH3InventoryPanel class="mx-6" :hosts="h3Hosts" />
 
       <!-- Installed: the full-featured inventory scoped to what you have. -->
       <InstalledTab

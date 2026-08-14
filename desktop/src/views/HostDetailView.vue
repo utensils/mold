@@ -3,6 +3,7 @@ import { computed, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 import CardSurface from "@ui/components/CardSurface.vue";
 import Chip from "@ui/components/Chip.vue";
+import Tooltip from "@ui/components/Tooltip.vue";
 import Icon from "@ui/components/Icon.vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
@@ -24,6 +25,7 @@ import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
 import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
 import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
+import { unifiedMemoryHost } from "@studio/lib/telemetryMemory";
 import { inferBackendFromGpuName } from "../lib/hosts";
 import {
   modelDiskBytes,
@@ -240,6 +242,9 @@ function backendLabel(gpu: GpuSnapshot): string {
 
 const cpu = computed(() => snapshot.value?.cpu ?? null);
 const ram = computed(() => snapshot.value?.system_ram ?? null);
+/** Apple Metal shares one physical pool — a VRAM row and a RAM row would
+ *  show the same numbers twice, so unified hosts render one Memory row. */
+const unifiedMemory = computed(() => unifiedMemoryHost(gpus.value));
 const modelsDisk = computed(() => status.value?.models_disk ?? null);
 const diskUsedPct = computed(() => {
   const d = modelsDisk.value;
@@ -409,6 +414,17 @@ function toggleTarget() {
 
 const renameOpen = ref(false);
 
+async function copyInstanceId() {
+  const id = host.value?.instanceId;
+  if (!id) return;
+  try {
+    await navigator.clipboard.writeText(id);
+    toasts.push("Instance ID copied");
+  } catch {
+    toasts.push("Couldn't copy the instance ID", "error");
+  }
+}
+
 function onRenameSave(name: string) {
   renameOpen.value = false;
   const h = host.value;
@@ -497,19 +513,21 @@ async function forget() {
           </Chip>
         </div>
         <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 pl-7">
-          <span
-            v-if="host.instanceId"
-            class="edge-code max-w-40 truncate"
-            :title="host.instanceId"
-            data-test="host-instance-id"
-          >
-            {{ host.instanceId }}
-          </span>
+          <Tooltip v-if="host.instanceId" :text="`${host.instanceId} — click to copy`">
+            <button
+              type="button"
+              class="edge-code max-w-40 truncate hover:text-ink"
+              data-test="host-instance-id"
+              @click="copyInstanceId"
+            >
+              {{ host.instanceId }}
+            </button>
+          </Tooltip>
           <button
             v-if="host.kind === 'remote'"
             type="button"
             data-test="rename-host"
-            class="text-caption text-ink-3 transition-colors hover:text-ink"
+            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-ink"
             @click="renameOpen = true"
           >
             Rename…
@@ -517,7 +535,7 @@ async function forget() {
           <button
             type="button"
             data-test="open-web-ui"
-            class="text-caption text-ink-3 transition-colors hover:text-ink disabled:opacity-40"
+            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-ink disabled:opacity-40"
             :disabled="!host.baseUrl"
             @click="openHostUrl(host.baseUrl ?? '')"
           >
@@ -527,7 +545,7 @@ async function forget() {
             v-if="host.kind === 'remote'"
             type="button"
             data-test="disconnect-host"
-            class="text-caption text-ink-3 transition-colors hover:text-stop"
+            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-stop"
             @click="disconnect"
           >
             Disconnect
@@ -536,8 +554,6 @@ async function forget() {
         <p v-if="host.status === 'error'" class="mt-2 pl-7 text-caption text-stop">
           Unreachable — reconnect below or check the server.
         </p>
-
-        <MinimaxH3InventoryPanel :hosts="h3Host" heading="H3 on this machine" />
 
         <!-- Two-column instrument layout (stacks below on narrow widths). -->
         <div class="mt-6 flex flex-col gap-5 lg:flex-row lg:items-start">
@@ -584,14 +600,18 @@ async function forget() {
                         util
                       </span>
                     </div>
-                    <span class="edge-code">VRAM</span>
+                    <span class="edge-code">{{ unifiedMemory ? "MEMORY" : "VRAM" }}</span>
                     <div
                       class="h-1.5 overflow-hidden rounded-full bg-bath"
                       role="meter"
                       aria-valuemin="0"
                       aria-valuemax="100"
                       :aria-valuenow="Math.round(percent(gpu.vram_used, gpu.vram_total))"
-                      :aria-label="`VRAM used on ${gpu.name}`"
+                      :aria-label="
+                        unifiedMemory
+                          ? `Unified memory used on ${gpu.name}`
+                          : `VRAM used on ${gpu.name}`
+                      "
                     >
                       <div
                         class="h-full transition-[width] duration-300"
@@ -623,7 +643,7 @@ async function forget() {
                     {{ cpu.usage_percent.toFixed(0) }}% · {{ cpu.cores }} CORES
                   </span>
                 </div>
-                <div v-if="ram" class="contents" data-test="ram-card">
+                <div v-if="ram && !unifiedMemory" class="contents" data-test="ram-card">
                   <span class="edge-code">RAM</span>
                   <div
                     class="h-1.5 overflow-hidden rounded-full bg-bath"
@@ -832,6 +852,9 @@ async function forget() {
             </div>
           </div>
         </div>
+
+        <!-- Specialized capability detail reads below the live instruments. -->
+        <MinimaxH3InventoryPanel :hosts="h3Host" heading="H3 on this machine" />
 
         <!-- One consistent model-detail drawer, shared with the catalog. -->
         <CatalogDetailDrawer

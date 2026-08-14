@@ -291,6 +291,21 @@ afterEach(() => {
 });
 
 describe("MobileCatalogView", () => {
+  it("does not render the fleet-wide H3 runtime panel — it lives in host detail", async () => {
+    apiFetchTo.mockImplementation((target: ApiTarget, path: string) => {
+      if (path === "/api/models") return Promise.resolve(jsonResponse([]));
+      if (path === "/api/capabilities" && target.baseUrl === studio.baseUrl) {
+        return Promise.resolve(jsonResponse(authenticatedMiniMaxH3Capabilities()));
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+
+    wrapper = mountCatalog();
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="h3-inventory"]').exists()).toBe(false);
+  });
+
   it("shows both compact H3 acquisition rows and pulls only to a host that advertised them", async () => {
     searchCatalog.mockResolvedValue(
       searchResponse([

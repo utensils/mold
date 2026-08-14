@@ -14,6 +14,12 @@ vi.mock("../../lib/api/client", async (importOriginal) => ({
 
 vi.mock("./ConfigSettingRow.vue", () => ({ default: { template: "<div />" } }));
 
+const openLogsDir = vi.fn();
+vi.mock("../../lib/ipc", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/ipc")>();
+  return { ...actual, ipc: { ...actual.ipc, openLogsDir: () => openLogsDir() } };
+});
+
 const stub = { template: "<div />" };
 let router: Router;
 
@@ -61,6 +67,37 @@ describe("HostsSection this-device card", () => {
     expect(wrapper.text()).toContain("desktop-secret");
     await wrapper.get('[data-test="copy-local-api-key"]').trigger("click");
     expect(writeText).toHaveBeenCalledWith("desktop-secret");
+  });
+
+  it("offers to open the logs folder when the local engine failed", async () => {
+    const wrapper = await mountSection();
+    const conn = useConnectionStore();
+    conn.localError =
+      "The engine didn't become healthy and did not stop; gallery authority remains with the server. Check the Mold home logs folder.";
+    await wrapper.vm.$nextTick();
+
+    const open = wrapper.get('[data-test="open-local-logs"]');
+    expect(open.text()).toContain("Open logs folder");
+    await open.trigger("click");
+    expect(openLogsDir).toHaveBeenCalledOnce();
+  });
+
+  it("offers the logs shortcut when startLocalEngine failed after the server came up", async () => {
+    const wrapper = await mountSection();
+    const conn = useConnectionStore();
+    // startLocalEngine() rejections land in `error`, not `localError`.
+    conn.status = "error";
+    conn.error = "The engine didn't start. Check the Mold home logs folder.";
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.text()).toContain("The engine didn't start.");
+    await wrapper.get('[data-test="open-local-logs"]').trigger("click");
+    expect(openLogsDir).toHaveBeenCalledOnce();
+  });
+
+  it("hides the logs shortcut while the local engine is healthy", async () => {
+    const wrapper = await mountSection();
+    expect(wrapper.find('[data-test="open-local-logs"]').exists()).toBe(false);
   });
 
   it("no longer advertises the Keychain", async () => {

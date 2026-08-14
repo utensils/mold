@@ -259,7 +259,13 @@ const undiscovered = computed(() =>
   discovered.value.filter(
     (d) =>
       !connectedRemoteIds.value.has(hostIdFromUrl(d.url)) &&
-      !(d.instanceId && connectedRemoteInstanceIds.value.has(d.instanceId)),
+      !(d.instanceId && connectedRemoteInstanceIds.value.has(d.instanceId)) &&
+      // The app's own embedded server is already the This-device card; its
+      // mDNS advertisement is noise here. Instance UUID identifies the
+      // primary (so a standalone `mold serve` on this machine stays listed),
+      // and isThisMachine guards against a copied MOLD_HOME sharing that
+      // UUID from another box.
+      !(d.isThisMachine && d.instanceId && d.instanceId === hosts.primaryHost?.instanceId),
   ),
 );
 

@@ -45,10 +45,12 @@ describe("ModelTableRow", () => {
   });
 
   it("shows a warm residency dot when loaded, a cold placeholder when not, none when omitted", () => {
-    expect(mountRow({ loaded: true }).find("[role='img'][title='On GPU']").exists()).toBe(true);
-    expect(mountRow({ loaded: false }).find("[role='img'][title='Cold']").exists()).toBe(true);
-    expect(mountRow().find("[role='img'][title='Cold']").exists()).toBe(false);
-    expect(mountRow().find("[role='img'][title='On GPU']").exists()).toBe(false);
+    expect(mountRow({ loaded: true }).find("[role='img'][aria-label='On GPU']").exists()).toBe(
+      true,
+    );
+    expect(mountRow({ loaded: false }).find("[role='img'][aria-label='Cold']").exists()).toBe(true);
+    expect(mountRow().find("[role='img'][aria-label='Cold']").exists()).toBe(false);
+    expect(mountRow().find("[role='img'][aria-label='On GPU']").exists()).toBe(false);
   });
 
   it("renders the two-line size block and the relative usage bar", () => {
@@ -62,17 +64,35 @@ describe("ModelTableRow", () => {
     expect(sizes.text()).toContain("23.1 GB with shared runtime");
     const footprint = wrapper.get("[data-test='model-footprint-bar']");
     expect(footprint.html()).toContain("width: 40%");
-    expect(footprint.attributes("title")).toContain("23.1 GB with shared runtime");
-    expect(footprint.attributes("title")).toContain("largest model in this list");
-    expect(footprint.attributes("title")).toContain("not download progress");
-    expect(footprint.attributes("aria-label")).toBe(footprint.attributes("title"));
+    expect(footprint.attributes("aria-label")).toContain("23.1 GB with shared runtime");
+    expect(footprint.attributes("aria-label")).toContain("largest model in this list");
+    expect(footprint.attributes("aria-label")).toContain("not download progress");
     expect(footprint.attributes("role")).toBe("meter");
     expect(footprint.attributes("aria-valuenow")).toBe("40");
     const description = wrapper.get("[data-test='model-footprint-description']");
     expect(wrapper.get("[data-test='model-table-row']").attributes("aria-describedby")).toBe(
       description.attributes("id"),
     );
-    expect(description.text()).toBe(footprint.attributes("title"));
+    expect(description.text()).toBe(footprint.attributes("aria-label"));
+  });
+
+  it("explains the footprint bar with the styled tooltip, not a native title", async () => {
+    vi.useFakeTimers();
+    try {
+      const wrapper = mountRow({ sizeSecondary: "23.1 GB with shared runtime", barPercent: 40 });
+      const footprint = wrapper.get("[data-test='model-footprint-bar']");
+      expect(footprint.attributes("title")).toBeUndefined();
+
+      await footprint.element.parentElement!.dispatchEvent(new Event("mouseenter"));
+      vi.advanceTimersByTime(400);
+      await wrapper.vm.$nextTick();
+      const tip = document.body.querySelector('[role="tooltip"]');
+      expect(tip?.textContent).toContain("not download progress");
+      wrapper.unmount();
+      document.body.innerHTML = "";
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("opens the external model page without triggering the row's open action", async () => {

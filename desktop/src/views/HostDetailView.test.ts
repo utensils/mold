@@ -60,6 +60,7 @@ vi.mock("../lib/api/models", async (importOriginal) => ({
 }));
 
 import HostDetailView from "./HostDetailView.vue";
+import { authenticatedMiniMaxH3Capabilities } from "@studio/lib/minimaxH3Inventory.testFixtures";
 import { useComposerStore } from "../stores/composer";
 import { useConnectionStore } from "../stores/connection";
 import { useHostModelsStore } from "../stores/hostModels";
@@ -440,11 +441,33 @@ describe("HostDetailView header", () => {
     expect(wrapper.get("[data-test='host-version']").text()).toContain("0.17.0");
     const instance = wrapper.get("[data-test='host-instance-id']");
     expect(instance.text()).toContain("0f7a2c31-instance-uuid");
-    expect(instance.attributes("title")).toBe("0f7a2c31-instance-uuid");
     // Remote hosts get the remote-only management actions.
     expect(wrapper.find("[data-test='rename-host']").exists()).toBe(true);
     expect(wrapper.find("[data-test='disconnect-host']").exists()).toBe(true);
     expect(wrapper.find("[data-test='forget-host']").exists()).toBe(true);
+  });
+
+  it("copies the full instance id on click even though the display truncates", async () => {
+    const wrapper = await mountView();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+
+    await wrapper.get("[data-test='host-instance-id']").trigger("click");
+    expect(writeText).toHaveBeenCalledWith("0f7a2c31-instance-uuid");
+  });
+
+  it("reports a clipboard failure instead of silently rejecting", async () => {
+    const wrapper = await mountView();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
+    });
+
+    await wrapper.get("[data-test='host-instance-id']").trigger("click");
+    await flushPromises();
+    const { useToastStore } = await import("../stores/toasts");
+    const toasts = useToastStore();
+    expect(toasts.items.some((t) => t.kind === "error" && t.message.includes("copy"))).toBe(true);
   });
 
   it("renders the local primary without remote-only actions", async () => {
@@ -513,12 +536,61 @@ describe("HostDetailView telemetry", () => {
     expect(wrapper.get("[data-test='ram-card']").text()).toContain("21.0 GB/64.0 GB");
   });
 
+  it("collapses VRAM and RAM into one Memory row on a unified-memory Metal host", async () => {
+    const wrapper = await mountView();
+    const stream = lastStream();
+    stream.options.onEvent(
+      "snapshot",
+      JSON.stringify({
+        hostname: "halcyon",
+        timestamp: 1,
+        gpus: [
+          {
+            ordinal: 0,
+            name: "Apple Metal GPU",
+            backend: "metal",
+            vram_total: 51_500_000_000,
+            vram_used: 46_900_000_000,
+            gpu_utilization: null,
+          },
+        ],
+        system_ram: { total: 51_500_000_000, used: 46_900_000_000 },
+        cpu: { cores: 16, usage_percent: 44 },
+      }),
+    );
+    await flushPromises();
+
+    const gpuCard = wrapper.get("[data-test='gpu-card']");
+    expect(gpuCard.text()).toContain("MEMORY");
+    expect(gpuCard.text()).not.toContain("VRAM");
+    expect(gpuCard.text()).toContain("46.9 GB/51.5 GB");
+    // The standalone RAM row would repeat the same numbers — it stays hidden,
+    // while CPU keeps its own row.
+    expect(wrapper.find("[data-test='ram-card']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='cpu-card']").exists()).toBe(true);
+  });
+
   it("aborts the resources stream on unmount", async () => {
     const wrapper = await mountView();
     const stream = lastStream();
     expect(stream.options.signal.aborted).toBe(false);
     wrapper.unmount();
     expect(stream.options.signal.aborted).toBe(true);
+  });
+});
+
+describe("HostDetailView H3 placement", () => {
+  it("renders the H3 capability panel below the primary instrument sections", async () => {
+    const wrapper = await mountView();
+    mountedHosts.capabilities[REMOTE_ID] =
+      authenticatedMiniMaxH3Capabilities() as unknown as ServerCapabilities;
+    await flushPromises();
+
+    const html = wrapper.html();
+    const h3At = html.indexOf('data-test="h3-inventory"');
+    expect(h3At).toBeGreaterThan(-1);
+    expect(html.indexOf("TELEMETRY")).toBeLessThan(h3At);
+    expect(html.indexOf("INSTALLED MODELS")).toBeLessThan(h3At);
   });
 });
 

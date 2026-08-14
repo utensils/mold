@@ -37,7 +37,7 @@ import { useContextMenuStore } from "../stores/contextMenu";
 const stub = { template: "<div />" };
 let router: Router;
 
-async function mountView() {
+async function mountView(setup?: (hosts: ReturnType<typeof useHostsStore>) => void) {
   router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -102,6 +102,7 @@ async function mountView() {
       },
     ],
   };
+  setup?.(hosts);
   const wrapper = mount(MachinesView, { global: { plugins: [pinia, router] } });
   await flushPromises();
   return wrapper;
@@ -203,6 +204,52 @@ describe("MachinesView overview", () => {
     const discovered = wrapper.get("[data-test='discovered-host']");
     expect(discovered.text()).toContain("studio-7680");
     expect(discovered.find("[data-test='discovered-add']").exists()).toBe(true);
+  });
+
+  it("hides the app's own embedded server from On your network but keeps standalone same-machine servers", async () => {
+    discoverServers.mockResolvedValue([
+      {
+        name: "halcyon-7680",
+        url: "http://192.168.1.142:7680",
+        host: "192.168.1.142",
+        port: 7680,
+        version: "1",
+        authRequired: true,
+        isThisMachine: true,
+        instanceId: "uuid-local",
+      },
+      {
+        name: "halcyon-7681",
+        url: "http://192.168.1.142:7681",
+        host: "192.168.1.142",
+        port: 7681,
+        version: "1",
+        authRequired: false,
+        isThisMachine: true,
+        instanceId: "uuid-standalone",
+      },
+      {
+        // A copied MOLD_HOME on another box shares the primary's UUID; it is
+        // NOT this machine and must stay discoverable.
+        name: "clone-7680",
+        url: "http://192.168.1.99:7680",
+        host: "192.168.1.99",
+        port: 7680,
+        version: "1",
+        authRequired: false,
+        isThisMachine: false,
+        instanceId: "uuid-local",
+      },
+    ]);
+    const wrapper = await mountView((hosts) => {
+      hosts.telemetry.local!.instanceId = "uuid-local";
+    });
+
+    const rows = wrapper.findAll("[data-test='discovered-host']");
+    const text = rows.map((row) => row.text()).join(" ");
+    expect(text).not.toContain("halcyon-7680");
+    expect(text).toContain("halcyon-7681");
+    expect(text).toContain("clone-7680");
   });
 
   it("opens the connect-a-machine modal from Add machine", async () => {
