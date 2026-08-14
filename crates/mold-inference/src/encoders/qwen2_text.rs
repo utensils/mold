@@ -1128,6 +1128,20 @@ impl Qwen2TextEncoder {
         self.reload(progress)
     }
 
+    /// Whether a retained encoder can serve a render planned for these
+    /// weights on this device at this dtype.
+    ///
+    /// All of them have to match. `resolve_text_encoder_source` re-measures
+    /// free VRAM every request, so consecutive renders of the same model can
+    /// legitimately land on a different GGUF tier or move between GPU and CPU
+    /// — reusing a retained encoder across any of those changes would silently
+    /// ignore the decision that was just made. The vision shards are not part
+    /// of the key because they are a function of the family and of these same
+    /// resolved paths. Mirrors `wan::text::umt5`'s retention rule.
+    pub fn matches(&self, paths: &[PathBuf], device: &Device, dtype: DType) -> bool {
+        self.encoder_paths == paths && self.device.same_device(device) && self.dtype == dtype
+    }
+
     /// Whether this encoder is currently parked, on either dtype path.
     pub fn is_parked(&self) -> bool {
         self.model.is_none() && (self.parked_tensors.is_some() || self.parked_gguf.is_some())
@@ -1225,6 +1239,35 @@ mod tests {
         assert!(
             encoder.parked_gguf.is_none(),
             "the parked map must not survive alongside the live model"
+        );
+    }
+
+    /// A retained encoder may only serve a render planned for the same
+    /// weights, device, and dtype. The variant resolver re-measures free VRAM
+    /// every request, so a legitimately different GGUF tier or placement must
+    /// drop the retained one rather than silently override the decision that
+    /// was just made.
+    #[test]
+    fn a_retained_encoder_matches_only_its_own_weights_device_and_dtype() {
+        let encoder = test_encoder(true);
+        let planned = [PathBuf::from("/nonexistent/qwen2.gguf")];
+
+        assert!(encoder.matches(&planned, &Device::Cpu, DType::F32));
+        assert!(
+            !encoder.matches(
+                &[PathBuf::from("/nonexistent/qwen2-q8.gguf")],
+                &Device::Cpu,
+                DType::F32
+            ),
+            "a different variant is a different encoder"
+        );
+        assert!(
+            !encoder.matches(&planned, &Device::Cpu, DType::BF16),
+            "a different compute dtype is a different encoder"
+        );
+        assert!(
+            !encoder.matches(&[], &Device::Cpu, DType::F32),
+            "no planned weights cannot match"
         );
     }
 
