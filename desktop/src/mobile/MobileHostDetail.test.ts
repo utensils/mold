@@ -870,6 +870,38 @@ describe("MobileHostDetail remote host data", () => {
     expect(deviceCalls).toBe(2);
   });
 
+  it("collapses VRAM and RAM into one Memory row on a unified-memory Metal host", async () => {
+    const view = await mountDetail();
+    stream("/api/resources/stream").options.onEvent(
+      "snapshot",
+      JSON.stringify({
+        hostname: "studio",
+        timestamp: 1,
+        gpus: [
+          {
+            ordinal: 0,
+            name: "Apple Metal GPU",
+            backend: "metal",
+            vram_total: 51_500_000_000,
+            vram_used: 46_900_000_000,
+            gpu_utilization: null,
+          },
+        ],
+        system_ram: { total: 51_500_000_000, used: 46_900_000_000 },
+        cpu: { cores: 16, usage_percent: 44 },
+      }),
+    );
+    await flushPromises();
+
+    expect(
+      view.find("[role='meter'][aria-label='Unified memory usage for Apple Metal GPU']").exists(),
+    ).toBe(true);
+    expect(view.text()).toContain("MEMORY");
+    expect(view.text()).not.toContain("VRAM");
+    expect(view.find("[role='meter'][aria-label='RAM usage']").exists()).toBe(false);
+    expect(view.find("[role='meter'][aria-label='CPU usage']").exists()).toBe(true);
+  });
+
   it("renders every status GPU before the resource stream produces a snapshot", async () => {
     apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string): Promise<unknown> => {
       if (path === "/api/status") {

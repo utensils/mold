@@ -24,6 +24,7 @@ import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
 import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
 import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
+import { unifiedMemoryHost } from "@studio/lib/telemetryMemory";
 import { inferBackendFromGpuName } from "../lib/hosts";
 import {
   modelDiskBytes,
@@ -240,6 +241,9 @@ function backendLabel(gpu: GpuSnapshot): string {
 
 const cpu = computed(() => snapshot.value?.cpu ?? null);
 const ram = computed(() => snapshot.value?.system_ram ?? null);
+/** Apple Metal shares one physical pool — a VRAM row and a RAM row would
+ *  show the same numbers twice, so unified hosts render one Memory row. */
+const unifiedMemory = computed(() => unifiedMemoryHost(gpus.value));
 const modelsDisk = computed(() => status.value?.models_disk ?? null);
 const diskUsedPct = computed(() => {
   const d = modelsDisk.value;
@@ -584,14 +588,18 @@ async function forget() {
                         util
                       </span>
                     </div>
-                    <span class="edge-code">VRAM</span>
+                    <span class="edge-code">{{ unifiedMemory ? "MEMORY" : "VRAM" }}</span>
                     <div
                       class="h-1.5 overflow-hidden rounded-full bg-bath"
                       role="meter"
                       aria-valuemin="0"
                       aria-valuemax="100"
                       :aria-valuenow="Math.round(percent(gpu.vram_used, gpu.vram_total))"
-                      :aria-label="`VRAM used on ${gpu.name}`"
+                      :aria-label="
+                        unifiedMemory
+                          ? `Unified memory used on ${gpu.name}`
+                          : `VRAM used on ${gpu.name}`
+                      "
                     >
                       <div
                         class="h-full transition-[width] duration-300"
@@ -623,7 +631,7 @@ async function forget() {
                     {{ cpu.usage_percent.toFixed(0) }}% · {{ cpu.cores }} CORES
                   </span>
                 </div>
-                <div v-if="ram" class="contents" data-test="ram-card">
+                <div v-if="ram && !unifiedMemory" class="contents" data-test="ram-card">
                   <span class="edge-code">RAM</span>
                   <div
                     class="h-1.5 overflow-hidden rounded-full bg-bath"

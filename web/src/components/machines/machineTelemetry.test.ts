@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { ServerStatus } from "../../types";
-import { deriveHostCardGpu } from "./machineTelemetry";
+import type { ResourceSnapshot, ServerStatus } from "../../types";
+import { deriveHostCardGpu, deriveTelemetry } from "./machineTelemetry";
 
 function statusWithGpus(gpus: NonNullable<ServerStatus["gpus"]>): ServerStatus {
   return {
@@ -11,6 +11,53 @@ function statusWithGpus(gpus: NonNullable<ServerStatus["gpus"]>): ServerStatus {
     gpus,
   };
 }
+
+function resourcesWithGpu(
+  backend: "metal" | "cuda",
+  name: string,
+): ResourceSnapshot {
+  return {
+    hostname: "test",
+    timestamp: 1,
+    gpus: [
+      {
+        ordinal: 0,
+        name,
+        backend,
+        vram_total: 51_500_000_000,
+        vram_used: 46_900_000_000,
+        vram_used_by_mold: null,
+        vram_used_by_other: null,
+        gpu_utilization: null,
+      },
+    ],
+    system_ram: {
+      total: 51_500_000_000,
+      used: 46_900_000_000,
+      used_by_mold: 40_000_000_000,
+      used_by_other: 6_900_000_000,
+    },
+    cpu: { cores: 16, usage_percent: 44 },
+  };
+}
+
+describe("deriveTelemetry unified memory", () => {
+  it("marks a Metal host unified so the panel can drop the duplicate RAM row", () => {
+    const view = deriveTelemetry(
+      null,
+      resourcesWithGpu("metal", "Apple Metal GPU"),
+    );
+    expect(view.unifiedMemory).toBe(true);
+  });
+
+  it("keeps CUDA hosts and unknown hosts non-unified", () => {
+    expect(
+      deriveTelemetry(null, resourcesWithGpu("cuda", "NVIDIA L40S"))
+        .unifiedMemory,
+    ).toBe(false);
+    expect(deriveTelemetry(null, null).unifiedMemory).toBe(false);
+  });
+});
 
 describe("deriveHostCardGpu", () => {
   it("summarizes every homogeneous GPU and aggregates VRAM", () => {

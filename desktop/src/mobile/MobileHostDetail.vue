@@ -25,6 +25,7 @@ import type {
   ServerStatus,
 } from "../lib/api/types";
 import { formatGB, formatUptime, percent } from "../lib/format";
+import { unifiedMemoryHost } from "@studio/lib/telemetryMemory";
 import { inferBackendFromGpuName } from "../lib/hosts";
 import { unloadModel } from "../lib/api/models";
 import { modelDisplayName, modelDisplayNameForId, modelSizeLabels } from "../lib/models";
@@ -108,6 +109,9 @@ const gpus = computed<GpuSnapshot[]>(() => {
 
 const ram = computed(() => snapshot.value?.system_ram ?? null);
 const cpu = computed(() => snapshot.value?.cpu ?? null);
+/** Apple Metal shares one physical pool — a VRAM row and a RAM row would
+ *  show the same numbers twice, so unified hosts render one Memory row. */
+const unifiedMemory = computed(() => unifiedMemoryHost(gpus.value));
 const disk = computed(() => status.value?.models_disk ?? null);
 const h3Host = computed(() => [
   {
@@ -608,11 +612,15 @@ onBeforeUnmount(() => {
               <span>{{ (gpu.backend || inferBackendFromGpuName(gpu.name)).toUpperCase() }}</span>
             </div>
             <div class="telemetry-meter-row">
-              <span>VRAM</span>
+              <span>{{ unifiedMemory ? "MEMORY" : "VRAM" }}</span>
               <div
                 class="meter"
                 role="meter"
-                :aria-label="`VRAM usage for ${gpu.name}`"
+                :aria-label="
+                  unifiedMemory
+                    ? `Unified memory usage for ${gpu.name}`
+                    : `VRAM usage for ${gpu.name}`
+                "
                 :aria-valuenow="Math.round(percent(gpu.vram_used, gpu.vram_total))"
                 aria-valuemin="0"
                 aria-valuemax="100"
@@ -636,7 +644,7 @@ onBeforeUnmount(() => {
             </div>
             <strong>{{ cpu.usage_percent.toFixed(0) }}% · {{ cpu.cores }} cores</strong>
           </div>
-          <div v-if="ram" class="telemetry-meter-row">
+          <div v-if="ram && !unifiedMemory" class="telemetry-meter-row">
             <span>RAM</span>
             <div
               class="meter"

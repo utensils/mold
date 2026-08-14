@@ -576,7 +576,10 @@ onBeforeUnmount(() => {
           />
 
           <div class="md-metric md-metric--mt">
-            <span>Memory {{ telemetry.memLabel }}</span>
+            <span>
+              {{ telemetry.unifiedMemory ? "Unified memory" : "Memory" }}
+              {{ telemetry.memLabel }}
+            </span>
             <span class="md-halide" data-test="telemetry-mem">
               {{
                 telemetry.memPct != null
@@ -591,7 +594,8 @@ onBeforeUnmount(() => {
             label="Memory"
           />
 
-          <div class="md-metric md-metric--mt">
+          <!-- On unified-memory hosts this would repeat the Memory row. -->
+          <div v-if="!telemetry.unifiedMemory" class="md-metric md-metric--mt">
             <span>System RAM {{ telemetry.ramLabel }}</span>
             <span class="md-halide" data-test="telemetry-ram">
               {{
@@ -602,6 +606,7 @@ onBeforeUnmount(() => {
             </span>
           </div>
           <ProgressBar
+            v-if="!telemetry.unifiedMemory"
             :value="telemetry.ramPct ?? 0"
             tone="info"
             label="System RAM"

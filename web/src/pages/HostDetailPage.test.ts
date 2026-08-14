@@ -470,6 +470,27 @@ describe("HostDetailPage — telemetry", () => {
     );
   });
 
+  it("collapses the RAM row into one unified-memory row on a Metal host", async () => {
+    poll.resources.value = makeResources({
+      gpus: [
+        {
+          ordinal: 0,
+          name: "Apple Metal GPU",
+          backend: "metal",
+          vram_total: 51_500_000_000,
+          vram_used: 46_900_000_000,
+          vram_used_by_mold: null,
+          vram_used_by_other: null,
+          gpu_utilization: null,
+        },
+      ],
+    });
+    const w = await mountDetail();
+    expect(w.text()).toContain("Unified memory");
+    expect(w.find('[data-test="telemetry-ram"]').exists()).toBe(false);
+    expect(w.get('[data-test="telemetry-cpu"]').text()).toBe("32%");
+  });
+
   it("renders em-dash fallbacks for metrics the host does not expose", async () => {
     poll.status.value = {
       version: "0.16.0",

@@ -513,6 +513,40 @@ describe("HostDetailView telemetry", () => {
     expect(wrapper.get("[data-test='ram-card']").text()).toContain("21.0 GB/64.0 GB");
   });
 
+  it("collapses VRAM and RAM into one Memory row on a unified-memory Metal host", async () => {
+    const wrapper = await mountView();
+    const stream = lastStream();
+    stream.options.onEvent(
+      "snapshot",
+      JSON.stringify({
+        hostname: "halcyon",
+        timestamp: 1,
+        gpus: [
+          {
+            ordinal: 0,
+            name: "Apple Metal GPU",
+            backend: "metal",
+            vram_total: 51_500_000_000,
+            vram_used: 46_900_000_000,
+            gpu_utilization: null,
+          },
+        ],
+        system_ram: { total: 51_500_000_000, used: 46_900_000_000 },
+        cpu: { cores: 16, usage_percent: 44 },
+      }),
+    );
+    await flushPromises();
+
+    const gpuCard = wrapper.get("[data-test='gpu-card']");
+    expect(gpuCard.text()).toContain("MEMORY");
+    expect(gpuCard.text()).not.toContain("VRAM");
+    expect(gpuCard.text()).toContain("46.9 GB/51.5 GB");
+    // The standalone RAM row would repeat the same numbers — it stays hidden,
+    // while CPU keeps its own row.
+    expect(wrapper.find("[data-test='ram-card']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='cpu-card']").exists()).toBe(true);
+  });
+
   it("aborts the resources stream on unmount", async () => {
     const wrapper = await mountView();
     const stream = lastStream();
