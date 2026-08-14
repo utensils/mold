@@ -235,10 +235,7 @@ pub fn build_model_catalog(
             display_name: None,
             kind: None,
             modality: None,
-            // `None` stays "unknown" for every unclassified built-in, exactly
-            // as before; only a manifest recorded as mature advertises the
-            // flag every surface's `18+ NSFW` danger badge reads.
-            nsfw: crate::manifest::model_is_mature(&manifest.name).then_some(true),
+            nsfw: None,
             supports_audio: None,
             // Wan continues a clip the way its chain seam does — the source's
             // final frame becomes image conditioning — so only an
@@ -885,37 +882,6 @@ mod tests {
             assert!(catalog.iter().any(|entry| entry.name == model));
             crate::require_model_activation(model, Some("minimax-h3")).unwrap();
         }
-    }
-
-    #[test]
-    fn build_model_catalog_advertises_manifest_maturity() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let models_dir = test_models_dir("maturity");
-        std::fs::create_dir_all(&models_dir).unwrap();
-        std::env::set_var("MOLD_MODELS_DIR", &models_dir);
-
-        let catalog = build_model_catalog(&Config::default(), None, false);
-
-        for name in crate::manifest::mature_model_names() {
-            let entry = catalog
-                .iter()
-                .find(|model| model.name == *name)
-                .unwrap_or_else(|| panic!("{name} should be in the catalog"));
-            assert_eq!(
-                entry.nsfw,
-                Some(true),
-                "{name} must advertise its maturity so clients can badge it"
-            );
-        }
-        // Every other built-in stays unclassified, exactly as before.
-        let ordinary = catalog
-            .iter()
-            .find(|model| model.name == "flux-schnell:q8")
-            .expect("manifest model should exist");
-        assert_eq!(ordinary.nsfw, None);
-
-        std::env::remove_var("MOLD_MODELS_DIR");
-        let _ = std::fs::remove_dir_all(models_dir);
     }
 
     #[test]

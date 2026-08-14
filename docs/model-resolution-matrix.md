@@ -1601,21 +1601,6 @@ Models: `qwen-image-edit-lightning:fp8`.
 
 Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `false`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.
 
-### `qwen-image-edit-rapid:q4`
-
-Schema 1 · hash `282a74ba10963ef2c1d8bb2349584d8c5c320a3d8f4c80a7410ff6b62e25a89c` · default recipe `default`
-
-Models: `qwen-image-edit-rapid:q4`.
-
-#### Default (`default`)
-
-- Resolution: source driven; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
-- Defaults: `1024x1024`, 8 steps, guidance 1.
-- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
-- Presets: none.
-
-Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `false`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.
-
 ## `sd15`
 
 ### `dreamshaper-v8:fp16`

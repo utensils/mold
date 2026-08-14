@@ -112,7 +112,7 @@ Post-generation upscale persists distinct `-original` and `-upscaled` entries on
 - SD3.5: `sd3.5-large:q4/q8`, `sd3.5-large-turbo:q8`, `sd3.5-medium:q8`.
 - Z-Image: `z-image-turbo:bf16/q8/q6/q4`.
 - Qwen-Image: `qwen-image`, `qwen-image-2512` (`bf16`,`q2`–`q8`), `qwen-image-lightning:fp8`/`fp8-8step`, `qwen-image-flash:q8/q4` (4-step DMD2), `qwen-image-distill:q8/q4` (15-step).
-- Qwen-Image-Edit: `qwen-image-edit-2511:bf16/q2..q8`, `qwen-image-edit-rapid:q4` (8-step, `18+ NSFW`), `qwen-image-edit-lightning:fp8` (official 4-step).
+- Qwen-Image-Edit: `qwen-image-edit-2511:bf16/q2..q8`, `qwen-image-edit-lightning:fp8` (official 4-step).
 - Wuerstchen: `wuerstchen-v2:fp16`.
 - LTX-Video: `ltx-video-0.9.6`, `-0.9.6-distilled`, `-0.9.8-2b-distilled`, `-0.9.8-13b-dev`, `-0.9.8-13b-distilled` (`bf16`).
 - LTX-2: multiple 19B/22B distilled variants (`fp8` etc.).

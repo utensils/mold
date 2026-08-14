@@ -28,8 +28,8 @@ _"A colorful hot air balloon floating over a misty valley at sunrise, the balloo
   (quants of [nvidia/Qwen-Image-Flash](https://huggingface.co/nvidia/Qwen-Image-Flash)),
   [QuantStack/Qwen-Image-Distill-GGUF](https://huggingface.co/QuantStack/Qwen-Image-Distill-GGUF)
   (quants of DiffSynth-Studio's Qwen-Image-Distill-Full),
-  [Novice25/Qwen-Image-Edit-Rapid-AIO-GGUF](https://huggingface.co/Novice25/Qwen-Image-Edit-Rapid-AIO-GGUF)
-  (quants of Phr00t's Qwen-Image-Edit-Rapid-AIO)
+  [lightx2v/Qwen-Image-Edit-2511-Lightning](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning)
+  (official pre-merged 4-step Lightning edit distill)
 
 ## Stable GGUF Variants
 
@@ -95,7 +95,7 @@ same shared VAE / Qwen2.5-VL components and run CFG-free at guidance `1.0`.
 `qwen-image-flash:*` also runs its own packaged scheduler — NVIDIA ships
 `use_dynamic_shifting=false`, `shift=3.0`, `shift_terminal=null` for the
 four-step trajectory — rather than base Qwen-Image's resolution-dependent
-schedule. The Distill-Full and Rapid AIO merges are transformer-only exports
+schedule. The Distill-Full and Lightning merges are transformer-only exports
 with no scheduler of their own, so they keep the base contract.
 
 | Model                      | Steps | Guidance | Size    | Notes                                                     |
@@ -104,15 +104,12 @@ with no scheduler of their own, so they keep the base contract.
 | `qwen-image-flash:q4`      | 4     | 1.0      | 11.7 GB | Same distill, the 24 GB-friendly tier                     |
 | `qwen-image-distill:q8`    | 15    | 1.0      | 21.8 GB | DiffSynth Distill-Full merge, closer to base fidelity     |
 | `qwen-image-distill:q4`    | 15    | 1.0      | 13.1 GB | Same merge, the 24 GB-friendly tier                       |
-| `qwen-image-edit-rapid:q4` | 8     | 1.0      | 13.3 GB | 8-step edit merge; `qwen-image-edit` family, `--image` in |
 | `qwen-image-edit-lightning:fp8` | 4 | 1.0  | 20.4 GB | Official lightx2v 4-step fused Lightning edit distill     |
 
 ::: danger 18+ NSFW
 `qwen-image-edit-lightning:fp8` is the official pre-merged Lightning edit
 distill (lightx2v fuses ModelTC's 4-step LoRA into the Edit-2511 transformer,
 exported as ComfyUI-named fp8_scaled weights).
-`qwen-image-edit-rapid:q4` tracks the `v23` release of Phr00t's Rapid AIO merge
-(`v23/Qwen-Rapid-NSFW-v23_Q4_K.gguf`), which upstream classifies
 `not-for-all-audiences`. It is an uncensored community merge, and mold flags it
 as mature: `/api/models[].nsfw` is `true` for it, so every Models surface shows
 the `18+ NSFW` badge.
@@ -129,7 +126,7 @@ prompt depends on fine text or dense structure.
 ```bash
 mold run qwen-image-flash:q4 "your prompt here"
 mold run qwen-image-distill:q4 "your prompt here"
-mold run qwen-image-edit-rapid:q4 "make the sky stormy" --image input.png
+mold run qwen-image-edit-lightning:fp8 "make the sky stormy" --image input.png
 ```
 
 ::: tip Edit Path
@@ -224,8 +221,7 @@ using it by default with `qwen-image:q2` through `qwen-image:q8` or
 GGUF quantized matrix above and have different memory and scheduler behavior.
 
 The few-step GGUF distills — `qwen-image-flash:{q8,q4}`,
-`qwen-image-distill:{q8,q4}`, `qwen-image-edit-rapid:q4`, and
-`qwen-image-edit-lightning:fp8` — are listed with
+`qwen-image-distill:{q8,q4}`, and `qwen-image-edit-lightning:fp8` — are listed with
 their steps and sizes under
 [Few-step distilled variants](#few-step-distilled-variants) above.
 

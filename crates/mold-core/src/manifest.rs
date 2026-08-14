@@ -534,31 +534,6 @@ pub fn visible_manifests() -> impl Iterator<Item = &'static ModelManifest> {
     known_manifests().iter().filter(|m| !m.hidden)
 }
 
-/// Built-in models whose upstream weights are classified mature.
-///
-/// This is the manifest side of the model-metadata presentation invariant:
-/// a mature entry must carry the textual `18+ NSFW` danger badge on every
-/// surface, and that badge is driven by `ModelInfo.nsfw`. Catalog rows get
-/// theirs from the live provider (`CatalogEntry.nsfw`); manifest rows have no
-/// provider to ask, so the classification is recorded here and projected into
-/// `/api/models` by `catalog::build_model_catalog`. A description string is
-/// not a substitute — no filter or badge can read prose.
-const MATURE_MODELS: &[&str] = &[
-    // `Phr00t/Qwen-Image-Edit-Rapid-AIO` is tagged `not-for-all-audiences`
-    // upstream, and mold ships that merge's NSFW build.
-    "qwen-image-edit-rapid:q4",
-];
-
-/// The mature built-ins, as resolved model names.
-pub fn mature_model_names() -> &'static [&'static str] {
-    MATURE_MODELS
-}
-
-/// Whether a resolved built-in model name is classified mature.
-pub fn model_is_mature(name: &str) -> bool {
-    MATURE_MODELS.contains(&name)
-}
-
 fn build_known_manifests() -> Vec<ModelManifest> {
     let mut manifests = vec![
         ModelManifest {
@@ -2922,11 +2897,6 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         guidance: 1.0,
         ..base_defaults.clone()
     };
-    let qwen_edit_rapid_defaults = ManifestDefaults {
-        steps: 8,
-        guidance: 1.0,
-        ..qwen_edit_defaults.clone()
-    };
     let qwen_edit_lightning_defaults = ManifestDefaults {
         steps: 4,
         guidance: 1.0,
@@ -3624,30 +3594,6 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
             defaults: qwen_edit_defaults.clone(),
             hidden: false,
         },
-        // Few-step edit merge. Phr00t's Rapid AIO fuses the edit transformer
-        // with step-distillation LoRAs, so it edits in 8 steps at CFG 1. The
-        // upstream merge is uncensored; `MATURE_MODELS` records that so every
-        // surface's `18+ NSFW` badge can read it.
-        ModelManifest {
-            name: "qwen-image-edit-rapid:q4".to_string(),
-            family: "qwen-image-edit".to_string(),
-            description: "Qwen-Image-Edit Rapid AIO v23 Q4 — 8-step distilled merge for fast image editing; uncensored community merge"
-                .to_string(),
-            files: {
-                let mut files = shared_qwen_image_edit_files();
-                files.push(ModelFile {
-                    hf_repo: "Novice25/Qwen-Image-Edit-Rapid-AIO-GGUF".to_string(),
-                    hf_filename: "v23/Qwen-Rapid-NSFW-v23_Q4_K.gguf".to_string(),
-                    component: ModelComponent::Transformer,
-                    size_bytes: 13_342_416_352,
-                    gated: false,
-                    sha256: None,
-                });
-                files
-            },
-            defaults: qwen_edit_rapid_defaults.clone(),
-            hidden: false,
-        },
         // Official pre-merged Lightning edit distill: lightx2v fuses the
         // Edit-2511 transformer with ModelTC's 4-step Lightning LoRA and
         // exports ComfyUI-named fp8_e4m3fn_scaled weights, which is exactly
@@ -3789,12 +3735,9 @@ pub fn resolve_model_name(input: &str) -> String {
     if input == "qwen-image-edit" {
         return "qwen-image-edit-2511:q8".to_string();
     }
-    // The Rapid AIO few-step edit merge ships one tier. Without this pin the
+    // The Lightning edit distill ships one tier. Without this pin the
     // `:q8` → `:fp16` → `:bf16` → `:fp8` loop below synthesizes a name that
     // does not exist, and the bare model is unreachable.
-    if input == "qwen-image-edit-rapid" {
-        return "qwen-image-edit-rapid:q4".to_string();
-    }
     if input == "qwen-image-edit-lightning" {
         return "qwen-image-edit-lightning:fp8".to_string();
     }
@@ -6859,27 +6802,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn qwen_edit_rapid_manifest_is_an_eight_step_edit_merge() {
-        let manifest = find_manifest("qwen-image-edit-rapid:q4").unwrap();
-        assert_eq!(manifest.family, "qwen-image-edit");
-        assert_eq!(manifest.defaults.steps, 8);
-        assert_eq!(manifest.defaults.guidance, 1.0);
-        assert_eq!(manifest.defaults.width, 1024);
-        assert_eq!(manifest.defaults.height, 1024);
-        let transformer = manifest
-            .files
-            .iter()
-            .find(|f| f.component == ModelComponent::Transformer)
-            .expect("edit-rapid has no transformer file");
-        assert_eq!(
-            transformer.hf_repo,
-            "Novice25/Qwen-Image-Edit-Rapid-AIO-GGUF"
-        );
-        assert_eq!(transformer.hf_filename, "v23/Qwen-Rapid-NSFW-v23_Q4_K.gguf");
-        assert_eq!(transformer.size_bytes, 13_342_416_352);
-    }
-
     /// The official lightx2v fused Lightning edit distill: a transformer-only
     /// fp8_scaled export on the existing FP8 path, four steps at CFG 1.0.
     #[test]
@@ -6907,53 +6829,11 @@ mod tests {
         // The FP8 loader keys off "fp8" in the filename; a rename would
         // silently reroute this checkpoint through the BF16 path.
         assert!(transformer.hf_filename.contains("fp8"));
-        // Official distill of the official edit checkpoint: not mature.
-        assert!(!model_is_mature("qwen-image-edit-lightning:fp8"));
         // Single-tier bare name resolves to its only build.
         assert_eq!(
             resolve_model_name("qwen-image-edit-lightning"),
             "qwen-image-edit-lightning:fp8"
         );
-    }
-
-    #[test]
-    fn qwen_edit_rapid_is_flagged_mature() {
-        // Upstream `Phr00t/Qwen-Image-Edit-Rapid-AIO` carries Hugging Face's
-        // own `not-for-all-audiences` tag, and this is the NSFW build of the
-        // merge. Free-text prose is not a classification: the flag is what
-        // `/api/models[].nsfw` projects and what every surface's `18+ NSFW`
-        // danger badge reads.
-        assert!(model_is_mature("qwen-image-edit-rapid:q4"));
-        assert!(model_is_mature(&resolve_model_name(
-            "qwen-image-edit-rapid"
-        )));
-        // The description must still say so in words for text-only surfaces.
-        let manifest = find_manifest("qwen-image-edit-rapid:q4").unwrap();
-        assert!(
-            manifest.description.contains("uncensored"),
-            "description must disclose the uncensored merge, got: {}",
-            manifest.description
-        );
-    }
-
-    #[test]
-    fn every_mature_model_names_a_real_manifest_and_the_rest_are_not_flagged() {
-        for name in mature_model_names() {
-            assert!(
-                find_manifest(name).is_some(),
-                "{name} is flagged mature but is not a known manifest"
-            );
-        }
-        // Nothing else in the built-in catalog is mature; a new mature entry
-        // has to be added to the list deliberately.
-        for manifest in known_manifests() {
-            assert_eq!(
-                model_is_mature(&manifest.name),
-                mature_model_names().contains(&manifest.name.as_str()),
-                "{} maturity flag disagrees with the authority list",
-                manifest.name
-            );
-        }
     }
 
     #[test]
@@ -7000,17 +6880,6 @@ mod tests {
             assert_eq!(path, base_path, "{name} must not fork the base bucket");
         }
 
-        let rapid = find_manifest("qwen-image-edit-rapid:q4").unwrap();
-        let rapid_encoder = rapid
-            .files
-            .iter()
-            .find(|f| f.component == ModelComponent::TextEncoder)
-            .unwrap();
-        let rapid_path = storage_path(rapid, rapid_encoder);
-        assert!(rapid_path.starts_with("shared/qwen-image-edit"));
-        assert_eq!(rapid_path, edit_path);
-        assert_ne!(rapid_path, base_path);
-
         let lightning = find_manifest("qwen-image-edit-lightning:fp8").unwrap();
         let lightning_encoder = lightning
             .files
@@ -7035,12 +6904,8 @@ mod tests {
             resolve_model_name("qwen-image-distill"),
             "qwen-image-distill:q8"
         );
-        // Edit Rapid AIO ships only a Q4 tier, so it needs an explicit pin.
-        assert_eq!(
-            resolve_model_name("qwen-image-edit-rapid"),
-            "qwen-image-edit-rapid:q4"
-        );
-        // The pin must not steal the existing bare `qwen-image-edit` default.
+        // The single-tier edit-lightning pin must not steal the existing
+        // bare `qwen-image-edit` default.
         assert_eq!(
             resolve_model_name("qwen-image-edit"),
             "qwen-image-edit-2511:q8"
@@ -7501,7 +7366,7 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 30 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 14 Wan + 4 MiniMax H3 contracts (2 visible compact + 2 hidden official) + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 158
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 29 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 14 Wan + 4 MiniMax H3 contracts (2 visible compact + 2 hidden official) + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 157
         // Wan fp8 bump (#777): +wan22-{t2v,i2v}-a14b:fp8 — the Comfy-Org
         // fp8-scaled expert pairs.
         // Wan bump: +wan22-{t2v,i2v}-a14b:{q5,q8} — the two-expert A14B tiers.
@@ -7519,8 +7384,7 @@ mod tests {
         // GGUFs for the dense 2.1 14B, which the engine already shape-detects.
         // Qwen distilled bump (#1042): +qwen-image-flash:{q4,q8} (NVIDIA DMD2
         // 4-step), +qwen-image-distill:{q4,q8} (DiffSynth Distill-Full 15-step),
-        // +qwen-image-edit-rapid:q4 (8-step edit merge).
-        assert_eq!(known_manifests().len(), 158);
+        assert_eq!(known_manifests().len(), 157);
     }
 
     #[test]
