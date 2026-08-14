@@ -865,6 +865,16 @@ pub(crate) fn substitute_redacted_preview_endpoints(request: &mut mold_core::Gen
     {
         return;
     }
+    // Never allocate for a shape admission will refuse anyway. The contract
+    // bounds alignment, pixel count, and aspect ratio, so an unauthenticated
+    // preview cannot drive the probe into building an oversized placeholder;
+    // a contract-invalid request keeps its redacted endpoints and admission
+    // reports the same contract error it always did.
+    if mold_core::minimax_h3::validate_request_contract(request, mold_core::minimax_h3::Task::Fl2va)
+        .is_err()
+    {
+        return;
+    }
     let (width, height) = (request.width, request.height);
     let mut placeholder: Option<Vec<u8>> = None;
     let mut fill = |slot: &mut Vec<u8>| {
@@ -1596,6 +1606,16 @@ mod tests {
         let mut absent = request(mold_core::minimax_h3::FL2VA_COMFY);
         super::substitute_redacted_preview_endpoints(&mut absent);
         assert!(absent.source_image.is_none());
+
+        // A contract-invalid geometry never allocates a placeholder — the
+        // unauthenticated preview path must not be drivable into large
+        // synchronous allocations, and admission reports the contract error.
+        let mut oversized = request(mold_core::minimax_h3::FL2VA_COMFY);
+        oversized.width = 65_504;
+        oversized.height = 65_504;
+        oversized.source_image = Some(Vec::new());
+        super::substitute_redacted_preview_endpoints(&mut oversized);
+        assert_eq!(oversized.source_image.as_deref(), Some(&[][..]));
     }
 
     #[test]

@@ -415,16 +415,28 @@ describe("generation placement preview", () => {
     });
     expect(typeof AbortSignal.timeout).toBe("undefined");
     try {
-      await previewGenerationPlacement(
+      // A probe that never settles hits the deadline and aborts.
+      apiJsonTo.mockImplementationOnce(() => new Promise(() => {}));
+      const pending = previewGenerationPlacement(
         { baseUrl: "http://plato:7680", apiKey: null },
         { model: "m", prompt: "p" },
       );
+      void pending.catch(() => {});
       const init = apiJsonTo.mock.calls[0]![2] as RequestInit;
       const signal = init.signal as AbortSignal;
       expect(signal).toBeInstanceOf(AbortSignal);
       expect(signal.aborted).toBe(false);
       vi.advanceTimersByTime(900_000);
       expect(signal.aborted).toBe(true);
+
+      // A completed probe disarms its fallback timer instead of retaining
+      // the controller for the full deadline (Codex review).
+      apiJsonTo.mockResolvedValueOnce({});
+      await previewGenerationPlacement(
+        { baseUrl: "http://plato:7680", apiKey: null },
+        { model: "m", prompt: "p" },
+      );
+      expect(vi.getTimerCount()).toBe(0);
     } finally {
       Object.defineProperty(AbortSignal, "timeout", {
         configurable: true,

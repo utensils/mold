@@ -272,10 +272,22 @@ export function redactGenerationForPlacement<T extends Record<string, unknown>>(
  * work, so a retry after a rare timeout completes quickly. */
 export const PLACEMENT_PREVIEW_TIMEOUT_MS = 900_000;
 
-function placementPreviewSignal(): AbortSignal | undefined {
+interface PlacementPreviewBound {
+  signal: AbortSignal;
+  /** Disarm the deadline once the probe settles — the Safari 15 fallback
+   * timer would otherwise retain its controller for the full 15 minutes
+   * after every successful preview. */
+  release: () => void;
+}
+
+function placementPreviewBound(): PlacementPreviewBound | undefined {
   if (typeof AbortSignal === "undefined") return undefined;
   if (typeof AbortSignal.timeout === "function") {
-    return AbortSignal.timeout(PLACEMENT_PREVIEW_TIMEOUT_MS);
+    // Engine-managed timer; nothing to disarm.
+    return {
+      signal: AbortSignal.timeout(PLACEMENT_PREVIEW_TIMEOUT_MS),
+      release: () => {},
+    };
   }
   // Safari 15 (the desktop build's floor) has AbortController but not
   // AbortSignal.timeout — fall back to a timer-armed controller so the
@@ -286,10 +298,7 @@ function placementPreviewSignal(): AbortSignal | undefined {
     () => controller.abort(new Error("placement preview timed out")),
     PLACEMENT_PREVIEW_TIMEOUT_MS,
   );
-  controller.signal.addEventListener("abort", () => clearTimeout(timer), {
-    once: true,
-  });
-  return controller.signal;
+  return { signal: controller.signal, release: () => clearTimeout(timer) };
 }
 
 export async function previewGenerationPlacement(
@@ -297,20 +306,24 @@ export async function previewGenerationPlacement(
   request: Record<string, unknown>,
   copies = 1,
 ): Promise<GenerationPlacementPreview> {
-  const signal = placementPreviewSignal();
-  return apiJsonTo<GenerationPlacementPreview>(
-    target,
-    "/api/generate/placement-preview",
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        request: redactGenerationForPlacement(request),
-        copies,
-      }),
-      ...(signal ? { signal } : {}),
-    },
-  );
+  const bound = placementPreviewBound();
+  try {
+    return await apiJsonTo<GenerationPlacementPreview>(
+      target,
+      "/api/generate/placement-preview",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          request: redactGenerationForPlacement(request),
+          copies,
+        }),
+        ...(bound ? { signal: bound.signal } : {}),
+      },
+    );
+  } finally {
+    bound?.release();
+  }
 }
 
 /** Preserve sequence topology and conditioning presence while removing prompt
@@ -342,20 +355,24 @@ export async function previewChainPlacement(
   request: Record<string, unknown>,
   copies = 1,
 ): Promise<GenerationPlacementPreview> {
-  const signal = placementPreviewSignal();
-  return apiJsonTo<GenerationPlacementPreview>(
-    target,
-    "/api/chain-jobs/placement-preview",
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        request: redactChainForPlacement(request),
-        copies,
-      }),
-      ...(signal ? { signal } : {}),
-    },
-  );
+  const bound = placementPreviewBound();
+  try {
+    return await apiJsonTo<GenerationPlacementPreview>(
+      target,
+      "/api/chain-jobs/placement-preview",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          request: redactChainForPlacement(request),
+          copies,
+        }),
+        ...(bound ? { signal: bound.signal } : {}),
+      },
+    );
+  } finally {
+    bound?.release();
+  }
 }
 
 export function comparePlacementPreviews(
