@@ -140,6 +140,20 @@ fn local_generation_delivery_capabilities() -> mold_core::GenerationDeliveryCapa
     mold_core::GenerationDeliveryCapabilities::new(cfg!(feature = "mp4"), cfg!(feature = "webp"))
 }
 
+/// The encoder that will produce this run's bytes: this build's linked
+/// features when it renders locally, and everything when a server does —
+/// there the remote refuses at admission what it cannot deliver, still
+/// before anything is written to the path the user named.
+pub(crate) fn delivery_capabilities_for_run(
+    local: bool,
+) -> mold_core::GenerationDeliveryCapabilities {
+    if local {
+        local_generation_delivery_capabilities()
+    } else {
+        mold_core::GenerationDeliveryCapabilities::new(true, true)
+    }
+}
+
 fn local_generation_profile(
     config: &Config,
     model: &str,
@@ -512,6 +526,16 @@ pub async fn run(
             cfg!(feature = "mp4"),
         )
     };
+    // The container above is a family/recipe decision that never saw the
+    // filename. Reconcile the two here — above the family policy, so wan,
+    // ltx-video and LTX-2 all get it, and before any weight is read (#1050).
+    let output_format = reconcile_video_format_with_output_extension(
+        output_format,
+        output.as_deref(),
+        format != OutputFormat::Png,
+        delivery_capabilities_for_run(local),
+    )
+    .map_err(anyhow::Error::msg)?;
 
     // ── Chain routing ─────────────────────────────────────────────────────
     // When --frames exceeds the per-clip cap, auto-build a ChainRequest and
@@ -1520,6 +1544,121 @@ fn default_output_format(
         }
         _ => OutputFormat::Apng,
     }
+}
+
+/// The video container an `--output` extension names.
+///
+/// `png` resolves to APNG deliberately: an animated PNG *is* a PNG, and
+/// `OutputFormat::Apng::extension()` is `png`, so a `.png` name on a video
+/// render asks for the animated raster container rather than a still.
+fn video_container_named_by_extension(extension: &str) -> Option<OutputFormat> {
+    match extension {
+        "gif" => Some(OutputFormat::Gif),
+        "apng" | "png" => Some(OutputFormat::Apng),
+        "webp" => Some(OutputFormat::Webp),
+        "mp4" => Some(OutputFormat::Mp4),
+        _ => None,
+    }
+}
+
+/// The cargo feature a container needs and this run's encoder does not have.
+fn missing_delivery_feature(
+    format: OutputFormat,
+    delivery: mold_core::GenerationDeliveryCapabilities,
+) -> Option<&'static str> {
+    match format {
+        OutputFormat::Mp4 if !delivery.mp4 => Some("mp4"),
+        OutputFormat::Webp if !delivery.webp => Some("webp"),
+        _ => None,
+    }
+}
+
+/// Human-facing container name, for errors that have to name two at once.
+fn container_label(format: OutputFormat) -> &'static str {
+    match format {
+        OutputFormat::Png => "PNG",
+        OutputFormat::Jpeg => "JPEG",
+        OutputFormat::Gif => "GIF",
+        OutputFormat::Apng => "APNG",
+        OutputFormat::Webp => "WebP",
+        OutputFormat::Mp4 => "MP4",
+        OutputFormat::Wav => "WAV",
+    }
+}
+
+/// Reconcile the resolved video container with the extension `--output` names.
+///
+/// The container default is a family (or local-recipe) decision that knows
+/// nothing about the filename, and in a build without the `mp4` feature it
+/// degrades to a container this binary can actually encode — the truthful
+/// minimal-build fallback (#806). Nothing reconciled the two, so `--output
+/// out.mp4` happily received GIF bytes: QuickTime refuses that file and VLC
+/// content-sniffs it into broken timing that reads as an engine bug (#1050).
+///
+/// The extension is the authority a caller typed by hand, so it wins whenever
+/// this run can honour it, and is refused — before a weight is read, like the
+/// MiniMax H3 gate in `run.rs` — when it cannot, using the engine's own
+/// wording (`wan/pipeline.rs`). Three cases deliberately change nothing:
+/// stdout and an omitted `--output` claim no extension, a still render is not
+/// a video (a single-frame wan render stays a PNG, #798), and an extension
+/// mold has no container for at all (`.mov`, `.mkv`) carries no claim this
+/// function can reason about. An explicit `--format` still outranks the
+/// family default, but it may not disagree with the filename either: that is
+/// the same silent mismatch chosen by a different authority.
+///
+/// `delivery` is the encoder that will run this render — this build's linked
+/// features for a forced-local run, and everything for a remote one, where
+/// the server encodes and refuses at admission what it cannot deliver.
+pub(crate) fn reconcile_video_format_with_output_extension(
+    resolved: OutputFormat,
+    output: Option<&str>,
+    format_is_explicit: bool,
+    delivery: mold_core::GenerationDeliveryCapabilities,
+) -> Result<OutputFormat, String> {
+    if !resolved.is_video() {
+        return Ok(resolved);
+    }
+    let Some(path) = output.filter(|path| *path != "-") else {
+        return Ok(resolved);
+    };
+    let Some(extension) = std::path::Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+    else {
+        return Ok(resolved);
+    };
+    let Some(named) = video_container_named_by_extension(&extension) else {
+        return match extension.parse::<OutputFormat>() {
+            Ok(still) => Err(format!(
+                "--output '{path}' names a .{extension} file, but {} is not a supported video \
+                 output format — name a .mp4, .webp, .gif, or .png file, or write the bytes to \
+                 stdout with --output -",
+                container_label(still)
+            )),
+            Err(_) => Ok(resolved),
+        };
+    };
+    if named == resolved {
+        return Ok(resolved);
+    }
+    if format_is_explicit {
+        return Err(format!(
+            "--output '{path}' names {}, but --format selected {} — rename the output or drop \
+             --format so the saved bytes match the extension",
+            container_label(named),
+            container_label(resolved)
+        ));
+    }
+    if let Some(feature) = missing_delivery_feature(named, delivery) {
+        return Err(format!(
+            "--output '{path}' names a .{extension} file, but {} output requires the '{feature}' \
+             feature — rebuild with --features {feature}, or name a container this build can \
+             encode (.gif or .png)",
+            container_label(named)
+        ));
+    }
+    Ok(named)
 }
 
 /// Remote generation: try SSE streaming first, fall back to blocking API.
@@ -3186,6 +3325,256 @@ mod tests {
             ),
             OutputFormat::Mp4
         );
+    }
+
+    fn full_build() -> mold_core::GenerationDeliveryCapabilities {
+        mold_core::GenerationDeliveryCapabilities::new(true, true)
+    }
+
+    fn minimal_build() -> mold_core::GenerationDeliveryCapabilities {
+        mold_core::GenerationDeliveryCapabilities::new(false, false)
+    }
+
+    /// #1050 acceptance 1: an extension this build can encode outranks the
+    /// family's container default, for every video family rather than wan
+    /// alone — the reconciliation sits above the family policy.
+    #[test]
+    fn output_extension_wins_over_the_family_container_default() {
+        assert_eq!(
+            reconcile_video_format_with_output_extension(
+                OutputFormat::Mp4,
+                Some("clip.gif"),
+                false,
+                full_build(),
+            ),
+            Ok(OutputFormat::Gif)
+        );
+        assert_eq!(
+            reconcile_video_format_with_output_extension(
+                OutputFormat::Mp4,
+                Some("/tmp/clip.APNG"),
+                false,
+                full_build(),
+            ),
+            Ok(OutputFormat::Apng)
+        );
+        assert_eq!(
+            reconcile_video_format_with_output_extension(
+                OutputFormat::Gif,
+                Some("clip.webp"),
+                false,
+                full_build(),
+            ),
+            Ok(OutputFormat::Webp)
+        );
+        // A `.png` name asks for the animated raster container, not a still:
+        // `OutputFormat::Apng::extension()` is `png`.
+        assert_eq!(
+            reconcile_video_format_with_output_extension(
+                OutputFormat::Mp4,
+                Some("clip.png"),
+                false,
+                full_build(),
+            ),
+            Ok(OutputFormat::Apng)
+        );
+    }
+
+    #[test]
+    fn matching_extensions_pass_through_untouched() {
+        for (resolved, path) in [
+            (OutputFormat::Mp4, "clip.mp4"),
+            (OutputFormat::Gif, "clip.gif"),
+            (OutputFormat::Apng, "clip.png"),
+            (OutputFormat::Apng, "clip.apng"),
+            (OutputFormat::Webp, "clip.webp"),
+        ] {
+            assert_eq!(
+                reconcile_video_format_with_output_extension(
+                    resolved,
+                    Some(path),
+                    false,
+                    full_build(),
+                ),
+                Ok(resolved),
+                "{path} should keep {resolved}"
+            );
+        }
+    }
+
+    /// #1050 acceptance 2: the exact repro. The family default degraded to a
+    /// container this build can encode, the user named `.mp4`, and the bytes
+    /// used to be written anyway. Now it refuses with the engine's own wording
+    /// (`wan/pipeline.rs`) before a single weight is read.
+    #[test]
+    fn mp4_output_extension_is_refused_when_the_build_cannot_encode_it() {
+        let error = reconcile_video_format_with_output_extension(
+            OutputFormat::Gif,
+            Some("out.mp4"),
+            false,
+            minimal_build(),
+        )
+        .expect_err("a minimal build cannot honour a .mp4 name");
+        assert!(
+            error.contains("MP4 output requires the 'mp4' feature — rebuild with --features mp4"),
+            "got: {error}"
+        );
+        assert!(error.contains("out.mp4"), "got: {error}");
+    }
+
+    #[test]
+    fn webp_output_extension_is_refused_without_the_webp_encoder() {
+        let error = reconcile_video_format_with_output_extension(
+            OutputFormat::Apng,
+            Some("out.webp"),
+            false,
+            mold_core::GenerationDeliveryCapabilities::new(true, false),
+        )
+        .expect_err("a build without the webp encoder cannot honour a .webp name");
+        assert!(
+            error
+                .contains("WebP output requires the 'webp' feature — rebuild with --features webp"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn gif_output_extension_is_accepted_by_every_build() {
+        for delivery in [minimal_build(), full_build()] {
+            assert_eq!(
+                reconcile_video_format_with_output_extension(
+                    OutputFormat::Mp4,
+                    Some("out.gif"),
+                    false,
+                    delivery,
+                ),
+                Ok(OutputFormat::Gif)
+            );
+        }
+    }
+
+    /// #1050 acceptance 3: stdout claims no extension, and an omitted
+    /// `--output` names no file at all, so both keep the resolved container.
+    #[test]
+    fn stdout_and_omitted_output_keep_the_resolved_container() {
+        for output in [None, Some("-")] {
+            assert_eq!(
+                reconcile_video_format_with_output_extension(
+                    OutputFormat::Gif,
+                    output,
+                    false,
+                    minimal_build(),
+                ),
+                Ok(OutputFormat::Gif)
+            );
+        }
+    }
+
+    #[test]
+    fn stills_and_unnameable_extensions_are_left_alone() {
+        // A single-frame render is not a video; `.mp4` there is the caller's
+        // business and never re-containers a still (#798).
+        assert_eq!(
+            reconcile_video_format_with_output_extension(
+                OutputFormat::Png,
+                Some("still.mp4"),
+                false,
+                full_build(),
+            ),
+            Ok(OutputFormat::Png)
+        );
+        // An extension mold has no container for carries no claim to reconcile.
+        for path in ["clip.mov", "clip", "clip.mkv"] {
+            assert_eq!(
+                reconcile_video_format_with_output_extension(
+                    OutputFormat::Mp4,
+                    Some(path),
+                    false,
+                    full_build(),
+                ),
+                Ok(OutputFormat::Mp4),
+                "{path} should keep mp4"
+            );
+        }
+    }
+
+    #[test]
+    fn raster_and_audio_extensions_on_a_video_render_are_refused() {
+        for path in ["clip.jpg", "clip.wav"] {
+            let error = reconcile_video_format_with_output_extension(
+                OutputFormat::Mp4,
+                Some(path),
+                false,
+                full_build(),
+            )
+            .expect_err("no video fits that container");
+            assert!(
+                error.contains("is not a supported video output format"),
+                "got: {error}"
+            );
+        }
+    }
+
+    /// An explicit `--format` still outranks the family default, but it may
+    /// not disagree with the filename either — that is the same silent
+    /// mismatch, chosen by a different authority.
+    #[test]
+    fn explicit_format_conflicting_with_the_output_extension_is_refused() {
+        let error = reconcile_video_format_with_output_extension(
+            OutputFormat::Gif,
+            Some("clip.mp4"),
+            true,
+            full_build(),
+        )
+        .expect_err("--format gif and a .mp4 name cannot both be honoured");
+        assert!(error.contains("--format"), "got: {error}");
+        assert!(error.contains("clip.mp4"), "got: {error}");
+        // Agreement is still fine.
+        assert_eq!(
+            reconcile_video_format_with_output_extension(
+                OutputFormat::Gif,
+                Some("clip.gif"),
+                true,
+                full_build(),
+            ),
+            Ok(OutputFormat::Gif)
+        );
+    }
+
+    /// The end-to-end shape of the #1050 repro through this build's own
+    /// linked encoders: the local wan recipe resolves the container, and the
+    /// `.mp4` the user typed is reconciled against it.
+    #[test]
+    fn local_delivery_capabilities_gate_the_named_output_extension() {
+        let delivery = local_generation_delivery_capabilities();
+        assert_eq!(delivery.mp4, cfg!(feature = "mp4"));
+        assert_eq!(delivery.webp, cfg!(feature = "webp"));
+
+        let profile = local_generation_profile(&Config::default(), "wan21-t2v-1.3b:bf16")
+            .expect("built-in wan profile");
+        let resolved = mold_core::generation_profile_default_output_format(&profile, None).unwrap();
+        let reconciled = reconcile_video_format_with_output_extension(
+            resolved,
+            Some("out.mp4"),
+            false,
+            delivery,
+        );
+        #[cfg(feature = "mp4")]
+        {
+            assert_eq!(resolved, OutputFormat::Mp4);
+            assert_eq!(reconciled, Ok(OutputFormat::Mp4));
+        }
+        #[cfg(not(feature = "mp4"))]
+        {
+            assert_ne!(resolved, OutputFormat::Mp4);
+            let error = reconciled.expect_err("a minimal build must refuse a .mp4 name");
+            assert!(
+                error.contains(
+                    "MP4 output requires the 'mp4' feature — rebuild with --features mp4"
+                ),
+                "got: {error}"
+            );
+        }
     }
 
     fn h3_request(model: &str) -> GenerateRequest {
