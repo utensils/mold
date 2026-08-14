@@ -1444,7 +1444,7 @@ mod tests {
     }
 
     #[test]
-    fn loader_is_never_called_before_every_activation_authority() {
+    fn loader_is_never_called_before_every_runtime_authority() {
         for (model, quantized) in [
             (contract::FL2VA_OFFICIAL, false),
             (contract::FL2VA_COMFY, true),
@@ -1457,11 +1457,14 @@ mod tests {
                 &ProgressReporter::default(),
             )
             .err()
-            .expect("H3 must remain unavailable");
+            .expect("H3 runtime must remain unavailable");
             let H3BackendActivationError::Unavailable { requirements } = error else {
                 panic!("unexpected activation error: {error}");
             };
-            assert!(requirements.contains(&H3BackendRequirement::LicenseAuthorization));
+            assert_eq!(
+                requirements.contains(&H3BackendRequirement::LicenseAuthorization),
+                !mold_core::model_policy::is_reviewed_minimax_h3_model(model)
+            );
             assert!(requirements.contains(&H3BackendRequirement::RunnableCapabilityContract));
             assert!(requirements.contains(&H3BackendRequirement::QualifiedLosslessPackedAttention));
             assert!(

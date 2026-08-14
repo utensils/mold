@@ -63,28 +63,6 @@ on:
       - "scripts/verify-desktop-release.sh"
       - "scripts/verify-desktop-updater-signature.sh"
   pull_request:
-    paths:
-      - "desktop/src/*.ts"
-      - "desktop/src/*.vue"
-      - "desktop/src/assets/**"
-      - "desktop/src/components/**"
-      - "desktop/src/lib/**"
-      - "desktop/src/stores/**"
-      - "desktop/src/styles/**"
-      - "desktop/src/views/**"
-      - "desktop/src-tauri/**/*.rs"
-      - "desktop/.prettierignore"
-      - "desktop/icon-master.png"
-      - "desktop/index.html"
-      - "desktop/package.json"
-      - "desktop/tsconfig.json"
-      - "desktop/vite.config.ts"
-      - "desktop/vitest.config.ts"
-      - "studio/**"
-      - "ui/**"
-      - "package.json"
-      - "bun.lock"
-      - "bun.nix"
   workflow_dispatch:
 
 concurrency:
@@ -192,47 +170,37 @@ jobs:
         working-directory: .
       - run: bun run fmt:check
       - run: bun run test
-        if: github.event_name == 'push'
       # `build` already runs vue-tsc before Vite; a separate typecheck compiled
       # the same project twice on every frontend PR.
       - run: bun run build
-        if: github.event_name == 'push'
 
   desktop-rust:
-    name: Native Rust (fmt; main clippy and test)
+    name: Native Rust (fmt, clippy, test)
     needs: changes
     if: >-
-      github.event_name != 'pull_request' || needs.changes.outputs.rust_format == 'true'
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'macos-14' }}
+      github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
+    runs-on: macos-14
     defaults:
       run:
         working-directory: desktop
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        if: github.event_name == 'pull_request'
-        with:
-          components: rustfmt
-      - uses: dtolnay/rust-toolchain@stable
-        if: github.event_name == 'push'
         with:
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
-        if: github.event_name == 'push'
         with:
           workspaces: desktop/src-tauri
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-        if: github.event_name == 'push'
       # CPU-only: the metal feature is deliberately off in CI.
       - run: cargo test --manifest-path src-tauri/Cargo.toml
-        if: github.event_name == 'push'
 
   desktop-linux:
     name: Linux (clippy, test; main AppImage)
     needs: changes
-    # Native PR feedback is rustfmt-only on Linux. Every relevant main push
-    # runs Linux clippy/tests and the stronger CUDA AppImage build + launch.
+    # Native PR feedback runs on macOS above. Main adds the stronger CUDA
+    # AppImage build and launch without duplicating it on every PR revision.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04
     defaults:

@@ -20,13 +20,14 @@ concurrency:
   group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Cache strategy: main jobs that compile the same features share a cache key.
-# Pull requests do not compile or restore compiler caches.
+# Cache strategy: jobs that compile the same features share a cache key.
+# Only main saves the cache; pull requests restore the last trusted generation.
 #
-# Path-aware gating: PRs run only Rust/docs/frontend formatting for changed
-# source trees, plus static workflow syntax/routing validation. Substantive
-# compilation, tests, builds, and platform checks run after merge on main.
-# Keep rust/coverage/docs/web as job-level gates, NOT `on.<event>.paths`
+# Path-aware gating: pull requests run the deterministic checks for each
+# changed surface before merge. Main retains the external monitor and the
+# non-shipping FlashAttention check, while release workflows build CUDA/Metal
+# artifacts. Do not duplicate those 40+ minute release compiles here.
+# Keep rust/docs/web as job-level gates, NOT `on.<event>.paths`
 # filters: they are required status checks, and a workflow that never triggers
 # leaves them "Expected — waiting" forever. A skipped job reports success to
 # branch protection while retaining its established status-check name.
@@ -217,7 +218,7 @@ jobs:
       always() && !cancelled() &&
       (needs.changes.result != 'success' ||
        ((needs.changes.outputs.website == 'true' ||
-         (github.event_name == 'push' && needs.changes.outputs.workflow == 'true')) &&
+         needs.changes.outputs.workflow == 'true') &&
         needs.changes.outputs.trusted_release_pr != 'true'))
     runs-on: ubuntu-latest
     steps:
@@ -237,11 +238,9 @@ jobs:
         working-directory: website
         run: bun run fmt:check
       - name: Verify docs references
-        if: github.event_name == 'push'
         working-directory: website
         run: bun run verify
       - name: Build docs
-        if: github.event_name == 'push'
         working-directory: website
         run: bun run build
 
@@ -251,7 +250,7 @@ jobs:
       always() && !cancelled() &&
       (needs.changes.result != 'success' ||
        ((needs.changes.outputs.web == 'true' ||
-         (github.event_name == 'push' && needs.changes.outputs.workflow == 'true')) &&
+         needs.changes.outputs.workflow == 'true') &&
         needs.changes.outputs.trusted_release_pr != 'true'))
     runs-on: ubuntu-latest
     steps:
@@ -267,20 +266,16 @@ jobs:
       - name: Install web dependencies
         run: bun install --frozen-lockfile
       - name: Check frontend architecture and dead code
-        if: github.event_name == 'push'
         run: bun run check:architecture && bun run check:dead-code
       - name: Run shared Studio tests
-        if: github.event_name == 'push'
         run: bun run test:studio
       - name: Check web formatting
         working-directory: web
         run: bun run fmt:check
       - name: Run web tests
-        if: github.event_name == 'push'
         working-directory: web
         run: bun run test
       - name: Build web SPA (includes vue-tsc typecheck)
-        if: github.event_name == 'push'
         working-directory: web
         run: bun run build
 
@@ -309,7 +304,7 @@ jobs:
        needs.changes.outputs.workflow == 'true')
     runs-on: ubuntu-latest
     env:
-      RUN_RUST_SUITE: ${{ github.event_name == 'push' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true') }}
+      RUN_RUST_SUITE: ${{ needs.changes.outputs.trusted_release_pr != 'true' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true') }}
       RUN_RUST_FORMAT: ${{ needs.changes.outputs.trusted_release_pr != 'true' && needs.changes.outputs.rust_format == 'true' }}
       SCCACHE_GHA_ENABLED: "true"
     steps:
@@ -364,7 +359,7 @@ jobs:
             exit 1
           }
       - name: Validate all locked Cargo graphs
-        if: github.event_name == 'push' && needs.changes.outputs.release == 'true'
+        if: needs.changes.outputs.release == 'true'
         env:
           RUSTC_WRAPPER: ""
         run: |
@@ -374,7 +369,7 @@ jobs:
           cargo metadata --locked --no-deps --format-version 1 \
             --manifest-path apps/mobile/src-tauri/Cargo.toml >/dev/null
       - uses: DeterminateSystems/determinate-nix-action@v3
-        if: github.event_name == 'push' && needs.changes.outputs.release == 'true'
+        if: needs.changes.outputs.release == 'true'
       - name: Validate workflow syntax
         if: github.event_name == 'pull_request' && needs.changes.outputs.workflow == 'true'
         uses: docker://rhysd/actionlint:1.7.12
@@ -382,7 +377,7 @@ jobs:
         if: github.event_name == 'pull_request' && needs.changes.outputs.workflow == 'true'
         run: bash scripts/tests/ci-routing-contract.sh
       - name: Run protected release contracts
-        if: github.event_name == 'push' && needs.changes.outputs.release == 'true'
+        if: needs.changes.outputs.release == 'true'
         run: |
           nix run nixpkgs#actionlint -- .github/workflows/*.yml
           bash scripts/tests/release-sync-pr.sh
@@ -404,7 +399,7 @@ jobs:
           bash scripts/tests/regression-matrix-transient-retry.sh
           bash scripts/tests/wan-regression-matrix.sh
       - name: Test MiniMax H3 private-UAT release contract
-        if: github.event_name == 'push' && needs.changes.outputs.release == 'true'
+        if: needs.changes.outputs.release == 'true'
         run: bash scripts/tests/minimax-h3-private-uat-release-contract.sh
       - uses: dtolnay/rust-toolchain@stable
         if: github.event_name == 'pull_request' && env.RUN_RUST_FORMAT == 'true'
@@ -468,8 +463,14 @@ jobs:
       # The live Hugging Face search is an external-service monitor, not a
       # deterministic change gate. It has repeatedly failed release PRs on 429
       # responses, so keep that signal on main without forcing PR reruns.
+      - name: Test (deterministic PR suite)
+        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'pull_request'
+        run: >-
+          timeout --signal=TERM --kill-after=60s 20m
+          cargo test --workspace --
+          --skip catalog_api::catalog_live_test::live_search_free_text_can_find_manual_clip_components
       - name: Test (full main suite)
-        if: env.RUN_RUST_SUITE == 'true'
+        if: env.RUN_RUST_SUITE == 'true' && github.event_name == 'push'
         run: timeout --signal=TERM --kill-after=60s 20m cargo test --workspace
       - name: Test local multi-GPU qualification contract
         if: env.RUN_RUST_SUITE == 'true'
@@ -512,56 +513,6 @@ jobs:
         run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns
       - name: Record protected gate success
         run: echo "Required Rust and release routes completed successfully."
-
-  cuda-check:
-    name: CUDA forced-local typecheck
-    needs: changes
-    if: >-
-      github.event_name == 'push' &&
-      needs.changes.outputs.trusted_release_pr != 'true' &&
-      (needs.changes.outputs.gpu == 'true' || needs.changes.outputs.workflow == 'true')
-    runs-on: ubuntu-22.04
-    env:
-      CUDA_COMPUTE_CAP: "89"
-      LIBRARY_PATH: /usr/local/cuda/lib64/stubs
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - name: Free runner disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
-          sudo apt-get clean
-      - name: Install Rust build dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev
-      - name: Install CUDA toolkit
-        uses: Jimver/cuda-toolkit@v0.2.35
-        with:
-          cuda: "12.8.1"
-          method: local
-          log-file-suffix: root-ci-sm89
-          linux-local-args: '["--toolkit"]'
-          use-github-cache: false
-          use-local-cache: false
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: workspace-cuda-sm89
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Clippy CUDA forced-local, public H3, and server paths
-        run: cargo clippy -p mold-ai --features cuda,h3,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings
-      - name: Clippy the development-only MiniMax H3 runtime-record producer
-        run: cargo clippy -p mold-ai-inference --features dev-bins,h3 --bin h3_runtime_qualification_record -- -D warnings
-      - name: Clippy the CUDA private H3 server bridge
-        run: cargo clippy -p mold-ai-server --features h3-private-uat --all-targets -- -D warnings
-      - name: Clippy private exact-BF16 Qwen capture adapter
-        run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_qwen_layer50_capture -- -D warnings
-      - name: Clippy private visual-VAE capture adapter
-        run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_visual_vae_capture -- -D warnings
-      - name: Clippy private exact-FP32 AudioVAE capture adapter
-        run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_audio_vae_capture -- -D warnings
-      - name: Clippy private H3 transformer capture adapter
-        run: cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_transformer_capture -- -D warnings
 
   # The `flash-attn` feature was decorative for months (issue #598) precisely
   # because nothing ever compiled it: the cfg-stripped fallback in
@@ -647,7 +598,7 @@ jobs:
     name: Metal forced-local typecheck
     needs: changes
     if: >-
-      github.event_name == 'push' &&
+      github.event_name == 'pull_request' &&
       needs.changes.outputs.trusted_release_pr != 'true' &&
       (needs.changes.outputs.gpu == 'true' || needs.changes.outputs.workflow == 'true')
     runs-on: macos-14
@@ -663,27 +614,22 @@ jobs:
       - name: Clippy Metal forced-local and server paths
         run: cargo clippy -p mold-ai --features metal,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings
 
+  # Codecov remains a main-branch reporting signal. It is intentionally not a
+  # required PR check: the protected Rust job already runs the same tests, and
+  # coverage instrumentation requires a separate workspace compilation.
   coverage:
-    timeout-minutes: 60
+    name: Codecov coverage
+    timeout-minutes: 30
     needs: changes
-    # Retain the required status name on PRs, but collect coverage only after
-    # merge so no pull-request revision recompiles the workspace.
     if: >-
-      always() && !cancelled() &&
-      (needs.changes.result != 'success' ||
-       (github.event_name == 'push' &&
-        (needs.changes.outputs.rust == 'true' ||
-         needs.changes.outputs.workflow == 'true')))
+      github.event_name == 'push' &&
+      (needs.changes.outputs.rust == 'true' ||
+       needs.changes.outputs.workflow == 'true')
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
-      - name: Require successful change classification
-        if: needs.changes.result != 'success'
-        run: |
-          echo "::error::The required path classifier did not complete successfully."
-          exit 1
       - uses: actions/checkout@v6
 
       - name: Free runner disk space
@@ -732,7 +678,7 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Generate coverage
-        run: timeout --signal=TERM --kill-after=60s 45m cargo llvm-cov --workspace --lcov --output-path lcov.info
+        run: timeout --signal=TERM --kill-after=60s 25m cargo llvm-cov --workspace --lcov --output-path lcov.info
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
