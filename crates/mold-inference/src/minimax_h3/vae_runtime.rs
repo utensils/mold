@@ -1884,6 +1884,13 @@ fn stage_directory_prefix_for_this_process() -> String {
     format!("{STAGE_DIRECTORY_PREFIX}{}-", std::process::id())
 }
 
+/// A legacy stage directory (no embedded owner PID) is removed only past
+/// this age. Pre-PID binaries created and dropped their stages within one
+/// admission attempt — minutes — so a day-old legacy directory is
+/// conclusively a crash leftover, while a fresh one may belong to a live
+/// older server sharing the root during a rolling restart.
+const LEGACY_STAGE_EXPIRY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
 /// Remove staged directories abandoned by dead processes.
 ///
 /// The process-lifetime staged cache deliberately never drops its `TempDir`
@@ -1891,9 +1898,16 @@ fn stage_directory_prefix_for_this_process() -> String {
 /// would otherwise strand ~5.8 GB under the staging root. Stage directories
 /// embed their owner's PID; a sweep — always under this root's staging
 /// flight, right before a fresh stage is created — removes only directories
-/// whose owner is provably gone (or legacy unowned names), never a live
-/// process's stage.
+/// whose owner is provably gone, or legacy unowned names old enough that no
+/// live process can still be using them.
 fn sweep_stale_stage_directories(staging_root: &Path) {
+    sweep_stale_stage_directories_with_expiry(staging_root, LEGACY_STAGE_EXPIRY)
+}
+
+fn sweep_stale_stage_directories_with_expiry(
+    staging_root: &Path,
+    legacy_expiry: std::time::Duration,
+) {
     let Ok(entries) = std::fs::read_dir(staging_root) else {
         return;
     };
@@ -1923,9 +1937,20 @@ fn sweep_stale_stage_directories(staging_root: &Path) {
             }
             #[cfg(not(unix))]
             continue;
+        } else {
+            // Legacy unowned name: without an owner to test, only age proves
+            // abandonment.
+            let stale = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age >= legacy_expiry);
+            if !stale {
+                continue;
+            }
         }
-        // Legacy unowned names and dead-owner directories are removed; a
-        // failure here is not fatal — capacity enforcement reports it.
+        // A removal failure is not fatal — capacity enforcement reports it.
         let _ = std::fs::remove_dir_all(entry.path());
     }
 }
@@ -3129,7 +3154,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn stale_stage_directories_are_swept_only_for_dead_or_legacy_owners() {
+    fn stale_stage_directories_are_swept_only_with_dead_owner_or_expiry_proof() {
         let staging = tempfile::tempdir().unwrap();
         let dead = staging.path().join(".mold-h3-vae-stage-999999999-dead");
         let legacy = staging.path().join(".mold-h3-vae-stage-legacy");
@@ -3140,8 +3165,18 @@ mod tests {
         for path in [&dead, &legacy, &live, &unrelated] {
             std::fs::create_dir(path).unwrap();
         }
+
+        // A fresh legacy directory may belong to a live pre-PID server during
+        // a rolling restart — the production expiry preserves it.
         sweep_stale_stage_directories(staging.path());
         assert!(!dead.exists());
+        assert!(legacy.exists());
+        assert!(live.exists());
+        assert!(unrelated.exists());
+
+        // Once its age passes the expiry, the legacy directory is provably
+        // abandoned and removed; live-owner stages still survive.
+        sweep_stale_stage_directories_with_expiry(staging.path(), std::time::Duration::ZERO);
         assert!(!legacy.exists());
         assert!(live.exists());
         assert!(unrelated.exists());
