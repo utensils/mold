@@ -1782,24 +1782,110 @@ pub fn available_system_memory_bytes() -> Option<u64> {
 
 // ── Text-encoder retention ───────────────────────────────────────────────────
 
+/// Host RAM that must stay free *beyond* the parked encoder itself before the
+/// automatic default engages.
+///
+/// The parked copy is not the only host allocation a render makes — decoded
+/// output, the VAE's CPU fallback, and the OS page cache for the checkpoint all
+/// want room. 8 GiB is deliberately generous: an automatic default that pushes
+/// a box into swap is far worse than one that declines and pays a reload.
+pub const KEEP_TE_RAM_HEADROOM_MARGIN_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Host RAM currently available for a park, if the platform can report it.
+///
+/// Linux reports `MemAvailable` — the kernel's own estimate of what can be
+/// handed out without swapping, which already discounts unreclaimable page
+/// cache — and macOS goes through the existing VM-statistics probe. Anything
+/// else returns `None`, which reads as "unknown" and keeps the conservative
+/// default.
+pub fn host_available_memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+        parse_mem_available_kib(&meminfo).map(|kib| kib.saturating_mul(1024))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        available_system_memory_bytes()
+    }
+}
+
+/// `MemAvailable:   12345678 kB` → `12345678`.
+///
+/// Split out from [`host_available_memory_bytes`] so the parse is testable
+/// without a Linux host or a writable `/proc`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_mem_available_kib(meminfo: &str) -> Option<u64> {
+    meminfo.lines().find_map(|line| {
+        let rest = line.strip_prefix("MemAvailable:")?;
+        rest.split_whitespace().next()?.parse::<u64>().ok()
+    })
+}
+
 /// Whether to park text-encoder weights on CPU instead of dropping them after
-/// encoding finishes (opt-in via `MOLD_KEEP_TE_RAM=1`).
+/// encoding finishes.
 ///
-/// Default off for backward compatibility — the existing drop-and-reload path
-/// re-mmaps safetensors / re-dequantizes GGUF on every request, costing
-/// ~2-4 s per FLUX generation (~1 s on SD3).
+/// Size-unaware callers keep the historical opt-in default: without knowing
+/// what the park would cost, there is no way to prove the host can afford it,
+/// so an absent `MOLD_KEEP_TE_RAM` means "off". Callers that know the encoder's
+/// footprint use [`keep_te_in_ram_for_encoder_bytes`], which defaults **on**
+/// when the host can demonstrably afford the copy.
 ///
-/// When on, FP16/BF16 encoders survive between requests on host RAM (~9 GB
-/// for T5-XXL fp16); only the lightweight GPU↔CPU tensor copy happens between
-/// requests. Quantized GGUF encoders fall back to drop-and-reload regardless,
-/// because their `QTensor` storage is device-tied and not trivially walkable.
+/// When on, encoders survive between requests on host RAM; only the
+/// lightweight GPU↔CPU tensor copy happens between requests. Since #1044 this
+/// covers quantized GGUF encoders too — their `QTensor` bytes move losslessly
+/// through `wan::block_offload` rather than being re-read from disk.
 ///
 /// This mirrors ComfyUI's `text_encoder_offload_device()` behavior
 /// (`comfy/model_management.py:1012`).
 pub fn keep_te_in_ram() -> bool {
-    crate::runtime_env::value("MOLD_KEEP_TE_RAM")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    matches!(keep_te_ram_override(), Some(true))
+}
+
+/// [`keep_te_in_ram`] for a caller that knows how many bytes the park costs.
+///
+/// `MOLD_KEEP_TE_RAM` still wins in both directions — `1` forces parking even
+/// when the probe cannot vouch for the host, anything else forces the drop —
+/// so the knob remains the escape hatch documented in
+/// `website/guide/configuration.md`.
+///
+/// With the variable unset the default is **on** for a CUDA build when
+/// [`host_available_memory_bytes`] reports at least the encoder's own bytes
+/// plus [`KEEP_TE_RAM_HEADROOM_MARGIN_BYTES`]. That is the #1044 fix: the
+/// measured 35.1 s per-request encoder reload was being paid by default on
+/// boxes with tens of gigabytes of idle RAM. Metal is excluded at the call
+/// sites (unified memory makes the copy pointless) and an unreadable probe
+/// keeps the old drop-and-reload behavior.
+pub fn keep_te_in_ram_for_encoder_bytes(encoder_bytes: u64) -> bool {
+    if let Some(forced) = keep_te_ram_override() {
+        return forced;
+    }
+    keep_te_in_ram_default_for(
+        cfg!(feature = "cuda"),
+        encoder_bytes,
+        host_available_memory_bytes(),
+    )
+}
+
+/// The explicit `MOLD_KEEP_TE_RAM` decision, or `None` when unset.
+fn keep_te_ram_override() -> Option<bool> {
+    crate::runtime_env::value("MOLD_KEEP_TE_RAM").map(|v| v == "1")
+}
+
+/// The automatic default, over explicit inputs so it is testable without a
+/// CUDA device or a particular host's memory.
+fn keep_te_in_ram_default_for(
+    is_cuda_build: bool,
+    encoder_bytes: u64,
+    available_host_bytes: Option<u64>,
+) -> bool {
+    if !is_cuda_build || encoder_bytes == 0 {
+        return false;
+    }
+    let Some(available) = available_host_bytes else {
+        return false;
+    };
+    available >= encoder_bytes.saturating_add(KEEP_TE_RAM_HEADROOM_MARGIN_BYTES)
 }
 
 #[cfg(feature = "cuda")]
@@ -4249,15 +4335,30 @@ mod tests {
 
     // ── keep_te_in_ram ───────────────────────────────────────────────────
 
-    /// `MOLD_KEEP_TE_RAM` defaults to off so the existing drop-and-reload
-    /// behavior is preserved when the env var is absent.
+    /// Every `MOLD_KEEP_TE_RAM` behavior lives under one `#[test]` so cargo's
+    /// parallel runner cannot race two `set_var`/`remove_var` sequences on the
+    /// same process-global variable — the same reason
+    /// `test_reserved_vram_and_usable_free_vram` below is a single test.
+    ///
+    /// Two claims are pinned here. The size-unaware helper keeps the historical
+    /// opt-in default: with no encoder footprint to check the host against,
+    /// "off" is the only claim that can be made safely. And the variable is the
+    /// escape hatch in both directions for the size-aware helper (#1044) — `1`
+    /// forces the park even when the probe would decline, and any other set
+    /// value forces the drop even when the host has room to spare.
     #[test]
     fn test_keep_te_in_ram_env_behaviors() {
+        let huge = 4 * KEEP_TE_RAM_HEADROOM_MARGIN_BYTES;
+
         unsafe { std::env::remove_var("MOLD_KEEP_TE_RAM") };
         assert!(!keep_te_in_ram(), "missing var must be off");
 
         unsafe { std::env::set_var("MOLD_KEEP_TE_RAM", "1") };
         assert!(keep_te_in_ram(), "\"1\" must enable park");
+        assert!(
+            keep_te_in_ram_for_encoder_bytes(huge),
+            "\"1\" must force the park regardless of the host probe"
+        );
 
         for v in ["", "0", "true", "yes", "TRUE"] {
             unsafe { std::env::set_var("MOLD_KEEP_TE_RAM", v) };
@@ -4265,8 +4366,54 @@ mod tests {
                 !keep_te_in_ram(),
                 "value {v:?} must not enable park (helper is strict ==\"1\")"
             );
+            assert!(
+                !keep_te_in_ram_for_encoder_bytes(1),
+                "value {v:?} must force the drop regardless of the host probe"
+            );
         }
         unsafe { std::env::remove_var("MOLD_KEEP_TE_RAM") };
+    }
+
+    /// The automatic default: on for a CUDA build with demonstrable host
+    /// headroom, off for every case where the host cannot be vouched for.
+    #[test]
+    fn test_keep_te_in_ram_default_needs_cuda_and_measured_headroom() {
+        let encoder = 6 * 1024 * 1024 * 1024;
+        let enough = encoder + KEEP_TE_RAM_HEADROOM_MARGIN_BYTES;
+
+        assert!(
+            keep_te_in_ram_default_for(true, encoder, Some(enough)),
+            "exactly encoder + margin available must engage the default"
+        );
+        assert!(
+            !keep_te_in_ram_default_for(true, encoder, Some(enough - 1)),
+            "one byte short of the margin must decline"
+        );
+        assert!(
+            !keep_te_in_ram_default_for(false, encoder, Some(enough)),
+            "a non-CUDA build keeps the opt-in default"
+        );
+        assert!(
+            !keep_te_in_ram_default_for(true, encoder, None),
+            "an unreadable host probe must decline rather than guess"
+        );
+        assert!(
+            !keep_te_in_ram_default_for(true, 0, Some(enough)),
+            "an unknown encoder size must decline"
+        );
+    }
+
+    /// `MemAvailable` is what the kernel says can be handed out without
+    /// swapping; `MemFree` is not a substitute and must not be picked up.
+    #[test]
+    fn test_parse_mem_available_kib_reads_only_mem_available() {
+        let meminfo = "MemTotal:       65792840 kB\n\
+                       MemFree:         1234567 kB\n\
+                       MemAvailable:   48127344 kB\n\
+                       Buffers:          123456 kB\n";
+        assert_eq!(parse_mem_available_kib(meminfo), Some(48_127_344));
+        assert_eq!(parse_mem_available_kib("MemTotal: 100 kB\n"), None);
+        assert_eq!(parse_mem_available_kib(""), None);
     }
 
     // ── reserved_vram_bytes / usable_free_vram_bytes ─────────────────────

@@ -4,6 +4,27 @@
 //! multimodal projector or vision tower. This loader reads the GGUF language
 //! tensors directly and returns last hidden states without the final RMSNorm,
 //! matching the upstream diffusers Qwen-Image pipeline.
+//!
+//! ## Why the weight map is retained (#1044)
+//!
+//! [`GgufQwen2Weights`] is kept on the encoder rather than dropped at the end
+//! of `load`. It is the park/unpark source of truth: a cold prompt used to pay
+//! a measured **35.1 s** GGUF disk reload on every request because the only way
+//! back from `drop_weights()` was to re-read the file. Retaining the map costs
+//! nothing while resident — the quantized entries are the very `Arc<QTensor>`
+//! the blocks' [`QMatMul`]s hold, so they are shared, not duplicated.
+//!
+//! The map is deliberately split in two. Tensors that back a `QMatMul` stay
+//! quantized and share their `Arc`; tensors that are dequantized at load
+//! (the embedding table, the attention biases, the RMSNorm weights) are held
+//! **plain**, because their quantized source is never read again and keeping
+//! it would pin a second copy of a 150k-row embedding table on the device.
+//!
+//! Moving the quantized half between host and device is a raw byte memcpy via
+//! `wan::block_offload`'s [`qtensor_to_device`] / [`rebuild_on`] — never a
+//! dequantize/re-quantize round trip, which is lossy and would make a render
+//! depend on whether the encoder happened to be parked. That module is the one
+//! authority for the byte path; see its header for the full argument.
 
 use anyhow::Result;
 use candle_core::quantized::gguf_file;
@@ -13,6 +34,8 @@ use candle_transformers::models::with_tracing::QMatMul;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+
+use crate::wan::block_offload::{qtensor_to_device, rebuild_on};
 
 // Qwen-Image tokenization pads to TOKENIZER_WINDOW + template strip prefix,
 // so the GGUF path must support sequences comfortably above 1024 tokens.
@@ -191,57 +214,92 @@ impl Qwen2Block {
     }
 }
 
-pub(crate) struct GgufQwen2TextEncoder {
+/// Scalar shape/metadata read out of the GGUF header once.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GgufQwen2Params {
+    hidden_size: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    block_count: usize,
+    rope_positions: usize,
+    rms_norm_eps: f64,
+    rope_theta: f64,
+}
+
+impl GgufQwen2Params {
+    fn head_dim(&self) -> usize {
+        self.hidden_size / self.num_heads
+    }
+
+    fn kv_repeat(&self) -> usize {
+        self.num_heads / self.num_kv_heads
+    }
+}
+
+/// The encoder's complete weight set, wherever it currently lives.
+///
+/// This is the park/unpark source of truth (#1044): [`GgufQwen2Weights::to_device`]
+/// moves it host↔device without changing a byte, and [`GgufQwen2Weights::build`]
+/// reconstructs the runnable modules from it. See the module header for why the
+/// quantized and dequantized halves are stored separately.
+pub(crate) struct GgufQwen2Weights {
+    params: GgufQwen2Params,
+    /// Tensors that back a [`QMatMul`]. The blocks hold `Arc` clones of these,
+    /// so retaining the map while resident costs no extra memory.
+    quant: HashMap<String, Arc<QTensor>>,
+    /// Tensors dequantized at load time. Their quantized source is dropped.
+    plain: HashMap<String, Tensor>,
+}
+
+/// The runnable modules built from a resident [`GgufQwen2Weights`].
+struct GgufQwen2Modules {
     embedding: candle_nn::Embedding,
     blocks: Vec<Qwen2Block>,
     cos: Tensor,
     sin: Tensor,
-    device: Device,
-    dtype: DType,
 }
 
-impl GgufQwen2TextEncoder {
-    fn forward_last_hidden_from_embeddings(
-        &mut self,
-        xs: Tensor,
-        attn_mask: Option<&Tensor>,
-    ) -> Result<Tensor> {
-        let (b, seq_len, _) = xs.dims3()?;
-        let attention_mask = match attn_mask {
-            Some(mask) => Some(self.prepare_attention_mask(mask)?),
-            None => {
-                if seq_len <= 1 {
-                    None
-                } else {
-                    Some(self.prepare_causal_attention_mask(b, seq_len, 0)?)
-                }
-            }
-        };
-
-        let mut xs = xs;
-        for block in &self.blocks {
-            xs = block.forward(&xs, &self.cos, &self.sin, attention_mask.as_ref())?;
-        }
-        Ok(xs)
+fn read_tensor(
+    content: &gguf_file::Content,
+    file: &mut std::fs::File,
+    name: &str,
+    device: &Device,
+) -> Result<Arc<QTensor>> {
+    if !content.tensor_infos.contains_key(name) {
+        anyhow::bail!("missing tensor: {name}");
     }
+    Ok(Arc::new(content.tensor(file, name, device)?))
+}
 
-    pub fn load(path: &Path, device: &Device) -> Result<Self> {
+fn read_tensor_opt(
+    content: &gguf_file::Content,
+    file: &mut std::fs::File,
+    name: &str,
+    device: &Device,
+) -> Result<Option<Arc<QTensor>>> {
+    if !content.tensor_infos.contains_key(name) {
+        return Ok(None);
+    }
+    read_tensor(content, file, name, device).map(Some)
+}
+
+/// The seven per-block projections that stay quantized and run through a
+/// [`QMatMul`]. Everything else a block needs is dequantized at load.
+const BLOCK_QUANT_LEAVES: [&str; 7] = [
+    "attn_q",
+    "attn_k",
+    "attn_v",
+    "attn_output",
+    "ffn_gate",
+    "ffn_up",
+    "ffn_down",
+];
+
+impl GgufQwen2Weights {
+    /// Read every tensor this encoder needs out of `path` onto `device`.
+    fn read(path: &Path, device: &Device) -> Result<Self> {
         let mut file = std::fs::File::open(path)?;
         let content = gguf_file::Content::read(&mut file)?;
-
-        let mut tensors: HashMap<String, Arc<QTensor>> = HashMap::new();
-        for name in content.tensor_infos.keys() {
-            let tensor = content.tensor(&mut file, name, device)?;
-            tensors.insert(name.clone(), Arc::new(tensor));
-        }
-
-        let get = |name: &str| -> Result<Arc<QTensor>> {
-            tensors
-                .get(name)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("missing tensor: {name}"))
-        };
-        let get_opt = |name: &str| -> Option<Arc<QTensor>> { tensors.get(name).cloned() };
 
         let md_usize = |keys: &[&str]| -> Option<usize> {
             keys.iter().find_map(|key| {
@@ -264,10 +322,6 @@ impl GgufQwen2TextEncoder {
                 })
             })
         };
-
-        let embedding_weight = get("token_embd.weight")?.dequantize(device)?;
-        let hidden_size = embedding_weight.dim(1)?;
-        let embedding = candle_nn::Embedding::new(embedding_weight, hidden_size);
 
         let num_heads = md_usize(&[
             "qwen2vl.attention.head_count",
@@ -307,95 +361,261 @@ impl GgufQwen2TextEncoder {
         ])
         .unwrap_or(1_000_000.0);
 
-        let rope_positions = context_length.min(MAX_ROPE_POSITIONS);
-        let head_dim = hidden_size / num_heads;
-        let kv_repeat = num_heads / num_kv_heads;
-        let (cos, sin) = compute_rope(head_dim, rope_theta, rope_positions, device)?;
+        let mut quant: HashMap<String, Arc<QTensor>> = HashMap::new();
+        let mut plain: HashMap<String, Tensor> = HashMap::new();
 
-        let mut blocks = Vec::with_capacity(block_count);
+        // Dequantized immediately and never read quantized again, so the
+        // quantized source is dropped rather than parked alongside it.
+        let embedding_weight = read_tensor(&content, &mut file, TOKEN_EMBD, device)?
+            .dequantize(device)
+            .map_err(anyhow::Error::from)?;
+        let hidden_size = embedding_weight.dim(1)?;
+        plain.insert(TOKEN_EMBD.to_string(), embedding_weight);
+
         for i in 0..block_count {
             let prefix = format!("blk.{i}");
-
-            let q_proj = QMatMul::from_weights(get(&format!("{prefix}.attn_q.weight"))?)?;
-            let k_proj = QMatMul::from_weights(get(&format!("{prefix}.attn_k.weight"))?)?;
-            let v_proj = QMatMul::from_weights(get(&format!("{prefix}.attn_v.weight"))?)?;
-            let o_proj = QMatMul::from_weights(get(&format!("{prefix}.attn_output.weight"))?)?;
-
-            let q_bias = get_opt(&format!("{prefix}.attn_q.bias"))
-                .map(|t| t.dequantize(device))
-                .transpose()?;
-            let k_bias = get_opt(&format!("{prefix}.attn_k.bias"))
-                .map(|t| t.dequantize(device))
-                .transpose()?;
-            let v_bias = get_opt(&format!("{prefix}.attn_v.bias"))
-                .map(|t| t.dequantize(device))
-                .transpose()?;
-
-            let q_norm = get_opt(&format!("{prefix}.attn_q_norm.weight"))
-                .map(|t| {
-                    t.dequantize(device).map(|weight| RmsNorm {
-                        weight,
-                        eps: rms_norm_eps,
-                    })
-                })
-                .transpose()?;
-            let k_norm = get_opt(&format!("{prefix}.attn_k_norm.weight"))
-                .map(|t| {
-                    t.dequantize(device).map(|weight| RmsNorm {
-                        weight,
-                        eps: rms_norm_eps,
-                    })
-                })
-                .transpose()?;
-
-            let attn_norm = RmsNorm {
-                weight: get(&format!("{prefix}.attn_norm.weight"))?.dequantize(device)?,
-                eps: rms_norm_eps,
-            };
-            let ffn_norm = RmsNorm {
-                weight: get(&format!("{prefix}.ffn_norm.weight"))?.dequantize(device)?,
-                eps: rms_norm_eps,
-            };
-
-            let ffn = SwiGluFFN {
-                gate: QMatMul::from_weights(get(&format!("{prefix}.ffn_gate.weight"))?)?,
-                up: QMatMul::from_weights(get(&format!("{prefix}.ffn_up.weight"))?)?,
-                down: QMatMul::from_weights(get(&format!("{prefix}.ffn_down.weight"))?)?,
-            };
-
-            let self_attn = Qwen2Attention {
-                q_proj,
-                k_proj,
-                v_proj,
-                o_proj,
-                q_bias,
-                k_bias,
-                v_bias,
-                q_norm,
-                k_norm,
-                num_heads,
-                num_kv_heads,
-                kv_repeat,
-                head_dim,
-                hidden_size,
-            };
-
-            blocks.push(Qwen2Block {
-                attn_norm,
-                self_attn,
-                ffn_norm,
-                ffn,
-            });
+            for leaf in BLOCK_QUANT_LEAVES {
+                let name = format!("{prefix}.{leaf}.weight");
+                let tensor = read_tensor(&content, &mut file, &name, device)?;
+                quant.insert(name, tensor);
+            }
+            for leaf in ["attn_norm", "ffn_norm"] {
+                let name = format!("{prefix}.{leaf}.weight");
+                let tensor = read_tensor(&content, &mut file, &name, device)?.dequantize(device)?;
+                plain.insert(name, tensor);
+            }
+            for name in [
+                format!("{prefix}.attn_q.bias"),
+                format!("{prefix}.attn_k.bias"),
+                format!("{prefix}.attn_v.bias"),
+                format!("{prefix}.attn_q_norm.weight"),
+                format!("{prefix}.attn_k_norm.weight"),
+            ] {
+                if let Some(tensor) = read_tensor_opt(&content, &mut file, &name, device)? {
+                    plain.insert(name, tensor.dequantize(device)?);
+                }
+            }
         }
 
         Ok(Self {
+            params: GgufQwen2Params {
+                hidden_size,
+                num_heads,
+                num_kv_heads,
+                block_count,
+                rope_positions: context_length.min(MAX_ROPE_POSITIONS),
+                rms_norm_eps,
+                rope_theta,
+            },
+            quant,
+            plain,
+        })
+    }
+
+    /// Total bytes this weight set occupies wherever it currently lives.
+    pub(crate) fn size_in_bytes(&self) -> u64 {
+        let quant: u64 = self
+            .quant
+            .values()
+            .map(|t| t.storage_size_in_bytes() as u64)
+            .sum();
+        let plain: u64 = self
+            .plain
+            .values()
+            .map(|t| (t.elem_count() * t.dtype().size_in_bytes()) as u64)
+            .sum();
+        quant + plain
+    }
+
+    /// Move the whole set to `device`, losslessly.
+    pub(crate) fn to_device(&self, device: &Device) -> Result<Self> {
+        self.relocate(device, false)
+    }
+
+    /// [`Self::to_device`] with the same-device short circuit removed — see
+    /// `wan::block_offload::rebuild_on` for why that distinction has to be
+    /// reachable: CI has no GPU, and a same-device move hands back the input
+    /// `Arc`, so a park/unpark test written against `to_device` would compare
+    /// a tensor with itself.
+    #[cfg(test)]
+    fn rebuilt_on(&self, device: &Device) -> Result<Self> {
+        self.relocate(device, true)
+    }
+
+    fn relocate(&self, device: &Device, force: bool) -> Result<Self> {
+        let mut quant = HashMap::with_capacity(self.quant.len());
+        for (name, tensor) in &self.quant {
+            let moved = if force {
+                rebuild_on(tensor, device)?
+            } else {
+                qtensor_to_device(tensor, device)?
+            };
+            quant.insert(name.clone(), moved);
+        }
+        let mut plain = HashMap::with_capacity(self.plain.len());
+        for (name, tensor) in &self.plain {
+            plain.insert(name.clone(), tensor.to_device(device)?);
+        }
+        Ok(Self {
+            params: self.params,
+            quant,
+            plain,
+        })
+    }
+
+    fn quant_tensor(&self, name: &str) -> Result<Arc<QTensor>> {
+        self.quant
+            .get(name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing tensor: {name}"))
+    }
+
+    fn plain_tensor(&self, name: &str) -> Result<Tensor> {
+        self.plain
+            .get(name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing tensor: {name}"))
+    }
+
+    /// Reconstruct the runnable modules. `device` must be where the weights
+    /// currently live; only the RoPE cache is built fresh.
+    fn build(&self, device: &Device) -> Result<GgufQwen2Modules> {
+        let params = self.params;
+        let head_dim = params.head_dim();
+        let (cos, sin) = compute_rope(head_dim, params.rope_theta, params.rope_positions, device)?;
+
+        let embedding_weight = self.plain_tensor(TOKEN_EMBD)?;
+        let embedding = candle_nn::Embedding::new(embedding_weight, params.hidden_size);
+
+        let mut blocks = Vec::with_capacity(params.block_count);
+        for i in 0..params.block_count {
+            let prefix = format!("blk.{i}");
+            let quant_matmul = |leaf: &str| -> Result<QMatMul> {
+                Ok(QMatMul::from_weights(
+                    self.quant_tensor(&format!("{prefix}.{leaf}.weight"))?,
+                )?)
+            };
+            let optional = |name: String| -> Option<Tensor> { self.plain.get(&name).cloned() };
+            let norm = |name: String| -> Option<RmsNorm> {
+                self.plain.get(&name).cloned().map(|weight| RmsNorm {
+                    weight,
+                    eps: params.rms_norm_eps,
+                })
+            };
+
+            let self_attn = Qwen2Attention {
+                q_proj: quant_matmul("attn_q")?,
+                k_proj: quant_matmul("attn_k")?,
+                v_proj: quant_matmul("attn_v")?,
+                o_proj: quant_matmul("attn_output")?,
+                q_bias: optional(format!("{prefix}.attn_q.bias")),
+                k_bias: optional(format!("{prefix}.attn_k.bias")),
+                v_bias: optional(format!("{prefix}.attn_v.bias")),
+                q_norm: norm(format!("{prefix}.attn_q_norm.weight")),
+                k_norm: norm(format!("{prefix}.attn_k_norm.weight")),
+                num_heads: params.num_heads,
+                num_kv_heads: params.num_kv_heads,
+                kv_repeat: params.kv_repeat(),
+                head_dim,
+                hidden_size: params.hidden_size,
+            };
+
+            blocks.push(Qwen2Block {
+                attn_norm: RmsNorm {
+                    weight: self.plain_tensor(&format!("{prefix}.attn_norm.weight"))?,
+                    eps: params.rms_norm_eps,
+                },
+                self_attn,
+                ffn_norm: RmsNorm {
+                    weight: self.plain_tensor(&format!("{prefix}.ffn_norm.weight"))?,
+                    eps: params.rms_norm_eps,
+                },
+                ffn: SwiGluFFN {
+                    gate: quant_matmul("ffn_gate")?,
+                    up: quant_matmul("ffn_up")?,
+                    down: quant_matmul("ffn_down")?,
+                },
+            });
+        }
+
+        Ok(GgufQwen2Modules {
             embedding,
             blocks,
             cos,
             sin,
+        })
+    }
+}
+
+const TOKEN_EMBD: &str = "token_embd.weight";
+
+pub(crate) struct GgufQwen2TextEncoder {
+    weights: GgufQwen2Weights,
+    modules: GgufQwen2Modules,
+    device: Device,
+    dtype: DType,
+}
+
+impl GgufQwen2TextEncoder {
+    fn forward_last_hidden_from_embeddings(
+        &mut self,
+        xs: Tensor,
+        attn_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let (b, seq_len, _) = xs.dims3()?;
+        let attention_mask = match attn_mask {
+            Some(mask) => Some(self.prepare_attention_mask(mask)?),
+            None => {
+                if seq_len <= 1 {
+                    None
+                } else {
+                    Some(self.prepare_causal_attention_mask(b, seq_len, 0)?)
+                }
+            }
+        };
+
+        let mut xs = xs;
+        for block in &self.modules.blocks {
+            xs = block.forward(
+                &xs,
+                &self.modules.cos,
+                &self.modules.sin,
+                attention_mask.as_ref(),
+            )?;
+        }
+        Ok(xs)
+    }
+
+    /// Cold load: read the GGUF off disk onto `device` and build the modules.
+    pub fn load(path: &Path, device: &Device) -> Result<Self> {
+        let weights = GgufQwen2Weights::read(path, device)?;
+        Self::from_weights(weights, device)
+    }
+
+    /// Warm load: rebuild from an already-read weight set, moving it to
+    /// `device` first. This is the unpark path — no disk I/O (#1044).
+    pub fn from_weights(weights: GgufQwen2Weights, device: &Device) -> Result<Self> {
+        let weights = weights.to_device(device)?;
+        let modules = weights.build(device)?;
+        Ok(Self {
+            weights,
+            modules,
             device: device.clone(),
             dtype: DType::F32,
         })
+    }
+
+    /// Park: byte-move the weight set to host RAM and hand it back. The
+    /// device-resident modules are released with `self`, so the VRAM the
+    /// `QMatMul`s held is freed as soon as the caller drops the return of
+    /// this call's consumed receiver.
+    pub fn park_to_cpu(self) -> Result<GgufQwen2Weights> {
+        self.weights.to_device(&Device::Cpu)
+    }
+
+    /// Bytes the retained weight set occupies on its current device.
+    pub fn weights_size_in_bytes(&self) -> u64 {
+        self.weights.size_in_bytes()
     }
 
     fn prepare_causal_attention_mask(
@@ -441,7 +661,7 @@ impl GgufQwen2TextEncoder {
         input_ids: &Tensor,
         attn_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
-        let xs = self.embedding.forward(input_ids)?;
+        let xs = self.modules.embedding.forward(input_ids)?;
         self.forward_last_hidden_from_embeddings(xs, attn_mask)
     }
 
@@ -452,7 +672,7 @@ impl GgufQwen2TextEncoder {
         image_embeds: &[Tensor],
         attn_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
-        let mut xs = self.embedding.forward(input_ids)?;
+        let mut xs = self.modules.embedding.forward(input_ids)?;
         for ((start, end), embeds) in image_spans.iter().zip(image_embeds.iter()) {
             if embeds.dim(0)? != end - start {
                 anyhow::bail!(
@@ -474,6 +694,224 @@ impl GgufQwen2TextEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::quantized::GgmlDType;
+
+    /// A tiny synthetic Qwen2 weight set, built straight as
+    /// [`GgufQwen2Weights`] rather than through a temporary GGUF file: the
+    /// park path never touches the file again, so the file adds nothing to
+    /// what is under test and a lot to the fixture.
+    ///
+    /// Shapes are the smallest that satisfy the family's own constraints —
+    /// `head_dim` even for RoPE, and every quantized matmul's inner dimension
+    /// a multiple of 32 for Q4_0's block size.
+    fn synthetic_weights(block_count: usize) -> GgufQwen2Weights {
+        const HIDDEN: usize = 64;
+        const HEADS: usize = 2;
+        const KV_HEADS: usize = 1;
+        const FFN: usize = 128;
+        const VOCAB: usize = 16;
+        let device = Device::Cpu;
+        let head_dim = HIDDEN / HEADS;
+        let kv_width = KV_HEADS * head_dim;
+
+        let quantize = |rows: usize, cols: usize, seed: f64| -> Arc<QTensor> {
+            let values: Vec<f32> = (0..rows * cols)
+                .map(|i| (i as f64 * 0.017 + seed).sin() as f32)
+                .collect();
+            let tensor = Tensor::from_vec(values, (rows, cols), &device).unwrap();
+            Arc::new(QTensor::quantize(&tensor, GgmlDType::Q4_0).unwrap())
+        };
+        let plain_tensor = |rows: usize, cols: usize, seed: f64| -> Tensor {
+            let values: Vec<f32> = (0..rows * cols)
+                .map(|i| (i as f64 * 0.031 + seed).cos() as f32)
+                .collect();
+            Tensor::from_vec(values, (rows, cols), &device).unwrap()
+        };
+
+        let mut quant = HashMap::new();
+        let mut plain = HashMap::new();
+        plain.insert(TOKEN_EMBD.to_string(), plain_tensor(VOCAB, HIDDEN, 0.5));
+
+        for i in 0..block_count {
+            let prefix = format!("blk.{i}");
+            let seed = i as f64;
+            quant.insert(
+                format!("{prefix}.attn_q.weight"),
+                quantize(HIDDEN, HIDDEN, seed + 1.0),
+            );
+            quant.insert(
+                format!("{prefix}.attn_k.weight"),
+                quantize(kv_width, HIDDEN, seed + 2.0),
+            );
+            quant.insert(
+                format!("{prefix}.attn_v.weight"),
+                quantize(kv_width, HIDDEN, seed + 3.0),
+            );
+            quant.insert(
+                format!("{prefix}.attn_output.weight"),
+                quantize(HIDDEN, HIDDEN, seed + 4.0),
+            );
+            quant.insert(
+                format!("{prefix}.ffn_gate.weight"),
+                quantize(FFN, HIDDEN, seed + 5.0),
+            );
+            quant.insert(
+                format!("{prefix}.ffn_up.weight"),
+                quantize(FFN, HIDDEN, seed + 6.0),
+            );
+            quant.insert(
+                format!("{prefix}.ffn_down.weight"),
+                quantize(HIDDEN, FFN, seed + 7.0),
+            );
+            plain.insert(
+                format!("{prefix}.attn_norm.weight"),
+                plain_tensor(1, HIDDEN, seed + 8.0).squeeze(0).unwrap(),
+            );
+            plain.insert(
+                format!("{prefix}.ffn_norm.weight"),
+                plain_tensor(1, HIDDEN, seed + 9.0).squeeze(0).unwrap(),
+            );
+            plain.insert(
+                format!("{prefix}.attn_q.bias"),
+                plain_tensor(1, HIDDEN, seed + 10.0).squeeze(0).unwrap(),
+            );
+            plain.insert(
+                format!("{prefix}.attn_k.bias"),
+                plain_tensor(1, kv_width, seed + 11.0).squeeze(0).unwrap(),
+            );
+            plain.insert(
+                format!("{prefix}.attn_v.bias"),
+                plain_tensor(1, kv_width, seed + 12.0).squeeze(0).unwrap(),
+            );
+        }
+
+        GgufQwen2Weights {
+            params: GgufQwen2Params {
+                hidden_size: HIDDEN,
+                num_heads: HEADS,
+                num_kv_heads: KV_HEADS,
+                block_count,
+                rope_positions: 32,
+                rms_norm_eps: 1e-6,
+                rope_theta: 1_000_000.0,
+            },
+            quant,
+            plain,
+        }
+    }
+
+    /// The premise of the whole GGUF park path (#1044): the bytes that come
+    /// back are the bytes that went out. A dequantize/re-quantize round trip
+    /// would pass a loose tolerance check and still make a render depend on
+    /// whether the encoder happened to be parked, so this asserts raw storage
+    /// equality rather than closeness.
+    ///
+    /// Deliberately drives `rebuilt_on`, not `to_device`: CI has no GPU, and a
+    /// same-device move returns the input `Arc` untouched, so a test written
+    /// against `to_device` would compare a tensor with itself and pass no
+    /// matter how broken the byte path was. Same reasoning as
+    /// `wan::block_offload::parking_a_block_is_byte_identical`.
+    #[test]
+    fn parking_the_gguf_encoder_is_byte_identical() {
+        let weights = synthetic_weights(2);
+        let parked = weights.rebuilt_on(&Device::Cpu).unwrap();
+
+        assert_eq!(
+            parked.quant.len(),
+            weights.quant.len(),
+            "a park must keep every quantized tensor"
+        );
+        for (name, before) in &weights.quant {
+            let after = parked.quant.get(name).expect("parked set keeps the name");
+            assert_eq!(before.dtype(), after.dtype(), "{name} changed quantization");
+            assert_eq!(before.shape(), after.shape(), "{name} changed shape");
+            assert_eq!(
+                before.data().unwrap().as_ref(),
+                after.data().unwrap().as_ref(),
+                "{name} is not byte-identical after a park/unpark cycle"
+            );
+        }
+        for (name, before) in &weights.plain {
+            let after = parked.plain.get(name).expect("parked set keeps the name");
+            assert_eq!(
+                before.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                after.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                "{name} changed value after a park/unpark cycle"
+            );
+        }
+    }
+
+    /// The consequence that actually matters: an encoder rebuilt from parked
+    /// weights produces bit-identical hidden states. This is what lets the
+    /// pipeline skip the 35.1 s reload without changing a render.
+    #[test]
+    fn an_unparked_gguf_encoder_produces_identical_hidden_states() {
+        let device = Device::Cpu;
+        let weights = synthetic_weights(2);
+        let input_ids = Tensor::from_vec(vec![3u32, 7, 1, 9, 4], (1, 5), &device).unwrap();
+
+        let mut before =
+            GgufQwen2TextEncoder::from_weights(weights.rebuilt_on(&device).unwrap(), &device)
+                .unwrap();
+        let hidden_before = before.forward_last_hidden(&input_ids, None).unwrap();
+
+        // Park (bytes to host) and unpark (bytes back), then run again.
+        let parked = before.park_to_cpu().unwrap();
+        let mut after =
+            GgufQwen2TextEncoder::from_weights(parked.rebuilt_on(&device).unwrap(), &device)
+                .unwrap();
+        let hidden_after = after.forward_last_hidden(&input_ids, None).unwrap();
+
+        assert_eq!(hidden_before.dims(), hidden_after.dims());
+        assert_eq!(
+            hidden_before
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            hidden_after
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            "a park/unpark cycle must not change the encoder's output"
+        );
+    }
+
+    /// Retaining the weight map is only free because the blocks share the very
+    /// same `Arc<QTensor>`. If `build` ever copied instead, a resident encoder
+    /// would silently double its quantized footprint on the device.
+    #[test]
+    fn building_shares_the_quantized_tensors_rather_than_copying_them() {
+        let device = Device::Cpu;
+        let weights = synthetic_weights(1);
+        let before = Arc::strong_count(weights.quant.get("blk.0.attn_q.weight").unwrap());
+        let _modules = weights.build(&device).unwrap();
+        let after = Arc::strong_count(weights.quant.get("blk.0.attn_q.weight").unwrap());
+        assert!(
+            after > before,
+            "the built QMatMul must hold an Arc clone, not a copy"
+        );
+    }
+
+    /// The size probe that gates the automatic park default has to count both
+    /// halves of the map, or a 7B encoder looks free.
+    #[test]
+    fn size_in_bytes_counts_quantized_and_plain_halves() {
+        let weights = synthetic_weights(1);
+        let quant: u64 = weights
+            .quant
+            .values()
+            .map(|t| t.storage_size_in_bytes() as u64)
+            .sum();
+        let plain: u64 = weights
+            .plain
+            .values()
+            .map(|t| (t.elem_count() * t.dtype().size_in_bytes()) as u64)
+            .sum();
+        assert!(quant > 0 && plain > 0);
+        assert_eq!(weights.size_in_bytes(), quant + plain);
+    }
 
     #[test]
     fn rope_cache_covers_qwen_image_padded_sequence_window() {

@@ -118,7 +118,6 @@ enum Qwen2TextEncoderPostEncodeAction {
 #[derive(Debug, Clone, Copy)]
 struct Qwen2TextEncoderResidencyInput {
     on_gpu: bool,
-    is_quantized: bool,
     is_metal: bool,
     keep_te_ram: bool,
     prompt_cache_miss: bool,
@@ -640,7 +639,11 @@ impl QwenImageEngine {
         {
             return Qwen2TextEncoderPostEncodeAction::KeepGpu;
         }
-        if input.keep_te_ram && !input.is_metal && !input.is_quantized {
+        // Both dtypes park (#1044): the GGUF encoder's `QTensor` bytes move
+        // host↔device losslessly, so a quantized encoder no longer has to pay
+        // the 35.1 s disk reload every cold prompt. Metal is still excluded —
+        // unified memory makes "host RAM" the same pool.
+        if input.keep_te_ram && !input.is_metal {
             return Qwen2TextEncoderPostEncodeAction::ParkCpu;
         }
         Qwen2TextEncoderPostEncodeAction::Drop
@@ -2685,9 +2688,9 @@ impl QwenImageEngine {
 
         let drop_text_encoder = is_edit_family || loaded.text_encoder.on_gpu;
         if drop_text_encoder {
-            let park_mode = crate::device::keep_te_in_ram()
-                && !loaded.device.is_metal()
-                && !loaded.text_encoder.is_quantized;
+            let park_mode = crate::device::keep_te_in_ram_for_encoder_bytes(
+                loaded.text_encoder.weights_size_bytes(),
+            ) && !loaded.device.is_metal();
             if park_mode {
                 loaded.text_encoder.park_to_cpu()?;
                 tracing::info!(
@@ -3093,9 +3096,10 @@ impl QwenImageEngine {
             let action =
                 Self::qwen2_text_encoder_post_encode_action(Qwen2TextEncoderResidencyInput {
                     on_gpu: loaded.text_encoder.on_gpu,
-                    is_quantized: loaded.text_encoder.is_quantized,
                     is_metal: loaded.device.is_metal(),
-                    keep_te_ram: crate::device::keep_te_in_ram(),
+                    keep_te_ram: crate::device::keep_te_in_ram_for_encoder_bytes(
+                        loaded.text_encoder.weights_size_bytes(),
+                    ),
                     prompt_cache_miss: !both_cached,
                     transformer_resident: loaded.transformer.is_some(),
                     free_vram_bytes: free_after_encode,
@@ -4590,7 +4594,6 @@ mod tests {
         let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
             Qwen2TextEncoderResidencyInput {
                 on_gpu: true,
-                is_quantized: true,
                 is_metal: false,
                 keep_te_ram: false,
                 prompt_cache_miss: true,
@@ -4608,7 +4611,6 @@ mod tests {
         let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
             Qwen2TextEncoderResidencyInput {
                 on_gpu: true,
-                is_quantized: true,
                 is_metal: false,
                 keep_te_ram: false,
                 prompt_cache_miss: false,
@@ -4626,7 +4628,6 @@ mod tests {
         let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
             Qwen2TextEncoderResidencyInput {
                 on_gpu: true,
-                is_quantized: true,
                 is_metal: false,
                 keep_te_ram: false,
                 prompt_cache_miss: true,
@@ -4644,7 +4645,6 @@ mod tests {
         let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
             Qwen2TextEncoderResidencyInput {
                 on_gpu: true,
-                is_quantized: false,
                 is_metal: false,
                 keep_te_ram: true,
                 prompt_cache_miss: true,
@@ -4657,14 +4657,55 @@ mod tests {
         assert_eq!(action, Qwen2TextEncoderPostEncodeAction::ParkCpu);
     }
 
+    /// The GGUF encoder parks by the same rule as BF16 (#1044): its
+    /// `QTensor` bytes move host↔device losslessly, so there is no longer a
+    /// quantized exclusion here. The 35.1 s disk reload was the whole reason
+    /// a quantized encoder used to fall through to `Drop`.
     #[test]
-    fn qwen_hot_text_encoder_never_parks_quantized() {
+    fn qwen_hot_text_encoder_parks_quantized_when_keep_ram_enabled() {
         let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
             Qwen2TextEncoderResidencyInput {
                 on_gpu: true,
-                is_quantized: true,
                 is_metal: false,
                 keep_te_ram: true,
+                prompt_cache_miss: true,
+                transformer_resident: true,
+                free_vram_bytes: 7_999_999_999,
+                required_vram_bytes: 8_000_000_000,
+            },
+        );
+
+        assert_eq!(action, Qwen2TextEncoderPostEncodeAction::ParkCpu);
+    }
+
+    /// Metal is unified memory: parking to "host RAM" frees nothing and only
+    /// costs a copy in each direction.
+    #[test]
+    fn qwen_hot_text_encoder_never_parks_on_metal() {
+        let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
+            Qwen2TextEncoderResidencyInput {
+                on_gpu: true,
+                is_metal: true,
+                keep_te_ram: true,
+                prompt_cache_miss: true,
+                transformer_resident: true,
+                free_vram_bytes: 7_999_999_999,
+                required_vram_bytes: 8_000_000_000,
+            },
+        );
+
+        assert_eq!(action, Qwen2TextEncoderPostEncodeAction::Drop);
+    }
+
+    /// Without the knob, the encoder still drops — parking is a host-RAM
+    /// trade, so it stays gated on `keep_te_ram`.
+    #[test]
+    fn qwen_hot_text_encoder_drops_quantized_without_keep_ram() {
+        let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
+            Qwen2TextEncoderResidencyInput {
+                on_gpu: true,
+                is_metal: false,
+                keep_te_ram: false,
                 prompt_cache_miss: true,
                 transformer_resident: true,
                 free_vram_bytes: 7_999_999_999,
@@ -4680,7 +4721,6 @@ mod tests {
         let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
             Qwen2TextEncoderResidencyInput {
                 on_gpu: true,
-                is_quantized: true,
                 is_metal: false,
                 keep_te_ram: false,
                 prompt_cache_miss: true,
