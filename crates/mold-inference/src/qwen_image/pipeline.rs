@@ -1974,7 +1974,7 @@ impl QwenImageEngine {
         // builds and drops a request-local transformer — nothing resident
         // to fingerprint.
         if self.base.load_strategy == LoadStrategy::Sequential {
-            self.active_lora_fingerprint = Vec::new();
+            self.active_lora_fingerprint.clear();
             return Ok(());
         }
 
@@ -2135,7 +2135,7 @@ impl QwenImageEngine {
         // The transformer above was built through `load_transformer`, which
         // merges `pending_loras`; record what it carries so the first
         // generate does not immediately rebuild it.
-        self.active_lora_fingerprint = fingerprint_stack(&self.pending_loras);
+        self.note_transformer_lora_stack();
         self.base.loaded = Some(LoadedQwenImage {
             transformer: Some(transformer),
             text_encoder,
@@ -2167,8 +2167,34 @@ impl QwenImageEngine {
             height,
         )?;
         loaded.transformer = Some(transformer);
-        self.active_lora_fingerprint = fingerprint_stack(&self.pending_loras);
+        self.note_transformer_lora_stack();
         Ok(())
+    }
+
+    /// Record the stack that a just-built transformer carries.
+    ///
+    /// `load_transformer` merges `pending_loras`, so the fingerprint is
+    /// always derived from that same slice — never from the request, which
+    /// is what made the original defect possible. Both build sites (eager
+    /// `load` and `reload_transformer`) go through here so the derivation
+    /// cannot drift between them.
+    fn note_transformer_lora_stack(&mut self) {
+        self.active_lora_fingerprint = fingerprint_stack(&self.pending_loras);
+    }
+
+    /// Drop the resident transformer and forget the stack baked into it.
+    ///
+    /// The two must move together: a cleared transformer left with a stale
+    /// fingerprint would let the next request elide a rebuild it genuinely
+    /// needs, which is the bug this whole fingerprint exists to prevent.
+    /// Every drop site (both VAE-decode drops and the changed-stack rebuild)
+    /// routes through here so neither half can be forgotten alone.
+    fn release_resident_transformer<T>(
+        transformer: &mut Option<T>,
+        active_lora_fingerprint: &mut Vec<QwenImageLoraFingerprint>,
+    ) {
+        *transformer = None;
+        active_lora_fingerprint.clear();
     }
 
     /// Make the resident transformer match this request's LoRA stack.
@@ -2206,8 +2232,10 @@ impl QwenImageEngine {
             .take()
             .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
         if stack_changed {
-            loaded_mut.transformer = None;
-            self.active_lora_fingerprint = Vec::new();
+            Self::release_resident_transformer(
+                &mut loaded_mut.transformer,
+                &mut self.active_lora_fingerprint,
+            );
             loaded_mut.device.synchronize()?;
         }
         let label = if stack_changed {
@@ -3658,9 +3686,11 @@ impl QwenImageEngine {
                     image
                 }
                 Err(err) if Self::is_oom_error(&err) => {
-                    loaded.transformer = None;
                     // No resident transformer means no baked LoRA stack.
-                    self.active_lora_fingerprint = Vec::new();
+                    Self::release_resident_transformer(
+                        &mut loaded.transformer,
+                        &mut self.active_lora_fingerprint,
+                    );
                     loaded.device.synchronize()?;
                     progress.info(
                         "Dropping Qwen-Image transformer after resident VAE decode OOM and retrying",
@@ -3681,9 +3711,11 @@ impl QwenImageEngine {
                 Err(err) => return Err(err),
             }
         } else {
-            loaded.transformer = None;
             // No resident transformer means no baked LoRA stack.
-            self.active_lora_fingerprint = Vec::new();
+            Self::release_resident_transformer(
+                &mut loaded.transformer,
+                &mut self.active_lora_fingerprint,
+            );
             loaded.device.synchronize()?;
             tracing::info!("Qwen-Image transformer dropped to free VRAM for VAE decode");
             Self::decode_vae_with_fallback(
@@ -3792,7 +3824,7 @@ impl InferenceEngine for QwenImageEngine {
         clear_cache(&self.prompt_cache);
         // The fingerprint describes the transformer that just went away;
         // the next load re-applies whatever the request carries.
-        self.active_lora_fingerprint = Vec::new();
+        self.active_lora_fingerprint.clear();
     }
 
     fn set_on_progress(&mut self, callback: ProgressCallback) {
@@ -5298,11 +5330,30 @@ mod tests {
         }
     }
 
-    /// Minimal stand-in for the resident-transformer half of the engine.
-    /// It owns exactly the state the rebuild decision reads — whether a
-    /// transformer is resident and which LoRA stack is baked into it —
-    /// and counts every build, so the elision contract is asserted on a
-    /// real request sequence rather than on the predicate alone.
+    /// Build an engine with no real weights behind it. Every path exercised
+    /// through it here stops before touching the filesystem.
+    fn fingerprint_test_engine(strategy: LoadStrategy) -> QwenImageEngine {
+        QwenImageEngine::new(
+            "qwen-image:q4".to_string(),
+            qwen_image_model_paths(
+                PathBuf::from("/nonexistent/transformer.gguf"),
+                vec![],
+                PathBuf::from("/nonexistent/vae.safetensors"),
+                Some(PathBuf::from("/nonexistent/tokenizer.json")),
+            ),
+            strategy,
+            0,
+            false,
+            None,
+        )
+    }
+
+    /// Minimal stand-in for the resident-transformer half of the engine,
+    /// used only to drive the *predicate* over a sequence of requests. It
+    /// deliberately does not stand in for the engine's own bookkeeping —
+    /// the write and clear sites that maintain `active_lora_fingerprint`
+    /// are pinned separately, on the real engine, by the four tests below
+    /// `qwen_transformer_build_records_the_pending_lora_stack`.
     struct RebuildCounter {
         resident: bool,
         baked: Vec<QwenImageLoraFingerprint>,
@@ -5465,6 +5516,113 @@ mod tests {
         engine.request(&stack);
 
         assert_eq!(engine.builds, 2);
+    }
+
+    /// The write half of the contract, on the real engine. Both build sites
+    /// (eager `load` and `reload_transformer`) call this, and it must derive
+    /// the fingerprint from `pending_loras` — the slice `load_transformer`
+    /// actually merges. Deriving it from anything else is the original
+    /// defect's shape: a field that does not describe the resident weights.
+    #[test]
+    fn qwen_transformer_build_records_the_pending_lora_stack() {
+        let mut engine = fingerprint_test_engine(LoadStrategy::Eager);
+        let stack = vec![
+            lora("/loras/lightning-8.safetensors", 1.0),
+            lora("/loras/style.safetensors", 0.4),
+        ];
+
+        engine.pending_loras = stack.clone();
+        engine.note_transformer_lora_stack();
+
+        assert_eq!(
+            engine.active_lora_fingerprint,
+            fingerprint_stack(&stack),
+            "a built transformer must record the stack merged into it"
+        );
+        assert!(!QwenImageEngine::qwen_transformer_rebuild_needed(
+            true,
+            &engine.active_lora_fingerprint,
+            &fingerprint_stack(&stack),
+        ));
+
+        // An unmerged rebuild must leave nothing behind to elide against.
+        engine.pending_loras.clear();
+        engine.note_transformer_lora_stack();
+        assert!(engine.active_lora_fingerprint.is_empty());
+    }
+
+    /// The clear half, on the code every drop site routes through. Dropping
+    /// the transformer without clearing the fingerprint is exactly the state
+    /// that made the stay-hot path render a new stack with the old merge, so
+    /// the two mutations are pinned as one.
+    #[test]
+    fn releasing_the_qwen_transformer_clears_the_baked_fingerprint() {
+        let mut transformer = Some(());
+        let mut baked = fingerprint_stack(&[lora("/loras/lightning-8.safetensors", 1.0)]);
+        assert!(!baked.is_empty());
+
+        QwenImageEngine::release_resident_transformer(&mut transformer, &mut baked);
+
+        assert!(transformer.is_none(), "the transformer must be dropped");
+        assert!(
+            baked.is_empty(),
+            "a dropped transformer must leave no stack to elide against"
+        );
+        // And the predicate now insists on a rebuild for that same stack.
+        assert!(QwenImageEngine::qwen_transformer_rebuild_needed(
+            false,
+            &baked,
+            &fingerprint_stack(&[lora("/loras/lightning-8.safetensors", 1.0)]),
+        ));
+    }
+
+    /// `unload()` is what the model-cache LRU calls when it evicts this
+    /// engine. The transformer goes with it, so the fingerprint must too —
+    /// otherwise a reloaded engine elides the merge its weights never got.
+    #[test]
+    fn qwen_unload_clears_the_baked_lora_fingerprint() {
+        let mut engine = fingerprint_test_engine(LoadStrategy::Eager);
+        engine.active_lora_fingerprint =
+            fingerprint_stack(&[lora("/loras/lightning-8.safetensors", 1.0)]);
+
+        InferenceEngine::unload(&mut engine);
+
+        assert!(
+            engine.active_lora_fingerprint.is_empty(),
+            "unload must forget the stack baked into the transformer it released"
+        );
+    }
+
+    /// Sequential loading builds a request-local transformer inside
+    /// `generate_sequential` and drops it again, so `load()` leaves nothing
+    /// resident. A fingerprint surviving that would claim otherwise.
+    #[test]
+    fn qwen_sequential_load_leaves_no_baked_lora_fingerprint() {
+        let mut engine = fingerprint_test_engine(LoadStrategy::Sequential);
+        engine.active_lora_fingerprint =
+            fingerprint_stack(&[lora("/loras/lightning-8.safetensors", 1.0)]);
+
+        QwenImageEngine::load(&mut engine).expect("sequential load defers and cannot fail here");
+
+        assert!(
+            engine.active_lora_fingerprint.is_empty(),
+            "sequential loading keeps no resident transformer to fingerprint"
+        );
+    }
+
+    /// With nothing loaded there is no transformer to reason about, so the
+    /// request must fail rather than record a stack for weights that do not
+    /// exist.
+    #[test]
+    fn qwen_ensure_transformer_without_a_loaded_engine_is_an_error() {
+        let mut engine = fingerprint_test_engine(LoadStrategy::Eager);
+        engine.pending_loras = vec![lora("/loras/lightning-8.safetensors", 1.0)];
+
+        assert!(engine.ensure_transformer_for_request(1024, 1024).is_err());
+        assert!(
+            engine.active_lora_fingerprint.is_empty(),
+            "a failed request must not claim a stack is baked in"
+        );
     }
 
     #[test]
