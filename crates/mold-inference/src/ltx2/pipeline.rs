@@ -615,7 +615,7 @@ impl Ltx2Engine {
                 Ok(Device::Cpu)
             }
             Ltx2Backend::Metal => {
-                self.info("Metal detected, using native LTX-2 correctness path");
+                self.info("Metal detected, using native LTX-2 Metal path");
                 // Never `Device::new_metal` directly: candle mints a distinct
                 // device identity per call and cannot move tensors between two
                 // of them. See `device::metal_device`.
@@ -1618,8 +1618,8 @@ fn ltx2_runtime_device_refs(
 /// transformer's chosen device.
 ///
 /// - Transformer on CPU/Metal: keep the encoder on the same device. CPU means
-///   the user opted out of GPU end-to-end; Metal uses the shared unified-memory
-///   correctness path.
+///   the user opted out of GPU end-to-end; Metal shares the unified-memory
+///   pool, so co-residency is the right default.
 /// - Transformer on CUDA: defer to the auto-resolver in
 ///   [`crate::device::resolve_ltx2_gemma_placement`], which honors the
 ///   `MOLD_LTX2_GEMMA_DEVICE` override and walks active GPU → siblings →
