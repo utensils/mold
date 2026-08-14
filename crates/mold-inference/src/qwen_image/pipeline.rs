@@ -213,36 +213,33 @@ enum QwenImageTransformer {
 #[derive(Clone)]
 struct CachedPromptConditioning {
     hidden_states: CachedTensor,
-    valid_len: usize,
 }
 
 impl CachedPromptConditioning {
+    /// `Qwen2TextEncoder` always narrows its embeddings to the true token count
+    /// and returns an all-ones mask, so `valid_len` is `hidden_states.dim(1)`
+    /// and the cache does not need to carry a mask. The check is kept so a
+    /// future encoder that starts padding fails loudly rather than silently
+    /// feeding pad rows into the transformer.
     fn from_parts(hidden_states: &Tensor, valid_len: usize) -> Result<Self> {
+        let seq_len = hidden_states.dim(1)?;
+        if valid_len != seq_len {
+            bail!("Qwen text conditioning must arrive unpadded: {valid_len} of {seq_len} tokens");
+        }
         Ok(Self {
             hidden_states: CachedTensor::from_tensor(hidden_states)?,
-            valid_len,
         })
     }
 
-    fn restore(&self, device: &Device, dtype: DType) -> Result<(Tensor, Tensor)> {
-        let hidden_states = self.hidden_states.restore(device, dtype)?;
-        let mut mask = vec![0u8; hidden_states.dim(1)?];
-        for value in &mut mask[..self.valid_len] {
-            *value = 1;
-        }
-        let attention_mask = Tensor::from_vec(mask, (1, hidden_states.dim(1)?), device)?;
-        Ok((hidden_states, attention_mask))
+    fn restore(&self, device: &Device, dtype: DType) -> Result<Tensor> {
+        self.hidden_states.restore(device, dtype)
     }
 }
 
-fn pad_text_conditioning(
-    hidden_states: &Tensor,
-    attention_mask: &Tensor,
-    target_len: usize,
-) -> Result<(Tensor, Tensor)> {
+fn pad_text_conditioning(hidden_states: &Tensor, target_len: usize) -> Result<Tensor> {
     let seq_len = hidden_states.dim(1)?;
     if seq_len == target_len {
-        return Ok((hidden_states.clone(), attention_mask.clone()));
+        return Ok(hidden_states.clone());
     }
     if seq_len > target_len {
         bail!("cannot shrink text conditioning from {seq_len} to {target_len}");
@@ -255,28 +252,43 @@ fn pad_text_conditioning(
         hidden_states.dtype(),
         hidden_states.device(),
     )?;
-    let pad_mask = Tensor::zeros(
-        (attention_mask.dim(0)?, pad_len),
-        attention_mask.dtype(),
-        attention_mask.device(),
-    )?;
 
-    Ok((
-        Tensor::cat(&[hidden_states, &pad_hs], 1)?,
-        Tensor::cat(&[attention_mask, &pad_mask], 1)?,
-    ))
+    Ok(Tensor::cat(&[hidden_states, &pad_hs], 1)?)
 }
 
+/// Pad the two CFG streams to a common length **only** when batching them into
+/// one forward, and return the joint `[2, target_len]` text mask that goes with
+/// the padding — `None` when both streams were already the same length.
+///
+/// This mirrors diffusers `pipeline_qwenimage.py:265-266`
+/// (`if prompt_embeds_mask.all(): prompt_embeds_mask = None`): a mask that
+/// keeps every key is not a mask, and the padding that made one necessary is
+/// pure waste on every path that does not batch.
 fn align_cfg_conditioning(
     cond_hs: &Tensor,
-    cond_mask: &Tensor,
     uncond_hs: &Tensor,
-    uncond_mask: &Tensor,
-) -> Result<((Tensor, Tensor), (Tensor, Tensor))> {
-    let target_len = cond_hs.dim(1)?.max(uncond_hs.dim(1)?);
-    let cond = pad_text_conditioning(cond_hs, cond_mask, target_len)?;
-    let uncond = pad_text_conditioning(uncond_hs, uncond_mask, target_len)?;
-    Ok((cond, uncond))
+) -> Result<(Tensor, Tensor, Option<Tensor>)> {
+    let cond_len = cond_hs.dim(1)?;
+    let uncond_len = uncond_hs.dim(1)?;
+    if cond_len == uncond_len {
+        return Ok((cond_hs.clone(), uncond_hs.clone(), None));
+    }
+
+    let target_len = cond_len.max(uncond_len);
+    let mut mask = vec![0u8; 2 * target_len];
+    for value in &mut mask[..cond_len] {
+        *value = 1;
+    }
+    for value in &mut mask[target_len..target_len + uncond_len] {
+        *value = 1;
+    }
+    let mask = Tensor::from_vec(mask, (2, target_len), cond_hs.device())?;
+
+    Ok((
+        pad_text_conditioning(cond_hs, target_len)?,
+        pad_text_conditioning(uncond_hs, target_len)?,
+        Some(mask),
+    ))
 }
 
 impl QwenImageTransformer {
@@ -292,7 +304,7 @@ impl QwenImageTransformer {
         latents: &Tensor,
         t: &Tensor,
         encoder_hidden_states: &Tensor,
-        encoder_attention_mask: &Tensor,
+        encoder_attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
         match self {
             Self::BF16(model) => {
@@ -312,7 +324,7 @@ impl QwenImageTransformer {
         packed_latents: &Tensor,
         t: &Tensor,
         encoder_hidden_states: &Tensor,
-        encoder_attention_mask: &Tensor,
+        encoder_attention_mask: Option<&Tensor>,
         img_shapes: &[(usize, usize, usize)],
     ) -> Result<Tensor> {
         match self {
@@ -1059,7 +1071,7 @@ impl QwenImageEngine {
         prompt: &str,
         device: &Device,
         dtype: DType,
-    ) -> Result<(Tensor, Tensor)> {
+    ) -> Result<Tensor> {
         let cache_key = prompt_text_key(prompt);
         if let Some(cached) = prompt_cache
             .lock()
@@ -1085,35 +1097,20 @@ impl QwenImageEngine {
             CachedPromptConditioning::from_parts(&hidden_states, valid_len)?,
         );
 
-        let mut mask = vec![0u8; hidden_states.dim(1)?];
-        for value in &mut mask[..valid_len] {
-            *value = 1;
-        }
-        let attention_mask = Tensor::from_vec(mask, (1, hidden_states.dim(1)?), device)?;
-        Ok((hidden_states, attention_mask))
+        Ok(hidden_states)
     }
 
-    fn spill_conditioning_to_cpu(
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-    ) -> Result<(Tensor, Tensor)> {
-        Ok((
-            hidden_states
-                .to_device(&Device::Cpu)?
-                .to_dtype(DType::F32)?,
-            attention_mask.to_device(&Device::Cpu)?,
-        ))
+    fn spill_conditioning_to_cpu(hidden_states: Tensor) -> Result<Tensor> {
+        Ok(hidden_states
+            .to_device(&Device::Cpu)?
+            .to_dtype(DType::F32)?)
     }
 
-    fn maybe_spill_conditioning(
-        use_cpu_staging: bool,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-    ) -> Result<(Tensor, Tensor)> {
+    fn maybe_spill_conditioning(use_cpu_staging: bool, hidden_states: Tensor) -> Result<Tensor> {
         if use_cpu_staging {
-            Self::spill_conditioning_to_cpu(hidden_states, attention_mask)
+            Self::spill_conditioning_to_cpu(hidden_states)
         } else {
-            Ok((hidden_states, attention_mask))
+            Ok(hidden_states)
         }
     }
 
@@ -2032,161 +2029,150 @@ impl QwenImageEngine {
         };
         let both_cached = prompt_cached.is_some() && (!use_cfg || uncond_cached.is_some());
 
-        let (mut encoder_hidden_states, mut encoder_attention_mask, mut uncond_hs, mut uncond_mask) =
-            if both_cached {
-                self.base.progress.cache_hit("prompt conditioning");
-                let cached = prompt_cached.unwrap();
-                let restore_device = if use_cpu_staging {
-                    &Device::Cpu
-                } else {
-                    &device
-                };
-                let restore_dtype = if use_cpu_staging { DType::F32 } else { dtype };
-                let (hs, mask) = cached.restore(restore_device, restore_dtype)?;
-                let (u_hs, u_mask) = if use_cfg {
-                    let ucached = uncond_cached.unwrap();
-                    let (u_hs, u_mask) = ucached.restore(restore_device, restore_dtype)?;
-                    (Some(u_hs), Some(u_mask))
-                } else {
-                    (None, None)
-                };
-                (hs, mask, u_hs, u_mask)
+        let (mut encoder_hidden_states, mut uncond_hs) = if both_cached {
+            self.base.progress.cache_hit("prompt conditioning");
+            let cached = prompt_cached.unwrap();
+            let restore_device = if use_cpu_staging {
+                &Device::Cpu
             } else {
-                let (te_plan, te_auto_device_label) =
-                    self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
-                let qwen_ref = effective_device_ref(
-                    self.pending_placement.as_ref(),
-                    |adv| adv.qwen.clone(),
-                    true,
-                );
-                let auto_te_device = if te_plan.use_gpu {
-                    device.clone()
-                } else {
-                    Device::Cpu
-                };
-                let te_device =
-                    crate::device::resolve_device(Some(qwen_ref), || Ok(auto_te_device.clone()))?;
-                let te_use_gpu = !te_device.is_cpu();
-                let te_device_label: String = if te_use_gpu == te_plan.use_gpu {
-                    te_auto_device_label
-                } else if te_use_gpu {
-                    "GPU".into()
-                } else {
-                    "CPU".into()
-                };
-                let te_dtype = Self::text_encoder_load_dtype(te_use_gpu, dtype);
+                &device
+            };
+            let restore_dtype = if use_cpu_staging { DType::F32 } else { dtype };
+            let hs = cached.restore(restore_device, restore_dtype)?;
+            let u_hs = if use_cfg {
+                let ucached = uncond_cached.unwrap();
+                Some(ucached.restore(restore_device, restore_dtype)?)
+            } else {
+                None
+            };
+            (hs, u_hs)
+        } else {
+            let (te_plan, te_auto_device_label) =
+                self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
+            let qwen_ref = effective_device_ref(
+                self.pending_placement.as_ref(),
+                |adv| adv.qwen.clone(),
+                true,
+            );
+            let auto_te_device = if te_plan.use_gpu {
+                device.clone()
+            } else {
+                Device::Cpu
+            };
+            let te_device =
+                crate::device::resolve_device(Some(qwen_ref), || Ok(auto_te_device.clone()))?;
+            let te_use_gpu = !te_device.is_cpu();
+            let te_device_label: String = if te_use_gpu == te_plan.use_gpu {
+                te_auto_device_label
+            } else if te_use_gpu {
+                "GPU".into()
+            } else {
+                "CPU".into()
+            };
+            let te_dtype = Self::text_encoder_load_dtype(te_use_gpu, dtype);
 
-                let te_label = if resolved_text_encoder.is_gguf {
-                    format!(
-                        "Loading Qwen2.5 text encoder ({} GGUF, {})",
-                        resolved_text_encoder.variant_label, te_device_label
-                    )
-                } else {
-                    format!(
-                        "Loading Qwen2.5 text encoder ({} shards, {})",
-                        resolved_text_encoder.paths.len(),
-                        te_device_label,
-                    )
-                };
-                if te_plan.use_cpu_staging && device.is_metal() && !resolved_text_encoder.is_gguf {
-                    self.base.progress.info(
+            let te_label = if resolved_text_encoder.is_gguf {
+                format!(
+                    "Loading Qwen2.5 text encoder ({} GGUF, {})",
+                    resolved_text_encoder.variant_label, te_device_label
+                )
+            } else {
+                format!(
+                    "Loading Qwen2.5 text encoder ({} shards, {})",
+                    resolved_text_encoder.paths.len(),
+                    te_device_label,
+                )
+            };
+            if te_plan.use_cpu_staging && device.is_metal() && !resolved_text_encoder.is_gguf {
+                self.base.progress.info(
                         "Skipping hard preflight for Qwen2.5 text encoder on Metal; sequential mode spills prompt conditioning to CPU after encoding",
                     );
-                } else {
-                    let te_activation_budget = crate::device::activation_bytes(
-                        req.width,
-                        req.height,
-                        1,
-                        crate::device::dtype_bytes(te_dtype),
-                        crate::device::ActivationFamily::SmallTransformer,
-                    );
-                    preflight_memory_check(
-                        "Qwen2.5 text encoder",
-                        resolved_text_encoder.size_bytes,
-                        te_activation_budget,
-                    )?;
-                }
-
-                if let Some(status) = memory_status_string() {
-                    self.base.progress.info(&status);
-                }
-
-                self.base.progress.stage_start(&te_label);
-                let te_start = Instant::now();
-                let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
-                let mut text_encoder = self.load_text_encoder(
-                    &resolved_text_encoder,
-                    &text_tokenizer_path,
-                    text_tokenizer,
-                    &te_device,
-                    te_dtype,
-                    true,
+            } else {
+                let te_activation_budget = crate::device::activation_bytes(
+                    req.width,
+                    req.height,
+                    1,
+                    crate::device::dtype_bytes(te_dtype),
+                    crate::device::ActivationFamily::SmallTransformer,
+                );
+                preflight_memory_check(
+                    "Qwen2.5 text encoder",
+                    resolved_text_encoder.size_bytes,
+                    te_activation_budget,
                 )?;
-                self.base.progress.stage_done(&te_label, te_start.elapsed());
+            }
 
-                let (hs, mask) = Self::encode_prompt_cached(
+            if let Some(status) = memory_status_string() {
+                self.base.progress.info(&status);
+            }
+
+            self.base.progress.stage_start(&te_label);
+            let te_start = Instant::now();
+            let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
+            let mut text_encoder = self.load_text_encoder(
+                &resolved_text_encoder,
+                &text_tokenizer_path,
+                text_tokenizer,
+                &te_device,
+                te_dtype,
+                true,
+            )?;
+            self.base.progress.stage_done(&te_label, te_start.elapsed());
+
+            let hs = Self::encode_prompt_cached(
+                &self.base.progress,
+                &self.prompt_cache,
+                &mut text_encoder,
+                &req.prompt,
+                &device,
+                dtype,
+            )?;
+            let hs = Self::maybe_spill_conditioning(use_cpu_staging, hs)?;
+
+            let u_hs = if use_cfg {
+                let hs = Self::encode_prompt_cached(
                     &self.base.progress,
                     &self.prompt_cache,
                     &mut text_encoder,
-                    &req.prompt,
+                    QWEN_EMPTY_NEGATIVE_PROMPT,
                     &device,
                     dtype,
                 )?;
-                let (hs, mask) = Self::maybe_spill_conditioning(use_cpu_staging, hs, mask)?;
-
-                let (u_hs, u_mask) = if use_cfg {
-                    let (hs, mask) = Self::encode_prompt_cached(
-                        &self.base.progress,
-                        &self.prompt_cache,
-                        &mut text_encoder,
-                        QWEN_EMPTY_NEGATIVE_PROMPT,
-                        &device,
-                        dtype,
-                    )?;
-                    let (hs, mask) = Self::maybe_spill_conditioning(use_cpu_staging, hs, mask)?;
-                    (Some(hs), Some(mask))
-                } else {
-                    (None, None)
-                };
-
-                drop(text_encoder);
-                // Force the backend to release allocator state before transformer load.
-                device.synchronize()?;
-                if let Some(status) = crate::device::memory_status_string() {
-                    if use_cpu_staging {
-                        self.base.progress.info(&format!(
-                            "Freed Qwen2.5 text encoder and spilled prompt conditioning to CPU — {status}"
-                        ));
-                    } else {
-                        self.base
-                            .progress
-                            .info(&format!("Freed Qwen2.5 text encoder — {status}"));
-                    }
-                } else {
-                    if use_cpu_staging {
-                        self.base.progress.info(
-                            "Freed Qwen2.5 text encoder and spilled prompt conditioning to CPU",
-                        );
-                    } else {
-                        self.base.progress.info("Freed Qwen2.5 text encoder");
-                    }
-                }
-
-                (hs, mask, u_hs, u_mask)
+                Some(Self::maybe_spill_conditioning(use_cpu_staging, hs)?)
+            } else {
+                None
             };
 
-        if use_cfg {
-            let ((cond_hs, cond_mask), (neg_hs, neg_mask)) = align_cfg_conditioning(
-                &encoder_hidden_states,
-                &encoder_attention_mask,
-                uncond_hs.as_ref().expect("unconditional prompt missing"),
-                uncond_mask.as_ref().expect("unconditional mask missing"),
-            )?;
-            encoder_hidden_states = cond_hs;
-            encoder_attention_mask = cond_mask;
-            uncond_hs = Some(neg_hs);
-            uncond_mask = Some(neg_mask);
-        }
+            drop(text_encoder);
+            // Force the backend to release allocator state before transformer load.
+            device.synchronize()?;
+            if let Some(status) = crate::device::memory_status_string() {
+                if use_cpu_staging {
+                    self.base.progress.info(&format!(
+                            "Freed Qwen2.5 text encoder and spilled prompt conditioning to CPU — {status}"
+                        ));
+                } else {
+                    self.base
+                        .progress
+                        .info(&format!("Freed Qwen2.5 text encoder — {status}"));
+                }
+            } else {
+                if use_cpu_staging {
+                    self.base
+                        .progress
+                        .info("Freed Qwen2.5 text encoder and spilled prompt conditioning to CPU");
+                } else {
+                    self.base.progress.info("Freed Qwen2.5 text encoder");
+                }
+            }
+
+            (hs, u_hs)
+        };
+
+        // Conditioning stays at its true length here. Padding the two CFG
+        // streams to a common length is a property of *batching* them into one
+        // forward, so it happens in the `use_batched_cfg` branch below and
+        // nowhere else.
 
         // --- Phase 2: Load transformer and denoise ---
         let xformer_paths = self.transformer_paths();
@@ -2229,12 +2215,8 @@ impl QwenImageEngine {
 
         if use_cpu_staging {
             encoder_hidden_states = encoder_hidden_states.to_device(&device)?.to_dtype(dtype)?;
-            encoder_attention_mask = encoder_attention_mask.to_device(&device)?;
             if let Some(hs) = uncond_hs.take() {
                 uncond_hs = Some(hs.to_device(&device)?.to_dtype(dtype)?);
-            }
-            if let Some(mask) = uncond_mask.take() {
-                uncond_mask = Some(mask.to_device(&device)?);
             }
             if let Some(status) = memory_status_string() {
                 self.base.progress.info(&format!(
@@ -2372,16 +2354,16 @@ impl QwenImageEngine {
         }
 
         // Pre-batch CFG inputs when the selected transformer path can handle the
-        // extra batch dimension without exceeding peak memory.
+        // extra batch dimension without exceeding peak memory. Only this branch
+        // pads, and only when the two prompts differ in length.
         let (batched_hs, batched_mask) = if use_batched_cfg {
-            let hs = Tensor::cat(&[&encoder_hidden_states, uncond_hs.as_ref().unwrap()], 0)?;
-            let mask = Tensor::cat(&[&encoder_attention_mask, uncond_mask.as_ref().unwrap()], 0)?;
-            (hs, mask)
+            let (cond_hs, neg_hs, mask) = align_cfg_conditioning(
+                &encoder_hidden_states,
+                uncond_hs.as_ref().expect("unconditional prompt missing"),
+            )?;
+            (Tensor::cat(&[&cond_hs, &neg_hs], 0)?, mask)
         } else {
-            (
-                encoder_hidden_states.clone(),
-                encoder_attention_mask.clone(),
-            )
+            (encoder_hidden_states.clone(), None)
         };
 
         for step in 0..num_steps {
@@ -2397,24 +2379,19 @@ impl QwenImageEngine {
                         &batched_latents,
                         &t_tensor,
                         &batched_hs,
-                        &batched_mask,
+                        batched_mask.as_ref(),
                     )?;
                     (batched_pred.narrow(0, 0, 1)?, batched_pred.narrow(0, 1, 1)?)
                 } else {
                     let t_tensor =
                         Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
                     (
-                        transformer.forward(
-                            &latents,
-                            &t_tensor,
-                            &encoder_hidden_states,
-                            &encoder_attention_mask,
-                        )?,
+                        transformer.forward(&latents, &t_tensor, &encoder_hidden_states, None)?,
                         transformer.forward(
                             &latents,
                             &t_tensor,
                             uncond_hs.as_ref().unwrap(),
-                            uncond_mask.as_ref().unwrap(),
+                            None,
                         )?,
                     )
                 };
@@ -2433,12 +2410,7 @@ impl QwenImageEngine {
                 rescaled.to_dtype(dtype)?
             } else {
                 let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
-                transformer.forward(
-                    &latents,
-                    &t_tensor,
-                    &encoder_hidden_states,
-                    &encoder_attention_mask,
-                )?
+                transformer.forward(&latents, &t_tensor, &encoder_hidden_states, None)?
             };
             if step == 0 || step == num_steps / 2 || step == num_steps - 1 {
                 Self::debug_tensor_stats(&format!("noise_pred[{step}]"), &noise_pred);
@@ -2489,9 +2461,7 @@ impl QwenImageEngine {
         // Drop transformer and embeddings
         drop(transformer);
         drop(encoder_hidden_states);
-        drop(encoder_attention_mask);
         drop(uncond_hs);
-        drop(uncond_mask);
         device.synchronize()?;
         self.base.progress.info("Freed Qwen-Image transformer");
 
@@ -2684,22 +2654,21 @@ impl QwenImageEngine {
 
         progress.stage_start("Encoding prompt (Qwen2.5 edit)");
         let encode_start = Instant::now();
-        let (encoder_hidden_states, encoder_attention_mask, _) =
-            loaded.text_encoder.encode_formatted_multimodal(
-                &formatted_prompt,
-                edit_images,
-                &loaded.device,
-                loaded.dtype,
-            )?;
+        let (encoder_hidden_states, _, _) = loaded.text_encoder.encode_formatted_multimodal(
+            &formatted_prompt,
+            edit_images,
+            &loaded.device,
+            loaded.dtype,
+        )?;
         progress.phase_done(
             crate::ProgressPhase::PromptEncode,
             "Encoding prompt (Qwen2.5 edit)",
             encode_start.elapsed(),
         );
-        let (encoder_hidden_states, encoder_attention_mask, uncond_hs, uncond_mask) = if use_cfg {
+        let uncond_hs = if use_cfg {
             progress.stage_start("Encoding negative prompt (Qwen2.5 edit)");
             let neg_start = Instant::now();
-            let (hs, mask, _) = loaded.text_encoder.encode_formatted_multimodal(
+            let (hs, _, _) = loaded.text_encoder.encode_formatted_multimodal(
                 &formatted_negative,
                 edit_images,
                 &loaded.device,
@@ -2709,15 +2678,9 @@ impl QwenImageEngine {
                 "Encoding negative prompt (Qwen2.5 edit)",
                 neg_start.elapsed(),
             );
-            let ((cond_hs, cond_mask), (neg_hs, neg_mask)) = align_cfg_conditioning(
-                &encoder_hidden_states,
-                &encoder_attention_mask,
-                &hs,
-                &mask,
-            )?;
-            (cond_hs, cond_mask, Some(neg_hs), Some(neg_mask))
+            Some(hs)
         } else {
-            (encoder_hidden_states, encoder_attention_mask, None, None)
+            None
         };
 
         let drop_text_encoder = is_edit_family || loaded.text_encoder.on_gpu;
@@ -2808,15 +2771,13 @@ impl QwenImageEngine {
                 .expect("transformer must be loaded for denoising");
             let use_batched_cfg = use_cfg && transformer.supports_cfg_batching();
             let (batched_hs, batched_mask) = if use_batched_cfg {
-                let hs = Tensor::cat(&[&encoder_hidden_states, uncond_hs.as_ref().unwrap()], 0)?;
-                let mask =
-                    Tensor::cat(&[&encoder_attention_mask, uncond_mask.as_ref().unwrap()], 0)?;
-                (hs, mask)
+                let (cond_hs, neg_hs, mask) = align_cfg_conditioning(
+                    &encoder_hidden_states,
+                    uncond_hs.as_ref().expect("unconditional prompt missing"),
+                )?;
+                (Tensor::cat(&[&cond_hs, &neg_hs], 0)?, mask)
             } else {
-                (
-                    encoder_hidden_states.clone(),
-                    encoder_attention_mask.clone(),
-                )
+                (encoder_hidden_states.clone(), None)
             };
 
             for step in 0..num_steps {
@@ -2845,7 +2806,7 @@ impl QwenImageEngine {
                             &batched_input,
                             &timestep,
                             &batched_hs,
-                            &batched_mask,
+                            batched_mask.as_ref(),
                             &img_shapes,
                         )?;
                         (
@@ -2859,7 +2820,7 @@ impl QwenImageEngine {
                                     &latent_model_input,
                                     &timestep,
                                     &encoder_hidden_states,
-                                    &encoder_attention_mask,
+                                    None,
                                     &img_shapes,
                                 )?
                                 .narrow(1, 0, output_seq_len)?,
@@ -2868,7 +2829,7 @@ impl QwenImageEngine {
                                     &latent_model_input,
                                     &timestep,
                                     uncond_hs.as_ref().unwrap(),
-                                    uncond_mask.as_ref().unwrap(),
+                                    None,
                                     &img_shapes,
                                 )?
                                 .narrow(1, 0, output_seq_len)?,
@@ -2892,7 +2853,7 @@ impl QwenImageEngine {
                             &latent_model_input,
                             &timestep,
                             &encoder_hidden_states,
-                            &encoder_attention_mask,
+                            None,
                             &img_shapes,
                         )?
                         .narrow(1, 0, output_seq_len)?
@@ -3062,21 +3023,19 @@ impl QwenImageEngine {
         };
         let both_cached = prompt_cached.is_some() && (!use_cfg || uncond_cached.is_some());
 
-        let (encoder_hidden_states, encoder_attention_mask, uncond_hs, uncond_mask) = if both_cached
-        {
+        let (encoder_hidden_states, uncond_hs) = if both_cached {
             let cached = prompt_cached.expect("prompt cache unexpectedly missing");
             progress.cache_hit("prompt conditioning");
-            let (hs, mask) = cached.restore(&loaded.device, loaded.dtype)?;
-            let (u_hs, u_mask) = if use_cfg {
+            let hs = cached.restore(&loaded.device, loaded.dtype)?;
+            let u_hs = if use_cfg {
                 progress.cache_hit("unconditional conditioning");
                 let ucached =
                     uncond_cached.expect("unconditional prompt cache unexpectedly missing");
-                let (u_hs, u_mask) = ucached.restore(&loaded.device, loaded.dtype)?;
-                (Some(u_hs), Some(u_mask))
+                Some(ucached.restore(&loaded.device, loaded.dtype)?)
             } else {
-                (None, None)
+                None
             };
-            (hs, mask, u_hs, u_mask)
+            (hs, u_hs)
         } else {
             if loaded.text_encoder.model.is_none() {
                 let label = if loaded.text_encoder.is_parked() {
@@ -3094,7 +3053,7 @@ impl QwenImageEngine {
                 progress.stage_done(label, reload_start.elapsed());
             }
 
-            let (hs, mask) = Self::encode_prompt_cached(
+            let hs = Self::encode_prompt_cached(
                 progress,
                 &self.prompt_cache,
                 &mut loaded.text_encoder,
@@ -3103,39 +3062,24 @@ impl QwenImageEngine {
                 loaded.dtype,
             )?;
 
-            let (u_hs, u_mask) = if use_cfg {
-                let (hs, mask) = Self::encode_prompt_cached(
+            let u_hs = if use_cfg {
+                Some(Self::encode_prompt_cached(
                     progress,
                     &self.prompt_cache,
                     &mut loaded.text_encoder,
                     QWEN_EMPTY_NEGATIVE_PROMPT,
                     &loaded.device,
                     loaded.dtype,
-                )?;
-                (Some(hs), Some(mask))
+                )?)
             } else {
-                (None, None)
+                None
             };
 
-            (hs, mask, u_hs, u_mask)
+            (hs, u_hs)
         };
 
-        let (encoder_hidden_states, encoder_attention_mask, uncond_hs, uncond_mask) = if use_cfg {
-            let ((cond_hs, cond_mask), (neg_hs, neg_mask)) = align_cfg_conditioning(
-                &encoder_hidden_states,
-                &encoder_attention_mask,
-                uncond_hs.as_ref().expect("unconditional prompt missing"),
-                uncond_mask.as_ref().expect("unconditional mask missing"),
-            )?;
-            (cond_hs, cond_mask, Some(neg_hs), Some(neg_mask))
-        } else {
-            (
-                encoder_hidden_states,
-                encoder_attention_mask,
-                uncond_hs,
-                uncond_mask,
-            )
-        };
+        // Both streams keep their true length; only the batched-CFG branch in
+        // the denoise loop pads, and only when the lengths differ.
 
         // Drop or park text encoder to free VRAM for denoising.
         if loaded.text_encoder.on_gpu {
@@ -3291,17 +3235,16 @@ impl QwenImageEngine {
             }
 
             // Pre-batch CFG inputs when the selected transformer path can handle
-            // the extra batch dimension without exceeding peak memory.
+            // the extra batch dimension without exceeding peak memory. Only this
+            // branch pads, and only when the two prompts differ in length.
             let (batched_hs, batched_mask) = if use_batched_cfg {
-                let hs = Tensor::cat(&[&encoder_hidden_states, uncond_hs.as_ref().unwrap()], 0)?;
-                let mask =
-                    Tensor::cat(&[&encoder_attention_mask, uncond_mask.as_ref().unwrap()], 0)?;
-                (hs, mask)
+                let (cond_hs, neg_hs, mask) = align_cfg_conditioning(
+                    &encoder_hidden_states,
+                    uncond_hs.as_ref().expect("unconditional prompt missing"),
+                )?;
+                (Tensor::cat(&[&cond_hs, &neg_hs], 0)?, mask)
             } else {
-                (
-                    encoder_hidden_states.clone(),
-                    encoder_attention_mask.clone(),
-                )
+                (encoder_hidden_states.clone(), None)
             };
 
             for step in 0..num_steps {
@@ -3317,7 +3260,7 @@ impl QwenImageEngine {
                             &batched_latents,
                             &t_tensor,
                             &batched_hs,
-                            &batched_mask,
+                            batched_mask.as_ref(),
                         )?;
                         (batched_pred.narrow(0, 0, 1)?, batched_pred.narrow(0, 1, 1)?)
                     } else {
@@ -3328,13 +3271,13 @@ impl QwenImageEngine {
                                 &latents,
                                 &t_tensor,
                                 &encoder_hidden_states,
-                                &encoder_attention_mask,
+                                None,
                             )?,
                             transformer.forward(
                                 &latents,
                                 &t_tensor,
                                 uncond_hs.as_ref().unwrap(),
-                                uncond_mask.as_ref().unwrap(),
+                                None,
                             )?,
                         )
                     };
@@ -3349,12 +3292,7 @@ impl QwenImageEngine {
                 } else {
                     let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
                         .to_dtype(loaded.dtype)?;
-                    transformer.forward(
-                        &latents,
-                        &t_tensor,
-                        &encoder_hidden_states,
-                        &encoder_attention_mask,
-                    )?
+                    transformer.forward(&latents, &t_tensor, &encoder_hidden_states, None)?
                 };
                 if step == 0 || step == num_steps / 2 || step == num_steps - 1 {
                     Self::debug_tensor_stats(&format!("noise_pred[{step}]"), &noise_pred);
@@ -3390,9 +3328,7 @@ impl QwenImageEngine {
 
         // Free text embeddings
         drop(encoder_hidden_states);
-        drop(encoder_attention_mask);
         drop(uncond_hs);
-        drop(uncond_mask);
 
         // 8. VAE decode
         progress.stage_start("VAE decode");
@@ -3691,7 +3627,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_prompt_conditioning_roundtrips_and_restores_mask() {
+    fn cached_prompt_conditioning_roundtrips_unpadded_conditioning() {
         let device = Device::Cpu;
         let hidden_states = Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
@@ -3699,15 +3635,32 @@ mod tests {
             &device,
         )
         .unwrap();
-        let cached = CachedPromptConditioning::from_parts(&hidden_states, 2).unwrap();
+        let cached = CachedPromptConditioning::from_parts(&hidden_states, 3).unwrap();
 
-        let (restored_hs, restored_mask) = cached.restore(&device, DType::F32).unwrap();
+        let restored_hs = cached.restore(&device, DType::F32).unwrap();
 
         assert_eq!(
             tensor_values_f32(&restored_hs),
             tensor_values_f32(&hidden_states)
         );
-        assert_eq!(tensor_values_u8(&restored_mask), vec![1, 1, 0]);
+    }
+
+    /// `Qwen2TextEncoder` narrows to the true token count before returning, so
+    /// a cached entry whose `valid_len` is short means an encoder started
+    /// padding — which would feed zero rows into the transformer unmasked.
+    #[test]
+    fn cached_prompt_conditioning_rejects_padded_conditioning() {
+        let device = Device::Cpu;
+        let hidden_states = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            Shape::from((1, 3, 2)),
+            &device,
+        )
+        .unwrap();
+        let err = CachedPromptConditioning::from_parts(&hidden_states, 2)
+            .err()
+            .expect("padded conditioning must be rejected");
+        assert!(err.to_string().contains("must arrive unpadded"));
     }
 
     #[test]
@@ -3715,15 +3668,13 @@ mod tests {
         let device = Device::Cpu;
         let hidden_states =
             Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], Shape::from((1, 2, 2)), &device).unwrap();
-        let mask = Tensor::from_vec(vec![1u8, 1], Shape::from((1, 2)), &device).unwrap();
 
-        let (padded_hs, padded_mask) = pad_text_conditioning(&hidden_states, &mask, 2).unwrap();
+        let padded_hs = pad_text_conditioning(&hidden_states, 2).unwrap();
 
         assert_eq!(
             tensor_values_f32(&padded_hs),
             tensor_values_f32(&hidden_states)
         );
-        assert_eq!(tensor_values_u8(&padded_mask), vec![1, 1]);
     }
 
     #[test]
@@ -3731,16 +3682,14 @@ mod tests {
         let device = Device::Cpu;
         let hidden_states =
             Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], Shape::from((1, 2, 2)), &device).unwrap();
-        let mask = Tensor::from_vec(vec![1u8, 0], Shape::from((1, 2)), &device).unwrap();
 
-        let (padded_hs, padded_mask) = pad_text_conditioning(&hidden_states, &mask, 4).unwrap();
+        let padded_hs = pad_text_conditioning(&hidden_states, 4).unwrap();
 
         assert_eq!(padded_hs.dims3().unwrap(), (1, 4, 2));
         assert_eq!(
             tensor_values_f32(&padded_hs),
             vec![1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0]
         );
-        assert_eq!(tensor_values_u8(&padded_mask), vec![1, 0, 0, 0]);
     }
 
     #[test]
@@ -3748,14 +3697,34 @@ mod tests {
         let device = Device::Cpu;
         let hidden_states =
             Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], Shape::from((1, 2, 2)), &device).unwrap();
-        let mask = Tensor::from_vec(vec![1u8, 1], Shape::from((1, 2)), &device).unwrap();
 
-        let err = pad_text_conditioning(&hidden_states, &mask, 1).unwrap_err();
+        let err = pad_text_conditioning(&hidden_states, 1).unwrap_err();
         assert!(err.to_string().contains("cannot shrink text conditioning"));
     }
 
+    /// Equal lengths mean no padding and therefore no mask, which is the state
+    /// the split-CFG, no-CFG and edit paths are always in now that nothing pads
+    /// ahead of the batching decision.
     #[test]
-    fn align_cfg_conditioning_pads_shorter_branch_to_match_longer_one() {
+    fn align_cfg_conditioning_returns_no_mask_for_equal_lengths() {
+        let device = Device::Cpu;
+        let cond_hs =
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], Shape::from((1, 2, 2)), &device).unwrap();
+        let uncond_hs =
+            Tensor::from_vec(vec![5.0f32, 6.0, 7.0, 8.0], Shape::from((1, 2, 2)), &device).unwrap();
+
+        let (cond, uncond, mask) = align_cfg_conditioning(&cond_hs, &uncond_hs).unwrap();
+
+        assert!(
+            mask.is_none(),
+            "two equal-length streams need no mask (diffusers' `prompt_embeds_mask.all()` case)"
+        );
+        assert_eq!(tensor_values_f32(&cond), tensor_values_f32(&cond_hs));
+        assert_eq!(tensor_values_f32(&uncond), tensor_values_f32(&uncond_hs));
+    }
+
+    #[test]
+    fn align_cfg_conditioning_pads_shorter_branch_and_masks_the_padding() {
         let device = Device::Cpu;
         let cond_hs = Tensor::from_vec(
             vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
@@ -3763,26 +3732,25 @@ mod tests {
             &device,
         )
         .unwrap();
-        let cond_mask = Tensor::from_vec(vec![1u8, 1, 1], Shape::from((1, 3)), &device).unwrap();
         let uncond_hs = Tensor::from_vec(
             vec![7.0f32, 8.0, 9.0, 10.0],
             Shape::from((1, 2, 2)),
             &device,
         )
         .unwrap();
-        let uncond_mask = Tensor::from_vec(vec![1u8, 0], Shape::from((1, 2)), &device).unwrap();
 
-        let ((cond_hs, cond_mask), (uncond_hs, uncond_mask)) =
-            align_cfg_conditioning(&cond_hs, &cond_mask, &uncond_hs, &uncond_mask).unwrap();
+        let (cond, uncond, mask) = align_cfg_conditioning(&cond_hs, &uncond_hs).unwrap();
 
-        assert_eq!(cond_hs.dims3().unwrap(), (1, 3, 2));
-        assert_eq!(uncond_hs.dims3().unwrap(), (1, 3, 2));
-        assert_eq!(tensor_values_u8(&cond_mask), vec![1, 1, 1]);
-        assert_eq!(tensor_values_u8(&uncond_mask), vec![1, 0, 0]);
+        assert_eq!(cond.dims3().unwrap(), (1, 3, 2));
+        assert_eq!(uncond.dims3().unwrap(), (1, 3, 2));
         assert_eq!(
-            tensor_values_f32(&uncond_hs),
+            tensor_values_f32(&uncond),
             vec![7.0, 8.0, 9.0, 10.0, 0.0, 0.0]
         );
+        // The mask covers the batched `[cond; uncond]` pair, one row each.
+        let mask = mask.expect("differing lengths must carry a mask");
+        assert_eq!(mask.dims2().unwrap(), (2, 3));
+        assert_eq!(tensor_values_u8(&mask), vec![1, 1, 1, 1, 1, 0]);
     }
 
     #[test]

@@ -185,7 +185,7 @@ impl JointAttention {
         &self,
         img_hidden: &Tensor,
         txt_hidden: &Tensor,
-        txt_mask: &Tensor,
+        bias: Option<&Tensor>,
         img_cos: &Tensor,
         img_sin: &Tensor,
         txt_cos: &Tensor,
@@ -230,20 +230,7 @@ impl JointAttention {
         let v = v.transpose(1, 2)?.contiguous()?;
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let img_mask = Tensor::ones((b, img_seq_len), DType::U8, q.device())?;
-        let key_mask = Tensor::cat(&[txt_mask, &img_mask], 1)?
-            .unsqueeze(1)?
-            .unsqueeze(1)?;
-        let on_true = key_mask.zeros_like()?.to_dtype(q.dtype())?;
-        let on_false = Tensor::new(f32::NEG_INFINITY, q.device())?
-            .broadcast_as(key_mask.shape())?
-            .to_dtype(q.dtype())?;
-        let key_mask = key_mask.where_cond(&on_true, &on_false)?;
-
-        let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
-        attn_weights = attn_weights.broadcast_add(&key_mask)?;
-        attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
-        let attn = attn_weights.matmul(&v)?;
+        let attn = super::attention::joint_attention(&q, &k, &v, scale, bias)?;
 
         let total_seq = img_seq_len + txt_seq_len;
         let attn = attn.transpose(1, 2)?.reshape((b, total_seq, ()))?;
@@ -311,7 +298,7 @@ impl OffloadedQwenBlock {
         &self,
         img_hidden: &Tensor,
         txt_hidden: &Tensor,
-        txt_mask: &Tensor,
+        bias: Option<&Tensor>,
         temb: &Tensor,
         img_cos: &Tensor,
         img_sin: &Tensor,
@@ -353,7 +340,7 @@ impl OffloadedQwenBlock {
         let (img_attn, txt_attn) = self.attn.forward(
             &img_attn_in,
             &txt_attn_in,
-            txt_mask,
+            bias,
             img_cos,
             img_sin,
             txt_cos,
@@ -645,7 +632,7 @@ impl OffloadedQwenImageTransformer {
         x: &Tensor,
         t: &Tensor,
         encoder_hidden_states: &Tensor,
-        encoder_attention_mask: &Tensor,
+        encoder_attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
         let device = &self.gpu_device;
         let (_b, _c, h, w) = x.dims4()?;
@@ -685,6 +672,13 @@ impl OffloadedQwenImageTransformer {
             )
         };
 
+        let key_bias = super::attention::joint_key_bias(
+            encoder_attention_mask,
+            hp * wp,
+            compute_dtype,
+            device,
+        )?;
+
         // 5. Execute blocks — GPU-resident run in-place, CPU blocks stream
         tracing::debug!(
             gpu_resident = self.gpu_resident_count,
@@ -699,7 +693,7 @@ impl OffloadedQwenImageTransformer {
                     (txt, img) = block.forward(
                         &img,
                         &txt,
-                        encoder_attention_mask,
+                        key_bias.as_ref(),
                         &temb,
                         &img_cos,
                         &img_sin,
@@ -714,7 +708,7 @@ impl OffloadedQwenImageTransformer {
                     (txt, img) = gpu_block.forward(
                         &img,
                         &txt,
-                        encoder_attention_mask,
+                        key_bias.as_ref(),
                         &temb,
                         &img_cos,
                         &img_sin,
@@ -746,7 +740,7 @@ impl OffloadedQwenImageTransformer {
         packed_hidden_states: &Tensor,
         t: &Tensor,
         encoder_hidden_states: &Tensor,
-        encoder_attention_mask: &Tensor,
+        encoder_attention_mask: Option<&Tensor>,
         img_shapes: &[(usize, usize, usize)],
     ) -> Result<Tensor> {
         let device = &self.gpu_device;
@@ -778,13 +772,20 @@ impl OffloadedQwenImageTransformer {
             )
         };
 
+        let key_bias = super::attention::joint_key_bias(
+            encoder_attention_mask,
+            img.dim(1)?,
+            compute_dtype,
+            device,
+        )?;
+
         for residency in &self.blocks {
             match residency {
                 BlockResidency::Gpu(block) => {
                     (txt, img) = block.forward(
                         &img,
                         &txt,
-                        encoder_attention_mask,
+                        key_bias.as_ref(),
                         &temb,
                         &img_cos,
                         &img_sin,
@@ -798,7 +799,7 @@ impl OffloadedQwenImageTransformer {
                     (txt, img) = gpu_block.forward(
                         &img,
                         &txt,
-                        encoder_attention_mask,
+                        key_bias.as_ref(),
                         &temb,
                         &img_cos,
                         &img_sin,

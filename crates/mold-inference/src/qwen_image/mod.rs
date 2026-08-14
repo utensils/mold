@@ -1,3 +1,4 @@
+pub(crate) mod attention;
 pub(crate) mod lora;
 pub(crate) mod offload;
 mod pipeline;

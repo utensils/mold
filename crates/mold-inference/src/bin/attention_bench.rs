@@ -5,10 +5,14 @@
 //! `[batch, heads, seq, head_dim]`, where `seq` is the fused `[txt; img]`
 //! sequence for the image families.
 //!
-//! Only four call sites route through `crate::attention` — FLUX's offload and
-//! GGUF-bypass transformers, all of Flux.2, and Z-Image's offload transformer.
-//! Dense BF16 FLUX and Z-Image use upstream Candle's own attention and are
-//! unaffected by this feature, so the FLUX rows here describe the offload path.
+//! Five call sites route through `crate::attention` — FLUX's offload and
+//! GGUF-bypass transformers, all of Flux.2, Z-Image's offload transformer, and
+//! all three Qwen-Image transformers (BF16, quantized and offloaded, which
+//! share one dispatcher in `qwen_image/attention.rs`; off Metal it is
+//! `attention_with_bias`, and its bias is `None` unless batched CFG pads two
+//! different prompt lengths). Dense BF16 FLUX and Z-Image use upstream
+//! Candle's own attention and are unaffected by this feature, so the FLUX rows
+//! here describe the offload path.
 //!
 //! ```text
 //! cargo run --release -p mold-ai-inference --features dev-bins,flash-attn \
@@ -30,6 +34,8 @@ const SHAPES: &[(&str, usize, usize, usize, usize)] = &[
     ("Flux.2 klein 1024^2  ", 1, 24, 4150, 128),
     ("Flux.2 dev 1024^2    ", 1, 48, 4150, 128),
     ("Z-Image offload 1024^2", 1, 30, 4160, 128),
+    // 6889 image tokens (1328^2 / 16^2) + a 224-token prompt.
+    ("Qwen-Image 1328^2    ", 1, 24, 7113, 128),
     ("LTX-2 stage2 default ", 1, 32, 10868, 128),
     ("LTX-2 stage2 1024^2  ", 1, 32, 13312, 128),
 ];

@@ -157,12 +157,26 @@ enum RopeCacheDevice {
     Metal,
 }
 
+/// Image RoPE tables are `seq_len x total_half` — the large half of the cache —
+/// and depend only on the latent grid, never on the prompt length. Keying them
+/// on the text length (as one combined key used to) re-materialised them for
+/// every new prompt-pair length and, once split CFG stopped padding the two
+/// streams to a common length, would have doubled that again.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RopeCacheKey {
+struct ImageRopeKey {
     frame: usize,
     height: usize,
     width: usize,
-    max_txt_seq_len: usize,
+    device: RopeCacheDevice,
+}
+
+/// Text RoPE is `pos_cos.narrow(0, max_vid_index, txt_len)` — a `txt_len x
+/// total_half` slice, negligible next to the image tables, and a strict prefix
+/// of any longer slice at the same `max_vid_index`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TextRopeKey {
+    max_vid_index: usize,
+    txt_len: usize,
     device: RopeCacheDevice,
 }
 
@@ -178,7 +192,8 @@ impl RopeCacheDevice {
     }
 }
 
-type RopeCacheValue = (Tensor, Tensor, Tensor, Tensor);
+/// `(cos, sin)` for one axis group.
+type RopeTables = (Tensor, Tensor);
 
 #[derive(Debug)]
 pub(crate) struct QwenRopeEmbedder {
@@ -190,7 +205,8 @@ pub(crate) struct QwenRopeEmbedder {
     neg_cos: Tensor,
     neg_sin: Tensor,
     dtype: DType,
-    cache: Mutex<HashMap<RopeCacheKey, RopeCacheValue>>,
+    image_cache: Mutex<HashMap<ImageRopeKey, RopeTables>>,
+    text_cache: Mutex<HashMap<TextRopeKey, RopeTables>>,
 }
 
 impl Clone for QwenRopeEmbedder {
@@ -204,7 +220,8 @@ impl Clone for QwenRopeEmbedder {
             neg_cos: self.neg_cos.clone(),
             neg_sin: self.neg_sin.clone(),
             dtype: self.dtype,
-            cache: Mutex::new(HashMap::new()),
+            image_cache: Mutex::new(HashMap::new()),
+            text_cache: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -257,7 +274,8 @@ impl QwenRopeEmbedder {
             neg_cos: Tensor::cat(&neg_cos_parts, D::Minus1)?,
             neg_sin: Tensor::cat(&neg_sin_parts, D::Minus1)?,
             dtype,
-            cache: Mutex::new(HashMap::new()),
+            image_cache: Mutex::new(HashMap::new()),
+            text_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -336,6 +354,38 @@ impl QwenRopeEmbedder {
         tensor.to_device(device)?.to_dtype(self.dtype)
     }
 
+    /// Text RoPE for one `(max_vid_index, txt_len)` pair, cached separately
+    /// from the image tables so a new prompt length never re-materialises them.
+    fn text_tables(
+        &self,
+        max_vid_index: usize,
+        txt_len: usize,
+        device: &Device,
+    ) -> Result<RopeTables> {
+        if max_vid_index + txt_len > ROPE_CACHE_LEN {
+            candle_core::bail!(
+                "Qwen text RoPE slice [{}..{}) exceeds cache size {}",
+                max_vid_index,
+                max_vid_index + txt_len,
+                ROPE_CACHE_LEN
+            );
+        }
+        let key = TextRopeKey {
+            max_vid_index,
+            txt_len,
+            device: RopeCacheDevice::from_device(device),
+        };
+        if let Some(cached) = self.text_cache.lock().unwrap().get(&key) {
+            return Ok(cached.clone());
+        }
+        let value = (
+            self.to_target(self.pos_cos.narrow(0, max_vid_index, txt_len)?, device)?,
+            self.to_target(self.pos_sin.narrow(0, max_vid_index, txt_len)?, device)?,
+        );
+        self.text_cache.lock().unwrap().insert(key, value.clone());
+        Ok(value)
+    }
+
     pub(crate) fn forward(
         &self,
         frame: usize,
@@ -351,15 +401,17 @@ impl QwenRopeEmbedder {
             );
         }
 
-        let key = RopeCacheKey {
+        let max_vid_index = (height / 2).max(width / 2);
+        let (txt_cos, txt_sin) = self.text_tables(max_vid_index, max_txt_seq_len, device)?;
+
+        let image_key = ImageRopeKey {
             frame,
             height,
             width,
-            max_txt_seq_len,
             device: RopeCacheDevice::from_device(device),
         };
-        if let Some(cached) = self.cache.lock().unwrap().get(&key) {
-            return Ok(cached.clone());
+        if let Some((img_cos, img_sin)) = self.image_cache.lock().unwrap().get(&image_key) {
+            return Ok((img_cos.clone(), img_sin.clone(), txt_cos, txt_sin));
         }
 
         let frame_cos = self.leading_axis_freqs(&self.pos_cos, 0, frame)?;
@@ -412,26 +464,15 @@ impl QwenRopeEmbedder {
         )?
         .reshape((seq_len, total_half))?;
 
-        let max_vid_index = (height / 2).max(width / 2);
-        if max_vid_index + max_txt_seq_len > ROPE_CACHE_LEN {
-            candle_core::bail!(
-                "Qwen text RoPE slice [{}..{}) exceeds cache size {}",
-                max_vid_index,
-                max_vid_index + max_txt_seq_len,
-                ROPE_CACHE_LEN
-            );
-        }
-        let txt_cos = self.pos_cos.narrow(0, max_vid_index, max_txt_seq_len)?;
-        let txt_sin = self.pos_sin.narrow(0, max_vid_index, max_txt_seq_len)?;
-
-        let value = (
+        let image_tables = (
             self.to_target(img_cos, device)?,
             self.to_target(img_sin, device)?,
-            self.to_target(txt_cos, device)?,
-            self.to_target(txt_sin, device)?,
         );
-        self.cache.lock().unwrap().insert(key, value.clone());
-        Ok(value)
+        self.image_cache
+            .lock()
+            .unwrap()
+            .insert(image_key, image_tables.clone());
+        Ok((image_tables.0, image_tables.1, txt_cos, txt_sin))
     }
 
     pub(crate) fn forward_shapes(
@@ -513,14 +554,9 @@ impl QwenRopeEmbedder {
             max_vid_index = max_vid_index.max(height / 2).max(width / 2);
         }
 
-        if max_vid_index + max_txt_seq_len > ROPE_CACHE_LEN {
-            candle_core::bail!(
-                "Qwen text RoPE slice [{}..{}) exceeds cache size {}",
-                max_vid_index,
-                max_vid_index + max_txt_seq_len,
-                ROPE_CACHE_LEN
-            );
-        }
+        // The multi-shape image tables are not cached (an edit request's shape
+        // list is effectively per-request); the text half still is.
+        let (txt_cos, txt_sin) = self.text_tables(max_vid_index, max_txt_seq_len, device)?;
 
         Ok((
             self.to_target(
@@ -531,15 +567,15 @@ impl QwenRopeEmbedder {
                 Tensor::cat(&img_sin_parts.iter().collect::<Vec<_>>(), 0)?,
                 device,
             )?,
-            self.to_target(
-                self.pos_cos.narrow(0, max_vid_index, max_txt_seq_len)?,
-                device,
-            )?,
-            self.to_target(
-                self.pos_sin.narrow(0, max_vid_index, max_txt_seq_len)?,
-                device,
-            )?,
+            txt_cos,
+            txt_sin,
         ))
+    }
+
+    /// Number of cached image tables. Test-only observation of the cache split.
+    #[cfg(test)]
+    pub(crate) fn image_cache_len(&self) -> usize {
+        self.image_cache.lock().unwrap().len()
     }
 }
 
@@ -696,7 +732,7 @@ impl JointAttention {
         &self,
         img_hidden: &Tensor,
         txt_hidden: &Tensor,
-        txt_mask: &Tensor,
+        bias: Option<&Tensor>,
         img_cos: &Tensor,
         img_sin: &Tensor,
         txt_cos: &Tensor,
@@ -761,11 +797,7 @@ impl JointAttention {
         let v = v.transpose(1, 2)?.contiguous()?;
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let img_mask = Tensor::ones((batch, img_seq_len), DType::U8, img_hidden.device())?;
-        let key_mask = Tensor::cat(&[txt_mask, &img_mask], 1)?
-            .unsqueeze(1)?
-            .unsqueeze(1)?;
-        let attn = self.attention_dispatch(&q, &k, &v, &key_mask, scale)?;
+        let attn = super::attention::joint_attention(&q, &k, &v, scale, bias)?;
 
         let total_seq_len = img_seq_len + txt_seq_len;
         let attn = attn.transpose(1, 2)?.reshape((batch, total_seq_len, ()))?;
@@ -778,50 +810,6 @@ impl JointAttention {
             img_attn.apply(&self.to_out)?,
             txt_attn.apply(&self.add_out_proj)?,
         ))
-    }
-
-    fn attention_dispatch(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        key_mask: &Tensor,
-        scale: f64,
-    ) -> Result<Tensor> {
-        if q.device().is_metal() {
-            let sdpa_mask = self.prepare_sdpa_mask(key_mask, q)?;
-            candle_nn::ops::sdpa(q, k, v, Some(&sdpa_mask), false, scale as f32, 1.0)
-        } else {
-            self.attention_basic(q, k, v, key_mask, scale)
-        }
-    }
-
-    fn attention_basic(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        key_mask: &Tensor,
-        scale: f64,
-    ) -> Result<Tensor> {
-        let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
-        let on_true = key_mask.zeros_like()?.to_dtype(attn_weights.dtype())?;
-        let on_false = Tensor::new(f32::NEG_INFINITY, attn_weights.device())?
-            .broadcast_as(key_mask.shape())?
-            .to_dtype(attn_weights.dtype())?;
-        let key_mask = key_mask.where_cond(&on_true, &on_false)?;
-        attn_weights = attn_weights.broadcast_add(&key_mask)?;
-        attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
-        attn_weights.matmul(v)
-    }
-
-    fn prepare_sdpa_mask(&self, key_mask: &Tensor, q: &Tensor) -> Result<Tensor> {
-        let (batch, _, seq_len, _) = q.dims4()?;
-        let key_len = key_mask.dim(3)?;
-        let mask = key_mask.to_dtype(q.dtype())?;
-        let mask = ((mask - 1.0)? * 1e9)?;
-        mask.broadcast_as((batch, self.n_heads, seq_len, key_len))?
-            .contiguous()
     }
 }
 
@@ -857,7 +845,7 @@ impl QwenImageTransformerBlock {
         &self,
         img_hidden: &Tensor,
         txt_hidden: &Tensor,
-        txt_mask: &Tensor,
+        bias: Option<&Tensor>,
         temb: &Tensor,
         img_cos: &Tensor,
         img_sin: &Tensor,
@@ -925,7 +913,7 @@ impl QwenImageTransformerBlock {
         let (img_attn, txt_attn) = self.attn.forward(
             &img_attn_in,
             &txt_attn_in,
-            txt_mask,
+            bias,
             img_cos,
             img_sin,
             txt_cos,
@@ -933,9 +921,9 @@ impl QwenImageTransformerBlock {
             img_seq_len,
         )?;
 
-        // Match the BF16 path and upstream Qwen masking semantics: txt_mask is
-        // consumed inside attention and text-conditioning, not multiplied back
-        // into each residual update.
+        // Match the BF16 path and upstream Qwen masking semantics: any text
+        // mask is consumed inside attention and text-conditioning, not
+        // multiplied back into each residual update.
         let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
         let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?;
 
@@ -1050,7 +1038,7 @@ impl QuantizedQwenImageTransformer2DModel {
         x: &Tensor,
         t: &Tensor,
         encoder_hidden_states: &Tensor,
-        encoder_attention_mask: &Tensor,
+        encoder_attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
         let out_dtype = x.dtype();
         let device = x.device();
@@ -1061,7 +1049,6 @@ impl QuantizedQwenImageTransformer2DModel {
         let x = x.to_dtype(dtype)?;
         let t = t.to_dtype(dtype)?;
         let encoder_hidden_states = encoder_hidden_states.to_dtype(dtype)?;
-        let encoder_attention_mask = encoder_attention_mask.to_device(device)?;
         debug_stage("inputs prepared");
 
         let (batch, channels, height, width) = x.dims4()?;
@@ -1102,11 +1089,18 @@ impl QuantizedQwenImageTransformer2DModel {
                 .forward(1, h_tokens, w_tokens, txt_seq_len, device)?;
         debug_stage("rope");
 
+        let key_bias = super::attention::joint_key_bias(
+            encoder_attention_mask,
+            height_patches * width_patches,
+            dtype,
+            device,
+        )?;
+
         for (i, block) in self.blocks.iter().enumerate() {
             (img, txt) = block.forward(
                 &img,
                 &txt,
-                &encoder_attention_mask,
+                key_bias.as_ref(),
                 &temb,
                 &img_cos,
                 &img_sin,
@@ -1143,7 +1137,7 @@ impl QuantizedQwenImageTransformer2DModel {
         packed_hidden_states: &Tensor,
         t: &Tensor,
         encoder_hidden_states: &Tensor,
-        encoder_attention_mask: &Tensor,
+        encoder_attention_mask: Option<&Tensor>,
         img_shapes: &[(usize, usize, usize)],
     ) -> Result<Tensor> {
         let out_dtype = packed_hidden_states.dtype();
@@ -1151,7 +1145,6 @@ impl QuantizedQwenImageTransformer2DModel {
         let dtype = working_dtype(device);
         let mut timestep = t.to_dtype(dtype)?;
         let encoder_hidden_states = encoder_hidden_states.to_dtype(dtype)?;
-        let encoder_attention_mask = encoder_attention_mask.to_device(device)?;
         let packed_hidden_states = packed_hidden_states.to_dtype(dtype)?;
         let batch = packed_hidden_states.dim(0)?;
 
@@ -1172,11 +1165,14 @@ impl QuantizedQwenImageTransformer2DModel {
             self.rope_embedder
                 .forward_shapes(img_shapes, txt_seq_len, device)?;
 
+        let key_bias =
+            super::attention::joint_key_bias(encoder_attention_mask, img.dim(1)?, dtype, device)?;
+
         for block in &self.blocks {
             (img, txt) = block.forward(
                 &img,
                 &txt,
-                &encoder_attention_mask,
+                key_bias.as_ref(),
                 &temb,
                 &img_cos,
                 &img_sin,
@@ -1200,9 +1196,10 @@ impl QuantizedQwenImageTransformer2DModel {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_edit_modulation_index, select_modulation_params, RopeCacheDevice, RopeCacheKey,
+        build_edit_modulation_index, select_modulation_params, ImageRopeKey, QwenRopeEmbedder,
+        RopeCacheDevice, TextRopeKey,
     };
-    use candle_core::{Device, Tensor};
+    use candle_core::{DType, Device, Tensor};
 
     #[test]
     fn rope_cache_device_detects_cpu() {
@@ -1214,21 +1211,79 @@ mod tests {
 
     #[test]
     fn rope_cache_key_includes_shape_and_device() {
-        let a = RopeCacheKey {
+        let a = ImageRopeKey {
             frame: 1,
             height: 64,
             width: 64,
-            max_txt_seq_len: 512,
             device: RopeCacheDevice::Cpu,
         };
-        let b = RopeCacheKey {
+        let b = ImageRopeKey {
             frame: 1,
             height: 64,
             width: 64,
-            max_txt_seq_len: 512,
             device: RopeCacheDevice::Metal,
         };
         assert_ne!(a, b);
+
+        let text_a = TextRopeKey {
+            max_vid_index: 32,
+            txt_len: 512,
+            device: RopeCacheDevice::Cpu,
+        };
+        let text_b = TextRopeKey {
+            max_vid_index: 32,
+            txt_len: 256,
+            device: RopeCacheDevice::Cpu,
+        };
+        assert_ne!(text_a, text_b);
+    }
+
+    /// The image tables are the expensive half and do not depend on the prompt
+    /// length, so two prompts at one resolution must share a single entry.
+    ///
+    /// Before the split this was keyed on `max(cond_len, uncond_len)`, so every
+    /// new prompt pair re-materialised a `seq_len x total_half` pair — and once
+    /// split CFG stopped padding the two streams to a common length it would
+    /// have produced two entries per generation instead of one.
+    #[test]
+    fn rope_image_table_is_shared_across_text_lengths() {
+        let device = Device::Cpu;
+        let embedder =
+            QwenRopeEmbedder::new(10000.0, vec![16, 56, 56], &device, DType::F32).unwrap();
+
+        let (cos_a, sin_a, txt_cos_a, _) = embedder.forward(1, 8, 8, 20, &device).unwrap();
+        let (cos_b, sin_b, txt_cos_b, _) = embedder.forward(1, 8, 8, 12, &device).unwrap();
+
+        assert_eq!(
+            embedder.image_cache_len(),
+            1,
+            "two prompt lengths at one resolution must share one image entry"
+        );
+        assert_eq!(cos_a.dims(), cos_b.dims());
+        let diff = |a: &Tensor, b: &Tensor| {
+            (a - b)
+                .unwrap()
+                .abs()
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .max(0)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap()
+        };
+        assert_eq!(diff(&cos_a, &cos_b), 0.0);
+        assert_eq!(diff(&sin_a, &sin_b), 0.0);
+
+        // Text RoPE is a prefix slice: the shorter stream sees exactly what the
+        // longer one saw at those positions, so slicing never moves a real token.
+        assert_eq!(txt_cos_a.dims(), &[20, 64]);
+        assert_eq!(txt_cos_b.dims(), &[12, 64]);
+        assert_eq!(diff(&txt_cos_a.narrow(0, 0, 12).unwrap(), &txt_cos_b), 0.0);
+
+        // A different resolution is a different image entry.
+        embedder.forward(1, 8, 16, 12, &device).unwrap();
+        assert_eq!(embedder.image_cache_len(), 2);
     }
 
     #[test]
