@@ -38,20 +38,24 @@ mod tests {
 
     struct UnsetEnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
-        name: &'static str,
-        previous: Option<std::ffi::OsString>,
+        previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
     }
 
     impl UnsetEnvGuard {
-        fn new(name: &'static str) -> Self {
+        fn new(names: &[&'static str]) -> Self {
             let lock = env_lock()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let previous = std::env::var_os(name);
-            std::env::remove_var(name);
+            let previous = names
+                .iter()
+                .map(|name| {
+                    let previous = std::env::var_os(name);
+                    std::env::remove_var(name);
+                    (*name, previous)
+                })
+                .collect();
             Self {
                 _lock: lock,
-                name,
                 previous,
             }
         }
@@ -59,9 +63,11 @@ mod tests {
 
     impl Drop for UnsetEnvGuard {
         fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.name, value),
-                None => std::env::remove_var(self.name),
+            for (name, previous) in &self.previous {
+                match previous {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
             }
         }
     }
@@ -671,7 +677,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn chain_validation_surfaces_normalization_errors_without_queueing() {
         let response = {
-            let _models_dir = UnsetEnvGuard::new("MOLD_MODELS_DIR");
+            let _models_root = UnsetEnvGuard::new(&["MOLD_MODELS_DIR", "MOLD_HOME"]);
             let app = app_empty();
             let mut request = route_chain_request();
             request.stages[0].frames = 10;
@@ -1266,7 +1272,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn chain_validation_rejects_19b_camera_preset_on_ltx23_without_downloading() {
         let response = {
-            let _models_dir = UnsetEnvGuard::new("MOLD_MODELS_DIR");
+            let _models_root = UnsetEnvGuard::new(&["MOLD_MODELS_DIR", "MOLD_HOME"]);
             app_empty()
                 .oneshot(
                     Request::post("/api/generate/chain/validate")
