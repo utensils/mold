@@ -136,7 +136,33 @@ mold run flux-dev:bf16 "oil painting" --lora art.safetensors --image photo.png -
 mold run flux-dev:bf16 "epic shot" \
   --lora cinematic.safetensors --lora-scale 0.8 \
   --lora dramatic-lighting.safetensors --lora-scale 0.4
+
+# Qwen-Image Lightning: the few-step distill as an adapter on a checkpoint you
+# already have, instead of a second ~20 GB pre-merged transformer. Always
+# CFG-free — set --steps to the adapter's step count and --guidance 1.0.
+mold run qwen-image-2512:q8 "a snowy mountain cabin at twilight" \
+  --lora ~/loras/Qwen-Image-2512-Lightning-8steps-V1.0-bf16.safetensors \
+  --steps 8 --guidance 1.0
 ```
+
+**Qwen-Image Lightning adapters** (user-supplied files, no manifest entry — the
+pre-merged route is `qwen-image-lightning:fp8` / `:fp8-8step` and
+`qwen-image-edit-lightning:fp8`):
+`ModelTC/Qwen-Image-Lightning` ships
+`Qwen-Image-Lightning-{4,8}steps-V2.0-bf16.safetensors` for the `qwen-image:*`
+line, and `lightx2v/Qwen-Image-2512-Lightning` ships
+`Qwen-Image-2512-Lightning-{4,8}steps-V1.0-bf16.safetensors` for
+`qwen-image-2512:*`. Match the adapter's line to the checkpoint's.
+
+**Repeated stacks reuse the merge:** FLUX and Qwen-Image fingerprint the active
+adapter set, its order, and its scales; a still-resident transformer built with
+exactly that stack is reused instead of rebuilt — which for GGUF is a
+dequantize → merge → re-quantize of every affected tensor. Any change to the
+stack invalidates. Only resident paths can elide: Qwen-Image's sequential
+load-use-drop strategy and any render whose VAE decode drops the transformer
+pay the merge again on the next request (FLUX's `LoraDeltaCache` /
+`MOLD_LORA_BYPASS` have no Qwen equivalent yet), and Qwen block offload refuses
+LoRAs outright.
 
 **Models browse:** the desktop's single **Models** workspace (Installed +
 Discover segments) stacks installed
