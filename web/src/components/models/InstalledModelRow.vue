@@ -10,6 +10,7 @@ import { computed } from "vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
+import Tooltip from "@ui/components/Tooltip.vue";
 import type { ModelInfoExtended } from "../../types";
 import { modelDisplayName } from "@studio/lib/modelDisplay";
 import { useModelInstallTargets } from "../../composables/useModelInstallTargets";
@@ -72,18 +73,18 @@ const installHint = computed(() => {
       </span>
       <Icon name="chevron-right" :size="16" class="row__chevron" />
     </button>
-    <button
-      v-if="installPlan.canInstall"
-      type="button"
-      class="rowline__install"
-      data-test="install-elsewhere-btn"
-      :title="installHint"
-      :aria-label="installHint"
-      @click="emit('install')"
-    >
-      <Icon name="download" :size="14" />
-      Install
-    </button>
+    <Tooltip v-if="installPlan.canInstall" :text="installHint">
+      <button
+        type="button"
+        class="rowline__install"
+        data-test="install-elsewhere-btn"
+        :aria-label="installHint"
+        @click="emit('install')"
+      >
+        <Icon name="download" :size="14" />
+        Install
+      </button>
+    </Tooltip>
   </div>
 </template>
 

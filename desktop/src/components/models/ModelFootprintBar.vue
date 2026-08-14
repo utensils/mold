@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
 
+import Tooltip from "@ui/components/Tooltip.vue";
+
 /**
  * Relative model-footprint meter used by every desktop model table. It is a
  * comparison within the current list, not transfer progress, so the shared
@@ -20,33 +22,38 @@ const explanation = computed(() => {
 </script>
 
 <template>
-  <span
-    class="model-footprint"
-    role="meter"
-    :aria-label="explanation"
-    :aria-valuenow="Math.round(clamped)"
-    aria-valuemin="0"
-    aria-valuemax="100"
-    :title="explanation"
-    data-test="model-footprint-bar"
-  >
-    <span class="model-footprint__fill" :style="{ width: `${clamped}%` }" />
-  </span>
+  <Tooltip :text="explanation" class="model-footprint-anchor">
+    <span
+      class="model-footprint"
+      role="meter"
+      :aria-label="explanation"
+      :aria-valuenow="Math.round(clamped)"
+      aria-valuemin="0"
+      aria-valuemax="100"
+      data-test="model-footprint-bar"
+    >
+      <span class="model-footprint__fill" :style="{ width: `${clamped}%` }" />
+    </span>
+  </Tooltip>
   <span :id="descriptionId" class="sr-only" data-test="model-footprint-description">
     {{ explanation }}
   </span>
 </template>
 
 <style scoped>
+/* The tooltip wrapper takes over the meter's old flex role in the row. */
+.model-footprint-anchor {
+  min-width: 32px;
+  flex: 1 1 auto;
+}
+
 .model-footprint {
   display: block;
-  min-width: 32px;
+  width: 100%;
   height: 6px;
-  flex: 1 1 auto;
   overflow: hidden;
   border-radius: 999px;
   background: var(--bath);
-  cursor: help;
 }
 
 .model-footprint__fill {
