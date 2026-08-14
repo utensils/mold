@@ -594,7 +594,7 @@ start_probe_server() {
       probe_server_pid=""
       return 1
     fi
-    if curl -fsS "$probe_host/api/status" >/dev/null 2>&1; then
+    if probe_status_ok; then
       return 0
     fi
     sleep 1
@@ -603,6 +603,24 @@ start_probe_server() {
   echo "probe: server did not answer /api/status within ${waited}s; see $log" >&2
   stop_probe_server
   return 1
+}
+
+# Readiness/auth-aware status check: a server started with MOLD_API_KEY
+# answers /api/status only with the key attached, so send it when we have it.
+probe_status_ok() {
+  local -a auth=()
+  [[ -z "${MOLD_API_KEY:-}" ]] || auth=(-H "x-api-key: $MOLD_API_KEY")
+  curl -fsS "${auth[@]}" "$probe_host/api/status" >/dev/null 2>&1
+}
+
+# The selected probe server's own inventory — a model installed locally is not
+# evidence the server has it, and vice versa.
+probe_model_installed() {
+  local model="$1"
+  local -a auth=()
+  [[ -z "${MOLD_API_KEY:-}" ]] || auth=(-H "x-api-key: $MOLD_API_KEY")
+  curl -fsS "${auth[@]}" "$probe_host/api/models" 2>/dev/null \
+    | jq -e --arg m "$model" 'any(.[]; .name == $m and (.installed // true))' >/dev/null 2>&1
 }
 
 record_probe_rows_as() {
@@ -622,12 +640,12 @@ record_probe_rows_as() {
 # a `mold run --local` process holds its engine for exactly one generation.
 run_probe() {
   local started_here=0 i role warm probe_prompt
-  if ! model_installed "qwen-image-2512:q4"; then
-    echo "skip: reload probe needs qwen-image-2512:q4 installed" >&2
-    record_probe_rows_as model_missing
-    return 0
-  fi
   if [[ -z "$probe_host" ]]; then
+    if ! model_installed "qwen-image-2512:q4"; then
+      echo "skip: reload probe needs qwen-image-2512:q4 installed" >&2
+      record_probe_rows_as model_missing
+      return 0
+    fi
     if ! start_probe_server; then
       record_probe_rows_as not_run
       return 0
@@ -635,9 +653,14 @@ run_probe() {
     started_here=1
   else
     echo "probe: using already-running server $probe_host" >&2
-    if ! curl -fsS "$probe_host/api/status" >/dev/null 2>&1; then
+    if ! probe_status_ok; then
       echo "probe: $probe_host did not answer /api/status" >&2
       record_probe_rows_as not_run
+      return 0
+    fi
+    if ! probe_model_installed "qwen-image-2512:q4"; then
+      echo "skip: $probe_host does not report qwen-image-2512:q4 installed" >&2
+      record_probe_rows_as model_missing
       return 0
     fi
   fi
@@ -645,7 +668,11 @@ run_probe() {
   for ((i = 0; i < ${#BENCH_PROBE_ROLES[@]}; i++)); do
     role="${BENCH_PROBE_ROLES[$i]}"
     warm=true
-    [[ "$role" != "probe_cold" ]] || warm=false
+    if [[ "$role" == "probe_cold" ]]; then
+      # An externally supplied server may already hold the engine or cached
+      # conditioning: its initial state is unknown, not cold.
+      if [[ "$started_here" -eq 1 ]]; then warm=false; else warm=null; fi
+    fi
     probe_prompt="$prompt"
     [[ "$role" != "probe_reload" ]] || probe_prompt="$BENCH_PROMPT_ALT"
     if ! run_case "qwen-image-2512:q4" 1024 1024 "$BENCH_STEPS" 4.0 \
@@ -707,11 +734,12 @@ check_gates() {
     detail="$(jq -s -r '
       [ .[] | select(.role == "matrix")
             | select(.model | test("lightning|flash"))
-            | select(.status == "ok") ] as $rows
+            | select(.status != "model_missing" and .status != "planned"
+                     and .status != "not_run") ] as $rows
       | if ($rows | length) == 0 then
           "no installed distilled model produced a successful run"
         else
-          ($rows | map(select(.total_s == null or .total_s > 25))
+          ($rows | map(select(.status != "ok" or .total_s == null or .total_s > 25))
                  | map("\(.model) total_s=\(.total_s)")
                  | join(", "))
         end' "$rows_file")"

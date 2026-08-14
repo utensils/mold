@@ -290,6 +290,11 @@ assert_eq "gate (a) fails on a slow distilled row" "$(run_gates "$slow_distilled
 grep -q 'FAIL (a).*qwen-image-lightning:fp8 total_s=31' "$tmp/gate-stderr" \
   || fail "gate (a) failure should name the model and its total_s"
 
+# (a) an installed distilled model that ERRORED is a failure, not a discard —
+# the gate promises every installed distilled model finishes in budget.
+failed_distilled="$(jq -c '.[0].status = "oom_or_error" | .[0].total_s = null' <<<"$passing_rows")"
+assert_eq "gate (a) fails on an errored distilled row" "$(run_gates "$failed_distilled")" "fail"
+
 # (a) is skipped, never failed, when its opt-in flag excluded the rows
 no_distilled="$(jq -c '[.[] | select(.model | test("lightning|flash") | not)]' <<<"$passing_rows")"
 skip_distilled=1
