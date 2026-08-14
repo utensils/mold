@@ -293,6 +293,8 @@ pub enum RuntimeSemanticVariable {
     Qwen2TextEncoderMode,
     Qwen2Variant,
     Qwen3Variant,
+    QwenFp8Cache,
+    QwenQMatMul,
     ReserveVramMb,
     T5Variant,
     VaeDtype,
@@ -634,6 +636,8 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_QWEN2_TEXT_ENCODER_MODE" => RuntimeSemanticVariable::Qwen2TextEncoderMode,
         "MOLD_QWEN2_VARIANT" => RuntimeSemanticVariable::Qwen2Variant,
         "MOLD_QWEN3_VARIANT" => RuntimeSemanticVariable::Qwen3Variant,
+        "MOLD_QWEN_FP8_CACHE" => RuntimeSemanticVariable::QwenFp8Cache,
+        "MOLD_QWEN_QMATMUL" => RuntimeSemanticVariable::QwenQMatMul,
         "MOLD_RESERVE_VRAM_MB" => RuntimeSemanticVariable::ReserveVramMb,
         "MOLD_T5_VARIANT" => RuntimeSemanticVariable::T5Variant,
         "MOLD_VAE_DTYPE" => RuntimeSemanticVariable::VaeDtype,
@@ -714,6 +718,15 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSe
         }
         Some(value) if variable == RuntimeSemanticVariable::LongPrompts => {
             CanonicalRuntimeValue::Boolean(value == "1")
+        }
+        // Both mirror the engine's own parsers exactly (`parse_qwen_qmatmul`
+        // and `parse_qwen_fp8_cache`), so the canonical value is the decision
+        // rather than the spelling.
+        Some(value) if variable == RuntimeSemanticVariable::QwenQMatMul => {
+            CanonicalRuntimeValue::Boolean(value.trim() != "0")
+        }
+        Some(value) if variable == RuntimeSemanticVariable::QwenFp8Cache => {
+            CanonicalRuntimeValue::Boolean(value.trim() == "1")
         }
         // Do not invent normalization for a runtime parser we have not made
         // authoritative here. Exact text is conservative: it can cause false

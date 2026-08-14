@@ -56,6 +56,14 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     "MOLD_QWEN2_TEXT_ENCODER_MODE",
     "MOLD_QWEN2_VARIANT",
     "MOLD_QWEN3_VARIANT",
+    // #1045: caching the widened BF16 FP8 weights trades VRAM for a per-forward
+    // cast, so residency and step latency both change — a cached run must not
+    // share a learned-timing bucket with one that widened every forward.
+    "MOLD_QWEN_FP8_CACHE",
+    // #1045 A/B switch: forcing the quantized Qwen linears back onto the
+    // dequantize-per-forward arm changes numerics (int8 MMQ vs a BF16 GEMM over
+    // dequantized weights), runtime, and transient VRAM.
+    "MOLD_QWEN_QMATMUL",
     "MOLD_RESERVE_VRAM_MB",
     "MOLD_T5_VARIANT",
     "MOLD_UMT5_VARIANT",
