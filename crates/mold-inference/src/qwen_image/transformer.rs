@@ -408,13 +408,18 @@ impl JointAttention {
 
     /// Joint attention forward pass.
     ///
+    /// `bias` is the optional `[B, 1, 1, txt + img]` additive key bias built
+    /// once per forward by [`super::attention::joint_key_bias`]; it is `None`
+    /// whenever the text stream carries no padding, which is every path except
+    /// batched CFG over two prompts of different length.
+    ///
     /// Returns (image_output, text_output).
     #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
         img_hidden: &Tensor,
         txt_hidden: &Tensor,
-        txt_mask: &Tensor,
+        bias: Option<&Tensor>,
         img_cos: &Tensor,
         img_sin: &Tensor,
         txt_cos: &Tensor,
@@ -468,17 +473,7 @@ impl JointAttention {
 
         // Scaled dot-product attention
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let img_mask = Tensor::ones((b, img_seq_len), DType::U8, q.device())?;
-        // Key mask order: [text, image] to match concatenation
-        let key_mask = Tensor::cat(&[txt_mask, &img_mask], 1)?
-            .unsqueeze(1)?
-            .unsqueeze(1)?;
-        let on_true = key_mask.zeros_like()?.to_dtype(q.dtype())?;
-        let on_false = Tensor::new(f32::NEG_INFINITY, q.device())?
-            .broadcast_as(key_mask.shape())?
-            .to_dtype(q.dtype())?;
-        let key_mask = key_mask.where_cond(&on_true, &on_false)?;
-        let attn = self.attention_dispatch(&q, &k, &v, scale, q.device(), Some(&key_mask))?;
+        let attn = super::attention::joint_attention(&q, &k, &v, scale, bias)?;
 
         // Reshape: (B, heads, total_seq, head_dim) -> (B, total_seq, inner_dim)
         let total_seq = img_seq_len + txt_seq_len;
@@ -488,13 +483,13 @@ impl JointAttention {
         let txt_attn = attn.narrow(1, 0, txt_seq_len)?;
         let img_attn = attn.narrow(1, txt_seq_len, img_seq_len)?;
 
-        // Output projections
+        // Output projections. Upstream `transformer_qwenimage.py:580` is a bare
+        // `attn.to_add_out(txt_attn_output)` — there is no mask multiply here,
+        // and there never was one in the quantized or offloaded engines. A pad
+        // row only ever feeds its own residual/MLP lane and is re-masked as a
+        // key in the next block, so the image stream never reads it.
         let img_out = img_attn.apply(&self.to_out)?;
-        let txt_out = txt_attn.apply(&self.add_out_proj)?.broadcast_mul(
-            &txt_mask
-                .unsqueeze(D::Minus1)?
-                .to_dtype(txt_hidden.dtype())?,
-        )?;
+        let txt_out = txt_attn.apply(&self.add_out_proj)?;
 
         Ok((img_out, txt_out))
     }
@@ -505,29 +500,6 @@ impl JointAttention {
         let flat = x.reshape((b * seq * heads, head_dim))?;
         let normed = norm.forward(&flat)?;
         normed.reshape((b, seq, heads, head_dim))
-    }
-
-    /// Attention dispatch: use platform-optimal implementation.
-    fn attention_dispatch(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        scale: f64,
-        device: &Device,
-        key_mask: Option<&Tensor>,
-    ) -> candle_core::Result<Tensor> {
-        if device.is_metal() {
-            candle_nn::ops::sdpa(q, k, v, None, false, scale as f32, 1.0)
-        } else {
-            // Basic attention for CUDA/CPU
-            let mut attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
-            if let Some(mask) = key_mask {
-                attn_weights = attn_weights.broadcast_add(mask)?;
-            }
-            attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
-            attn_weights.matmul(v)
-        }
     }
 }
 
@@ -633,7 +605,7 @@ impl QwenImageTransformerBlock {
         &self,
         img_hidden: &Tensor,
         txt_hidden: &Tensor,
-        txt_mask: &Tensor,
+        bias: Option<&Tensor>,
         temb: &Tensor,
         img_cos: &Tensor,
         img_sin: &Tensor,
@@ -712,7 +684,7 @@ impl QwenImageTransformerBlock {
         let (img_attn, txt_attn) = self.attn.forward(
             &img_attn_in,
             &txt_attn_in,
-            txt_mask,
+            bias,
             img_cos,
             img_sin,
             txt_cos,
@@ -722,7 +694,7 @@ impl QwenImageTransformerBlock {
 
         // Gate + residual (no tanh on gate). Upstream Qwen masking happens in
         // attention and the initial text-conditioning projection, so we do not
-        // reapply txt_mask after each residual block.
+        // reapply a text mask after each residual block.
         let img_hidden = (img_hidden + img_gate_msa.broadcast_mul(&img_attn)?)?;
         let txt_hidden = (txt_hidden + txt_gate_msa.broadcast_mul(&txt_attn)?)?;
 
@@ -907,6 +879,9 @@ impl QwenImageTransformer2DModel {
     /// * `x` - Latent tensor (B, C, H, W) where C=16
     /// * `t` - Timestep tensor (B,) — Qwen pre-scaled sigma values (`sigma * 1000`)
     /// * `encoder_hidden_states` - Text encoder output (B, text_len, 3584)
+    /// * `encoder_attention_mask` - `[B, text_len]` u8 mask, or `None` when the
+    ///   text conditioning carries no padding (the usual case; only batched CFG
+    ///   over two different prompt lengths needs one)
     ///
     /// # Returns
     /// Noise prediction tensor (B, C, H, W)
@@ -915,7 +890,7 @@ impl QwenImageTransformer2DModel {
         x: &Tensor,
         t: &Tensor,
         encoder_hidden_states: &Tensor,
-        encoder_attention_mask: &Tensor,
+        encoder_attention_mask: Option<&Tensor>,
     ) -> candle_core::Result<Tensor> {
         let device = x.device();
         let (_b, _c, h, w) = x.dims4()?;
@@ -950,14 +925,29 @@ impl QwenImageTransformer2DModel {
             self.rope_embedder
                 .forward(1, h_tokens, w_tokens, txt_seq_len, device)?;
 
-        // 5. Process through all transformer blocks
+        // 5. Process through all transformer blocks. The joint key bias is a
+        //    function of the mask and the image length, so it is built once
+        //    here rather than rebuilt inside all 60 blocks.
+        let key_bias = super::attention::joint_key_bias(
+            encoder_attention_mask,
+            hp * wp,
+            img_hidden.dtype(),
+            device,
+        )?;
+        let key_bias = super::attention::hoist_bias_for_device(
+            key_bias,
+            self.cfg.num_attention_heads,
+            txt_seq_len + hp * wp,
+            img_hidden.dtype(),
+            device,
+        )?;
         let mut img = img_hidden;
         let mut txt = txt_hidden;
         for block in &self.blocks {
             let (new_img, new_txt) = block.forward(
                 &img,
                 &txt,
-                encoder_attention_mask,
+                key_bias.as_ref(),
                 &temb,
                 &img_cos,
                 &img_sin,
@@ -987,7 +977,7 @@ impl QwenImageTransformer2DModel {
         packed_hidden_states: &Tensor,
         t: &Tensor,
         encoder_hidden_states: &Tensor,
-        encoder_attention_mask: &Tensor,
+        encoder_attention_mask: Option<&Tensor>,
         img_shapes: &[(usize, usize, usize)],
     ) -> candle_core::Result<Tensor> {
         let device = packed_hidden_states.device();
@@ -1013,11 +1003,24 @@ impl QwenImageTransformer2DModel {
             self.rope_embedder
                 .forward_shapes(img_shapes, txt_seq_len, device)?;
 
+        let key_bias = super::attention::joint_key_bias(
+            encoder_attention_mask,
+            img.dim(1)?,
+            img.dtype(),
+            device,
+        )?;
+        let key_bias = super::attention::hoist_bias_for_device(
+            key_bias,
+            self.cfg.num_attention_heads,
+            txt_seq_len + img.dim(1)?,
+            img.dtype(),
+            device,
+        )?;
         for block in &self.blocks {
             let (new_img, new_txt) = block.forward(
                 &img,
                 &txt,
-                encoder_attention_mask,
+                key_bias.as_ref(),
                 &temb,
                 &img_cos,
                 &img_sin,
@@ -1035,5 +1038,159 @@ impl QwenImageTransformer2DModel {
             temb
         };
         self.output_layer.forward(&img, &out_temb)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn tiny_cfg() -> QwenImageConfig {
+        QwenImageConfig {
+            num_attention_heads: 2,
+            attention_head_dim: 8,
+            inner_dim: 16,
+            joint_attention_dim: 16,
+            num_layers: 1,
+            in_channels: 64,
+            out_channels: 16,
+            patch_size: 2,
+            axes_dims_rope: vec![2, 3, 3],
+            norm_eps: 1e-6,
+            zero_cond_t: false,
+        }
+    }
+
+    /// Build a `JointAttention` from **random** tensors.
+    ///
+    /// Deliberately not a `VarMap` backend: `candle_nn::Init::default()` is
+    /// `Const(0.)`, so every weight would be zero and the padded/sliced
+    /// comparison below would pass vacuously.
+    fn random_joint_attention(cfg: &QwenImageConfig, device: &Device) -> JointAttention {
+        let dim = cfg.inner_dim;
+        let head_dim = cfg.attention_head_dim;
+        let mut tensors: HashMap<String, Tensor> = HashMap::new();
+        for name in [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0",
+            "add_q_proj",
+            "add_k_proj",
+            "add_v_proj",
+            "to_add_out",
+        ] {
+            tensors.insert(
+                format!("{name}.weight"),
+                Tensor::randn(0.0_f32, 0.5_f32, (dim, dim), device).unwrap(),
+            );
+        }
+        for name in ["norm_q", "norm_k", "norm_added_q", "norm_added_k"] {
+            tensors.insert(
+                format!("{name}.weight"),
+                Tensor::randn(1.0_f32, 0.1_f32, head_dim, device).unwrap(),
+            );
+        }
+        let vb = VarBuilder::from_tensors(tensors, DType::F32, device);
+        JointAttention::new(cfg, vb).unwrap()
+    }
+
+    fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
+        (a - b)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
+    }
+
+    /// The model-level statement of the invariant: running joint attention over
+    /// zero-padded text plus a key mask is the same as running it over the text
+    /// sliced to its true length — for the image stream exactly, and for the
+    /// text stream at every real token.
+    ///
+    /// This licenses the pipeline to stop padding, and it also pins that
+    /// dropping the old `add_out_proj · txt_mask` multiply is a no-op for real
+    /// tokens (upstream's `transformer_qwenimage.py:580` is a bare
+    /// `attn.to_add_out(...)`, and the quantized engine never had the multiply).
+    #[test]
+    fn joint_attention_padded_text_matches_sliced_text() {
+        let device = Device::Cpu;
+        let cfg = tiny_cfg();
+        let attn = random_joint_attention(&cfg, &device);
+
+        let img_seq_len = 5;
+        let txt_real = 3;
+        let txt_pad = 2;
+        let dim = cfg.inner_dim;
+        let half = cfg.attention_head_dim / 2;
+
+        let img_hidden = Tensor::randn(0.0_f32, 1.0_f32, (1, img_seq_len, dim), &device).unwrap();
+        let txt_real_hidden = Tensor::randn(0.0_f32, 1.0_f32, (1, txt_real, dim), &device).unwrap();
+        let txt_padded = Tensor::cat(
+            &[
+                &txt_real_hidden,
+                &Tensor::zeros((1, txt_pad, dim), DType::F32, &device).unwrap(),
+            ],
+            1,
+        )
+        .unwrap();
+
+        let img_cos = Tensor::randn(0.0_f32, 1.0_f32, (img_seq_len, half), &device).unwrap();
+        let img_sin = Tensor::randn(0.0_f32, 1.0_f32, (img_seq_len, half), &device).unwrap();
+        // Text RoPE is a prefix slice of one table, so the shorter stream sees
+        // exactly the values the longer one saw at those positions.
+        let txt_cos_full =
+            Tensor::randn(0.0_f32, 1.0_f32, (txt_real + txt_pad, half), &device).unwrap();
+        let txt_sin_full =
+            Tensor::randn(0.0_f32, 1.0_f32, (txt_real + txt_pad, half), &device).unwrap();
+        let txt_cos_sliced = txt_cos_full.narrow(0, 0, txt_real).unwrap();
+        let txt_sin_sliced = txt_sin_full.narrow(0, 0, txt_real).unwrap();
+
+        let mask =
+            Tensor::from_vec(vec![1u8, 1, 1, 0, 0], (1, txt_real + txt_pad), &device).unwrap();
+        let bias =
+            super::super::attention::joint_key_bias(Some(&mask), img_seq_len, DType::F32, &device)
+                .unwrap()
+                .expect("a padded mask must produce a bias");
+
+        let (padded_img, padded_txt) = attn
+            .forward(
+                &img_hidden,
+                &txt_padded,
+                Some(&bias),
+                &img_cos,
+                &img_sin,
+                &txt_cos_full,
+                &txt_sin_full,
+                img_seq_len,
+            )
+            .unwrap();
+        let (sliced_img, sliced_txt) = attn
+            .forward(
+                &img_hidden,
+                &txt_real_hidden,
+                None,
+                &img_cos,
+                &img_sin,
+                &txt_cos_sliced,
+                &txt_sin_sliced,
+                img_seq_len,
+            )
+            .unwrap();
+
+        assert!(
+            max_abs_diff(&padded_img, &sliced_img) < 1e-5,
+            "the image stream must not see the text padding at all"
+        );
+        assert!(
+            max_abs_diff(&padded_txt.narrow(1, 0, txt_real).unwrap(), &sliced_txt) < 1e-5,
+            "every real text token must be unchanged by the padding"
+        );
     }
 }
