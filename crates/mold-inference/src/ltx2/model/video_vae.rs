@@ -30,8 +30,7 @@ impl PerChannelRmsNorm {
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let dtype = x.dtype();
         let x_f32 = x.to_dtype(DType::F32)?;
-        let mean_sq =
-            crate::ltx2::metal_reduce::mean_keepdim_stable(&x_f32.sqr()?, self.channel_dim)?;
+        let mean_sq = crate::metal_reduce::mean_keepdim_stable(&x_f32.sqr()?, self.channel_dim)?;
         let rms = mean_sq.affine(1.0, self.eps)?.sqrt()?;
         x_f32.broadcast_div(&rms)?.to_dtype(dtype)
     }

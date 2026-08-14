@@ -409,7 +409,11 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
         aliases: &[],
         backends: BackendApplicability {
             cuda: BackendQualification::Supported,
-            metal: BackendQualification::Unsupported,
+            // Correctness path (#800): family-scoped BF16, folded VAE
+            // reductions, chunked math attention, fp8 refused by name.
+            // `Supported` waits on checkpoint-backed perf UAT, per the LTX-2
+            // precedent.
+            metal: BackendQualification::CorrectnessOnly,
             cpu: BackendQualification::CorrectnessOnly,
         },
         placement: ComponentPlacementCapability {

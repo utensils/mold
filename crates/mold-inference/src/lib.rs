@@ -26,6 +26,7 @@ pub mod latent_preview;
 pub mod loader;
 pub mod ltx2;
 pub mod ltx_video;
+pub(crate) mod metal_reduce;
 // The deterministic scheduler contract lands ahead of the license-gated H3
 // engine. Keeping these primitives crate-private avoids advertising a runnable
 // family while leaving exact math and conditioner lifecycle ready for the

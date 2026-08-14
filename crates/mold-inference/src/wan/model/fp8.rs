@@ -149,12 +149,25 @@ pub(crate) struct ScaledFp8Checkpoint {
 
 impl ScaledFp8Checkpoint {
     /// Refuse an fp8-scaled checkpoint this loader cannot honour.
-    pub fn ensure_supported(&self, path: &Path) -> Result<()> {
+    pub fn ensure_supported(&self, path: &Path, device: &candle_core::Device) -> Result<()> {
         if self.marker.flavour == Fp8Flavour::E5M2 {
             bail!(
                 "{}{} is fp8-e5m2-scaled and mold reads the e4m3 flavour only — every \
                  repository that publishes an e5m2 Wan DiT publishes the matching \
                  `_fp8_e4m3fn_scaled_` file beside it",
+                path.display(),
+                self.model_type_suffix()
+            );
+        }
+        // candle's Metal backend has no F8E4M3 cast kernel, so the per-forward
+        // widening in `load_linear` would fail with a raw
+        // "Metal contiguous to_dtype F8E4M3 F32 not implemented" from inside a
+        // linear, naming neither the checkpoint nor the fix. Refuse by name.
+        if device.is_metal() {
+            bail!(
+                "{}{} is fp8-scaled, which mold does not run on Metal — candle has no \
+                 Metal fp8 widening kernel. Use the bf16 or GGUF tier of this model \
+                 instead.",
                 path.display(),
                 self.model_type_suffix()
             );
@@ -449,7 +462,10 @@ mod tests {
             model_type: Some("Wan2_2-I2V-A14B-high".to_string()),
         };
         let err = checkpoint
-            .ensure_supported(Path::new("/models/HIGH_fp8_e5m2_scaled_KJ.safetensors"))
+            .ensure_supported(
+                Path::new("/models/HIGH_fp8_e5m2_scaled_KJ.safetensors"),
+                &candle_core::Device::Cpu,
+            )
             .unwrap_err()
             .to_string();
         assert!(err.contains("e5m2"), "{err}");
@@ -463,8 +479,30 @@ mod tests {
             model_type: None,
         };
         assert!(supported
-            .ensure_supported(Path::new("ok.safetensors"))
+            .ensure_supported(Path::new("ok.safetensors"), &candle_core::Device::Cpu)
             .is_ok());
+    }
+
+    /// candle has no Metal fp8 widening kernel, so even a supported e4m3
+    /// checkpoint must be refused by name on a Metal device.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn an_fp8_checkpoint_is_refused_on_metal_by_name() {
+        let metal = candle_core::Device::new_metal(0).unwrap();
+        let checkpoint = ScaledFp8Checkpoint {
+            marker: ScaledFp8Marker::parse("F8_E4M3", 2).unwrap(),
+            model_type: Some("Wan2_2-I2V-A14B-high".to_string()),
+        };
+        let err = checkpoint
+            .ensure_supported(
+                Path::new("/models/HIGH_fp8_e4m3fn_scaled_KJ.safetensors"),
+                &metal,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Metal"), "{err}");
+        assert!(err.contains("HIGH_fp8_e4m3fn_scaled_KJ"), "{err}");
+        assert!(err.contains("bf16 or GGUF"), "{err}");
     }
 
     /// Build a one-module fp8 fixture and load it through [`load_linear`].

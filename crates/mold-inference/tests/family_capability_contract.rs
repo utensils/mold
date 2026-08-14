@@ -76,6 +76,17 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
     assert!(ltx2.workflows.generated_audio);
     assert!(ltx2.workflows.chain);
 
+    let wan = capabilities
+        .iter()
+        .find(|capability| capability.family == "wan")
+        .unwrap();
+    assert_eq!(wan.backends.cuda, BackendQualification::Supported);
+    assert_eq!(wan.backends.cpu, BackendQualification::CorrectnessOnly);
+    // The Metal correctness path (#800): promoted from `Unsupported` with the
+    // folded VAE reductions, Metal-chunked math attention, family-scoped BF16,
+    // and the named fp8 refusal. `Supported` waits on perf UAT.
+    assert_eq!(wan.backends.metal, BackendQualification::CorrectnessOnly);
+
     let qwen_edit = capabilities
         .iter()
         .find(|capability| capability.family == "qwen-image-edit")

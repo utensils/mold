@@ -526,7 +526,12 @@ impl WanRmsNorm {
         let dtype = x.dtype();
         let x32 = x.to_dtype(DType::F32)?;
         // 1e-24 under the sqrt is F.normalize's 1e-12 floor on the norm.
-        let norm = x32.sqr()?.sum_keepdim(1)?.affine(1.0, 1e-24)?.sqrt()?;
+        // Rank-5 `[b, c, t, h, w]` reduced over the channel axis: candle's
+        // Metal reduction is wrong there, and the undersized sum-of-squares
+        // reaches `sqrt` negative, NaN-ing every pixel. See `metal_reduce`.
+        let norm = crate::metal_reduce::sum_keepdim_stable(&x32.sqr()?, 1)?
+            .affine(1.0, 1e-24)?
+            .sqrt()?;
         let mut shape = vec![1usize; x.rank()];
         shape[1] = self.gamma.dim(0)?;
         let gamma = self.gamma.to_dtype(DType::F32)?.reshape(shape)?;
@@ -864,12 +869,15 @@ impl AvgDown3d {
         let (b, c, t, h, w) = x.dims5()?;
         let (ft, fs) = (self.factor_t, self.factor_s);
         let (tn, hn, wn) = (t / ft, h / fs, w / fs);
-        x.reshape(&[b, c, tn, ft, hn, fs, wn, fs])?
+        let grouped = x
+            .reshape(&[b, c, tn, ft, hn, fs, wn, fs])?
             .permute(vec![0, 1, 3, 5, 7, 2, 4, 6])?
             .contiguous()?
             .reshape(&[b, c * ft * fs * fs, tn, hn, wn])?
-            .reshape(&[b, self.out_channels, self.group_size, tn, hn, wn])?
-            .mean(2)
+            .reshape(&[b, self.out_channels, self.group_size, tn, hn, wn])?;
+        // Rank-6 reduced over dim 2 hits the same Metal defect as the norm
+        // above; the fold keeps the group mean correct there.
+        crate::metal_reduce::mean_stable(&grouped, 2)
     }
 }
 
