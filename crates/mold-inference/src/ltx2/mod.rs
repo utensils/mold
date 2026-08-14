@@ -5,6 +5,7 @@ mod conditioning;
 pub(crate) mod convrot;
 mod execution;
 pub(crate) mod exr;
+pub(crate) mod fp8_widen;
 mod guidance;
 mod hdr;
 mod lora;
