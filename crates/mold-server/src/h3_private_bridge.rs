@@ -1552,6 +1552,18 @@ mod tests {
 
     #[test]
     fn redacted_preview_endpoints_are_substituted_only_when_present_and_empty() {
+        fn request(model: &str) -> mold_core::GenerateRequest {
+            serde_json::from_value(serde_json::json!({
+                "prompt": "probe",
+                "model": model,
+                "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+                "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+                "steps": mold_core::minimax_h3::DEFAULT_STEPS,
+                "batch_size": 1,
+                "output_format": "mp4"
+            }))
+            .expect("test request must deserialize")
+        }
         let mut fl2va = request(mold_core::minimax_h3::FL2VA_COMFY);
         fl2va.source_image = Some(Vec::new());
         fl2va.keyframes = Some(vec![
