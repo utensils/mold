@@ -848,6 +848,40 @@ pub(crate) fn pin_private_preview_seed(
     Ok(())
 }
 
+/// Substitute redacted FL2VA endpoints in a placement probe.
+///
+/// Placement previews redact media, so a present endpoint arrives as zero
+/// bytes (`source_image: ""` on the wire). Admission decodes endpoints
+/// exactly as a real submission would, which refused every H3 preview with
+/// "endpoint is empty" even though the client validated the real image
+/// locally. The probe substitutes a solid placeholder at the request's own
+/// target geometry so the preview prices the same shape; the real submission
+/// still decodes the real bytes at admission. Only present-but-empty
+/// endpoints are touched — real bytes and absent fields pass through.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+pub(crate) fn substitute_redacted_preview_endpoints(request: &mut mold_core::GenerateRequest) {
+    if mold_core::minimax_h3::task_for_model(&request.model)
+        != Some(mold_core::minimax_h3::Task::Fl2va)
+    {
+        return;
+    }
+    let (width, height) = (request.width, request.height);
+    let mut placeholder: Option<Vec<u8>> = None;
+    let mut fill = |slot: &mut Vec<u8>| {
+        if slot.is_empty() {
+            *slot = placeholder
+                .get_or_insert_with(|| mold_inference::h3_placeholder_endpoint_png(width, height))
+                .clone();
+        }
+    };
+    if let Some(image) = request.source_image.as_mut() {
+        fill(image);
+    }
+    for keyframe in request.keyframes.iter_mut().flatten() {
+        fill(&mut keyframe.image);
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct H3PreparedAttemptFacts {
     pub(crate) device_id: String,
@@ -1515,6 +1549,42 @@ mod presentation_tests {
 mod tests {
     use std::fs::{self, OpenOptions};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn redacted_preview_endpoints_are_substituted_only_when_present_and_empty() {
+        let mut fl2va = request(mold_core::minimax_h3::FL2VA_COMFY);
+        fl2va.source_image = Some(Vec::new());
+        fl2va.keyframes = Some(vec![
+            mold_core::KeyframeCondition {
+                frame: 123,
+                image: Vec::new(),
+                name: None,
+            },
+            mold_core::KeyframeCondition {
+                frame: 0,
+                image: vec![1, 2, 3],
+                name: None,
+            },
+        ]);
+        super::substitute_redacted_preview_endpoints(&mut fl2va);
+        let substituted = fl2va.source_image.clone().unwrap();
+        assert!(!substituted.is_empty());
+        let keyframes = fl2va.keyframes.as_deref().unwrap();
+        assert_eq!(keyframes[0].image, substituted);
+        // Real bytes are never replaced.
+        assert_eq!(keyframes[1].image, vec![1, 2, 3]);
+
+        // Non-FL2VA requests pass through untouched.
+        let mut ref2va = request(mold_core::minimax_h3::REF2VA_COMFY);
+        ref2va.source_image = Some(Vec::new());
+        super::substitute_redacted_preview_endpoints(&mut ref2va);
+        assert_eq!(ref2va.source_image.as_deref(), Some(&[][..]));
+
+        // An absent endpoint stays absent — presence is contract-relevant.
+        let mut absent = request(mold_core::minimax_h3::FL2VA_COMFY);
+        super::substitute_redacted_preview_endpoints(&mut absent);
+        assert!(absent.source_image.is_none());
+    }
 
     #[test]
     fn staging_root_is_created_owner_only_when_missing_and_left_alone_when_present() {
