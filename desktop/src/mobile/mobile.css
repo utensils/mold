@@ -46,7 +46,7 @@ button {
   box-sizing: border-box;
   overflow: hidden;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   background: var(--bath);
   color: var(--rebate);
   padding-top: env(safe-area-inset-top);
@@ -2256,6 +2256,37 @@ button.mobile-generate-disclosure {
   min-height: 24px;
   margin: 4px 0 8px;
   color: var(--ink-3);
+}
+
+.mobile-create-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px max(16px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left));
+  border-top: 1px solid var(--edge);
+  background: color-mix(in srgb, var(--bench) 96%, transparent);
+  box-shadow: 0 -10px 24px color-mix(in srgb, #000 12%, transparent);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+}
+
+.mobile-create-action .mobile-estimate {
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  overflow: hidden;
+}
+
+.mobile-create-action .ms-action-blocker {
+  grid-column: 1 / -1;
+}
+
+.mobile-create-action .primary-button {
+  width: auto;
+  min-width: 128px;
+  min-height: 48px;
+  padding-inline: 18px;
 }
 
 .mobile-surface .mask-editor-backdrop {

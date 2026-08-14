@@ -17,10 +17,10 @@ describe("MobileApp prompt requirement", () => {
 
   it("uses that one gate for both the button and the pre-submit guard", () => {
     const occurrences = mobileAppSource.match(/promptMissing(\.value)?\b/g) ?? [];
-    // definition + the `:disabled` binding + the `generate()` guard
+    // definition + the shared Develop-disabled computation + the `generate()` guard
     expect(occurrences.length).toBeGreaterThanOrEqual(3);
     expect(mobileAppSource).toMatch(/promptMissing\.value \|\|\s*!selectedModelAvailable\.value/);
-    expect(mobileAppSource).toMatch(/promptMissing \|\|\s*!selectedModelAvailable/);
+    expect(mobileAppSource).toContain(':disabled="developDisabled"');
     // The bare check must not survive anywhere in the generation path; only
     // "Use as prompt" may still skip a print with no recorded prompt.
     expect(mobileAppSource).not.toContain("!form.prompt.trim() ||");

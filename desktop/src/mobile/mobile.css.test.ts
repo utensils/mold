@@ -58,6 +58,23 @@ describe("mobile scrolling", () => {
 });
 
 describe("mobile navigation", () => {
+  it("reserves a persistent row for the one-shot Develop action", () => {
+    const shell = css.match(/\.mobile-shell\s*\{([^}]*)\}/s);
+    const action = css.match(/\.mobile-create-action\s*\{([^}]*)\}/s);
+    const actionButton = css.match(/\.mobile-create-action \.primary-button\s*\{([^}]*)\}/s);
+
+    expect(shell?.[1]).toMatch(/grid-template-rows:\s*auto minmax\(0, 1fr\) auto auto\s*;/);
+    expect(action?.[1]).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\) auto\s*;/);
+    expect(action?.[1]).toContain("env(safe-area-inset-left)");
+    expect(action?.[1]).toContain("env(safe-area-inset-right)");
+    expect(css).toMatch(
+      /\.mobile-create-action \.ms-action-blocker\s*\{[^}]*grid-column:\s*1 \/ -1/s,
+    );
+    expect(Number(actionButton?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(
+      48,
+    );
+  });
+
   it("visually marks the tab exposed as the current page", () => {
     expect(css).toMatch(/\.mobile-tab\[aria-current="page"\]\s*\{/);
     expect(css).not.toMatch(/\.mobile-tab\[aria-selected="true"\]\s*\{/);

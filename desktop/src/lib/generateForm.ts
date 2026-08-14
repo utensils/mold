@@ -430,7 +430,13 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     // clear from here, so the deferred marker has served its purpose.
     form.negativeExplicitClear = false;
   }
-  const recipe = effectiveGenerationRecipe(m, null);
+  const recipe = effectiveGenerationRecipe(m, form.pipeline);
+  // A row refresh can resolve a persisted/template form against a newer
+  // authoritative recipe. Fixed controls are not user choices: normalize the
+  // hidden form value to the same value the disabled control displays, or the
+  // validator can strand Generate behind an error the user cannot correct.
+  if (recipe?.steps.mode === "fixed") form.steps = recipe.steps.default;
+  if (recipe?.guidance.mode === "fixed") form.guidance = recipe.guidance.default;
   const caps = generationCapabilitiesForFamily(
     m.family,
     m.name,

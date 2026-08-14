@@ -84,6 +84,7 @@ import type { ChainJobDetail, ChainLimits } from "@studio/lib/api/chainTypes";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import LiveActivityList from "@ui/components/LiveActivityList.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
+import ActionBlocker from "@ui/components/ActionBlocker.vue";
 import { upscaleImage } from "../lib/api/upscale";
 import {
   generationCapabilitiesForFamily,
@@ -1089,6 +1090,28 @@ const mobileMediaBudgetError = computed(() => mobileMediaBudgetValidationError(f
 // host would accept. The placeholder carries the same news.
 const promptMissing = computed(() => promptRequired(form) && !form.prompt.trim());
 const promptFieldPlaceholder = computed(() => promptPlaceholder(form, "Describe the print…"));
+const developBlockerReason = computed<string | null>(() => {
+  // An empty prompt is self-evident beside the composer and does not warrant
+  // a persistent banner. Everything outside the visible composer names the
+  // exact correction beside the pinned action.
+  if (!selectedModelAvailable.value) return "Choose an installed model before generating.";
+  if (quickExpansionSnapshot.value && quickStaleReasons.value.length > 0) {
+    return "The prepared rewrite no longer matches these settings. Use a recovery action above.";
+  }
+  if (!seedValid.value) return "Enter a valid whole-number seed, or choose Random.";
+  if (!resolutionValid.value) return "Choose a supported size for this model.";
+  if (stepsError.value) return stepsError.value;
+  if (guidanceError.value) return guidanceError.value;
+  if (mobileMediaBudgetError.value) return mobileMediaBudgetError.value;
+  if (sourceConditioningError.value) return sourceConditioningError.value;
+  if (h3AuthoringError.value) return h3AuthoringError.value;
+  if (!sourceControlsValid.value) return "Open Advanced and correct the source image settings.";
+  if (!parameterValid.value) return "Open Advanced and correct the highlighted settings.";
+  return null;
+});
+const developDisabled = computed(
+  () => promptMissing.value || developBlockerReason.value !== null || preparingGeneration.value,
+);
 const estimateRequest = computed(() => {
   if (!form.model) return null;
   return buildGenerationEstimateRequest(buildRequest(form), form.family);
@@ -4970,31 +4993,6 @@ onBeforeUnmount(() => {
               @load="loadTemplate"
             />
 
-            <div class="mobile-estimate">
-              <EstimateBadge :request="estimateRequest" :target="selectedTarget" />
-            </div>
-            <button
-              v-if="!preparedBatch"
-              class="primary-button"
-              type="button"
-              :disabled="
-                promptMissing ||
-                !selectedModelAvailable ||
-                !seedValid ||
-                !parameterValid ||
-                !sourceControlsValid ||
-                !resolutionValid ||
-                !basicParametersValid ||
-                !!mobileMediaBudgetError ||
-                !!sourceConditioningError ||
-                !!h3AuthoringError ||
-                preparingGeneration
-              "
-              data-test="mobile-develop-button"
-              @click="generate"
-            >
-              {{ developButtonLabel }}
-            </button>
             <!-- Live develop bed: once the host streams latent previews the
                active print literally forms here — the preview's blur tightens
                with denoise progress while the Develop grain thins over it.
@@ -5496,6 +5494,31 @@ onBeforeUnmount(() => {
         />
       </KeepAlive>
     </section>
+
+    <div
+      v-if="!settingsOpen && tab === 'generate' && selectedHost && !isSequence && !preparedBatch"
+      class="mobile-create-action"
+      data-test="mobile-create-action"
+    >
+      <ActionBlocker
+        v-if="developBlockerReason"
+        :reason="developBlockerReason"
+        compact
+        data-test="mobile-develop-blocker"
+      />
+      <div class="mobile-estimate">
+        <EstimateBadge :request="estimateRequest" :target="selectedTarget" />
+      </div>
+      <button
+        class="primary-button"
+        type="button"
+        :disabled="developDisabled"
+        data-test="mobile-develop-button"
+        @click="generate"
+      >
+        {{ developButtonLabel }}
+      </button>
+    </div>
 
     <MobileGalleryViewer
       v-if="selectedPrint"
