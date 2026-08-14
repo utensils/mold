@@ -81,21 +81,24 @@ describe("MinimaxH3AuthoringPanel", () => {
     expect(wrapper.find("[data-test='h3-last-file']").exists()).toBe(false);
   });
 
-  it("delegates the opening frame to a surface's upload and gallery picker", async () => {
+  it("offers drop, direct pick, and the surface gallery picker for both endpoints", async () => {
     const wrapper = mount(MinimaxH3AuthoringPanel, {
       props: {
         modelValue: emptyMinimaxH3AuthoringState(),
         task: "fl2va",
-        requiredEndpoint: "first",
       },
     });
 
-    expect(wrapper.find("[data-test='h3-first-file']").exists()).toBe(false);
-    await wrapper.get("[data-test='h3-first-picker']").trigger("click");
+    expect(wrapper.find("[data-test='h3-first-well']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='h3-first-file']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='h3-last-well']").exists()).toBe(true);
+    await wrapper.get("[data-test='h3-first-gallery']").trigger("click");
     expect(wrapper.emitted("request-first-frame")).toHaveLength(1);
+    await wrapper.get("[data-test='h3-last-gallery']").trigger("click");
+    expect(wrapper.emitted("request-last-frame")).toHaveLength(1);
   });
 
-  it("keeps an incompatible restored last frame removable", () => {
+  it("keeps an incompatible restored last frame removable", async () => {
     const restored = emptyMinimaxH3AuthoringState();
     restored.lastFrame = {
       filename: "old-last.png",
@@ -112,15 +115,17 @@ describe("MinimaxH3AuthoringPanel", () => {
       },
     });
 
-    expect(wrapper.find("[data-test='h3-last-file']").exists()).toBe(true);
-    expect(
-      wrapper.get("[data-test='h3-last-file']").attributes("disabled"),
-    ).toBe("");
     expect(wrapper.get("[data-test='h3-mode']").text()).toBe(
       "first-frame-required",
     );
     expect(wrapper.text()).toContain("incompatible; remove");
-    expect(wrapper.get("[data-test='h3-last-remove']").text()).toBe("Remove");
+    const remove = wrapper.get("[data-test='h3-last-remove']");
+    expect(remove.attributes("disabled")).toBeUndefined();
+    await remove.trigger("click");
+    const emitted = wrapper.emitted(
+      "update:modelValue",
+    )?.[0]?.[0] as MinimaxH3AuthoringState;
+    expect(emitted.lastFrame).toBeNull();
   });
 
   it("never presents a restored first-plus-last pair as supported", () => {

@@ -129,6 +129,7 @@ const emit = defineEmits<{
   close: [];
   "open-picker": [];
   "open-h3-first-frame-picker": [];
+  "open-h3-last-frame-picker": [];
   "clear-source": [];
   /** Wan first/last-frame conditioning (#779). The closing still gets its own
    * picker so it can never overwrite the opening one. */
@@ -817,6 +818,7 @@ function setSequenceCameraMode(mode: string) {
             :required-endpoint="caps.requiresSourceImage ? 'first' : null"
             @update:model-value="setH3Authoring"
             @request-first-frame="emit('open-h3-first-frame-picker')"
+            @request-last-frame="emit('open-h3-last-frame-picker')"
           />
         </AccordionSection>
 

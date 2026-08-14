@@ -258,11 +258,15 @@ export function appendMinimaxH3GalleryImageReference(
   };
 }
 
-/** Use one gallery print as the FL2VA opening boundary. Kept beside the
+/** The two FL2VA boundary slots share one setter contract. */
+export type MinimaxH3BoundaryEndpoint = "firstFrame" | "lastFrame";
+
+/** Use one gallery print as an FL2VA boundary. Kept beside the
  * ordered-reference helper so every Library surface validates identical image
  * facts before writing dedicated H3 authoring state. */
-export function setMinimaxH3GalleryImageFirstFrame(
+export function setMinimaxH3GalleryImageBoundary(
   state: MinimaxH3AuthoringState | null | undefined,
+  endpoint: MinimaxH3BoundaryEndpoint,
   image: MinimaxH3GalleryImageSource,
 ): MinimaxH3GalleryImageResult {
   const invalid = validateGalleryImageSource(image);
@@ -272,7 +276,7 @@ export function setMinimaxH3GalleryImageFirstFrame(
     ok: true,
     state: {
       ...current,
-      firstFrame: {
+      [endpoint]: {
         filename: image.filename.trim(),
         mimeType: image.mimeType.split(";", 1)[0]!.trim().toLowerCase(),
         width: image.width,
@@ -285,11 +289,19 @@ export function setMinimaxH3GalleryImageFirstFrame(
   };
 }
 
+export function setMinimaxH3GalleryImageFirstFrame(
+  state: MinimaxH3AuthoringState | null | undefined,
+  image: MinimaxH3GalleryImageSource,
+): MinimaxH3GalleryImageResult {
+  return setMinimaxH3GalleryImageBoundary(state, "firstFrame", image);
+}
+
 /** Normalize an image from any existing surface picker into the one FL2VA
  * boundary contract. This replaces three H3-only file readers without making
  * the shared authoring state depend on a desktop, web, or native picker type. */
-export function setMinimaxH3PickedImageFirstFrame(
+export function setMinimaxH3PickedImageBoundary(
   state: MinimaxH3AuthoringState | null | undefined,
+  endpoint: MinimaxH3BoundaryEndpoint,
   image: MinimaxH3PickedImageSource,
 ): MinimaxH3GalleryImageResult {
   const decoded = imageDimensionsFromBase64(image.base64);
@@ -301,13 +313,20 @@ export function setMinimaxH3PickedImageFirstFrame(
     (extension.endsWith(".jpg") || extension.endsWith(".jpeg")
       ? "image/jpeg"
       : "image/png");
-  return setMinimaxH3GalleryImageFirstFrame(state, {
+  return setMinimaxH3GalleryImageBoundary(state, endpoint, {
     filename: image.filename,
     mimeType,
     width,
     height,
     data: image.base64,
   });
+}
+
+export function setMinimaxH3PickedImageFirstFrame(
+  state: MinimaxH3AuthoringState | null | undefined,
+  image: MinimaxH3PickedImageSource,
+): MinimaxH3GalleryImageResult {
+  return setMinimaxH3PickedImageBoundary(state, "firstFrame", image);
 }
 
 export function cloneMinimaxH3AuthoringState(

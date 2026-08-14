@@ -97,8 +97,9 @@ import {
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
-  setMinimaxH3PickedImageFirstFrame,
+  setMinimaxH3PickedImageBoundary,
   type MinimaxH3AuthoringState,
+  type MinimaxH3BoundaryEndpoint,
 } from "@studio/lib/minimaxH3Authoring";
 
 const props = withDefaults(
@@ -148,17 +149,19 @@ const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3Autho
 function setH3Authoring(value: MinimaxH3AuthoringState): void {
   props.form.h3Authoring = value;
 }
-const h3FirstFramePickerOpen = ref(false);
-const h3FirstFramePickerError = ref<string | null>(null);
-function onH3FirstFramePicked(images: PickedImage[]): void {
+// One picker serves both FL2VA boundaries; the target names the slot.
+const h3BoundaryPickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
+const h3BoundaryPickerError = ref<string | null>(null);
+function onH3BoundaryPicked(images: PickedImage[]): void {
+  const endpoint = h3BoundaryPickerTarget.value;
   const image = images[0];
-  if (!image) return;
-  const result = setMinimaxH3PickedImageFirstFrame(props.form.h3Authoring, image);
+  if (!endpoint || !image) return;
+  const result = setMinimaxH3PickedImageBoundary(props.form.h3Authoring, endpoint, image);
   if (!result.ok) {
-    h3FirstFramePickerError.value = result.error;
+    h3BoundaryPickerError.value = result.error;
     return;
   }
-  h3FirstFramePickerError.value = null;
+  h3BoundaryPickerError.value = null;
   props.form.h3Authoring = result.state;
 }
 
@@ -678,17 +681,18 @@ function reset() {
           :task="h3Task"
           :required-endpoint="caps.requiresSourceImage ? 'first' : null"
           @update:model-value="setH3Authoring"
-          @request-first-frame="h3FirstFramePickerOpen = true"
+          @request-first-frame="h3BoundaryPickerTarget = 'firstFrame'"
+          @request-last-frame="h3BoundaryPickerTarget = 'lastFrame'"
         />
-        <p v-if="h3FirstFramePickerError" class="ms-hint text-stop" role="alert">
-          {{ h3FirstFramePickerError }}
+        <p v-if="h3BoundaryPickerError" class="ms-hint text-stop" role="alert">
+          {{ h3BoundaryPickerError }}
         </p>
         <ImagePickerModal
-          :open="h3FirstFramePickerOpen"
-          title="First frame"
+          :open="h3BoundaryPickerTarget !== null"
+          :title="h3BoundaryPickerTarget === 'lastFrame' ? 'Last frame' : 'First frame'"
           :multiple="false"
-          @pick="onH3FirstFramePicked"
-          @close="h3FirstFramePickerOpen = false"
+          @pick="onH3BoundaryPicked"
+          @close="h3BoundaryPickerTarget = null"
         />
       </AccordionSection>
 

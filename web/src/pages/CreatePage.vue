@@ -185,7 +185,8 @@ import {
   isMinimaxH3Identity,
   minimaxH3AuthoringError,
   minimaxH3TaskForModel,
-  setMinimaxH3PickedImageFirstFrame,
+  setMinimaxH3PickedImageBoundary,
+  type MinimaxH3BoundaryEndpoint,
 } from "@studio/lib/minimaxH3Authoring";
 import {
   firstLastFrameRestoreNotice,
@@ -239,7 +240,8 @@ const showRemix = ref(false);
 const remixRoute = ref<HostRoute | null>(null);
 const remixTask = ref<ExpandTask>("text-to-image");
 const showPicker = ref(false);
-const showH3FirstFramePicker = ref(false);
+// One picker serves both FL2VA boundaries; the target names the slot.
+const h3BoundaryPickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
 /** Wan's closing still gets its own picker (#779) so attaching one can never
  * overwrite the opening frame the source well holds. */
 const showEndFramePicker = ref(false);
@@ -3160,11 +3162,13 @@ async function onPickSource(v: SourceImageState[]) {
   composerError.value = null;
 }
 
-function onPickH3FirstFrame(images: SourceImageState[]): void {
+function onPickH3Boundary(images: SourceImageState[]): void {
+  const endpoint = h3BoundaryPickerTarget.value;
   const image = images[0];
-  if (!image) return;
-  const result = setMinimaxH3PickedImageFirstFrame(
+  if (!endpoint || !image) return;
+  const result = setMinimaxH3PickedImageBoundary(
     form.state.value.h3Authoring,
+    endpoint,
     {
       filename: image.filename,
       base64: image.base64,
@@ -3987,7 +3991,8 @@ onBeforeUnmount(() => {
             currentFamily === 'ltx2' && currentModel?.supports_audio !== false
           "
           @open-picker="showPicker = true"
-          @open-h3-first-frame-picker="showH3FirstFramePicker = true"
+          @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
+          @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
           @clear-source="onClearSource"
           @open-end-frame-picker="showEndFramePicker = true"
           @clear-end-frame="onClearEndFrame"
@@ -4018,7 +4023,8 @@ onBeforeUnmount(() => {
         "
         @close="showAdvanced = false"
         @open-picker="showPicker = true"
-        @open-h3-first-frame-picker="showH3FirstFramePicker = true"
+        @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
+        @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
         @clear-source="onClearSource"
         @open-end-frame-picker="showEndFramePicker = true"
         @clear-end-frame="onClearEndFrame"
@@ -4076,11 +4082,11 @@ onBeforeUnmount(() => {
       @close="showPicker = false"
     />
     <ImagePickerModal
-      :open="showH3FirstFramePicker"
-      title="First frame"
+      :open="h3BoundaryPickerTarget !== null"
+      :title="h3BoundaryPickerTarget === 'lastFrame' ? 'Last frame' : 'First frame'"
       :multiple="false"
-      @pick="onPickH3FirstFrame"
-      @close="showH3FirstFramePicker = false"
+      @pick="onPickH3Boundary"
+      @close="h3BoundaryPickerTarget = null"
     />
     <ImagePickerModal
       :open="showEndFramePicker"

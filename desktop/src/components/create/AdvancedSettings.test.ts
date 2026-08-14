@@ -495,7 +495,7 @@ describe("AdvancedSettings — video (LTX-2)", () => {
       } as ModelEntry,
     });
 
-    await wrapper.get("[data-test='h3-first-picker']").trigger("click");
+    await wrapper.get("[data-test='h3-first-gallery']").trigger("click");
     const picker = wrapper
       .findAllComponents(ImagePickerModal)
       .find((candidate) => candidate.props("title") === "First frame");

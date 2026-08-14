@@ -4150,6 +4150,7 @@ describe("MobileApp wan source conditioning", () => {
 
     await wrapper.get("[data-test='mobile-open-advanced']").trigger("click");
     await flushPromises();
+    await wrapper.get("[data-test='h3-first-gallery']").trigger("click");
     await pickInto(
       "First frame",
       "opening.png",

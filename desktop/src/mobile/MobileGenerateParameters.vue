@@ -84,8 +84,9 @@ import {
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
-  setMinimaxH3PickedImageFirstFrame,
+  setMinimaxH3PickedImageBoundary,
   type MinimaxH3AuthoringState,
+  type MinimaxH3BoundaryEndpoint,
 } from "@studio/lib/minimaxH3Authoring";
 
 const props = withDefaults(
@@ -136,22 +137,28 @@ const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3Autho
 function setH3Authoring(value: MinimaxH3AuthoringState): void {
   props.form.h3Authoring = value;
 }
-const h3FirstFramePickerOpen = ref(false);
-const h3FirstFramePickerError = ref<string | null>(null);
-const h3FirstFramePickerMaxBytes = computed(() =>
+// One picker sheet serves both FL2VA boundaries; the target names the slot.
+const h3BoundaryPickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
+const h3BoundaryPickerError = ref<string | null>(null);
+const h3BoundaryPickerMaxBytes = computed(() =>
   Math.max(
     0,
     MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES -
-      inlineGenerationMediaBytes(props.form, "h3FirstFrame"),
+      inlineGenerationMediaBytes(
+        props.form,
+        h3BoundaryPickerTarget.value === "lastFrame" ? "h3LastFrame" : "h3FirstFrame",
+      ),
   ),
 );
-function onH3FirstFramePicked(image: MobilePickedImage): void {
-  const result = setMinimaxH3PickedImageFirstFrame(props.form.h3Authoring, image);
+function onH3BoundaryPicked(image: MobilePickedImage): void {
+  const endpoint = h3BoundaryPickerTarget.value;
+  if (!endpoint) return;
+  const result = setMinimaxH3PickedImageBoundary(props.form.h3Authoring, endpoint, image);
   if (!result.ok) {
-    h3FirstFramePickerError.value = result.error;
+    h3BoundaryPickerError.value = result.error;
     return;
   }
-  h3FirstFramePickerError.value = null;
+  h3BoundaryPickerError.value = null;
   props.form.h3Authoring = result.state;
 }
 const videoContract = computed(() => props.selectedModel ?? { family: props.form.family });
@@ -766,19 +773,20 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         :required-endpoint="caps.requiresSourceImage ? 'first' : null"
         touch-friendly
         @update:model-value="setH3Authoring"
-        @request-first-frame="h3FirstFramePickerOpen = true"
+        @request-first-frame="h3BoundaryPickerTarget = 'firstFrame'"
+        @request-last-frame="h3BoundaryPickerTarget = 'lastFrame'"
       />
-      <p v-if="h3FirstFramePickerError" class="mobile-generate-validation" role="alert">
-        {{ h3FirstFramePickerError }}
+      <p v-if="h3BoundaryPickerError" class="mobile-generate-validation" role="alert">
+        {{ h3BoundaryPickerError }}
       </p>
       <MobileImagePickerSheet
-        :open="h3FirstFramePickerOpen"
+        :open="h3BoundaryPickerTarget !== null"
         :target="target"
-        title="First frame"
-        :max-bytes="h3FirstFramePickerMaxBytes"
+        :title="h3BoundaryPickerTarget === 'lastFrame' ? 'Last frame' : 'First frame'"
+        :max-bytes="h3BoundaryPickerMaxBytes"
         oversize-message="Combined generation media must be 45 MiB or smaller on iPhone."
-        @pick="onH3FirstFramePicked"
-        @close="h3FirstFramePickerOpen = false"
+        @pick="onH3BoundaryPicked"
+        @close="h3BoundaryPickerTarget = null"
       />
     </fieldset>
 

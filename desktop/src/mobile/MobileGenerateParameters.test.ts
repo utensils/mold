@@ -88,8 +88,8 @@ describe("MobileGenerateParameters", () => {
       model,
     );
 
-    expect(wrapper.find("[data-test='h3-first-file']").exists()).toBe(false);
-    await wrapper.get("[data-test='h3-first-picker']").trigger("click");
+    expect(wrapper.find("[data-test='h3-first-well']").exists()).toBe(true);
+    await wrapper.get("[data-test='h3-first-gallery']").trigger("click");
     const picker = wrapper.getComponent(MobileImagePickerSheet);
     expect(picker.props("open")).toBe(true);
     picker.vm.$emit("pick", {

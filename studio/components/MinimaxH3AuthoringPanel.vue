@@ -23,6 +23,7 @@ import {
   probeMinimaxH3Mp4,
   probeMinimaxH3Wav,
 } from "../lib/minimaxH3MediaProbe";
+import ImageDropWell from "./ImageDropWell.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -42,6 +43,7 @@ const props = withDefaults(
 const emit = defineEmits<{
   "update:modelValue": [state: MinimaxH3AuthoringState];
   "request-first-frame": [];
+  "request-last-frame": [];
 }>();
 
 const error = ref("");
@@ -211,14 +213,10 @@ async function referenceDraft(file: File): Promise<MinimaxH3ReferenceDraft> {
   }
 }
 
-async function pickBoundary(
+async function attachBoundary(
   endpoint: "firstFrame" | "lastFrame",
-  event: Event,
+  file: File,
 ): Promise<void> {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  input.value = "";
-  if (!file) return;
   error.value = "";
   busy.value = true;
   try {
@@ -331,36 +329,30 @@ function durationLabel(
         <span class="h3-authoring__mode" data-test="h3-mode">{{ mode }}</span>
       </header>
       <div class="h3-authoring__endpoints">
-        <label class="h3-authoring__endpoint">
+        <div class="h3-authoring__endpoint">
           <span>First frame · frame 0</span>
           <small>{{
             modelValue.firstFrame?.filename ??
             (requiredEndpoint === "first" ? "Required" : "Optional")
           }}</small>
-          <button
-            type="button"
-            :disabled="disabled || busy"
-            data-test="h3-first-picker"
-            @click="emit('request-first-frame')"
-          >
-            {{
-              modelValue.firstFrame
-                ? "Replace first frame"
-                : "Choose first frame"
-            }}
-          </button>
-          <button
-            v-if="modelValue.firstFrame"
-            type="button"
+          <ImageDropWell
+            :image="modelValue.firstFrame?.data || null"
+            :mime-type="modelValue.firstFrame?.mimeType"
+            :filename="modelValue.firstFrame?.filename"
+            placeholder="Drop the opening frame or click to pick"
             :disabled="disabled"
-            aria-label="Remove first frame"
-            data-test="h3-first-remove"
-            @click="patch({ firstFrame: null })"
-          >
-            Remove
-          </button>
-        </label>
-        <label
+            :pick-disabled="busy"
+            :required="requiredEndpoint === 'first'"
+            gallery
+            alt="First frame"
+            :touch-friendly="touchFriendly"
+            test-id="h3-first"
+            @file="attachBoundary('firstFrame', $event)"
+            @gallery="emit('request-first-frame')"
+            @clear="patch({ firstFrame: null })"
+          />
+        </div>
+        <div
           v-if="requiredEndpoint !== 'first' || modelValue.lastFrame"
           class="h3-authoring__endpoint"
           :class="{
@@ -374,24 +366,22 @@ function durationLabel(
               ? `${modelValue.lastFrame?.filename ?? "Last frame"} · incompatible; remove`
               : (modelValue.lastFrame?.filename ?? "Optional")
           }}</small>
-          <input
-            type="file"
-            accept="image/*"
-            :disabled="disabled || busy || requiredEndpoint === 'first'"
-            data-test="h3-last-file"
-            @change="pickBoundary('lastFrame', $event)"
-          />
-          <button
-            v-if="modelValue.lastFrame"
-            type="button"
+          <ImageDropWell
+            :image="modelValue.lastFrame?.data || null"
+            :mime-type="modelValue.lastFrame?.mimeType"
+            :filename="modelValue.lastFrame?.filename"
+            placeholder="Drop the closing frame or click to pick"
             :disabled="disabled"
-            aria-label="Remove last frame"
-            data-test="h3-last-remove"
-            @click="patch({ lastFrame: null })"
-          >
-            Remove
-          </button>
-        </label>
+            :pick-disabled="busy || requiredEndpoint === 'first'"
+            gallery
+            alt="Last frame"
+            :touch-friendly="touchFriendly"
+            test-id="h3-last"
+            @file="attachBoundary('lastFrame', $event)"
+            @gallery="emit('request-last-frame')"
+            @clear="patch({ lastFrame: null })"
+          />
+        </div>
       </div>
     </template>
 
@@ -567,16 +557,20 @@ function durationLabel(
 .h3-authoring__add {
   display: grid;
   gap: 7px;
-  border: 1px dashed var(--edge, #bbb);
   border-radius: 10px;
   padding: 12px;
 }
-.h3-authoring__endpoint input,
+/* The well inside draws its own dashed drop target. */
+.h3-authoring__endpoint {
+  border: 1px solid var(--edge, #bbb);
+}
+.h3-authoring__add {
+  border: 1px dashed var(--edge, #bbb);
+}
 .h3-authoring__add input {
   max-width: 100%;
   font-size: 16px;
 }
-.h3-authoring__endpoint button,
 .h3-authoring__actions button,
 .h3-authoring__reattach {
   min-width: 44px;
