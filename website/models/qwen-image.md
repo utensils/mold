@@ -98,13 +98,13 @@ four-step trajectory — rather than base Qwen-Image's resolution-dependent
 schedule. The Distill-Full and Lightning merges are transformer-only exports
 with no scheduler of their own, so they keep the base contract.
 
-| Model                      | Steps | Guidance | Size    | Notes                                                     |
-| -------------------------- | ----- | -------- | ------- | --------------------------------------------------------- |
-| `qwen-image-flash:q8`      | 4     | 1.0      | 21.8 GB | NVIDIA DMD2 4-step distill of base Qwen-Image             |
-| `qwen-image-flash:q4`      | 4     | 1.0      | 11.7 GB | Same distill, the 24 GB-friendly tier                     |
-| `qwen-image-distill:q8`    | 15    | 1.0      | 21.8 GB | DiffSynth Distill-Full merge, closer to base fidelity     |
-| `qwen-image-distill:q4`    | 15    | 1.0      | 13.1 GB | Same merge, the 24 GB-friendly tier                       |
-| `qwen-image-edit-lightning:fp8` | 4 | 1.0  | 20.4 GB | Official lightx2v 4-step fused Lightning edit distill     |
+| Model                           | Steps | Guidance | Size    | Notes                                                 |
+| ------------------------------- | ----- | -------- | ------- | ----------------------------------------------------- |
+| `qwen-image-flash:q8`           | 4     | 1.0      | 21.8 GB | NVIDIA DMD2 4-step distill of base Qwen-Image         |
+| `qwen-image-flash:q4`           | 4     | 1.0      | 11.7 GB | Same distill, the 24 GB-friendly tier                 |
+| `qwen-image-distill:q8`         | 15    | 1.0      | 21.8 GB | DiffSynth Distill-Full merge, closer to base fidelity |
+| `qwen-image-distill:q4`         | 15    | 1.0      | 13.1 GB | Same merge, the 24 GB-friendly tier                   |
+| `qwen-image-edit-lightning:fp8` | 4     | 1.0      | 20.4 GB | Official lightx2v 4-step fused Lightning edit distill |
 
 `qwen-image-edit-lightning:fp8` is the official pre-merged Lightning edit
 distill: lightx2v fuses ModelTC's 4-step LoRA into the Edit-2511 transformer
