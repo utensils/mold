@@ -203,6 +203,48 @@ struct QwenTensorStats {
     total: usize,
 }
 
+/// The on-device half of a boundary check: four scalars, one transfer.
+///
+/// `min`/`max` are `±Inf` when the tensor holds an infinity, and NaN when it
+/// holds a NaN, so [`is_clean`](Self::is_clean) needs no separate ±Inf counts —
+/// the full breakdown is only ever wanted for the error message, and that path
+/// pays for the complete scan anyway.
+#[derive(Debug, Clone, Copy)]
+struct QwenFinitenessProbe {
+    nan_count: u64,
+    min: f32,
+    max: f32,
+    mean: f32,
+    total: usize,
+}
+
+impl QwenFinitenessProbe {
+    fn is_clean(&self) -> bool {
+        self.nan_count == 0 && self.min.is_finite() && self.max.is_finite() && self.mean.is_finite()
+    }
+
+    /// Promote a clean probe to the stats shape callers already consume. Only
+    /// valid for a clean probe: the ±Inf counts are asserted zero rather than
+    /// measured, which is exactly what `is_clean` established.
+    fn into_stats(self) -> QwenTensorStats {
+        QwenTensorStats {
+            min: self.min,
+            max: self.max,
+            mean: self.mean,
+            nan_count: 0,
+            pos_inf_count: 0,
+            neg_inf_count: 0,
+            total: self.total,
+        }
+    }
+}
+
+/// Counts full CPU-side stats downloads so a test can prove the clean boundary
+/// path never takes one. Test-only: the hot path must not pay for a counter.
+#[cfg(test)]
+static FULL_TENSOR_STATS_DOWNLOADS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Check if a Qwen-Image safetensors checkpoint stores weights in FP8 (F8_E4M3).
 /// Uses filename pattern first, then dtype probing as fallback.
 fn safetensors_is_fp8(path: &Path) -> bool {
@@ -1119,7 +1161,57 @@ impl QwenImageEngine {
         }
     }
 
+    /// Four scalars reduced on the tensor's own device.
+    ///
+    /// This is the cheap half of the boundary check: `[nan_count, min, max,
+    /// mean]` are computed with tensor ops that stay where the tensor lives
+    /// and are concatenated into one 4-element vector, so a clean boundary
+    /// costs one 16-byte transfer instead of a full `to_vec1` of the whole
+    /// tensor — which at the decoded-image boundary is 5.3M f32 elements, run
+    /// twice per image.
+    ///
+    /// `min`/`max` over a tensor containing NaN are backend-defined, which is
+    /// fine: `nan_count` is what decides, and a probe that trips hands over to
+    /// the full CPU-side stats for the message.
+    fn tensor_finiteness_probe(tensor: &Tensor) -> Result<QwenFinitenessProbe> {
+        let flat = tensor.to_dtype(DType::F32)?.flatten_all()?;
+        let total = flat.elem_count();
+        if total == 0 {
+            return Ok(QwenFinitenessProbe {
+                nan_count: 0,
+                min: f32::NAN,
+                max: f32::NAN,
+                mean: f32::NAN,
+                total,
+            });
+        }
+        // `x != x` is true exactly for NaN, so the sum counts them.
+        let nan = flat
+            .ne(&flat)?
+            .to_dtype(DType::F32)?
+            .sum_all()?
+            .reshape(1)?;
+        let min = flat.min(0)?.reshape(1)?;
+        let max = flat.max(0)?.reshape(1)?;
+        let mean = flat.mean_all()?.reshape(1)?;
+        let probe = Tensor::cat(&[&nan, &min, &max, &mean], 0)?.to_vec1::<f32>()?;
+        Ok(QwenFinitenessProbe {
+            nan_count: probe[0] as u64,
+            min: probe[1],
+            max: probe[2],
+            mean: probe[3],
+            total,
+        })
+    }
+
+    /// Full CPU-side stats: one complete GPU→CPU copy plus a scalar loop.
+    ///
+    /// Only reached when the cheap probe trips or `MOLD_QWEN_DEBUG` is set —
+    /// the boundary validator's common path is
+    /// [`tensor_finiteness_probe`].
     fn tensor_stats(tensor: &Tensor) -> Result<QwenTensorStats> {
+        #[cfg(test)]
+        FULL_TENSOR_STATS_DOWNLOADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let t = tensor.to_dtype(DType::F32)?;
         let values = t.flatten_all()?.to_vec1::<f32>()?;
         let mut min = f32::INFINITY;
@@ -1191,7 +1283,29 @@ impl QwenImageEngine {
         stats.max <= 0.02 * scale && stats.mean <= 0.01 * scale
     }
 
+    /// Whether a boundary has to fall back to the full CPU-side stats.
+    ///
+    /// Two reasons, and only two: the operator asked for the numbers, or the
+    /// cheap probe found something non-finite and the error message needs the
+    /// NaN/±Inf breakdown that only the full scan produces.
+    fn boundary_needs_full_stats(probe: QwenFinitenessProbe, debug: bool) -> bool {
+        debug || !probe.is_clean()
+    }
+
+    /// Fail loudly on a non-finite boundary tensor — this is what caught the
+    /// MMQ kernel defect in #1045 — without paying for a full GPU→CPU copy
+    /// when nothing is wrong.
+    ///
+    /// The common path is four scalars reduced on-device
+    /// ([`tensor_finiteness_probe`]). The full download happens only when that
+    /// probe trips, or when `MOLD_QWEN_DEBUG` asks for the numbers, so a clean
+    /// render transfers 16 bytes per boundary instead of the whole tensor.
     fn validate_qwen_tensor_boundary(name: &str, tensor: &Tensor) -> Result<QwenTensorStats> {
+        let probe = Self::tensor_finiteness_probe(tensor)?;
+        if !Self::boundary_needs_full_stats(probe, std::env::var_os("MOLD_QWEN_DEBUG").is_some()) {
+            return Ok(probe.into_stats());
+        }
+
         let stats = Self::tensor_stats(tensor)?;
         if stats.nan_count > 0
             || stats.pos_inf_count > 0
@@ -4919,6 +5033,9 @@ mod tests {
 
     #[test]
     fn qwen_debug_stats_counts_nan_and_inf() {
+        let _guard = FULL_STATS_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tensor = Tensor::from_vec(
             vec![0.0f32, 1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY],
             Shape::from((5,)),
@@ -4935,6 +5052,125 @@ mod tests {
         assert_eq!(stats.min, 0.0);
         assert_eq!(stats.max, 1.0);
         assert_eq!(stats.mean, 0.5);
+    }
+
+    /// The two tests below read a process-global counter, so they must not
+    /// interleave with each other or with anything else that calls
+    /// `tensor_stats`.
+    static FULL_STATS_COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn full_stats_downloads() -> usize {
+        FULL_TENSOR_STATS_DOWNLOADS.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[test]
+    fn qwen_boundary_probe_reports_the_same_numbers_as_the_full_scan() {
+        let _guard = FULL_STATS_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tensor = Tensor::from_vec(
+            vec![-1.0f32, 0.0, 1.0, 2.0],
+            Shape::from((4,)),
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let probe = QwenImageEngine::tensor_finiteness_probe(&tensor).unwrap();
+        let stats = QwenImageEngine::tensor_stats(&tensor).unwrap();
+
+        assert!(probe.is_clean());
+        assert_eq!(probe.total, stats.total);
+        assert_eq!(probe.min, stats.min);
+        assert_eq!(probe.max, stats.max);
+        assert_eq!(probe.mean, stats.mean);
+        assert_eq!(probe.nan_count, stats.nan_count);
+    }
+
+    #[test]
+    fn qwen_boundary_probe_sees_nan_and_infinities() {
+        let device = Device::Cpu;
+        let nan = Tensor::from_vec(vec![0.0f32, f32::NAN], Shape::from((2,)), &device).unwrap();
+        let pos_inf =
+            Tensor::from_vec(vec![0.0f32, f32::INFINITY], Shape::from((2,)), &device).unwrap();
+        let neg_inf =
+            Tensor::from_vec(vec![0.0f32, f32::NEG_INFINITY], Shape::from((2,)), &device).unwrap();
+
+        let nan_probe = QwenImageEngine::tensor_finiteness_probe(&nan).unwrap();
+        assert_eq!(nan_probe.nan_count, 1);
+        assert!(!nan_probe.is_clean());
+        assert!(!QwenImageEngine::tensor_finiteness_probe(&pos_inf)
+            .unwrap()
+            .is_clean());
+        assert!(!QwenImageEngine::tensor_finiteness_probe(&neg_inf)
+            .unwrap()
+            .is_clean());
+    }
+
+    #[test]
+    fn qwen_boundary_needs_the_full_scan_only_when_asked_or_tripped() {
+        let clean = QwenFinitenessProbe {
+            nan_count: 0,
+            min: -1.0,
+            max: 1.0,
+            mean: 0.0,
+            total: 4,
+        };
+        let tripped = QwenFinitenessProbe {
+            nan_count: 3,
+            ..clean
+        };
+
+        assert!(!QwenImageEngine::boundary_needs_full_stats(clean, false));
+        assert!(QwenImageEngine::boundary_needs_full_stats(clean, true));
+        assert!(QwenImageEngine::boundary_needs_full_stats(tripped, false));
+    }
+
+    /// The clean boundary must never take the full CPU-side scan. Asserted on
+    /// the download counter rather than on timing.
+    #[test]
+    fn qwen_clean_boundary_never_downloads_the_whole_tensor() {
+        let _guard = FULL_STATS_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tensor =
+            Tensor::from_vec(vec![0.1f32, 0.2, 0.3, 0.4], Shape::from((4,)), &Device::Cpu).unwrap();
+
+        let before = full_stats_downloads();
+        let stats = QwenImageEngine::validate_qwen_tensor_boundary("clean", &tensor).unwrap();
+
+        assert_eq!(
+            full_stats_downloads(),
+            before,
+            "a finite boundary must be settled by the on-device probe alone"
+        );
+        assert_eq!(stats.total, 4);
+        assert_eq!(stats.nan_count, 0);
+        assert_eq!(stats.min, 0.1);
+    }
+
+    /// The fail-loud half is unchanged: an injected NaN still aborts, and the
+    /// message still carries the full breakdown, which costs the scan.
+    #[test]
+    fn qwen_injected_nan_boundary_still_errors_with_the_full_breakdown() {
+        let _guard = FULL_STATS_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tensor = Tensor::from_vec(
+            vec![0.0f32, f32::NAN, 1.0, f32::INFINITY],
+            Shape::from((4,)),
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let before = full_stats_downloads();
+        let err = QwenImageEngine::validate_qwen_tensor_boundary("noise_pred[0]", &tensor)
+            .expect_err("a NaN boundary must abort the render");
+
+        assert!(full_stats_downloads() > before);
+        let message = err.to_string();
+        assert!(message.contains("noise_pred[0]"), "{message}");
+        assert!(message.contains("NaN=1/4"), "{message}");
+        assert!(message.contains("+Inf=1"), "{message}");
     }
 
     #[test]
