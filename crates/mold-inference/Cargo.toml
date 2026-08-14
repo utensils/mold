@@ -138,6 +138,11 @@ gif = "0.13"
 webp-animation = { version = "0.10", features = ["static"], optional = true }
 image = "0.25"
 half = "2"
+# Already vendored transitively through candle-core, so these add no new
+# crates to the Nix vendor set. `float8` must resolve to the same version
+# candle uses or `F8E4M3` would be a different type than its tensors hold.
+float8 = "0.7"
+rayon = "1"
 libc = "0.2"
 # Already vendored transitively via image's default features, so a direct
 # dependency adds no new crates to the Nix vendor set. Pure Rust: no system

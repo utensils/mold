@@ -484,24 +484,30 @@ fn dequantize_fp8_weight_for_runtime(
     runtime_dtype: DType,
     runtime_device: &Device,
 ) -> Result<Tensor> {
-    // Candle stores F8E4M3 tensors on Metal but cannot cast them there yet.
-    // Bridge only the active output-row chunk through CPU, widen it, and move
-    // the BF16 result back. The surrounding streaming block still retains its
-    // compact FP8 storage and never expands the complete transformer.
-    let mut dequantized = if runtime_device.is_metal() && weight.dtype() == DType::F8E4M3 {
-        weight
-            .to_device(&Device::Cpu)?
-            .to_dtype(runtime_dtype)?
-            .to_device(runtime_device)?
-    } else if weight.device().same_device(runtime_device) {
-        weight.to_dtype(runtime_dtype)?
-    } else if weight.dtype() == DType::F8E4M3 {
-        weight
-            .to_device(&Device::Cpu)?
-            .to_dtype(runtime_dtype)?
-            .to_device(runtime_device)?
+    // Candle stores F8E4M3 tensors on Metal but cannot cast them there yet, and
+    // its CPU cast converts one byte at a time — a stack sample of an LTX-2
+    // Metal denoise put 47% of the worker thread inside `F8E4M3::to_f32` and
+    // 0.1% in the matmul it feeds. `fp8_widen` does the same conversion through
+    // a 256-entry table, in parallel, and is bit-identical by construction.
+    //
+    // Bridge only the active output-row chunk, so the surrounding streaming
+    // block retains its compact FP8 storage and never expands the complete
+    // transformer.
+    let widened = if weight.dtype() == DType::F8E4M3
+        && (runtime_device.is_metal() || !weight.device().same_device(runtime_device))
+    {
+        crate::ltx2::fp8_widen::widen_f8e4m3(weight, runtime_dtype, runtime_device)?
     } else {
-        weight.to_device(runtime_device)?.to_dtype(runtime_dtype)?
+        None
+    };
+    let mut dequantized = match widened {
+        Some(dequantized) => dequantized,
+        None if weight.device().same_device(runtime_device) => weight.to_dtype(runtime_dtype)?,
+        None if weight.dtype() == DType::F8E4M3 => weight
+            .to_device(&Device::Cpu)?
+            .to_dtype(runtime_dtype)?
+            .to_device(runtime_device)?,
+        None => weight.to_device(runtime_device)?.to_dtype(runtime_dtype)?,
     };
     if let Some(scale) = weight_scale {
         let scale = if scale.device().same_device(runtime_device) {
