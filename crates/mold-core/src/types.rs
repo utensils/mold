@@ -1585,6 +1585,15 @@ impl GuidanceCapabilities {
         fixed_scale: None,
     };
 
+    /// Resolve the guidance scale a request should carry. A recipe that pins
+    /// the scale owns the default, because a per-model default is optional and
+    /// the global fallback (3.5) does not survive the recipe's own validation.
+    /// An explicitly requested value is always preserved, so a conflict is
+    /// still reported to the caller instead of being silently rewritten.
+    pub fn resolve_scale(&self, requested: Option<f64>, model_default: f64) -> f64 {
+        requested.or(self.fixed_scale).unwrap_or(model_default)
+    }
+
     /// Resolve the effective guidance contract for the selected recipe.
     /// `None` means the model's default pipeline.
     pub fn for_recipe(family: &str, model: &str, pipeline: Option<Ltx2PipelineMode>) -> Self {
@@ -5304,6 +5313,28 @@ mod tests {
             ),
             GuidanceCapabilities::FIXED_ONE,
         );
+    }
+
+    /// A recipe that pins guidance owns the default. The CLI has no per-model
+    /// `default_guidance` for the distilled LTX checkpoints, so it used to fall
+    /// back to the global 3.5 and then fail its own profile validation with
+    /// "guidance is fixed at 1 for this recipe" — the model was unrunnable from
+    /// the CLI without passing `--guidance 1` by hand. An explicit conflicting
+    /// value must still be refused rather than silently rewritten.
+    #[test]
+    fn a_pinned_recipe_supplies_the_guidance_default_but_never_rewrites_an_explicit_one() {
+        let pinned = GuidanceCapabilities::FIXED_ONE;
+        assert_eq!(pinned.resolve_scale(None, 3.5), 1.0);
+        assert_eq!(pinned.resolve_scale(Some(3.5), 3.5), 3.5);
+        assert_eq!(pinned.resolve_scale(Some(1.0), 3.5), 1.0);
+
+        for adjustable in [
+            GuidanceCapabilities::ADJUSTABLE_CFG,
+            GuidanceCapabilities::ADJUSTABLE_NO_NEGATIVE,
+        ] {
+            assert_eq!(adjustable.resolve_scale(None, 3.5), 3.5);
+            assert_eq!(adjustable.resolve_scale(Some(7.0), 3.5), 7.0);
+        }
     }
 
     /// Every Studio surface has to know which pipeline renders audio only
