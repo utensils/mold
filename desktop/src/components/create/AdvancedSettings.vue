@@ -88,7 +88,6 @@ import {
   pipelineForControlId,
 } from "@studio/lib/ltx2Control";
 import { AUDIO_ONLY_PIPELINE, isAudioOnlyPipeline } from "@studio/lib/ltx2Pipeline";
-import SourceImageWell from "../generate/SourceImageWell.vue";
 import LoraStack from "../generate/LoraStack.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import { attachPickedVideo } from "../../lib/sourceAttachment";
@@ -97,7 +96,6 @@ import {
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
-  setMinimaxH3PickedImageFirstFrame,
   type MinimaxH3AuthoringState,
 } from "@studio/lib/minimaxH3Authoring";
 
@@ -147,19 +145,6 @@ const h3Family = computed(() => isMinimaxH3Identity(props.form.family, props.for
 const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3AuthoringState());
 function setH3Authoring(value: MinimaxH3AuthoringState): void {
   props.form.h3Authoring = value;
-}
-const h3FirstFramePickerOpen = ref(false);
-const h3FirstFramePickerError = ref<string | null>(null);
-function onH3FirstFramePicked(images: PickedImage[]): void {
-  const image = images[0];
-  if (!image) return;
-  const result = setMinimaxH3PickedImageFirstFrame(props.form.h3Authoring, image);
-  if (!result.ok) {
-    h3FirstFramePickerError.value = result.error;
-    return;
-  }
-  h3FirstFramePickerError.value = null;
-  props.form.h3Authoring = result.state;
 }
 
 // ── Scheduler & sampling ─────────────────────────────────────────────────────
@@ -658,51 +643,18 @@ function reset() {
         </div>
       </AccordionSection>
 
+      <!-- H3 Ref2VA ordered references. FL2VA boundaries and every other
+           image well live in the primary form (InspectorPanel), not here. -->
       <AccordionSection
-        v-if="h3Task"
+        v-if="h3Task === 'ref2va'"
         icon="video"
-        :title="h3Task === 'fl2va' ? 'Frame endpoints' : 'Ordered references'"
-        :summary="
-          h3Task === 'fl2va'
-            ? caps.requiresSourceImage
-              ? 'First frame required'
-              : 'First, last, both, or text only'
-            : `${h3Authoring.references.length} in semantic order`
-        "
+        title="Ordered references"
+        :summary="`${h3Authoring.references.length} in semantic order`"
         :open="true"
         :header-interactive="false"
         data-test="section-h3-authoring"
       >
-        <MinimaxH3AuthoringPanel
-          :model-value="h3Authoring"
-          :task="h3Task"
-          :required-endpoint="caps.requiresSourceImage ? 'first' : null"
-          @update:model-value="setH3Authoring"
-          @request-first-frame="h3FirstFramePickerOpen = true"
-        />
-        <p v-if="h3FirstFramePickerError" class="ms-hint text-stop" role="alert">
-          {{ h3FirstFramePickerError }}
-        </p>
-        <ImagePickerModal
-          :open="h3FirstFramePickerOpen"
-          title="First frame"
-          :multiple="false"
-          @pick="onH3FirstFramePicked"
-          @close="h3FirstFramePickerOpen = false"
-        />
-      </AccordionSection>
-
-      <!-- 3 · Source image -->
-      <AccordionSection
-        v-if="caps.supportsImg2img && !h3Family"
-        icon="image"
-        title="Source image"
-        summary="Image-to-image &amp; inpainting"
-        :open="true"
-        :header-interactive="false"
-        data-test="section-source"
-      >
-        <SourceImageWell :form="form" />
+        <MinimaxH3AuthoringPanel :model-value="h3Authoring" @update:model-value="setH3Authoring" />
       </AccordionSection>
 
       <!-- 4 · LoRA stack -->

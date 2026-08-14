@@ -7,6 +7,7 @@ import {
   type ModelAccessCapabilityRecord,
 } from "./modelAccess";
 import { imageDimensionsFromBase64 } from "./imageDimensions";
+import { readFileBase64 } from "./fileBase64";
 
 export const MINIMAX_H3_FIXED_FPS = 24;
 export const MINIMAX_H3_MIN_FRAMES = 124;
@@ -258,11 +259,15 @@ export function appendMinimaxH3GalleryImageReference(
   };
 }
 
-/** Use one gallery print as the FL2VA opening boundary. Kept beside the
+/** The two FL2VA boundary slots share one setter contract. */
+export type MinimaxH3BoundaryEndpoint = "firstFrame" | "lastFrame";
+
+/** Use one gallery print as an FL2VA boundary. Kept beside the
  * ordered-reference helper so every Library surface validates identical image
  * facts before writing dedicated H3 authoring state. */
-export function setMinimaxH3GalleryImageFirstFrame(
+export function setMinimaxH3GalleryImageBoundary(
   state: MinimaxH3AuthoringState | null | undefined,
+  endpoint: MinimaxH3BoundaryEndpoint,
   image: MinimaxH3GalleryImageSource,
 ): MinimaxH3GalleryImageResult {
   const invalid = validateGalleryImageSource(image);
@@ -272,7 +277,7 @@ export function setMinimaxH3GalleryImageFirstFrame(
     ok: true,
     state: {
       ...current,
-      firstFrame: {
+      [endpoint]: {
         filename: image.filename.trim(),
         mimeType: image.mimeType.split(";", 1)[0]!.trim().toLowerCase(),
         width: image.width,
@@ -285,11 +290,19 @@ export function setMinimaxH3GalleryImageFirstFrame(
   };
 }
 
+export function setMinimaxH3GalleryImageFirstFrame(
+  state: MinimaxH3AuthoringState | null | undefined,
+  image: MinimaxH3GalleryImageSource,
+): MinimaxH3GalleryImageResult {
+  return setMinimaxH3GalleryImageBoundary(state, "firstFrame", image);
+}
+
 /** Normalize an image from any existing surface picker into the one FL2VA
  * boundary contract. This replaces three H3-only file readers without making
  * the shared authoring state depend on a desktop, web, or native picker type. */
-export function setMinimaxH3PickedImageFirstFrame(
+export function setMinimaxH3PickedImageBoundary(
   state: MinimaxH3AuthoringState | null | undefined,
+  endpoint: MinimaxH3BoundaryEndpoint,
   image: MinimaxH3PickedImageSource,
 ): MinimaxH3GalleryImageResult {
   const decoded = imageDimensionsFromBase64(image.base64);
@@ -301,12 +314,49 @@ export function setMinimaxH3PickedImageFirstFrame(
     (extension.endsWith(".jpg") || extension.endsWith(".jpeg")
       ? "image/jpeg"
       : "image/png");
-  return setMinimaxH3GalleryImageFirstFrame(state, {
+  return setMinimaxH3GalleryImageBoundary(state, endpoint, {
     filename: image.filename,
     mimeType,
     width,
     height,
     data: image.base64,
+  });
+}
+
+export function setMinimaxH3PickedImageFirstFrame(
+  state: MinimaxH3AuthoringState | null | undefined,
+  image: MinimaxH3PickedImageSource,
+): MinimaxH3GalleryImageResult {
+  return setMinimaxH3PickedImageBoundary(state, "firstFrame", image);
+}
+
+/** Read a picked or dropped File into an FL2VA boundary. All surfaces route
+ * their file wells through this so a file and a gallery pick produce
+ * identical boundary facts. */
+export async function setMinimaxH3BoundaryFile(
+  state: MinimaxH3AuthoringState | null | undefined,
+  endpoint: MinimaxH3BoundaryEndpoint,
+  file: File,
+): Promise<MinimaxH3GalleryImageResult> {
+  if (!file.type.toLowerCase().startsWith("image/")) {
+    return { ok: false, error: "FL2VA endpoints must be still images." };
+  }
+  let base64: string;
+  try {
+    base64 = await readFileBase64(file);
+  } catch (reason) {
+    return {
+      ok: false,
+      error: reason instanceof Error ? reason.message : String(reason),
+    };
+  }
+  if (!imageDimensionsFromBase64(base64)) {
+    return { ok: false, error: "Use a PNG or JPEG image for FL2VA endpoints." };
+  }
+  return setMinimaxH3PickedImageBoundary(state, endpoint, {
+    filename: file.name,
+    base64,
+    mimeType: file.type,
   });
 }
 

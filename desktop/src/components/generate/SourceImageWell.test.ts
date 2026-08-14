@@ -34,7 +34,7 @@ describe("SourceImageWell", () => {
     const form = formFor("sd15");
     const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
 
-    await wrapper.get("[data-test='source-choose-gallery']").trigger("click");
+    await wrapper.get("[data-test='source-gallery']").trigger("click");
     wrapper
       .findComponent(ImagePickerModal)
       .vm.$emit("pick", [{ filename: "pick.png", base64: "PICKED" }]);
@@ -43,14 +43,16 @@ describe("SourceImageWell", () => {
     expect(form.sourceImage).toBe("PICKED");
   });
 
-  it("stacks a loaded source preview and gallery action vertically", () => {
+  it("previews a loaded source with a working remove and gallery action", async () => {
     const form = formFor("sd15");
     form.sourceImage = "SRC";
     const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
 
     const mediaControls = wrapper.get("[data-test='source-media-controls']");
-    expect(mediaControls.classes()).toContain("flex-col");
-    expect(mediaControls.get("img").classes()).toContain("max-w-full");
+    expect(mediaControls.find("img").exists()).toBe(true);
+    expect(mediaControls.find("[data-test='source-gallery']").exists()).toBe(true);
+    await mediaControls.get("[data-test='source-remove']").trigger("click");
+    expect(form.sourceImage).toBeNull();
   });
 
   it("gates Edit mask on a source image and applies the painted mask", async () => {
@@ -413,10 +415,10 @@ describe("SourceImageWell — per-model source conditioning (#772, #779)", () =>
     const form = wanForm("optional");
     const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
 
-    expect(wrapper.find("[data-test='end-frame-media-controls']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='end-frame-well']").exists()).toBe(true);
 
     // Same picker affordance as the source well; the end frame keeps its name.
-    await wrapper.get("[data-test='end-frame-choose-gallery']").trigger("click");
+    await wrapper.get("[data-test='end-frame-gallery']").trigger("click");
     wrapper
       .findAllComponents(ImagePickerModal)[1]!
       .vm.$emit("pick", [{ filename: "close.png", base64: "ENDB64" }]);
@@ -439,7 +441,7 @@ describe("SourceImageWell — per-model source conditioning (#772, #779)", () =>
     form.endFrame = { filename: "close.png", base64: "ENDB64" };
     const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
 
-    await wrapper.get("[aria-label='Clear end frame']").trigger("click");
+    await wrapper.get("[data-test='end-frame-remove']").trigger("click");
     expect(form.endFrame).toBeNull();
   });
 });

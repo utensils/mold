@@ -6,8 +6,9 @@ use mold_core::generation_profile::{
     resolution_qualification_record, AdapterControlProfile, AspectGroup, ControlMode,
     FeatureControlProfile, FloatControl, FpsControl, GenerationCapabilitiesProfile,
     GenerationDefaultsProfile, GenerationProfileSet, GenerationRecipeProfile, IntegerControl,
-    OutputCapabilitiesProfile, ProfileProvenance, ProvenanceKind, RecipeSelector, ResolutionDomain,
-    ResolutionPreset, ResolutionProfile, TemporalProfile, WanRecipeCapabilitiesProfile,
+    OffBucketPolicy, OutputCapabilitiesProfile, ProfileProvenance, ProvenanceKind, RecipeSelector,
+    ResolutionDomain, ResolutionPreset, ResolutionProfile, TemporalProfile,
+    WanRecipeCapabilitiesProfile,
 };
 use mold_core::manifest::known_manifests;
 use mold_core::{
@@ -91,6 +92,7 @@ fn render_typescript_contract() -> String {
         }};
     }
     declaration!(ResolutionDomain);
+    declaration!(OffBucketPolicy);
     declaration!(ControlMode);
     declaration!(ProvenanceKind);
     declaration!(ProfileProvenance);

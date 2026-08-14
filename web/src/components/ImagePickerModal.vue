@@ -22,7 +22,14 @@ import { useOverlayFocus } from "../composables/useOverlayFocus";
 import type { GalleryImage, SourceImageState } from "../types";
 
 const props = withDefaults(
-  defineProps<{ open: boolean; title?: string; multiple?: boolean }>(),
+  defineProps<{
+    open: boolean;
+    title?: string;
+    multiple?: boolean;
+    /** Wells own drop + file picking themselves; their gallery link opens
+     * this picker straight on the gallery with no redundant upload tab. */
+    galleryOnly?: boolean;
+  }>(),
   {
     title: "Source image",
     multiple: true,
@@ -33,7 +40,7 @@ const emit = defineEmits<{
   (e: "close"): void;
 }>();
 
-const tab = ref<"upload" | "gallery">("upload");
+const tab = ref<"upload" | "gallery">(props.galleryOnly ? "gallery" : "upload");
 const entries = ref<GalleryImage[]>([]);
 const stillEntries = computed(() =>
   entries.value.filter((entry) =>
@@ -225,13 +232,14 @@ async function pickFromGallery(item: GalleryImage) {
         </header>
 
         <SegmentedControl
+          v-if="!galleryOnly"
           v-model="tab"
           :options="tabOptions"
           label="Image source"
           class="ip__seg"
         />
 
-        <div v-if="tab === 'upload'" class="ip__body">
+        <div v-if="tab === 'upload' && !galleryOnly" class="ip__body">
           <div
             class="ip__drop"
             :data-dragging="dragging ? 'true' : undefined"

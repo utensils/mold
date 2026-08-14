@@ -8,16 +8,27 @@ import { inTauri, ipc } from "../../lib/ipc";
 import type { PickedImage } from "../../lib/generateForm";
 import { useGalleryStore, type MergedPrint } from "../../stores/gallery";
 
-const props = withDefaults(defineProps<{ open: boolean; title?: string; multiple?: boolean }>(), {
-  title: "Source image",
-  multiple: false,
-});
+const props = withDefaults(
+  defineProps<{
+    open: boolean;
+    title?: string;
+    multiple?: boolean;
+    /** Wells own drop + file picking themselves; their gallery link opens
+     * this picker straight on the gallery with no redundant upload tab. */
+    galleryOnly?: boolean;
+  }>(),
+  {
+    title: "Source image",
+    multiple: false,
+    galleryOnly: false,
+  },
+);
 const emit = defineEmits<{
   (e: "pick", v: PickedImage[]): void;
   (e: "close"): void;
 }>();
 
-const tab = ref<"upload" | "gallery">("upload");
+const tab = ref<"upload" | "gallery">(props.galleryOnly ? "gallery" : "upload");
 const error = ref<string | null>(null);
 const dragOver = ref(false);
 // Focus the close button on open and restore focus to the opener on close,
@@ -36,6 +47,7 @@ const gallery = useGalleryStore();
 // previous session's pick/upload error is stale by now — clear it.
 function loadGallery() {
   error.value = null;
+  if (props.galleryOnly) tab.value = "gallery";
   void gallery.fetchAll();
 }
 
@@ -169,7 +181,7 @@ async function pickFromGallery(entry: MergedPrint) {
           </button>
         </div>
 
-        <div class="mt-4 flex gap-2">
+        <div v-if="!galleryOnly" class="mt-4 flex gap-2">
           <button
             type="button"
             class="rounded-control px-3 py-1 text-body transition-colors duration-100"
@@ -198,7 +210,7 @@ async function pickFromGallery(entry: MergedPrint) {
           </button>
         </div>
 
-        <div v-if="tab === 'upload'" class="mt-4 flex-1 overflow-y-auto">
+        <div v-if="tab === 'upload' && !galleryOnly" class="mt-4 flex-1 overflow-y-auto">
           <button
             type="button"
             class="flex h-48 w-full cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors"
@@ -265,7 +277,7 @@ async function pickFromGallery(entry: MergedPrint) {
                 />
                 <span
                   v-if="showHostLabels"
-                  class="edge-code absolute bottom-1 left-1 rounded-control bg-black/60 px-1 text-on-media"
+                  class="edge-code absolute bottom-1 left-1 rounded-control bg-black/60 px-1 !text-on-media"
                   data-test="picker-item-host"
                 >
                   {{ entry.hostLabel }}

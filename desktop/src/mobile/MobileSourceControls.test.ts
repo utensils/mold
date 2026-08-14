@@ -560,3 +560,69 @@ describe("MobileSourceControls", () => {
     expect(wrapper.find("[data-test='mobile-control-model']").exists()).toBe(false);
   });
 });
+
+describe("MobileSourceControls — MiniMax H3 FL2VA boundaries", () => {
+  it("renders the shared wells and applies a gallery pick to the first frame", async () => {
+    const form = formFor("minimax-h3");
+    form.model = "minimax-h3-fl2va:comfy-pruned-int8";
+    const model = {
+      name: form.model,
+      family: "minimax-h3",
+      source_image: "required",
+    } as ModelEntry;
+    const wrapper = mount(MobileSourceControls, { props: { form, model } });
+
+    expect(wrapper.find("[data-test='mobile-h3-boundaries']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='source-well']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='source-required-badge']").exists()).toBe(true);
+    // Reviewed first-frame-only runtime: no empty last-frame well.
+    expect(wrapper.find("[data-test='end-frame-well']").exists()).toBe(false);
+
+    await wrapper.get("[data-test='source-gallery']").trigger("click");
+    const sheet = wrapper.getComponent(MobileImagePickerSheet);
+    expect(sheet.props("open")).toBe(true);
+    expect(sheet.props("title")).toBe("First frame");
+    sheet.vm.$emit("pick", {
+      filename: "opening.png",
+      base64: "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC",
+    });
+    await flushPromises();
+    expect(form.h3Authoring?.firstFrame).toMatchObject({
+      filename: "opening.png",
+      width: 7,
+      height: 4,
+    });
+  });
+
+  it("offers both boundary wells when no endpoint is required", () => {
+    const form = formFor("minimax-h3");
+    form.model = "minimax-h3-fl2va:comfy-pruned-int8";
+    const model = { name: form.model, family: "minimax-h3" } as ModelEntry;
+    const wrapper = mount(MobileSourceControls, { props: { form, model } });
+    expect(wrapper.find("[data-test='source-well']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='end-frame-well']").exists()).toBe(true);
+  });
+});
+
+describe("MobileSourceControls — H3 boundary media budget", () => {
+  it("refuses a direct file past the 45 MiB request budget before reading it", async () => {
+    const form = formFor("minimax-h3");
+    form.model = "minimax-h3-fl2va:comfy-pruned-int8";
+    const model = { name: form.model, family: "minimax-h3" } as ModelEntry;
+    const wrapper = mount(MobileSourceControls, { props: { form, model } });
+
+    const oversized = new File([new Uint8Array(8)], "huge.png", {
+      type: "image/png",
+    });
+    Object.defineProperty(oversized, "size", {
+      value: MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES + 1,
+    });
+    await wrapper
+      .get("[data-test='source-well']")
+      .trigger("drop", { dataTransfer: { files: [oversized] } });
+    await flushPromises();
+
+    expect(form.h3Authoring?.firstFrame ?? null).toBeNull();
+    expect(wrapper.text()).toContain("45 MiB");
+  });
+});

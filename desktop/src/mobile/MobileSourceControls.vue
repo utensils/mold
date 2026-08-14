@@ -19,6 +19,15 @@ import { base64ToDataUrl, fileToBase64, isStillImageFile } from "../lib/image";
 import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
 import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/SourceMediaWells.vue";
+import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
+import {
+  emptyMinimaxH3AuthoringState,
+  setMinimaxH3BoundaryFile,
+  setMinimaxH3PickedImageBoundary,
+  type MinimaxH3BoundaryEndpoint,
+  type MinimaxH3GalleryImageResult,
+} from "@studio/lib/minimaxH3Authoring";
 
 const props = withDefaults(
   defineProps<{
@@ -51,12 +60,72 @@ const caps = computed(() =>
     props.form.family,
     props.form.model,
     props.form.pipeline,
-    props.form.guidanceCapabilities,
-    props.form.sourceImageCapability,
+    props.model?.guidance_capabilities ?? props.form.guidanceCapabilities,
+    props.model?.source_image ?? props.form.sourceImageCapability,
     effectiveGenerationRecipe(props.model, props.form.pipeline),
   ),
 );
-const isAttachmentMode = computed(() => caps.value.sourceImageMode !== "single");
+/** The model's own image-attachment shape — the single shared policy. */
+const plan = computed(() => sourceMediaPlan(caps.value));
+const isAttachmentMode = computed(() => plan.value.kind === "attachments");
+
+// ── MiniMax H3 FL2VA boundaries ─────────────────────────────────────────────
+// The same standard wells, backed by the dedicated H3 authoring state and the
+// shared studio setters so a file and a gallery pick produce identical facts.
+const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3AuthoringState());
+const h3PickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
+const h3Error = ref<string | null>(null);
+const h3PickerMaxBytes = computed(() =>
+  Math.max(
+    0,
+    MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES -
+      inlineGenerationMediaBytes(
+        props.form,
+        h3PickerTarget.value === "lastFrame" ? "h3LastFrame" : "h3FirstFrame",
+      ),
+  ),
+);
+function h3Endpoint(slot: SourceMediaSlot): MinimaxH3BoundaryEndpoint {
+  return slot === "source" ? "firstFrame" : "lastFrame";
+}
+function applyH3(result: MinimaxH3GalleryImageResult): void {
+  if (!result.ok) {
+    h3Error.value = result.error;
+    return;
+  }
+  h3Error.value = null;
+  props.form.h3Authoring = result.state;
+}
+async function onH3File(slot: SourceMediaSlot, file: File): Promise<void> {
+  // The same 45 MiB request budget the picker sheet enforces — checked before
+  // the file is read so an oversized base64 never lands in the WebView.
+  const endpoint = h3Endpoint(slot);
+  const budget = Math.max(
+    0,
+    MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES -
+      inlineGenerationMediaBytes(
+        props.form,
+        endpoint === "lastFrame" ? "h3LastFrame" : "h3FirstFrame",
+      ),
+  );
+  if (file.size > budget) {
+    h3Error.value = MOBILE_MEDIA_BUDGET_ERROR;
+    return;
+  }
+  applyH3(await setMinimaxH3BoundaryFile(props.form.h3Authoring, endpoint, file));
+}
+function onH3Gallery(slot: SourceMediaSlot): void {
+  h3PickerTarget.value = h3Endpoint(slot);
+}
+function onH3Clear(slot: SourceMediaSlot): void {
+  h3Error.value = null;
+  props.form.h3Authoring = { ...h3Authoring.value, [h3Endpoint(slot)]: null };
+}
+function onH3Picked(image: MobilePickedImage): void {
+  const endpoint = h3PickerTarget.value;
+  if (!endpoint) return;
+  applyH3(setMinimaxH3PickedImageBoundary(props.form.h3Authoring, endpoint, image));
+}
 const flux2Dev = computed(() => isFlux2DevModel(props.form.model));
 const error = ref("");
 const maskOpen = ref(false);
@@ -338,7 +407,48 @@ function applyMask(mask: string): void {
 </script>
 
 <template>
-  <template v-if="caps.supportsImg2img">
+  <!-- MiniMax H3 FL2VA boundaries: the exact same wells, H3-owned state. -->
+  <template v-if="plan.kind === 'h3-boundaries'">
+    <fieldset class="mobile-source-controls" data-test="mobile-h3-boundaries">
+      <SourceMediaWells
+        :plan="plan"
+        touch-friendly
+        :source="h3Authoring.firstFrame"
+        :end-frame="h3Authoring.lastFrame"
+        :error="h3Error"
+        @file="onH3File"
+        @gallery="onH3Gallery"
+        @clear="onH3Clear"
+      />
+      <!-- The same client-side fit as an ordinary source, coerced maskless
+           and applied to both boundaries at submit. -->
+      <label v-if="h3Authoring.firstFrame || h3Authoring.lastFrame" class="field">
+        <span>Source fit</span>
+        <select
+          class="control"
+          :value="coerceSourceFitForMaskless(form.sourceFit).mode"
+          data-test="mobile-h3-source-fit"
+          @change="setSourceFit"
+        >
+          <option value="crop-fill">Crop fill</option>
+          <option value="pad-fit">Pad fit</option>
+          <option value="lanczos-resize">Lanczos resize</option>
+          <option value="upscale-then-fit">Upscale then fit</option>
+        </select>
+      </label>
+    </fieldset>
+    <MobileImagePickerSheet
+      :open="h3PickerTarget !== null"
+      :target="target"
+      :title="h3PickerTarget === 'lastFrame' ? 'Last frame' : 'First frame'"
+      :max-bytes="h3PickerMaxBytes"
+      :oversize-message="MOBILE_MEDIA_BUDGET_ERROR"
+      @pick="onH3Picked"
+      @close="h3PickerTarget = null"
+    />
+  </template>
+
+  <template v-else-if="plan.kind === 'attachments' || plan.kind === 'single'">
     <fieldset
       v-if="isAttachmentMode"
       class="mobile-source-controls"

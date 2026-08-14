@@ -46,7 +46,10 @@ import {
   sequenceMotionTailFrames,
 } from "@studio/lib/sequence";
 import { OPTIONAL_PROMPT_GUIDANCE, promptRequired } from "@studio/lib/promptRequirement";
-import { minimaxH3AuthoringError } from "@studio/lib/minimaxH3Authoring";
+import {
+  emptyMinimaxH3AuthoringState,
+  minimaxH3AuthoringError,
+} from "@studio/lib/minimaxH3Authoring";
 import { firstLastFrameRestoreNotice } from "@studio/lib/sourceImageCapability";
 import {
   clampClipsToMotionTail,
@@ -113,7 +116,7 @@ import {
   wanRecipeValidationError,
 } from "../lib/generateValidation";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
-import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
+import { applyH3BoundaryFit, applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
 import { expansionTaskForRequest } from "@studio/lib/expandTask";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
@@ -2329,6 +2332,37 @@ async function preprocessSourceFit(
     draft.guidanceCapabilities,
     draft.sourceImageCapability,
   );
+  // H3 FL2VA boundaries take the same client-side fit as an ordinary source,
+  // coerced maskless (H3 has no repaint mask).
+  if (draftCaps.sourceImageMode === "h3-boundaries") {
+    try {
+      draft.h3Authoring =
+        (await applyH3BoundaryFit(
+          draft.h3Authoring,
+          draft.sourceFit,
+          { width: draft.width, height: draft.height },
+          {
+            ops: domCanvasOps,
+            cache: sourceFitCache,
+            upscale: (image, model) =>
+              upscaleImage({
+                model,
+                image,
+                ...(route ? { target: route.target } : {}),
+                onProgress: (message) => (preprocessingStatus.value = message),
+              }),
+            onStatus: (message) => (preprocessingStatus.value = message),
+          },
+        )) ?? emptyMinimaxH3AuthoringState();
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      toasts.push(`Source preprocessing failed: ${message}`, "error");
+      return false;
+    } finally {
+      preprocessingStatus.value = null;
+    }
+  }
   if (!draftCaps.supportsImg2img || draftCaps.sourceImageMode !== "single") return true;
   if (!draft.sourceImage) return true;
   try {

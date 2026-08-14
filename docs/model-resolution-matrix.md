@@ -1912,7 +1912,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `wan21-t2v-1.3b:bf16`
 
-Schema 1 · hash `726dc2709a3c377078ac16c937a4d93946470ee9e3bc2744108ce51f610fbe57` · default recipe `default`
+Schema 1 · hash `bd8a5ca2941ee414dbf3ebdf98084fc4a2dfe65e4edbb8095fb703cd628be348` · default recipe `default`
 
 Models: `wan21-t2v-1.3b:bf16`.
 
@@ -1932,7 +1932,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan21-t2v-14b`
 
-Schema 1 · hash `a2e053be1bd09b8e8c77bc8420ead948f44fb57650a1c722ca1d353ed4edafc2` · default recipe `default`
+Schema 1 · hash `04d7c3ad2c25fa40ec7137f8499c0f3ccecbb8051c1c8310ae5057e9614cc72b` · default recipe `default`
 
 Models: `wan21-t2v-14b:q5`, `wan21-t2v-14b:q8`.
 
@@ -1954,7 +1954,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-i2v-a14b:fp8`
 
-Schema 1 · hash `b1b456db84441fbe2b68d5623ec330a0225db399ad46e19809fd67f79fada023` · default recipe `default`
+Schema 1 · hash `c96310aefed60fa4db0893148ed0f28da2654f8e1b71c4f76c4f97c138e9297f` · default recipe `default`
 
 Models: `wan22-i2v-a14b:fp8`.
 
@@ -1976,7 +1976,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan22-i2v-a14b`
 
-Schema 1 · hash `3cb48434f3390c63334247c1cfc3c4fc885cd13466488645a57b5d08bcaa839f` · default recipe `default`
+Schema 1 · hash `d2d3902c56c5e7c4a30f8549b5d7461f119ced4cf11426022dae25ff01f376eb` · default recipe `default`
 
 Models: `wan22-i2v-a14b:q4`, `wan22-i2v-a14b:q5`.
 
@@ -1998,7 +1998,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-i2v-a14b:q8`
 
-Schema 1 · hash `3a13c7774410f2cec5b92ab77d2502e95f14a8269217beb98ffa4ae8a1821810` · default recipe `default`
+Schema 1 · hash `c30f29affa4f87dfa8d3ea3551568afab9ca6a0d09e3ff3f8360dadef8c82cae` · default recipe `default`
 
 Models: `wan22-i2v-a14b:q8`.
 
@@ -2020,7 +2020,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-t2v-a14b:fp8`
 
-Schema 1 · hash `72bc0445be2151847f91d9db6645039d24a784229b9c0c21c9ac3174bb97d2a0` · default recipe `default`
+Schema 1 · hash `3298d14a6bf5e48fccca1b29f4f83ea4d812c5ab6d27f5eee46e31abad59a079` · default recipe `default`
 
 Models: `wan22-t2v-a14b:fp8`.
 
@@ -2042,7 +2042,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan22-t2v-a14b`
 
-Schema 1 · hash `1d3062aeaab6f6783f7e2a5a43c697d744db41d3ec18e9fb079698181ee59792` · default recipe `default`
+Schema 1 · hash `0dfe1ed50759a49e9dfac71492bf9cca0c761772bf708f7d1e525bf7e3ff0919` · default recipe `default`
 
 Models: `wan22-t2v-a14b:q4`, `wan22-t2v-a14b:q5`.
 
@@ -2064,7 +2064,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-t2v-a14b:q8`
 
-Schema 1 · hash `350ae3e22cd7cd0b7c7db1f0a2f3954bb91a64b5b9a7326d6f698918193d9431` · default recipe `default`
+Schema 1 · hash `75e7f2f0d2078a4aa2ee79481425b040c4dc5c00809eed0d7a2f157aaefcaae2` · default recipe `default`
 
 Models: `wan22-t2v-a14b:q8`.
 
@@ -2086,7 +2086,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### Profile `wan.wan22-ti2v-5b`
 
-Schema 1 · hash `fab8a259ae8b1bd895af3a5814d1d62ceb5cb0e244f969c06257a578ac1db339` · default recipe `default`
+Schema 1 · hash `4ea18867bd668f5c49ae485a6da9e7dbdeb6894c76f2af6e05a7ad68d1b5f337` · default recipe `default`
 
 Models: `wan22-ti2v-5b:fp16`, `wan22-ti2v-5b:q8`.
 
@@ -2106,7 +2106,7 @@ Provenance: [Upstream](https://github.com/Wan-Video/Wan2.2) at `42bf4cfaa384bc21
 
 ### `wan22-ti2v-5b:turbo`
 
-Schema 1 · hash `75a5ea12913bdff8640db1e86670a9441918db9ad2ffc8de585ab4d25d21b53f` · default recipe `default`
+Schema 1 · hash `790797fd7ac2f9e3d0bdf2282c83a09e402de1c3efecd9efee19d823312e01e3` · default recipe `default`
 
 Models: `wan22-ti2v-5b:turbo`.
 

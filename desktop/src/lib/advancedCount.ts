@@ -29,7 +29,7 @@ export function advancedActiveCount(form: GenerateForm): number {
   if (caps.supportsScheduler && form.scheduler !== "default") count += 1;
   if (caps.supportsCfgPlus && form.cfgPlus) count += 1;
   if (caps.wanRecipe.supported) count += wanRecipeCount(form.wanRecipe);
-  if (caps.supportsImg2img && (form.sourceImage || form.imageAttachments.length > 0)) count += 1;
+  // Source images and attachments live in the primary form now, not Advanced.
   if (caps.supportsLora && form.loras.length > 0) count += 1;
   if (!caps.supportsVideo && form.upscaleModel) count += 1;
   if (caps.supportsVideo && form.cameraControl) count += 1;

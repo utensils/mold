@@ -739,7 +739,7 @@ export function resolutionProfileError(
   if (resolution.max_aspect_ratio && ratio > resolution.max_aspect_ratio) {
     return `The ${ratio.toFixed(2)} aspect ratio is wider than this recipe supports.`;
   }
-  if (resolution.domain === "buckets") {
+  if (resolution.domain === "buckets" && resolution.off_bucket !== "warn") {
     const exact = resolution.aspect_groups.some((group) =>
       group.presets.some(
         (preset) => preset.width === width && preset.height === height,
@@ -749,6 +749,34 @@ export function resolutionProfileError(
       return "Choose one of this recipe's supported resolution buckets.";
   }
   return null;
+}
+
+/**
+ * Advisory counterpart to {@link resolutionProfileError} for `warn`-policy
+ * bucket recipes: the size is admitted (the buckets are the trained sizes,
+ * not the only runnable ones), but the user should know quality may vary.
+ * Never rendered as a blocker.
+ */
+export function resolutionProfileWarning(
+  width: number,
+  height: number,
+  resolution: ResolutionProfile | null | undefined,
+): string | null {
+  if (
+    !resolution ||
+    resolution.domain !== "buckets" ||
+    resolution.off_bucket !== "warn"
+  ) {
+    return null;
+  }
+  if (resolutionProfileError(width, height, resolution)) return null;
+  const exact = resolution.aspect_groups.some((group) =>
+    group.presets.some(
+      (preset) => preset.width === width && preset.height === height,
+    ),
+  );
+  if (exact) return null;
+  return `This model isn't optimized for ${width}×${height} — results may vary.`;
 }
 
 function positiveInteger(

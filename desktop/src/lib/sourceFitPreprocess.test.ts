@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import type { Rect, SourceFitPolicy, SourceFitTransform } from "@studio/lib/sourceFit";
 import {
+  applyH3BoundaryFit,
   applySourceFitPreprocess,
   drawableFitPolicy,
   type SourceFitCanvasOps,
@@ -320,5 +321,67 @@ describe("applySourceFitPreprocess", () => {
       },
     );
     expect(statuses.some((s) => s.includes("real-esrgan-x2plus:fp16"))).toBe(true);
+  });
+});
+
+describe("applyH3BoundaryFit", () => {
+  const boundary = (name: string, data: string) => ({
+    filename: name,
+    mimeType: "image/jpeg",
+    width: 720,
+    height: 1280,
+    data,
+    sha256: "a".repeat(64),
+  });
+
+  it("fits both boundaries maskless and records the new facts", async () => {
+    const ops = fakeOps({ width: 720, height: 1280 });
+    const next = await applyH3BoundaryFit(
+      {
+        firstFrame: boundary("first.jpg", "FIRST"),
+        lastFrame: boundary("last.jpg", "LAST"),
+        references: [],
+      },
+      // A stale pad-repaint policy must coerce away: H3 has no repaint mask.
+      { mode: "pad-repaint" },
+      TARGET,
+      { ops },
+    );
+    expect(next?.firstFrame).toMatchObject({
+      filename: "first.jpg",
+      data: "fit(FIRST)",
+      mimeType: "image/png",
+      width: TARGET.width,
+      height: TARGET.height,
+      sha256: null,
+    });
+    expect(next?.lastFrame).toMatchObject({ data: "fit(LAST)" });
+    // Maskless coercion: no repaint mask is ever built for a boundary.
+    expect(ops.maskCalls).toHaveLength(0);
+  });
+
+  it("leaves an already-sized boundary and its provenance untouched", async () => {
+    const ops = fakeOps(TARGET);
+    const state = {
+      firstFrame: { ...boundary("first.jpg", "FIRST"), width: TARGET.width, height: TARGET.height },
+      lastFrame: null,
+      references: [],
+    };
+    const next = await applyH3BoundaryFit(state, { mode: "crop-fill" }, TARGET, { ops });
+    expect(next?.firstFrame).toMatchObject({ data: "FIRST", sha256: "a".repeat(64) });
+    expect(ops.fitCalls).toHaveLength(0);
+  });
+
+  it("passes empty and reattach-pending states through unchanged", async () => {
+    const ops = fakeOps(TARGET);
+    expect(await applyH3BoundaryFit(null, { mode: "crop-fill" }, TARGET, { ops })).toBeNull();
+    const stripped = {
+      firstFrame: { ...boundary("first.jpg", "") },
+      lastFrame: null,
+      references: [],
+    };
+    expect(await applyH3BoundaryFit(stripped, { mode: "crop-fill" }, TARGET, { ops })).toBe(
+      stripped,
+    );
   });
 });

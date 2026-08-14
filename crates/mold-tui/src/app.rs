@@ -1154,6 +1154,9 @@ pub struct GenerateState {
     pub last_seed: Option<u64>,
     pub last_generation_time_ms: Option<u64>,
     pub error_message: Option<String>,
+    /// Non-blocking advisory (e.g. an admitted off-bucket size); rendered in
+    /// the error row's slot with warning styling, never as an error.
+    pub warning_message: Option<String>,
     pub model_description: String,
     /// Path of the most recently saved output — drives the activity
     /// strip's "done · saved to …" line. None when saving is disabled or
@@ -2048,6 +2051,7 @@ impl App {
                 last_seed: None,
                 last_generation_time_ms: None,
                 error_message: None,
+                warning_message: None,
                 model_description,
                 last_output_path: None,
                 prompt_transform_token: 0,
@@ -3428,6 +3432,7 @@ impl App {
                         let text = input.trim().to_string();
                         self.close_popup();
                         if let Some((w, h)) = parse_size_input(&text) {
+                            let mut advisory = None;
                             if let Some(recipe) = self.active_generation_recipe() {
                                 if let Err(error) =
                                     mold_core::validate_dimensions_against_recipe(&recipe, w, h)
@@ -3435,10 +3440,14 @@ impl App {
                                     self.generate.error_message = Some(error);
                                     return;
                                 }
+                                // Warn-policy bucket recipes admit the size but
+                                // are not tuned for it (parity with the other
+                                // four shells' Resolution advisory).
+                                advisory = mold_core::off_bucket_resolution_warning(&recipe, w, h);
                             }
                             self.generate.params.width = w;
                             self.generate.params.height = h;
-                            self.generate.error_message = None;
+                            self.generate.error_message = advisory;
                         }
                     }
                     KeyCode::Char(c)
@@ -9370,6 +9379,7 @@ mod tests {
                 last_seed: None,
                 last_generation_time_ms: None,
                 error_message: None,
+                warning_message: None,
                 model_description: String::new(),
                 last_output_path: None,
                 prompt_transform_token: 0,
@@ -12600,6 +12610,7 @@ mod tests {
             last_seed: None,
             last_generation_time_ms: None,
             error_message: None,
+            warning_message: None,
             model_description: String::new(),
             last_output_path: None,
             prompt_transform_token: 0,
@@ -12664,6 +12675,7 @@ mod tests {
             last_seed: None,
             last_generation_time_ms: None,
             error_message: None,
+            warning_message: None,
             model_description: String::new(),
             last_output_path: None,
             prompt_transform_token: 0,
@@ -12709,6 +12721,7 @@ mod tests {
             last_seed: None,
             last_generation_time_ms: None,
             error_message: None,
+            warning_message: None,
             model_description: String::new(),
             last_output_path: None,
             prompt_transform_token: 0,
