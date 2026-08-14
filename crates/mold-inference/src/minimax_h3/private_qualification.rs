@@ -946,6 +946,25 @@ fn store_cached_artifact_digest(canonical_path: &Path, identity: FileIdentity, s
     }
 }
 
+/// Per-canonical-path single-flight guard: concurrent qualifications that both
+/// miss the digest cache must not duplicate a cold multi-gigabyte hash. The
+/// loser blocks until the winner stores its digest, then reuses it through the
+/// ordinary cache lookup. Poisoning is deliberately ignored — a panicking
+/// winner leaves no cache entry, so the next holder simply re-hashes.
+static ARTIFACT_HASH_FLIGHTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>>,
+> = std::sync::OnceLock::new();
+
+fn artifact_hash_flight(canonical_path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let flights = ARTIFACT_HASH_FLIGHTS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut map = match flights.lock() {
+        Ok(map) => map,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    map.entry(canonical_path.to_path_buf()).or_default().clone()
+}
+
 fn hash_exact_file(
     artifact: &ResolvedArtifact<'_>,
     expected_sha: &str,
@@ -978,6 +997,11 @@ fn hash_exact_file(
             artifact.file.size_bytes
         )
     }
+    let flight = artifact_hash_flight(&artifact.canonical_path);
+    let _hash_flight = match flight.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     if let Some(cached_sha) =
         lookup_cached_artifact_digest(&artifact.canonical_path, &before, expected_sha)
     {
@@ -1803,6 +1827,44 @@ mod tests {
             Some(new_sha.as_str())
         );
         assert!(lookup_cached_artifact_digest(&path, &identity, &sha).is_none());
+    }
+
+    #[test]
+    fn hash_flight_serializes_cold_fills_per_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flight.safetensors");
+        fs::write(&path, b"flight artifact bytes").unwrap();
+        let other = directory.path().join("other.safetensors");
+
+        // One flight per canonical path, shared across callers.
+        assert!(std::sync::Arc::ptr_eq(
+            &artifact_hash_flight(&path),
+            &artifact_hash_flight(&path)
+        ));
+        assert!(!std::sync::Arc::ptr_eq(
+            &artifact_hash_flight(&path),
+            &artifact_hash_flight(&other)
+        ));
+
+        // A loser blocked on the winner's flight observes the winner's stored
+        // digest as soon as it acquires the lock — it never re-hashes.
+        let identity = FileIdentity::from_metadata(&fs::symlink_metadata(&path).unwrap());
+        let sha = "d".repeat(64);
+        let flight = artifact_hash_flight(&path);
+        let winner_guard = flight.lock().unwrap();
+        let loser = std::thread::spawn({
+            let flight = artifact_hash_flight(&path);
+            let path = path.clone();
+            let identity = identity.clone();
+            let sha = sha.clone();
+            move || {
+                let _guard = flight.lock().unwrap();
+                lookup_cached_artifact_digest(&path, &identity, &sha)
+            }
+        });
+        store_cached_artifact_digest(&path, identity, sha.clone());
+        drop(winner_guard);
+        assert_eq!(loser.join().unwrap().as_deref(), Some(sha.as_str()));
     }
 
     #[cfg(unix)]

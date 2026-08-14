@@ -696,6 +696,11 @@ fn open_h3_comfy_int8_checkpoint(
             cancellation,
         )?;
     }
+    let flight = opened_hash_flight(&canonical_path);
+    let hash_flight = match flight.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     let H3ComfyOpenedHashes {
         content_sha256,
         block_content_sha256,
@@ -707,6 +712,7 @@ fn open_h3_comfy_int8_checkpoint(
             hashes
         }
     };
+    drop(hash_flight);
     if let Some((_, expected_sha256)) = expected_content {
         if content_sha256 != expected_sha256 {
             return Err(failure(
@@ -1171,6 +1177,25 @@ fn store_cached_opened_hashes(
     if let Ok(mut cache) = opened_content_hash_cache().lock() {
         cache.insert(canonical_path.to_path_buf(), (identity, hashes));
     }
+}
+
+/// Per-canonical-path single-flight guard: concurrent opens that both miss the
+/// content-hash cache must not duplicate a cold ~21 GB hash pass. The loser
+/// blocks until the winner stores its hashes, then reuses them through the
+/// ordinary cache lookup. Poisoning is ignored — a panicking winner leaves no
+/// cache entry, so the next holder simply re-hashes.
+static OPENED_HASH_FLIGHTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>>,
+> = std::sync::OnceLock::new();
+
+fn opened_hash_flight(canonical_path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let flights =
+        OPENED_HASH_FLIGHTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut map = match flights.lock() {
+        Ok(map) => map,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    map.entry(canonical_path.to_path_buf()).or_default().clone()
 }
 
 fn hash_open_file(
@@ -2652,6 +2677,47 @@ mod tests {
         let changed =
             H3OpenedFileIdentity::from_metadata(&std::fs::symlink_metadata(&path).unwrap());
         assert!(lookup_cached_opened_hashes(&path, &changed).is_none());
+    }
+
+    #[test]
+    fn opened_hash_flight_serializes_cold_fills_per_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flight-checkpoint.safetensors");
+        std::fs::write(&path, b"flight checkpoint bytes").unwrap();
+        let other = directory.path().join("other-checkpoint.safetensors");
+
+        assert!(std::sync::Arc::ptr_eq(
+            &opened_hash_flight(&path),
+            &opened_hash_flight(&path)
+        ));
+        assert!(!std::sync::Arc::ptr_eq(
+            &opened_hash_flight(&path),
+            &opened_hash_flight(&other)
+        ));
+
+        // A loser blocked on the winner's flight observes the winner's stored
+        // hashes as soon as it acquires the lock — it never re-hashes.
+        let identity =
+            H3OpenedFileIdentity::from_metadata(&std::fs::symlink_metadata(&path).unwrap());
+        let hashes = H3ComfyOpenedHashes {
+            content_sha256: "e".repeat(64),
+            block_content_sha256: vec!["f".repeat(64)],
+        };
+        let flight = opened_hash_flight(&path);
+        let winner_guard = flight.lock().unwrap();
+        let loser = std::thread::spawn({
+            let flight = opened_hash_flight(&path);
+            let path = path.clone();
+            let identity = identity.clone();
+            move || {
+                let _guard = flight.lock().unwrap();
+                lookup_cached_opened_hashes(&path, &identity)
+            }
+        });
+        store_cached_opened_hashes(&path, identity, hashes.clone());
+        drop(winner_guard);
+        let observed = loser.join().unwrap().unwrap();
+        assert_eq!(observed.content_sha256, hashes.content_sha256);
     }
 
     fn tiny_config() -> H3TransformerConfig {
