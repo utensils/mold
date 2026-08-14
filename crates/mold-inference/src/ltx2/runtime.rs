@@ -6754,7 +6754,7 @@ fn load_ltx2_av_transformer_with_loras_inner(
         vb.rename_f(remap_ltx2_transformer_key)
     };
     if select_ltx2_transformer_residency_mode(
-        device.is_cuda(),
+        Ltx2Accelerator::of(device),
         checkpoint_is_fp8,
         force_eager,
         force_streaming,
@@ -6776,7 +6776,7 @@ fn load_ltx2_av_transformer_with_loras_inner(
         match weights {
             Ok(weights)
                 if select_ltx2_transformer_residency_mode(
-                    device.is_cuda(),
+                    Ltx2Accelerator::of(device),
                     checkpoint_is_fp8,
                     force_eager,
                     force_streaming,
@@ -7072,13 +7072,47 @@ enum Ltx2TransformerResidencyMode {
     Adaptive,
 }
 
-fn ltx2_force_streaming_enabled() -> bool {
-    if crate::runtime_env::value("MOLD_LTX2_FORCE_STREAMING").is_some() {
-        return true;
+/// The accelerator a transformer is being loaded onto. Residency is not a
+/// CUDA-or-not decision: CUDA can page blocks against a measured VRAM budget,
+/// Metal shares one unified pool with the host and cannot, and CPU has no
+/// device memory to be resident in at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ltx2Accelerator {
+    Cuda,
+    Metal,
+    Other,
+}
+
+impl Ltx2Accelerator {
+    fn of(device: &candle_core::Device) -> Self {
+        if device.is_cuda() {
+            Self::Cuda
+        } else if device.is_metal() {
+            Self::Metal
+        } else {
+            Self::Other
+        }
     }
-    matches!(
+}
+
+/// `MOLD_LTX2_FORCE_STREAMING` used to be read with `is_some()`, so setting it
+/// to `0` or `false` switched streaming *on* — the opposite of what the value
+/// says, and unlike the `MOLD_OFFLOAD` alias sitting next to it. Both are
+/// parsed the same way now.
+fn ltx2_force_streaming_from_values(force_streaming: Option<&str>, offload: Option<&str>) -> bool {
+    fn truthy(value: Option<&str>) -> bool {
+        matches!(
+            value.map(|raw| raw.trim().to_ascii_lowercase()).as_deref(),
+            Some("1") | Some("true") | Some("yes") | Some("on")
+        )
+    }
+    truthy(force_streaming) || truthy(offload)
+}
+
+fn ltx2_force_streaming_enabled() -> bool {
+    ltx2_force_streaming_from_values(
+        crate::runtime_env::value("MOLD_LTX2_FORCE_STREAMING").as_deref(),
         crate::runtime_env::value("MOLD_OFFLOAD").as_deref(),
-        Some("1") | Some("true") | Some("yes")
     )
 }
 
@@ -7087,18 +7121,31 @@ fn ltx2_effective_force_streaming(configured: bool, checkpoint_is_convrot: bool)
 }
 
 fn select_ltx2_transformer_residency_mode(
-    is_cuda: bool,
+    accelerator: Ltx2Accelerator,
     checkpoint_is_fp8: bool,
     force_eager: bool,
     force_streaming: bool,
     has_block_sizes: bool,
     free_vram: u64,
 ) -> Ltx2TransformerResidencyMode {
-    if !is_cuda || force_streaming {
+    if force_streaming {
         return Ltx2TransformerResidencyMode::Streaming;
     }
-    if checkpoint_is_fp8 && force_eager {
+    // An explicit eager request is honoured on every accelerator that has
+    // device memory to be resident in. On Metal this is the only way to
+    // measure what streaming costs: it re-materialises all 48 blocks per
+    // denoise pass out of a pool the host already shares, so the copy buys
+    // nothing there. The *default* stays streaming on Metal — a resident
+    // transformer has to be sized against the prompt encoder first.
+    if checkpoint_is_fp8
+        && force_eager
+        && matches!(accelerator, Ltx2Accelerator::Cuda | Ltx2Accelerator::Metal)
+    {
         return Ltx2TransformerResidencyMode::Eager;
+    }
+    // Only CUDA can page blocks against a measured free-VRAM budget.
+    if accelerator != Ltx2Accelerator::Cuda {
+        return Ltx2TransformerResidencyMode::Streaming;
     }
     if has_block_sizes && free_vram > 0 {
         Ltx2TransformerResidencyMode::Adaptive
@@ -10185,7 +10232,7 @@ mod tests {
     fn ltx2_transformer_residency_defaults_cuda_fp8_to_adaptive() {
         assert_eq!(
             super::select_ltx2_transformer_residency_mode(
-                true,
+                super::Ltx2Accelerator::Cuda,
                 true,
                 false,
                 false,
@@ -10194,6 +10241,100 @@ mod tests {
             ),
             super::Ltx2TransformerResidencyMode::Adaptive
         );
+    }
+
+    /// Metal reached `Streaming` through a blanket "not CUDA" arm that ran
+    /// *before* the eager one, so `MOLD_LTX2_FORCE_EAGER` was dead code on
+    /// Apple Silicon and a resident transformer could not even be measured —
+    /// while streaming re-materialises all 48 blocks (20.86 GB) from the mmap
+    /// on every denoise pass, for a pool the host already shares. The default
+    /// deliberately stays `Streaming`; this only makes the escape hatch real.
+    #[test]
+    fn ltx2_transformer_residency_honours_an_explicit_eager_request_on_metal() {
+        let mode = |force_eager, force_streaming| {
+            super::select_ltx2_transformer_residency_mode(
+                super::Ltx2Accelerator::Metal,
+                true,
+                force_eager,
+                force_streaming,
+                true,
+                24_000_000_000,
+            )
+        };
+
+        assert_eq!(
+            mode(true, false),
+            super::Ltx2TransformerResidencyMode::Eager
+        );
+        assert_eq!(
+            mode(false, false),
+            super::Ltx2TransformerResidencyMode::Streaming,
+            "Metal must keep streaming by default until a resident window is sized"
+        );
+        assert_eq!(
+            mode(true, true),
+            super::Ltx2TransformerResidencyMode::Streaming,
+            "an explicit streaming request still outranks an eager one"
+        );
+
+        assert_eq!(
+            super::select_ltx2_transformer_residency_mode(
+                super::Ltx2Accelerator::Metal,
+                false,
+                true,
+                false,
+                true,
+                24_000_000_000
+            ),
+            super::Ltx2TransformerResidencyMode::Streaming,
+            "eager residency is an FP8-checkpoint contract, not a Metal one"
+        );
+
+        assert_eq!(
+            super::select_ltx2_transformer_residency_mode(
+                super::Ltx2Accelerator::Other,
+                true,
+                true,
+                false,
+                true,
+                24_000_000_000
+            ),
+            super::Ltx2TransformerResidencyMode::Streaming,
+            "CPU has no device memory to be resident in"
+        );
+
+        assert_eq!(
+            super::select_ltx2_transformer_residency_mode(
+                super::Ltx2Accelerator::Metal,
+                true,
+                false,
+                false,
+                false,
+                0
+            ),
+            super::Ltx2TransformerResidencyMode::Streaming,
+            "Metal never reaches the CUDA adaptive plan"
+        );
+    }
+
+    /// `MOLD_LTX2_FORCE_STREAMING` was read with `is_some()`, so `0` and
+    /// `false` both switched streaming on — the opposite of the value, and
+    /// unlike the `MOLD_OFFLOAD` alias parsed right beside it.
+    #[test]
+    fn ltx2_force_streaming_reads_its_value_rather_than_its_presence() {
+        let from = super::ltx2_force_streaming_from_values;
+
+        assert!(from(Some("1"), None));
+        assert!(from(Some("true"), None));
+        assert!(from(Some("YES"), None));
+        assert!(from(Some(" on "), None));
+        assert!(from(None, Some("1")));
+
+        assert!(!from(Some("0"), None));
+        assert!(!from(Some("false"), None));
+        assert!(!from(Some(""), None));
+        assert!(!from(None, Some("0")));
+        assert!(!from(None, None));
     }
 
     /// The budget still scales with every simultaneously live latent frame —
@@ -10220,7 +10361,7 @@ mod tests {
     fn ltx2_transformer_residency_force_streaming_wins() {
         assert_eq!(
             super::select_ltx2_transformer_residency_mode(
-                true,
+                super::Ltx2Accelerator::Cuda,
                 true,
                 true,
                 true,
@@ -10242,7 +10383,7 @@ mod tests {
     fn ltx2_transformer_residency_force_eager_is_explicit_cuda_fp8_only() {
         assert_eq!(
             super::select_ltx2_transformer_residency_mode(
-                true,
+                super::Ltx2Accelerator::Cuda,
                 true,
                 true,
                 false,
@@ -10253,7 +10394,7 @@ mod tests {
         );
         assert_eq!(
             super::select_ltx2_transformer_residency_mode(
-                true,
+                super::Ltx2Accelerator::Cuda,
                 false,
                 true,
                 false,
@@ -10264,7 +10405,7 @@ mod tests {
         );
         assert_eq!(
             super::select_ltx2_transformer_residency_mode(
-                false,
+                super::Ltx2Accelerator::Other,
                 true,
                 true,
                 false,
