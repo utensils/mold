@@ -1009,6 +1009,13 @@ impl QwenImageTransformer2DModel {
             img.dtype(),
             device,
         )?;
+        let key_bias = super::attention::hoist_bias_for_device(
+            key_bias,
+            self.cfg.num_attention_heads,
+            txt_seq_len + img.dim(1)?,
+            img.dtype(),
+            device,
+        )?;
         for block in &self.blocks {
             let (new_img, new_txt) = block.forward(
                 &img,

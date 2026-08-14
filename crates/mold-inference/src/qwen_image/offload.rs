@@ -678,6 +678,13 @@ impl OffloadedQwenImageTransformer {
             compute_dtype,
             device,
         )?;
+        let key_bias = super::attention::hoist_bias_for_device(
+            key_bias,
+            self.cfg.num_attention_heads,
+            txt_seq_len + hp * wp,
+            compute_dtype,
+            device,
+        )?;
 
         // 5. Execute blocks — GPU-resident run in-place, CPU blocks stream
         tracing::debug!(
@@ -775,6 +782,13 @@ impl OffloadedQwenImageTransformer {
         let key_bias = super::attention::joint_key_bias(
             encoder_attention_mask,
             img.dim(1)?,
+            compute_dtype,
+            device,
+        )?;
+        let key_bias = super::attention::hoist_bias_for_device(
+            key_bias,
+            self.cfg.num_attention_heads,
+            txt_seq_len + img.dim(1)?,
             compute_dtype,
             device,
         )?;
