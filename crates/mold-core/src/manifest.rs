@@ -2858,6 +2858,12 @@ fn shared_qwen_image_edit_files() -> Vec<ModelFile> {
     ]
 }
 
+/// Trade-off disclosure shared by both Qwen-Image Flash tiers. The DMD2
+/// distillation buys a 4-step schedule at a measurable cost in the hardest
+/// content, so every surface that renders a description says so.
+const QWEN_FLASH_DESCRIPTION_Q8: &str = "Qwen-Image Flash Q8 (NVIDIA): 4-step DMD2 distill — dense small text, hair-fine detail, and very complex scenes may degrade vs base";
+const QWEN_FLASH_DESCRIPTION_Q4: &str = "Qwen-Image Flash Q4 (NVIDIA): 4-step DMD2 distill — dense small text, hair-fine detail, and very complex scenes may degrade vs base";
+
 /// All known Qwen-Image model manifests.
 fn qwen_image_manifests() -> Vec<ModelManifest> {
     let base_defaults = ManifestDefaults {
@@ -2884,6 +2890,23 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         frames: None,
         fps: None,
         source_image: None,
+    };
+    // NVIDIA's DMD2 distill collapses the schedule to four CFG-free steps.
+    let qwen_flash_defaults = ManifestDefaults {
+        steps: 4,
+        guidance: 1.0,
+        ..base_defaults.clone()
+    };
+    // DiffSynth's Distill-Full merge trades a longer schedule for fidelity.
+    let qwen_distill_defaults = ManifestDefaults {
+        steps: 15,
+        guidance: 1.0,
+        ..base_defaults.clone()
+    };
+    let qwen_edit_rapid_defaults = ManifestDefaults {
+        steps: 8,
+        guidance: 1.0,
+        ..qwen_edit_defaults.clone()
     };
 
     vec![
@@ -3276,7 +3299,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                         "qwen_image_2512_fp8_e4m3fn_scaled_comfyui_4steps_v1.0.safetensors"
                             .to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 20_400_000_000,
+                    size_bytes: 20_436_302_974,
                     gated: false,
                     sha256: None,
                 });
@@ -3308,7 +3331,7 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                     hf_filename: "qwen_image_2512_fp8_e4m3fn_scaled_8steps_v1.0.safetensors"
                         .to_string(),
                     component: ModelComponent::Transformer,
-                    size_bytes: 20_400_000_000,
+                    size_bytes: 20_487_870_224,
                     gated: false,
                     sha256: None,
                 });
@@ -3326,6 +3349,88 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                 fps: None,
                 source_image: None,
             },
+            hidden: false,
+        },
+        // NVIDIA's DMD2 4-step distill of BASE Qwen-Image. Same 60-block
+        // transformer, so it reuses the base shared components.
+        ModelManifest {
+            name: "qwen-image-flash:q8".to_string(),
+            family: "qwen-image".to_string(),
+            description: QWEN_FLASH_DESCRIPTION_Q8.to_string(),
+            files: {
+                let mut files = shared_qwen_image_base_files();
+                files.push(ModelFile {
+                    hf_repo: "realrebelai/Qwen_Image_Flash_GGUF".to_string(),
+                    hf_filename: "Qwen-Image-Flash-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 21_761_817_152,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: qwen_flash_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image-flash:q4".to_string(),
+            family: "qwen-image".to_string(),
+            description: QWEN_FLASH_DESCRIPTION_Q4.to_string(),
+            files: {
+                let mut files = shared_qwen_image_base_files();
+                files.push(ModelFile {
+                    hf_repo: "realrebelai/Qwen_Image_Flash_GGUF".to_string(),
+                    hf_filename: "Qwen-Image-Flash-Q4_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 11_715_639_872,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: qwen_flash_defaults.clone(),
+            hidden: false,
+        },
+        // DiffSynth's Distill-Full merge of BASE Qwen-Image: a gentler 15-step
+        // distillation that keeps more of the base model's fidelity.
+        ModelManifest {
+            name: "qwen-image-distill:q8".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image Distill Q8 — 15-step DiffSynth Distill-Full merge, CFG-free"
+                .to_string(),
+            files: {
+                let mut files = shared_qwen_image_base_files();
+                files.push(ModelFile {
+                    hf_repo: "QuantStack/Qwen-Image-Distill-GGUF".to_string(),
+                    hf_filename: "Qwen_Image_Distill-Q8_0.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 21_761_817_120,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: qwen_distill_defaults.clone(),
+            hidden: false,
+        },
+        ModelManifest {
+            name: "qwen-image-distill:q4".to_string(),
+            family: "qwen-image".to_string(),
+            description: "Qwen-Image Distill Q4 — 15-step DiffSynth Distill-Full merge, CFG-free"
+                .to_string(),
+            files: {
+                let mut files = shared_qwen_image_base_files();
+                files.push(ModelFile {
+                    hf_repo: "QuantStack/Qwen-Image-Distill-GGUF".to_string(),
+                    hf_filename: "Qwen_Image_Distill-Q4_K_M.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 13_065_746_976,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: qwen_distill_defaults.clone(),
             hidden: false,
         },
         ModelManifest {
@@ -3493,6 +3598,30 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
             defaults: qwen_edit_defaults.clone(),
             hidden: false,
         },
+        // Few-step edit merge. Phr00t's Rapid AIO fuses the edit transformer
+        // with step-distillation LoRAs, so it edits in 8 steps at CFG 1. The
+        // upstream merge is uncensored; the description says so because the
+        // manifest has no maturity flag for a client badge to read.
+        ModelManifest {
+            name: "qwen-image-edit-rapid:q4".to_string(),
+            family: "qwen-image-edit".to_string(),
+            description: "Qwen-Image-Edit Rapid AIO v23 Q4 — 8-step distilled merge for fast image editing; uncensored community merge"
+                .to_string(),
+            files: {
+                let mut files = shared_qwen_image_edit_files();
+                files.push(ModelFile {
+                    hf_repo: "Novice25/Qwen-Image-Edit-Rapid-AIO-GGUF".to_string(),
+                    hf_filename: "v23/Qwen-Rapid-NSFW-v23_Q4_K.gguf".to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 13_342_416_352,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: qwen_edit_rapid_defaults.clone(),
+            hidden: false,
+        },
     ]
 }
 
@@ -3605,6 +3734,12 @@ pub fn resolve_model_name(input: &str) -> String {
     }
     if input == "qwen-image-edit" {
         return "qwen-image-edit-2511:q8".to_string();
+    }
+    // The Rapid AIO few-step edit merge ships one tier. Without this pin the
+    // `:q8` → `:fp16` → `:bf16` → `:fp8` loop below synthesizes a name that
+    // does not exist, and the bare model is unreachable.
+    if input == "qwen-image-edit-rapid" {
+        return "qwen-image-edit-rapid:q4".to_string();
     }
     // These high-memory BF16 variants are opt-in. Bare LTX-2.3 22B names
     // continue to resolve to the smaller FP8 checkpoints.
@@ -6599,6 +6734,202 @@ mod tests {
     }
 
     #[test]
+    fn qwen_flash_manifests_are_four_step_dmd2_distills() {
+        for (name, filename, size) in [
+            (
+                "qwen-image-flash:q8",
+                "Qwen-Image-Flash-Q8_0.gguf",
+                21_761_817_152_u64,
+            ),
+            (
+                "qwen-image-flash:q4",
+                "Qwen-Image-Flash-Q4_K_M.gguf",
+                11_715_639_872_u64,
+            ),
+        ] {
+            let manifest = find_manifest(name).unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(manifest.family, "qwen-image", "{name} family");
+            assert_eq!(manifest.defaults.steps, 4, "{name} steps");
+            assert_eq!(manifest.defaults.guidance, 1.0, "{name} guidance");
+            assert_eq!(manifest.defaults.width, 1328, "{name} width");
+            assert_eq!(manifest.defaults.height, 1328, "{name} height");
+            assert!(
+                manifest.description.contains(
+                    "4-step DMD2 distill — dense small text, hair-fine detail, and very complex scenes may degrade vs base"
+                ),
+                "{name} description must disclose the distillation trade-off, got: {}",
+                manifest.description
+            );
+            let transformer = manifest
+                .files
+                .iter()
+                .find(|f| f.component == ModelComponent::Transformer)
+                .unwrap_or_else(|| panic!("{name} has no transformer file"));
+            assert_eq!(transformer.hf_repo, "realrebelai/Qwen_Image_Flash_GGUF");
+            assert_eq!(transformer.hf_filename, filename);
+            assert_eq!(transformer.size_bytes, size, "{name} exact size");
+        }
+    }
+
+    #[test]
+    fn qwen_distill_manifests_are_fifteen_step_merges() {
+        for (name, filename, size) in [
+            (
+                "qwen-image-distill:q8",
+                "Qwen_Image_Distill-Q8_0.gguf",
+                21_761_817_120_u64,
+            ),
+            (
+                "qwen-image-distill:q4",
+                "Qwen_Image_Distill-Q4_K_M.gguf",
+                13_065_746_976_u64,
+            ),
+        ] {
+            let manifest = find_manifest(name).unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(manifest.family, "qwen-image", "{name} family");
+            assert_eq!(manifest.defaults.steps, 15, "{name} steps");
+            assert_eq!(manifest.defaults.guidance, 1.0, "{name} guidance");
+            assert_eq!(manifest.defaults.width, 1328, "{name} width");
+            assert_eq!(manifest.defaults.height, 1328, "{name} height");
+            let transformer = manifest
+                .files
+                .iter()
+                .find(|f| f.component == ModelComponent::Transformer)
+                .unwrap_or_else(|| panic!("{name} has no transformer file"));
+            assert_eq!(transformer.hf_repo, "QuantStack/Qwen-Image-Distill-GGUF");
+            assert_eq!(transformer.hf_filename, filename);
+            assert_eq!(transformer.size_bytes, size, "{name} exact size");
+        }
+    }
+
+    #[test]
+    fn qwen_edit_rapid_manifest_is_an_eight_step_edit_merge() {
+        let manifest = find_manifest("qwen-image-edit-rapid:q4").unwrap();
+        assert_eq!(manifest.family, "qwen-image-edit");
+        assert_eq!(manifest.defaults.steps, 8);
+        assert_eq!(manifest.defaults.guidance, 1.0);
+        assert_eq!(manifest.defaults.width, 1024);
+        assert_eq!(manifest.defaults.height, 1024);
+        let transformer = manifest
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::Transformer)
+            .expect("edit-rapid has no transformer file");
+        assert_eq!(
+            transformer.hf_repo,
+            "Novice25/Qwen-Image-Edit-Rapid-AIO-GGUF"
+        );
+        assert_eq!(transformer.hf_filename, "v23/Qwen-Rapid-NSFW-v23_Q4_K.gguf");
+        assert_eq!(transformer.size_bytes, 13_342_416_352);
+    }
+
+    #[test]
+    fn qwen_distilled_variants_reuse_the_existing_shared_buckets() {
+        let base_path = {
+            let manifest = find_manifest("qwen-image:q4").unwrap();
+            let encoder = manifest
+                .files
+                .iter()
+                .find(|f| f.component == ModelComponent::TextEncoder)
+                .unwrap();
+            storage_path(manifest, encoder)
+        };
+        let edit_path = {
+            let manifest = find_manifest("qwen-image-edit-2511:q4").unwrap();
+            let encoder = manifest
+                .files
+                .iter()
+                .find(|f| f.component == ModelComponent::TextEncoder)
+                .unwrap();
+            storage_path(manifest, encoder)
+        };
+
+        // Flash and Distill are distills of BASE Qwen-Image: they must land in
+        // the `shared/qwen-image-base` bucket, not the 2512 one.
+        for name in [
+            "qwen-image-flash:q8",
+            "qwen-image-flash:q4",
+            "qwen-image-distill:q8",
+            "qwen-image-distill:q4",
+        ] {
+            let manifest = find_manifest(name).unwrap();
+            let encoder = manifest
+                .files
+                .iter()
+                .find(|f| f.component == ModelComponent::TextEncoder)
+                .unwrap();
+            let path = storage_path(manifest, encoder);
+            assert!(
+                path.starts_with("shared/qwen-image-base"),
+                "{name} encoder must share the base bucket, got: {}",
+                path.display()
+            );
+            assert_eq!(path, base_path, "{name} must not fork the base bucket");
+        }
+
+        let rapid = find_manifest("qwen-image-edit-rapid:q4").unwrap();
+        let rapid_encoder = rapid
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::TextEncoder)
+            .unwrap();
+        let rapid_path = storage_path(rapid, rapid_encoder);
+        assert!(rapid_path.starts_with("shared/qwen-image-edit"));
+        assert_eq!(rapid_path, edit_path);
+        assert_ne!(rapid_path, base_path);
+    }
+
+    #[test]
+    fn qwen_distilled_bare_names_resolve_through_the_quality_ladder() {
+        // No pins: the `:q8` → `:fp16` → `:bf16` → `:fp8` loop picks q8.
+        assert_eq!(
+            resolve_model_name("qwen-image-flash"),
+            "qwen-image-flash:q8"
+        );
+        assert_eq!(
+            resolve_model_name("qwen-image-distill"),
+            "qwen-image-distill:q8"
+        );
+        // Edit Rapid AIO ships only a Q4 tier, so it needs an explicit pin.
+        assert_eq!(
+            resolve_model_name("qwen-image-edit-rapid"),
+            "qwen-image-edit-rapid:q4"
+        );
+        // The pin must not steal the existing bare `qwen-image-edit` default.
+        assert_eq!(
+            resolve_model_name("qwen-image-edit"),
+            "qwen-image-edit-2511:q8"
+        );
+    }
+
+    #[test]
+    fn qwen_lightning_transformer_sizes_are_exact() {
+        // Rounded sizes break `file_is_complete`, which re-downloads on every
+        // run. These are the exact byte sizes published by the HF repo.
+        for (name, filename, size) in [
+            (
+                "qwen-image-lightning:fp8",
+                "qwen_image_2512_fp8_e4m3fn_scaled_comfyui_4steps_v1.0.safetensors",
+                20_436_302_974_u64,
+            ),
+            (
+                "qwen-image-lightning:fp8-8step",
+                "qwen_image_2512_fp8_e4m3fn_scaled_8steps_v1.0.safetensors",
+                20_487_870_224_u64,
+            ),
+        ] {
+            let manifest = find_manifest(name).unwrap();
+            let transformer = manifest
+                .files
+                .iter()
+                .find(|f| f.component == ModelComponent::Transformer)
+                .unwrap();
+            assert_eq!(transformer.hf_filename, filename, "{name} filename");
+            assert_eq!(transformer.size_bytes, size, "{name} exact size");
+        }
+    }
+
+    #[test]
     fn storage_path_zimage_preserves_nested_filenames() {
         let manifest = find_manifest("z-image-turbo:q8").unwrap();
         let encoder_file = manifest
@@ -7025,7 +7356,7 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 14 Wan + 4 MiniMax H3 contracts (2 visible compact + 2 hidden official) + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 152
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 29 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 14 Wan + 4 MiniMax H3 contracts (2 visible compact + 2 hidden official) + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 157
         // Wan fp8 bump (#777): +wan22-{t2v,i2v}-a14b:fp8 — the Comfy-Org
         // fp8-scaled expert pairs.
         // Wan bump: +wan22-{t2v,i2v}-a14b:{q5,q8} — the two-expert A14B tiers.
@@ -7041,7 +7372,10 @@ mod tests {
         // single-file Wan checkpoints.
         // Wan 2.1 14B bump (#797): +wan21-t2v-14b:{q5,q8} — city96's canonical
         // GGUFs for the dense 2.1 14B, which the engine already shape-detects.
-        assert_eq!(known_manifests().len(), 152);
+        // Qwen distilled bump (#1042): +qwen-image-flash:{q4,q8} (NVIDIA DMD2
+        // 4-step), +qwen-image-distill:{q4,q8} (DiffSynth Distill-Full 15-step),
+        // +qwen-image-edit-rapid:q4 (8-step edit merge).
+        assert_eq!(known_manifests().len(), 157);
     }
 
     #[test]

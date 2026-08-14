@@ -23,6 +23,13 @@ _"A colorful hot air balloon floating over a misty valley at sunrise, the balloo
   [unsloth/Qwen-Image-2512-GGUF](https://huggingface.co/unsloth/Qwen-Image-2512-GGUF),
   [unsloth/Qwen-Image-Edit-2511-GGUF](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF),
   [unsloth/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF)
+- **Few-step distill sources**:
+  [realrebelai/Qwen_Image_Flash_GGUF](https://huggingface.co/realrebelai/Qwen_Image_Flash_GGUF)
+  (quants of [nvidia/Qwen-Image-Flash](https://huggingface.co/nvidia/Qwen-Image-Flash)),
+  [QuantStack/Qwen-Image-Distill-GGUF](https://huggingface.co/QuantStack/Qwen-Image-Distill-GGUF)
+  (quants of DiffSynth-Studio's Qwen-Image-Distill-Full),
+  [Novice25/Qwen-Image-Edit-Rapid-AIO-GGUF](https://huggingface.co/Novice25/Qwen-Image-Edit-Rapid-AIO-GGUF)
+  (quants of Phr00t's Qwen-Image-Edit-Rapid-AIO)
 
 ## Stable GGUF Variants
 
@@ -79,6 +86,36 @@ roughly `1024x1024` area.
 | `qwen-image-edit-2511:q3`   | 50    | 9.9 GB  | Lower bitrate, still relatively small |
 | `qwen-image-edit-2511:q2`   | 50    | 7.5 GB  | Smallest published edit GGUF          |
 | `qwen-image-edit-2511:bf16` | 50    | 40.9 GB | Sharded BF16 edit transformer         |
+
+### Few-step distilled variants
+
+These are step-distilled merges of the base transformers, so they reuse the
+same shared VAE / Qwen2.5-VL components and run CFG-free at guidance `1.0`.
+
+| Model                      | Steps | Guidance | Size    | Notes                                                     |
+| -------------------------- | ----- | -------- | ------- | --------------------------------------------------------- |
+| `qwen-image-flash:q8`      | 4     | 1.0      | 21.8 GB | NVIDIA DMD2 4-step distill of base Qwen-Image             |
+| `qwen-image-flash:q4`      | 4     | 1.0      | 11.7 GB | Same distill, the 24 GB-friendly tier                     |
+| `qwen-image-distill:q8`    | 15    | 1.0      | 21.8 GB | DiffSynth Distill-Full merge, closer to base fidelity     |
+| `qwen-image-distill:q4`    | 15    | 1.0      | 13.1 GB | Same merge, the 24 GB-friendly tier                       |
+| `qwen-image-edit-rapid:q4` | 8     | 1.0      | 13.3 GB | 8-step edit merge; `qwen-image-edit` family, `--image` in |
+
+`qwen-image-edit-rapid:q4` tracks the `v23` release of Phr00t's Rapid AIO merge
+(`v23/Qwen-Rapid-NSFW-v23_Q4_K.gguf`). It is an uncensored community merge.
+
+::: warning Distillation trade-off
+`qwen-image-flash:*` collapses the schedule to four steps. Dense small text,
+hair-fine detail, and very complex scenes may degrade against base Qwen-Image.
+Use `qwen-image-distill:*` (15 steps) when you want most of the speed-up with
+more of the base model's fidelity, and base `qwen-image:*` at 50 steps when the
+prompt depends on fine text or dense structure.
+:::
+
+```bash
+mold run qwen-image-flash:q4 "your prompt here"
+mold run qwen-image-distill:q4 "your prompt here"
+mold run qwen-image-edit-rapid:q4 "make the sky stormy" --image input.png
+```
 
 ::: tip Edit Path
 `qwen-image-edit-2511` runs a real multimodal edit path: Qwen2.5-VL condition
@@ -167,9 +204,14 @@ using it by default with `qwen-image:q2` through `qwen-image:q8` or
 ## Other Qwen Variants
 
 `mold` also exposes higher-VRAM Qwen paths such as `qwen-image:bf16`,
-`qwen-image:fp8`, `qwen-image-lightning:fp8`, and `qwen-image-lightning:fp8-8step`.
-Those are separate from the GGUF quantized matrix above and have different
-memory and scheduler behavior.
+`qwen-image:fp8`, `qwen-image-lightning:fp8` (4 steps, 20.4 GB), and
+`qwen-image-lightning:fp8-8step` (8 steps, 20.5 GB). Those are separate from the
+GGUF quantized matrix above and have different memory and scheduler behavior.
+
+The few-step GGUF distills — `qwen-image-flash:{q8,q4}`,
+`qwen-image-distill:{q8,q4}`, and `qwen-image-edit-rapid:q4` — are listed with
+their steps and sizes under
+[Few-step distilled variants](#few-step-distilled-variants) above.
 
 ## Recommended Dimensions
 

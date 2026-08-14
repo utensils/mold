@@ -1494,6 +1494,36 @@ Models: `qwen-image-2512:bf16`, `qwen-image-2512:q2`, `qwen-image-2512:q3`, `qwe
 
 Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `false`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.
 
+### Profile `qwen-image.qwen-image-distill`
+
+Schema 1 · hash `2678669bac07550f103b6b4f9b1b3ea546a259ac019743b03c102e2133b212c8` · default recipe `default`
+
+Models: `qwen-image-distill:q4`, `qwen-image-distill:q8`.
+
+#### Default (`default`)
+
+- Resolution: dynamic; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `1328x1328`, 15 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
+
+Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `false`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.
+
+### Profile `qwen-image.qwen-image-flash`
+
+Schema 1 · hash `ab5f24a5e6d57c074ee38e4f3c17cabe004b238ab4dbe82ad5a1924ab499bba3` · default recipe `default`
+
+Models: `qwen-image-flash:q4`, `qwen-image-flash:q8`.
+
+#### Default (`default`)
+
+- Resolution: dynamic; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `1328x1328`, 4 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
+
+Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `false`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.
+
 ### `qwen-image-lightning:fp8`
 
 Schema 1 · hash `5f8ce16d397d82442a72d709b40877c9c3c75f2c437c4bdae7f307c8ef739d3d` · default recipe `default`
@@ -1551,6 +1581,21 @@ Models: `qwen-image-edit-2511:bf16`, `qwen-image-edit-2511:q2`, `qwen-image-edit
 
 - Resolution: source driven; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
 - Defaults: `1024x1024`, 50 steps, guidance 4.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Presets: none.
+
+Provenance: [Upstream](https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md) at `6b5e1f5cec987d404be5ac6657db3b9aacb56a89`, qualified: `false`, evidence: `static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded`.
+
+### `qwen-image-edit-rapid:q4`
+
+Schema 1 · hash `282a74ba10963ef2c1d8bb2349584d8c5c320a3d8f4c80a7410ff6b62e25a89c` · default recipe `default`
+
+Models: `qwen-image-edit-rapid:q4`.
+
+#### Default (`default`)
+
+- Resolution: source driven; alignment `16`; minimum `64x64`; maximum `1800000` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `1024x1024`, 8 steps, guidance 1.
 - Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
 - Presets: none.
 

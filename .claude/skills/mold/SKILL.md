@@ -534,6 +534,9 @@ Pick the right model for the task:
 | `qwen-image:q4`                     | Slow (50 steps)   | Good      | Stable base Qwen GGUF on 24 GB cards                    |
 | `qwen-image-2512:q4`                | Slow (50 steps)   | Good      | Stable 2512 GGUF on 24 GB cards                         |
 | `qwen-image:q8`                     | Slow (50 steps)   | Better    | Best base GGUF quality, validated at 768x768 on 24 GB   |
+| `qwen-image-flash:q4`               | Fast (4 steps)    | Good      | Fastest Qwen path; DMD2 distill, degrades on hard detail |
+| `qwen-image-distill:q4`             | Medium (15 steps) | Better    | Faster Qwen with more of the base model's fidelity      |
+| `qwen-image-edit-rapid:q4`          | Fast (8 steps)    | Good      | Fast image editing on the `qwen-image-edit` family      |
 | `ltx-video-0.9.6-distilled:bf16`    | Fast (8 steps)    | Good      | Text-to-video, 30fps                                    |
 | `ltx-video-0.9.8-2b-distilled:bf16` | Fast (7+3 steps)  | Better    | Newer checkpoint family with full multiscale refinement |
 | `ltx-2-19b-distilled:fp8`           | Slow (8 steps)    | Better    | Joint audio-video, recommended LTX-2 default            |
@@ -556,6 +559,9 @@ Default model if none specified: `flux2-klein:q8`
 | `flux2-klein-9b`               | 4     | 1.0      | 1024x1024                                      |
 | `qwen-image`                   | 50    | 4.0      | 1328x1328                                      |
 | `qwen-image-2512`              | 50    | 4.0      | 1328x1328                                      |
+| `qwen-image-flash`             | 4     | 1.0      | 1328x1328                                      |
+| `qwen-image-distill`           | 15    | 1.0      | 1328x1328                                      |
+| `qwen-image-edit-rapid`        | 8     | 1.0      | 1024x1024                                      |
 | `ltx-video-0.9.6-distilled`    | 8     | 1.0      | 1216x704 (25 frames, 30fps)                    |
 | `ltx-video-0.9.8-2b-distilled` | 7+3   | 1.0      | 1216x704 (25 frames, 30fps, multiscale refine) |
 | `ltx-2-19b-distilled`          | 8     | 3.0      | 1216x704 (97 frames, 24fps, mp4 default)       |
@@ -586,6 +592,8 @@ Default model if none specified: `flux2-klein:q8`
 **Qwen-Image**: `qwen-image:q8`, `qwen-image:q6`, `qwen-image:q5`, `qwen-image:q4`, `qwen-image:q3`, `qwen-image:q2`, `qwen-image:fp8`, `qwen-image:bf16`
 
 **Qwen-Image-2512**: `qwen-image-2512:q8`, `qwen-image-2512:q6`, `qwen-image-2512:q5`, `qwen-image-2512:q4`, `qwen-image-2512:q3`, `qwen-image-2512:q2`, `qwen-image-lightning:fp8`, `qwen-image-lightning:fp8-8step`, `qwen-image-2512:bf16`
+
+**Qwen-Image few-step distills** (all CFG-free at guidance 1.0): `qwen-image-flash:q8`, `qwen-image-flash:q4` (NVIDIA DMD2, 4 steps), `qwen-image-distill:q8`, `qwen-image-distill:q4` (DiffSynth Distill-Full, 15 steps), `qwen-image-edit-rapid:q4` (8-step edit merge, `qwen-image-edit` family)
 
 **LTX Video**: `ltx-video-0.9.6:bf16`, `ltx-video-0.9.6-distilled:bf16`, `ltx-video-0.9.8-2b-distilled:bf16`, `ltx-video-0.9.8-13b-dev:bf16`, `ltx-video-0.9.8-13b-distilled:bf16`
 
