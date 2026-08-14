@@ -788,6 +788,11 @@ pub struct PlacementCapabilities {
 pub struct ResolvedExecutionPlan {
     pub device_id: String,
     pub device_ordinal: usize,
+    /// Backend of the device this plan was resolved against. Admission
+    /// arithmetic branches on it: CUDA gates VRAM and host RAM as the two
+    /// separate pools they are, while Metal collapses both claims onto the
+    /// one unified pool (#1038).
+    pub device_backend: GpuBackend,
     /// Semantic family resolved from authoritative model metadata.
     pub model_family: String,
     pub model_fingerprint: String,
@@ -829,6 +834,64 @@ pub struct ResolvedExecutionPlan {
     /// Exact, device-qualified worker/lease identity. This remains the
     /// authority for residency, grants, cache reconstruction, and provenance.
     pub execution_fingerprint: String,
+}
+
+impl ResolvedExecutionPlan {
+    /// Host-charged bytes that never coexist with the device peak.
+    ///
+    /// A CPU-parked text encoder is loaded, used, and dropped before the
+    /// transformer is built on every family (`wan/pipeline.rs` documents the
+    /// order as a VRAM requirement; LTX-2's runtime `take()`s its prompt
+    /// encoder the same way), so its bytes and the denoise peak are two
+    /// phases of one lifetime, not a sum. A CPU-pinned transformer or a
+    /// streamed block file stays out of this figure: those genuinely coexist
+    /// with the device peak.
+    pub fn predicted_phase_disjoint_host_bytes(&self) -> u64 {
+        self.components
+            .values()
+            .filter(|component| {
+                matches!(component.load_strategy, ComponentLoadStrategy::ParkedCpu)
+                    && component.role.is_text_encoder()
+            })
+            .map(|component| component.predicted_host_bytes)
+            .fold(0u64, u64::saturating_add)
+    }
+
+    /// The demand admission must prove against the device pool.
+    ///
+    /// CUDA: the raw predicted VRAM peak — host RAM is a separate pool with
+    /// its own gate. Metal: both claims land on one unified pool
+    /// (`memory_preflight`'s worker gate already models it that way), so the
+    /// demand is the larger of the two phases — the encoder phase (its
+    /// CPU-parked bytes, which on unified memory are the same physical pages
+    /// a device placement would use) and the denoise peak — plus whatever
+    /// host charge genuinely coexists with the peak (#1038).
+    pub fn admission_vram_demand_bytes(&self) -> u64 {
+        match self.device_backend {
+            GpuBackend::Metal => {
+                let disjoint = self.predicted_phase_disjoint_host_bytes();
+                let concurrent = self.predicted_host_increment_bytes.saturating_sub(disjoint);
+                self.predicted_vram_peak_bytes
+                    .max(disjoint)
+                    .saturating_add(concurrent)
+            }
+            GpuBackend::Cuda => self.predicted_vram_peak_bytes,
+        }
+    }
+
+    /// The demand admission must prove against host RAM headroom.
+    ///
+    /// Zero on Metal: the host claim is already folded into
+    /// [`Self::admission_vram_demand_bytes`], and gating it a second time
+    /// against a second sample of the same physical pool — minus a safety
+    /// floor the device gate does not pay — is exactly the #1038
+    /// double-count.
+    pub fn admission_host_demand_bytes(&self) -> u64 {
+        match self.device_backend {
+            GpuBackend::Metal => 0,
+            GpuBackend::Cuda => self.predicted_host_increment_bytes,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1457,6 +1520,7 @@ fn resolve_private_h3_execution_plans(
         plans.push(ResolvedExecutionPlan {
             device_id: device.id,
             device_ordinal: device.ordinal,
+            device_backend: device.backend,
             model_family: mold_core::minimax_h3::FAMILY.to_string(),
             model_fingerprint: evidence.component_set_identity_sha256().to_string(),
             effective_placement,
@@ -2524,6 +2588,7 @@ fn build_plan(
     Some(Ok(ResolvedExecutionPlan {
         device_id: device.id.clone(),
         device_ordinal: device.ordinal,
+        device_backend: device.backend,
         model_family: context.family.to_string(),
         model_fingerprint,
         effective_placement: context.effective.clone(),
@@ -4247,6 +4312,141 @@ mod tests {
                 available_vram_bytes: *bytes,
             })
             .collect()
+    }
+
+    fn metal_devices(free: &[u64]) -> Vec<DeviceFact> {
+        free.iter()
+            .enumerate()
+            .map(|(ordinal, bytes)| DeviceFact {
+                id: format!("metal:{ordinal}"),
+                ordinal,
+                backend: GpuBackend::Metal,
+                compute_capability: None,
+                available_vram_bytes: *bytes,
+            })
+            .collect()
+    }
+
+    /// A CPU-parked text encoder is dropped before the transformer loads, so
+    /// its host charge is phase-disjoint from the device peak (#1038).
+    #[test]
+    fn a_parked_text_encoder_is_a_phase_disjoint_host_charge() {
+        let root = TempDir::new().unwrap();
+        sparse_file(&root.path().join("t5.safetensors"), MIB);
+        let placement = DevicePlacement {
+            text_encoders: DeviceRef::Cpu,
+            advanced: None,
+        };
+        let plan = resolve_execution_plans(
+            &config(root.path(), "flux2", None),
+            &request(Some(placement)),
+            &devices(&[24 * GIB]),
+            false,
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(plan.device_backend, GpuBackend::Cuda);
+        assert_eq!(plan.predicted_phase_disjoint_host_bytes(), MIB);
+        // CUDA admission is unchanged: two pools, raw figures.
+        assert_eq!(
+            plan.admission_vram_demand_bytes(),
+            plan.predicted_vram_peak_bytes
+        );
+        assert_eq!(
+            plan.admission_host_demand_bytes(),
+            plan.predicted_host_increment_bytes
+        );
+    }
+
+    /// On Metal both claims land on one unified pool: the demand is the
+    /// larger phase plus the genuinely concurrent host charge, and the host
+    /// gate sees zero so the same bytes are not proven twice against a
+    /// second sample of the same pool (#1038).
+    #[test]
+    fn metal_admission_folds_both_claims_onto_the_unified_pool() {
+        let root = TempDir::new().unwrap();
+        sparse_file(&root.path().join("t5.safetensors"), MIB);
+        let placement = DevicePlacement {
+            text_encoders: DeviceRef::Cpu,
+            advanced: None,
+        };
+        let plan = resolve_execution_plans(
+            &config(root.path(), "flux2", None),
+            &request(Some(placement)),
+            &metal_devices(&[24 * GIB]),
+            false,
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(plan.device_backend, GpuBackend::Metal);
+        assert_eq!(plan.predicted_phase_disjoint_host_bytes(), MIB);
+        // The denoise peak dwarfs the 1 MiB encoder, so the unified demand
+        // is the peak plus only the concurrent remainder (the base
+        // transient), never peak + encoder.
+        assert_eq!(
+            plan.admission_vram_demand_bytes(),
+            plan.predicted_vram_peak_bytes + BASE_HOST_TRANSIENT
+        );
+        assert_eq!(plan.admission_host_demand_bytes(), 0);
+    }
+
+    /// An encoder phase larger than the denoise peak bounds the unified
+    /// demand: max semantics, not a sum — the wan shape from #1038, where a
+    /// an 11.7 GB UMT5 charge and a 9.6 GB peak were both proven at once.
+    #[test]
+    fn metal_unified_demand_is_the_larger_phase_not_the_sum() {
+        let root = TempDir::new().unwrap();
+        sparse_file(&root.path().join("t5.safetensors"), 12 * GIB);
+        let placement = DevicePlacement {
+            text_encoders: DeviceRef::Cpu,
+            advanced: None,
+        };
+        let plan = resolve_execution_plans(
+            &config(root.path(), "flux2", None),
+            &request(Some(placement)),
+            &metal_devices(&[40 * GIB]),
+            false,
+        )
+        .unwrap()
+        .remove(0);
+        let disjoint = plan.predicted_phase_disjoint_host_bytes();
+        assert_eq!(disjoint, 12 * GIB);
+        assert!(disjoint > plan.predicted_vram_peak_bytes);
+        assert_eq!(
+            plan.admission_vram_demand_bytes(),
+            disjoint + BASE_HOST_TRANSIENT
+        );
+    }
+
+    /// A CPU-pinned transformer computes during the peak, so its host bytes
+    /// stay a concurrent charge even on Metal — only drop-before-denoise
+    /// text encoders are phase-disjoint.
+    #[test]
+    fn a_cpu_pinned_transformer_stays_a_concurrent_charge_on_metal() {
+        let root = TempDir::new().unwrap();
+        let (config, mut request) = sized_config(root.path(), "flux2", 32, 1, 2);
+        request.placement = Some(DevicePlacement {
+            text_encoders: DeviceRef::Auto,
+            advanced: Some(AdvancedPlacement {
+                transformer: DeviceRef::Cpu,
+                ..AdvancedPlacement::default()
+            }),
+        });
+        let plan = resolve_execution_plans(&config, &request, &metal_devices(&[8 * GIB]), false)
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            plan.components[&ComponentRole::Transformer].placement,
+            ResolvedComponentPlacement::Cpu
+        );
+        assert!(
+            plan.predicted_phase_disjoint_host_bytes() < 32 * GIB,
+            "a CPU-pinned transformer must never count as phase-disjoint"
+        );
+        assert!(
+            plan.admission_vram_demand_bytes() >= plan.predicted_vram_peak_bytes + 32 * GIB,
+            "CPU-pinned transformer weights must stay in the unified demand"
+        );
     }
 
     #[test]

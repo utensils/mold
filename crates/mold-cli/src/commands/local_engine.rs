@@ -200,8 +200,16 @@ pub(crate) async fn plan_local_batch(
             execution_fingerprint: plan.execution_fingerprint.clone(),
             execution_equivalence_fingerprint: plan.execution_equivalence_fingerprint.clone(),
             available_vram_bytes: plan.admitted_available_vram_bytes,
-            predicted_vram_bytes: plan.predicted_vram_peak_bytes,
-            predicted_host_ram_bytes: plan.predicted_host_increment_bytes,
+            // Backend-aware admission demands (#1038): on CUDA these are the
+            // raw plan figures over two genuinely separate pools; on Metal
+            // both claims fold onto the one unified pool — the demand is the
+            // larger of the encoder phase and the denoise peak plus the
+            // concurrent host charge, and the host figure is zero so the
+            // same bytes are not proven twice against a second sample of the
+            // same physical memory minus a safety floor the device gate
+            // never paid. The gate predicate itself is unchanged.
+            predicted_vram_bytes: plan.admission_vram_demand_bytes(),
+            predicted_host_ram_bytes: plan.admission_host_demand_bytes(),
         })
         .collect::<Vec<_>>();
 
