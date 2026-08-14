@@ -779,10 +779,15 @@ pub async fn run(
     } else {
         steps.unwrap_or_else(|| model_cfg.effective_steps(&config))
     };
+    let guidance_caps = mold_core::GuidanceCapabilities::for_recipe(
+        family.as_deref().unwrap_or_default(),
+        model,
+        pipeline,
+    );
     let effective_guidance = if is_h3 {
         0.0
     } else {
-        guidance.unwrap_or_else(|| model_cfg.effective_guidance())
+        guidance_caps.resolve_scale(guidance, model_cfg.effective_guidance())
     };
     let effective_negative_prompt = if is_h3 {
         None
@@ -908,11 +913,6 @@ pub async fn run(
         prompt.to_string()
     };
     status!("{} \"{}\"", theme::icon_info(), display_prompt.dimmed());
-    let guidance_caps = mold_core::GuidanceCapabilities::for_recipe(
-        family.as_deref().unwrap_or_default(),
-        &req.model,
-        req.pipeline,
-    );
     if !guidance_caps.adjustable {
         status!(
             "{} Distilled recipe fixes CFG at 1.0 and does not use negative-prompt guidance; choose a Dev checkpoint with Auto or a guided pipeline to adjust it",
