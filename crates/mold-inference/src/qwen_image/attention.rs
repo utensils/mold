@@ -74,11 +74,48 @@ pub(super) fn joint_attention(
     }
 }
 
+/// Pre-expand a joint bias into Metal `sdpa`'s `[B, H, Q, K]` form once per
+/// forward.
+///
+/// The bias is block-invariant, but `joint_attention` runs once per block —
+/// 60 times per forward — and the expanded tensor is the full score-matrix
+/// shape. Hoisting the expansion here keeps that materialization to one per
+/// forward; [`sdpa_bias`] recognises the pre-expanded shape and passes it
+/// through untouched. Non-Metal devices return the bias unchanged: the math
+/// path broadcasts `[B, 1, 1, K]` for free.
+pub(super) fn hoist_bias_for_device(
+    bias: Option<Tensor>,
+    heads: usize,
+    seq_len: usize,
+    dtype: DType,
+    device: &Device,
+) -> Result<Option<Tensor>> {
+    match bias {
+        Some(bias) if device.is_metal() => {
+            let batch = bias.dim(0)?;
+            let key_len = bias.dim(D::Minus1)?;
+            Ok(Some(
+                bias.to_dtype(dtype)?
+                    .clamp(SDPA_BIAS_FLOOR, f64::MAX)?
+                    .broadcast_as((batch, heads, seq_len, key_len))?
+                    .contiguous()?,
+            ))
+        }
+        other => Ok(other),
+    }
+}
+
 /// `[B, 1, 1, K]` additive bias expanded to the `[B, H, Q, K]` candle's Metal
 /// `sdpa` wants, with `-inf` floored to [`SDPA_BIAS_FLOOR`].
+///
+/// A bias already in the full `[B, H, Q, K]` shape — the once-per-forward
+/// [`hoist_bias_for_device`] product — passes through untouched.
 fn sdpa_bias(bias: &Tensor, q: &Tensor) -> Result<Tensor> {
     let (batch, heads, seq_len, _) = q.dims4()?;
     let key_len = bias.dim(D::Minus1)?;
+    if bias.dims() == [batch, heads, seq_len, key_len] && bias.dtype() == q.dtype() {
+        return Ok(bias.clone());
+    }
     bias.to_dtype(q.dtype())?
         .clamp(SDPA_BIAS_FLOOR, f64::MAX)?
         .broadcast_as((batch, heads, seq_len, key_len))?

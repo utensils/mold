@@ -1095,6 +1095,13 @@ impl QuantizedQwenImageTransformer2DModel {
             dtype,
             device,
         )?;
+        let key_bias = super::attention::hoist_bias_for_device(
+            key_bias,
+            self.cfg.num_attention_heads,
+            txt_seq_len + height_patches * width_patches,
+            dtype,
+            device,
+        )?;
 
         for (i, block) in self.blocks.iter().enumerate() {
             (img, txt) = block.forward(
@@ -1167,6 +1174,13 @@ impl QuantizedQwenImageTransformer2DModel {
 
         let key_bias =
             super::attention::joint_key_bias(encoder_attention_mask, img.dim(1)?, dtype, device)?;
+        let key_bias = super::attention::hoist_bias_for_device(
+            key_bias,
+            self.cfg.num_attention_heads,
+            txt_seq_len + img.dim(1)?,
+            dtype,
+            device,
+        )?;
 
         for block in &self.blocks {
             (img, txt) = block.forward(

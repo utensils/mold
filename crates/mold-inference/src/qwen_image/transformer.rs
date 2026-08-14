@@ -934,6 +934,13 @@ impl QwenImageTransformer2DModel {
             img_hidden.dtype(),
             device,
         )?;
+        let key_bias = super::attention::hoist_bias_for_device(
+            key_bias,
+            self.cfg.num_attention_heads,
+            txt_seq_len + hp * wp,
+            img_hidden.dtype(),
+            device,
+        )?;
         let mut img = img_hidden;
         let mut txt = txt_hidden;
         for block in &self.blocks {

@@ -3753,6 +3753,118 @@ mod tests {
         assert_eq!(tensor_values_u8(&mask), vec![1, 1, 1, 1, 1, 0]);
     }
 
+    /// The batched-CFG bias rows must pair with the `cat([cond, uncond], 0)`
+    /// batch order all the way through attention: row 0 masks nothing when
+    /// cond is the longer stream, and row 1 masks exactly uncond's padding.
+    /// A transposed pairing would pass every single-batch test in this crate
+    /// while masking the wrong stream on every batched render.
+    #[test]
+    fn batched_cfg_bias_rows_pair_with_the_cond_uncond_cat_order() {
+        let device = Device::Cpu;
+        let cond_hs = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            Shape::from((1, 3, 2)),
+            &device,
+        )
+        .unwrap();
+        let uncond_hs = Tensor::from_vec(
+            vec![7.0f32, 8.0, 9.0, 10.0],
+            Shape::from((1, 2, 2)),
+            &device,
+        )
+        .unwrap();
+        let (_, _, mask) = align_cfg_conditioning(&cond_hs, &uncond_hs).unwrap();
+        let mask = mask.expect("differing lengths must carry a mask");
+
+        // Joint bias over [text(3), image(2)] keys for the batch-2 forward.
+        let img_seq_len = 2;
+        let bias = crate::qwen_image::attention::joint_key_bias(
+            Some(&mask),
+            img_seq_len,
+            DType::F32,
+            &device,
+        )
+        .unwrap()
+        .expect("padded text must produce a bias");
+        assert_eq!(bias.dims(), &[2, 1, 1, 5]);
+
+        // Per-batch K/V whose padded slot (text index 2 of the uncond row)
+        // holds a poison value that would dominate attention if unmasked.
+        let head_dim = 4;
+        let total = 5;
+        let mut k_data = Vec::new();
+        let mut v_data = Vec::new();
+        for batch in 0..2 {
+            for key in 0..total {
+                for d in 0..head_dim {
+                    let poison = batch == 1 && key == 2;
+                    k_data.push(if poison {
+                        50.0
+                    } else {
+                        (batch * 100 + key * 10 + d) as f32 * 0.01
+                    });
+                    v_data.push((batch * 1000 + key * 100 + d) as f32 * 0.001);
+                }
+            }
+        }
+        let k = Tensor::from_vec(k_data, Shape::from((2, 1, total, head_dim)), &device).unwrap();
+        let v = Tensor::from_vec(v_data, Shape::from((2, 1, total, head_dim)), &device).unwrap();
+        let q = Tensor::rand(-1.0f32, 1.0, Shape::from((2, 1, total, head_dim)), &device).unwrap();
+        let scale = 1.0 / (head_dim as f32).sqrt();
+
+        let got = crate::attention::attention_with_bias(&q, &k, &v, scale, Some(&bias)).unwrap();
+
+        // Row 0 (cond): nothing masked — plain attention over all 5 keys.
+        let q0 = q.narrow(0, 0, 1).unwrap();
+        let want0 = crate::attention::attention(
+            &q0,
+            &k.narrow(0, 0, 1).unwrap(),
+            &v.narrow(0, 0, 1).unwrap(),
+            scale,
+        )
+        .unwrap();
+        // Row 1 (uncond): the pad key (text index 2) must be invisible —
+        // reference drops it entirely.
+        let keep = [0usize, 1, 3, 4];
+        let q1 = q.narrow(0, 1, 1).unwrap();
+        let k1 = Tensor::cat(
+            &keep
+                .iter()
+                .map(|&i| k.narrow(0, 1, 1).unwrap().narrow(2, i, 1).unwrap())
+                .collect::<Vec<_>>(),
+            2,
+        )
+        .unwrap();
+        let v1 = Tensor::cat(
+            &keep
+                .iter()
+                .map(|&i| v.narrow(0, 1, 1).unwrap().narrow(2, i, 1).unwrap())
+                .collect::<Vec<_>>(),
+            2,
+        )
+        .unwrap();
+        let want1 = crate::attention::attention(&q1, &k1, &v1, scale).unwrap();
+
+        let diff0 = (got.narrow(0, 0, 1).unwrap() - &want0)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        let diff1 = (got.narrow(0, 1, 1).unwrap() - &want1)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(diff0 < 1e-5, "cond row diverged from maskless: {diff0}");
+        assert!(diff1 < 1e-5, "uncond row saw its pad key: {diff1}");
+    }
+
     #[test]
     fn qwen_image_detects_gguf_transformer() {
         let engine = QwenImageEngine::new(
