@@ -534,6 +534,31 @@ pub fn visible_manifests() -> impl Iterator<Item = &'static ModelManifest> {
     known_manifests().iter().filter(|m| !m.hidden)
 }
 
+/// Built-in models whose upstream weights are classified mature.
+///
+/// This is the manifest side of the model-metadata presentation invariant:
+/// a mature entry must carry the textual `18+ NSFW` danger badge on every
+/// surface, and that badge is driven by `ModelInfo.nsfw`. Catalog rows get
+/// theirs from the live provider (`CatalogEntry.nsfw`); manifest rows have no
+/// provider to ask, so the classification is recorded here and projected into
+/// `/api/models` by `catalog::build_model_catalog`. A description string is
+/// not a substitute — no filter or badge can read prose.
+const MATURE_MODELS: &[&str] = &[
+    // `Phr00t/Qwen-Image-Edit-Rapid-AIO` is tagged `not-for-all-audiences`
+    // upstream, and mold ships that merge's NSFW build.
+    "qwen-image-edit-rapid:q4",
+];
+
+/// The mature built-ins, as resolved model names.
+pub fn mature_model_names() -> &'static [&'static str] {
+    MATURE_MODELS
+}
+
+/// Whether a resolved built-in model name is classified mature.
+pub fn model_is_mature(name: &str) -> bool {
+    MATURE_MODELS.contains(&name)
+}
+
 fn build_known_manifests() -> Vec<ModelManifest> {
     let mut manifests = vec![
         ModelManifest {
@@ -2858,12 +2883,6 @@ fn shared_qwen_image_edit_files() -> Vec<ModelFile> {
     ]
 }
 
-/// Trade-off disclosure shared by both Qwen-Image Flash tiers. The DMD2
-/// distillation buys a 4-step schedule at a measurable cost in the hardest
-/// content, so every surface that renders a description says so.
-const QWEN_FLASH_DESCRIPTION_Q8: &str = "Qwen-Image Flash Q8 (NVIDIA): 4-step DMD2 distill — dense small text, hair-fine detail, and very complex scenes may degrade vs base";
-const QWEN_FLASH_DESCRIPTION_Q4: &str = "Qwen-Image Flash Q4 (NVIDIA): 4-step DMD2 distill — dense small text, hair-fine detail, and very complex scenes may degrade vs base";
-
 /// All known Qwen-Image model manifests.
 fn qwen_image_manifests() -> Vec<ModelManifest> {
     let base_defaults = ManifestDefaults {
@@ -3356,7 +3375,8 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image-flash:q8".to_string(),
             family: "qwen-image".to_string(),
-            description: QWEN_FLASH_DESCRIPTION_Q8.to_string(),
+            description: "Qwen-Image Flash Q8 (NVIDIA): 4-step DMD2 distill — dense small text, hair-fine detail, and very complex scenes may degrade vs base"
+                .to_string(),
             files: {
                 let mut files = shared_qwen_image_base_files();
                 files.push(ModelFile {
@@ -3375,7 +3395,8 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         ModelManifest {
             name: "qwen-image-flash:q4".to_string(),
             family: "qwen-image".to_string(),
-            description: QWEN_FLASH_DESCRIPTION_Q4.to_string(),
+            description: "Qwen-Image Flash Q4 (NVIDIA): 4-step DMD2 distill — dense small text, hair-fine detail, and very complex scenes may degrade vs base"
+                .to_string(),
             files: {
                 let mut files = shared_qwen_image_base_files();
                 files.push(ModelFile {
@@ -6821,6 +6842,46 @@ mod tests {
         );
         assert_eq!(transformer.hf_filename, "v23/Qwen-Rapid-NSFW-v23_Q4_K.gguf");
         assert_eq!(transformer.size_bytes, 13_342_416_352);
+    }
+
+    #[test]
+    fn qwen_edit_rapid_is_flagged_mature() {
+        // Upstream `Phr00t/Qwen-Image-Edit-Rapid-AIO` carries Hugging Face's
+        // own `not-for-all-audiences` tag, and this is the NSFW build of the
+        // merge. Free-text prose is not a classification: the flag is what
+        // `/api/models[].nsfw` projects and what every surface's `18+ NSFW`
+        // danger badge reads.
+        assert!(model_is_mature("qwen-image-edit-rapid:q4"));
+        assert!(model_is_mature(&resolve_model_name(
+            "qwen-image-edit-rapid"
+        )));
+        // The description must still say so in words for text-only surfaces.
+        let manifest = find_manifest("qwen-image-edit-rapid:q4").unwrap();
+        assert!(
+            manifest.description.contains("uncensored"),
+            "description must disclose the uncensored merge, got: {}",
+            manifest.description
+        );
+    }
+
+    #[test]
+    fn every_mature_model_names_a_real_manifest_and_the_rest_are_not_flagged() {
+        for name in mature_model_names() {
+            assert!(
+                find_manifest(name).is_some(),
+                "{name} is flagged mature but is not a known manifest"
+            );
+        }
+        // Nothing else in the built-in catalog is mature; a new mature entry
+        // has to be added to the list deliberately.
+        for manifest in known_manifests() {
+            assert_eq!(
+                model_is_mature(&manifest.name),
+                mature_model_names().contains(&manifest.name.as_str()),
+                "{} maturity flag disagrees with the authority list",
+                manifest.name
+            );
+        }
     }
 
     #[test]
