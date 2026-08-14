@@ -3615,12 +3615,17 @@ mod tests {
     }
 
     #[test]
-    fn h3_remote_missing_model_cannot_enter_auto_pull() {
+    fn h3_remote_auto_pull_respects_compiled_activation_policy() {
         let request = h3_request(mold_core::minimax_h3::FL2VA_COMFY);
-        let error = require_remote_auto_pull_activation(&request, &Config::default()).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        let result = require_remote_auto_pull_activation(&request, &Config::default());
+        if cfg!(feature = "h3") {
+            result.expect("public H3 builds permit the canonical FL2VA auto-pull identity");
+        } else {
+            let error = result.expect_err("non-H3 builds must reject H3 auto-pull");
+            assert!(error
+                .to_string()
+                .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        }
     }
 
     #[tokio::test]
@@ -4430,7 +4435,7 @@ mod tests {
     }
 
     #[test]
-    fn forced_local_policy_gates_nested_models_and_artifacts_before_pull() {
+    fn forced_local_policy_respects_compiled_h3_artifact_activation() {
         let root = "/Volumes/ExternalStorage/mold-uat/minimax-h3/models";
         let mut config = Config {
             models_dir: root.to_string(),
@@ -4464,7 +4469,12 @@ mod tests {
 
             expert: None,
         });
-        assert!(require_local_request_model_activation(&request, &config).is_err());
+        let h3_artifact_result = require_local_request_model_activation(&request, &config);
+        if cfg!(feature = "h3") {
+            h3_artifact_result.expect("public H3 builds accept trusted H3 artifact paths");
+        } else {
+            assert!(h3_artifact_result.is_err());
+        }
 
         request.lora.as_mut().unwrap().path = format!("{root}/flux/ordinary-adapter.safetensors");
         assert!(require_local_request_model_activation(&request, &config).is_ok());
