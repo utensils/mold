@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokenizers::Tokenizer;
 
 use super::park;
-use super::qwen2_text_gguf::GgufQwen2TextEncoder;
+use super::qwen2_text_gguf::{GgufQwen2TextEncoder, GgufQwen2Weights};
 use super::qwen2_vision::{Qwen2VisionConfig, Qwen2VisionModel};
 
 const TOKENIZER_WINDOW: usize = 1024;
@@ -600,6 +600,10 @@ pub(crate) struct Qwen2TextEncoder {
     /// tower's weights live alongside the text-encoder shards, so the
     /// same parked map covers both branches when `enable_vision=true`.
     parked_tensors: Option<HashMap<String, Tensor>>,
+    /// GGUF-only: the quantized weight set byte-moved to host RAM (#1044).
+    /// Separate from `parked_tensors` because the two unpark through
+    /// different constructors and must never be mistaken for one another.
+    parked_gguf: Option<GgufQwen2Weights>,
 }
 
 impl Qwen2TextEncoder {
@@ -677,6 +681,7 @@ impl Qwen2TextEncoder {
             dtype,
             config,
             parked_tensors: None,
+            parked_gguf: None,
         })
     }
 
@@ -723,6 +728,7 @@ impl Qwen2TextEncoder {
             dtype,
             config,
             parked_tensors: None,
+            parked_gguf: None,
         })
     }
 
@@ -971,6 +977,7 @@ impl Qwen2TextEncoder {
         self.model = None;
         self.vision = None;
         self.parked_tensors = None;
+        self.parked_gguf = None;
     }
 
     pub fn reload(&mut self, progress: &crate::progress::ProgressReporter) -> Result<()> {
@@ -1003,6 +1010,11 @@ impl Qwen2TextEncoder {
                 progress,
             )?);
         }
+        // Weights just came from disk, so any parked copy is now a redundant
+        // second allocation of the same bytes. Callers route a parked encoder
+        // through `unpark_to_gpu`; this only guards the path that does not.
+        self.parked_tensors = None;
+        self.parked_gguf = None;
         Ok(())
     }
 
@@ -1015,11 +1027,21 @@ impl Qwen2TextEncoder {
     /// populated. Subsequent `unpark_to_gpu()` calls are CPU→GPU tensor
     /// copies (~100-300 ms typical).
     ///
-    /// BF16 path: populates `parked_tensors` from the encoder shards.
-    /// GGUF path: falls back to `drop_weights()`. The vision tower's
-    /// tensors share the same shard set so a single parked map covers
-    /// both submodules.
+    /// BF16 path: populates `parked_tensors` from the encoder shards. The
+    /// vision tower's tensors share the same shard set so a single parked
+    /// map covers both submodules.
+    ///
+    /// GGUF path (#1044): byte-moves the retained `QTensor` map to host RAM
+    /// via [`GgufQwen2TextEncoder::park_to_cpu`] — never a dequantize /
+    /// re-quantize round trip, which would be lossy. The vision tower is a
+    /// separate safetensors shard set and still reloads from disk on unpark.
     /// No-op when already parked.
+    ///
+    /// Parking is an optimization, never a precondition of the request that
+    /// asked for it: this is called *after* the prompt (and, on the edit path,
+    /// the negative prompt) has been encoded, so a failed host allocation or
+    /// device→host copy must degrade to `drop_weights()` and let the next
+    /// request reload, not abort a generation that has already been paid for.
     pub fn park_to_cpu(&mut self) -> Result<()> {
         if self.is_parked() {
             self.model = None;
@@ -1027,22 +1049,69 @@ impl Qwen2TextEncoder {
             return Ok(());
         }
         if self.is_quantized {
-            // GGUF: device-tied QTensors → unpark routes to reload().
-            self.drop_weights();
+            let Some(Qwen2TextModel::Quantized(encoder)) = self.model.take() else {
+                // Nothing resident to park (or a dtype mismatch that cannot
+                // happen); fall back to the safe drop.
+                self.drop_weights();
+                return Ok(());
+            };
+            // The parked map is built before `encoder` is dropped, so host
+            // RAM grows first and device memory is released after.
+            match encoder.park_to_cpu() {
+                Ok(Some(parked)) => {
+                    self.parked_gguf = Some(parked);
+                    self.vision = None;
+                }
+                Ok(None) => {
+                    // The build dequantized, so no map was retained and there
+                    // is nothing to move. Unpark routes to reload().
+                    self.drop_weights();
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "parking the quantized Qwen2.5 text encoder failed; dropping it instead"
+                    );
+                    self.drop_weights();
+                }
+            }
             return Ok(());
         }
-        let parked = park::load_tensors_to_cpu(&self.encoder_paths)?;
-        self.parked_tensors = Some(parked);
+        match park::load_tensors_to_cpu(&self.encoder_paths) {
+            Ok(parked) => self.parked_tensors = Some(parked),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "parking the BF16 Qwen2.5 text encoder failed; dropping it instead"
+                );
+                self.drop_weights();
+                return Ok(());
+            }
+        }
         self.model = None;
         self.vision = None;
         Ok(())
     }
 
-    /// Restore from CPU back to the encoder's primary device. Falls back
-    /// to `reload()` on the GGUF path or when no parked map is present.
+    /// Restore from CPU back to the encoder's primary device. Falls back to
+    /// `reload()` when no parked state is present.
     /// No-op when the model is already loaded.
     pub fn unpark_to_gpu(&mut self, progress: &crate::progress::ProgressReporter) -> Result<()> {
         if self.model.is_some() {
+            return Ok(());
+        }
+        if let Some(parked) = self.parked_gguf.take() {
+            self.model = Some(Qwen2TextModel::Quantized(
+                GgufQwen2TextEncoder::from_weights(parked, &self.device)?,
+            ));
+            if !self.vision_encoder_paths.is_empty() {
+                self.vision = Some(Self::load_vision_from_paths(
+                    &self.vision_encoder_paths,
+                    &self.device,
+                    self.dtype,
+                    progress,
+                )?);
+            }
             return Ok(());
         }
         if let Some(parked) = self.parked_tensors.as_ref() {
@@ -1059,16 +1128,199 @@ impl Qwen2TextEncoder {
         self.reload(progress)
     }
 
-    /// Whether this encoder is currently parked. Always `false` for the
-    /// GGUF path (parks fall through to drop+reload).
+    /// Whether a retained encoder can serve a render planned for these
+    /// weights on this device at this dtype.
+    ///
+    /// All of them have to match. `resolve_text_encoder_source` re-measures
+    /// free VRAM every request, so consecutive renders of the same model can
+    /// legitimately land on a different GGUF tier or move between GPU and CPU
+    /// — reusing a retained encoder across any of those changes would silently
+    /// ignore the decision that was just made. The vision shards are not part
+    /// of the key because they are a function of the family and of these same
+    /// resolved paths. Mirrors `wan::text::umt5`'s retention rule.
+    pub fn matches(&self, paths: &[PathBuf], device: &Device, dtype: DType) -> bool {
+        // Compare device LOCATIONS, not instances: `same_device` on CUDA
+        // compares candle's unique per-`CudaDevice` id, and the server
+        // resolves a fresh `Device::new_cuda(ordinal)` for every planned
+        // request — so an instance comparison judged every parked encoder
+        // stale and silently re-read 16 GB from disk on each new prompt.
+        // Two handles to one physical ordinal are the same device for
+        // weight-residency purposes.
+        self.encoder_paths == paths
+            && self.device.location() == device.location()
+            && self.dtype == dtype
+    }
+
+    /// Whether this encoder is currently parked, on either dtype path.
     pub fn is_parked(&self) -> bool {
-        self.model.is_none() && self.parked_tensors.is_some()
+        self.model.is_none() && (self.parked_tensors.is_some() || self.parked_gguf.is_some())
+    }
+
+    /// Bytes the encoder's weights occupy, for the host-RAM accounting a park
+    /// reports (#1044).
+    ///
+    /// Resident encoders report their real in-memory size; otherwise this
+    /// falls back to the on-disk size of the checkpoint files, which is what
+    /// a load would materialize.
+    pub fn weights_size_bytes(&self) -> u64 {
+        if let Some(Qwen2TextModel::Quantized(encoder)) = self.model.as_ref() {
+            // Zero means the encoder retained no weight map (its build
+            // dequantized), so the on-disk size below is the better answer.
+            let resident = encoder.weights_size_in_bytes();
+            if resident > 0 {
+                return resident;
+            }
+        }
+        if let Some(parked) = self.parked_gguf.as_ref() {
+            return parked.size_in_bytes();
+        }
+        // On the BF16 path the vision tower shares the text encoder's shards,
+        // so the two lists must be deduplicated before their sizes are summed.
+        let unique: std::collections::BTreeSet<&PathBuf> = self
+            .encoder_paths
+            .iter()
+            .chain(self.vision_encoder_paths.iter())
+            .collect();
+        unique
+            .into_iter()
+            .filter_map(|path| std::fs::metadata(path).ok())
+            .map(|meta| meta.len())
+            .sum()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::quantized::GgmlDType;
+
+    /// An encoder shell with no weights on either path. Built as a struct
+    /// literal (same pattern as `t5.rs`'s `make_test_encoder`) because every
+    /// real constructor wants a tokenizer file and a checkpoint, and the park
+    /// state machine touches neither.
+    fn test_encoder(is_quantized: bool) -> Qwen2TextEncoder {
+        Qwen2TextEncoder {
+            model: None,
+            vision: None,
+            tokenizer: Arc::new(Tokenizer::new(
+                tokenizers::models::wordpiece::WordPiece::default(),
+            )),
+            device: Device::Cpu,
+            on_gpu: false,
+            is_quantized,
+            encoder_paths: vec![PathBuf::from("/nonexistent/qwen2.gguf")],
+            vision_encoder_paths: Vec::new(),
+            dtype: DType::F32,
+            config: Qwen2TextEncoderConfig::qwen_image(),
+            parked_tensors: None,
+            parked_gguf: None,
+        }
+    }
+
+    fn quantized_test_encoder_with_weights() -> Qwen2TextEncoder {
+        let mut encoder = test_encoder(true);
+        let weights = super::super::qwen2_text_gguf::synthetic_weights(1, GgmlDType::Q4_0);
+        encoder.model = Some(Qwen2TextModel::Quantized(
+            GgufQwen2TextEncoder::from_weights(weights, &Device::Cpu).unwrap(),
+        ));
+        encoder
+    }
+
+    /// The GGUF park state machine (#1044): resident → parked → resident,
+    /// with `parked_gguf` populated exactly while parked and never left
+    /// alongside a live model (that would be two copies of the weights).
+    #[test]
+    fn gguf_park_and_unpark_moves_the_weight_map_without_touching_disk() {
+        let progress = crate::progress::ProgressReporter::default();
+        let mut encoder = quantized_test_encoder_with_weights();
+        assert!(!encoder.is_parked(), "a resident encoder is not parked");
+
+        encoder.park_to_cpu().unwrap();
+        assert!(encoder.is_parked(), "parked = no model + a parked map");
+        assert!(encoder.model.is_none(), "the device copy must be released");
+        assert!(encoder.parked_gguf.is_some());
+
+        // `encoder_paths` points at a file that does not exist, so this can
+        // only succeed by unparking rather than reloading.
+        encoder.unpark_to_gpu(&progress).unwrap();
+        assert!(!encoder.is_parked(), "unparked = a live model");
+        assert!(encoder.model.is_some());
+        assert!(
+            encoder.parked_gguf.is_none(),
+            "the parked map must not survive alongside the live model"
+        );
+    }
+
+    /// A retained encoder may only serve a render planned for the same
+    /// weights, device, and dtype. The variant resolver re-measures free VRAM
+    /// every request, so a legitimately different GGUF tier or placement must
+    /// drop the retained one rather than silently override the decision that
+    /// was just made.
+    #[test]
+    fn a_retained_encoder_matches_only_its_own_weights_device_and_dtype() {
+        let encoder = test_encoder(true);
+        let planned = [PathBuf::from("/nonexistent/qwen2.gguf")];
+
+        assert!(encoder.matches(&planned, &Device::Cpu, DType::F32));
+        assert!(
+            !encoder.matches(
+                &[PathBuf::from("/nonexistent/qwen2-q8.gguf")],
+                &Device::Cpu,
+                DType::F32
+            ),
+            "a different variant is a different encoder"
+        );
+        assert!(
+            !encoder.matches(&planned, &Device::Cpu, DType::BF16),
+            "a different compute dtype is a different encoder"
+        );
+        assert!(
+            !encoder.matches(&[], &Device::Cpu, DType::F32),
+            "no planned weights cannot match"
+        );
+    }
+
+    /// A park with nothing resident degrades to a drop rather than erroring
+    /// or claiming a parked state it does not have.
+    #[test]
+    fn gguf_park_without_a_resident_model_falls_back_to_a_drop() {
+        let mut encoder = test_encoder(true);
+        encoder
+            .park_to_cpu()
+            .expect("park must not fail the request");
+        assert!(!encoder.is_parked());
+        assert!(encoder.parked_gguf.is_none());
+    }
+
+    /// `drop_weights` is the "release everything" call, so it has to clear the
+    /// parked map too — otherwise a caller asking for host RAM back keeps
+    /// paying for a multi-gigabyte copy it can no longer see.
+    #[test]
+    fn drop_weights_clears_a_parked_gguf_map() {
+        let mut encoder = quantized_test_encoder_with_weights();
+        encoder.park_to_cpu().unwrap();
+        assert!(encoder.parked_gguf.is_some());
+
+        encoder.drop_weights();
+        assert!(!encoder.is_parked());
+        assert!(encoder.parked_gguf.is_none());
+    }
+
+    /// A second park while already parked is a no-op, not a second copy.
+    #[test]
+    fn parking_an_already_parked_gguf_encoder_is_a_noop() {
+        let mut encoder = quantized_test_encoder_with_weights();
+        encoder.park_to_cpu().unwrap();
+        let bytes = encoder.weights_size_bytes();
+
+        encoder.park_to_cpu().unwrap();
+        assert!(encoder.is_parked());
+        assert_eq!(
+            encoder.weights_size_bytes(),
+            bytes,
+            "re-parking must not change what is parked"
+        );
+    }
 
     #[test]
     fn qwen_image_prompt_format_includes_chat_template() {

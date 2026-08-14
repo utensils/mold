@@ -118,13 +118,25 @@ enum Qwen2TextEncoderPostEncodeAction {
 #[derive(Debug, Clone, Copy)]
 struct Qwen2TextEncoderResidencyInput {
     on_gpu: bool,
-    is_quantized: bool,
     is_metal: bool,
     keep_te_ram: bool,
     prompt_cache_miss: bool,
     transformer_resident: bool,
     free_vram_bytes: u64,
     required_vram_bytes: u64,
+}
+
+/// Inputs to the edit path's post-conditioning encoder release. The edit
+/// pipeline never consults free VRAM the way the hot text-to-image path does —
+/// it always releases the encoder — so the only question is park or drop.
+#[derive(Debug, Clone, Copy)]
+struct Qwen2EditTextEncoderReleaseInput {
+    on_gpu: bool,
+    is_metal: bool,
+    keep_te_ram: bool,
+    /// The engine unloads the whole `LoadedQwenImage` as soon as this request
+    /// returns (sequential edit generation).
+    engine_unloads_after: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -377,6 +389,18 @@ pub struct QwenImageEngine {
     shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     qwen2_variant: Option<String>,
     qwen2_text_encoder_mode: Qwen2TextEncoderMode,
+    /// Text encoder retained between sequential generations under
+    /// `MOLD_KEEP_TE_RAM=1`, parked on host RAM. `None` in the default
+    /// drop-and-reload mode.
+    ///
+    /// Sequential is the load-use-drop path — and the one the server actually
+    /// selects for a quantized Qwen-Image checkpoint (`memory_preflight.rs`
+    /// routes a GGUF transformer that fits straight to `Sequential`), so
+    /// without this the #1044 park was unreachable for its own target
+    /// configuration. The encoder is a local there rather than part of
+    /// `LoadedQwenImage`, so the retention has to live on the engine.
+    /// Mirrors `WanEngine::retained_encoder`.
+    retained_sequential_text_encoder: Option<encoders::qwen2_text::Qwen2TextEncoder>,
 }
 
 /// Order-sensitive fingerprint of a single LoRA adapter (path-hash + scale).
@@ -640,10 +664,31 @@ impl QwenImageEngine {
         {
             return Qwen2TextEncoderPostEncodeAction::KeepGpu;
         }
-        if input.keep_te_ram && !input.is_metal && !input.is_quantized {
+        // Both dtypes park (#1044): the GGUF encoder's `QTensor` bytes move
+        // host↔device losslessly, so a quantized encoder no longer has to pay
+        // the 35.1 s disk reload every cold prompt. Metal is still excluded —
+        // unified memory makes "host RAM" the same pool.
+        if input.keep_te_ram && !input.is_metal {
             return Qwen2TextEncoderPostEncodeAction::ParkCpu;
         }
         Qwen2TextEncoderPostEncodeAction::Drop
+    }
+
+    /// Park or drop the edit path's text encoder once conditioning is done.
+    ///
+    /// Three gates, each of which was a real regression when it was missing:
+    ///
+    /// * `on_gpu` — dynamic placement can put the encoder on the CPU, where a
+    ///   "park" moves nothing (`to_device` short-circuits on the same device)
+    ///   and simply retains host RAM the drop used to release. With a
+    ///   three-engine model-cache LRU that is up to three encoders' worth of
+    ///   unreleased host RAM on a box that was already short of VRAM.
+    /// * `!is_metal` — unified memory makes host RAM the same pool.
+    /// * `!engine_unloads_after` — sequential edit generation calls `unload()`
+    ///   as soon as the request returns, dropping the parked map microseconds
+    ///   after a multi-gigabyte device→host copy paid for it.
+    fn qwen2_edit_text_encoder_should_park(input: Qwen2EditTextEncoderReleaseInput) -> bool {
+        input.keep_te_ram && input.on_gpu && !input.is_metal && !input.engine_unloads_after
     }
 
     fn qwen2_hot_text_encoder_required_vram(
@@ -1052,6 +1097,7 @@ impl QwenImageEngine {
             qwen2_text_encoder_mode: Qwen2TextEncoderMode::from_value(
                 qwen2_text_encoder_mode.as_deref(),
             ),
+            retained_sequential_text_encoder: None,
         }
     }
 
@@ -2083,41 +2129,82 @@ impl QwenImageEngine {
                     te_device_label,
                 )
             };
-            if te_plan.use_cpu_staging && device.is_metal() && !resolved_text_encoder.is_gguf {
-                self.base.progress.info(
+            // Reuse the encoder retained by the previous sequential render
+            // when this one was planned for the same weights, device, and
+            // dtype; otherwise the retained one is stale and is dropped before
+            // the fresh load so both are never resident.
+            let retained = self.retained_sequential_text_encoder.take();
+            let reusable = match retained {
+                Some(retained)
+                    if retained.matches(&resolved_text_encoder.paths, &te_device, te_dtype) =>
+                {
+                    Some(retained)
+                }
+                stale => {
+                    if stale.is_some() {
+                        // Visible on purpose: a silent rejection here is a
+                        // 16 GB disk re-read that looks like a cold load.
+                        tracing::warn!(
+                            "retained Qwen2.5 encoder rejected as stale (paths/device/dtype changed); reloading from disk"
+                        );
+                    }
+                    // Explicit: a `_` arm would keep the stale encoder's
+                    // several GB alive until the end of the match, i.e.
+                    // across the fresh load.
+                    drop(stale);
+                    None
+                }
+            };
+
+            let mut text_encoder = if let Some(mut retained) = reusable {
+                let label = if retained.is_parked() {
+                    "Unparking Qwen2.5 encoder (CPU→GPU)"
+                } else {
+                    "Reloading Qwen2.5 encoder"
+                };
+                self.base.progress.stage_start(label);
+                let unpark_start = Instant::now();
+                retained.unpark_to_gpu(&self.base.progress)?;
+                self.base.progress.stage_done(label, unpark_start.elapsed());
+                retained
+            } else {
+                if te_plan.use_cpu_staging && device.is_metal() && !resolved_text_encoder.is_gguf {
+                    self.base.progress.info(
                         "Skipping hard preflight for Qwen2.5 text encoder on Metal; sequential mode spills prompt conditioning to CPU after encoding",
                     );
-            } else {
-                let te_activation_budget = crate::device::activation_bytes(
-                    req.width,
-                    req.height,
-                    1,
-                    crate::device::dtype_bytes(te_dtype),
-                    crate::device::ActivationFamily::SmallTransformer,
-                );
-                preflight_memory_check(
-                    "Qwen2.5 text encoder",
-                    resolved_text_encoder.size_bytes,
-                    te_activation_budget,
+                } else {
+                    let te_activation_budget = crate::device::activation_bytes(
+                        req.width,
+                        req.height,
+                        1,
+                        crate::device::dtype_bytes(te_dtype),
+                        crate::device::ActivationFamily::SmallTransformer,
+                    );
+                    preflight_memory_check(
+                        "Qwen2.5 text encoder",
+                        resolved_text_encoder.size_bytes,
+                        te_activation_budget,
+                    )?;
+                }
+
+                if let Some(status) = memory_status_string() {
+                    self.base.progress.info(&status);
+                }
+
+                self.base.progress.stage_start(&te_label);
+                let te_start = Instant::now();
+                let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
+                let text_encoder = self.load_text_encoder(
+                    &resolved_text_encoder,
+                    &text_tokenizer_path,
+                    text_tokenizer,
+                    &te_device,
+                    te_dtype,
+                    true,
                 )?;
-            }
-
-            if let Some(status) = memory_status_string() {
-                self.base.progress.info(&status);
-            }
-
-            self.base.progress.stage_start(&te_label);
-            let te_start = Instant::now();
-            let text_tokenizer = self.load_text_tokenizer(&text_tokenizer_path)?;
-            let mut text_encoder = self.load_text_encoder(
-                &resolved_text_encoder,
-                &text_tokenizer_path,
-                text_tokenizer,
-                &te_device,
-                te_dtype,
-                true,
-            )?;
-            self.base.progress.stage_done(&te_label, te_start.elapsed());
+                self.base.progress.stage_done(&te_label, te_start.elapsed());
+                text_encoder
+            };
 
             let hs = Self::encode_prompt_cached(
                 &self.base.progress,
@@ -2143,7 +2230,17 @@ impl QwenImageEngine {
                 None
             };
 
-            drop(text_encoder);
+            // Under `MOLD_KEEP_TE_RAM=1` the encoder moves to host RAM instead
+            // of vanishing, so the next sequential render skips the disk read
+            // — 35.1 s for the GGUF encoder (#1044). The device memory is
+            // released either way, which is what sequential mode is for.
+            // Metal is unified memory, so "host RAM" is the same pool there.
+            if crate::device::keep_te_in_ram() && !te_device.is_metal() {
+                text_encoder.park_to_cpu()?;
+                self.retained_sequential_text_encoder = Some(text_encoder);
+            } else {
+                drop(text_encoder);
+            }
             // Force the backend to release allocator state before transformer load.
             device.synchronize()?;
             if let Some(status) = crate::device::memory_status_string() {
@@ -2585,6 +2682,10 @@ impl QwenImageEngine {
         let start = Instant::now();
         // The checkpoint's own packaged scheduler config, not the family's.
         let shift_policy = shift_policy_for_model(&self.base.model_name);
+        // Read before the long `&mut self.base.loaded` borrow below: the
+        // sequential edit route in `generate_inner` unloads the engine the
+        // moment this returns, which decides park vs drop.
+        let engine_unloads_after = self.base.load_strategy == LoadStrategy::Sequential;
 
         let loaded_ref = self
             .base
@@ -2685,13 +2786,19 @@ impl QwenImageEngine {
 
         let drop_text_encoder = is_edit_family || loaded.text_encoder.on_gpu;
         if drop_text_encoder {
-            let park_mode = crate::device::keep_te_in_ram()
-                && !loaded.device.is_metal()
-                && !loaded.text_encoder.is_quantized;
+            let park_mode =
+                Self::qwen2_edit_text_encoder_should_park(Qwen2EditTextEncoderReleaseInput {
+                    on_gpu: loaded.text_encoder.on_gpu,
+                    is_metal: loaded.device.is_metal(),
+                    keep_te_ram: crate::device::keep_te_in_ram(),
+                    engine_unloads_after,
+                });
             if park_mode {
+                let parked_bytes = loaded.text_encoder.weights_size_bytes();
                 loaded.text_encoder.park_to_cpu()?;
                 tracing::info!(
                     on_gpu = loaded.text_encoder.on_gpu,
+                    parked_bytes,
                     "Qwen2.5 text encoder parked to CPU host RAM after edit conditioning"
                 );
             } else {
@@ -3093,7 +3200,6 @@ impl QwenImageEngine {
             let action =
                 Self::qwen2_text_encoder_post_encode_action(Qwen2TextEncoderResidencyInput {
                     on_gpu: loaded.text_encoder.on_gpu,
-                    is_quantized: loaded.text_encoder.is_quantized,
                     is_metal: loaded.device.is_metal(),
                     keep_te_ram: crate::device::keep_te_in_ram(),
                     prompt_cache_miss: !both_cached,
@@ -3480,6 +3586,11 @@ impl InferenceEngine for QwenImageEngine {
     }
 
     fn unload(&mut self) {
+        // A parked encoder is several GB of host RAM held by this engine.
+        // Unload means "give the resources back", so the retention opt-in does
+        // not survive it — an explicit unload, or the model cache evicting
+        // this engine, releases it.
+        self.retained_sequential_text_encoder = None;
         self.base.unload();
         clear_cache(&self.prompt_cache);
     }
@@ -4590,7 +4701,6 @@ mod tests {
         let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
             Qwen2TextEncoderResidencyInput {
                 on_gpu: true,
-                is_quantized: true,
                 is_metal: false,
                 keep_te_ram: false,
                 prompt_cache_miss: true,
@@ -4608,7 +4718,6 @@ mod tests {
         let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
             Qwen2TextEncoderResidencyInput {
                 on_gpu: true,
-                is_quantized: true,
                 is_metal: false,
                 keep_te_ram: false,
                 prompt_cache_miss: false,
@@ -4626,7 +4735,6 @@ mod tests {
         let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
             Qwen2TextEncoderResidencyInput {
                 on_gpu: true,
-                is_quantized: true,
                 is_metal: false,
                 keep_te_ram: false,
                 prompt_cache_miss: true,
@@ -4644,7 +4752,6 @@ mod tests {
         let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
             Qwen2TextEncoderResidencyInput {
                 on_gpu: true,
-                is_quantized: false,
                 is_metal: false,
                 keep_te_ram: true,
                 prompt_cache_miss: true,
@@ -4657,14 +4764,151 @@ mod tests {
         assert_eq!(action, Qwen2TextEncoderPostEncodeAction::ParkCpu);
     }
 
+    /// The GGUF encoder parks by the same rule as BF16 (#1044): its
+    /// `QTensor` bytes move host↔device losslessly, so there is no longer a
+    /// quantized exclusion here. The 35.1 s disk reload was the whole reason
+    /// a quantized encoder used to fall through to `Drop`.
     #[test]
-    fn qwen_hot_text_encoder_never_parks_quantized() {
+    fn qwen_hot_text_encoder_parks_quantized_when_keep_ram_enabled() {
         let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
             Qwen2TextEncoderResidencyInput {
                 on_gpu: true,
-                is_quantized: true,
                 is_metal: false,
                 keep_te_ram: true,
+                prompt_cache_miss: true,
+                transformer_resident: true,
+                free_vram_bytes: 7_999_999_999,
+                required_vram_bytes: 8_000_000_000,
+            },
+        );
+
+        assert_eq!(action, Qwen2TextEncoderPostEncodeAction::ParkCpu);
+    }
+
+    /// Metal is unified memory: parking to "host RAM" frees nothing and only
+    /// costs a copy in each direction.
+    #[test]
+    fn qwen_hot_text_encoder_never_parks_on_metal() {
+        let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
+            Qwen2TextEncoderResidencyInput {
+                on_gpu: true,
+                is_metal: true,
+                keep_te_ram: true,
+                prompt_cache_miss: true,
+                transformer_resident: true,
+                free_vram_bytes: 7_999_999_999,
+                required_vram_bytes: 8_000_000_000,
+            },
+        );
+
+        assert_eq!(action, Qwen2TextEncoderPostEncodeAction::Drop);
+    }
+
+    /// The retained sequential encoder is several gigabytes of host RAM held
+    /// by the engine, so `unload()` — what the model-cache LRU calls when it
+    /// evicts this engine — has to release it. Mirrors `WanEngine::unload`.
+    #[test]
+    fn qwen_unload_releases_the_retained_sequential_text_encoder() {
+        let mut engine = QwenImageEngine::new(
+            "qwen-image:q4".to_string(),
+            qwen_image_model_paths(
+                PathBuf::from("/nonexistent/transformer.gguf"),
+                vec![],
+                PathBuf::from("/nonexistent/vae.safetensors"),
+                Some(PathBuf::from("/nonexistent/tokenizer.json")),
+            ),
+            LoadStrategy::Sequential,
+            0,
+            false,
+            None,
+        );
+
+        engine.retained_sequential_text_encoder = Some(
+            encoders::qwen2_text::Qwen2TextEncoder::prepare_gguf_with_tokenizer(
+                Path::new("/nonexistent/qwen2.gguf"),
+                &PathBuf::from("/nonexistent/tokenizer.json"),
+                Some(Arc::new(Tokenizer::new(
+                    tokenizers::models::wordpiece::WordPiece::default(),
+                ))),
+                &Device::Cpu,
+                DType::F32,
+                &[],
+            )
+            .unwrap(),
+        );
+
+        engine.unload();
+
+        assert!(
+            engine.retained_sequential_text_encoder.is_none(),
+            "unload must give the parked encoder's host RAM back"
+        );
+    }
+
+    /// The edit path's release rule. `keep_te_ram` alone is not enough:
+    /// parking a CPU-resident encoder retains host RAM the drop used to
+    /// release, and parking right before `unload()` pays a multi-gigabyte
+    /// device→host copy for a map that is discarded microseconds later.
+    #[test]
+    fn qwen_edit_text_encoder_parks_only_when_the_park_can_pay_off() {
+        let resident_gpu_edit = Qwen2EditTextEncoderReleaseInput {
+            on_gpu: true,
+            is_metal: false,
+            keep_te_ram: true,
+            engine_unloads_after: false,
+        };
+        assert!(
+            QwenImageEngine::qwen2_edit_text_encoder_should_park(resident_gpu_edit),
+            "an opted-in GPU encoder that survives the request parks"
+        );
+
+        assert!(
+            !QwenImageEngine::qwen2_edit_text_encoder_should_park(
+                Qwen2EditTextEncoderReleaseInput {
+                    keep_te_ram: false,
+                    ..resident_gpu_edit
+                }
+            ),
+            "parking stays opt-in"
+        );
+        assert!(
+            !QwenImageEngine::qwen2_edit_text_encoder_should_park(
+                Qwen2EditTextEncoderReleaseInput {
+                    on_gpu: false,
+                    ..resident_gpu_edit
+                }
+            ),
+            "a CPU-placed encoder must be dropped, not retained in host RAM"
+        );
+        assert!(
+            !QwenImageEngine::qwen2_edit_text_encoder_should_park(
+                Qwen2EditTextEncoderReleaseInput {
+                    is_metal: true,
+                    ..resident_gpu_edit
+                }
+            ),
+            "unified memory makes the park pointless"
+        );
+        assert!(
+            !QwenImageEngine::qwen2_edit_text_encoder_should_park(
+                Qwen2EditTextEncoderReleaseInput {
+                    engine_unloads_after: true,
+                    ..resident_gpu_edit
+                }
+            ),
+            "a park the engine unloads immediately afterwards is pure cost"
+        );
+    }
+
+    /// Without the knob, the encoder still drops — parking is a host-RAM
+    /// trade, so it stays gated on `keep_te_ram`.
+    #[test]
+    fn qwen_hot_text_encoder_drops_quantized_without_keep_ram() {
+        let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
+            Qwen2TextEncoderResidencyInput {
+                on_gpu: true,
+                is_metal: false,
+                keep_te_ram: false,
                 prompt_cache_miss: true,
                 transformer_resident: true,
                 free_vram_bytes: 7_999_999_999,
@@ -4680,7 +4924,6 @@ mod tests {
         let action = QwenImageEngine::qwen2_text_encoder_post_encode_action(
             Qwen2TextEncoderResidencyInput {
                 on_gpu: true,
-                is_quantized: true,
                 is_metal: false,
                 keep_te_ram: false,
                 prompt_cache_miss: true,

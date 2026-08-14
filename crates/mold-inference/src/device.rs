@@ -1785,14 +1785,29 @@ pub fn available_system_memory_bytes() -> Option<u64> {
 /// Whether to park text-encoder weights on CPU instead of dropping them after
 /// encoding finishes (opt-in via `MOLD_KEEP_TE_RAM=1`).
 ///
-/// Default off for backward compatibility — the existing drop-and-reload path
-/// re-mmaps safetensors / re-dequantizes GGUF on every request, costing
-/// ~2-4 s per FLUX generation (~1 s on SD3).
+/// Default off. Two things keep it that way rather than letting mold decide
+/// per host:
 ///
-/// When on, FP16/BF16 encoders survive between requests on host RAM (~9 GB
-/// for T5-XXL fp16); only the lightweight GPU↔CPU tensor copy happens between
-/// requests. Quantized GGUF encoders fall back to drop-and-reload regardless,
-/// because their `QTensor` storage is device-tied and not trivially walkable.
+/// * A park is a multi-gigabyte **host** allocation, and the only probes
+///   available here (`/proc/meminfo`, the macOS VM statistics) describe the
+///   machine, not this process's cgroup. Inside a memory-capped container —
+///   which is how mold ships (the GHCR matrix, Lambda/RunPod provisioning) —
+///   `MemAvailable` reports the host's free RAM, so a probe-driven default
+///   would engage against a limit it cannot see and get the process
+///   OOM-killed. Nothing in the tree reads `memory.max`.
+/// * `MOLD_KEEP_TE_RAM` is an [`crate::runtime_env::ENGINE_SHAPING_VARIABLES`]
+///   member precisely because memory residency must be frozen at admission.
+///   A live host probe would let two runs with byte-identical frozen
+///   snapshots take opposite residency paths while serializing to one
+///   execution-equivalence fingerprint and one learned-timing bucket — the
+///   same trap `MOLD_WAN_OFFLOAD_BLOCKS` is documented against.
+///
+/// When on, encoders survive between requests on host RAM; only the
+/// lightweight GPU↔CPU tensor copy happens between requests. Since #1044 this
+/// covers Qwen-Image's quantized GGUF Qwen2 encoder too — its `QTensor` bytes
+/// move losslessly through `wan::block_offload` rather than being re-read from
+/// disk (measured at 35.1 s per cold prompt). Other families' GGUF encoders
+/// (T5, Qwen3) still drop and reload.
 ///
 /// This mirrors ComfyUI's `text_encoder_offload_device()` behavior
 /// (`comfy/model_management.py:1012`).
@@ -4249,8 +4264,17 @@ mod tests {
 
     // ── keep_te_in_ram ───────────────────────────────────────────────────
 
-    /// `MOLD_KEEP_TE_RAM` defaults to off so the existing drop-and-reload
-    /// behavior is preserved when the env var is absent.
+    /// Every `MOLD_KEEP_TE_RAM` behavior lives under one `#[test]` so cargo's
+    /// parallel runner cannot race two `set_var`/`remove_var` sequences on the
+    /// same process-global variable — the same reason
+    /// `test_reserved_vram_and_usable_free_vram` below is a single test.
+    ///
+    /// One claim is pinned here: parking is opt-in and the decision is a pure
+    /// function of the frozen environment. There is deliberately no host-memory
+    /// probe in this path — a `/proc/meminfo` read cannot see a container's
+    /// cgroup limit, and an unfrozen input would let two runs with identical
+    /// frozen snapshots take opposite residency paths under one
+    /// execution-equivalence fingerprint.
     #[test]
     fn test_keep_te_in_ram_env_behaviors() {
         unsafe { std::env::remove_var("MOLD_KEEP_TE_RAM") };
