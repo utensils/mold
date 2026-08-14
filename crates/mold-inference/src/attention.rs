@@ -314,13 +314,36 @@ fn math_attention_impl(
     attn.reshape(batch_dims)
 }
 
+/// Query rows per chunk the `Auto` policy uses on CUDA.
+pub(crate) const CUDA_AUTO_QUERY_CHUNK: usize = 512;
+/// Query length past which the `Auto` policy engages the CUDA chunk.
+pub(crate) const CUDA_AUTO_CHUNK_MIN_QUERY_ROWS: usize = 1024;
+
+/// The query chunk the CUDA math path would use for a `q_len`-row score
+/// matrix, or `None` when it materializes the whole matrix at once.
+///
+/// Exposed because the score matrix is the largest allocation in a Qwen-Image
+/// denoise step, so `qwen_image::pipeline`'s VRAM estimate has to price the
+/// chunk this function actually picks — including a `MOLD_ATTN_CHUNK` override
+/// that raises it, or `off`, which restores the full matrix.
+pub(crate) fn cuda_query_chunk_rows(q_len: usize) -> Option<usize> {
+    match resolved_chunk_policy() {
+        AttentionChunkPolicy::Off => None,
+        AttentionChunkPolicy::Size(size) => (size < q_len).then_some(size),
+        AttentionChunkPolicy::Auto => {
+            (q_len > CUDA_AUTO_CHUNK_MIN_QUERY_ROWS).then_some(CUDA_AUTO_QUERY_CHUNK)
+        }
+    }
+}
+
 fn math_attention_chunk_size(q: &Tensor) -> Option<usize> {
     let q_len = q.dim(D::Minus2).ok()?;
-    match resolved_chunk_policy() {
-        AttentionChunkPolicy::Off => return None,
-        AttentionChunkPolicy::Size(size) => return (size < q_len).then_some(size),
-        AttentionChunkPolicy::Auto => {}
+    if matches!(q.device(), Device::Cuda(_)) {
+        return cuda_query_chunk_rows(q_len);
     }
+    match resolved_chunk_policy() {
+        AttentionChunkPolicy::Off | AttentionChunkPolicy::Auto => None,
+        AttentionChunkPolicy::Size(size) => (size < q_len).then_some(size),
 
     // Metal chunks for the same reason CUDA does, but harder: there is no
     // flash path there, so an unchunked math attention materializes the full

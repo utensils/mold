@@ -56,8 +56,57 @@ const VAE_F32_BYTES: u64 = 4;
 const QWEN_EMPTY_NEGATIVE_PROMPT: &str = " ";
 const QWEN_NATIVE_WIDTH: usize = 1328;
 const QWEN_NATIVE_HEIGHT: usize = 1328;
-const QWEN_GGUF_NATIVE_CFG_HEADROOM: u64 = 14_000_000_000;
 const QWEN_GGUF_MIN_CFG_HEADROOM: u64 = 3_000_000_000;
+/// Transformer geometry the denoise working set is derived from.
+/// `QwenImageConfig` names the same numbers; these are the `u64` copies the
+/// byte arithmetic below uses, pinned to the config by a unit test.
+const QWEN_DIT_INNER_DIM: u64 = 3072;
+const QWEN_DIT_HEADS: u64 = 24;
+const QWEN_DIT_FF_DIM: u64 = 4 * QWEN_DIT_INNER_DIM;
+/// Pixels per image token: the VAE's 8x spatial downsample times the
+/// transformer's 2x patch.
+const QWEN_DIT_PIXELS_PER_TOKEN_AXIS: u64 = 16;
+/// Every transformer tensor in the denoise runs BF16 on CUDA.
+const QWEN_DIT_BF16_BYTES: u64 = 2;
+/// The batch batched true CFG puts through one forward. This whole estimate
+/// exists to answer "can this request afford *batched* CFG", so it is always
+/// priced at two rows.
+const QWEN_CFG_BATCH: u64 = 2;
+/// Joint-stream (`[batch, text + image, inner_dim]`) BF16 buffers alive at the
+/// attention peak of one block.
+///
+/// Shadowed `let` bindings do not drop in Rust, so the attention forward holds
+/// every intermediate to the end of the call: three generations each of q and
+/// k (projection, QK-norm, RoPE) and one of v (7), their `cat`ed joint forms
+/// (3), the transposed contiguous copies the matmul needs (3), the attention
+/// output plus its transpose/reshape/narrow copies (4), and the block's own
+/// hidden states and normalized attention inputs (3).
+const QWEN_DIT_ATTENTION_LIVE_STREAMS: u64 = 20;
+/// Score buffers alive inside one query chunk: `QK^T` and its softmax.
+const QWEN_DIT_ATTENTION_SCORE_BUFFERS: u64 = 2;
+/// Joint-stream buffers alive at the MLP peak: both hidden states, both
+/// normalized MLP inputs, and the modulation temporaries around them.
+const QWEN_DIT_MLP_LIVE_STREAMS: u64 = 8;
+/// Feed-forward buffers alive at once: the `inner -> 4*inner` projection and
+/// its GELU, which the `proj.forward(x)?.apply(gelu)` temporary keeps live
+/// together.
+const QWEN_DIT_MLP_LIVE_FF_BUFFERS: u64 = 2;
+/// Dequantized weight copies in flight. The default CUDA arm widens each GGUF
+/// weight to BF16 per forward; the largest is the feed-forward `4*inner x
+/// inner` pair, and two can overlap across a statement boundary.
+const QWEN_DIT_DEQUANT_WEIGHT_BUFFERS: u64 = 2;
+/// Bytes per element of the F32 activation copy candle's MMQ kernels make
+/// before quantizing to Q8_1 (`MOLD_QWEN_QMATMUL=1`, #1045).
+const QWEN_DIT_MMQ_ACTIVATION_BYTES: u64 = 4;
+/// Margin over the derived working set.
+///
+/// The derivation counts allocation shapes, not allocator behaviour: candle
+/// hands each tensor straight to CUDA, so fragmentation across a 60-block
+/// forward is real and unmodelled, and the block counts above are read off
+/// today's forward rather than measured. 1.5x is the same order of slack the
+/// VAE decode reserve carries.
+const QWEN_CFG_HEADROOM_SAFETY_NUM: u64 = 3;
+const QWEN_CFG_HEADROOM_SAFETY_DEN: u64 = 2;
 const QWEN_VAE_TILE_SIZES: [u32; 3] = [64, 32, 16];
 const QWEN_IMAGE_EDIT_VAE_AREA: u32 = 1024 * 1024;
 const QWEN_IMAGE_EDIT_SYSTEM_PROMPT: &str = "Describe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.";
@@ -1320,24 +1369,121 @@ impl QwenImageEngine {
         Ok(text_tokenizer_path.clone())
     }
 
-    /// Non-weight VRAM the quantized CUDA denoise needs on top of the resident
-    /// transformer, scaled from a measurement at the native 1328² shape.
+    /// Image tokens one CFG row carries: the VAE's 8x downsample times the
+    /// transformer's 2x patch, on each axis.
+    fn qwen_dit_image_tokens(width: usize, height: usize) -> u64 {
+        let w = (width.max(1) as u64) / QWEN_DIT_PIXELS_PER_TOKEN_AXIS;
+        let h = (height.max(1) as u64) / QWEN_DIT_PIXELS_PER_TOKEN_AXIS;
+        w.max(1).saturating_mul(h.max(1))
+    }
+
+    /// Joint sequence length: image tokens plus the widest text window
+    /// `Qwen2TextEncoder` can emit.
+    fn qwen_dit_joint_tokens(width: usize, height: usize) -> u64 {
+        Self::qwen_dit_image_tokens(width, height)
+            .saturating_add(encoders::qwen2_text::MAX_SEQUENCE_LENGTH as u64)
+    }
+
+    /// One BF16 `[cfg_batch, joint_tokens, inner_dim]` buffer.
+    fn qwen_dit_joint_stream_bytes(joint_tokens: u64) -> u64 {
+        QWEN_CFG_BATCH
+            .saturating_mul(joint_tokens)
+            .saturating_mul(QWEN_DIT_INNER_DIM)
+            .saturating_mul(QWEN_DIT_BF16_BYTES)
+    }
+
+    /// The widest dequantized weight the forward materializes, times the
+    /// number that can be in flight at once.
+    fn qwen_dit_dequant_weight_bytes() -> u64 {
+        QWEN_DIT_DEQUANT_WEIGHT_BUFFERS
+            .saturating_mul(QWEN_DIT_FF_DIM)
+            .saturating_mul(QWEN_DIT_INNER_DIM)
+            .saturating_mul(QWEN_DIT_BF16_BYTES)
+    }
+
+    /// What one block's joint attention holds while it runs: the live joint
+    /// streams, the score matrix for one query chunk plus its softmax, and a
+    /// dequantized projection weight.
     ///
-    /// It is deliberately pixel-proportional rather than weight-proportional:
-    /// since the linears run through candle's MMQ kernels, the dominant
-    /// transient is no longer a dequantized weight but the F32 copy
-    /// `fast_mmq::try_fwd` makes of the *activation* before quantizing it to
-    /// Q8_1 (`tokens x in_features x 4` — every image-stream linear takes that
-    /// path, since the BF16-native MMVQ kernel caps at 8 rows). That is the
-    /// same axis this function already scales on, so the shape of the estimate
-    /// still holds; the constant itself is empirical and only a measurement on
-    /// hardware should move it.
+    /// `query_chunk_rows` is what `crate::attention` would actually chunk the
+    /// query axis by — `None` means it materializes the whole score matrix,
+    /// which is the pre-#1043 behaviour and is what the retired 14 GB constant
+    /// was priced against.
+    fn qwen_dit_attention_phase_bytes(joint_tokens: u64, query_chunk_rows: Option<u64>) -> u64 {
+        let rows = query_chunk_rows.unwrap_or(joint_tokens).min(joint_tokens);
+        let streams = QWEN_DIT_ATTENTION_LIVE_STREAMS
+            .saturating_mul(Self::qwen_dit_joint_stream_bytes(joint_tokens));
+        let scores = QWEN_DIT_ATTENTION_SCORE_BUFFERS
+            .saturating_mul(QWEN_CFG_BATCH)
+            .saturating_mul(QWEN_DIT_HEADS)
+            .saturating_mul(rows)
+            .saturating_mul(joint_tokens)
+            .saturating_mul(QWEN_DIT_BF16_BYTES);
+
+        streams
+            .saturating_add(scores)
+            .saturating_add(Self::qwen_dit_dequant_weight_bytes())
+    }
+
+    /// What one block's feed-forward holds: the live joint streams, the
+    /// `4 x inner` projection and its GELU, a dequantized weight, and the F32
+    /// activation copy the opt-in MMQ arm makes before quantizing to Q8_1.
+    fn qwen_dit_mlp_phase_bytes(joint_tokens: u64) -> u64 {
+        let streams = QWEN_DIT_MLP_LIVE_STREAMS
+            .saturating_mul(Self::qwen_dit_joint_stream_bytes(joint_tokens));
+        let ff_elems = QWEN_CFG_BATCH
+            .saturating_mul(joint_tokens)
+            .saturating_mul(QWEN_DIT_FF_DIM);
+        let ff = QWEN_DIT_MLP_LIVE_FF_BUFFERS
+            .saturating_mul(ff_elems)
+            .saturating_mul(QWEN_DIT_BF16_BYTES);
+        let mmq_activation = ff_elems.saturating_mul(QWEN_DIT_MMQ_ACTIVATION_BYTES);
+
+        streams
+            .saturating_add(ff)
+            .saturating_add(mmq_activation)
+            .saturating_add(Self::qwen_dit_dequant_weight_bytes())
+    }
+
+    /// Non-weight VRAM the quantized CUDA denoise needs on top of the resident
+    /// transformer, derived from the shapes one block actually allocates.
+    ///
+    /// The 60 blocks run one at a time and each releases before the next, so
+    /// the peak is the widest single block, and inside a block the attention
+    /// and feed-forward phases are sequential — hence the max of the two, not
+    /// their sum, exactly as the VAE decode reserve treats its phases (#1046).
+    ///
+    /// This replaces a flat `14 GB scaled by pixel count`, which priced the
+    /// pre-#1043 attention: an unchunked `[batch, heads, seq, seq]` BF16 score
+    /// matrix plus its softmax is 10.5 GB at 1328² with batched CFG, and this
+    /// same derivation with `query_chunk_rows = None` returns 12.5 GB — the
+    /// old constant, recovered. Chunking the query axis 512 rows at a time
+    /// (`attention::CUDA_AUTO_QUERY_CHUNK`) drops that term to 0.73 GB and the
+    /// whole estimate to ~4.0 GB at 1328², which is what makes batched CFG
+    /// admissible for a q4 checkpoint on a 24 GB card at native resolution.
+    ///
+    /// The chunk is read from `crate::attention` rather than restated, so
+    /// `MOLD_ATTN_CHUNK` moves the estimate with the allocation — including
+    /// `off`, which restores the full matrix and forces split CFG back.
     fn quantized_cuda_cfg_headroom(width: usize, height: usize) -> u64 {
-        let native_pixels = (QWEN_NATIVE_WIDTH * QWEN_NATIVE_HEIGHT) as f64;
-        let pixels = (width.max(1) * height.max(1)) as f64;
-        let scaled =
-            (QWEN_GGUF_NATIVE_CFG_HEADROOM as f64 * (pixels / native_pixels)).round() as u64;
-        scaled.max(QWEN_GGUF_MIN_CFG_HEADROOM)
+        let joint_tokens = Self::qwen_dit_joint_tokens(width, height);
+        let chunk_rows =
+            crate::attention::cuda_query_chunk_rows(joint_tokens.min(usize::MAX as u64) as usize)
+                .map(|rows| rows as u64);
+        Self::quantized_cuda_cfg_headroom_for_chunk(joint_tokens, chunk_rows)
+    }
+
+    /// [`quantized_cuda_cfg_headroom`] with the query chunk supplied, so the
+    /// formula can be pinned without depending on process-frozen env.
+    fn quantized_cuda_cfg_headroom_for_chunk(
+        joint_tokens: u64,
+        query_chunk_rows: Option<u64>,
+    ) -> u64 {
+        let peak = Self::qwen_dit_attention_phase_bytes(joint_tokens, query_chunk_rows)
+            .max(Self::qwen_dit_mlp_phase_bytes(joint_tokens));
+        peak.saturating_mul(QWEN_CFG_HEADROOM_SAFETY_NUM)
+            .saturating_div(QWEN_CFG_HEADROOM_SAFETY_DEN)
+            .max(QWEN_GGUF_MIN_CFG_HEADROOM)
     }
 
     fn should_split_cfg_quantized_cuda(
@@ -4638,20 +4784,82 @@ mod tests {
         );
     }
 
+    /// The transformer geometry the byte arithmetic restates as `u64` must
+    /// stay the checkpoint's own.
     #[test]
-    fn quantized_cuda_cfg_headroom_scales_with_resolution() {
-        let native = QwenImageEngine::quantized_cuda_cfg_headroom(1328, 1328);
-        let reduced = QwenImageEngine::quantized_cuda_cfg_headroom(512, 512);
-        assert_eq!(native, QWEN_GGUF_NATIVE_CFG_HEADROOM);
-        assert_eq!(reduced, QWEN_GGUF_MIN_CFG_HEADROOM);
+    fn qwen_dit_working_set_constants_match_the_transformer_config() {
+        let cfg = QwenImageConfig::qwen_image_2512();
+        assert_eq!(QWEN_DIT_INNER_DIM, cfg.inner_dim as u64);
+        assert_eq!(QWEN_DIT_HEADS, cfg.num_attention_heads as u64);
+        assert_eq!(
+            QWEN_DIT_PIXELS_PER_TOKEN_AXIS,
+            (vae::VAE_SPATIAL_COMPRESSION * cfg.patch_size) as u64
+        );
     }
 
+    /// Both shapes are pinned exactly: the estimate decides whether a q4
+    /// checkpoint batches CFG at all, so a silent drift in any buffer count is
+    /// a silent change to that decision.
     #[test]
-    fn qwen_quantized_native_resolution_uses_split_cfg_on_24gb_cuda() {
-        assert!(QwenImageEngine::should_split_cfg_quantized_cuda(
+    fn quantized_cuda_cfg_headroom_is_pinned_at_the_two_common_shapes() {
+        // 1328²: 6889 image + 512 text = 7401 joint tokens, chunked 512 rows.
+        assert_eq!(
+            QwenImageEngine::quantized_cuda_cfg_headroom_for_chunk(7401, Some(512)),
+            4_046_118_912
+        );
+        // 1024²: 4096 + 512 = 4608 joint tokens. The derivation lands at
+        // 2.60 GB, under the floor, so the floor is what ships.
+        assert_eq!(
+            QwenImageEngine::quantized_cuda_cfg_headroom_for_chunk(4608, Some(512)),
+            QWEN_GGUF_MIN_CFG_HEADROOM
+        );
+        // The resolution-derived path agrees with the token-derived one.
+        assert_eq!(
+            QwenImageEngine::quantized_cuda_cfg_headroom(1024, 1024),
+            QWEN_GGUF_MIN_CFG_HEADROOM
+        );
+        assert_eq!(QwenImageEngine::qwen_dit_joint_tokens(1328, 1328), 7401);
+        assert_eq!(QwenImageEngine::qwen_dit_joint_tokens(1024, 1024), 4608);
+    }
+
+    /// The derivation reproduces the constant it replaces when it is asked the
+    /// question that constant was answering: an unchunked score matrix.
+    #[test]
+    fn unchunked_attention_recovers_the_retired_fourteen_gigabyte_estimate() {
+        let chunked = QwenImageEngine::qwen_dit_attention_phase_bytes(7401, Some(512));
+        let unchunked = QwenImageEngine::qwen_dit_attention_phase_bytes(7401, None);
+
+        // The retired constant was 14 GB at this shape; the pre-#1043 score
+        // matrix plus its softmax accounts for essentially all of it.
+        assert!(
+            (12_000_000_000..14_000_000_000).contains(&unchunked),
+            "unchunked attention phase was {unchunked}"
+        );
+        assert!(
+            chunked < unchunked / 4,
+            "chunking must be the reason the estimate moved: {chunked} vs {unchunked}"
+        );
+    }
+
+    /// The headline outcome: 1328² q4 on a 24 GB card now batches CFG.
+    #[test]
+    fn qwen_quantized_native_resolution_batches_cfg_on_24gb_cuda() {
+        assert!(!QwenImageEngine::should_split_cfg_quantized_cuda(
             false,
             12_300_000_000,
             24_600_000_000,
+            1328,
+            1328,
+        ));
+    }
+
+    /// A 16 GB card still cannot, which is what keeps the decision meaningful.
+    #[test]
+    fn qwen_quantized_native_resolution_still_splits_cfg_on_16gb_cuda() {
+        assert!(QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
+            12_300_000_000,
+            16_000_000_000,
             1328,
             1328,
         ));
@@ -5592,11 +5800,11 @@ mod tests {
 
     #[test]
     fn resident_quantized_transformer_re_decides_cfg_at_the_request_resolution() {
-        // A 12.3 GB q4 checkpoint loaded at 1328² on a 24 GB card baked
+        // A 12.3 GB q4 checkpoint loaded at 1328² on a 16 GB card baked
         // split CFG. Dropping it returns its own bytes, so the budget the
         // rebuild sees is the whole card.
         let transformer_size = 12_300_000_000u64;
-        let card = 24_600_000_000u64;
+        let card = 16_000_000_000u64;
         let free_while_resident = card - transformer_size;
 
         let baked_supports_batching = !QwenImageEngine::should_split_cfg_quantized_cuda(
@@ -5606,7 +5814,7 @@ mod tests {
             1328,
             1328,
         );
-        assert!(!baked_supports_batching, "1328² bakes split CFG on 24 GB");
+        assert!(!baked_supports_batching, "1328² bakes split CFG on 16 GB");
 
         // The same engine now serves 768². Read free VRAM while the old
         // transformer is still resident, then add its bytes back.
@@ -5618,7 +5826,7 @@ mod tests {
             768,
             768,
         );
-        assert!(!request_splits, "768² fits batched CFG on 24 GB");
+        assert!(!request_splits, "768² fits batched CFG on 16 GB");
 
         assert!(
             QwenImageEngine::qwen_cfg_batching_stale(Some(baked_supports_batching), request_splits),

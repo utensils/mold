@@ -20,7 +20,7 @@ use super::qwen2_text_gguf::{GgufQwen2TextEncoder, GgufQwen2Weights};
 use super::qwen2_vision::{Qwen2VisionConfig, Qwen2VisionModel};
 
 const TOKENIZER_WINDOW: usize = 1024;
-const MAX_SEQUENCE_LENGTH: usize = 512;
+pub(crate) const MAX_SEQUENCE_LENGTH: usize = 512;
 const SYSTEM_PROMPT: &str = "Describe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:";
 type ImageTokenSpan = (usize, usize);
 type ExpandedImagePadTokens = (Vec<u32>, Vec<ImageTokenSpan>);
