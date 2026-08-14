@@ -6,7 +6,6 @@ function params(
 ): AdvancedCountParams {
   return {
     negativePrompt: "",
-    hasSource: false,
     loraCount: 0,
     upscaleOn: false,
     scheduler: null,
@@ -36,17 +35,11 @@ describe("advancedActiveCount", () => {
     expect(advancedActiveCount(params({ scheduler: null }))).toBe(0);
   });
 
-  it("counts source, upscale, custom size and video non-defaults", () => {
-    expect(advancedActiveCount(params({ hasSource: true }))).toBe(1);
+  it("counts upscale, custom size and video non-defaults — never source media", () => {
     expect(advancedActiveCount(params({ upscaleOn: true }))).toBe(1);
     expect(advancedActiveCount(params({ customSize: true }))).toBe(1);
     expect(advancedActiveCount(params({ videoNonDefault: true }))).toBe(1);
-  });
-
-  it("counts an active ControlNet block once", () => {
-    expect(advancedActiveCount(params({ controlNet: true }))).toBe(1);
-    expect(advancedActiveCount(params({ controlNet: false }))).toBe(0);
-    // Absent (older callers) behaves like off.
+    // Source images and ControlNet live in the primary form now.
     expect(advancedActiveCount(params())).toBe(0);
   });
 
@@ -60,17 +53,15 @@ describe("advancedActiveCount", () => {
       advancedActiveCount(
         params({
           negativePrompt: "low quality",
-          hasSource: true,
           loraCount: 2,
           upscaleOn: true,
           scheduler: "uni-pc",
           customSize: true,
           videoNonDefault: true,
-          controlNet: true,
           videoSuite: true,
           wanRecipe: 2,
         }),
       ),
-    ).toBe(12);
+    ).toBe(10);
   });
 });

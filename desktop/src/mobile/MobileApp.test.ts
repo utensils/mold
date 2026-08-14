@@ -4148,8 +4148,9 @@ describe("MobileApp wan source conditioning", () => {
       "disabled",
     );
 
-    await wrapper.get("[data-test='mobile-open-advanced']").trigger("click");
-    await flushPromises();
+    // The boundary wells live in the primary Create stack now — no Advanced
+    // sheet required.
+    await wrapper.get("[data-test='source-gallery']").trigger("click");
     await pickInto(
       "First frame",
       "opening.png",

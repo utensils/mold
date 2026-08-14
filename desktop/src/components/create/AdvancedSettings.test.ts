@@ -85,7 +85,6 @@ describe("AdvancedSettings — capability matrix", () => {
     expect(titles).toEqual([
       "Scheduler & sampling",
       "Negative prompt",
-      "Source image",
       "LoRA stack",
       "Output & seed",
     ]);
@@ -95,7 +94,7 @@ describe("AdvancedSettings — capability matrix", () => {
     const titles = accordionTitles(mountSettings(formFor("flux")));
     expect(titles).not.toContain("Scheduler & sampling");
     expect(titles).not.toContain("Negative prompt");
-    expect(titles).toContain("Source image");
+    expect(titles).not.toContain("Source image");
     expect(titles).toContain("Output & seed");
   });
 
@@ -107,7 +106,7 @@ describe("AdvancedSettings — capability matrix", () => {
 
   it("keeps qwen-edit free of scheduler, negative, and video", () => {
     const titles = accordionTitles(mountSettings(formFor("qwen-image-edit")));
-    expect(titles).toEqual(["Source image", "LoRA stack", "Output & seed"]);
+    expect(titles).toEqual(["LoRA stack", "Output & seed"]);
   });
 
   it("gives wan a sampler recipe instead of a second scheduler picker", async () => {
@@ -188,7 +187,6 @@ describe("AdvancedSettings — section ordering contract", () => {
     "scheduler",
     "wan-recipe",
     "negative",
-    "source",
     "lora",
     "upscale",
     "output",
@@ -204,19 +202,12 @@ describe("AdvancedSettings — section ordering contract", () => {
 
   it("renders still-image sections in the canonical order", () => {
     const wrapper = mountSettings(formFor("sdxl"), { upscalers: [upscaler] });
-    expect(sectionIds(wrapper)).toEqual([
-      "scheduler",
-      "negative",
-      "source",
-      "lora",
-      "upscale",
-      "output",
-    ]);
+    expect(sectionIds(wrapper)).toEqual(["scheduler", "negative", "lora", "upscale", "output"]);
   });
 
   it("renders video sections in the canonical order", () => {
     const wrapper = mountSettings(formFor("ltx2"), { upscalers: [upscaler] });
-    expect(sectionIds(wrapper)).toEqual(["negative", "source", "lora", "output", "video"]);
+    expect(sectionIds(wrapper)).toEqual(["negative", "lora", "output", "video"]);
   });
 
   it("keeps every family's rendered sections a subsequence of the canon", () => {
@@ -484,36 +475,26 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     expect(form.keyframes[0]!.frame).toBe(0);
   });
 
-  it("uses the existing upload and gallery picker for an H3 first frame", async () => {
-    const form = formFor("minimax-h3");
-    form.model = "minimax-h3-fl2va:comfy-pruned-int8";
-    const wrapper = mountSettings(form, {
+  it("keeps only the Ref2VA ordered-reference panel in Advanced for H3", () => {
+    const fl2va = formFor("minimax-h3");
+    fl2va.model = "minimax-h3-fl2va:comfy-pruned-int8";
+    const fl2vaWrapper = mountSettings(fl2va, {
       selectedModel: {
-        name: form.model,
-        family: form.family,
+        name: fl2va.model,
+        family: fl2va.family,
         source_image: "required",
       } as ModelEntry,
     });
+    // Boundaries render as the shared source wells in the primary form.
+    expect(fl2vaWrapper.find("[data-test='section-h3-authoring']").exists()).toBe(false);
 
-    await wrapper.get("[data-test='h3-first-picker']").trigger("click");
-    const picker = wrapper
-      .findAllComponents(ImagePickerModal)
-      .find((candidate) => candidate.props("title") === "First frame");
-    if (!picker) throw new Error("H3 first-frame picker not found");
-    expect(picker.props("open")).toBe(true);
-    picker.vm.$emit("pick", [
-      {
-        filename: "opening.png",
-        base64: "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC",
-      },
-    ]);
-    await flushPromises();
-
-    expect(form.h3Authoring?.firstFrame).toMatchObject({
-      filename: "opening.png",
-      width: 7,
-      height: 4,
+    const ref2va = formFor("minimax-h3");
+    ref2va.model = "minimax-h3-ref2va:comfy-pruned-int8";
+    const ref2vaWrapper = mountSettings(ref2va, {
+      selectedModel: { name: ref2va.model, family: ref2va.family } as ModelEntry,
     });
+    expect(ref2vaWrapper.find("[data-test='section-h3-authoring']").exists()).toBe(true);
+    expect(accordionTitles(ref2vaWrapper)).toContain("Ordered references");
   });
 
   it("shows the chained-clips cue when frames exceed one clip for a chainable model", async () => {
@@ -856,21 +837,13 @@ describe("AdvancedSettings — per-model source-image contract (#772)", () => {
     });
   }
 
-  it("keeps the Source image section when the server advertises nothing", () => {
-    const wrapper = mountSettings(wanForm(), { selectedModel: wanModel() });
-    expect(accordionTitles(wrapper)).toContain("Source image");
-  });
-
-  it("drops the Source image section for an advertised text-to-video checkpoint", () => {
-    const wrapper = mountSettings(wanForm("unsupported"), {
-      selectedModel: wanModel("unsupported"),
-    });
-    expect(accordionTitles(wrapper)).not.toContain("Source image");
-  });
-
-  it("keeps the section and its required marker for an image-to-video checkpoint", () => {
-    const wrapper = mountSettings(wanForm("required"), { selectedModel: wanModel("required") });
-    expect(accordionTitles(wrapper)).toContain("Source image");
-    expect(wrapper.find("[data-test='source-required-badge']").exists()).toBe(true);
+  it("never renders a source section — the wells live in the primary form", () => {
+    for (const contract of [undefined, "optional", "required", "unsupported"]) {
+      const wrapper = mountSettings(wanForm(contract), {
+        selectedModel: wanModel(contract),
+      });
+      expect(accordionTitles(wrapper)).not.toContain("Source image");
+      expect(wrapper.find("[data-test='section-source']").exists()).toBe(false);
+    }
   });
 });

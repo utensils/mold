@@ -3,6 +3,8 @@ import { newGenerateForm } from "./generateForm";
 import {
   inlineGenerationMediaBytes,
   sourceConditioningValidationError,
+  resolutionValidationWarning,
+  resolutionValidationError,
 } from "./generateValidation";
 
 function formWithEveryH3MediaField() {
@@ -115,5 +117,81 @@ describe("sourceConditioningValidationError — a continuation carries source fr
     const form = wanContinuation();
     form.family = "ltx-video";
     expect(sourceConditioningValidationError(form)).toMatch(/image-to-video only/);
+  });
+});
+
+describe("resolutionValidationWarning", () => {
+  it("surfaces the warn-policy off-bucket advisory without ever blocking", () => {
+    const recipe = {
+      id: "default",
+      label: "Default",
+      request_selector: {},
+      defaults: { width: 1280, height: 704, steps: 20, guidance: 5 },
+      resolution: {
+        domain: "buckets",
+        alignment: 16,
+        min_width: 64,
+        min_height: 64,
+        max_pixels: 2_000_000,
+        off_bucket: "warn",
+        aspect_groups: [
+          {
+            id: "16:9",
+            label: "16:9",
+            presets: [{ id: "1280x704", width: 1280, height: 704, tier: "recommended" }],
+          },
+        ],
+      },
+      steps: { default: 20, min: 1, max: 100, step: 1, mode: "adjustable" },
+      guidance: { default: 5, min: 0, max: 20, step: 0.1, mode: "adjustable" },
+      capabilities: {
+        guidance: {
+          adjustable: true,
+          supports_negative_prompt: true,
+          fixed_scale: null,
+        },
+        negative_prompt: { mode: "adjustable", required: false },
+        supports_lora: false,
+        supports_controlnet: false,
+        supports_sequence: false,
+        supports_extend: false,
+        supports_audio: false,
+        source_video: { mode: "hidden", required: false },
+        mask: { mode: "hidden", required: false },
+        keyframes: { mode: "hidden", required: false },
+        audio: { mode: "hidden", required: false },
+        lora: { mode: "hidden", max_count: 0 },
+        controlnet: { mode: "hidden", max_count: 0 },
+        output: {
+          default_format: "mp4",
+          formats: ["mp4"],
+          audio_requires_mp4: false,
+        },
+        wan_recipe: {
+          mode: "hidden",
+          supports_distill_strength: false,
+          supports_first_last_frame: false,
+        },
+        schedulers: [],
+      },
+      provenance: [],
+    };
+    const model = {
+      name: "wan22-ti2v-5b:fp16",
+      family: "wan",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "wan.v1",
+        profile_hash: "hash",
+        default_recipe_id: "default",
+        recipes: [recipe],
+      },
+    } as unknown as Parameters<typeof resolutionValidationWarning>[2];
+
+    // The bucket size is silent; an aligned off-bucket size is admitted
+    // (no blocking error) and earns the advisory instead.
+    expect(resolutionValidationWarning(1280, 704, model)).toBeNull();
+    expect(resolutionValidationError(1024, 1024, model)).toBeNull();
+    expect(resolutionValidationWarning(1024, 1024, model)).toContain("results may vary");
   });
 });

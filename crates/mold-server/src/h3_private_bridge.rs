@@ -560,6 +560,8 @@ fn reviewed_h3_private_generation_profile() -> Option<(mold_core::GenerationProf
     let pixels = u64::from(width).checked_mul(u64::from(height))?;
     let aspect = f64::from(width) / f64::from(height);
     recipe.resolution.domain = ResolutionDomain::Buckets;
+    // The reviewed diffusers runtime refuses off-bucket shapes outright.
+    recipe.resolution.off_bucket = Some(mold_core::generation_profile::OffBucketPolicy::Reject);
     recipe.resolution.min_width = width;
     recipe.resolution.min_height = height;
     recipe.resolution.max_pixels = pixels;

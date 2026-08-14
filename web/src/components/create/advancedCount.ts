@@ -1,9 +1,8 @@
 /*
  * Advanced "N on" count — the badge on the Advanced entry and section header.
  * A pure sum of the currently-active advanced fields so the badge, the section
- * header, and any tests all agree. Extends the prototype's advCount (negative +
- * source + loras + upscale + non-default scheduler) with custom size, video
- * non-defaults, ControlNet, and the LTX-2 video suite, per the Create spec.
+ * header, and any tests all agree. Source images and ControlNet moved to the
+ * primary form (SourceMediaPanel) and no longer count here.
  * Capability gating is the caller's job: pass a flag only for a field the
  * current family actually exposes.
  */
@@ -17,8 +16,6 @@ export interface AdvancedCountParams {
   negativePrompt: string;
   /** The model's advertised default negative ("" when none). */
   negativePromptDefault?: string;
-  /** A source image is attached. */
-  hasSource: boolean;
   /** Number of active LoRA adapters (each counts). */
   loraCount: number;
   /** Upscale-after-generate is enabled. */
@@ -29,9 +26,6 @@ export interface AdvancedCountParams {
   customSize: boolean;
   /** A video family has non-default video controls set. */
   videoNonDefault: boolean;
-  /** A ControlNet guidance image + model is active (Advanced Source section).
-   * Optional so callers that never surface ControlNet can omit it. */
-  controlNet?: boolean;
   /** Any LTX-2 / video advanced control beyond frames/fps is set — pipeline,
    * audio, source video, keyframes, retake, spatial/temporal upscale, or the
    * GIF preview toggle. Counts once. Optional for the same reason. */
@@ -50,13 +44,11 @@ export function advancedActiveCount(p: AdvancedCountParams): number {
     ) !== undefined
       ? 1
       : 0) +
-    (p.hasSource ? 1 : 0) +
     Math.max(0, p.loraCount) +
     (p.upscaleOn ? 1 : 0) +
     (p.scheduler && p.scheduler !== "default" ? 1 : 0) +
     (p.customSize ? 1 : 0) +
     (p.videoNonDefault ? 1 : 0) +
-    (p.controlNet ? 1 : 0) +
     (p.videoSuite ? 1 : 0) +
     Math.max(0, p.wanRecipe ?? 0)
   );

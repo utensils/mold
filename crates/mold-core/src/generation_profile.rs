@@ -26,6 +26,26 @@ pub enum ResolutionDomain {
     None,
 }
 
+/// What an off-bucket resolution means for a `Buckets`-domain recipe.
+///
+/// `Reject` keeps the historical fail-closed behaviour (H3's reviewed
+/// runtime genuinely refuses off-bucket shapes). `Warn` admits any size
+/// that clears the alignment/limit/aspect gates — the buckets are the
+/// trained sizes the model is optimized for, not the only runnable ones —
+/// and the advisory dimension-warning channel tells the user results may
+/// vary. Absent on the wire means `Reject`, so older profiles keep today's
+/// semantics and clients fail closed against older servers.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
+)]
+#[serde(rename_all = "kebab-case")]
+#[ts(rename_all = "kebab-case")]
+pub enum OffBucketPolicy {
+    #[default]
+    Reject,
+    Warn,
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS,
 )]
@@ -106,6 +126,10 @@ pub struct ResolutionProfile {
     pub min_aspect_ratio: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_aspect_ratio: Option<f64>,
+    /// Only meaningful for the `Buckets` domain; see [`OffBucketPolicy`].
+    /// Absent on the wire (older servers and profiles) means `Reject`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off_bucket: Option<OffBucketPolicy>,
     pub aspect_groups: Vec<AspectGroup>,
 }
 
@@ -493,6 +517,30 @@ pub fn validate_dimensions_against_recipe(
     validate_resolution(&recipe.resolution, width, height)
 }
 
+/// Advisory counterpart to the `Warn` off-bucket policy: the size is admitted
+/// (it cleared every hard gate), but the model is not tuned for it. `None`
+/// for exact buckets, for `Reject`-policy recipes (they refuse instead), and
+/// for sizes the recipe refuses outright.
+pub fn off_bucket_resolution_warning(
+    recipe: &GenerationRecipeProfile,
+    width: u32,
+    height: u32,
+) -> Option<String> {
+    let profile = &recipe.resolution;
+    if profile.domain != ResolutionDomain::Buckets
+        || profile.off_bucket.unwrap_or_default() != OffBucketPolicy::Warn
+        || validate_resolution(profile, width, height).is_err()
+    {
+        return None;
+    }
+    let exact = profile
+        .aspect_groups
+        .iter()
+        .flat_map(|group| &group.presets)
+        .any(|preset| preset.width == width && preset.height == height);
+    (!exact).then(|| format!("This model isn't optimized for {width}x{height} — results may vary."))
+}
+
 fn validate_resolution(profile: &ResolutionProfile, width: u32, height: u32) -> Result<(), String> {
     if width < profile.min_width || height < profile.min_height {
         return Err(format!(
@@ -533,6 +581,7 @@ fn validate_resolution(profile: &ResolutionProfile, width: u32, height: u32) -> 
         ));
     }
     if profile.domain == ResolutionDomain::Buckets
+        && profile.off_bucket.unwrap_or_default() == OffBucketPolicy::Reject
         && !profile
             .aspect_groups
             .iter()
@@ -949,6 +998,7 @@ fn recipe(
             max_axis_pixels: None,
             min_aspect_ratio: None,
             max_aspect_ratio: None,
+            off_bucket: None,
             aspect_groups: Vec::new(),
         }
     } else {
@@ -972,6 +1022,10 @@ fn recipe(
                 .then_some(crate::minimax_h3::MIN_ASPECT_RATIO),
             max_aspect_ratio: (family == "minimax-h3")
                 .then_some(crate::minimax_h3::MAX_ASPECT_RATIO),
+            // Wan's buckets are the trained sizes, not the only runnable
+            // ones — a deliberate off-bucket request is admitted and the
+            // advisory warning channel says results may vary.
+            off_bucket: (family == "wan").then_some(OffBucketPolicy::Warn),
             aspect_groups: aspect_groups(family, &dimensions),
         }
     };
@@ -1770,10 +1824,36 @@ mod tests {
         let wan = resolve_generation_profile(wan_input);
         let valid = request_for(&wan, 1280, 720);
         validate_request_against_generation_profile(&wan, &valid).unwrap();
-        let invalid = request_for(&wan, 1024, 768);
-        assert!(validate_request_against_generation_profile(&wan, &invalid)
-            .unwrap_err()
-            .contains("not an available bucket"));
+
+        // Wan's buckets are the trained sizes, not the only runnable ones: a
+        // deliberate aligned off-bucket request is admitted (the advisory
+        // dimension-warning channel says results may vary)...
+        let off_bucket = request_for(&wan, 1024, 768);
+        validate_request_against_generation_profile(&wan, &off_bucket).unwrap();
+
+        // ...while a Reject-policy bucket profile (H3's reviewed bridge, and
+        // every profile serialized before the field existed) still refuses.
+        let mut strict = wan.clone();
+        for recipe in &mut strict.recipes {
+            recipe.resolution.off_bucket = Some(OffBucketPolicy::Reject);
+        }
+        assert!(
+            validate_request_against_generation_profile(&strict, &off_bucket)
+                .unwrap_err()
+                .contains("not an available bucket")
+        );
+
+        // The advisory helper (the TUI's warning source) fires exactly for the
+        // admitted off-bucket size — never for exact buckets, never for a
+        // Reject-policy recipe, never for a refused shape.
+        let recipe = wan.default_recipe().unwrap();
+        assert!(off_bucket_resolution_warning(recipe, 1024, 768)
+            .unwrap()
+            .contains("results may vary"));
+        assert!(off_bucket_resolution_warning(recipe, 1280, 720).is_none());
+        assert!(off_bucket_resolution_warning(recipe, 1023, 768).is_none());
+        let strict_recipe = strict.default_recipe().unwrap();
+        assert!(off_bucket_resolution_warning(strict_recipe, 1024, 768).is_none());
     }
 
     #[test]

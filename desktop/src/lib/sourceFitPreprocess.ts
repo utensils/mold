@@ -20,6 +20,7 @@
  */
 import type { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import {
+  coerceSourceFitForMaskless,
   maskPaddingRectangles,
   resolveSourceFitTransform,
   type Rect,
@@ -27,6 +28,7 @@ import {
   type SourceFitPolicy,
   type SourceFitTransform,
 } from "@studio/lib/sourceFit";
+import type { MinimaxH3AuthoringState } from "@studio/lib/minimaxH3Authoring";
 
 /** Canvas operations the preprocess needs — injectable for tests. */
 export interface SourceFitCanvasOps {
@@ -127,4 +129,42 @@ export async function applySourceFitPreprocess(
   return deps.cache
     ? deps.cache.fit(fitSource, fitMask, fitPolicy, input.target, runFit)
     : runFit();
+}
+
+/**
+ * Fit both MiniMax H3 FL2VA boundaries onto the render canvas with the same
+ * client-side machinery as an ordinary source image. H3 has no repaint mask,
+ * so the policy is coerced maskless; an untouched boundary (already at the
+ * target size) keeps its provenance, while a rewritten one drops its stale
+ * sha256 and records the new dimensions.
+ */
+export async function applyH3BoundaryFit(
+  state: MinimaxH3AuthoringState | null | undefined,
+  policy: SourceFitPolicy,
+  target: { width: number; height: number },
+  deps: Parameters<typeof applySourceFitPreprocess>[1],
+): Promise<MinimaxH3AuthoringState | null> {
+  if (!state || (!state.firstFrame?.data && !state.lastFrame?.data)) {
+    return state ?? null;
+  }
+  const maskless = coerceSourceFitForMaskless(policy);
+  const next = { ...state };
+  for (const endpoint of ["firstFrame", "lastFrame"] as const) {
+    const boundary = next[endpoint];
+    if (!boundary?.data) continue;
+    const result = await applySourceFitPreprocess(
+      { source: boundary.data, mask: null, policy: maskless, target },
+      deps,
+    );
+    if (!result.changed || !result.source) continue;
+    next[endpoint] = {
+      ...boundary,
+      data: result.source,
+      mimeType: "image/png",
+      width: target.width,
+      height: target.height,
+      sha256: null,
+    };
+  }
+  return next;
 }

@@ -5,6 +5,7 @@ import {
   generationRecipeSelectionError,
   profileAspectOptions,
   resolutionProfileError,
+  resolutionProfileWarning,
   type GenerationProfileModel,
   type GenerationProfileSet,
   type GenerationRecipeProfile,
@@ -152,6 +153,26 @@ describe("generation profile contract", () => {
     expect(resolutionProfileError(1024, 1024, resolution)).toContain(
       "supported resolution buckets",
     );
+  });
+
+  it("softens bucket membership to an advisory for a warn-policy recipe", () => {
+    const strict = effectiveGenerationRecipe(
+      profileModel(),
+      "one-stage",
+    )?.resolution;
+    // Absent policy (older servers) keeps the fail-closed blocker and no
+    // advisory — the server would refuse the request.
+    expect(resolutionProfileWarning(1024, 1024, strict)).toBeNull();
+
+    const advisory = { ...strict!, off_bucket: "warn" as const };
+    expect(resolutionProfileError(1024, 1024, advisory)).toBeNull();
+    expect(resolutionProfileWarning(1024, 1024, advisory)).toContain(
+      "results may vary",
+    );
+    // An exact bucket stays silent, and a size the recipe refuses outright
+    // (off-grid) never earns the softer message.
+    expect(resolutionProfileWarning(1024, 576, advisory)).toBeNull();
+    expect(resolutionProfileWarning(1008, 576, advisory)).toBeNull();
   });
 
   it("renders exactly the authored aspect groups", () => {

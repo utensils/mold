@@ -46,7 +46,7 @@ const _: () = assert!(TIMELINE_HEIGHT as usize >= timeline::TIMELINE_VISIBLE_ROW
 
 /// Render the Create view.
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
-    let show_error = app.generate.error_message.is_some();
+    let show_error = app.generate.error_message.is_some() || app.generate.warning_message.is_some();
 
     let mut constraints: Vec<Constraint> =
         vec![Constraint::Length(PROMPT_HEIGHT), Constraint::Min(10)];
@@ -151,6 +151,10 @@ fn render_text_area<'a>(
 fn render_error(frame: &mut Frame, app: &App, area: Rect) {
     if let Some(err) = &app.generate.error_message {
         let line = Paragraph::new(format!(" \u{2717} {err}")).style(app.theme.error());
+        frame.render_widget(line, area);
+    } else if let Some(warning) = &app.generate.warning_message {
+        // Same slot, advisory styling: the size was accepted, nothing failed.
+        let line = Paragraph::new(format!(" ! {warning}")).style(app.theme.warning());
         frame.render_widget(line, area);
     }
 }

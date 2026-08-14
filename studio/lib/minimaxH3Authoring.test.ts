@@ -20,7 +20,10 @@ import {
   minimaxH3TaskForModel,
   moveMinimaxH3Reference,
   serializeMinimaxH3Authoring,
+  setMinimaxH3BoundaryFile,
+  setMinimaxH3GalleryImageBoundary,
   setMinimaxH3GalleryImageFirstFrame,
+  setMinimaxH3PickedImageBoundary,
   setMinimaxH3PickedImageFirstFrame,
 } from "./minimaxH3Authoring";
 
@@ -95,6 +98,85 @@ describe("MiniMax H3 Studio authority", () => {
       width: 7,
       height: 4,
       data: png,
+    });
+  });
+
+  it("normalizes a surface-picker image into the FL2VA closing boundary without touching the opening one", () => {
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC";
+    const opened = setMinimaxH3PickedImageBoundary(null, "firstFrame", {
+      filename: "opening.png",
+      base64: png,
+    });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+
+    const closed = setMinimaxH3PickedImageBoundary(opened.state, "lastFrame", {
+      filename: "closing.png",
+      base64: png,
+    });
+    expect(closed.ok).toBe(true);
+    if (!closed.ok) return;
+    expect(closed.state.firstFrame?.filename).toBe("opening.png");
+    expect(closed.state.lastFrame).toMatchObject({
+      filename: "closing.png",
+      mimeType: "image/png",
+      width: 7,
+      height: 4,
+      data: png,
+    });
+    expect(closed.reference).toBeNull();
+  });
+
+  it("reads a picked file into a boundary and refuses non-still media", async () => {
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC";
+    const bytes = Uint8Array.from(atob(png), (c) => c.charCodeAt(0));
+    const attached = await setMinimaxH3BoundaryFile(
+      null,
+      "lastFrame",
+      new File([bytes], "closing.png", { type: "image/png" }),
+    );
+    expect(attached.ok).toBe(true);
+    if (!attached.ok) return;
+    expect(attached.state.lastFrame).toMatchObject({
+      filename: "closing.png",
+      mimeType: "image/png",
+      width: 7,
+      height: 4,
+      data: png,
+    });
+
+    const refused = await setMinimaxH3BoundaryFile(
+      null,
+      "firstFrame",
+      new File(["mp4"], "clip.mp4", { type: "video/mp4" }),
+    );
+    expect(refused).toEqual({
+      ok: false,
+      error: "FL2VA endpoints must be still images.",
+    });
+
+    const undecodable = await setMinimaxH3BoundaryFile(
+      null,
+      "firstFrame",
+      new File(["webp"], "still.webp", { type: "image/webp" }),
+    );
+    expect(undecodable).toEqual({
+      ok: false,
+      error: "Use a PNG or JPEG image for FL2VA endpoints.",
+    });
+  });
+
+  it("rejects a non-image gallery pick for the closing boundary", () => {
+    const result = setMinimaxH3GalleryImageBoundary(null, "lastFrame", {
+      filename: "clip.mp4",
+      mimeType: "video/mp4",
+      width: 1280,
+      height: 720,
+      data: "VIDEO",
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: "Only gallery images can be used as MiniMax H3 visual references.",
     });
   });
 

@@ -7,7 +7,7 @@
  * Advanced → Output & seed), Batch is a stepper, and the Advanced button
  * surfaces the "N on" badge and opens the drawer.
  */
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
@@ -20,6 +20,7 @@ import Icon from "@ui/components/Icon.vue";
 import { aspectsSupportedByPresets } from "@ui/lib/resolution";
 import {
   effectiveGenerationRecipe,
+  resolutionProfileWarning,
   profileAspectIdForResolution,
   profileAspectOptions,
 } from "@studio/lib/generationProfile";
@@ -98,6 +99,14 @@ const capabilities = computed(() =>
 );
 const activeRecipe = computed(() =>
   effectiveGenerationRecipe(props.model, props.modelValue.pipeline),
+);
+/** Warn-policy bucket recipes admit this size but are not tuned for it. */
+const resolutionWarning = computed(() =>
+  resolutionProfileWarning(
+    props.modelValue.width,
+    props.modelValue.height,
+    activeRecipe.value?.resolution,
+  ),
 );
 const sequenceMode = computed(() => props.output === "sequence");
 // Edit families (Qwen image edit) render one print at a time; a sequence
@@ -179,18 +188,34 @@ const shapeOptions = computed(() => {
       ]
     : canonicalShapeOptions.value;
 });
-const aspectId = computed(() =>
-  followsSource.value
-    ? "source"
-    : ((props.model
-        ? profileAspectIdForResolution(
-            props.model,
-            props.modelValue.pipeline,
-            props.modelValue.width,
-            props.modelValue.height,
-          )
-        : projection.value.aspectId) ?? ""),
+const canonicalAspectId = computed(
+  () =>
+    (props.model
+      ? profileAspectIdForResolution(
+          props.model,
+          props.modelValue.pipeline,
+          props.modelValue.width,
+          props.modelValue.height,
+        )
+      : projection.value.aspectId) ?? "",
 );
+/** The user's explicit Shape pick disambiguates a canvas that satisfies both
+ * a canonical aspect and the source (a 1280×704 source IS wan's 20:11
+ * bucket) — without it the Source chip would win forever and the bucket chip
+ * could never light up. Forgotten once the canvas stops matching the pick. */
+const explicitAspectId = ref<string | null>(null);
+const aspectId = computed(() => {
+  const explicit = explicitAspectId.value;
+  if (explicit === "source" && followsSource.value) return "source";
+  if (
+    explicit &&
+    explicit !== "source" &&
+    canonicalAspectId.value === explicit
+  ) {
+    return explicit;
+  }
+  return followsSource.value ? "source" : canonicalAspectId.value;
+});
 const mp = computed(() => projection.value.mp);
 
 const currentRatio = computed(() => {
@@ -272,6 +297,7 @@ const selectedMp = computed(() => {
 });
 
 function setAspect(id: string) {
+  explicitAspectId.value = id;
   if (id === "source") {
     matchSource();
     return;
@@ -300,6 +326,9 @@ function setAspect(id: string) {
 }
 
 function matchSource() {
+  // Matching the source is itself an explicit pick — without this, a source
+  // whose size is also a canonical bucket would re-light the earlier chip.
+  explicitAspectId.value = "source";
   const source = sourceResolution.value;
   if (!source) return;
   patch({ width: source.output.width, height: source.output.height });
@@ -407,6 +436,13 @@ function lockLastSeed() {
       >
         Match source
       </button>
+      <p
+        v-if="resolutionWarning"
+        class="controls__hint controls__hint--warning"
+        data-test="resolution-warning"
+      >
+        {{ resolutionWarning }}
+      </p>
     </div>
 
     <div class="controls__group">
@@ -668,6 +704,10 @@ function lockLastSeed() {
   font-size: 11px;
   color: var(--ink-3);
   line-height: 1.4;
+}
+
+.controls__hint--warning {
+  color: var(--safelight);
 }
 
 .controls__match-source {

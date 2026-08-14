@@ -579,3 +579,130 @@ describe("InspectorPanel — model picker", () => {
     expect(form.model).toBe("cv:23423432");
   });
 });
+
+describe("InspectorPanel — source media in the primary form", () => {
+  const wanModel = (sourceImage?: string): ModelEntry =>
+    ({
+      name: "wan22-t2v-a14b",
+      family: "wan",
+      downloaded: true,
+      ...(sourceImage === undefined ? {} : { source_image: sourceImage }),
+    }) as ModelEntry;
+
+  it("renders the source well for an image family without any Advanced toggle", () => {
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("sd15") } });
+    const field = wrapper.get("[data-test='inspector-source-media']");
+    expect(field.find("[data-test='source-well']").exists()).toBe(true);
+  });
+
+  it("follows the advertised per-model contract, exactly like resolutions", async () => {
+    const form = formFor("wan");
+    form.model = "wan22-t2v-a14b";
+    useModelStore().all = [wanModel("unsupported")];
+    const hidden = mount(InspectorPanel, { props: { form } });
+    expect(hidden.find("[data-test='inspector-source-media']").exists()).toBe(false);
+    hidden.unmount();
+
+    useModelStore().all = [wanModel("required")];
+    const required = mount(InspectorPanel, { props: { form } });
+    const field = required.get("[data-test='inspector-source-media']");
+    expect(field.find("[data-test='source-required-badge']").exists()).toBe(true);
+    expect(field.find("[data-test='end-frame-well']").exists()).toBe(true);
+  });
+
+  it("renders H3 FL2VA boundaries as the same standard wells and applies a gallery pick", async () => {
+    const form = formFor("minimax-h3");
+    form.model = "minimax-h3-fl2va:comfy-pruned-int8";
+    useModelStore().all = [
+      {
+        name: form.model,
+        family: form.family,
+        downloaded: true,
+        source_image: "required",
+      } as ModelEntry,
+    ];
+    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
+    const field = wrapper.get("[data-test='inspector-source-media']");
+    expect(field.find("[data-test='source-well']").exists()).toBe(true);
+    expect(field.find("[data-test='source-required-badge']").exists()).toBe(true);
+    // Reviewed first-frame-only runtime: no empty last-frame well.
+    expect(field.find("[data-test='end-frame-well']").exists()).toBe(false);
+
+    await field.get("[data-test='source-gallery']").trigger("click");
+    const picker = wrapper
+      .findAllComponents({ name: "ImagePickerModal" })
+      .find((candidate) => candidate.props("title") === "First frame");
+    if (!picker) throw new Error("H3 first-frame picker not found");
+    expect(picker.props("open")).toBe(true);
+    picker.vm.$emit("pick", [
+      {
+        filename: "opening.png",
+        base64: "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC",
+      },
+    ]);
+    await flushPromises();
+    expect(form.h3Authoring?.firstFrame).toMatchObject({
+      filename: "opening.png",
+      width: 7,
+      height: 4,
+    });
+  });
+
+  it("keeps H3 Ref2VA references out of the primary form", () => {
+    const form = formFor("minimax-h3");
+    form.model = "minimax-h3-ref2va:comfy-pruned-int8";
+    useModelStore().all = [
+      { name: form.model, family: form.family, downloaded: true } as ModelEntry,
+    ];
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    expect(wrapper.find("[data-test='inspector-source-media']").exists()).toBe(false);
+  });
+
+  it("stands down in sequence mode — the sequence composer owns its opening image", () => {
+    useSequenceDraftStore().output = "sequence";
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("sd15") } });
+    expect(wrapper.find("[data-test='inspector-source-media']").exists()).toBe(false);
+  });
+});
+
+describe("InspectorPanel — explicit shape pick vs source tie", () => {
+  it("lets the user select the canonical aspect even when it equals the source", async () => {
+    // A 1280x704 source IS wan's 20:11 bucket: both chips describe the same
+    // canvas, so the pick — not derived matching — must decide the highlight.
+    const model = {
+      name: "wan22-ti2v-5b:fp16",
+      family: "wan",
+      downloaded: true,
+      default_width: 1280,
+      default_height: 704,
+    } as ModelEntry;
+    useModelStore().all = [model];
+    const form = formFor("wan");
+    form.model = model.name;
+    form.width = 1280;
+    form.height = 704;
+    form.sourceImage = "SRC";
+    form.sourceImageWidth = 1280;
+    form.sourceImageHeight = 704;
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    const shape = wrapper.getComponent(ShapePicker);
+    // Derived matching alone pins Source...
+    expect(shape.props("modelValue")).toBe("source");
+
+    // ...an explicit canonical pick wins the tie...
+    const canonical = (shape.props("options") as ReadonlyArray<{ id: string }>).find(
+      (option) => option.id !== "source",
+    )!.id;
+    shape.vm.$emit("update:modelValue", canonical);
+    await flushPromises();
+    expect(shape.props("modelValue")).toBe(canonical);
+    // ...and the canvas itself is unchanged (same bucket).
+    expect(form.width).toBe(1280);
+    expect(form.height).toBe(704);
+
+    // Picking Source hands the tie back.
+    shape.vm.$emit("update:modelValue", "source");
+    await flushPromises();
+    expect(shape.props("modelValue")).toBe("source");
+  });
+});

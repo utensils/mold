@@ -1012,6 +1012,10 @@ textarea.control {
   font-size: var(--text-caption);
 }
 
+.mobile-resolution-note--warning {
+  color: var(--safelight);
+}
+
 .mobile-seed-picker {
   min-width: 0;
   margin: 2px 0 14px;
