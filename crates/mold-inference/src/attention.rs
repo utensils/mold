@@ -265,6 +265,31 @@ pub fn math_attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<
     math_attention_impl(q, k, v, scale, math_attention_chunk_size(q))
 }
 
+/// Math attention with an explicit query chunk, forced on every device.
+///
+/// [`math_attention`]'s `Auto` policy only chunks on CUDA past 1024 query rows,
+/// so a Metal or CPU caller always materialises the whole `Q x K` score matrix.
+/// That is the right default for a transformer block, whose score matrix is
+/// small next to its weights — but not for the Qwen-Image VAE mid-block, which
+/// attends over every latent token at once and whose two `N x N` F32 buffers
+/// are the single largest allocation in the decode (~3 GB each at a 1328²
+/// render). Such a caller forces the chunk here instead of hoping the heuristic
+/// agrees with it.
+///
+/// Chunking is arithmetically a no-op: each chunk softmaxes over the full key
+/// axis, so the concatenated result is bit-comparable to the single-pass path.
+/// `chunk_size` is clamped to at least one row (zero would not terminate), and
+/// a chunk at or above the query length degenerates to a single pass.
+pub fn math_attention_with_chunk(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f32,
+    chunk_size: usize,
+) -> Result<Tensor> {
+    math_attention_impl(q, k, v, scale, Some(chunk_size.max(1)))
+}
+
 fn math_attention_impl(
     q: &Tensor,
     k: &Tensor,
@@ -484,6 +509,41 @@ mod tests {
             max_abs_diff(&chunked, &full) < 1e-5,
             "chunked math attention diverged from full math"
         );
+    }
+
+    /// `math_attention_with_chunk` is the device-independent entry point the
+    /// Qwen-Image VAE mid-block uses: `math_attention`'s `Auto` policy only
+    /// chunks on CUDA past 1024 rows, so Metal and CPU would otherwise still
+    /// materialise the whole `N x N` score matrix. Chunking is an arithmetic
+    /// no-op, so the forced path must agree with the unforced one — including
+    /// at `H = 1`, which is the VAE's own single-head layout.
+    #[test]
+    fn math_attention_with_chunk_matches_math_attention() {
+        for shape in [(1, 1, 37, 24), (1, 1, 64, 8), (2, 4, 16, 32)] {
+            let (q, k, v) = rand_qkv(shape);
+            let scale = 1.0 / (shape.3 as f32).sqrt();
+            let want = math_attention(&q, &k, &v, scale).unwrap();
+
+            for chunk in [1, 7, 16, shape.2, shape.2 * 2] {
+                let got = math_attention_with_chunk(&q, &k, &v, scale, chunk).unwrap();
+                assert_eq!(got.dims(), want.dims(), "shape {shape:?} chunk {chunk}");
+                assert!(
+                    max_abs_diff(&got, &want) < 1e-5,
+                    "shape {shape:?} chunk {chunk} diverged from math_attention"
+                );
+            }
+        }
+    }
+
+    /// A zero chunk would loop forever in `math_attention_chunked_flat`; the
+    /// public entry point clamps it to a single row instead.
+    #[test]
+    fn math_attention_with_chunk_clamps_zero_to_one_row() {
+        let (q, k, v) = rand_qkv((1, 1, 9, 8));
+        let scale = 1.0 / (8f32).sqrt();
+        let want = math_attention(&q, &k, &v, scale).unwrap();
+        let got = math_attention_with_chunk(&q, &k, &v, scale, 0).unwrap();
+        assert!(max_abs_diff(&got, &want) < 1e-5);
     }
 
     /// The invariant the whole Qwen mask removal rests on: attending over

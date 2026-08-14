@@ -23,6 +23,21 @@ const BLOCK_OUT_CHANNELS: [usize; 4] = [96, 192, 384, 384];
 const LATENT_CHANNELS: usize = 16;
 const NUM_RES_BLOCKS: usize = 2;
 
+/// Query rows per pass in the mid-block attention.
+///
+/// The mid block attends over every latent token at once as a single head, so
+/// the score matrix is `[1, 1, N, N]` F32 with `N = (H/8) * (W/8)`. At a native
+/// 1328² render that is 27_556 tokens — a 3.0 GB buffer, materialised twice
+/// (scores, then the softmax of them), which is the largest allocation in the
+/// whole decode. Chunking the query axis replaces it with a `[chunk, N]` buffer
+/// (113 MB at 1328²) per pass and is arithmetically identical, because each
+/// chunk still softmaxes over the complete key axis.
+///
+/// 1024 rows keeps the per-pass matmul large enough to stay compute-bound
+/// while capping the transient at ~1/27th of the full matrix at native size.
+/// `qwen_image::pipeline`'s decode-workspace reserve derives from this value.
+pub(crate) const VAE_ATTENTION_CHUNK_ROWS: usize = 1024;
+
 /// Load a 5D causal conv3d weight as a 2D conv by extracting the last temporal slice.
 ///
 /// For single-frame (T=1) inference with causal padding, only the last temporal kernel
@@ -128,13 +143,29 @@ impl Module for QwenImageAttentionBlock2d {
         let qkv = x.apply(&self.to_qkv)?;
         let qkv = qkv.reshape((b, 1, c * 3, h * w))?.transpose(2, 3)?;
         let chunks = qkv.chunk(3, D::Minus1)?;
-        let q = &chunks[0];
-        let k = &chunks[1];
-        let v = &chunks[2];
-        let scale = 1.0 / (c as f64).sqrt();
-        let attn = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
-        let attn = candle_nn::ops::softmax_last_dim(&attn)?;
-        let x = attn.matmul(v)?;
+        // `chunk` over a transposed tensor hands back strided views. The
+        // attention helper flattens its inputs, which a non-contiguous view
+        // cannot do, so materialise them here (the same reason `wan`'s VAE
+        // `head()` closure calls `contiguous`).
+        let q = chunks[0].contiguous()?;
+        let k = chunks[1].contiguous()?;
+        let v = chunks[2].contiguous()?;
+        let scale = (1.0 / (c as f64).sqrt()) as f32;
+        let tokens = h * w;
+        // Route through `math_attention*` rather than `attention()`: a VAE
+        // reconstruction must not change depending on whether the binary was
+        // built with `flash-attn`.
+        let x = if tokens > VAE_ATTENTION_CHUNK_ROWS {
+            crate::attention::math_attention_with_chunk(
+                &q,
+                &k,
+                &v,
+                scale,
+                VAE_ATTENTION_CHUNK_ROWS,
+            )?
+        } else {
+            crate::attention::math_attention(&q, &k, &v, scale)?
+        };
         let x = x.transpose(2, 3)?.reshape((b, c, h, w))?;
         x.apply(&self.proj)? + residual
     }
@@ -569,6 +600,106 @@ mod tests {
             .map(|(name, tensor)| (name.to_string(), tensor))
             .collect::<HashMap<_, _>>();
         VarBuilder::from_tensors(map, DType::F32, &Device::Cpu)
+    }
+
+    fn attention_block(dim: usize) -> QwenImageAttentionBlock2d {
+        let dev = Device::Cpu;
+        let vb = vb_from_tensors(vec![
+            (
+                "norm.gamma",
+                Tensor::ones((dim, 1, 1), DType::F32, &dev).unwrap(),
+            ),
+            (
+                "to_qkv.weight",
+                Tensor::randn(0f32, 0.5f32, (dim * 3, dim, 1, 1), &dev).unwrap(),
+            ),
+            (
+                "to_qkv.bias",
+                Tensor::randn(0f32, 0.5f32, dim * 3, &dev).unwrap(),
+            ),
+            (
+                "proj.weight",
+                Tensor::randn(0f32, 0.5f32, (dim, dim, 1, 1), &dev).unwrap(),
+            ),
+            ("proj.bias", Tensor::randn(0f32, 0.5f32, dim, &dev).unwrap()),
+        ]);
+        QwenImageAttentionBlock2d::new(dim, vb).unwrap()
+    }
+
+    /// The pre-chunking mid-block attention, inline: one full `[1, 1, N, N]`
+    /// score matrix, softmax, one matmul. This is the numerical contract the
+    /// chunked forward has to preserve exactly.
+    fn reference_attention_forward(block: &QwenImageAttentionBlock2d, x: &Tensor) -> Tensor {
+        let residual = x;
+        let (b, c, h, w) = x.dims4().unwrap();
+        let x = x.apply(&block.norm).unwrap();
+        let qkv = x.apply(&block.to_qkv).unwrap();
+        let qkv = qkv
+            .reshape((b, 1, c * 3, h * w))
+            .unwrap()
+            .transpose(2, 3)
+            .unwrap();
+        let chunks = qkv.chunk(3, D::Minus1).unwrap();
+        let (q, k, v) = (&chunks[0], &chunks[1], &chunks[2]);
+        let scale = 1.0 / (c as f64).sqrt();
+        let attn = (q.matmul(&k.transpose(2, 3).unwrap()).unwrap() * scale).unwrap();
+        let attn = candle_nn::ops::softmax_last_dim(&attn).unwrap();
+        let x = attn.matmul(v).unwrap();
+        let x = x
+            .transpose(2, 3)
+            .unwrap()
+            .reshape((b, c, h, w))
+            .unwrap()
+            .apply(&block.proj)
+            .unwrap();
+        (x + residual).unwrap()
+    }
+
+    fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
+        (a - b)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
+    }
+
+    /// A latent past `VAE_ATTENTION_CHUNK_ROWS` takes the chunked path, which
+    /// never materialises the full score matrix. It must still be the same
+    /// arithmetic as the single-pass version it replaced.
+    #[test]
+    fn mid_block_attention_chunked_matches_full_score_matrix() {
+        // 33 x 33 = 1089 tokens, one row past the 1024-row chunk.
+        let side = 33;
+        assert!(side * side > VAE_ATTENTION_CHUNK_ROWS);
+        let block = attention_block(8);
+        let x = Tensor::randn(0f32, 1.0f32, (1, 8, side, side), &Device::Cpu).unwrap();
+
+        let got = block.forward(&x).unwrap();
+        let want = reference_attention_forward(&block, &x);
+
+        assert_eq!(got.dims(), want.dims());
+        assert!(
+            max_abs_diff(&got, &want) < 1e-5,
+            "chunked mid-block attention diverged from the full score matrix"
+        );
+    }
+
+    /// Small latents stay on the single-pass path; the same equality holds.
+    #[test]
+    fn mid_block_attention_small_latent_matches_full_score_matrix() {
+        const { assert!(6 * 6 <= VAE_ATTENTION_CHUNK_ROWS) };
+        let block = attention_block(8);
+        let x = Tensor::randn(0f32, 1.0f32, (1, 8, 6, 6), &Device::Cpu).unwrap();
+
+        let got = block.forward(&x).unwrap();
+        let want = reference_attention_forward(&block, &x);
+
+        assert!(max_abs_diff(&got, &want) < 1e-5);
     }
 
     #[test]

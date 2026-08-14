@@ -623,15 +623,58 @@ impl QwenImageEngine {
         }
     }
 
+    /// Transient VRAM the VAE decode needs on top of its weights.
+    ///
+    /// Derived from the two allocation shapes that dominate it rather than from
+    /// a flat per-pixel factor, because chunking the mid-block attention
+    /// (`VAE_ATTENTION_CHUNK_ROWS`) changed one of them by an order of
+    /// magnitude. With `P` output pixels and `N = P / 64` latent tokens (the
+    /// VAE is 8x per axis), all F32:
+    ///
+    /// * mid-block score buffers — two `[chunk, N]` matrices (the scores and
+    ///   their softmax) = `2 * 1024 * N * 4`. This term used to be `2 * N * N * 4`,
+    ///   i.e. 6.1 GB at native 1328²; it is now 226 MB.
+    /// * mid-block operands — the `[N, 3C]` qkv projection, the three
+    ///   contiguous `[N, C]` q/k/v copies, the `[N, C]` output and its
+    ///   transpose, at `C = 384`: `8 * 384 * N * 4`.
+    /// * decoder conv stack — the last up-block runs at full resolution with 96
+    ///   channels, and its residual chain keeps eight of those buffers alive to
+    ///   the end of the statement (`x`, five chained temporaries, `h`, and the
+    ///   `residual + h` result): `8 * 96 * P * 4`. Untouched by this change and
+    ///   now the dominant term.
+    ///
+    /// The mid block runs to completion before the up-blocks allocate anything,
+    /// so summing the two phases instead of taking their max is the deliberate
+    /// margin — it covers cuDNN conv workspaces and the norm temporaries this
+    /// arithmetic does not model. Native 1328² reserves ~5.98 GB (was ~7.2 GB),
+    /// and small 512² requests stay below the proactive tiling threshold.
     fn qwen_vae_decode_workspace_bytes(width: u32, height: u32) -> u64 {
+        const F32_BYTES: u64 = 4;
+        const MID_BLOCK_CHANNELS: u64 = 384;
+        const MID_BLOCK_OPERANDS: u64 = 8;
+        const FINAL_UP_BLOCK_CHANNELS: u64 = 96;
+        const FINAL_UP_BLOCK_LIVE_BUFFERS: u64 = 8;
+        const VAE_SPATIAL_COMPRESSION: u64 = 8;
+
         let pixels = width as u64 * height as u64;
-        // Qwen's 3D causal VAE decode has a much larger transient workspace
-        // than the final RGB tensor. This factor is intentionally conservative:
-        // native 1328² requests reserve ~7.2 GB, while small 512² requests stay
-        // below the proactive tiling threshold.
-        pixels.saturating_mul(4).saturating_mul(1024)
+        let latent_tokens = pixels / (VAE_SPATIAL_COMPRESSION * VAE_SPATIAL_COMPRESSION);
+
+        let scores = 2 * (super::vae::VAE_ATTENTION_CHUNK_ROWS as u64) * latent_tokens * F32_BYTES;
+        let operands = MID_BLOCK_OPERANDS * MID_BLOCK_CHANNELS * latent_tokens * F32_BYTES;
+        let conv_stack = FINAL_UP_BLOCK_LIVE_BUFFERS * FINAL_UP_BLOCK_CHANNELS * pixels * F32_BYTES;
+
+        scores.saturating_add(operands).saturating_add(conv_stack)
     }
 
+    /// Skip the full-resolution decode and go straight to tiles when the card
+    /// cannot hold the reserve above.
+    ///
+    /// The machinery is unchanged; chunking the mid-block attention only moved
+    /// where it engages. Native 1328² now asks for 8.48 GB free rather than
+    /// 9.72 GB, so a 12 GB card with a resident transformer that used to tile
+    /// proactively runs the full decode instead — while an actually starved
+    /// card still tiles, and the OOM-triggered fallback below stays the
+    /// backstop for everything this estimate gets wrong.
     fn should_proactively_tile_vae_decode(
         width: u32,
         height: u32,
@@ -4652,6 +4695,80 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("bad tiled decode"));
+    }
+
+    /// The decode workspace reserve is arithmetic over the two allocations that
+    /// dominate it, so it is pinned exactly rather than described as "about N
+    /// GB". Chunking the mid-block attention replaced an `N x N` score matrix
+    /// with a `chunk x N` one, and this test is what stops the reserve from
+    /// silently drifting back to the pre-chunking factor.
+    #[test]
+    fn qwen_vae_decode_workspace_matches_chunked_allocation_shape() {
+        // 1024²: 1_048_576 px, 16_384 latent tokens.
+        //   score buffers   2 * 1024 * 16_384 * 4 =   134_217_728
+        //   attn operands   8 *  384 * 16_384 * 4 =   201_326_592
+        //   conv stack      8 *   96 * 1_048_576 * 4 = 3_221_225_472
+        assert_eq!(
+            QwenImageEngine::qwen_vae_decode_workspace_bytes(1024, 1024),
+            3_556_769_792
+        );
+
+        // 1328² (native): 1_763_584 px, 27_556 latent tokens.
+        //   score buffers   2 * 1024 * 27_556 * 4 =   225_738_752
+        //   attn operands   8 *  384 * 27_556 * 4 =   338_608_128
+        //   conv stack      8 *   96 * 1_763_584 * 4 = 5_417_730_048
+        assert_eq!(
+            QwenImageEngine::qwen_vae_decode_workspace_bytes(1328, 1328),
+            5_982_076_928
+        );
+
+        // Every term is linear in pixel count, so the reserve is too.
+        assert_eq!(
+            QwenImageEngine::qwen_vae_decode_workspace_bytes(2048, 1024),
+            2 * QwenImageEngine::qwen_vae_decode_workspace_bytes(1024, 1024)
+        );
+    }
+
+    /// The unchunked score matrix was `N x N`; at native 1328² that alone was
+    /// ~3 GB per buffer. The reserve must now sit strictly below what the old
+    /// `pixels * 4KiB` factor asked for, or the whole change bought nothing.
+    #[test]
+    fn qwen_vae_decode_workspace_is_below_the_prechunking_reserve() {
+        for (w, h) in [(1024u32, 1024u32), (1328, 1328), (1664, 928)] {
+            let pre_chunking = (w as u64) * (h as u64) * 4 * 1024;
+            let now = QwenImageEngine::qwen_vae_decode_workspace_bytes(w, h);
+            assert!(
+                now < pre_chunking,
+                "{w}x{h}: {now} must be below the pre-chunking {pre_chunking}"
+            );
+        }
+    }
+
+    /// Tiling still engages, just later: the gate reads the workspace reserve,
+    /// so a smaller reserve means native 1328² now fits in free VRAM that used
+    /// to force a proactive tiled decode.
+    #[test]
+    fn qwen_proactive_tiling_engages_at_the_rederived_reserve() {
+        let required = VAE_DECODE_VRAM_THRESHOLD
+            + QwenImageEngine::qwen_vae_decode_workspace_bytes(1328, 1328);
+        assert_eq!(required, 8_482_076_928);
+        assert!(QwenImageEngine::should_proactively_tile_vae_decode(
+            1328,
+            1328,
+            true,
+            required - 1
+        ));
+        assert!(!QwenImageEngine::should_proactively_tile_vae_decode(
+            1328, 1328, true, required
+        ));
+        // A card that had to tile under the old ~9.7 GB requirement but has
+        // more than the re-derived one now runs the full decode.
+        assert!(!QwenImageEngine::should_proactively_tile_vae_decode(
+            1328,
+            1328,
+            true,
+            9_000_000_000
+        ));
     }
 
     #[test]
