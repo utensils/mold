@@ -4123,6 +4123,44 @@ describe("MobileApp wan source conditioning", () => {
     await flushPromises();
   }
 
+  it("shows the H3 first-frame blocker before prompt entry and clears it after picking", async () => {
+    const h3Model: ModelEntry = {
+      ...wanModel,
+      name: "minimax-h3-fl2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      hf_repo: "Comfy-Org/MiniMax-H3",
+      default_steps: 21,
+      default_guidance: 0,
+      default_width: 1344,
+      default_height: 768,
+      default_frames: 124,
+      default_fps: 24,
+      source_image: "required",
+    };
+    serveWan(h3Model);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-h3-authoring-error']").text()).toContain(
+      "requires a first frame",
+    );
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).toHaveProperty(
+      "disabled",
+    );
+
+    await wrapper.get("[data-test='mobile-open-advanced']").trigger("click");
+    await flushPromises();
+    await pickInto(
+      "First frame",
+      "opening.png",
+      "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC",
+    );
+    expect(wrapper.find("[data-test='mobile-h3-authoring-error']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).toHaveProperty(
+      "disabled",
+    );
+  });
+
   it("keeps the well and offers no end frame when the host advertises no contract", async () => {
     serveWan(wanModel);
     wrapper = mountMobileApp();

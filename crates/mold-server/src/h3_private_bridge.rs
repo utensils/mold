@@ -533,9 +533,7 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
 
 #[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn reviewed_h3_private_generation_profile() -> Option<(mold_core::GenerationProfileSet, u32, u64)> {
-    use mold_core::generation_profile::{
-        AspectGroup, ControlMode, FpsControl, ResolutionDomain, ResolutionPreset,
-    };
+    use mold_core::generation_profile::{ControlMode, FpsControl, ResolutionDomain};
 
     let width = mold_core::minimax_h3::DEFAULT_WIDTH;
     let height = mold_core::minimax_h3::DEFAULT_HEIGHT;
@@ -568,16 +566,28 @@ fn reviewed_h3_private_generation_profile() -> Option<(mold_core::GenerationProf
     recipe.resolution.max_axis_pixels = Some(width.max(height));
     recipe.resolution.min_aspect_ratio = Some(aspect);
     recipe.resolution.max_aspect_ratio = Some(aspect);
-    recipe.resolution.aspect_groups = vec![AspectGroup {
-        id: "reviewed-landscape".into(),
-        label: "Reviewed landscape".into(),
-        presets: vec![ResolutionPreset {
-            id: format!("{width}x{height}"),
-            width,
-            height,
-            tier: "reviewed".into(),
-        }],
-    }];
+    // Keep the generated profile's canonical reduced-ratio identity (`7:4`).
+    // Create surfaces render this label inside a compact aspect chip; replacing
+    // it with prose here made one server-only presentation fork wrap outside
+    // the control even though every surface already shares the profile.
+    let mut reviewed_group = recipe
+        .resolution
+        .aspect_groups
+        .iter()
+        .find(|group| {
+            group
+                .presets
+                .iter()
+                .any(|preset| preset.width == width && preset.height == height)
+        })?
+        .clone();
+    reviewed_group
+        .presets
+        .retain(|preset| preset.width == width && preset.height == height);
+    for preset in &mut reviewed_group.presets {
+        preset.tier = "reviewed".into();
+    }
+    recipe.resolution.aspect_groups = vec![reviewed_group];
     recipe.steps.default = steps;
     recipe.steps.min = steps;
     recipe.steps.max = steps;
@@ -666,9 +676,9 @@ pub(crate) fn authenticated_h3_private_model_row(
             size_gb: disk_usage_bytes as f32 / 1_000_000_000.0,
             is_loaded: false,
             last_used: None,
-            // Acquisition is represented by the registered public manifest;
-            // this installed runtime row must not introduce another recipe.
-            hf_repo: String::new(),
+            // The row remains the sole executable recipe, while its acquisition
+            // provenance is the same pinned Hugging Face repo as the manifest.
+            hf_repo: mold_core::minimax_h3::COMFY_REPO.into(),
         },
         defaults: mold_core::ModelDefaults {
             default_steps: request.steps,
@@ -1452,6 +1462,31 @@ fn validate_private_h3_live_owner_route(
     Ok(())
 }
 
+#[cfg(test)]
+mod presentation_tests {
+    #[test]
+    fn reviewed_profile_keeps_the_canonical_exact_aspect_identity() {
+        let (profile, _, _) = super::reviewed_h3_private_generation_profile()
+            .expect("the reviewed H3 profile must resolve");
+        let recipe = profile.default_recipe().expect("one reviewed recipe");
+        let group = recipe
+            .resolution
+            .aspect_groups
+            .first()
+            .expect("one reviewed aspect group");
+
+        assert_eq!(recipe.resolution.aspect_groups.len(), 1);
+        assert_eq!(group.id, "7:4");
+        assert_eq!(group.label, "7:4");
+        assert_eq!(group.presets.len(), 1);
+        assert_eq!(
+            (group.presets[0].width, group.presets[0].height),
+            (1344, 768)
+        );
+        assert_eq!(group.presets[0].tier, "reviewed");
+    }
+}
+
 #[cfg(all(test, any(feature = "h3", feature = "h3-private-uat")))]
 mod tests {
     use std::fs::{self, OpenOptions};
@@ -1537,7 +1572,7 @@ mod tests {
         assert_eq!(row.info.name, mold_core::minimax_h3::FL2VA_COMFY);
         assert_eq!(row.info.family, mold_core::minimax_h3::FAMILY);
         assert!(row.downloaded);
-        assert_eq!(row.info.hf_repo, "");
+        assert_eq!(row.info.hf_repo, mold_core::minimax_h3::COMFY_REPO);
         assert_eq!(row.defaults.default_width, 1344);
         assert_eq!(row.defaults.default_height, 768);
         assert_eq!(row.defaults.default_frames, Some(124));
@@ -1563,6 +1598,14 @@ mod tests {
             mold_core::generation_profile::ResolutionDomain::Buckets
         );
         assert_eq!(recipe.resolution.aspect_groups[0].presets.len(), 1);
+        assert_eq!(recipe.resolution.aspect_groups[0].id, "7:4");
+        assert_eq!(recipe.resolution.aspect_groups[0].label, "7:4");
+        assert_eq!(recipe.resolution.aspect_groups[0].presets[0].width, 1344);
+        assert_eq!(recipe.resolution.aspect_groups[0].presets[0].height, 768);
+        assert_eq!(
+            recipe.resolution.aspect_groups[0].presets[0].tier,
+            "reviewed"
+        );
         assert_eq!(recipe.steps.min, 21);
         assert_eq!(recipe.steps.max, 21);
         assert_eq!(

@@ -6,6 +6,7 @@ import {
   isModelAccessRestricted,
   type ModelAccessCapabilityRecord,
 } from "./modelAccess";
+import { imageDimensionsFromBase64 } from "./imageDimensions";
 
 export const MINIMAX_H3_FIXED_FPS = 24;
 export const MINIMAX_H3_MIN_FRAMES = 124;
@@ -173,6 +174,17 @@ export interface MinimaxH3GalleryImageSource {
   sha256?: string | null;
 }
 
+/** Surface-picker shape shared by desktop, web, and iPhone. Their established
+ * pickers all return base64 + a filename, while dimensions and MIME may be
+ * present when the picker already knows them. */
+export interface MinimaxH3PickedImageSource {
+  filename: string;
+  base64: string;
+  mimeType?: string | null;
+  width?: number | null;
+  height?: number | null;
+}
+
 export type MinimaxH3GalleryImageResult =
   | {
       ok: true;
@@ -271,6 +283,31 @@ export function setMinimaxH3GalleryImageFirstFrame(
     },
     reference: null,
   };
+}
+
+/** Normalize an image from any existing surface picker into the one FL2VA
+ * boundary contract. This replaces three H3-only file readers without making
+ * the shared authoring state depend on a desktop, web, or native picker type. */
+export function setMinimaxH3PickedImageFirstFrame(
+  state: MinimaxH3AuthoringState | null | undefined,
+  image: MinimaxH3PickedImageSource,
+): MinimaxH3GalleryImageResult {
+  const decoded = imageDimensionsFromBase64(image.base64);
+  const width = image.width ?? decoded?.width ?? 0;
+  const height = image.height ?? decoded?.height ?? 0;
+  const extension = image.filename.trim().toLowerCase();
+  const mimeType =
+    image.mimeType?.split(";", 1)[0]?.trim().toLowerCase() ||
+    (extension.endsWith(".jpg") || extension.endsWith(".jpeg")
+      ? "image/jpeg"
+      : "image/png");
+  return setMinimaxH3GalleryImageFirstFrame(state, {
+    filename: image.filename,
+    mimeType,
+    width,
+    height,
+    data: image.base64,
+  });
 }
 
 export function cloneMinimaxH3AuthoringState(

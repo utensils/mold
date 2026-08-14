@@ -76,6 +76,24 @@ function factory(
 }
 
 describe("AdvancedDrawer sequence contract", () => {
+  it("delegates the H3 opening frame to the page's existing upload/gallery picker", async () => {
+    const model = {
+      name: "minimax-h3-fl2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      source_image: "required",
+      downloaded: true,
+    } as ModelInfoExtended;
+    const wrapper = factory(
+      model.family,
+      { model: model.name, modelFamily: model.family },
+      { models: [model] },
+    );
+
+    expect(wrapper.find("[data-test='h3-first-file']").exists()).toBe(false);
+    await wrapper.get("[data-test='h3-first-picker']").trigger("click");
+    expect(wrapper.emitted("open-h3-first-frame-picker")).toHaveLength(1);
+  });
+
   it("preserves but disables clip negatives for a distilled recipe", () => {
     const wrapper = factory(
       "ltx2",

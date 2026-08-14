@@ -97,6 +97,7 @@ import {
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
+  setMinimaxH3PickedImageFirstFrame,
   type MinimaxH3AuthoringState,
 } from "@studio/lib/minimaxH3Authoring";
 
@@ -146,6 +147,19 @@ const h3Family = computed(() => isMinimaxH3Identity(props.form.family, props.for
 const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3AuthoringState());
 function setH3Authoring(value: MinimaxH3AuthoringState): void {
   props.form.h3Authoring = value;
+}
+const h3FirstFramePickerOpen = ref(false);
+const h3FirstFramePickerError = ref<string | null>(null);
+function onH3FirstFramePicked(images: PickedImage[]): void {
+  const image = images[0];
+  if (!image) return;
+  const result = setMinimaxH3PickedImageFirstFrame(props.form.h3Authoring, image);
+  if (!result.ok) {
+    h3FirstFramePickerError.value = result.error;
+    return;
+  }
+  h3FirstFramePickerError.value = null;
+  props.form.h3Authoring = result.state;
 }
 
 // ── Scheduler & sampling ─────────────────────────────────────────────────────
@@ -664,6 +678,17 @@ function reset() {
           :task="h3Task"
           :required-endpoint="caps.requiresSourceImage ? 'first' : null"
           @update:model-value="setH3Authoring"
+          @request-first-frame="h3FirstFramePickerOpen = true"
+        />
+        <p v-if="h3FirstFramePickerError" class="ms-hint text-stop" role="alert">
+          {{ h3FirstFramePickerError }}
+        </p>
+        <ImagePickerModal
+          :open="h3FirstFramePickerOpen"
+          title="First frame"
+          :multiple="false"
+          @pick="onH3FirstFramePicked"
+          @close="h3FirstFramePickerOpen = false"
         />
       </AccordionSection>
 

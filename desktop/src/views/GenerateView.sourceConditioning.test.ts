@@ -16,6 +16,7 @@ import { useComposerStore } from "../stores/composer";
 import { useToastStore } from "../stores/toasts";
 import { useUiStore } from "../stores/ui";
 import type { ModelEntry, OutputMetadata } from "../lib/api/types";
+import ComposerCard from "../components/create/ComposerCard.vue";
 
 vi.mock("vue-router", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
@@ -139,6 +140,34 @@ describe("GenerateView source-conditioning gating (#772, #779)", () => {
     useUiStore().generateTick++;
     await flushPromises();
     expect(submitBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the required H3 first frame before the user starts typing", async () => {
+    const model = {
+      ...wanModel("minimax-h3-fl2va:comfy-pruned-int8", "required"),
+      family: "minimax-h3",
+      default_width: 1344,
+      default_height: 768,
+      default_steps: 21,
+      default_frames: 124,
+      default_fps: 24,
+    } as ModelEntry;
+    useModelStore().all = [model];
+    const wrapper = mount(GenerateView, {
+      shallow: true,
+      attachTo: document.body,
+    });
+    await flushPromises();
+    const form = useGenerateFormStore().form;
+    form.prompt = "";
+    form.model = model.name;
+    form.family = model.family;
+    form.sourceImageCapability = "required";
+    await flushPromises();
+
+    expect(wrapper.getComponent(ComposerCard).props("disabledReason")).toBe(
+      "This reviewed MiniMax H3 runtime requires a first frame.",
+    );
   });
 
   it("blocks an end-frame-only draft until a first frame joins it", async () => {

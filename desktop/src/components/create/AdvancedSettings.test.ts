@@ -484,6 +484,38 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     expect(form.keyframes[0]!.frame).toBe(0);
   });
 
+  it("uses the existing upload and gallery picker for an H3 first frame", async () => {
+    const form = formFor("minimax-h3");
+    form.model = "minimax-h3-fl2va:comfy-pruned-int8";
+    const wrapper = mountSettings(form, {
+      selectedModel: {
+        name: form.model,
+        family: form.family,
+        source_image: "required",
+      } as ModelEntry,
+    });
+
+    await wrapper.get("[data-test='h3-first-picker']").trigger("click");
+    const picker = wrapper
+      .findAllComponents(ImagePickerModal)
+      .find((candidate) => candidate.props("title") === "First frame");
+    if (!picker) throw new Error("H3 first-frame picker not found");
+    expect(picker.props("open")).toBe(true);
+    picker.vm.$emit("pick", [
+      {
+        filename: "opening.png",
+        base64: "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC",
+      },
+    ]);
+    await flushPromises();
+
+    expect(form.h3Authoring?.firstFrame).toMatchObject({
+      filename: "opening.png",
+      width: 7,
+      height: 4,
+    });
+  });
+
   it("shows the chained-clips cue when frames exceed one clip for a chainable model", async () => {
     const form = formFor("ltx2");
     form.model = "ltx-2.3-22b-distilled:fp8";

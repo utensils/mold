@@ -32,11 +32,16 @@ const props = withDefaults(
     disabled?: boolean;
     touchFriendly?: boolean;
   }>(),
-  { requiredEndpoint: null, disabled: false, touchFriendly: false },
+  {
+    requiredEndpoint: null,
+    disabled: false,
+    touchFriendly: false,
+  },
 );
 
 const emit = defineEmits<{
   "update:modelValue": [state: MinimaxH3AuthoringState];
+  "request-first-frame": [];
 }>();
 
 const error = ref("");
@@ -332,13 +337,18 @@ function durationLabel(
             modelValue.firstFrame?.filename ??
             (requiredEndpoint === "first" ? "Required" : "Optional")
           }}</small>
-          <input
-            type="file"
-            accept="image/*"
+          <button
+            type="button"
             :disabled="disabled || busy"
-            data-test="h3-first-file"
-            @change="pickBoundary('firstFrame', $event)"
-          />
+            data-test="h3-first-picker"
+            @click="emit('request-first-frame')"
+          >
+            {{
+              modelValue.firstFrame
+                ? "Replace first frame"
+                : "Choose first frame"
+            }}
+          </button>
           <button
             v-if="modelValue.firstFrame"
             type="button"

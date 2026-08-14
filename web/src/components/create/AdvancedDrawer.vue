@@ -128,6 +128,7 @@ const emit = defineEmits<{
   "update:modelValue": [value: GenerateFormState];
   close: [];
   "open-picker": [];
+  "open-h3-first-frame-picker": [];
   "clear-source": [];
   /** Wan first/last-frame conditioning (#779). The closing still gets its own
    * picker so it can never overwrite the opening one. */
@@ -815,6 +816,7 @@ function setSequenceCameraMode(mode: string) {
             :task="h3Task"
             :required-endpoint="caps.requiresSourceImage ? 'first' : null"
             @update:model-value="setH3Authoring"
+            @request-first-frame="emit('open-h3-first-frame-picker')"
           />
         </AccordionSection>
 

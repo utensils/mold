@@ -762,6 +762,57 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.find("[data-test='cold-start-stub']").exists()).toBe(true);
   });
 
+  it("shows the H3 first-frame blocker before prompt entry", async () => {
+    const h3Model: ModelInfoExtended = {
+      name: "minimax-h3-fl2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      display_name: "MiniMax H3 FL2VA",
+      size_gb: 42.5,
+      is_loaded: false,
+      last_used: null,
+      hf_repo: "Comfy-Org/MiniMax-H3",
+      downloaded: true,
+      default_steps: 21,
+      default_guidance: 0,
+      default_width: 1344,
+      default_height: 768,
+      default_frames: 124,
+      default_fps: 24,
+      description: "Reviewed first-frame H3 runtime",
+      source_image: "required",
+    };
+    hostModelsMock.mockResolvedValue([h3Model]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = h3Model.name;
+    form.state.value.modelFamily = h3Model.family;
+    form.state.value.prompt = "";
+    form.state.value.sourceImageCapability = "required";
+    form.state.value.h3Authoring = {
+      firstFrame: null,
+      lastFrame: null,
+      references: [],
+    };
+    await nextTick();
+
+    expect(
+      wrapper.get("[data-test='page-generation-blocker']").text(),
+    ).toContain("requires a first frame");
+
+    form.state.value.h3Authoring.firstFrame = {
+      filename: "opening.png",
+      mimeType: "image/png",
+      width: 1344,
+      height: 768,
+      data: "FIRST",
+    };
+    await nextTick();
+    expect(wrapper.get("[data-test='page-generation-blocker']").text()).toBe(
+      "Add a prompt before generating.",
+    );
+  });
+
   it("blocks non-Qwen mask submissions until a source image is selected", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
@@ -3325,9 +3376,9 @@ function pageStubs() {
     },
     ComposerCard: {
       name: "ComposerCard",
-      props: ["busy"],
+      props: ["busy", "disabledReason"],
       template:
-        '<div><div data-test="prompt-style-stub"/><slot name="mobile-controls"/><button data-test="composer-submit" @click="$emit(\'submit\')">go</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
+        '<div><div data-test="prompt-style-stub"/><slot name="mobile-controls"/><p v-if="disabledReason" data-test="page-generation-blocker">{{ disabledReason }}</p><button data-test="composer-submit" @click="$emit(\'submit\')">go</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
       // The page calls these through its template ref on submit / new-print;
       // a stub without them throws an unhandled TypeError mid-run.
       methods: { record: vi.fn(), focus: vi.fn() },
