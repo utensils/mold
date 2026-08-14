@@ -558,9 +558,9 @@ describe("ControlsAside — explicit shape pick vs source tie", () => {
     const shape = wrapper.getComponent(ShapePicker);
     expect(shape.props("modelValue")).toBe("source");
 
-    const canonical = (shape.props("options") as ReadonlyArray<{ id: string }>).find(
-      (option) => option.id !== "source",
-    )!.id;
+    const canonical = (
+      shape.props("options") as ReadonlyArray<{ id: string }>
+    ).find((option) => option.id !== "source")!.id;
     shape.vm.$emit("update:modelValue", canonical);
     await wrapper.vm.$nextTick();
     // The pick may or may not resize (nearest preset); when the canvas stays
