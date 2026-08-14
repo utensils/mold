@@ -585,7 +585,10 @@ start_probe_server() {
   local log="$out_dir/probe-server.log" waited=0
   probe_host="http://127.0.0.1:$probe_port"
   echo "probe: starting $mold_bin serve --port $probe_port (log: $log)" >&2
-  "$mold_bin" serve --port "$probe_port" --bind 127.0.0.1 > "$log" 2>&1 &
+  # Gate (d) measures the parking capability, which is opt-in (#1044): the
+  # probe server runs with MOLD_KEEP_TE_RAM=1 so a reload is an unpark, not a
+  # disk re-read. An externally supplied --probe-host keeps its own config.
+  MOLD_KEEP_TE_RAM=1 "$mold_bin" serve --port "$probe_port" --bind 127.0.0.1 > "$log" 2>&1 &
   probe_server_pid=$!
   trap stop_probe_server EXIT
   while ((waited < 180)); do
