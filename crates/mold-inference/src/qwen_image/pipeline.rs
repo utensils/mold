@@ -2890,12 +2890,16 @@ impl QwenImageEngine {
     }
 
     fn generate_edit_loaded(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        // Started before the reload below so `generation_time_ms` keeps
+        // covering the transformer rebuild and its LoRA merge, exactly as
+        // FLUX's does. That cost is the whole subject of the fingerprint
+        // elision — a timing that excluded it could not show the win.
+        let start = Instant::now();
         // Before any borrow of `self.base`: reuse the resident transformer
         // when this request's LoRA stack is the one already merged into it.
         self.ensure_transformer_for_request(req.width as usize, req.height as usize)?;
 
         let progress = &self.base.progress;
-        let start = Instant::now();
         // The checkpoint's own packaged scheduler config, not the family's.
         let shift_policy = shift_policy_for_model(&self.base.model_name);
         // Read before the long `&mut self.base.loaded` borrow below: the
@@ -3264,6 +3268,12 @@ impl QwenImageEngine {
             bail!("model not loaded -- call load() first");
         }
 
+        // Started before the reload below so `generation_time_ms` keeps
+        // covering the transformer rebuild and its LoRA merge, exactly as
+        // FLUX's does. That cost is the whole subject of the fingerprint
+        // elision — a timing that excluded it could not show the win.
+        let start = Instant::now();
+
         // Reload the transformer when it was dropped after a previous VAE
         // decode, or when this request's LoRA stack differs from the one
         // merged into the resident transformer. An unchanged stack keeps
@@ -3273,7 +3283,6 @@ impl QwenImageEngine {
 
         let progress = &self.base.progress;
         let gpu_ordinal = self.base.gpu_ordinal;
-        let start = Instant::now();
 
         // The checkpoint's own packaged scheduler config, not the family's.
         // Read before `loaded` takes the mutable borrow of `self.base`.
