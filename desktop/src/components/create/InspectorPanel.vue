@@ -33,6 +33,8 @@ import {
 import { normalizeTargetHost } from "../../lib/hosts";
 import { modelDisplayName } from "../../lib/models";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
+import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
+import SourceImageWell from "../generate/SourceImageWell.vue";
 import { advancedActiveCount } from "../../lib/advancedCount";
 import { aspectsSupportedByPresets } from "@ui/lib/resolution";
 import {
@@ -199,7 +201,22 @@ const caps = computed(() =>
     props.form.model,
     props.form.pipeline,
     selectedModel.value?.guidance_capabilities,
+    // Per-model source-image contract (#772): the picked row when we have it,
+    // otherwise the form's snapshot of it. Without this the Source image well
+    // would render for a text-to-video wan checkpoint that rejects one.
+    selectedModel.value?.source_image ?? props.form.sourceImageCapability,
+    effectiveGenerationRecipe(selectedModel.value, props.form.pipeline),
   ),
+);
+/** The model's image-attachment shape — one shared policy, never a local
+ * heuristic. `none` hides the well outright; `h3-references` keeps the H3
+ * ordered-reference editor in Advanced. */
+const sourcePlan = computed(() => sourceMediaPlan(caps.value));
+const showSourceMedia = computed(
+  () =>
+    !isSequence.value &&
+    sourcePlan.value.kind !== "none" &&
+    sourcePlan.value.kind !== "h3-references",
 );
 const activeRecipe = computed(() =>
   effectiveGenerationRecipe(selectedModel.value, props.form.pipeline),
@@ -585,6 +602,12 @@ function resetSettings() {
             separate.
           </p>
         </div>
+      </div>
+
+      <!-- Source media — primary-form image conditioning; the model dictates
+           whether (and how) it renders, exactly like resolutions. -->
+      <div v-if="showSourceMedia" class="ms-field" data-test="inspector-source-media">
+        <SourceImageWell :form="form" :selected-model="selectedModel" />
       </div>
 
       <!-- Shape -->

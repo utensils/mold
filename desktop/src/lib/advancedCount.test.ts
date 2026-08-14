@@ -25,12 +25,12 @@ describe("advancedActiveCount", () => {
     expect(advancedActiveCount(form)).toBe(0);
   });
 
-  it("counts a source image and advanced video as one section each", () => {
+  it("never counts a source image — it lives in the primary form, not Advanced", () => {
     const form = { ...newGenerateForm(), family: "ltx2" };
     form.sourceImage = "bytes";
     form.pipeline = "keyframe";
     form.cameraControl = "dolly-in";
-    expect(advancedActiveCount(form)).toBe(3);
+    expect(advancedActiveCount(form)).toBe(2);
   });
 
   it("counts active LTX-2 guidance overrides as one advanced group", () => {

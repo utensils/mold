@@ -54,6 +54,7 @@ import {
 import { promptPlaceholder, promptRequired } from "@studio/lib/promptRequirement";
 import {
   appendMinimaxH3GalleryImageReference,
+  emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
   minimaxH3AuthoringError,
   minimaxH3TaskForModel,
@@ -91,6 +92,7 @@ import {
   isFlux2DevModel,
   outputFormatsForFamily,
 } from "../lib/capabilities";
+import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/models";
 import type {
   CompleteEvent,
@@ -174,7 +176,7 @@ import { sequenceParams } from "../lib/sequenceParams";
 import { isGenerationModel } from "../stores/models";
 import type { HostRoute } from "../stores/hosts";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
-import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
+import { applyH3BoundaryFit, applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
 import {
   isCancelledError,
@@ -437,8 +439,7 @@ const advancedActiveCount = computed(() => {
     negativePromptWireValue(form.negativePrompt, form.negativePromptDefault) !== undefined
   )
     count += 1;
-  if (form.sourceImage || form.endFrame || form.controlImage || form.imageAttachments.length)
-    count += 1;
+  // Source media lives in the primary form now, not the Advanced sheet.
   if (form.loras.length) count += 1;
   if (form.upscaleModel) count += 1;
   if (form.scheduler !== "default") count += 1;
@@ -729,7 +730,13 @@ const caps = computed(() =>
     effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline),
   ),
 );
-const h3Family = computed(() => isMinimaxH3Identity(form.family, form.model));
+/** The model's image-attachment shape — one shared policy (`sourceMediaPlan`).
+ * `none` hides the source section outright; `h3-references` keeps the H3
+ * ordered-reference editor in the Advanced sheet. */
+const sourcePlan = computed(() => sourceMediaPlan(caps.value));
+const showSourceMedia = computed(
+  () => sourcePlan.value.kind !== "none" && sourcePlan.value.kind !== "h3-references",
+);
 const h3AuthoringError = computed(() =>
   minimaxH3AuthoringError(
     form.family,
@@ -905,14 +912,21 @@ const upscalers = computed(() =>
   models.value.filter((model) => model.family === "upscaler" || model.family === "real-esrgan"),
 );
 const controlModels = computed(() => models.value.filter((model) => model.family === "controlnet"));
-const sourceSectionTitle = computed(() =>
-  caps.value.sourceImageMode !== "single"
+const sourceSectionTitle = computed(() => {
+  if (sourcePlan.value.kind === "h3-boundaries") return "Frame endpoints";
+  return caps.value.sourceImageMode !== "single"
     ? isFlux2DevModel(form.model)
       ? "References"
       : "Pictures"
-    : "Source image",
-);
+    : "Source image";
+});
 const sourceSectionSummary = computed(() => {
+  if (sourcePlan.value.kind === "h3-boundaries") {
+    const first = form.h3Authoring?.firstFrame?.filename;
+    if (!first) return caps.value.requiresSourceImage ? "First frame required" : "Optional";
+    const last = form.h3Authoring?.lastFrame?.filename;
+    return last ? `${first} · ${last}` : first;
+  }
   if (caps.value.sourceImageMode !== "single") {
     const count = form.imageAttachments.length;
     if (isFlux2DevModel(form.model)) {
@@ -1069,10 +1083,8 @@ watch(
 const sourceControlsValid = computed(() => !caps.value.supportsImg2img || sourceValid.value);
 /**
  * The per-model source-image contract (#772) and wan's first/last-frame
- * pairing (#779). The source well lives inside the full-screen Advanced sheet,
- * so its own inline copy is invisible while that sheet is closed — this is the
- * same message beside Develop, which is what stops a disabled button from
- * being a dead end. It also covers the case the well cannot report at all: an
+ * pairing (#779), repeated beside Develop so a disabled button is never a
+ * dead end. It also covers the case the well cannot report at all: an
  * advertised text-to-video checkpoint hides the well entirely.
  */
 const sourceConditioningError = computed(() => sourceConditioningValidationError(form));
@@ -1104,7 +1116,7 @@ const developBlockerReason = computed<string | null>(() => {
   if (mobileMediaBudgetError.value) return mobileMediaBudgetError.value;
   if (sourceConditioningError.value) return sourceConditioningError.value;
   if (h3AuthoringError.value) return h3AuthoringError.value;
-  if (!sourceControlsValid.value) return "Open Advanced and correct the source image settings.";
+  if (!sourceControlsValid.value) return "Correct the source image settings above.";
   if (!parameterValid.value) return "Open Advanced and correct the highlighted settings.";
   return null;
 });
@@ -3203,7 +3215,30 @@ async function prepareGenerationRequest(
     draft.guidanceCapabilities,
     draft.sourceImageCapability,
   );
-  if (draftCaps.supportsImg2img && draftCaps.sourceImageMode === "single" && draft.sourceImage) {
+  if (draftCaps.sourceImageMode === "h3-boundaries") {
+    // H3 FL2VA boundaries take the same client-side fit, coerced maskless.
+    draft.h3Authoring = (await applyH3BoundaryFit(
+      draft.h3Authoring,
+      draft.sourceFit,
+      { width: draft.width, height: draft.height },
+      {
+        ops: domCanvasOps,
+        cache: sourceFitCache,
+        upscale: (image, model) =>
+          upscaleImage({
+            image,
+            model,
+            target,
+            onProgress: (message) => {
+              if (isCurrent()) setGenerationStatus(message);
+            },
+          }),
+        onStatus: (message) => {
+          if (isCurrent()) setGenerationStatus(message);
+        },
+      },
+    )) ?? emptyMinimaxH3AuthoringState();
+  } else if (draftCaps.supportsImg2img && draftCaps.sourceImageMode === "single" && draft.sourceImage) {
     const result = await applySourceFitPreprocess(
       {
         source: draft.sourceImage,
@@ -4863,6 +4898,38 @@ onBeforeUnmount(() => {
               {{ h3AuthoringError }}
             </p>
 
+            <!-- Source media in the primary form: the model dictates whether
+                 (and how) it renders, exactly like resolutions. H3 FL2VA
+                 boundaries render through the same component. -->
+            <details
+              v-if="form.model && showSourceMedia"
+              class="mobile-native-disclosure"
+              :open="
+                !!(
+                  form.sourceImage ||
+                  form.endFrame ||
+                  form.controlImage ||
+                  form.imageAttachments.length
+                ) ||
+                caps.requiresSourceImage ||
+                caps.sourceImageMode !== 'single'
+              "
+              data-test="mobile-source-disclosure"
+            >
+              <summary>
+                <span>{{ sourceSectionTitle }}</span>
+                <small>{{ sourceSectionSummary }}</small>
+              </summary>
+              <MobileSourceControls
+                :form="form"
+                :model="selectedGenerationModel"
+                :target="selectedTarget"
+                :control-models="controlModels"
+                :upscalers="upscalers"
+                @validity-change="sourceValid = $event"
+              />
+            </details>
+
             <MobileSharedParams
               :form="form"
               :duration-model="selectedGenerationModel"
@@ -4884,7 +4951,7 @@ onBeforeUnmount(() => {
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M4 6h16M4 12h16M4 18h16" />
                 </svg>
-                <span>Advanced (sampler, LoRA, source)</span>
+                <span>Advanced (sampler, LoRA, format)</span>
                 <span
                   v-if="advancedActiveCount > 0"
                   class="mobile-advanced-trigger-badge"
@@ -4941,34 +5008,6 @@ onBeforeUnmount(() => {
                   to enable it.
                 </small>
               </label>
-              <details
-                v-if="form.model && caps.supportsImg2img && !h3Family"
-                class="mobile-native-disclosure"
-                :open="
-                  !!(
-                    form.sourceImage ||
-                    form.endFrame ||
-                    form.controlImage ||
-                    form.imageAttachments.length
-                  ) ||
-                  caps.requiresSourceImage ||
-                  caps.sourceImageMode !== 'single'
-                "
-                data-test="mobile-source-disclosure"
-              >
-                <summary>
-                  <span>{{ sourceSectionTitle }}</span>
-                  <small>{{ sourceSectionSummary }}</small>
-                </summary>
-                <MobileSourceControls
-                  :form="form"
-                  :model="selectedGenerationModel"
-                  :target="selectedTarget"
-                  :control-models="controlModels"
-                  :upscalers="upscalers"
-                  @validity-change="sourceValid = $event"
-                />
-              </details>
               <MobileLoraControls
                 v-if="selectedTarget"
                 :form="form"

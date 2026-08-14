@@ -76,38 +76,36 @@ function factory(
 }
 
 describe("AdvancedDrawer sequence contract", () => {
-  it("delegates the H3 opening frame to the page's existing upload/gallery picker", async () => {
-    const model = {
+  it("keeps only the Ref2VA ordered-reference panel — boundaries live in the primary form", () => {
+    const fl2va = {
       name: "minimax-h3-fl2va:comfy-pruned-int8",
       family: "minimax-h3",
       source_image: "required",
       downloaded: true,
     } as ModelInfoExtended;
-    const wrapper = factory(
-      model.family,
-      { model: model.name, modelFamily: model.family },
-      { models: [model] },
+    const boundaries = factory(
+      fl2va.family,
+      { model: fl2va.name, modelFamily: fl2va.family },
+      { models: [fl2va] },
+    );
+    expect(boundaries.find("[data-test='section-h3-authoring']").exists()).toBe(
+      false,
     );
 
-    expect(wrapper.find("[data-test='h3-first-well']").exists()).toBe(true);
-    await wrapper.get("[data-test='h3-first-gallery']").trigger("click");
-    expect(wrapper.emitted("open-h3-first-frame-picker")).toHaveLength(1);
-  });
-
-  it("delegates the optional H3 closing frame to the page's picker as well", async () => {
-    const model = {
-      name: "minimax-h3-fl2va:comfy-pruned-int8",
+    const ref2va = {
+      name: "minimax-h3-ref2va:comfy-pruned-int8",
       family: "minimax-h3",
       downloaded: true,
     } as ModelInfoExtended;
-    const wrapper = factory(
-      model.family,
-      { model: model.name, modelFamily: model.family },
-      { models: [model] },
+    const references = factory(
+      ref2va.family,
+      { model: ref2va.name, modelFamily: ref2va.family },
+      { models: [ref2va] },
     );
-
-    await wrapper.get("[data-test='h3-last-gallery']").trigger("click");
-    expect(wrapper.emitted("open-h3-last-frame-picker")).toHaveLength(1);
+    expect(references.find("[data-test='section-h3-authoring']").exists()).toBe(
+      true,
+    );
+    expect(references.text()).toContain("Ordered references");
   });
 
   it("preserves but disables clip negatives for a distilled recipe", () => {
@@ -267,7 +265,6 @@ function sections(family: string, extra: Record<string, unknown> = {}) {
 const SECTION_ORDER = [
   "scheduler",
   "negative",
-  "source",
   "lora",
   "upscale",
   "output",
@@ -291,7 +288,6 @@ describe("AdvancedDrawer section ordering contract", () => {
     expect(sectionIds(factory("sdxl", {}, gpus))).toEqual([
       "scheduler",
       "negative",
-      "source",
       "lora",
       "upscale",
       "output",
@@ -302,7 +298,6 @@ describe("AdvancedDrawer section ordering contract", () => {
   it("renders video sections in the canonical order", () => {
     expect(sectionIds(factory("ltx2", {}, gpus))).toEqual([
       "negative",
-      "source",
       "lora",
       "output",
       "video",
@@ -365,29 +360,28 @@ describe("AdvancedDrawer capability matrix", () => {
     expect(wrapper.find("[data-test='exact-width']").exists()).toBe(true);
   });
 
-  it("sdxl exposes scheduler, negative, source and output", () => {
+  it("sdxl exposes scheduler, negative and output — never a source section", () => {
     const s = sections("sdxl");
     expect(s.scheduler).toBe(true);
     expect(s.negative).toBe(true);
-    expect(s.source).toBe(true);
+    expect(s.source).toBe(false);
     expect(s.output).toBe(true);
     expect(s.video).toBe(false);
   });
 
-  it("flux hides scheduler and negative but keeps source, lora and output", () => {
+  it("flux hides scheduler and negative but keeps lora and output", () => {
     const s = sections("flux");
     expect(s.scheduler).toBe(false);
     expect(s.negative).toBe(false);
-    expect(s.source).toBe(true);
+    expect(s.source).toBe(false);
     expect(s.lora).toBe(true);
     expect(s.output).toBe(true);
   });
 
-  it("qwen-image-edit exposes its required edit-image attachment section", async () => {
+  it("qwen-image-edit keeps its edit images in the primary form, not Advanced", () => {
     const wrapper = factory("qwen-image-edit");
-    expect(sections("qwen-image-edit").source).toBe(true);
-    expect(wrapper.find("[data-test='source-attach']").exists()).toBe(true);
-    expect(wrapper.text()).toContain("Edit images");
+    expect(sections("qwen-image-edit").source).toBe(false);
+    expect(wrapper.find("[data-test='source-attach']").exists()).toBe(false);
   });
 
   it("ltx2 exposes the video section", () => {
@@ -424,26 +418,6 @@ describe("AdvancedDrawer capability matrix", () => {
     ).toEqual(placement);
   });
 
-  it("offers all five source-fit policies", async () => {
-    const wrapper = factory("sdxl", {
-      imageAttachments: [
-        { kind: "upload", filename: "source.png", base64: "AA" },
-      ],
-    });
-    await wrapper
-      .get("[data-test='section-source'] .ms-acc__head")
-      .trigger("click");
-    const labels = wrapper
-      .findAll("[aria-label='Fit to canvas'] button")
-      .map((button) => button.text());
-    expect(labels).toEqual([
-      "Contain",
-      "Cover",
-      "Pad + repaint",
-      "Lanczos",
-      "Upscale + fit",
-    ]);
-  });
 });
 
 describe("AdvancedDrawer always-open sections", () => {
@@ -452,7 +426,6 @@ describe("AdvancedDrawer always-open sections", () => {
 
   it("shows every available control without aria disclosure state", () => {
     const w = factory("flux");
-    expect(w.find("[data-test='source-attach']").exists()).toBe(true);
     expect(w.find("[data-test='lora-picker-stub']").exists()).toBe(true);
     expect(w.find("[data-test='exact-width']").exists()).toBe(true);
     expect(w.find("[aria-expanded]").exists()).toBe(false);
@@ -462,98 +435,6 @@ describe("AdvancedDrawer always-open sections", () => {
     const w = factory("sd3.5");
     expect(w.find("[data-test='section-lora']").exists()).toBe(false);
     expect(w.find("[data-test='cfg-plus']").exists()).toBe(true);
-  });
-});
-
-describe("AdvancedDrawer ControlNet block", () => {
-  beforeEach(() => localStorage.clear());
-  afterEach(() => __testing__.resetForTest());
-
-  async function openSource(family: string, overrides = {}) {
-    const wrapper = factory(family, overrides);
-    const head = wrapper.find("[data-test='section-source'] .ms-acc__head");
-    if (head.exists()) await head.trigger("click");
-    return wrapper;
-  }
-
-  it("shows the ControlNet block for a controlnet family (sd15)", async () => {
-    const wrapper = await openSource("sd15");
-    expect(wrapper.find("[data-test='controlnet-block']").exists()).toBe(true);
-  });
-
-  it("hides the ControlNet block for flux", async () => {
-    const wrapper = await openSource("flux");
-    expect(wrapper.find("[data-test='controlnet-block']").exists()).toBe(false);
-  });
-
-  it("only surfaces control model + scale once an image is attached", async () => {
-    const bare = await openSource("sd15");
-    expect(bare.find("[data-test='control-attach']").exists()).toBe(true);
-    expect(bare.find("[data-test='control-model']").exists()).toBe(false);
-
-    const withImage = await openSource("sd15", {
-      controlImage: { kind: "upload", filename: "canny.png", base64: "AA" },
-    });
-    expect(withImage.find("[data-test='control-model']").exists()).toBe(true);
-  });
-
-  it("round-trips the control model text field", async () => {
-    const wrapper = await openSource("sd15", {
-      controlImage: { kind: "upload", filename: "canny.png", base64: "AA" },
-    });
-    const input = wrapper.get("[data-test='control-model']");
-    (input.element as HTMLInputElement).value = "control_v11p_sd15_canny";
-    await input.trigger("input");
-    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
-      GenerateFormState,
-    ];
-    expect(next.controlModel).toBe("control_v11p_sd15_canny");
-  });
-
-  it("suggests installed ControlNet models while retaining custom input", async () => {
-    const wrapper = await openSource("sd15", {
-      controlImage: { kind: "upload", filename: "canny.png", base64: "AA" },
-    });
-    await wrapper.setProps({
-      models: [
-        {
-          ...UPSCALERS[0],
-          name: "controlnet-canny-sd15:fp16",
-          family: "controlnet",
-        },
-      ],
-    });
-    expect(wrapper.get("[data-test='control-model']").attributes("list")).toBe(
-      "installed-controlnet-models",
-    );
-    expect(
-      wrapper.get("#installed-controlnet-models option").attributes("value"),
-    ).toBe("controlnet-canny-sd15:fp16");
-  });
-
-  it("round-trips the control scale slider", async () => {
-    const wrapper = await openSource("sd15", {
-      controlImage: { kind: "upload", filename: "canny.png", base64: "AA" },
-    });
-    const range = wrapper.get("[data-test='control-scale'] input");
-    (range.element as HTMLInputElement).value = "1.5";
-    await range.trigger("input");
-    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
-      GenerateFormState,
-    ];
-    expect(next.controlScale).toBe(1.5);
-  });
-
-  it("removes the control image", async () => {
-    const wrapper = await openSource("sd15", {
-      controlImage: { kind: "upload", filename: "canny.png", base64: "AA" },
-      controlModel: "control_v11p_sd15_canny",
-    });
-    await wrapper.get("[data-test='control-remove']").trigger("click");
-    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
-      GenerateFormState,
-    ];
-    expect(next.controlImage).toBe(null);
   });
 });
 
@@ -927,138 +808,6 @@ describe("AdvancedDrawer interactions", () => {
  * (#779). Every gate here comes from the shared capability kit — the drawer
  * never reads `source_image` or a family set of its own.
  */
-describe("AdvancedDrawer source-image contract", () => {
-  beforeEach(() => localStorage.clear());
-  afterEach(() => __testing__.resetForTest());
-
-  function wanModel(source_image?: string | null): ModelInfoExtended {
-    return {
-      name: "wan22-ti2v-5b:fp16",
-      family: "wan",
-      size_gb: 10,
-      is_loaded: false,
-      last_used: null,
-      hf_repo: "",
-      downloaded: true,
-      default_steps: 20,
-      default_guidance: 3.5,
-      default_width: 1280,
-      default_height: 704,
-      default_frames: 81,
-      default_fps: 24,
-      description: "Wan 2.2 TI2V 5B",
-      ...(source_image === undefined ? {} : { source_image }),
-    } as ModelInfoExtended;
-  }
-
-  function wan(
-    source_image?: string | null,
-    overrides: Partial<GenerateFormState> = {},
-  ) {
-    return factory(
-      "wan",
-      {
-        model: "wan22-ti2v-5b:fp16",
-        modelFamily: "wan",
-        frames: 81,
-        fps: 24,
-        sourceImageCapability: source_image ?? null,
-        ...overrides,
-      },
-      { models: [wanModel(source_image)] },
-    );
-  }
-
-  it("keeps today's source well when the server advertises nothing", () => {
-    const wrapper = wan(undefined);
-    expect(wrapper.find("[data-test='section-source']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='source-required-badge']").exists()).toBe(
-      false,
-    );
-    // An older server rejects wan keyframes outright, so absence hides the well.
-    expect(wrapper.find("[data-test='end-frame-well']").exists()).toBe(false);
-  });
-
-  it("hides the whole source section for a text-to-video checkpoint", () => {
-    const wrapper = wan("unsupported");
-    expect(wrapper.find("[data-test='section-source']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='end-frame-well']").exists()).toBe(false);
-  });
-
-  it("marks the source required and names why the request would be refused", () => {
-    const wrapper = wan("required");
-    expect(wrapper.find("[data-test='source-required-badge']").exists()).toBe(
-      true,
-    );
-    expect(wrapper.get("[data-test='source-conditioning-error']").text()).toBe(
-      "This checkpoint is image-to-video only. Attach a source image to use as the first frame.",
-    );
-  });
-
-  // #783: the inline notice has to read a continuation the way submit and
-  // admission do (`request_carries_source_frames`), or the well contradicts a
-  // Generate button that accepts the draft.
-  it("clears the inline message for a continuation with no attached image", () => {
-    const wrapper = wan("required", {
-      extendVideo: { kind: "upload", filename: "clip.mp4", base64: "Q0xJUA==" },
-    });
-    expect(
-      wrapper.find("[data-test='source-conditioning-error']").exists(),
-    ).toBe(false);
-  });
-
-  it("clears the inline message once the opening frame is attached", () => {
-    const wrapper = wan("required", {
-      imageAttachments: [
-        { kind: "upload", filename: "open.png", base64: "FIRST" },
-      ],
-    });
-    expect(
-      wrapper.find("[data-test='source-conditioning-error']").exists(),
-    ).toBe(false);
-  });
-
-  it("offers the optional End frame well and its attach/remove affordances", async () => {
-    const wrapper = wan("optional");
-    expect(wrapper.get("[data-test='end-frame-well']").text()).toContain(
-      "Optional",
-    );
-    await wrapper.get("[data-test='end-frame-attach']").trigger("click");
-    expect(wrapper.emitted("open-end-frame-picker")).toHaveLength(1);
-
-    const attached = wan("optional", {
-      imageAttachments: [
-        { kind: "upload", filename: "open.png", base64: "FIRST" },
-      ],
-      endFrame: { kind: "upload", filename: "close.png", base64: "LAST" },
-    });
-    expect(attached.get("[data-test='end-frame-well']").text()).toContain(
-      "close.png",
-    );
-    await attached.get("[data-test='end-frame-remove']").trigger("click");
-    expect(attached.emitted("clear-end-frame")).toHaveLength(1);
-  });
-
-  it("explains an end frame with no first frame", () => {
-    const wrapper = wan("optional", {
-      endFrame: { kind: "upload", filename: "close.png", base64: "LAST" },
-    });
-    expect(wrapper.get("[data-test='source-conditioning-error']").text()).toBe(
-      "An end frame needs a first frame. Attach a source image, or remove the end frame.",
-    );
-  });
-
-  it("never offers an End frame well outside wan", () => {
-    const wrapper = factory("ltx2", {
-      model: "ltx-2-19b:fp8",
-      modelFamily: "ltx2",
-      sourceImageCapability: "optional",
-    });
-    expect(wrapper.find("[data-test='section-source']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='end-frame-well']").exists()).toBe(false);
-  });
-});
-
 /**
  * Continuation is not an LTX-2 control (#783). Wan continues by seeding the
  * render with the source clip's final frame, which its image-conditioned

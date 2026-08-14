@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import type { GenerateForm, PickedImage } from "../../lib/generateForm";
+import type { ModelEntry } from "../../lib/api/types";
 import { generationCapabilitiesForFamily, isFlux2DevModel } from "../../lib/capabilities";
 import { base64ToDataUrl, fileToBase64 } from "../../lib/image";
 import {
@@ -19,10 +20,31 @@ import { useHostsStore } from "../../stores/hosts";
 import { useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
 import { attachPickedImage } from "../../lib/sourceAttachment";
+import ImageDropWell from "@studio/components/ImageDropWell.vue";
+import SourceMediaWells, {
+  type SourceMediaSlot,
+} from "@studio/components/SourceMediaWells.vue";
+import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
+import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
+import {
+  emptyMinimaxH3AuthoringState,
+  setMinimaxH3BoundaryFile,
+  setMinimaxH3PickedImageBoundary,
+  type MinimaxH3BoundaryEndpoint,
+  type MinimaxH3GalleryImageResult,
+} from "@studio/lib/minimaxH3Authoring";
 import ImagePickerModal from "./ImagePickerModal.vue";
 import MaskEditorModal from "./MaskEditorModal.vue";
 
-const props = defineProps<{ form: GenerateForm }>();
+const props = withDefaults(
+  defineProps<{
+    form: GenerateForm;
+    /** The picked model row; its advertised contract wins over the form's
+     * snapshot so this component and its mount gate share one derivation. */
+    selectedModel?: ModelEntry | null;
+  }>(),
+  { selectedModel: null },
+);
 const toasts = useToastStore();
 const models = useModelStore();
 const appPrefs = useAppPrefsStore();
@@ -39,10 +61,14 @@ const caps = computed(() =>
     props.form.family,
     props.form.model,
     props.form.pipeline,
-    props.form.guidanceCapabilities,
-    props.form.sourceImageCapability,
+    props.selectedModel?.guidance_capabilities ?? props.form.guidanceCapabilities,
+    props.selectedModel?.source_image ?? props.form.sourceImageCapability,
   ),
 );
+/** The model's own image-attachment shape — the single policy every surface
+ * renders (`@studio/lib/sourceMediaPlan`). `none` and `h3-references` render
+ * nothing here. */
+const plan = computed(() => sourceMediaPlan(caps.value));
 const flux2Dev = computed(() => isFlux2DevModel(props.form.model));
 /** Why the attached conditioning would be refused, in the server's own order. */
 const conditioningError = computed(() => sourceConditioningValidationError(props.form));
@@ -171,13 +197,6 @@ watch(
 );
 
 type Slot = "source" | "end" | "mask" | "control";
-const dragOver = ref<Slot | null>(null);
-const inputEls = ref<Record<Slot, HTMLInputElement | null>>({
-  source: null,
-  end: null,
-  mask: null,
-  control: null,
-});
 
 function setSlot(slot: Slot, b64: string | null, name: string | null = null) {
   if (slot === "source") {
@@ -204,19 +223,55 @@ async function ingest(slot: Slot, file: File | undefined | null) {
     toasts.push("Couldn't read the image.", "error");
   }
 }
-
-function onDrop(slot: Slot, e: DragEvent) {
-  dragOver.value = null;
-  void ingest(slot, e.dataTransfer?.files?.[0]);
-}
-function onPick(slot: Slot, e: Event) {
-  void ingest(slot, (e.target as HTMLInputElement).files?.[0]);
-}
-function pick(slot: Slot) {
-  inputEls.value[slot]?.click();
-}
 function clearSlot(slot: Slot) {
   setSlot(slot, null);
+}
+
+function onWellFile(slot: SourceMediaSlot, file: File) {
+  void ingest(slot === "source" ? "source" : "end", file);
+}
+function onWellGallery(slot: SourceMediaSlot) {
+  if (slot === "source") pickerOpen.value = true;
+  else endPickerOpen.value = true;
+}
+function onWellClear(slot: SourceMediaSlot) {
+  clearSlot(slot === "source" ? "source" : "end");
+}
+
+// ── MiniMax H3 FL2VA boundaries ─────────────────────────────────────────────
+// The same two wells, backed by the dedicated H3 authoring state and the
+// shared studio setters so a file and a gallery pick produce identical facts.
+
+const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3AuthoringState());
+const h3PickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
+const h3Error = ref<string | null>(null);
+
+function h3Endpoint(slot: SourceMediaSlot): MinimaxH3BoundaryEndpoint {
+  return slot === "source" ? "firstFrame" : "lastFrame";
+}
+function applyH3(result: MinimaxH3GalleryImageResult) {
+  if (!result.ok) {
+    h3Error.value = result.error;
+    return;
+  }
+  h3Error.value = null;
+  props.form.h3Authoring = result.state;
+}
+async function onH3File(slot: SourceMediaSlot, file: File) {
+  applyH3(await setMinimaxH3BoundaryFile(props.form.h3Authoring, h3Endpoint(slot), file));
+}
+function onH3Gallery(slot: SourceMediaSlot) {
+  h3PickerTarget.value = h3Endpoint(slot);
+}
+function onH3Clear(slot: SourceMediaSlot) {
+  h3Error.value = null;
+  props.form.h3Authoring = { ...h3Authoring.value, [h3Endpoint(slot)]: null };
+}
+function onH3Picked(images: PickedImage[]) {
+  const endpoint = h3PickerTarget.value;
+  const image = images[0];
+  if (!endpoint || !image) return;
+  applyH3(setMinimaxH3PickedImageBoundary(props.form.h3Authoring, endpoint, image));
 }
 
 /** Port of the web SPA's `setSourceFitPolicy` mode→policy mapping. */
@@ -244,12 +299,13 @@ function setSourceFitMode(e: Event) {
   }
   props.form.sourceFit = { mode: raw === "pad-fit" ? "pad-fit" : "pad-repaint" };
 }
+
 </script>
 
 <template>
   <!-- Ordered Qwen edit pictures or FLUX.2 reference images. -->
-  <div v-if="caps.supportsImg2img && caps.sourceImageMode !== 'single'">
-    <div class="mt-5 mb-2 flex items-center gap-2">
+  <div v-if="plan.kind === 'attachments'">
+    <div class="mb-2 flex items-center gap-2">
       <span class="edge-code">Pictures</span>
       <div class="border-edge h-px flex-1 border-t" />
     </div>
@@ -337,165 +393,20 @@ function setSourceFitMode(e: Event) {
     />
   </div>
 
-  <div v-else-if="caps.supportsImg2img && caps.sourceImageMode === 'single'">
-    <div class="mt-5 mb-2 flex items-center gap-2">
-      <span class="edge-code">Source</span>
-      <span
-        v-if="caps.requiresSourceImage"
-        class="edge-code text-safelight"
-        data-test="source-required-badge"
-      >
-        Required
-      </span>
-      <div class="border-edge h-px flex-1 border-t" />
-    </div>
-
-    <!-- Source well -->
-    <div data-test="source-media-controls" class="flex flex-col items-start">
-      <input
-        :ref="(el) => (inputEls.source = el as HTMLInputElement | null)"
-        type="file"
-        accept="image/*"
-        class="hidden"
-        @change="onPick('source', $event)"
-      />
-      <div
-        v-if="!form.sourceImage"
-        role="button"
-        tabindex="0"
-        :aria-required="caps.requiresSourceImage || undefined"
-        class="flex h-24 cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors focus-visible:outline-2 focus-visible:outline-safelight"
-        :class="
-          dragOver === 'source'
-            ? 'border-safelight text-safelight'
-            : 'border-control-edge text-ink-3'
-        "
-        @click="pick('source')"
-        @keydown.enter.prevent="pick('source')"
-        @keydown.space.prevent="pick('source')"
-        @dragover.prevent="dragOver = 'source'"
-        @dragleave="dragOver = null"
-        @drop.prevent="onDrop('source', $event)"
-      >
-        Drop an image or click to pick
-      </div>
-      <div v-else class="relative inline-block max-w-full">
-        <img
-          :src="base64ToDataUrl(form.sourceImage)"
-          alt="source"
-          class="max-h-40 max-w-full rounded-media border border-[color-mix(in_srgb,var(--rebate)_25%,transparent)] p-px"
-        />
-        <button
-          type="button"
-          class="border-edge absolute top-1 right-1 h-5 w-5 rounded-control border bg-bath text-ink-2 hover:text-stop"
-          title="Clear source"
-          aria-label="Clear source image"
-          @click="clearSlot('source')"
-        >
-          ✕
-        </button>
-      </div>
-      <button
-        type="button"
-        class="mt-2 text-caption text-ink-3 underline-offset-2 hover:text-ink hover:underline"
-        data-test="source-choose-gallery"
-        @click="pickerOpen = true"
-      >
-        Choose from gallery…
-      </button>
-    </div>
-
-    <!-- Why the attached conditioning would be refused. One message at a time,
-         in the same order admission checks them. -->
-    <p
-      v-if="conditioningError"
-      class="mt-2 text-caption text-stop"
-      role="alert"
-      data-test="source-conditioning-error"
-    >
-      {{ conditioningError }}
-    </p>
-
-    <!-- End frame well (wan first/last-frame conditioning). Offered only when
-         the server advertised a source-image contract for this checkpoint —
-         an older server rejects wan keyframes outright. -->
-    <template v-if="caps.supportsEndFrame">
-      <div class="mt-4 mb-2 flex items-center gap-2">
-        <span class="edge-code">End frame</span>
-        <span class="edge-code text-ink-3">Optional</span>
-        <div class="border-edge h-px flex-1 border-t" />
-      </div>
-      <div data-test="end-frame-media-controls" class="flex flex-col items-start">
-        <input
-          :ref="(el) => (inputEls.end = el as HTMLInputElement | null)"
-          type="file"
-          accept="image/*"
-          class="hidden"
-          @change="onPick('end', $event)"
-        />
-        <div
-          v-if="!form.endFrame"
-          role="button"
-          tabindex="0"
-          class="flex h-24 cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors focus-visible:outline-2 focus-visible:outline-safelight"
-          :class="
-            dragOver === 'end'
-              ? 'border-safelight text-safelight'
-              : 'border-control-edge text-ink-3'
-          "
-          @click="pick('end')"
-          @keydown.enter.prevent="pick('end')"
-          @keydown.space.prevent="pick('end')"
-          @dragover.prevent="dragOver = 'end'"
-          @dragleave="dragOver = null"
-          @drop.prevent="onDrop('end', $event)"
-        >
-          Drop the closing image or click to pick
-        </div>
-        <div v-else class="relative inline-block max-w-full">
-          <img
-            :src="base64ToDataUrl(form.endFrame.base64)"
-            alt="end frame"
-            class="max-h-40 max-w-full rounded-media border border-[color-mix(in_srgb,var(--rebate)_25%,transparent)] p-px"
-          />
-          <button
-            type="button"
-            class="border-edge absolute top-1 right-1 h-5 w-5 rounded-control border bg-bath text-ink-2 hover:text-stop"
-            title="Clear end frame"
-            aria-label="Clear end frame"
-            @click="clearSlot('end')"
-          >
-            ✕
-          </button>
-        </div>
-        <button
-          type="button"
-          class="mt-2 text-caption text-ink-3 underline-offset-2 hover:text-ink hover:underline"
-          data-test="end-frame-choose-gallery"
-          @click="endPickerOpen = true"
-        >
-          Choose from gallery…
-        </button>
-      </div>
-      <p class="mt-1 text-caption text-ink-3">
-        Renders a first/last-frame clip: the source opens it, this closes it.
-      </p>
-    </template>
-
-    <!-- Strength (wan pins the first frame exactly and never reads it) -->
-    <template v-if="form.sourceImage && caps.supportsStrength">
-      <label class="mt-3 flex items-center justify-between text-caption text-ink-2">
-        Strength <span class="data-mono text-ink">{{ form.strength.toFixed(2) }}</span>
-      </label>
-      <input
-        v-model.number="form.strength"
-        type="range"
-        min="0.05"
-        max="1"
-        step="0.05"
-        class="mt-1 w-full accent-[var(--safelight)]"
-      />
-    </template>
+  <div v-else-if="plan.kind === 'single'" data-test="source-media-controls">
+    <SourceMediaWells
+      :plan="plan"
+      :source="
+        form.sourceImage ? { data: form.sourceImage, filename: form.sourceImageName } : null
+      "
+      :end-frame="
+        form.endFrame ? { data: form.endFrame.base64, filename: form.endFrame.filename } : null
+      "
+      :error="conditioningError"
+      @file="onWellFile"
+      @gallery="onWellGallery"
+      @clear="onWellClear"
+    />
 
     <!-- Source fit (how a mismatched source maps onto the target canvas;
          applied client-side on submit — labels mirror the web SPA) -->
@@ -527,6 +438,21 @@ function setSourceFitMode(e: Event) {
       </p>
     </template>
 
+    <!-- Strength (wan pins the first frame exactly and never reads it) -->
+    <template v-if="form.sourceImage && caps.supportsStrength">
+      <label class="mt-3 flex items-center justify-between text-caption text-ink-2">
+        Strength <span class="data-mono text-ink">{{ form.strength.toFixed(2) }}</span>
+      </label>
+      <input
+        v-model.number="form.strength"
+        type="range"
+        min="0.05"
+        max="1"
+        step="0.05"
+        class="mt-1 w-full accent-[var(--safelight)]"
+      />
+    </template>
+
     <!-- Mask well (inpaint families) -->
     <template v-if="caps.supportsMask && form.sourceImage">
       <div class="mt-3 flex items-center justify-between">
@@ -540,98 +466,30 @@ function setSourceFitMode(e: Event) {
           Edit mask…
         </button>
       </div>
-      <input
-        :ref="(el) => (inputEls.mask = el as HTMLInputElement | null)"
-        type="file"
-        accept="image/*"
-        class="hidden"
-        @change="onPick('mask', $event)"
-      />
       <div class="mt-1">
-        <div
-          v-if="!form.maskImage"
-          role="button"
-          tabindex="0"
-          class="flex h-16 cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors focus-visible:outline-2 focus-visible:outline-safelight"
-          :class="
-            dragOver === 'mask'
-              ? 'border-safelight text-safelight'
-              : 'border-control-edge text-ink-3'
-          "
-          @click="pick('mask')"
-          @keydown.enter.prevent="pick('mask')"
-          @keydown.space.prevent="pick('mask')"
-          @dragover.prevent="dragOver = 'mask'"
-          @dragleave="dragOver = null"
-          @drop.prevent="onDrop('mask', $event)"
-        >
-          White repaints, black preserves
-        </div>
-        <div v-else class="relative inline-block">
-          <img
-            :src="base64ToDataUrl(form.maskImage)"
-            alt="mask"
-            class="max-h-28 rounded-media border border-[color-mix(in_srgb,var(--rebate)_25%,transparent)] p-px"
-          />
-          <button
-            type="button"
-            class="border-edge absolute top-1 right-1 h-5 w-5 rounded-control border bg-bath text-ink-2 hover:text-stop"
-            title="Clear mask"
-            aria-label="Clear mask image"
-            @click="clearSlot('mask')"
-          >
-            ✕
-          </button>
-        </div>
+        <ImageDropWell
+          :image="form.maskImage"
+          alt="Mask image"
+          placeholder="White repaints, black preserves"
+          test-id="mask"
+          @file="ingest('mask', $event)"
+          @clear="clearSlot('mask')"
+        />
       </div>
     </template>
 
     <!-- Control well + model + scale (sd15 only) -->
     <template v-if="caps.supportsControlNet">
-      <label class="mt-3 text-caption text-ink-2">Control image</label>
-      <input
-        :ref="(el) => (inputEls.control = el as HTMLInputElement | null)"
-        type="file"
-        accept="image/*"
-        class="hidden"
-        @change="onPick('control', $event)"
-      />
+      <label class="mt-3 block text-caption text-ink-2">Control image</label>
       <div class="mt-1">
-        <div
-          v-if="!form.controlImage"
-          role="button"
-          tabindex="0"
-          class="flex h-16 cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors focus-visible:outline-2 focus-visible:outline-safelight"
-          :class="
-            dragOver === 'control'
-              ? 'border-safelight text-safelight'
-              : 'border-control-edge text-ink-3'
-          "
-          @click="pick('control')"
-          @keydown.enter.prevent="pick('control')"
-          @keydown.space.prevent="pick('control')"
-          @dragover.prevent="dragOver = 'control'"
-          @dragleave="dragOver = null"
-          @drop.prevent="onDrop('control', $event)"
-        >
-          Drop a control image
-        </div>
-        <div v-else class="relative inline-block">
-          <img
-            :src="base64ToDataUrl(form.controlImage)"
-            alt="control"
-            class="max-h-28 rounded-media border border-[color-mix(in_srgb,var(--rebate)_25%,transparent)] p-px"
-          />
-          <button
-            type="button"
-            class="border-edge absolute top-1 right-1 h-5 w-5 rounded-control border bg-bath text-ink-2 hover:text-stop"
-            title="Clear control image"
-            aria-label="Clear control image"
-            @click="clearSlot('control')"
-          >
-            ✕
-          </button>
-        </div>
+        <ImageDropWell
+          :image="form.controlImage"
+          alt="Control image"
+          placeholder="Drop a control image"
+          test-id="control"
+          @file="ingest('control', $event)"
+          @clear="clearSlot('control')"
+        />
       </div>
       <template v-if="form.controlImage">
         <label class="mt-3 block text-caption text-ink-2" for="controlnet-select">
@@ -689,6 +547,7 @@ function setSourceFitMode(e: Event) {
     <ImagePickerModal
       :open="pickerOpen"
       :multiple="false"
+      gallery-only
       @pick="onSourcePicked"
       @close="pickerOpen = false"
     />
@@ -697,6 +556,7 @@ function setSourceFitMode(e: Event) {
       :open="endPickerOpen"
       :multiple="false"
       title="Pick an end frame"
+      gallery-only
       @pick="onEndFramePicked"
       @close="endPickerOpen = false"
     />
@@ -706,6 +566,44 @@ function setSourceFitMode(e: Event) {
       :initial-mask="form.maskImage"
       @apply="onMaskApplied"
       @close="maskOpen = false"
+    />
+  </div>
+
+  <!-- MiniMax H3 FL2VA boundaries: the exact same wells, H3-owned state. -->
+  <div v-else-if="plan.kind === 'h3-boundaries'" data-test="source-media-controls">
+    <SourceMediaWells
+      :plan="plan"
+      :source="h3Authoring.firstFrame"
+      :end-frame="h3Authoring.lastFrame"
+      :error="h3Error"
+      @file="onH3File"
+      @gallery="onH3Gallery"
+      @clear="onH3Clear"
+    />
+    <!-- The same client-side fit as an ordinary source, coerced maskless and
+         applied to both boundaries at submit. -->
+    <template v-if="h3Authoring.firstFrame || h3Authoring.lastFrame">
+      <label class="mt-3 block text-caption text-ink-2" for="source-fit-policy">Source fit</label>
+      <select
+        id="source-fit-policy"
+        :value="coerceSourceFitForMaskless(form.sourceFit ?? { mode: 'crop-fill' }).mode"
+        data-test="source-fit-policy"
+        class="border-edge mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-body text-ink"
+        @change="setSourceFitMode"
+      >
+        <option value="crop-fill">Crop fill</option>
+        <option value="pad-fit">Pad fit</option>
+        <option value="lanczos-resize">Lanczos resize</option>
+        <option value="upscale-then-fit">Upscale then fit</option>
+      </select>
+    </template>
+    <ImagePickerModal
+      :open="h3PickerTarget !== null"
+      :title="h3PickerTarget === 'lastFrame' ? 'Last frame' : 'First frame'"
+      :multiple="false"
+      gallery-only
+      @pick="onH3Picked"
+      @close="h3PickerTarget = null"
     />
   </div>
 </template>

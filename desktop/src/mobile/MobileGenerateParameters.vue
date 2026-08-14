@@ -79,14 +79,11 @@ import {
   pipelineForControlId,
 } from "@studio/lib/ltx2Control";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
-import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
 import {
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
-  setMinimaxH3PickedImageBoundary,
   type MinimaxH3AuthoringState,
-  type MinimaxH3BoundaryEndpoint,
 } from "@studio/lib/minimaxH3Authoring";
 
 const props = withDefaults(
@@ -136,30 +133,6 @@ const h3Family = computed(() => isMinimaxH3Identity(props.form.family, props.for
 const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3AuthoringState());
 function setH3Authoring(value: MinimaxH3AuthoringState): void {
   props.form.h3Authoring = value;
-}
-// One picker sheet serves both FL2VA boundaries; the target names the slot.
-const h3BoundaryPickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
-const h3BoundaryPickerError = ref<string | null>(null);
-const h3BoundaryPickerMaxBytes = computed(() =>
-  Math.max(
-    0,
-    MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES -
-      inlineGenerationMediaBytes(
-        props.form,
-        h3BoundaryPickerTarget.value === "lastFrame" ? "h3LastFrame" : "h3FirstFrame",
-      ),
-  ),
-);
-function onH3BoundaryPicked(image: MobilePickedImage): void {
-  const endpoint = h3BoundaryPickerTarget.value;
-  if (!endpoint) return;
-  const result = setMinimaxH3PickedImageBoundary(props.form.h3Authoring, endpoint, image);
-  if (!result.ok) {
-    h3BoundaryPickerError.value = result.error;
-    return;
-  }
-  h3BoundaryPickerError.value = null;
-  props.form.h3Authoring = result.state;
 }
 const videoContract = computed(() => props.selectedModel ?? { family: props.form.family });
 const frameGridLabel = computed(() => videoFrameGridLabel(videoContract.value));
@@ -763,30 +736,18 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
       </label>
     </fieldset>
 
-    <fieldset v-if="h3Task" class="mobile-generate-section" data-test="mobile-h3-authoring">
-      <legend class="mobile-generate-legend">
-        {{ h3Task === "fl2va" ? "Frame endpoints" : "Ordered references" }}
-      </legend>
+    <!-- H3 Ref2VA ordered references. FL2VA boundaries render as the shared
+         source wells in the primary Create stack, not in this sheet. -->
+    <fieldset
+      v-if="h3Task === 'ref2va'"
+      class="mobile-generate-section"
+      data-test="mobile-h3-authoring"
+    >
+      <legend class="mobile-generate-legend">Ordered references</legend>
       <MinimaxH3AuthoringPanel
         :model-value="h3Authoring"
-        :task="h3Task"
-        :required-endpoint="caps.requiresSourceImage ? 'first' : null"
         touch-friendly
         @update:model-value="setH3Authoring"
-        @request-first-frame="h3BoundaryPickerTarget = 'firstFrame'"
-        @request-last-frame="h3BoundaryPickerTarget = 'lastFrame'"
-      />
-      <p v-if="h3BoundaryPickerError" class="mobile-generate-validation" role="alert">
-        {{ h3BoundaryPickerError }}
-      </p>
-      <MobileImagePickerSheet
-        :open="h3BoundaryPickerTarget !== null"
-        :target="target"
-        :title="h3BoundaryPickerTarget === 'lastFrame' ? 'Last frame' : 'First frame'"
-        :max-bytes="h3BoundaryPickerMaxBytes"
-        oversize-message="Combined generation media must be 45 MiB or smaller on iPhone."
-        @pick="onH3BoundaryPicked"
-        @close="h3BoundaryPickerTarget = null"
       />
     </fieldset>
 

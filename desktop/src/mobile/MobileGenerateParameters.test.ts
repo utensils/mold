@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 import { buildRequest, newGenerateForm, type GenerateForm } from "../lib/generateForm";
 import type { Ltx2CameraControlInfo, Ltx2ControlAdapterInfo, ModelEntry } from "../lib/api/types";
 import MobileGenerateParameters from "./MobileGenerateParameters.vue";
-import MobileImagePickerSheet from "./MobileImagePickerSheet.vue";
 
 const { fileToBase64 } = vi.hoisted(() => ({ fileToBase64: vi.fn() }));
 
@@ -73,36 +72,37 @@ async function attachFile(wrapper: VueWrapper, selector: string, file: File): Pr
 }
 
 describe("MobileGenerateParameters", () => {
-  it("reuses the mobile local/gallery picker for the required H3 first frame", async () => {
-    const model = {
+  it("keeps only the Ref2VA ordered-reference panel in the Advanced sheet for H3", () => {
+    const fl2va = {
       name: "minimax-h3-fl2va:comfy-pruned-int8",
       family: "minimax-h3",
       source_image: "required",
     } as ModelEntry;
-    const { wrapper, form } = mountParameters(
-      formFor(model.family, model.name),
+    const boundaries = mountParameters(
+      formFor(fl2va.family, fl2va.name),
       [],
       true,
       [],
       [],
-      model,
+      fl2va,
     );
+    // FL2VA boundaries render as the shared source wells in the primary form.
+    expect(boundaries.wrapper.find("[data-test='mobile-h3-authoring']").exists()).toBe(false);
 
-    expect(wrapper.find("[data-test='h3-first-well']").exists()).toBe(true);
-    await wrapper.get("[data-test='h3-first-gallery']").trigger("click");
-    const picker = wrapper.getComponent(MobileImagePickerSheet);
-    expect(picker.props("open")).toBe(true);
-    picker.vm.$emit("pick", {
-      filename: "opening.png",
-      base64: "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC",
-    });
-    await flushPromises();
-
-    expect(form.h3Authoring?.firstFrame).toMatchObject({
-      filename: "opening.png",
-      width: 7,
-      height: 4,
-    });
+    const ref2va = {
+      name: "minimax-h3-ref2va:comfy-pruned-int8",
+      family: "minimax-h3",
+    } as ModelEntry;
+    const references = mountParameters(
+      formFor(ref2va.family, ref2va.name),
+      [],
+      true,
+      [],
+      [],
+      ref2va,
+    );
+    expect(references.wrapper.find("[data-test='mobile-h3-authoring']").exists()).toBe(true);
+    expect(references.wrapper.text()).toContain("Ordered references");
   });
 
   it("resets model-owned controls when the recipe changes", async () => {

@@ -14,6 +14,7 @@ import ResultCanvas from "../components/create/ResultCanvas.vue";
 import ControlsAside from "../components/create/ControlsAside.vue";
 import CreateModelPicker from "../components/create/CreateModelPicker.vue";
 import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
+import SourceMediaPanel from "../components/create/SourceMediaPanel.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
 import EstimateBadge from "../components/create/EstimateBadge.vue";
 import { advancedActiveCount } from "../components/create/advancedCount";
@@ -1948,7 +1949,6 @@ const advCount = computed(() =>
         negativePromptDefault: capabilities.value.supportsNegativePrompt
           ? (form.state.value.negativePromptDefault ?? "")
           : "",
-        hasSource: form.state.value.imageAttachments.length > 0,
         loraCount: form.state.value.loras.length,
         upscaleOn: form.state.value.upscaleModel.trim() !== "",
         scheduler: capabilities.value.supportsScheduler
@@ -1959,9 +1959,6 @@ const advCount = computed(() =>
           capabilities.value.supportsVideo &&
           form.state.value.frames != null &&
           form.state.value.frames !== 25,
-        controlNet:
-          capabilities.value.supportsControlNet &&
-          form.state.value.controlImage != null,
         videoSuite:
           capabilities.value.supportsVideo &&
           (form.state.value.gifPreview ||
@@ -2663,13 +2660,44 @@ async function onSubmit(allowStaleQuick = false) {
   const finalizedCopies = requestCopyCount(req);
   if (quick) req.original_prompt = quick.originalPrompt;
   if (quick?.promptTransform) req.prompt_transform = quick.promptTransform;
-  // H3's dedicated FL2VA panel owns first/last endpoints. The legacy still
-  // preprocessor has no corresponding attachment and must never erase that
-  // serialized first-frame authority.
-  if (
-    "source_image" in req &&
-    !isMinimaxH3Identity(currentFamily.value, form.state.value.model)
-  ) {
+  // H3's dedicated FL2VA boundaries own first/last endpoints. The legacy
+  // still preprocessor has no corresponding attachment and must never erase
+  // that serialized first-frame authority — instead each boundary takes the
+  // same client-side fit, coerced maskless.
+  if (isMinimaxH3Identity(currentFamily.value, form.state.value.model)) {
+    const h3 = form.state.value.h3Authoring;
+    const boundaryRoute: HostRoute | null = route || null;
+    const fitBoundary = async (
+      base64: string,
+      boundary: { filename: string; width: number; height: number; mimeType: string },
+    ): Promise<string | false> => {
+      const fitted = await prepareStillSourceToRequest(boundaryRoute, {
+        source: {
+          kind: "upload",
+          filename: boundary.filename,
+          base64,
+          width: boundary.width,
+          height: boundary.height,
+          mime: boundary.mimeType,
+        },
+        mask: null,
+        maskless: true,
+      });
+      if (fitted === false) return false;
+      return fitted.source?.base64 ?? base64;
+    };
+    if (typeof req.source_image === "string" && h3?.firstFrame) {
+      const fitted = await fitBoundary(req.source_image, h3.firstFrame);
+      if (fitted === false) return;
+      req.source_image = fitted;
+    }
+    const keyframes = (req as { keyframes?: { image: string }[] }).keyframes;
+    if (keyframes?.[0] && h3?.lastFrame) {
+      const fitted = await fitBoundary(keyframes[0].image, h3.lastFrame);
+      if (fitted === false) return;
+      keyframes[0].image = fitted;
+    }
+  } else if ("source_image" in req) {
     req.source_image = preparedSource.source?.base64 ?? null;
     if (preparedSource.mask) req.mask_image = preparedSource.mask.base64;
     else delete req.mask_image;
@@ -3809,6 +3837,19 @@ onBeforeUnmount(() => {
                   @open-advanced="openAdvanced"
                   @reset-settings="onResetSettings"
                 />
+                <SourceMediaPanel
+                  v-if="!sequenceMode"
+                  v-model="form.state.value"
+                  :family="currentFamily"
+                  :models="models"
+                  @open-picker="showPicker = true"
+                  @clear-source="onClearSource"
+                  @open-end-frame-picker="showEndFramePicker = true"
+                  @clear-end-frame="onClearEndFrame"
+                  @open-mask="showMask = true"
+                  @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
+                  @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
+                />
               </div>
             </template>
           </ComposerCard>
@@ -3975,6 +4016,21 @@ onBeforeUnmount(() => {
           @open-advanced="openAdvanced"
           @reset-settings="onResetSettings"
         />
+        <!-- Source media in the primary form: the model dictates whether
+             (and how) it renders, exactly like resolutions. -->
+        <SourceMediaPanel
+          v-if="!sequenceMode"
+          v-model="form.state.value"
+          :family="currentFamily"
+          :models="models"
+          @open-picker="showPicker = true"
+          @clear-source="onClearSource"
+          @open-end-frame-picker="showEndFramePicker = true"
+          @clear-end-frame="onClearEndFrame"
+          @open-mask="showMask = true"
+          @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
+          @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
+        />
         <!-- Tablet+ : inline, always-visible Advanced column. -->
         <AdvancedDrawer
           :mobile="false"
@@ -4078,6 +4134,11 @@ onBeforeUnmount(() => {
         (currentFamily === 'qwen-image-edit' ||
           isFlux2DevModel(form.state.value.model))
       "
+      :gallery-only="
+        !sequenceMode &&
+        currentFamily !== 'qwen-image-edit' &&
+        !isFlux2DevModel(form.state.value.model)
+      "
       @pick="onPickSource"
       @close="showPicker = false"
     />
@@ -4085,6 +4146,7 @@ onBeforeUnmount(() => {
       :open="h3BoundaryPickerTarget !== null"
       :title="h3BoundaryPickerTarget === 'lastFrame' ? 'Last frame' : 'First frame'"
       :multiple="false"
+      gallery-only
       @pick="onPickH3Boundary"
       @close="h3BoundaryPickerTarget = null"
     />
@@ -4092,6 +4154,7 @@ onBeforeUnmount(() => {
       :open="showEndFramePicker"
       title="End frame"
       :multiple="false"
+      gallery-only
       @pick="onPickEndFrame"
       @close="showEndFramePicker = false"
     />

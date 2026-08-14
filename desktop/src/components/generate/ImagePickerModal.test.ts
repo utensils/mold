@@ -137,6 +137,24 @@ describe("ImagePickerModal", () => {
     expect(wrapper.emitted("close")).toBeTruthy();
   });
 
+
+  it("opens straight onto the gallery with no redundant upload tab when gallery-only", async () => {
+    seedTwoHostGallery();
+    mount(ImagePickerModal, {
+      props: { open: true, galleryOnly: true },
+      global: { plugins: [pinia] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await nextTick();
+
+    expect(document.body.querySelector("[data-test='picker-tab-upload']")).toBeNull();
+    expect(document.body.querySelector("[data-test='picker-tab-gallery']")).toBeNull();
+    expect(document.body.querySelector("[data-test='picker-native-file-button']")).toBeNull();
+    const thumbs = document.body.querySelectorAll("[data-test='picker-gallery-item']");
+    expect(thumbs.length).toBe(2);
+  });
+
   it("labels tiles with their host when more than one gallery source exists", async () => {
     seedTwoHostGallery();
     mount(ImagePickerModal, {

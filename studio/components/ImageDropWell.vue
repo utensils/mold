@@ -183,7 +183,9 @@ function onDrop(event: DragEvent): void {
   line-height: 1.45;
   text-align: center;
   cursor: pointer;
-  transition: border-color 0.1s, color 0.1s;
+  transition:
+    border-color 0.1s,
+    color 0.1s;
 }
 .image-well__zone--over {
   border-color: var(--safelight, #b45309);

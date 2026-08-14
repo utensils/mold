@@ -2,7 +2,6 @@ import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import MinimaxH3AuthoringPanel from "./MinimaxH3AuthoringPanel.vue";
 import type { MinimaxH3AuthoringState } from "../lib/minimaxH3Authoring";
-import { emptyMinimaxH3AuthoringState } from "../lib/minimaxH3Authoring";
 import {
   h264AacMp4Fixture,
   pcmWavFixture,
@@ -64,103 +63,9 @@ function fileBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 describe("MinimaxH3AuthoringPanel", () => {
-  it("presents the reviewed first-frame-only contract", () => {
-    const wrapper = mount(MinimaxH3AuthoringPanel, {
-      props: {
-        modelValue: emptyMinimaxH3AuthoringState(),
-        task: "fl2va",
-        requiredEndpoint: "first",
-      },
-    });
-
-    expect(wrapper.get("[data-test='h3-mode']").text()).toBe(
-      "first-frame-required",
-    );
-    expect(wrapper.text()).toContain("Required");
-    expect(wrapper.text()).toContain("accepts no other endpoint mode");
-    expect(wrapper.find("[data-test='h3-last-file']").exists()).toBe(false);
-  });
-
-  it("offers drop, direct pick, and the surface gallery picker for both endpoints", async () => {
-    const wrapper = mount(MinimaxH3AuthoringPanel, {
-      props: {
-        modelValue: emptyMinimaxH3AuthoringState(),
-        task: "fl2va",
-      },
-    });
-
-    expect(wrapper.find("[data-test='h3-first-well']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='h3-first-file']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='h3-last-well']").exists()).toBe(true);
-    await wrapper.get("[data-test='h3-first-gallery']").trigger("click");
-    expect(wrapper.emitted("request-first-frame")).toHaveLength(1);
-    await wrapper.get("[data-test='h3-last-gallery']").trigger("click");
-    expect(wrapper.emitted("request-last-frame")).toHaveLength(1);
-  });
-
-  it("keeps an incompatible restored last frame removable", async () => {
-    const restored = emptyMinimaxH3AuthoringState();
-    restored.lastFrame = {
-      filename: "old-last.png",
-      mimeType: "image/png",
-      width: 1344,
-      height: 768,
-      data: "LAST",
-    };
-    const wrapper = mount(MinimaxH3AuthoringPanel, {
-      props: {
-        modelValue: restored,
-        task: "fl2va",
-        requiredEndpoint: "first",
-      },
-    });
-
-    expect(wrapper.get("[data-test='h3-mode']").text()).toBe(
-      "first-frame-required",
-    );
-    expect(wrapper.text()).toContain("incompatible; remove");
-    const remove = wrapper.get("[data-test='h3-last-remove']");
-    expect(remove.attributes("disabled")).toBeUndefined();
-    await remove.trigger("click");
-    const emitted = wrapper.emitted(
-      "update:modelValue",
-    )?.[0]?.[0] as MinimaxH3AuthoringState;
-    expect(emitted.lastFrame).toBeNull();
-  });
-
-  it("never presents a restored first-plus-last pair as supported", () => {
-    const restored = emptyMinimaxH3AuthoringState();
-    restored.firstFrame = {
-      filename: "first.png",
-      mimeType: "image/png",
-      width: 1344,
-      height: 768,
-      data: "FIRST",
-    };
-    restored.lastFrame = {
-      filename: "old-last.png",
-      mimeType: "image/png",
-      width: 1344,
-      height: 768,
-      data: "LAST",
-    };
-    const wrapper = mount(MinimaxH3AuthoringPanel, {
-      props: {
-        modelValue: restored,
-        task: "fl2va",
-        requiredEndpoint: "first",
-      },
-    });
-
-    expect(wrapper.get("[data-test='h3-mode']").text()).toBe(
-      "first-frame-to-audio-video",
-    );
-    expect(wrapper.text()).not.toContain("first-and-last-frame-to-audio-video");
-  });
-
   it("renders semantic resynthesis, one-based mixed order, soundtrack association, and budgets", () => {
     const wrapper = mount(MinimaxH3AuthoringPanel, {
-      props: { modelValue: state(), task: "ref2va" },
+      props: { modelValue: state() },
     });
     expect(wrapper.text()).toContain("Reference-guided semantic resynthesis");
     expect(wrapper.text()).toContain("not pixel-aligned");
@@ -175,7 +80,7 @@ describe("MinimaxH3AuthoringPanel", () => {
 
   it("offers an explicit same-slot reattach control for redacted provenance", () => {
     const wrapper = mount(MinimaxH3AuthoringPanel, {
-      props: { modelValue: state(), task: "ref2va" },
+      props: { modelValue: state() },
     });
 
     const input = wrapper.get('[data-test="h3-reference-reattach-2"]');
@@ -189,7 +94,7 @@ describe("MinimaxH3AuthoringPanel", () => {
 
   it("offers accessible 44pt reorder alternatives without regrouping kinds", async () => {
     const wrapper = mount(MinimaxH3AuthoringPanel, {
-      props: { modelValue: state(), task: "ref2va", touchFriendly: true },
+      props: { modelValue: state(), touchFriendly: true },
     });
     const later = wrapper.get('[data-test="h3-reference-down-0"]');
     expect(later.attributes("aria-label")).toBe("Move reference 1 later");
@@ -208,7 +113,6 @@ describe("MinimaxH3AuthoringPanel", () => {
     const wrapper = mount(MinimaxH3AuthoringPanel, {
       props: {
         modelValue: { firstFrame: null, lastFrame: null, references: [] },
-        task: "ref2va",
       },
     });
     const bytes = pcmWavFixture({
@@ -248,7 +152,6 @@ describe("MinimaxH3AuthoringPanel", () => {
     const wrapper = mount(MinimaxH3AuthoringPanel, {
       props: {
         modelValue: { firstFrame: null, lastFrame: null, references: [] },
-        task: "ref2va",
       },
     });
     const bytes = h264AacMp4Fixture();
@@ -284,34 +187,5 @@ describe("MinimaxH3AuthoringPanel", () => {
       audio_channels: 2,
       provenance: { name: "motion.mp4" },
     });
-  });
-
-  it("renders all four FL2VA endpoint modes and removes endpoints explicitly", async () => {
-    const first = {
-      filename: "first.png",
-      mimeType: "image/png",
-      width: 1280,
-      height: 720,
-      data: "FIRST",
-    };
-    const wrapper = mount(MinimaxH3AuthoringPanel, {
-      props: {
-        modelValue: {
-          firstFrame: first,
-          lastFrame: { ...first, filename: "last.png" },
-          references: [],
-        },
-        task: "fl2va",
-      },
-    });
-    expect(wrapper.get('[data-test="h3-mode"]').text()).toBe(
-      "first-and-last-frame-to-audio-video",
-    );
-    await wrapper.get('[data-test="h3-first-remove"]').trigger("click");
-    const emitted = wrapper.emitted(
-      "update:modelValue",
-    )?.[0]?.[0] as MinimaxH3AuthoringState;
-    expect(emitted.firstFrame).toBeNull();
-    expect(emitted.lastFrame?.filename).toBe("last.png");
   });
 });

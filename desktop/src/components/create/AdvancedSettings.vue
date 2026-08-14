@@ -88,7 +88,6 @@ import {
   pipelineForControlId,
 } from "@studio/lib/ltx2Control";
 import { AUDIO_ONLY_PIPELINE, isAudioOnlyPipeline } from "@studio/lib/ltx2Pipeline";
-import SourceImageWell from "../generate/SourceImageWell.vue";
 import LoraStack from "../generate/LoraStack.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import { attachPickedVideo } from "../../lib/sourceAttachment";
@@ -97,9 +96,7 @@ import {
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
-  setMinimaxH3PickedImageBoundary,
   type MinimaxH3AuthoringState,
-  type MinimaxH3BoundaryEndpoint,
 } from "@studio/lib/minimaxH3Authoring";
 
 const props = withDefaults(
@@ -148,21 +145,6 @@ const h3Family = computed(() => isMinimaxH3Identity(props.form.family, props.for
 const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3AuthoringState());
 function setH3Authoring(value: MinimaxH3AuthoringState): void {
   props.form.h3Authoring = value;
-}
-// One picker serves both FL2VA boundaries; the target names the slot.
-const h3BoundaryPickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
-const h3BoundaryPickerError = ref<string | null>(null);
-function onH3BoundaryPicked(images: PickedImage[]): void {
-  const endpoint = h3BoundaryPickerTarget.value;
-  const image = images[0];
-  if (!endpoint || !image) return;
-  const result = setMinimaxH3PickedImageBoundary(props.form.h3Authoring, endpoint, image);
-  if (!result.ok) {
-    h3BoundaryPickerError.value = result.error;
-    return;
-  }
-  h3BoundaryPickerError.value = null;
-  props.form.h3Authoring = result.state;
 }
 
 // ── Scheduler & sampling ─────────────────────────────────────────────────────
@@ -661,52 +643,21 @@ function reset() {
         </div>
       </AccordionSection>
 
+      <!-- H3 Ref2VA ordered references. FL2VA boundaries and every other
+           image well live in the primary form (InspectorPanel), not here. -->
       <AccordionSection
-        v-if="h3Task"
+        v-if="h3Task === 'ref2va'"
         icon="video"
-        :title="h3Task === 'fl2va' ? 'Frame endpoints' : 'Ordered references'"
-        :summary="
-          h3Task === 'fl2va'
-            ? caps.requiresSourceImage
-              ? 'First frame required'
-              : 'First, last, both, or text only'
-            : `${h3Authoring.references.length} in semantic order`
-        "
+        title="Ordered references"
+        :summary="`${h3Authoring.references.length} in semantic order`"
         :open="true"
         :header-interactive="false"
         data-test="section-h3-authoring"
       >
         <MinimaxH3AuthoringPanel
           :model-value="h3Authoring"
-          :task="h3Task"
-          :required-endpoint="caps.requiresSourceImage ? 'first' : null"
           @update:model-value="setH3Authoring"
-          @request-first-frame="h3BoundaryPickerTarget = 'firstFrame'"
-          @request-last-frame="h3BoundaryPickerTarget = 'lastFrame'"
         />
-        <p v-if="h3BoundaryPickerError" class="ms-hint text-stop" role="alert">
-          {{ h3BoundaryPickerError }}
-        </p>
-        <ImagePickerModal
-          :open="h3BoundaryPickerTarget !== null"
-          :title="h3BoundaryPickerTarget === 'lastFrame' ? 'Last frame' : 'First frame'"
-          :multiple="false"
-          @pick="onH3BoundaryPicked"
-          @close="h3BoundaryPickerTarget = null"
-        />
-      </AccordionSection>
-
-      <!-- 3 · Source image -->
-      <AccordionSection
-        v-if="caps.supportsImg2img && !h3Family"
-        icon="image"
-        title="Source image"
-        summary="Image-to-image &amp; inpainting"
-        :open="true"
-        :header-interactive="false"
-        data-test="section-source"
-      >
-        <SourceImageWell :form="form" />
       </AccordionSection>
 
       <!-- 4 · LoRA stack -->

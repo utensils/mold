@@ -7,6 +7,7 @@ import {
   type ModelAccessCapabilityRecord,
 } from "./modelAccess";
 import { imageDimensionsFromBase64 } from "./imageDimensions";
+import { readFileBase64 } from "./fileBase64";
 
 export const MINIMAX_H3_FIXED_FPS = 24;
 export const MINIMAX_H3_MIN_FRAMES = 124;
@@ -327,6 +328,36 @@ export function setMinimaxH3PickedImageFirstFrame(
   image: MinimaxH3PickedImageSource,
 ): MinimaxH3GalleryImageResult {
   return setMinimaxH3PickedImageBoundary(state, "firstFrame", image);
+}
+
+/** Read a picked or dropped File into an FL2VA boundary. All surfaces route
+ * their file wells through this so a file and a gallery pick produce
+ * identical boundary facts. */
+export async function setMinimaxH3BoundaryFile(
+  state: MinimaxH3AuthoringState | null | undefined,
+  endpoint: MinimaxH3BoundaryEndpoint,
+  file: File,
+): Promise<MinimaxH3GalleryImageResult> {
+  if (!file.type.toLowerCase().startsWith("image/")) {
+    return { ok: false, error: "FL2VA endpoints must be still images." };
+  }
+  let base64: string;
+  try {
+    base64 = await readFileBase64(file);
+  } catch (reason) {
+    return {
+      ok: false,
+      error: reason instanceof Error ? reason.message : String(reason),
+    };
+  }
+  if (!imageDimensionsFromBase64(base64)) {
+    return { ok: false, error: "Use a PNG or JPEG image for FL2VA endpoints." };
+  }
+  return setMinimaxH3PickedImageBoundary(state, endpoint, {
+    filename: file.name,
+    base64,
+    mimeType: file.type,
+  });
 }
 
 export function cloneMinimaxH3AuthoringState(

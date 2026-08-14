@@ -25,10 +25,7 @@ import PlacementPanel from "../PlacementPanel.vue";
 import ExtendVideoControls from "./advanced/ExtendVideoControls.vue";
 import Ltx2VideoControls from "./advanced/Ltx2VideoControls.vue";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
-import {
-  DEFAULT_EXTEND_OVERLAP_FRAMES,
-  submitsExtend,
-} from "@studio/lib/extend";
+import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
 import UpscaleSection from "./advanced/UpscaleSection.vue";
 import type {
   DevicePlacement,
@@ -38,13 +35,8 @@ import type {
   ModelInfoExtended,
   OutputFormat,
   Scheduler,
-  SourceFitPolicy,
-  SourceImageState,
 } from "../../types";
-import {
-  generationCapabilitiesForFamily,
-  isFlux2DevModel,
-} from "../../lib/generateCapabilities";
+import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities";
 import { schedulerLabel } from "@studio/lib/generationCapabilities";
 import {
   MAX_WAN_DISTILL_STRENGTH,
@@ -53,7 +45,6 @@ import {
   wanRecipeError,
   type WanRecipeState,
 } from "@studio/lib/wanRecipe";
-import { blobToBase64 } from "../../lib/base64";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { OutputMode } from "@studio/lib/sequence";
@@ -86,7 +77,6 @@ import {
   MINIMAX_H3_MIN_FRAMES,
   type MinimaxH3AuthoringState,
 } from "@studio/lib/minimaxH3Authoring";
-import { sourceImageValidationError } from "@studio/lib/sourceImageCapability";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 
 const props = withDefaults(
@@ -238,7 +228,6 @@ const caps = computed(() =>
     effectiveGenerationRecipe(selectedModel.value, props.modelValue.pipeline),
   ),
 );
-const flux2Dev = computed(() => isFlux2DevModel(props.modelValue.model));
 const h3Task = computed(() =>
   selectedModel.value ? minimaxH3TaskForModel(props.modelValue.model) : null,
 );
@@ -329,41 +318,6 @@ function addNegative(word: string) {
   patch({ negativePrompt: cur ? `${cur}, ${word}` : word });
 }
 
-// ── Source image ──────────────────────────────────────────────────────
-const hasSource = computed(() => props.modelValue.imageAttachments.length > 0);
-const hasEndFrame = computed(
-  () => caps.value.supportsEndFrame && props.modelValue.endFrame != null,
-);
-/** Why the attached conditioning would be refused, in the server's own order.
- * H3 keeps its own authoring validator, which names its boundaries precisely.
- * A continuation carries its own first frames (#783), so the well's notice has
- * to read it the way submit and admission do or the two disagree. */
-const sourceConditioningError = computed(() =>
-  h3Family.value
-    ? null
-    : sourceImageValidationError({
-        capability: caps.value.sourceImageCapability,
-        hasSourceImage: hasSource.value,
-        isExtend: submitsExtend({
-          family: props.family,
-          extendVideo: props.modelValue.extendVideo,
-          extendVideoPath: props.modelValue.extendVideoPath,
-        }),
-        hasEndFrame: hasEndFrame.value,
-        frames: caps.value.supportsVideo ? props.modelValue.frames : null,
-        model: props.modelValue.model,
-      }),
-);
-const fitOptions = [
-  { value: "pad-fit", label: "Contain" },
-  { value: "crop-fill", label: "Cover" },
-  { value: "pad-repaint", label: "Pad + repaint" },
-  { value: "lanczos-resize", label: "Lanczos" },
-  { value: "upscale-then-fit", label: "Upscale + fit" },
-] as const;
-const fitMode = computed(
-  () => props.modelValue.sourceFitPolicy?.mode ?? "pad-repaint",
-);
 const sequenceFitOptions = SOURCE_FIT_OPTIONS.filter(
   (option) => option.value !== "pad-repaint",
 );
@@ -381,56 +335,6 @@ function setSequenceFit(mode: SourceFitMode) {
     }),
   });
 }
-function setFit(mode: string) {
-  if (mode === "upscale-then-fit") {
-    patch({
-      sourceFitPolicy: {
-        mode,
-        upscalerModel:
-          props.modelValue.upscaleModel || "real-esrgan-x4plus:fp16",
-        fit: { mode: "crop-fill" },
-      },
-    });
-    return;
-  }
-  patch({ sourceFitPolicy: { mode } as SourceFitPolicy });
-}
-
-// ── ControlNet (guidance image + model + scale) ───────────────────────
-// Gated by capability (only sd15 today). The control image is an inline
-// upload — unlike the primary source dropzone, which routes through the
-// parent's picker modal — so the drawer stays self-contained. Control
-// model + scale surface only once an image is attached, matching the
-// server's request-time gate (`control_model`/`control_scale` are sent
-// only when a control image is present).
-const showControlNet = computed(() => caps.value.supportsControlNet);
-const hasControl = computed(() => props.modelValue.controlImage != null);
-const controlModels = computed(() =>
-  props.models.filter(
-    (model) => model.downloaded && model.family === "controlnet",
-  ),
-);
-async function readControlImage(
-  event: Event,
-): Promise<SourceImageState | null> {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0] ?? null;
-  input.value = "";
-  if (!file) return null;
-  return {
-    kind: "upload",
-    filename: file.name,
-    base64: await blobToBase64(file),
-  };
-}
-async function onControlImage(event: Event) {
-  const image = await readControlImage(event);
-  if (image) patch({ controlImage: image });
-}
-function clearControl() {
-  patch({ controlImage: null });
-}
-
 // LTX-2 / LTX-2.3 own the full advanced video suite (pipeline, audio,
 // keyframes, retake, spatial/temporal). `supportsAudio` is true for
 // exactly those families, so it doubles as the suite gate; plain
@@ -797,28 +701,20 @@ function setSequenceCameraMode(mode: string) {
         </AccordionSection>
       </template>
       <template v-else>
+        <!-- H3 Ref2VA ordered references. FL2VA boundaries and every other
+             image well live in the primary form (SourceMediaPanel). -->
         <AccordionSection
-          v-if="h3Task"
+          v-if="h3Task === 'ref2va'"
           icon="video"
-          :title="h3Task === 'fl2va' ? 'Frame endpoints' : 'Ordered references'"
-          :summary="
-            h3Task === 'fl2va'
-              ? caps.requiresSourceImage
-                ? 'First frame required'
-                : 'First, last, both, or text only'
-              : `${h3Authoring.references.length} in semantic order`
-          "
+          title="Ordered references"
+          :summary="`${h3Authoring.references.length} in semantic order`"
           :open="true"
           :header-interactive="false"
           data-test="section-h3-authoring"
         >
           <MinimaxH3AuthoringPanel
             :model-value="h3Authoring"
-            :task="h3Task"
-            :required-endpoint="caps.requiresSourceImage ? 'first' : null"
             @update:model-value="setH3Authoring"
-            @request-first-frame="emit('open-h3-first-frame-picker')"
-            @request-last-frame="emit('open-h3-last-frame-picker')"
           />
         </AccordionSection>
 
@@ -1008,231 +904,6 @@ function setSequenceCameraMode(mode: string) {
           </div>
         </AccordionSection>
 
-        <!-- Hidden outright for a checkpoint the server says takes no source
-             image: admission rejects one, so offering the well can only
-             produce a refused request. -->
-        <AccordionSection
-          v-if="!h3Family && caps.supportsSourceImage"
-          icon="image"
-          :title="
-            caps.sourceImageMode !== 'single'
-              ? flux2Dev
-                ? 'Reference images'
-                : 'Edit images'
-              : 'Source image'
-          "
-          :summary="
-            hasSource
-              ? caps.sourceImageMode !== 'single'
-                ? `${modelValue.imageAttachments.length} attached`
-                : `1 image · denoise ${modelValue.strength.toFixed(2)}`
-              : caps.sourceImageMode !== 'single'
-                ? flux2Dev
-                  ? 'Optional · up to 4 ordered references'
-                  : 'Target and reference images'
-                : 'Image-to-image & inpainting'
-          "
-          :open="true"
-          :header-interactive="false"
-          data-test="section-source"
-        >
-          <!-- Requiredness is never inferred: only an explicit advertised
-               `required` marks the well, because a family heuristic can say a
-               checkpoint reads a source image, not that it cannot render
-               without one. -->
-          <p
-            v-if="caps.requiresSourceImage"
-            class="adv__required"
-            data-test="source-required-badge"
-          >
-            Required — this checkpoint renders from an image.
-          </p>
-          <button
-            v-if="!hasSource"
-            type="button"
-            class="adv__dropzone"
-            data-test="source-attach"
-            :aria-required="caps.requiresSourceImage || undefined"
-            @click="emit('open-picker')"
-          >
-            {{
-              caps.sourceImageMode !== "single"
-                ? flux2Dev
-                  ? "Attach references or "
-                  : "Attach images or "
-                : "Drop an image or "
-            }}<span class="adv__accent">browse</span>
-          </button>
-          <div v-else>
-            <div class="adv__source-row">
-              <span class="adv__source-name">{{
-                modelValue.imageAttachments[0]?.filename
-              }}</span>
-              <button
-                type="button"
-                class="adv__remove"
-                data-test="source-remove"
-                @click="emit('clear-source')"
-              >
-                Remove
-              </button>
-            </div>
-            <!-- Wan pins the first frame exactly and never reads strength. -->
-            <SliderRow
-              v-if="caps.sourceImageMode === 'single' && caps.supportsStrength"
-              label="Denoise strength"
-              :model-value="modelValue.strength"
-              :min="0"
-              :max="1"
-              :step="0.01"
-              :value-label="modelValue.strength.toFixed(2)"
-              @update:model-value="patch({ strength: $event })"
-            />
-            <div v-if="caps.sourceImageMode === 'single'" class="adv__field">
-              <label class="adv__label">Fit to canvas</label>
-              <SegmentedControl
-                :model-value="fitMode"
-                :options="fitOptions"
-                label="Fit to canvas"
-                @update:model-value="setFit"
-              />
-            </div>
-            <button
-              v-if="caps.supportsMask"
-              type="button"
-              class="adv__mask"
-              data-test="source-mask"
-              @click="emit('open-mask')"
-            >
-              {{
-                modelValue.maskImage
-                  ? "Mask applied · edit"
-                  : "Edit inpaint mask"
-              }}
-            </button>
-          </div>
-
-          <!-- Why the attached conditioning would be refused. One message at a
-               time, in the same order admission checks them. -->
-          <p
-            v-if="sourceConditioningError"
-            class="adv__error"
-            role="alert"
-            data-test="source-conditioning-error"
-          >
-            {{ sourceConditioningError }}
-          </p>
-
-          <!-- End frame (wan first/last-frame conditioning, #779). Offered
-               only when the server advertised a source-image contract for this
-               checkpoint: a host old enough to omit the field rejects wan
-               keyframes outright. -->
-          <div
-            v-if="caps.supportsEndFrame"
-            class="adv__end-frame"
-            data-test="end-frame-well"
-          >
-            <div class="adv__subhead">End frame <span>· Optional</span></div>
-            <button
-              v-if="!modelValue.endFrame"
-              type="button"
-              class="adv__dropzone"
-              data-test="end-frame-attach"
-              @click="emit('open-end-frame-picker')"
-            >
-              Drop the closing image or
-              <span class="adv__accent">browse</span>
-            </button>
-            <div v-else class="adv__source-row">
-              <span class="adv__source-name">{{
-                modelValue.endFrame.filename
-              }}</span>
-              <button
-                type="button"
-                class="adv__remove"
-                data-test="end-frame-remove"
-                @click="emit('clear-end-frame')"
-              >
-                Remove
-              </button>
-            </div>
-            <p class="adv__hint">
-              Renders a first/last-frame clip: the source image opens it, this
-              one closes it.
-            </p>
-          </div>
-
-          <div
-            v-if="showControlNet"
-            class="adv__controlnet"
-            data-test="controlnet-block"
-          >
-            <div class="adv__subhead">ControlNet</div>
-            <label
-              v-if="!hasControl"
-              class="adv__filezone"
-              data-test="control-attach"
-            >
-              <span
-                >Attach a control image or
-                <span class="adv__accent">browse</span></span
-              >
-              <input
-                type="file"
-                accept="image/png,image/jpeg"
-                class="adv__file-input"
-                @change="onControlImage"
-              />
-            </label>
-            <template v-else>
-              <div class="adv__source-row">
-                <span class="adv__source-name">{{
-                  modelValue.controlImage?.filename
-                }}</span>
-                <button
-                  type="button"
-                  class="adv__remove"
-                  data-test="control-remove"
-                  @click="clearControl"
-                >
-                  Remove
-                </button>
-              </div>
-              <div class="adv__field">
-                <label class="adv__label">Control model</label>
-                <input
-                  class="adv__input"
-                  data-test="control-model"
-                  list="installed-controlnet-models"
-                  placeholder="e.g. control_v11p_sd15_canny"
-                  :value="modelValue.controlModel"
-                  @input="
-                    patch({
-                      controlModel: ($event.target as HTMLInputElement).value,
-                    })
-                  "
-                />
-                <datalist id="installed-controlnet-models">
-                  <option
-                    v-for="model in controlModels"
-                    :key="model.name"
-                    :value="model.name"
-                  />
-                </datalist>
-              </div>
-              <SliderRow
-                label="Control scale"
-                data-test="control-scale"
-                :model-value="modelValue.controlScale"
-                :min="0"
-                :max="2"
-                :step="0.05"
-                :value-label="modelValue.controlScale.toFixed(2)"
-                @update:model-value="patch({ controlScale: $event })"
-              />
-            </template>
-          </div>
-        </AccordionSection>
 
         <AccordionSection
           v-if="caps.supportsLora"
