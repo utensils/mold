@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
-import { resolutionValidationError } from "../lib/generateValidation";
+import {
+  resolutionValidationError,
+  resolutionValidationWarning,
+} from "../lib/generateValidation";
 import {
   aspectRatioLabel,
   matchPreset,
@@ -60,6 +63,10 @@ const currentAspect = computed(() =>
 const customVisible = computed(() => manualOpen.value || !currentPreset.value);
 const resolutionError = computed(() =>
   resolutionValidationError(width.value, height.value, props.model, props.pipeline),
+);
+/** Warn-policy bucket recipes admit this size but are not tuned for it. */
+const resolutionWarning = computed(() =>
+  resolutionValidationWarning(width.value, height.value, props.model, props.pipeline),
 );
 const sourceResolution = computed(() =>
   props.sourceDimensions
@@ -347,6 +354,13 @@ function matchSource(): void {
       data-test="mobile-resolution-error"
     >
       {{ resolutionError }}
+    </p>
+    <p
+      v-else-if="resolutionWarning"
+      class="mobile-resolution-note mobile-resolution-note--warning"
+      data-test="mobile-resolution-warning"
+    >
+      {{ resolutionWarning }}
     </p>
   </fieldset>
 </template>

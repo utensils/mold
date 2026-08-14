@@ -19,6 +19,7 @@ import {
   generationRecipeSelectionError,
   integerControlError,
   resolutionProfileError,
+  resolutionProfileWarning,
 } from "@studio/lib/generationProfile";
 
 export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
@@ -188,6 +189,19 @@ export function resolutionValidationError(
  * contains no architecture, so the check passed a preset that cannot resolve
  * and rejected one on a 19B install reached the same way.
  */
+/** Advisory counterpart to {@link resolutionValidationError}: a warn-policy
+ * bucket recipe admits this size, but the model is not tuned for it. Never a
+ * blocker. */
+export function resolutionValidationWarning(
+  width: number,
+  height: number,
+  contract?: ModelResolutionContract | null,
+  pipeline?: string | null,
+): string | null {
+  const recipe = effectiveGenerationRecipe(contract, pipeline);
+  return resolutionProfileWarning(width, height, recipe?.resolution);
+}
+
 export function cameraControlValidationError(
   form: GenerateForm,
   availablePresetIds?: readonly string[],

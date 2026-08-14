@@ -58,6 +58,7 @@ import {
 import {
   profileStepsValidationError,
   resolutionValidationError,
+  resolutionValidationWarning,
 } from "../../lib/generateValidation";
 import { randomSeed } from "../../stores/generation";
 import { useGenerateFormStore } from "../../stores/generateForm";
@@ -385,18 +386,30 @@ const shapeOptions = computed(() => {
       ]
     : canonicalShapeOptions.value;
 });
-const shapeId = computed(() =>
-  followsSource.value
-    ? "source"
-    : ((selectedModel.value
-        ? profileAspectIdForResolution(
-            selectedModel.value,
-            props.form.pipeline,
-            props.form.width,
-            props.form.height,
-          )
-        : aspectIdFor(props.form.width, props.form.height)) ?? ""),
+const canonicalShapeId = computed(
+  () =>
+    (selectedModel.value
+      ? profileAspectIdForResolution(
+          selectedModel.value,
+          props.form.pipeline,
+          props.form.width,
+          props.form.height,
+        )
+      : aspectIdFor(props.form.width, props.form.height)) ?? "",
 );
+/** The user's explicit Shape pick disambiguates a canvas that satisfies both
+ * a canonical aspect and the source (a 1280×704 source IS wan's 20:11
+ * bucket) — without it the Source chip would win forever and the bucket chip
+ * could never light up. Forgotten once the canvas stops matching the pick. */
+const explicitShapeId = ref<string | null>(null);
+const shapeId = computed(() => {
+  const explicit = explicitShapeId.value;
+  if (explicit === "source" && followsSource.value) return "source";
+  if (explicit && explicit !== "source" && canonicalShapeId.value === explicit) {
+    return explicit;
+  }
+  return followsSource.value ? "source" : canonicalShapeId.value;
+});
 const resolutionRatio = computed(() => props.form.width / props.form.height);
 const resolutionPresets = computed(() => {
   const exactGroup = presetsForAspectGroup(selectedModel.value, props.form.pipeline, shapeId.value);
@@ -450,6 +463,14 @@ const resolutionMp = computed(() => {
     )[0]?.mp ?? current
   );
 });
+const resolutionWarning = computed(() =>
+  resolutionValidationWarning(
+    props.form.width,
+    props.form.height,
+    selectedModel.value,
+    props.form.pipeline,
+  ),
+);
 const resolutionError = computed(() =>
   resolutionValidationError(
     props.form.width,
@@ -463,6 +484,7 @@ const stepsError = computed(() =>
 );
 
 function onShape(id: string) {
+  explicitShapeId.value = id;
   if (id === "source") {
     matchSource();
     return;
@@ -488,6 +510,9 @@ function onShape(id: string) {
 function matchSource() {
   const source = sourceResolution.value;
   if (!source) return;
+  // Matching the source is itself an explicit pick — without this, a source
+  // whose size is also a canonical bucket would re-light the earlier chip.
+  explicitShapeId.value = "source";
   props.form.width = source.output.width;
   props.form.height = source.output.height;
 }
@@ -650,6 +675,13 @@ function resetSettings() {
           Match source
         </button>
         <p v-if="resolutionError" class="ms-field__error" role="alert">{{ resolutionError }}</p>
+        <p
+          v-else-if="resolutionWarning"
+          class="ms-field__hint ms-field__hint--warning"
+          data-test="resolution-warning"
+        >
+          {{ resolutionWarning }}
+        </p>
       </div>
 
       <!-- Detail (steps) -->
@@ -931,6 +963,9 @@ function resetSettings() {
 }
 .ms-field__hint--after-slider {
   margin-top: 12px;
+}
+.ms-field__hint--warning {
+  color: var(--safelight);
 }
 .ms-field__error {
   font-size: 11px;

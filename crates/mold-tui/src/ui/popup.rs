@@ -1209,6 +1209,7 @@ mod tests {
                 last_seed: None,
                 last_generation_time_ms: None,
                 error_message: None,
+                warning_message: None,
                 model_description: String::new(),
                 last_output_path: None,
                 prompt_transform_token: 0,

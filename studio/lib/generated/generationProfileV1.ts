@@ -3,6 +3,8 @@
 
 export type ResolutionDomain = "dynamic" | "buckets" | "source-driven" | "none";
 
+export type OffBucketPolicy = "reject" | "warn";
+
 export type ControlMode = "adjustable" | "fixed" | "hidden";
 
 export type ProvenanceKind = "upstream" | "mold-policy" | "derived" | "delivery-limit";
@@ -13,7 +15,12 @@ export type ProfileResolutionPreset = { id: string, width: number, height: numbe
 
 export type ProfileAspectGroup = { id: string, label: string, presets: Array<ProfileResolutionPreset>, };
 
-export type ResolutionProfile = { domain: ResolutionDomain, alignment: number, min_width: number, min_height: number, max_pixels: number, max_axis_pixels?: number | null, min_aspect_ratio?: number | null, max_aspect_ratio?: number | null, aspect_groups: Array<ProfileAspectGroup>, };
+export type ResolutionProfile = { domain: ResolutionDomain, alignment: number, min_width: number, min_height: number, max_pixels: number, max_axis_pixels?: number | null, min_aspect_ratio?: number | null, max_aspect_ratio?: number | null,
+/**
+ * Only meaningful for the `Buckets` domain; see [`OffBucketPolicy`].
+ * Absent on the wire (older servers and profiles) means `Reject`.
+ */
+off_bucket?: OffBucketPolicy | null, aspect_groups: Array<ProfileAspectGroup>, };
 
 export type IntegerControl = { default: number, min: number, max: number, step: number, recommended?: Array<number>, mode: ControlMode, };
 

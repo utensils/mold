@@ -665,3 +665,46 @@ describe("InspectorPanel — source media in the primary form", () => {
     expect(wrapper.find("[data-test='inspector-source-media']").exists()).toBe(false);
   });
 });
+
+
+describe("InspectorPanel — explicit shape pick vs source tie", () => {
+  it("lets the user select the canonical aspect even when it equals the source", async () => {
+    // A 1280x704 source IS wan's 20:11 bucket: both chips describe the same
+    // canvas, so the pick — not derived matching — must decide the highlight.
+    const model = {
+      name: "wan22-ti2v-5b:fp16",
+      family: "wan",
+      downloaded: true,
+      default_width: 1280,
+      default_height: 704,
+    } as ModelEntry;
+    useModelStore().all = [model];
+    const form = formFor("wan");
+    form.model = model.name;
+    form.width = 1280;
+    form.height = 704;
+    form.sourceImage = "SRC";
+    form.sourceImageWidth = 1280;
+    form.sourceImageHeight = 704;
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    const shape = wrapper.getComponent(ShapePicker);
+    // Derived matching alone pins Source...
+    expect(shape.props("modelValue")).toBe("source");
+
+    // ...an explicit canonical pick wins the tie...
+    const canonical = (shape.props("options") as ReadonlyArray<{ id: string }>).find(
+      (option) => option.id !== "source",
+    )!.id;
+    shape.vm.$emit("update:modelValue", canonical);
+    await flushPromises();
+    expect(shape.props("modelValue")).toBe(canonical);
+    // ...and the canvas itself is unchanged (same bucket).
+    expect(form.width).toBe(1280);
+    expect(form.height).toBe(704);
+
+    // Picking Source hands the tie back.
+    shape.vm.$emit("update:modelValue", "source");
+    await flushPromises();
+    expect(shape.props("modelValue")).toBe("source");
+  });
+});

@@ -540,3 +540,38 @@ describe("ControlsAside", () => {
     expect(wrapper.find("[data-test='seed-seg']").exists()).toBe(true);
   });
 });
+
+
+describe("ControlsAside — explicit shape pick vs source tie", () => {
+  it("lets the user select the canonical aspect even when it equals the source", async () => {
+    // A source whose size IS a canonical aspect describes the same canvas as
+    // that aspect chip — the explicit pick, not derived matching, decides
+    // which chip lights up.
+    const sourceDimensions = { width: 1024, height: 1024 };
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm(sourceDimensions),
+        family: "flux",
+        advCount: 0,
+        sourceDimensions,
+      },
+    });
+    const shape = wrapper.getComponent(ShapePicker);
+    expect(shape.props("modelValue")).toBe("source");
+
+    const canonical = (shape.props("options") as Array<{ id: string }>).find(
+      (option) => option.id !== "source",
+    )!.id;
+    shape.vm.$emit("update:modelValue", canonical);
+    await wrapper.vm.$nextTick();
+    // The pick may or may not resize (nearest preset); when the canvas stays
+    // identical the explicit pick must still win the highlight.
+    const emitted = wrapper.emitted("update:modelValue");
+    if (emitted) {
+      await wrapper.setProps({
+        modelValue: emitted.at(-1)![0] as GenerateFormState,
+      });
+    }
+    expect(shape.props("modelValue")).toBe(canonical);
+  });
+});
