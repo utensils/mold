@@ -1215,6 +1215,15 @@ pub(crate) struct QuantizedQwenImageTransformer2DModel {
     rope_embedder: QwenRopeEmbedder,
     output_layer: OutputLayer,
     cfg: QwenImageConfig,
+    /// Whether this model may be handed a batched true-CFG forward.
+    ///
+    /// It is a **budget** decision, not a property of the weights: nothing in
+    /// the constructor below reads it, and every layer — `time_embed`,
+    /// `img_in`, `txt_in`, `txt_norm`, all `num_layers` blocks, the RoPE
+    /// embedder, the output layer — is built identically either way. The
+    /// forward is shape-agnostic in the batch axis, so the decision can be
+    /// re-taken per request through [`Self::set_supports_cfg_batching`]
+    /// without rebuilding anything.
     supports_cfg_batching: bool,
 }
 
@@ -1261,6 +1270,16 @@ impl QuantizedQwenImageTransformer2DModel {
 
     pub fn supports_cfg_batching(&self) -> bool {
         self.supports_cfg_batching
+    }
+
+    /// Re-take the CFG-batching budget decision on the resident model.
+    ///
+    /// The flag has no structural effect (see the field), so a request whose
+    /// resolution changes the decision flips a `bool` rather than paying a
+    /// transformer rebuild — which, with a LoRA stack, is a full GGUF
+    /// dequantize → merge → re-quantize across every block.
+    pub fn set_supports_cfg_batching(&mut self, supports_cfg_batching: bool) {
+        self.supports_cfg_batching = supports_cfg_batching;
     }
 
     pub fn forward(
