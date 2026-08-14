@@ -59,6 +59,38 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+fn settled_job(id: &str, model: &str, status: JobStatus) -> mold_core::types::DownloadJob {
+    mold_core::types::DownloadJob {
+        id: id.into(),
+        model: model.into(),
+        catalog_id: None,
+        status,
+        files_done: 1,
+        files_total: 1,
+        bytes_done: 100,
+        bytes_total: 100,
+        current_file: None,
+        started_at: Some(1),
+        completed_at: Some(2),
+        error: (status == JobStatus::Failed).then(|| "permission denied".into()),
+    }
+}
+
+#[tokio::test]
+async fn completed_retry_retires_the_same_models_failed_history() {
+    let queue = DownloadQueue::new_for_test();
+    queue.push_history(settled_job("other", "z-image:q6", JobStatus::Failed));
+    queue.push_history(settled_job("failed", "minimax-h3:fp8", JobStatus::Failed));
+    queue.push_history(settled_job("retry", "minimax-h3:fp8", JobStatus::Completed));
+
+    let listing = queue.listing().await;
+    assert_eq!(listing.history.len(), 2);
+    assert_eq!(listing.history[0].id, "other");
+    assert_eq!(listing.history[1].id, "retry");
+    assert_eq!(listing.history[1].status, JobStatus::Completed);
+    assert!(listing.history[1].error.is_none());
+}
+
 /// Recipe driver that the manifest-flow tests never invoke. If a test
 /// expects manifest behavior and the queue accidentally takes the recipe
 /// branch, the test sees `Err("noop recipe driver")` rather than silent

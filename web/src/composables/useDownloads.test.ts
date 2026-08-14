@@ -234,6 +234,50 @@ describe("applyDownloadEvent", () => {
     expect(state.history.at(-1)?.id).toBe("id-24");
   });
 
+  it("JobDone clears a stale failure for the retried model", () => {
+    const state = newDownloadsState();
+    state.history = [
+      {
+        id: "failed-attempt",
+        model: "minimax-h3:fp8",
+        catalog_id: null,
+        status: "failed",
+        files_done: 4,
+        files_total: 6,
+        bytes_done: 80,
+        bytes_total: 100,
+        current_file: null,
+        started_at: 1,
+        completed_at: 2,
+        error: "permission denied",
+      },
+    ];
+    applyDownloadEvent(state, {
+      type: "enqueued",
+      id: "retry",
+      model: "minimax-h3:fp8",
+      position: 1,
+    });
+    applyDownloadEvent(state, {
+      type: "started",
+      id: "retry",
+      files_total: 6,
+      bytes_total: 100,
+    });
+    applyDownloadEvent(state, {
+      type: "job_done",
+      id: "retry",
+      model: "minimax-h3:fp8",
+    });
+
+    expect(state.history).toHaveLength(1);
+    expect(state.history[0]).toMatchObject({
+      id: "retry",
+      status: "completed",
+      error: null,
+    });
+  });
+
   it("JobCancelled moves a queued job into terminal history", () => {
     const state = newDownloadsState();
     applyDownloadEvent(state, {

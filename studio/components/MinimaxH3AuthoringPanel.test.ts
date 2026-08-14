@@ -81,6 +81,20 @@ describe("MinimaxH3AuthoringPanel", () => {
     expect(wrapper.find("[data-test='h3-last-file']").exists()).toBe(false);
   });
 
+  it("delegates the opening frame to a surface's upload and gallery picker", async () => {
+    const wrapper = mount(MinimaxH3AuthoringPanel, {
+      props: {
+        modelValue: emptyMinimaxH3AuthoringState(),
+        task: "fl2va",
+        requiredEndpoint: "first",
+      },
+    });
+
+    expect(wrapper.find("[data-test='h3-first-file']").exists()).toBe(false);
+    await wrapper.get("[data-test='h3-first-picker']").trigger("click");
+    expect(wrapper.emitted("request-first-frame")).toHaveLength(1);
+  });
+
   it("keeps an incompatible restored last frame removable", () => {
     const restored = emptyMinimaxH3AuthoringState();
     restored.lastFrame = {

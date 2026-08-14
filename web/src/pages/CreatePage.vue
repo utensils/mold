@@ -178,13 +178,14 @@ import {
   serverExtendOverlapDefault,
   submitsExtend,
 } from "@studio/lib/extend";
-import { promptOptional } from "@studio/lib/promptRequirement";
+import { promptOptional, promptRequired } from "@studio/lib/promptRequirement";
 import {
   MINIMAX_H3_PROMPT_PLACEHOLDER,
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
   minimaxH3AuthoringError,
   minimaxH3TaskForModel,
+  setMinimaxH3PickedImageFirstFrame,
 } from "@studio/lib/minimaxH3Authoring";
 import {
   firstLastFrameRestoreNotice,
@@ -238,6 +239,7 @@ const showRemix = ref(false);
 const remixRoute = ref<HostRoute | null>(null);
 const remixTask = ref<ExpandTask>("text-to-image");
 const showPicker = ref(false);
+const showH3FirstFramePicker = ref(false);
 /** Wan's closing still gets its own picker (#779) so attaching one can never
  * overwrite the opening frame the source well holds. */
 const showEndFramePicker = ref(false);
@@ -1216,6 +1218,29 @@ const capabilities = computed(() =>
     effectiveGenerationRecipe(currentModel.value, form.state.value.pipeline),
   ),
 );
+const h3FrameError = computed(() =>
+  minimaxH3AuthoringError(
+    currentFamily.value,
+    form.state.value.model,
+    form.state.value.h3Authoring,
+    capabilities.value.requiresSourceImage,
+  ),
+);
+const h3GenerationInputBlocker = computed<string | null>(() => {
+  if (h3FrameError.value) return h3FrameError.value;
+  if (
+    isMinimaxH3Identity(currentFamily.value, form.state.value.model) &&
+    promptRequired({
+      family: currentFamily.value,
+      model: form.state.value.model,
+      sourceImage: form.state.value.h3Authoring?.firstFrame,
+    }) &&
+    !form.state.value.prompt.trim()
+  ) {
+    return "Add a prompt before generating.";
+  }
+  return null;
+});
 
 // A conditioned LTX-2 render may go out undescribed — the server admits it,
 // so the composer says so instead of implying a prompt is mandatory. Nothing
@@ -2280,16 +2305,14 @@ function validateSubmit(): boolean {
     composerError.value = "Pick a model to start.";
     return false;
   }
-  const h3Error = minimaxH3AuthoringError(
-    currentFamily.value,
-    form.state.value.model,
-    form.state.value.h3Authoring,
-    effectiveGenerationRecipe(currentModel.value, form.state.value.pipeline)
-      ?.capabilities.source_image === "required",
-  );
+  const h3Error = h3FrameError.value;
   if (h3Error) {
     composerError.value = h3Error;
     showAdvanced.value = true;
+    return false;
+  }
+  if (h3GenerationInputBlocker.value) {
+    composerError.value = h3GenerationInputBlocker.value;
     return false;
   }
   const recipe = effectiveGenerationRecipe(
@@ -3137,6 +3160,27 @@ async function onPickSource(v: SourceImageState[]) {
   composerError.value = null;
 }
 
+function onPickH3FirstFrame(images: SourceImageState[]): void {
+  const image = images[0];
+  if (!image) return;
+  const result = setMinimaxH3PickedImageFirstFrame(
+    form.state.value.h3Authoring,
+    {
+      filename: image.filename,
+      base64: image.base64,
+      mimeType: image.mime,
+      width: image.width,
+      height: image.height,
+    },
+  );
+  if (!result.ok) {
+    composerError.value = result.error;
+    return;
+  }
+  form.state.value.h3Authoring = result.state;
+  composerError.value = null;
+}
+
 async function resolveMaskSourceConflict(): Promise<boolean> {
   const choice = await requestChoice({
     title: "Source image has a mask",
@@ -3725,6 +3769,7 @@ onBeforeUnmount(() => {
             :steps="form.state.value.steps"
             :batch-size="form.state.value.batchSize"
             :busy="ordinarySubmitBlocked"
+            :disabled-reason="h3GenerationInputBlocker"
             :expanded="expanded"
             :prompt-optional="canSkipPrompt"
             :required-placeholder="requiredPromptPlaceholder"
@@ -3942,6 +3987,7 @@ onBeforeUnmount(() => {
             currentFamily === 'ltx2' && currentModel?.supports_audio !== false
           "
           @open-picker="showPicker = true"
+          @open-h3-first-frame-picker="showH3FirstFramePicker = true"
           @clear-source="onClearSource"
           @open-end-frame-picker="showEndFramePicker = true"
           @clear-end-frame="onClearEndFrame"
@@ -3972,6 +4018,7 @@ onBeforeUnmount(() => {
         "
         @close="showAdvanced = false"
         @open-picker="showPicker = true"
+        @open-h3-first-frame-picker="showH3FirstFramePicker = true"
         @clear-source="onClearSource"
         @open-end-frame-picker="showEndFramePicker = true"
         @clear-end-frame="onClearEndFrame"
@@ -4027,6 +4074,13 @@ onBeforeUnmount(() => {
       "
       @pick="onPickSource"
       @close="showPicker = false"
+    />
+    <ImagePickerModal
+      :open="showH3FirstFramePicker"
+      title="First frame"
+      :multiple="false"
+      @pick="onPickH3FirstFrame"
+      @close="showH3FirstFramePicker = false"
     />
     <ImagePickerModal
       :open="showEndFramePicker"

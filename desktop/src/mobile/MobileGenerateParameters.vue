@@ -9,6 +9,7 @@ import type {
   Ltx2TemporalUpscale,
   ModelEntry,
 } from "../lib/api/types";
+import type { ApiTarget } from "../lib/api/client";
 import { generationCapabilitiesForFamily, MAX_LORA_STACK } from "../lib/capabilities";
 import {
   clampVideoFrames,
@@ -78,10 +79,12 @@ import {
   pipelineForControlId,
 } from "@studio/lib/ltx2Control";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
+import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
 import {
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
+  setMinimaxH3PickedImageFirstFrame,
   type MinimaxH3AuthoringState,
 } from "@studio/lib/minimaxH3Authoring";
 
@@ -90,6 +93,7 @@ const props = withDefaults(
     form: GenerateForm;
     /** Selected model row; carries the continuation capability. */
     selectedModel?: ModelEntry | null;
+    target?: ApiTarget | null;
     upscalers?: ModelEntry[];
     audioOutputSupported?: boolean;
     controlAdapters?: Ltx2ControlAdapterInfo[];
@@ -99,6 +103,7 @@ const props = withDefaults(
   }>(),
   {
     selectedModel: null,
+    target: null,
     upscalers: () => [],
     audioOutputSupported: true,
     controlAdapters: () => [],
@@ -130,6 +135,24 @@ const h3Family = computed(() => isMinimaxH3Identity(props.form.family, props.for
 const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3AuthoringState());
 function setH3Authoring(value: MinimaxH3AuthoringState): void {
   props.form.h3Authoring = value;
+}
+const h3FirstFramePickerOpen = ref(false);
+const h3FirstFramePickerError = ref<string | null>(null);
+const h3FirstFramePickerMaxBytes = computed(() =>
+  Math.max(
+    0,
+    MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES -
+      inlineGenerationMediaBytes(props.form, "h3FirstFrame"),
+  ),
+);
+function onH3FirstFramePicked(image: MobilePickedImage): void {
+  const result = setMinimaxH3PickedImageFirstFrame(props.form.h3Authoring, image);
+  if (!result.ok) {
+    h3FirstFramePickerError.value = result.error;
+    return;
+  }
+  h3FirstFramePickerError.value = null;
+  props.form.h3Authoring = result.state;
 }
 const videoContract = computed(() => props.selectedModel ?? { family: props.form.family });
 const frameGridLabel = computed(() => videoFrameGridLabel(videoContract.value));
@@ -743,6 +766,19 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
         :required-endpoint="caps.requiresSourceImage ? 'first' : null"
         touch-friendly
         @update:model-value="setH3Authoring"
+        @request-first-frame="h3FirstFramePickerOpen = true"
+      />
+      <p v-if="h3FirstFramePickerError" class="mobile-generate-validation" role="alert">
+        {{ h3FirstFramePickerError }}
+      </p>
+      <MobileImagePickerSheet
+        :open="h3FirstFramePickerOpen"
+        :target="target"
+        title="First frame"
+        :max-bytes="h3FirstFramePickerMaxBytes"
+        oversize-message="Combined generation media must be 45 MiB or smaller on iPhone."
+        @pick="onH3FirstFramePicked"
+        @close="h3FirstFramePickerOpen = false"
       />
     </fieldset>
 

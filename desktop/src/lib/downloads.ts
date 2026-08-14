@@ -34,8 +34,14 @@ function finishJob(
     state.queued.find((candidate) => candidate.id === id);
   const activeJobs = state.activeJobs.filter((candidate) => candidate.id !== id);
   const queued = state.queued.filter((candidate) => candidate.id !== id);
+  const priorHistory =
+    job && status === "completed"
+      ? state.history.filter(
+          (attempt) => attempt.model !== job.model || attempt.status !== "failed",
+        )
+      : state.history;
   const history = job
-    ? [{ ...job, status, error: error ?? job.error ?? null }, ...state.history]
+    ? [{ ...job, status, error: error ?? job.error ?? null }, ...priorHistory]
     : state.history;
   return { activeJobs, queued, history };
 }

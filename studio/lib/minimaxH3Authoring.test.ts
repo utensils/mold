@@ -21,6 +21,7 @@ import {
   moveMinimaxH3Reference,
   serializeMinimaxH3Authoring,
   setMinimaxH3GalleryImageFirstFrame,
+  setMinimaxH3PickedImageFirstFrame,
 } from "./minimaxH3Authoring";
 
 const image = (name: string): GenerationReference => ({
@@ -77,6 +78,24 @@ describe("MiniMax H3 Studio authority", () => {
       MINIMAX_H3_REF2VA_COMFY,
     );
     expect(canonicalMinimaxH3ModelName("minimax-h3-ref2va:future")).toBeNull();
+  });
+
+  it("normalizes an existing surface-picker image into the FL2VA first-frame authority", () => {
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC";
+    const result = setMinimaxH3PickedImageFirstFrame(null, {
+      filename: "opening.png",
+      base64: png,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.state.firstFrame).toMatchObject({
+      filename: "opening.png",
+      mimeType: "image/png",
+      width: 7,
+      height: 4,
+      data: png,
+    });
   });
 
   it.each([

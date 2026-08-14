@@ -142,6 +142,37 @@ describe("applyDownloadEvent", () => {
     expect(s.history[0]!.error).toBe("connection reset");
   });
 
+  it("clears a model's stale failure when its retry completes", () => {
+    const s = reduce([
+      { type: "enqueued", id: "first", model: "minimax-h3:fp8", position: 0 },
+      { type: "started", id: "first", files_total: 6, bytes_total: 100 },
+      { type: "job_failed", id: "first", error: "permission denied" },
+      { type: "enqueued", id: "retry", model: "minimax-h3:fp8", position: 0 },
+      { type: "started", id: "retry", files_total: 6, bytes_total: 100 },
+      { type: "job_done", id: "retry", model: "minimax-h3:fp8" },
+    ]);
+
+    expect(s.history).toHaveLength(1);
+    expect(s.history[0]).toMatchObject({ id: "retry", status: "completed" });
+    expect(s.history[0]!.error).toBeNull();
+  });
+
+  it("keeps failures for other models when a retry completes", () => {
+    const s = reduce([
+      { type: "enqueued", id: "other", model: "z-image:q6", position: 0 },
+      { type: "job_failed", id: "other", error: "disk full" },
+      { type: "enqueued", id: "retry", model: "minimax-h3:fp8", position: 0 },
+      { type: "job_failed", id: "retry", error: "permission denied" },
+      { type: "enqueued", id: "success", model: "minimax-h3:fp8", position: 0 },
+      { type: "job_done", id: "success", model: "minimax-h3:fp8" },
+    ]);
+
+    expect(s.history.map((job) => [job.model, job.status])).toEqual([
+      ["minimax-h3:fp8", "completed"],
+      ["z-image:q6", "failed"],
+    ]);
+  });
+
   it("cancels a queued job into history", () => {
     const s = reduce([
       { type: "snapshot", listing: snapshot },
