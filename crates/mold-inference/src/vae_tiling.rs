@@ -524,11 +524,6 @@ fn axis_starts(len: usize, tile_size: usize, step: usize, offset: usize) -> Vec<
     out
 }
 
-/// Build a feathered blend-weight buffer for one tile, output as a flat
-/// `out_h * out_w` `f32` vector. Edges that touch the latent boundary get
-/// weight 1.0; interior edges ramp linearly from 0 → 1 over the overlap
-/// region in image space.
-#[allow(clippy::too_many_arguments)]
 /// Blend-ramp weight at position `i` (0-based, counted from the tile edge)
 /// over a ramp of `ramp_len` cells.
 ///
@@ -543,6 +538,11 @@ fn ramp_weight(i: usize, ramp_len: usize) -> f32 {
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
+/// Build a feathered blend-weight buffer for one tile, output as a flat
+/// `out_h * out_w` `f32` vector. Edges that touch the latent boundary get
+/// weight 1.0; interior edges ramp from 0 → 1 over the overlap region in
+/// image space via [`ramp_weight`]'s smootherstep.
+#[allow(clippy::too_many_arguments)]
 fn build_blend_weights_2d(
     tile_x: usize,
     tile_y: usize,
@@ -1017,7 +1017,6 @@ mod tests {
         // Right edge of a left tile vs left edge of a right tile, mid-row.
         let left = build_blend_weights_2d(0, 0, 8, 8, 12, 8, overlap, scale);
         let right = build_blend_weights_2d(4, 0, 8, 8, 12, 8, overlap, scale);
-        let w = 8 * scale;
         // First cell of the fade-in ramp: smootherstep((col+1)/(ramp+1)) with
         // the LTX-2 trapezoid denominator (ramp+1, so opposing ramps are
         // exactly complementary). A linear ramp would put ~0.03 here;
