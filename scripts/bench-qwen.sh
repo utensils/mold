@@ -682,8 +682,8 @@ probe_model_installed() {
     | jq -e --arg m "$model" 'any(.[]; .name == $m and (.installed // true))' >/dev/null 2>&1
 }
 
-record_probe_rows_as() {
-  local status="$1" i role warm spec
+record_base_probe_rows_as() {
+  local status="$1" i role warm
   for ((i = 0; i < ${#BENCH_PROBE_ROLES[@]}; i++)); do
     role="${BENCH_PROBE_ROLES[$i]}"
     warm=true
@@ -691,6 +691,11 @@ record_probe_rows_as() {
     record_status "qwen-image-2512:q4" 1024 1024 "$BENCH_STEPS" 4.0 \
       "$status" server "$role" "$i" "$warm"
   done
+}
+
+record_probe_rows_as() {
+  local status="$1" spec
+  record_base_probe_rows_as "$status"
   # The distilled probe shares this server, so it shares its fate.
   if distilled_probe_runs; then
     for spec in "${BENCH_DISTILLED_MODELS[@]}"; do
@@ -704,12 +709,17 @@ record_probe_rows_as() {
 # encoder. This is the only place a warm engine or a reload can be observed —
 # a `mold run --local` process holds its engine for exactly one generation.
 run_probe() {
-  local started_here=0 server_died=0 i role warm probe_prompt
+  local started_here=0 server_died=0 base_present=1 i role warm probe_prompt
   if [[ -z "$probe_host" ]]; then
     if ! model_installed "qwen-image-2512:q4"; then
+      base_present=0
       echo "skip: reload probe needs qwen-image-2512:q4 installed" >&2
-      record_probe_rows_as model_missing
-      return 0
+      record_base_probe_rows_as model_missing
+      if ! distilled_probe_runs; then
+        return 0
+      fi
+      # An installed Lightning/Flash still gets its warm measurement: the
+      # base model gates only its own rows, not the shared server.
     fi
     if ! start_probe_server; then
       record_probe_rows_as not_run
@@ -724,13 +734,17 @@ run_probe() {
       return 0
     fi
     if ! probe_model_installed "qwen-image-2512:q4"; then
+      base_present=0
       echo "skip: $probe_host does not report qwen-image-2512:q4 installed" >&2
-      record_probe_rows_as model_missing
-      return 0
+      record_base_probe_rows_as model_missing
+      if ! distilled_probe_runs; then
+        return 0
+      fi
     fi
   fi
 
   for ((i = 0; i < ${#BENCH_PROBE_ROLES[@]}; i++)); do
+    [[ "$base_present" -eq 1 ]] || break
     role="${BENCH_PROBE_ROLES[$i]}"
     warm=true
     if [[ "$role" == "probe_cold" ]]; then
