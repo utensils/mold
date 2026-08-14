@@ -263,11 +263,41 @@ export function redactGenerationForPlacement<T extends Record<string, unknown>>(
   return redacted as T;
 }
 
+/** Upper bound on one placement probe. A preview is a planning read, but a
+ * cold H3 host legitimately verifies its full checkpoint set once (tens of
+ * GB — minutes on slow storage), so the bound is deliberately enormous: it
+ * exists only so a hung or unreachable host eventually surfaces as a normal
+ * placement failure instead of an unbounded Planning spinner. The server
+ * keeps verifying after a client abort and its digest cache retains the
+ * work, so a retry after a rare timeout completes quickly. */
+export const PLACEMENT_PREVIEW_TIMEOUT_MS = 900_000;
+
+function placementPreviewSignal(): AbortSignal | undefined {
+  if (typeof AbortSignal === "undefined") return undefined;
+  if (typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(PLACEMENT_PREVIEW_TIMEOUT_MS);
+  }
+  // Safari 15 (the desktop build's floor) has AbortController but not
+  // AbortSignal.timeout — fall back to a timer-armed controller so the
+  // bound holds on every supported runtime.
+  if (typeof AbortController === "undefined") return undefined;
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new Error("placement preview timed out")),
+    PLACEMENT_PREVIEW_TIMEOUT_MS,
+  );
+  controller.signal.addEventListener("abort", () => clearTimeout(timer), {
+    once: true,
+  });
+  return controller.signal;
+}
+
 export async function previewGenerationPlacement(
   target: ApiTarget,
   request: Record<string, unknown>,
   copies = 1,
 ): Promise<GenerationPlacementPreview> {
+  const signal = placementPreviewSignal();
   return apiJsonTo<GenerationPlacementPreview>(
     target,
     "/api/generate/placement-preview",
@@ -278,6 +308,7 @@ export async function previewGenerationPlacement(
         request: redactGenerationForPlacement(request),
         copies,
       }),
+      ...(signal ? { signal } : {}),
     },
   );
 }
@@ -311,6 +342,7 @@ export async function previewChainPlacement(
   request: Record<string, unknown>,
   copies = 1,
 ): Promise<GenerationPlacementPreview> {
+  const signal = placementPreviewSignal();
   return apiJsonTo<GenerationPlacementPreview>(
     target,
     "/api/chain-jobs/placement-preview",
@@ -321,6 +353,7 @@ export async function previewChainPlacement(
         request: redactChainForPlacement(request),
         copies,
       }),
+      ...(signal ? { signal } : {}),
     },
   );
 }

@@ -1109,6 +1109,28 @@ impl H3PrivateUatPathSet {
         }
     }
 
+    /// Create the server-owned staging root when it is missing.
+    ///
+    /// Admission strictly validates this directory (process-owned, not
+    /// group/other writable, canonical) but nothing ever created it, so a
+    /// fresh public-H3 deployment could never admit a request — the VAE load
+    /// plan failed with "cannot inspect private H3 staging root". Creation is
+    /// owner-only and non-recursive in spirit: an existing directory is left
+    /// exactly as the operator set it, and failures stay silent here because
+    /// admission's own validation reports the authoritative error.
+    pub(crate) fn ensure_staging_root(&self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            if !self.staging_root.exists() {
+                let _ = std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(&self.staging_root);
+            }
+        }
+    }
+
     pub(crate) fn inference_paths(&self) -> mold_inference::H3PrivateFl2VaUatPaths<'_> {
         mold_inference::H3PrivateFl2VaUatPaths {
             models_root: &self.models_root,
@@ -1493,6 +1515,31 @@ mod presentation_tests {
 mod tests {
     use std::fs::{self, OpenOptions};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn staging_root_is_created_owner_only_when_missing_and_left_alone_when_present() {
+        let temporary = tempfile::tempdir().unwrap();
+        let staging = temporary.path().join("h3-runtime").join("staging");
+        let paths = super::H3PrivateUatPathSet {
+            models_root: temporary.path().join("models"),
+            staging_root: staging.clone(),
+            authorization_record: temporary.path().join("authorization-record.json"),
+            runtime_qualification_record: temporary.path().join("runtime-qualification.json"),
+        };
+
+        paths.ensure_staging_root();
+        let metadata = fs::symlink_metadata(&staging).unwrap();
+        assert!(metadata.is_dir());
+        // Admission requires process-owned, not group/other writable.
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+
+        // A pre-existing directory keeps its mode — ensure never loosens or
+        // tightens an operator-managed staging root.
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o755)).unwrap();
+        paths.ensure_staging_root();
+        let unchanged = fs::symlink_metadata(&staging).unwrap();
+        assert_eq!(unchanged.permissions().mode() & 0o777, 0o755);
+    }
 
     fn private_file(path: &std::path::Path, bytes: u64) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
