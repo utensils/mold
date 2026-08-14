@@ -33,7 +33,10 @@ vi.mock("../lib/catalogSizes", () => ({
 }));
 
 import ModelsView from "./ModelsView.vue";
+import { authenticatedMiniMaxH3Capabilities } from "@studio/lib/minimaxH3Inventory.testFixtures";
 import { getActivePinia } from "pinia";
+import { useConnectionStore } from "../stores/connection";
+import type { ServerCapabilities } from "../lib/api/types";
 import { useDownloadsStore } from "../stores/downloads";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
@@ -124,6 +127,20 @@ beforeEach(() => {
     page: 1,
     page_size: 24,
     total: 2,
+  });
+});
+
+describe("ModelsView H3 runtime placement", () => {
+  it("does not render the fleet-wide H3 runtime panel — it lives in host detail", async () => {
+    const wrapper = await mountView();
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: null };
+    conn.status = "ready";
+    const hosts = useHostsStore();
+    hosts.capabilities.local =
+      authenticatedMiniMaxH3Capabilities() as unknown as ServerCapabilities;
+    await flushPromises();
+    expect(wrapper.find('[data-test="h3-inventory"]').exists()).toBe(false);
   });
 });
 

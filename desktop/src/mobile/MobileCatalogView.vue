@@ -38,7 +38,6 @@ import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
 import { reviewedMiniMaxH3ModelAccess } from "@studio/lib/minimaxH3Inventory";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
-import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 import { modelKindLabel, modelKindValue, modelWeightsLabel } from "@studio/lib/modelMetadata";
 import {
   planModelInstall,
@@ -179,14 +178,6 @@ const selectedTarget = computed<ApiTarget | null>(() => {
   const host = selectedHost.value;
   return host ? mobileHostTarget(host) : null;
 });
-
-const h3Hosts = computed(() =>
-  props.hosts.map((host) => ({
-    id: host.id,
-    label: host.name,
-    capabilities: capabilitiesByHost.value[host.id],
-  })),
-);
 
 /** The selected host remains usable while its latest reachability probe is pending. */
 const downloadHosts = computed(() =>
@@ -1259,8 +1250,6 @@ onBeforeUnmount(() => {
           </li>
         </ul>
       </section>
-
-      <MinimaxH3InventoryPanel :hosts="h3Hosts" />
 
       <div class="mobile-catalog-search-row">
         <input

@@ -6,6 +6,7 @@ import type { ModelInfoExtended, ServerCapabilities } from "../types";
 import type { RoutableHost } from "../lib/hostRouting";
 import InstalledModelRow from "../components/models/InstalledModelRow.vue";
 import { addHost } from "../lib/hostRegistry";
+import { authenticatedMiniMaxH3Capabilities } from "@studio/lib/minimaxH3Inventory.testFixtures";
 import { useModelInstallTargets } from "../composables/useModelInstallTargets";
 
 function makeModel(over: Partial<ModelInfoExtended> = {}): ModelInfoExtended {
@@ -115,6 +116,18 @@ beforeEach(() => {
     openInstalledDetail: vi.fn(),
     setFilter: vi.fn(),
   };
+});
+
+describe("ModelsPage H3 runtime placement", () => {
+  it("does not render the fleet-wide H3 runtime panel — it lives in host detail", async () => {
+    mockCapabilities.value = {
+      origin:
+        authenticatedMiniMaxH3Capabilities() as unknown as ServerCapabilities,
+    };
+    const wrapper = mountPage();
+    await flushPromises();
+    expect(wrapper.find('[data-test="h3-inventory"]').exists()).toBe(false);
+  });
 });
 
 describe("ModelsPage — Models workspace", () => {
