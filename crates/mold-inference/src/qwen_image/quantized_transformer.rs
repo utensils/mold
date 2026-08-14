@@ -111,9 +111,9 @@ pub(crate) fn cuda_mmq_block_size(dtype: GgmlDType) -> Option<usize> {
 /// actually types, and silently ignoring those would leave them measuring the
 /// path they meant to disable.
 pub(crate) fn parse_qwen_qmatmul(value: Option<&str>) -> bool {
-    !matches!(
+    matches!(
         value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
-        Some("0" | "false" | "off" | "no")
+        Some("1" | "true" | "on" | "yes")
     )
 }
 
@@ -123,9 +123,10 @@ fn qwen_qmatmul_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         let enabled = parse_qwen_qmatmul(crate::runtime_env::value("MOLD_QWEN_QMATMUL").as_deref());
-        if !enabled {
+        if enabled {
             tracing::warn!(
-                "qwen-image: MOLD_QWEN_QMATMUL=0 — quantized linears dequantize per forward"
+                "qwen-image: MOLD_QWEN_QMATMUL=1 — experimental QMatMul fast path enabled; \
+                 the boundary validator aborts the render if it produces non-finite values"
             );
         }
         enabled
@@ -1503,19 +1504,25 @@ mod tests {
 
     #[test]
     fn qwen_qmatmul_env_parses() {
-        assert!(parse_qwen_qmatmul(None));
-        assert!(parse_qwen_qmatmul(Some("1")));
-        assert!(parse_qwen_qmatmul(Some("")));
-        // A value we do not understand keeps the shipped fast path.
-        assert!(parse_qwen_qmatmul(Some("garbage")));
+        // Experimental and OFF by default: the fork's MMQ kernels currently
+        // NaN on Qwen's shapes (2026-08-14, RTX 4090, first forward), so only
+        // an explicit truthy opt-in enables them.
+        assert!(!parse_qwen_qmatmul(None));
+        assert!(!parse_qwen_qmatmul(Some("")));
+        // A value we do not understand keeps the safe default.
+        assert!(!parse_qwen_qmatmul(Some("garbage")));
         assert!(!parse_qwen_qmatmul(Some("0")));
         assert!(!parse_qwen_qmatmul(Some(" 0 ")));
-        // What someone reaching for a kill switch actually types must not
-        // silently leave the path they meant to disable running.
         for off in ["false", "FALSE", "off", "Off", "no", " No "] {
             assert!(
                 !parse_qwen_qmatmul(Some(off)),
-                "{off:?} must disable the fast path"
+                "{off:?} must keep the fast path disabled"
+            );
+        }
+        for on in ["1", " 1 ", "true", "TRUE", "on", "On", "yes", " Yes "] {
+            assert!(
+                parse_qwen_qmatmul(Some(on)),
+                "{on:?} must opt into the fast path"
             );
         }
     }

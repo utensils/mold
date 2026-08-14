@@ -723,9 +723,9 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSe
         // and `parse_qwen_fp8_cache`), so the canonical value is the decision
         // rather than the spelling.
         Some(value) if variable == RuntimeSemanticVariable::QwenQMatMul => {
-            CanonicalRuntimeValue::Boolean(!matches!(
+            CanonicalRuntimeValue::Boolean(matches!(
                 value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "off" | "no"
+                "1" | "true" | "on" | "yes"
             ))
         }
         Some(value) if variable == RuntimeSemanticVariable::QwenFp8Cache => {
