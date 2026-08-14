@@ -158,10 +158,18 @@ struct OpenedSupportArtifact {
     file: File,
     identity: FileIdentity,
     expected_sha256: String,
+    /// Completed full re-hashes of the opened descriptor. Revalidation runs
+    /// one full content re-hash per opened descriptor; afterwards the
+    /// dev/inode/mtime/ctime opened-file identity is the change detector, the
+    /// same metadata-identity trust model the qualification digest caches use.
+    /// Revalidation is on the per-request admission path, so an unconditional
+    /// re-hash turns these small files into a hashing hot loop.
+    full_rehashes: std::sync::atomic::AtomicU64,
 }
 
 impl OpenedSupportArtifact {
     fn revalidate(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
         let before = FileIdentity::from_metadata(
             &self
                 .file
@@ -174,14 +182,17 @@ impl OpenedSupportArtifact {
                 self.role.stable_id()
             )
         }
-        let actual_sha256 = sha256_open_file(&self.file)
-            .with_context(|| format!("failed to rehash opened {}", self.role.stable_id()))?;
-        let after = FileIdentity::from_metadata(&self.file.metadata()?);
-        if before != after || actual_sha256 != self.expected_sha256 {
-            bail!(
-                "private H3 {} changed after authentication",
-                self.role.stable_id()
-            )
+        if self.full_rehashes.load(Ordering::Acquire) == 0 {
+            let actual_sha256 = sha256_open_file(&self.file)
+                .with_context(|| format!("failed to rehash opened {}", self.role.stable_id()))?;
+            let after = FileIdentity::from_metadata(&self.file.metadata()?);
+            if before != after || actual_sha256 != self.expected_sha256 {
+                bail!(
+                    "private H3 {} changed after authentication",
+                    self.role.stable_id()
+                )
+            }
+            self.full_rehashes.fetch_add(1, Ordering::AcqRel);
         }
         let current = open_regular_file_no_follow(&self.path).with_context(|| {
             format!(
@@ -264,13 +275,28 @@ impl H3PrivateQwenSupport {
         Ok(())
     }
 
-    /// Re-hash the retained descriptors and prove that every manifest path
-    /// still names the same opened file before conditioner construction.
+    /// Prove that every retained descriptor and its manifest path still name
+    /// the authenticated opened files before conditioner construction. The
+    /// first call fully re-hashes each descriptor's content; later calls rely
+    /// on the opened-file metadata identity, which detects any write through
+    /// the filesystem via ctime.
     pub(crate) fn revalidate(&self) -> Result<()> {
         for artifact in &self.artifacts {
             artifact.revalidate()?;
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn full_rehash_count(&self) -> u64 {
+        self.artifacts
+            .iter()
+            .map(|artifact| {
+                artifact
+                    .full_rehashes
+                    .load(std::sync::atomic::Ordering::Acquire)
+            })
+            .sum()
     }
 }
 
@@ -591,6 +617,7 @@ fn authenticate_support_file(
             file,
             identity: before,
             expected_sha256: contract.sha256.clone(),
+            full_rehashes: std::sync::atomic::AtomicU64::new(0),
         },
         bytes,
     ))
@@ -867,6 +894,36 @@ mod tests {
 
         let tokenizer_path = root.path().join(tokenizer_relative);
         let original_path = tokenizer_path.with_extension("authenticated.json");
+        std::fs::rename(&tokenizer_path, &original_path).unwrap();
+        std::fs::copy(&original_path, &tokenizer_path).unwrap();
+        let error = support.revalidate().unwrap_err();
+        assert!(error.to_string().contains("private H3 tokenizer"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn revalidate_fully_rehashes_each_descriptor_exactly_once() {
+        let root = tempfile::tempdir().unwrap();
+        let contracts = synthetic_contracts(root.path());
+        let tokenizer_relative = contracts
+            .iter()
+            .find(|contract| contract.role == SupportRole::Tokenizer)
+            .unwrap()
+            .relative_path
+            .clone();
+        let support =
+            load_support_from_contracts(root.path(), contract::FL2VA_COMFY, contracts).unwrap();
+        // Loading already ran the one full revalidation re-hash per artifact.
+        let per_artifact_once = SupportRole::ALL.len() as u64;
+        assert_eq!(support.full_rehash_count(), per_artifact_once);
+        support.revalidate().unwrap();
+        support.revalidate().unwrap();
+        assert_eq!(support.full_rehash_count(), per_artifact_once);
+
+        // The fast path still fails closed when the manifest path stops naming
+        // the authenticated inode.
+        let tokenizer_path = root.path().join(tokenizer_relative);
+        let original_path = tokenizer_path.with_extension("swapped.json");
         std::fs::rename(&tokenizer_path, &original_path).unwrap();
         std::fs::copy(&original_path, &tokenizer_path).unwrap();
         let error = support.revalidate().unwrap_err();
