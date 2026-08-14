@@ -408,6 +408,15 @@ pub struct QwenImageEngine {
     retained_sequential_text_encoder: Option<encoders::qwen2_text::Qwen2TextEncoder>,
 }
 
+/// One quantized CUDA split-vs-batched CFG decision plus the readings it was
+/// taken from, so the caller can report the same numbers it decided on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuantizedCfgDecision {
+    split: bool,
+    transformer_size: u64,
+    free: u64,
+}
+
 /// Order-sensitive fingerprint of a single LoRA adapter (path-hash + scale).
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct QwenImageLoraFingerprint {
@@ -1356,6 +1365,76 @@ impl QwenImageEngine {
         estimated_peak > free_vram
     }
 
+    /// Transformer weight bytes on disk.
+    ///
+    /// Two things read the same number: the weight term of the quantized CUDA
+    /// CFG decision, and the VRAM that dropping a resident quantized
+    /// transformer hands back to the free pool.
+    fn transformer_file_bytes(&self) -> u64 {
+        std::fs::metadata(&self.base.paths.transformer)
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    /// The quantized CUDA split-vs-batched CFG decision for one request,
+    /// together with the readings it was taken from (both wanted by the
+    /// progress line the load path prints).
+    ///
+    /// `resident_transformer_bytes` is added back to the free reading because
+    /// the caller may be asking *while the transformer this decision would
+    /// replace is still resident*: a rebuild drops it first, so those bytes
+    /// belong to the budget the rebuilt model will see. It is zero on the
+    /// load/reload path, where nothing is resident. The add-back is skipped
+    /// when the VRAM probe itself failed, so a failed probe still reads as
+    /// zero free and biases to the safer split path.
+    fn decide_quantized_split_cfg(
+        &self,
+        device: &Device,
+        width: usize,
+        height: usize,
+        resident_transformer_bytes: u64,
+    ) -> QuantizedCfgDecision {
+        let transformer_size = self.transformer_file_bytes();
+        let free = usable_free_vram_bytes(self.base.gpu_ordinal)
+            .map(|free| free.saturating_add(resident_transformer_bytes))
+            .unwrap_or(0);
+        let split = device.is_cuda()
+            && (self.offload
+                || Self::should_split_cfg_quantized_cuda(
+                    self.is_edit_family(),
+                    transformer_size,
+                    free,
+                    width,
+                    height,
+                ));
+        QuantizedCfgDecision {
+            split,
+            transformer_size,
+            free,
+        }
+    }
+
+    /// Whether a resident quantized transformer's baked CFG-batching flag
+    /// disagrees with the decision this request's own resolution makes.
+    ///
+    /// The quantized transformer bakes `supports_cfg_batching` at build time,
+    /// so the flag is a property of the resident weights, not of the request
+    /// — a model loaded at the native 1328² shape keeps split CFG for a 768²
+    /// request that would batch fine. `None` is every non-quantized
+    /// transformer (BF16, FP8, offloaded): they carry no baked flag, so
+    /// nothing can be stale.
+    fn qwen_cfg_batching_stale(
+        baked_supports_batching: Option<bool>,
+        request_splits_cfg: bool,
+    ) -> bool {
+        match baked_supports_batching {
+            // `supports_cfg_batching` is the negation of the split decision,
+            // so equality here *is* the disagreement.
+            Some(supports) => supports == request_splits_cfg,
+            None => false,
+        }
+    }
+
     /// Load transformer from disk.
     fn load_transformer(
         &self,
@@ -1368,20 +1447,14 @@ impl QwenImageEngine {
         let active_loras = &self.pending_loras;
         let has_lora = !active_loras.is_empty();
         if self.detect_is_quantized() {
-            let transformer_size = std::fs::metadata(&self.base.paths.transformer)
-                .map(|m| m.len())
-                .unwrap_or(0);
             // Reserve-adjusted reading: split-CFG is a budget decision.
-            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-            let split_cfg_for_memory = device.is_cuda()
-                && (self.offload
-                    || Self::should_split_cfg_quantized_cuda(
-                        self.is_edit_family(),
-                        transformer_size,
-                        free,
-                        width,
-                        height,
-                    ));
+            // Nothing is resident here — every build site drops the old
+            // transformer first — so no bytes are added back.
+            let QuantizedCfgDecision {
+                split: split_cfg_for_memory,
+                transformer_size,
+                free,
+            } = self.decide_quantized_split_cfg(device, width, height, 0);
             if self.offload && device.is_cuda() {
                 self.base.progress.info(
                     "Quantized Qwen CUDA offload requested — using low-memory split-CFG mode until GGUF block offload lands",
@@ -1800,12 +1873,19 @@ impl QwenImageEngine {
     /// whose baked stack is byte-for-byte the request's stack is reused;
     /// any difference — adapter set, order, scale — invalidates it, as
     /// does having no resident transformer at all.
+    ///
+    /// `cfg_batching_stale` is the second thing baked into the built
+    /// weights: the quantized transformer fixes `supports_cfg_batching` at
+    /// construction, so a resident model that decided split CFG at one
+    /// resolution keeps splitting at every later one. See
+    /// `qwen_cfg_batching_stale`.
     fn qwen_transformer_rebuild_needed(
         transformer_resident: bool,
         baked_lora: &[QwenImageLoraFingerprint],
         requested_lora: &[QwenImageLoraFingerprint],
+        cfg_batching_stale: bool,
     ) -> bool {
-        !transformer_resident || baked_lora != requested_lora
+        !transformer_resident || baked_lora != requested_lora || cfg_batching_stale
     }
 
     fn decode_vae_gpu_only(
@@ -2206,42 +2286,70 @@ impl QwenImageEngine {
     /// every request. A changed stack drops the old transformer (and
     /// synchronizes) before the rebuild so the merge is not asked to fit
     /// two transformers into VRAM at once.
+    ///
+    /// It also makes a resident *quantized* transformer re-decide split vs
+    /// batched CFG at this request's real resolution: that flag is baked
+    /// into the built model, so without a rebuild a 1328²-loaded engine
+    /// would keep two-pass CFG for every smaller request that fits batched.
     fn ensure_transformer_for_request(&mut self, width: usize, height: usize) -> Result<()> {
         let requested = fingerprint_stack(&self.pending_loras);
-        let resident = self
-            .base
-            .loaded
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("model not loaded"))?
-            .transformer
-            .is_some();
+        let (resident, baked_cfg_batching, device) = {
+            let loaded = self
+                .base
+                .loaded
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
+            let baked = match loaded.transformer.as_ref() {
+                Some(QwenImageTransformer::Quantized(model)) => Some(model.supports_cfg_batching()),
+                _ => None,
+            };
+            (loaded.transformer.is_some(), baked, loaded.device.clone())
+        };
+        // Only a quantized transformer bakes the flag, so only that arm pays
+        // for the VRAM probe the decision needs.
+        let cfg_batching_stale = match baked_cfg_batching {
+            Some(_) => Self::qwen_cfg_batching_stale(
+                baked_cfg_batching,
+                self.decide_quantized_split_cfg(
+                    &device,
+                    width,
+                    height,
+                    // The resident transformer's own bytes come back when the
+                    // rebuild drops it, so they belong to the new budget.
+                    self.transformer_file_bytes(),
+                )
+                .split,
+            ),
+            None => false,
+        };
+        let lora_stack_changed = self.active_lora_fingerprint != requested;
         if !Self::qwen_transformer_rebuild_needed(
             resident,
             &self.active_lora_fingerprint,
             &requested,
+            cfg_batching_stale,
         ) {
             return Ok(());
         }
 
-        // Past the check above, a resident transformer can only mean its
-        // baked stack differs from the one this request asks for.
-        let stack_changed = resident;
         let mut loaded_mut = self
             .base
             .loaded
             .take()
             .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
-        if stack_changed {
+        if resident {
             Self::release_resident_transformer(
                 &mut loaded_mut.transformer,
                 &mut self.active_lora_fingerprint,
             );
             loaded_mut.device.synchronize()?;
         }
-        let label = if stack_changed {
+        let label = if !resident {
+            "Reloading Qwen-Image transformer"
+        } else if lora_stack_changed {
             "Rebuilding Qwen-Image transformer for the requested LoRA stack"
         } else {
-            "Reloading Qwen-Image transformer"
+            "Rebuilding Qwen-Image transformer for this request's CFG batching mode"
         };
         self.base.progress.stage_start(label);
         let reload_start = Instant::now();
@@ -5376,6 +5484,7 @@ mod tests {
                 self.resident,
                 &self.baked,
                 &requested,
+                false,
             ) {
                 self.builds += 1;
                 self.baked = requested;
@@ -5424,26 +5533,106 @@ mod tests {
         let empty: Vec<QwenImageLoraFingerprint> = Vec::new();
 
         assert!(!QwenImageEngine::qwen_transformer_rebuild_needed(
-            true, &stack, &stack
+            true, &stack, &stack, false
         ));
         assert!(!QwenImageEngine::qwen_transformer_rebuild_needed(
-            true, &empty, &empty
+            true, &empty, &empty, false
         ));
         assert!(QwenImageEngine::qwen_transformer_rebuild_needed(
-            true, &stack, &rescaled
+            true, &stack, &rescaled, false
         ));
         assert!(QwenImageEngine::qwen_transformer_rebuild_needed(
-            true, &stack, &empty
+            true, &stack, &empty, false
         ));
         assert!(QwenImageEngine::qwen_transformer_rebuild_needed(
-            true, &empty, &stack
+            true, &empty, &stack, false
         ));
         // No resident transformer always rebuilds, stack notwithstanding.
         assert!(QwenImageEngine::qwen_transformer_rebuild_needed(
-            false, &stack, &stack
+            false, &stack, &stack, false
         ));
         assert!(QwenImageEngine::qwen_transformer_rebuild_needed(
-            false, &empty, &empty
+            false, &empty, &empty, false
+        ));
+    }
+
+    #[test]
+    fn qwen_cfg_batching_is_stale_only_when_the_baked_flag_contradicts_this_request() {
+        // Baked batched (`supports = true`), request wants batched too.
+        assert!(!QwenImageEngine::qwen_cfg_batching_stale(Some(true), false));
+        // Baked split (`supports = false`), request wants split too.
+        assert!(!QwenImageEngine::qwen_cfg_batching_stale(Some(false), true));
+        // Baked split at 1328², but this smaller request batches — the whole
+        // point of re-deciding per request.
+        assert!(QwenImageEngine::qwen_cfg_batching_stale(Some(false), false));
+        // Baked batched, but this request no longer fits batched.
+        assert!(QwenImageEngine::qwen_cfg_batching_stale(Some(true), true));
+        // BF16 / FP8 / offloaded transformers bake no flag.
+        assert!(!QwenImageEngine::qwen_cfg_batching_stale(None, true));
+        assert!(!QwenImageEngine::qwen_cfg_batching_stale(None, false));
+    }
+
+    #[test]
+    fn qwen_transformer_rebuilds_when_only_the_cfg_batching_mode_went_stale() {
+        let stack = fingerprint_stack(&[lora("/loras/lightning-8.safetensors", 1.0)]);
+        let empty: Vec<QwenImageLoraFingerprint> = Vec::new();
+
+        // Same stack, resident transformer — the LoRA half alone would elide.
+        assert!(QwenImageEngine::qwen_transformer_rebuild_needed(
+            true, &stack, &stack, true
+        ));
+        assert!(QwenImageEngine::qwen_transformer_rebuild_needed(
+            true, &empty, &empty, true
+        ));
+        // A fresh flag never *prevents* the LoRA rebuild.
+        assert!(QwenImageEngine::qwen_transformer_rebuild_needed(
+            true, &stack, &empty, false
+        ));
+    }
+
+    #[test]
+    fn resident_quantized_transformer_re_decides_cfg_at_the_request_resolution() {
+        // A 12.3 GB q4 checkpoint loaded at 1328² on a 24 GB card baked
+        // split CFG. Dropping it returns its own bytes, so the budget the
+        // rebuild sees is the whole card.
+        let transformer_size = 12_300_000_000u64;
+        let card = 24_600_000_000u64;
+        let free_while_resident = card - transformer_size;
+
+        let baked_supports_batching = !QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
+            transformer_size,
+            card,
+            1328,
+            1328,
+        );
+        assert!(!baked_supports_batching, "1328² bakes split CFG on 24 GB");
+
+        // The same engine now serves 768². Read free VRAM while the old
+        // transformer is still resident, then add its bytes back.
+        let free_for_rebuild = free_while_resident + transformer_size;
+        let request_splits = QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
+            transformer_size,
+            free_for_rebuild,
+            768,
+            768,
+        );
+        assert!(!request_splits, "768² fits batched CFG on 24 GB");
+
+        assert!(
+            QwenImageEngine::qwen_cfg_batching_stale(Some(baked_supports_batching), request_splits),
+            "the baked split flag must be seen as stale for a request that batches"
+        );
+
+        // Forgetting the add-back is the bug this guards: the resident
+        // reading alone makes even 768² look like it must split.
+        assert!(QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
+            transformer_size,
+            free_while_resident,
+            768,
+            768,
         ));
     }
 
@@ -5543,6 +5732,7 @@ mod tests {
             true,
             &engine.active_lora_fingerprint,
             &fingerprint_stack(&stack),
+            false,
         ));
 
         // An unmerged rebuild must leave nothing behind to elide against.
@@ -5573,6 +5763,7 @@ mod tests {
             false,
             &baked,
             &fingerprint_stack(&[lora("/loras/lightning-8.safetensors", 1.0)]),
+            false,
         ));
     }
 
