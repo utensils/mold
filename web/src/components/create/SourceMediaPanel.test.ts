@@ -337,3 +337,42 @@ describe("SourceMediaPanel — MiniMax H3 FL2VA boundaries", () => {
     );
   });
 });
+
+describe("SourceMediaPanel — direct file uploads", () => {
+  const PNG_7x4 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC";
+
+  it("decodes dimensions for a dropped PNG so source-matched shapes keep working", async () => {
+    const wrapper = factory("sdxl");
+    const bytes = Uint8Array.from(atob(PNG_7x4), (c) => c.charCodeAt(0));
+    const file = new File([bytes], "still.png", { type: "image/png" });
+    await wrapper
+      .get("[data-test='source-well']")
+      .trigger("drop", { dataTransfer: { files: [file] } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.imageAttachments[0]).toMatchObject({
+      filename: "still.png",
+      base64: PNG_7x4,
+      width: 7,
+      height: 4,
+    });
+  });
+
+  it("refuses a dropped non-PNG/JPEG file with a visible error", async () => {
+    const wrapper = factory("sdxl");
+    const file = new File(["webp"], "still.webp", { type: "image/webp" });
+    await wrapper
+      .get("[data-test='source-well']")
+      .trigger("drop", { dataTransfer: { files: [file] } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(wrapper.emitted("update:modelValue")).toBeUndefined();
+    expect(
+      wrapper.get("[data-test='source-conditioning-error']").text(),
+    ).toContain("Only PNG or JPEG");
+  });
+});

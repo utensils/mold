@@ -603,3 +603,26 @@ describe("MobileSourceControls — MiniMax H3 FL2VA boundaries", () => {
     expect(wrapper.find("[data-test='end-frame-well']").exists()).toBe(true);
   });
 });
+
+describe("MobileSourceControls — H3 boundary media budget", () => {
+  it("refuses a direct file past the 45 MiB request budget before reading it", async () => {
+    const form = formFor("minimax-h3");
+    form.model = "minimax-h3-fl2va:comfy-pruned-int8";
+    const model = { name: form.model, family: "minimax-h3" } as ModelEntry;
+    const wrapper = mount(MobileSourceControls, { props: { form, model } });
+
+    const oversized = new File([new Uint8Array(8)], "huge.png", {
+      type: "image/png",
+    });
+    Object.defineProperty(oversized, "size", {
+      value: MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES + 1,
+    });
+    await wrapper
+      .get("[data-test='source-well']")
+      .trigger("drop", { dataTransfer: { files: [oversized] } });
+    await flushPromises();
+
+    expect(form.h3Authoring?.firstFrame ?? null).toBeNull();
+    expect(wrapper.text()).toContain("45 MiB");
+  });
+});

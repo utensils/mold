@@ -97,7 +97,22 @@ function applyH3(result: MinimaxH3GalleryImageResult): void {
   props.form.h3Authoring = result.state;
 }
 async function onH3File(slot: SourceMediaSlot, file: File): Promise<void> {
-  applyH3(await setMinimaxH3BoundaryFile(props.form.h3Authoring, h3Endpoint(slot), file));
+  // The same 45 MiB request budget the picker sheet enforces — checked before
+  // the file is read so an oversized base64 never lands in the WebView.
+  const endpoint = h3Endpoint(slot);
+  const budget = Math.max(
+    0,
+    MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES -
+      inlineGenerationMediaBytes(
+        props.form,
+        endpoint === "lastFrame" ? "h3LastFrame" : "h3FirstFrame",
+      ),
+  );
+  if (file.size > budget) {
+    h3Error.value = MOBILE_MEDIA_BUDGET_ERROR;
+    return;
+  }
+  applyH3(await setMinimaxH3BoundaryFile(props.form.h3Authoring, endpoint, file));
 }
 function onH3Gallery(slot: SourceMediaSlot): void {
   h3PickerTarget.value = h3Endpoint(slot);

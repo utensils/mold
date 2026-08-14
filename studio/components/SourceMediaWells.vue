@@ -29,6 +29,8 @@ const props = withDefaults(
     touchFriendly?: boolean;
     /** One conditioning error at a time, in the server's own order. */
     error?: string | null;
+    /** The engine takes only PNG/JPEG as source/keyframe conditioning. */
+    accept?: string;
   }>(),
   {
     source: null,
@@ -36,6 +38,7 @@ const props = withDefaults(
     disabled: false,
     touchFriendly: false,
     error: null,
+    accept: "image/png,image/jpeg",
   },
 );
 
@@ -108,6 +111,7 @@ const endHint = computed(() =>
       :mime-type="source?.mimeType ?? null"
       :filename="source?.filename ?? null"
       :placeholder="sourcePlaceholder"
+      :accept="accept"
       :disabled="disabled"
       :required="required"
       gallery
@@ -141,6 +145,7 @@ const endHint = computed(() =>
         :mime-type="endFrame?.mimeType ?? null"
         :filename="endFrame?.filename ?? null"
         placeholder="Drop the closing frame or click to pick"
+        :accept="accept"
         :disabled="disabled"
         :pick-disabled="endIncompatible"
         gallery

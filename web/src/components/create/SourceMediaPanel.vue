@@ -15,6 +15,7 @@ import { sourceImageValidationError } from "@studio/lib/sourceImageCapability";
 import { submitsExtend } from "@studio/lib/extend";
 import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
 import { blobToBase64 } from "../../lib/base64";
+import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
   emptyMinimaxH3AuthoringState,
   setMinimaxH3BoundaryFile,
@@ -118,17 +119,32 @@ const sourceConditioningError = computed(() =>
     : null,
 );
 
-async function fileToSourceImage(file: File): Promise<SourceImageState> {
+const uploadError = ref<string | null>(null);
+
+/** Decode the PNG/JPEG header for dimensions — the same facts a gallery pick
+ * carries, and a format gate (the engine accepts nothing else) that also
+ * covers drag-and-drop, which bypasses the file input's accept filter. */
+async function fileToSourceImage(file: File): Promise<SourceImageState | null> {
+  const base64 = await blobToBase64(file);
+  const dimensions = imageDimensionsFromBase64(base64);
+  if (!dimensions) {
+    uploadError.value = "Only PNG or JPEG images can be used here.";
+    return null;
+  }
+  uploadError.value = null;
   return {
     kind: "upload",
     filename: file.name,
-    base64: await blobToBase64(file),
+    base64,
+    width: dimensions.width,
+    height: dimensions.height,
     mime: file.type || null,
   };
 }
 
 async function onWellFile(slot: SourceMediaSlot, file: File) {
   const image = await fileToSourceImage(file);
+  if (!image) return;
   if (slot === "source") {
     // A source-matched canvas differs only by the model's pixel grid or a
     // safe downscale — resize exactly instead of manufacturing repaint bands.
@@ -236,7 +252,8 @@ async function onControlImage(event: Event) {
   const file = input.files?.[0] ?? null;
   input.value = "";
   if (!file) return;
-  patch({ controlImage: await fileToSourceImage(file) });
+  const image = await fileToSourceImage(file);
+  if (image) patch({ controlImage: image });
 }
 function clearControl() {
   patch({ controlImage: null });
@@ -330,7 +347,7 @@ function clearControl() {
               }
             : null
         "
-        :error="sourceConditioningError"
+        :error="uploadError ?? sourceConditioningError"
         @file="onWellFile"
         @gallery="onWellGallery"
         @clear="onWellClear"
@@ -440,7 +457,7 @@ function clearControl() {
         :plan="plan"
         :source="h3Authoring.firstFrame"
         :end-frame="h3Authoring.lastFrame"
-        :error="h3Error"
+        :error="uploadError ?? h3Error"
         @file="onH3File"
         @gallery="onH3Gallery"
         @clear="onH3Clear"

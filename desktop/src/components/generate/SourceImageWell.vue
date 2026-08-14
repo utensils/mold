@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import type { GenerateForm, PickedImage } from "../../lib/generateForm";
 import type { ModelEntry } from "../../lib/api/types";
 import { generationCapabilitiesForFamily, isFlux2DevModel } from "../../lib/capabilities";
-import { base64ToDataUrl, fileToBase64 } from "../../lib/image";
+import { base64ToDataUrl, fileToBase64, isStillImageFile } from "../../lib/image";
 import {
   attachmentRoleLabel,
   attachmentTitleLabel,
@@ -213,8 +213,15 @@ function setSlot(slot: Slot, b64: string | null, name: string | null = null) {
 }
 async function ingest(slot: Slot, file: File | undefined | null) {
   if (!file) return;
-  if (!file.type.startsWith("image/")) {
-    toasts.push("That file isn't an image.", "error");
+  // Same constraint as the picker modal: the engine only accepts PNG/JPEG
+  // for source_image / mask / keyframes — dropped files bypass the input's
+  // accept filter, so gate by MIME with a filename fallback.
+  if (
+    file.type !== "image/png" &&
+    file.type !== "image/jpeg" &&
+    !(!file.type && isStillImageFile(file.name))
+  ) {
+    toasts.push("Only PNG or JPEG images can be used here.", "error");
     return;
   }
   try {
