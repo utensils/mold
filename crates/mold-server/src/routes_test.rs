@@ -638,7 +638,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn chain_validation_surfaces_normalization_errors_without_queueing() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let app = app_empty();
         let mut request = route_chain_request();
         request.stages[0].frames = 10;
@@ -1230,7 +1232,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn chain_validation_rejects_19b_camera_preset_on_ltx23_without_downloading() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let app = app_empty();
         let response = app
             .oneshot(
