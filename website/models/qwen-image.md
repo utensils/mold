@@ -153,8 +153,9 @@ mold run qwen-image:q8 "a hot air balloon over a misty valley" \
   --steps 4 --guidance 1.0
 ```
 
-The adapters are authored by [ModelTC](https://github.com/ModelTC/Qwen-Image-Lightning)
-and published on Hugging Face under `lightx2v`. Match the adapter's line to the
+The adapters are authored by
+[ModelTC](https://github.com/ModelTC/LightX2V-Qwen-Image-Lightning) and
+published on Hugging Face under `lightx2v`. Match the adapter's line to the
 checkpoint's — a 2512 adapter belongs on `qwen-image-2512:*`, the base adapter on
 `qwen-image:*`. Use `--guidance 1.0`: upstream distils these adapters to run
 CFG-free, and mold enables classifier-free guidance for any `--guidance` above
