@@ -1024,6 +1024,67 @@ fn complete_gemma_bf16_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(sharded)
 }
 
+/// Host headroom kept free beside a resident BF16 Gemma encoder.
+///
+/// Matches the forced-local admission safety floor so the two agree about what
+/// "fits" means on a unified-memory host, where the encoder shares one pool
+/// with the transformer it has to sit beside.
+const GEMMA_BF16_HOST_HEADROOM: u64 = 8 << 30;
+
+/// Pick a Gemma variant when nothing is pinned, given a memory reading.
+///
+/// Selection used to be presence-based: BF16 won whenever its shards existed,
+/// however little memory was left. That is the one encoder in the tree without
+/// the quantized auto-fallback T5, Qwen3, Qwen2 and UMT5 all perform, and on a
+/// 48 GB unified-memory Mac it left LTX-2 permanently unadmittable — 24.5 GB of
+/// resident Gemma plus a ~20 GB transformer does not fit, so every plan was
+/// refused before a weight was read.
+///
+/// Quantizing this encoder is the normal path elsewhere rather than a
+/// compromise: ComfyUI ships Gemma-3-12B for LTX-2 at BF16 (24.4 GB), FP8
+/// (13.2 GB) and FP4-mixed (9.45 GB), and steers 16-24 GB cards to the smallest
+/// of those, reserving BF16 for 32 GB+. Mold's Q4 is Google's quantization-aware
+/// `q4_0` release, which holds up better than a post-training cast of the same
+/// width.
+///
+/// `available` is `None` off macOS, where no reclaimable-memory figure is
+/// published; BF16 stays the default there, so CUDA hosts are unaffected.
+fn choose_gemma_tag(bf16_bytes: u64, has_gguf: bool, available: Option<u64>) -> &'static str {
+    if !has_gguf {
+        return "bf16";
+    }
+    let Some(available) = available else {
+        return "bf16";
+    };
+    if bf16_bytes.saturating_add(GEMMA_BF16_HOST_HEADROOM) <= available {
+        "bf16"
+    } else {
+        "q4"
+    }
+}
+
+/// Resolve [`choose_gemma_tag`] against live host memory, disclosing a
+/// downgrade rather than silently substituting different weights.
+fn auto_gemma_tag(bf16: &[PathBuf], gguf: &[PathBuf]) -> &'static str {
+    let bf16_bytes = bf16
+        .iter()
+        .filter_map(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .fold(0u64, u64::saturating_add);
+    let available = mold_inference::device::available_system_memory_bytes();
+    let tag = choose_gemma_tag(bf16_bytes, !gguf.is_empty(), available);
+    if tag == "q4" {
+        tracing::warn!(
+            bf16_bytes,
+            available_bytes = available.unwrap_or(0),
+            "the BF16 Gemma prompt encoder does not fit in available host memory; \
+             using the Q4 encoder instead — prompt adherence may differ. Pin it with \
+             MOLD_LTX2_GEMMA_VARIANT=bf16 or q4 to choose explicitly."
+        );
+    }
+    tag
+}
+
 fn materialize_gemma(
     preference: Option<&str>,
     paths: &ModelPaths,
@@ -1043,10 +1104,12 @@ fn materialize_gemma(
         Some(value) if matches!(value.as_str(), "bf16" | "safetensors" | "bf16_safetensors") => {
             "bf16"
         }
-        Some(value) if (value.is_empty() || value == "auto") && !bf16.is_empty() => "bf16",
+        Some(value) if (value.is_empty() || value == "auto") && !bf16.is_empty() => {
+            auto_gemma_tag(&bf16, &gguf)
+        }
         Some(value) if value.is_empty() || value == "auto" => "q4",
         Some(value) => return Err(format!("unknown LTX-2 Gemma variant '{value}'")),
-        None if !bf16.is_empty() => "bf16",
+        None if !bf16.is_empty() => auto_gemma_tag(&bf16, &gguf),
         None => "q4",
     };
     let selected = if tag == "bf16" { bf16 } else { gguf };
@@ -2372,6 +2435,46 @@ mod tests {
                 reason,
             }) if dependency == "encoder.gguf" && reason == "still downloading"
         ));
+    }
+
+    /// BF16 Gemma is ~24.5 GB resident, so on a host that cannot hold it beside
+    /// the transformer the quantized encoder is the only admittable choice.
+    /// Presence-based selection pinned BF16 regardless and left LTX-2
+    /// unrunnable on a 48 GB unified-memory Mac.
+    #[test]
+    fn an_unpinned_gemma_falls_back_to_q4_only_when_bf16_cannot_fit() {
+        const GB: u64 = 1 << 30;
+        let bf16 = 24 * GB;
+
+        // Comfortable host: BF16 wins.
+        assert_eq!(super::choose_gemma_tag(bf16, true, Some(128 * GB)), "bf16");
+        // Exactly at the floor: still BF16, the boundary is inclusive.
+        assert_eq!(
+            super::choose_gemma_tag(bf16, true, Some(bf16 + super::GEMMA_BF16_HOST_HEADROOM)),
+            "bf16"
+        );
+        // One byte short of the floor: downgrade.
+        assert_eq!(
+            super::choose_gemma_tag(bf16, true, Some(bf16 + super::GEMMA_BF16_HOST_HEADROOM - 1)),
+            "q4"
+        );
+        // A 48 GB Mac with 24 GB reclaimable — the case that was refused.
+        assert_eq!(super::choose_gemma_tag(bf16, true, Some(24 * GB)), "q4");
+    }
+
+    /// Never downgrade to a variant that is not there, and never change
+    /// behaviour on a host that publishes no reclaimable-memory figure.
+    #[test]
+    fn gemma_selection_holds_bf16_without_a_q4_or_a_memory_reading() {
+        const GB: u64 = 1 << 30;
+        // No GGUF on disk: BF16 even under pressure, so the caller's
+        // "selected variant is not locally available" error still governs.
+        assert_eq!(super::choose_gemma_tag(24 * GB, false, Some(GB)), "bf16");
+        // Off macOS there is no reading; CUDA hosts keep their behaviour.
+        assert_eq!(super::choose_gemma_tag(24 * GB, true, None), "bf16");
+        // A missing/zero-byte shard set must not read as "fits" and then fail
+        // downstream — zero genuinely fits, and the artifact check catches it.
+        assert_eq!(super::choose_gemma_tag(0, true, Some(64 * GB)), "bf16");
     }
 
     #[test]
