@@ -11,8 +11,21 @@
 //! of `load`. It is the park/unpark source of truth: a cold prompt used to pay
 //! a measured **35.1 s** GGUF disk reload on every request because the only way
 //! back from `drop_weights()` was to re-read the file. Retaining the map costs
-//! nothing while resident — the quantized entries are the very `Arc<QTensor>`
-//! the blocks' [`QMatMul`]s hold, so they are shared, not duplicated.
+//! nothing while resident **as long as** the quantized entries are the very
+//! `Arc<QTensor>` the blocks' [`QMatMul`]s hold, so they are shared rather
+//! than duplicated.
+//!
+//! That is a property of candle's policy, not a law: `QMatMul::from_arc`
+//! dequantizes an `F32`/`F16`/`BF16` GGUF tensor (and, under
+//! `CANDLE_DEQUANTIZE_ALL`, everything) into a dense `Tensor` and drops the
+//! `Arc`, which would make the retained map a second, full, device-resident
+//! copy of the weights. So the encoder *measures* the sharing after building
+//! ([`GgufQwen2Weights::is_shared_with_built_modules`]) instead of asserting
+//! it, and simply does not retain a map it cannot retain for free — that
+//! encoder falls back to the old drop-and-reload rather than silently doubling
+//! its VRAM. Every shipped `unsloth/Qwen2.5-VL-7B-Instruct-GGUF` variant is a
+//! k-quant, so today this only guards the path; nothing in `read()` restricts
+//! which GGUF a per-model component path may point at.
 //!
 //! The map is deliberately split in two. Tensors that back a `QMatMul` stay
 //! quantized and share their `Arc`; tensors that are dequantized at load
@@ -463,6 +476,21 @@ impl GgufQwen2Weights {
         })
     }
 
+    /// Whether the modules just built from this set share its quantized
+    /// tensors, i.e. whether retaining the map is actually free.
+    ///
+    /// Measured through the `Arc` strong counts rather than by re-deriving
+    /// candle's dequantize policy, so an upstream change cannot silently turn
+    /// the module header's claim into a VRAM doubling. Must be called while
+    /// the built [`GgufQwen2Modules`] is still alive, and only on a map no
+    /// one else holds a clone of — every other holder inflates the count and
+    /// reads as sharing.
+    fn is_shared_with_built_modules(&self) -> bool {
+        self.quant
+            .values()
+            .all(|tensor| Arc::strong_count(tensor) > 1)
+    }
+
     fn quant_tensor(&self, name: &str) -> Result<Arc<QTensor>> {
         self.quant
             .get(name)
@@ -550,7 +578,10 @@ impl GgufQwen2Weights {
 const TOKEN_EMBD: &str = "token_embd.weight";
 
 pub(crate) struct GgufQwen2TextEncoder {
-    weights: GgufQwen2Weights,
+    /// The park/unpark source of truth, retained only while the built modules
+    /// share its quantized tensors. `None` means this encoder cannot park for
+    /// free and falls back to drop-and-reload — see the module header.
+    weights: Option<GgufQwen2Weights>,
     modules: GgufQwen2Modules,
     device: Device,
     dtype: DType,
@@ -595,8 +626,24 @@ impl GgufQwen2TextEncoder {
     /// Warm load: rebuild from an already-read weight set, moving it to
     /// `device` first. This is the unpark path — no disk I/O (#1044).
     pub fn from_weights(weights: GgufQwen2Weights, device: &Device) -> Result<Self> {
-        let weights = weights.to_device(device)?;
+        let weights = {
+            let moved = weights.to_device(device)?;
+            // A same-device move hands back the input `Arc`s, and a shadowed
+            // binding would keep the source map alive to the end of this
+            // function — inflating the strong counts the sharing check reads.
+            drop(weights);
+            moved
+        };
         let modules = weights.build(device)?;
+        // Retaining a map the modules did not share would be a second full
+        // device-resident copy of the weights, which is worse than the reload
+        // it avoids. Drop it and let this encoder take the disk path.
+        let weights = weights.is_shared_with_built_modules().then_some(weights);
+        if weights.is_none() {
+            tracing::debug!(
+                "GGUF Qwen2 encoder dequantized at build; not retaining the weight map (park unavailable)"
+            );
+        }
         Ok(Self {
             weights,
             modules,
@@ -609,13 +656,21 @@ impl GgufQwen2TextEncoder {
     /// device-resident modules are released with `self`, so the VRAM the
     /// `QMatMul`s held is freed as soon as the caller drops the return of
     /// this call's consumed receiver.
-    pub fn park_to_cpu(self) -> Result<GgufQwen2Weights> {
-        self.weights.to_device(&Device::Cpu)
+    ///
+    /// `Ok(None)` means this encoder never retained a map (the build
+    /// dequantized), so there is nothing to park and the caller must drop.
+    pub fn park_to_cpu(self) -> Result<Option<GgufQwen2Weights>> {
+        self.weights
+            .map(|weights| weights.to_device(&Device::Cpu))
+            .transpose()
     }
 
-    /// Bytes the retained weight set occupies on its current device.
+    /// Bytes the retained weight set occupies on its current device, or `0`
+    /// when no map is retained.
     pub fn weights_size_in_bytes(&self) -> u64 {
-        self.weights.size_in_bytes()
+        self.weights
+            .as_ref()
+            .map_or(0, GgufQwen2Weights::size_in_bytes)
     }
 
     fn prepare_causal_attention_mask(
@@ -692,113 +747,120 @@ impl GgufQwen2TextEncoder {
 }
 
 #[cfg(test)]
+use candle_core::quantized::GgmlDType;
+
+#[cfg(test)]
+/// A tiny synthetic Qwen2 weight set, built straight as
+/// [`GgufQwen2Weights`] rather than through a temporary GGUF file: the
+/// park path never touches the file again, so the file adds nothing to
+/// what is under test and a lot to the fixture.
+///
+/// Shapes are the smallest that satisfy the family's own constraints —
+/// `head_dim` even for RoPE, and every quantized matmul's inner dimension
+/// a multiple of 32 for Q4_0's block size.
+///
+/// `quant_dtype` is a parameter because candle's `QMatMul::from_arc`
+/// dequantizes F32/F16/BF16 and shares everything else, and the sharing is
+/// exactly what the retained weight map's cost claim rests on.
+pub(crate) fn synthetic_weights(block_count: usize, quant_dtype: GgmlDType) -> GgufQwen2Weights {
+    const HIDDEN: usize = 64;
+    const HEADS: usize = 2;
+    const KV_HEADS: usize = 1;
+    const FFN: usize = 128;
+    const VOCAB: usize = 16;
+    let device = Device::Cpu;
+    let head_dim = HIDDEN / HEADS;
+    let kv_width = KV_HEADS * head_dim;
+
+    let quantize = |rows: usize, cols: usize, seed: f64| -> Arc<QTensor> {
+        let values: Vec<f32> = (0..rows * cols)
+            .map(|i| (i as f64 * 0.017 + seed).sin() as f32)
+            .collect();
+        let tensor = Tensor::from_vec(values, (rows, cols), &device).unwrap();
+        Arc::new(QTensor::quantize(&tensor, quant_dtype).unwrap())
+    };
+    let plain_tensor = |rows: usize, cols: usize, seed: f64| -> Tensor {
+        let values: Vec<f32> = (0..rows * cols)
+            .map(|i| (i as f64 * 0.031 + seed).cos() as f32)
+            .collect();
+        Tensor::from_vec(values, (rows, cols), &device).unwrap()
+    };
+
+    let mut quant = HashMap::new();
+    let mut plain = HashMap::new();
+    plain.insert(TOKEN_EMBD.to_string(), plain_tensor(VOCAB, HIDDEN, 0.5));
+
+    for i in 0..block_count {
+        let prefix = format!("blk.{i}");
+        let seed = i as f64;
+        quant.insert(
+            format!("{prefix}.attn_q.weight"),
+            quantize(HIDDEN, HIDDEN, seed + 1.0),
+        );
+        quant.insert(
+            format!("{prefix}.attn_k.weight"),
+            quantize(kv_width, HIDDEN, seed + 2.0),
+        );
+        quant.insert(
+            format!("{prefix}.attn_v.weight"),
+            quantize(kv_width, HIDDEN, seed + 3.0),
+        );
+        quant.insert(
+            format!("{prefix}.attn_output.weight"),
+            quantize(HIDDEN, HIDDEN, seed + 4.0),
+        );
+        quant.insert(
+            format!("{prefix}.ffn_gate.weight"),
+            quantize(FFN, HIDDEN, seed + 5.0),
+        );
+        quant.insert(
+            format!("{prefix}.ffn_up.weight"),
+            quantize(FFN, HIDDEN, seed + 6.0),
+        );
+        quant.insert(
+            format!("{prefix}.ffn_down.weight"),
+            quantize(HIDDEN, FFN, seed + 7.0),
+        );
+        plain.insert(
+            format!("{prefix}.attn_norm.weight"),
+            plain_tensor(1, HIDDEN, seed + 8.0).squeeze(0).unwrap(),
+        );
+        plain.insert(
+            format!("{prefix}.ffn_norm.weight"),
+            plain_tensor(1, HIDDEN, seed + 9.0).squeeze(0).unwrap(),
+        );
+        plain.insert(
+            format!("{prefix}.attn_q.bias"),
+            plain_tensor(1, HIDDEN, seed + 10.0).squeeze(0).unwrap(),
+        );
+        plain.insert(
+            format!("{prefix}.attn_k.bias"),
+            plain_tensor(1, kv_width, seed + 11.0).squeeze(0).unwrap(),
+        );
+        plain.insert(
+            format!("{prefix}.attn_v.bias"),
+            plain_tensor(1, kv_width, seed + 12.0).squeeze(0).unwrap(),
+        );
+    }
+
+    GgufQwen2Weights {
+        params: GgufQwen2Params {
+            hidden_size: HIDDEN,
+            num_heads: HEADS,
+            num_kv_heads: KV_HEADS,
+            block_count,
+            rope_positions: 32,
+            rms_norm_eps: 1e-6,
+            rope_theta: 1_000_000.0,
+        },
+        quant,
+        plain,
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::quantized::GgmlDType;
-
-    /// A tiny synthetic Qwen2 weight set, built straight as
-    /// [`GgufQwen2Weights`] rather than through a temporary GGUF file: the
-    /// park path never touches the file again, so the file adds nothing to
-    /// what is under test and a lot to the fixture.
-    ///
-    /// Shapes are the smallest that satisfy the family's own constraints —
-    /// `head_dim` even for RoPE, and every quantized matmul's inner dimension
-    /// a multiple of 32 for Q4_0's block size.
-    fn synthetic_weights(block_count: usize) -> GgufQwen2Weights {
-        const HIDDEN: usize = 64;
-        const HEADS: usize = 2;
-        const KV_HEADS: usize = 1;
-        const FFN: usize = 128;
-        const VOCAB: usize = 16;
-        let device = Device::Cpu;
-        let head_dim = HIDDEN / HEADS;
-        let kv_width = KV_HEADS * head_dim;
-
-        let quantize = |rows: usize, cols: usize, seed: f64| -> Arc<QTensor> {
-            let values: Vec<f32> = (0..rows * cols)
-                .map(|i| (i as f64 * 0.017 + seed).sin() as f32)
-                .collect();
-            let tensor = Tensor::from_vec(values, (rows, cols), &device).unwrap();
-            Arc::new(QTensor::quantize(&tensor, GgmlDType::Q4_0).unwrap())
-        };
-        let plain_tensor = |rows: usize, cols: usize, seed: f64| -> Tensor {
-            let values: Vec<f32> = (0..rows * cols)
-                .map(|i| (i as f64 * 0.031 + seed).cos() as f32)
-                .collect();
-            Tensor::from_vec(values, (rows, cols), &device).unwrap()
-        };
-
-        let mut quant = HashMap::new();
-        let mut plain = HashMap::new();
-        plain.insert(TOKEN_EMBD.to_string(), plain_tensor(VOCAB, HIDDEN, 0.5));
-
-        for i in 0..block_count {
-            let prefix = format!("blk.{i}");
-            let seed = i as f64;
-            quant.insert(
-                format!("{prefix}.attn_q.weight"),
-                quantize(HIDDEN, HIDDEN, seed + 1.0),
-            );
-            quant.insert(
-                format!("{prefix}.attn_k.weight"),
-                quantize(kv_width, HIDDEN, seed + 2.0),
-            );
-            quant.insert(
-                format!("{prefix}.attn_v.weight"),
-                quantize(kv_width, HIDDEN, seed + 3.0),
-            );
-            quant.insert(
-                format!("{prefix}.attn_output.weight"),
-                quantize(HIDDEN, HIDDEN, seed + 4.0),
-            );
-            quant.insert(
-                format!("{prefix}.ffn_gate.weight"),
-                quantize(FFN, HIDDEN, seed + 5.0),
-            );
-            quant.insert(
-                format!("{prefix}.ffn_up.weight"),
-                quantize(FFN, HIDDEN, seed + 6.0),
-            );
-            quant.insert(
-                format!("{prefix}.ffn_down.weight"),
-                quantize(HIDDEN, FFN, seed + 7.0),
-            );
-            plain.insert(
-                format!("{prefix}.attn_norm.weight"),
-                plain_tensor(1, HIDDEN, seed + 8.0).squeeze(0).unwrap(),
-            );
-            plain.insert(
-                format!("{prefix}.ffn_norm.weight"),
-                plain_tensor(1, HIDDEN, seed + 9.0).squeeze(0).unwrap(),
-            );
-            plain.insert(
-                format!("{prefix}.attn_q.bias"),
-                plain_tensor(1, HIDDEN, seed + 10.0).squeeze(0).unwrap(),
-            );
-            plain.insert(
-                format!("{prefix}.attn_k.bias"),
-                plain_tensor(1, kv_width, seed + 11.0).squeeze(0).unwrap(),
-            );
-            plain.insert(
-                format!("{prefix}.attn_v.bias"),
-                plain_tensor(1, kv_width, seed + 12.0).squeeze(0).unwrap(),
-            );
-        }
-
-        GgufQwen2Weights {
-            params: GgufQwen2Params {
-                hidden_size: HIDDEN,
-                num_heads: HEADS,
-                num_kv_heads: KV_HEADS,
-                block_count,
-                rope_positions: 32,
-                rms_norm_eps: 1e-6,
-                rope_theta: 1_000_000.0,
-            },
-            quant,
-            plain,
-        }
-    }
 
     /// The premise of the whole GGUF park path (#1044): the bytes that come
     /// back are the bytes that went out. A dequantize/re-quantize round trip
@@ -813,7 +875,7 @@ mod tests {
     /// `wan::block_offload::parking_a_block_is_byte_identical`.
     #[test]
     fn parking_the_gguf_encoder_is_byte_identical() {
-        let weights = synthetic_weights(2);
+        let weights = synthetic_weights(2, GgmlDType::Q4_0);
         let parked = weights.rebuilt_on(&Device::Cpu).unwrap();
 
         assert_eq!(
@@ -847,7 +909,7 @@ mod tests {
     #[test]
     fn an_unparked_gguf_encoder_produces_identical_hidden_states() {
         let device = Device::Cpu;
-        let weights = synthetic_weights(2);
+        let weights = synthetic_weights(2, GgmlDType::Q4_0);
         let input_ids = Tensor::from_vec(vec![3u32, 7, 1, 9, 4], (1, 5), &device).unwrap();
 
         let mut before =
@@ -856,7 +918,10 @@ mod tests {
         let hidden_before = before.forward_last_hidden(&input_ids, None).unwrap();
 
         // Park (bytes to host) and unpark (bytes back), then run again.
-        let parked = before.park_to_cpu().unwrap();
+        let parked = before
+            .park_to_cpu()
+            .unwrap()
+            .expect("a k-quant encoder retains its weight map");
         let mut after =
             GgufQwen2TextEncoder::from_weights(parked.rebuilt_on(&device).unwrap(), &device)
                 .unwrap();
@@ -884,7 +949,7 @@ mod tests {
     #[test]
     fn building_shares_the_quantized_tensors_rather_than_copying_them() {
         let device = Device::Cpu;
-        let weights = synthetic_weights(1);
+        let weights = synthetic_weights(1, GgmlDType::Q4_0);
         let before = Arc::strong_count(weights.quant.get("blk.0.attn_q.weight").unwrap());
         let _modules = weights.build(&device).unwrap();
         let after = Arc::strong_count(weights.quant.get("blk.0.attn_q.weight").unwrap());
@@ -892,13 +957,46 @@ mod tests {
             after > before,
             "the built QMatMul must hold an Arc clone, not a copy"
         );
+        assert!(
+            weights.is_shared_with_built_modules(),
+            "a k-quant build shares every quantized tensor"
+        );
     }
 
-    /// The size probe that gates the automatic park default has to count both
-    /// halves of the map, or a 7B encoder looks free.
+    /// The other half of that claim, which the Q4_0 fixture cannot reach:
+    /// `QMatMul::from_arc` dequantizes an F16 GGUF tensor into a dense
+    /// `Tensor` and drops the `Arc`, so retaining the map would be a second
+    /// full copy of the weights on the device. The encoder must notice and
+    /// keep no map at all — a park that doubles VRAM is worse than the disk
+    /// reload it avoids.
+    #[test]
+    fn an_f16_gguf_build_does_not_retain_a_duplicate_weight_map() {
+        let device = Device::Cpu;
+        let weights = synthetic_weights(1, GgmlDType::F16);
+        let modules = weights.build(&device).unwrap();
+        assert!(
+            !weights.is_shared_with_built_modules(),
+            "candle dequantizes F16, so nothing shares the quantized Arc"
+        );
+        drop(modules);
+
+        let encoder = GgufQwen2TextEncoder::from_weights(weights, &device).unwrap();
+        assert_eq!(
+            encoder.weights_size_in_bytes(),
+            0,
+            "an encoder that cannot share must retain no map"
+        );
+        assert!(
+            encoder.park_to_cpu().unwrap().is_none(),
+            "with no retained map there is nothing to park"
+        );
+    }
+
+    /// The park's host-RAM accounting has to count both halves of the map, or
+    /// a 7B encoder looks free.
     #[test]
     fn size_in_bytes_counts_quantized_and_plain_halves() {
-        let weights = synthetic_weights(1);
+        let weights = synthetic_weights(1, GgmlDType::Q4_0);
         let quant: u64 = weights
             .quant
             .values()
