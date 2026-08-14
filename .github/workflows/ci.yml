@@ -180,6 +180,7 @@ jobs:
               - 'scripts/create-container-digest-manifest.sh'
               - 'scripts/validate-cuda-qualification-report.py'
               - 'scripts/verify-png-artifact.py'
+              - 'scripts/tests/ci-coverage-disk-guard.sh'
               - 'scripts/tests/ci-routing-contract.sh'
               - 'scripts/tests/cuda-distribution-contract.sh'
               - 'scripts/tests/cuda-ptx-parser-contract.py'
@@ -381,6 +382,7 @@ jobs:
           nix run nixpkgs#actionlint -- .github/workflows/*.yml
           bash scripts/tests/release-sync-pr.sh
           bash scripts/tests/crates-publish-contract.sh
+          bash scripts/tests/ci-coverage-disk-guard.sh
           bash scripts/tests/ci-routing-contract.sh
           bash scripts/tests/docker-web-context.sh
           bash scripts/tests/desktop-candle-lock-sync.sh
@@ -611,3 +613,76 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy Metal forced-local and server paths
         run: cargo clippy -p mold-ai --features metal,preview,expand,tui,webp,mp4,mdns --all-targets -- -D warnings
+
+  # Codecov remains a main-branch reporting signal. It is intentionally not a
+  # required PR check: the protected Rust job already runs the same tests, and
+  # coverage instrumentation requires a separate workspace compilation.
+  coverage:
+    name: Codecov coverage
+    timeout-minutes: 30
+    needs: changes
+    if: >-
+      github.event_name == 'push' &&
+      (needs.changes.outputs.rust == 'true' ||
+       needs.changes.outputs.workflow == 'true')
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          df -h
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          df -h
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust build deps
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev
+
+      - uses: mozilla-actions/sccache-action@v0.0.7
+
+      - name: Probe sccache (disable on cache outage)
+        shell: bash
+        run: |
+          set +e
+          printf 'fn main() {}\n' > /tmp/sccache_probe.rs
+          sccache rustc --edition 2021 -- /tmp/sccache_probe.rs -o /tmp/sccache_probe
+          status=$?
+          rm -f /tmp/sccache_probe /tmp/sccache_probe.rs
+          if [ $status -ne 0 ]; then
+            echo "sccache probe failed — disabling RUSTC_WRAPPER for this job"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            sccache --stop-server >/dev/null 2>&1 || true
+          fi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace-llvm-cov
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage
+        run: timeout --signal=TERM --kill-after=60s 25m cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false

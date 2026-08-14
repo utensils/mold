@@ -273,7 +273,7 @@ if wants contracts; then
   # The protected release contracts main runs when release-classified files
   # change. They are cheap, so run them every time rather than reimplementing
   # the workflow's path classification here and getting it subtly wrong.
-  for contract in release-sync-pr crates-publish-contract \
+  for contract in release-sync-pr crates-publish-contract ci-coverage-disk-guard \
                   docker-web-context desktop-candle-lock-sync \
                   desktop-candle-nix-source-hash cuda-distribution-contract \
                   install-cuda-arch cuda-qualification-contract \

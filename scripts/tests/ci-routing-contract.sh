@@ -306,9 +306,11 @@ for spec in \
   fi
 done
 
-if grep -q '^  coverage:' "$ci"; then
-  fail "routine CI still contains the duplicate instrumented coverage job"
-fi
+coverage_gate="$(extract_job "$ci" coverage)"
+grep -Fq "github.event_name == 'push'" <<< "$coverage_gate" \
+  || fail "Codecov coverage still recompiles the workspace on pull requests"
+grep -Fq 'uses: codecov/codecov-action@v5' <<< "$coverage_gate" \
+  || fail "main no longer uploads coverage to Codecov"
 
 rust_gate="$(extract_job "$ci" rust)"
 grep -Fq 'RUN_RUST_SUITE:' <<< "$rust_gate" \
