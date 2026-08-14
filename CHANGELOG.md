@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Treat both reviewed MiniMax H3 compact model IDs as ordinary model identities on every build, leaving execution availability to the host's advertised task, backend, and hardware capabilities instead of returning a compliance authorization error.
+
 - Aligned CLI package tests with the compiled MiniMax H3 policy so public CUDA/H3 builds accept the canonical FL2VA identity and trusted H3 artifact paths while non-H3 builds retain the fail-closed authorization gate.
 
 - Run the development-only MiniMax H3 runtime-record producer Clippy gate in main's CUDA job, after the toolkit is installed, instead of failing the CPU Rust job on a missing `nvcc`; the local CI mirror and routing contract now enforce the same placement.

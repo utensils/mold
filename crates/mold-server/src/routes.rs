@@ -4923,9 +4923,9 @@ async fn server_capabilities(
         &config.resolved_models_dir(),
         &device_state,
     );
-    // The family-wide public restriction remains intact. H3-aware clients may
-    // present only the exact additive private partition above; older clients
-    // continue to see the conservative family denial.
+    // The two source-controlled compact H3 manifests are ordinary model
+    // identities. Runtime availability remains represented by the exact
+    // additive task capability above rather than a licensing restriction.
     let model_access = mold_core::model_access_capabilities();
 
     let server_batch =
@@ -7667,12 +7667,9 @@ mod tests {
     }
 
     #[test]
-    fn family_wide_h3_access_remains_restricted_for_legacy_clients() {
+    fn h3_models_do_not_publish_a_family_wide_access_restriction() {
         let access = mold_core::model_access_capabilities();
-        assert!(access
-            .restrictions
-            .iter()
-            .any(|restriction| restriction.family == mold_core::minimax_h3::FAMILY));
+        assert!(access.restrictions.is_empty());
     }
 
     /// #787: an absent negative on a wan request materializes the tuned

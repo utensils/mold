@@ -3934,7 +3934,7 @@ mod tests {
     /// Clients feature-detect server-side catalog sorting against this
     /// advertisement — older servers omit the field entirely.
     #[tokio::test]
-    async fn capabilities_reports_catalog_sort_vocabulary_and_h3_model_access_restriction() {
+    async fn capabilities_reports_catalog_sort_vocabulary_without_h3_access_restriction() {
         let app = app_empty();
         let resp = app
             .oneshot(
@@ -3953,14 +3953,7 @@ mod tests {
         assert!(body["catalog"]["families"]
             .as_array()
             .is_some_and(|families| families.iter().any(|family| family == "minimax-h3")));
-        assert_eq!(
-            body["model_access"]["restrictions"][0]["code"],
-            mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
-        );
-        assert_eq!(
-            body["model_access"]["restrictions"][0]["family"],
-            "minimax-h3"
-        );
+        assert_eq!(body["model_access"]["restrictions"], serde_json::json!([]));
     }
 
     /// Poll the registry until the submitted job shows up (the generate

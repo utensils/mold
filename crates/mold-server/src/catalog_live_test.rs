@@ -175,10 +175,10 @@ async fn post(router: axum::Router, uri: &str) -> (StatusCode, String) {
 }
 
 #[test]
-fn pinned_compact_h3_identity_is_acquirable_but_not_runtime_activated() {
+fn pinned_compact_h3_identity_is_an_ordinary_model_identity() {
     let id = mold_core::minimax_h3::FL2VA_COMFY;
     mold_core::require_model_acquisition(id, Some("minimax-h3")).unwrap();
-    assert!(mold_core::require_model_activation(id, Some("minimax-h3")).is_err());
+    mold_core::require_model_activation(id, Some("minimax-h3")).unwrap();
 }
 
 #[tokio::test]
