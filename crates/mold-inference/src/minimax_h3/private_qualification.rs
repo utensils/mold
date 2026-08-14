@@ -998,9 +998,23 @@ fn hash_exact_file(
         )
     }
     let flight = artifact_hash_flight(&artifact.canonical_path);
-    let _hash_flight = match flight.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
+    let _hash_flight = loop {
+        match flight.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                // A zero-progress heartbeat keeps the caller's cooperative
+                // cancellation live while another attempt owns the flight.
+                progress(H3ArtifactHashProgress {
+                    relative_path: relative_path.clone(),
+                    artifact_bytes_verified: 0,
+                    artifact_bytes_total: before.len,
+                    total_bytes_verified: verified_before,
+                    total_bytes,
+                })?;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
     };
     if let Some(cached_sha) =
         lookup_cached_artifact_digest(&artifact.canonical_path, &before, expected_sha)

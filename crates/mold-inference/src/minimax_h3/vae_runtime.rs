@@ -1822,9 +1822,29 @@ fn staged_weights_for_plan(
         .identity
         .clone();
     let flight = staging_flight(&plan.staging_root);
-    let _flight_guard = match flight.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
+    let staging_total = required_staging_bytes(plan)?;
+    let _flight_guard = loop {
+        match flight.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                // A zero-progress heartbeat keeps the caller's cooperative
+                // cancellation live while another attempt owns the flight.
+                if !checkpoint(
+                    observer,
+                    H3ComfyVaeArtifactRole::VisualWeights,
+                    H3ComfyVaeLoadPhase::Stage,
+                    0,
+                    staging_total,
+                ) {
+                    return Err(H3ComfyVaeLoadError::Cancelled {
+                        role: H3ComfyVaeArtifactRole::VisualWeights,
+                        phase: H3ComfyVaeLoadPhase::Stage,
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
     };
     let cache = STAGED_WEIGHTS_CACHE
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -1842,7 +1862,8 @@ fn staged_weights_for_plan(
             entries.remove(&plan.staging_root);
         }
     }
-    ensure_staging_capacity(plan, required_staging_bytes(plan)?)?;
+    sweep_stale_stage_directories(&plan.staging_root);
+    ensure_staging_capacity(plan, staging_total)?;
     let staged = std::sync::Arc::new(StagedWeights::create(plan, opened, observer)?);
     if let Ok(mut entries) = cache.lock() {
         entries.insert(
@@ -1857,6 +1878,58 @@ fn staged_weights_for_plan(
     Ok(staged)
 }
 
+const STAGE_DIRECTORY_PREFIX: &str = ".mold-h3-vae-stage-";
+
+fn stage_directory_prefix_for_this_process() -> String {
+    format!("{STAGE_DIRECTORY_PREFIX}{}-", std::process::id())
+}
+
+/// Remove staged directories abandoned by dead processes.
+///
+/// The process-lifetime staged cache deliberately never drops its `TempDir`
+/// at normal exit (Rust runs no destructors for statics), so every restart
+/// would otherwise strand ~5.8 GB under the staging root. Stage directories
+/// embed their owner's PID; a sweep — always under this root's staging
+/// flight, right before a fresh stage is created — removes only directories
+/// whose owner is provably gone (or legacy unowned names), never a live
+/// process's stage.
+fn sweep_stale_stage_directories(staging_root: &Path) {
+    let Ok(entries) = std::fs::read_dir(staging_root) else {
+        return;
+    };
+    let own = stage_directory_prefix_for_this_process();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(suffix) = name.strip_prefix(STAGE_DIRECTORY_PREFIX) else {
+            continue;
+        };
+        if name.starts_with(&own) {
+            // This process's own stages are governed by the cache eviction
+            // above; a directory here without a live cache entry is stale.
+        } else if let Some(owner) = suffix
+            .split('-')
+            .next()
+            .and_then(|pid| pid.parse::<i32>().ok())
+        {
+            #[cfg(unix)]
+            {
+                // SAFETY: signal 0 performs permission/existence checks only.
+                let alive = unsafe { libc::kill(owner, 0) } == 0
+                    || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+                if alive {
+                    continue;
+                }
+            }
+            #[cfg(not(unix))]
+            continue;
+        }
+        // Legacy unowned names and dead-owner directories are removed; a
+        // failure here is not fatal — capacity enforcement reports it.
+        let _ = std::fs::remove_dir_all(entry.path());
+    }
+}
+
 impl StagedWeights {
     fn create(
         plan: &FrozenH3ComfyVaeLoadPlan,
@@ -1864,7 +1937,7 @@ impl StagedWeights {
         observer: &mut dyn H3ComfyVaeLoadObserver,
     ) -> LoadResult<Self> {
         let directory = tempfile::Builder::new()
-            .prefix(".mold-h3-vae-stage-")
+            .prefix(&stage_directory_prefix_for_this_process())
             .tempdir_in(&plan.staging_root)
             .map_err(|error| {
                 H3ComfyVaeLoadError::InvalidPlan(format!(
@@ -3052,6 +3125,26 @@ mod tests {
         let third = staged_weights_for_plan(&plan, &mut redrifted, &mut third_observer).unwrap();
         assert!(!std::sync::Arc::ptr_eq(&second, &third));
         assert!(stage_events(&third_observer) > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_stage_directories_are_swept_only_for_dead_or_legacy_owners() {
+        let staging = tempfile::tempdir().unwrap();
+        let dead = staging.path().join(".mold-h3-vae-stage-999999999-dead");
+        let legacy = staging.path().join(".mold-h3-vae-stage-legacy");
+        // PID 1 is always alive (kill(1, 0) answers EPERM), standing in for
+        // another live process's active stage.
+        let live = staging.path().join(".mold-h3-vae-stage-1-live");
+        let unrelated = staging.path().join("unrelated-directory");
+        for path in [&dead, &legacy, &live, &unrelated] {
+            std::fs::create_dir(path).unwrap();
+        }
+        sweep_stale_stage_directories(staging.path());
+        assert!(!dead.exists());
+        assert!(!legacy.exists());
+        assert!(live.exists());
+        assert!(unrelated.exists());
     }
 
     #[test]

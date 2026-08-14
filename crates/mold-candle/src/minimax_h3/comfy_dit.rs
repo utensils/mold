@@ -697,9 +697,15 @@ fn open_h3_comfy_int8_checkpoint(
         )?;
     }
     let flight = opened_hash_flight(&canonical_path);
-    let hash_flight = match flight.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
+    let hash_flight = loop {
+        match flight.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                cancellation_boundary_inspection(cancellation)?;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
     };
     let H3ComfyOpenedHashes {
         content_sha256,

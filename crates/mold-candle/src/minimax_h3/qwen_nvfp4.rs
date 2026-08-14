@@ -772,9 +772,17 @@ impl OpenedH3QwenNvfp4AwqArtifact {
         const READ_CHUNK_BYTES: usize = 1024 * 1024;
         self.revalidate("before full artifact authentication")?;
         let flight = full_authentication_flight(&self.path);
-        let _flight_guard = match flight.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
+        let _flight_guard = loop {
+            match flight.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    // A zero-progress heartbeat keeps the caller's cooperative
+                    // cancellation live while another attempt owns the flight.
+                    checkpoint(0, self.identity.len)?;
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
         };
         if lookup_full_authentication(&self.path, &self.identity) {
             checkpoint(self.identity.len, self.identity.len)?;
