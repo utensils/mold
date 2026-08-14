@@ -1,6 +1,13 @@
 {
   description = "mold — local AI image generation CLI for FLUX, SD1.5, SDXL & Z-Image diffusion models";
 
+  nixConfig = {
+    extra-substituters = [ "https://mold.cachix.org" ];
+    extra-trusted-public-keys = [
+      "mold.cachix.org-1:9HBc/bEXDdpbxMjOwpaIDpjZqBh9JYg0h5Fipm+D8m4="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";

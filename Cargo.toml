@@ -37,8 +37,8 @@ categories = ["command-line-utilities", "multimedia::images", "science"]
 name = "mold"
 
 [profile.release]
-lto = "fat"
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 strip = true
 
 [profile.dev-fast]

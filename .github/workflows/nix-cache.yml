@@ -1,0 +1,53 @@
+name: Publish Nix Cache
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+concurrency:
+  group: nix-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    # Cache availability is an optimization. This separate best-effort workflow
+    # can never delay or fail rolling nightlies or stable releases.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          df -h
+
+      - uses: cachix/install-nix-action@v31
+
+      # Pull the exact default sm89 package before building, then push only its
+      # runtime closure. Avoid daemon/store-scan uploads: the public cache is
+      # intentionally scoped to the package consumed by NixOS deployments.
+      - name: Configure Mold binary cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: mold
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          useDaemon: false
+          pathsToPush: result-mold
+
+      - name: Build cacheable default sm89 output
+        run: nix build .#mold --out-link result-mold

@@ -28,6 +28,30 @@ Add mold to your flake inputs and import the module:
 }
 ```
 
+## Binary Cache
+
+Direct `nix build github:utensils/mold` commands use Mold's signed public
+binary cache automatically after Nix accepts the flake configuration. When
+Mold is an input of another flake, that input's `nixConfig` is not inherited.
+Configure the consuming NixOS system explicitly so deployments can substitute
+the exact CI-built package instead of compiling Mold locally:
+
+```nix
+{
+  nix.settings = {
+    extra-substituters = [ "https://mold.cachix.org" ];
+    extra-trusted-public-keys = [
+      "mold.cachix.org-1:9HBc/bEXDdpbxMjOwpaIDpjZqBh9JYg0h5Fipm+D8m4="
+    ];
+  };
+}
+```
+
+Only store paths signed by that key are accepted. The cache is an optimization:
+Nix falls back to a local source build when CI has not published the exact
+revision and package variant. CI currently publishes the default Ada/sm89
+package; the other architecture variants fall back to a local build.
+
 ## Minimal Configuration
 
 ```nix
