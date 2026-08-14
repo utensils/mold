@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
 import ConfigSettingRow from "./ConfigSettingRow.vue";
 import MoldHomeCard from "./MoldHomeCard.vue";
+import { ipc } from "../../lib/ipc";
 import { useConnectionStore } from "../../stores/connection";
 import { useSettingsConfigStore } from "../../stores/settingsConfig";
 import { useToastStore } from "../../stores/toasts";
@@ -16,6 +17,11 @@ const toasts = useToastStore();
 // THIS device to other apps). Adding, connecting, and forgetting other
 // machines all moved to the Machines workspace.
 const restarting = computed(() => conn.status === "starting");
+/** Engine-start failures land in `error` (startLocalEngine) or `localError`
+ *  (ensureLocalServer) depending on which step died — surface either. */
+const localFailure = computed(() =>
+  conn.localError ? conn.localError : conn.status === "error" ? conn.error : null,
+);
 const localKeyVisible = ref(false);
 const localApiKey = computed(() => conn.localInfo?.apiKey ?? "");
 
@@ -123,7 +129,17 @@ function hostDot(status: "ready" | "connecting" | "error"): string {
             Copy
           </button>
         </div>
-        <p v-if="conn.localError" class="mt-2 text-caption text-stop">{{ conn.localError }}</p>
+        <div v-if="localFailure" class="mt-2">
+          <p class="text-caption text-stop">{{ localFailure }}</p>
+          <button
+            type="button"
+            data-test="open-local-logs"
+            class="border-edge mt-2 h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+            @click="ipc.openLogsDir()"
+          >
+            Open logs folder
+          </button>
+        </div>
       </div>
     </div>
 
