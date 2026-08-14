@@ -1029,13 +1029,17 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
     // matmuls onto the dequantize-per-forward fallback, so a normal run vs a
     // forced run measures whether the MMQ fast path is engaging and what it
     // is worth. Diagnostic only — never set in production.
-    #[cfg(feature = "cuda")]
+    //
+    // The switch it flips is process-global and never cleared, and candle
+    // exposes no reader, so it goes through `crate::quantized_dmmv` — the
+    // engines that dispatch on the quantized fast path (Qwen-Image's GGUF
+    // transformer) have to be able to see this run's flip afterwards.
     {
         static FORCE_DMMV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let force = *FORCE_DMMV
             .get_or_init(|| std::env::var("MOLD_WAN_FORCE_DMMV").is_ok_and(|value| value == "1"));
         if force {
-            candle_core::quantized::cuda::set_force_dmmv(true);
+            crate::quantized_dmmv::set_force_dmmv(true);
             tracing::warn!(
                 "wan: MOLD_WAN_FORCE_DMMV=1 — quantized matmuls on the dequant fallback"
             );
