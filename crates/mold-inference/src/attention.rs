@@ -14,6 +14,11 @@
 //! Selection is env-driven via `MOLD_ATTN={flash,math}` and cached in a
 //! `OnceLock` so we don't re-read the environment on every block.
 //!
+//! [`attention_with_bias`] adds an optional additive `[B, H, Q, K]` bias for
+//! callers that must mask keys (Qwen-Image's joint stream when the two batched
+//! CFG prompts differ in length). A bias always takes the math path — FA2 has
+//! no additive-bias entry point here — but keeps the same query chunking.
+//!
 //! ComfyUI does the same thing in `ldm/modules/attention.py:495-540`.
 
 use candle_core::{DType, Device, Result, Tensor, D};
@@ -161,6 +166,87 @@ pub fn attention(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32) -> Result<Tenso
         AttentionBackend::Flash => flash_attention(q, k, v, scale),
         AttentionBackend::Math => math_attention(q, k, v, scale),
     }
+}
+
+/// Scaled dot-product attention with an optional additive bias broadcast over
+/// `[B, H, Q, K]` (`0` keeps a key, `-inf` drops it).
+///
+/// `None` is the existing [`attention`] dispatch (flash when eligible, chunked
+/// math otherwise). `Some` never takes flash — FA2 has no additive-bias entry
+/// point here — but keeps the same query-chunk policy, so `MOLD_ATTN_CHUNK`
+/// still bounds the score matrix on the masked path.
+pub fn attention_with_bias(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f32,
+    bias: Option<&Tensor>,
+) -> Result<Tensor> {
+    if !bias_forces_math(bias) {
+        return attention(q, k, v, scale);
+    }
+    let bias = bias.expect("bias_forces_math is true exactly when the bias is Some");
+    math_attention_biased_impl(q, k, v, scale, bias, math_attention_chunk_size(q))
+}
+
+/// Pure predicate so the dispatch is testable without a GPU.
+pub(crate) fn bias_forces_math(bias: Option<&Tensor>) -> bool {
+    bias.is_some()
+}
+
+/// Biased math attention, kept 4-D on purpose.
+///
+/// [`math_attention_impl`] flattens `B·H` into one leading dim, which a
+/// `[B, 1, 1, K]` bias cannot broadcast against — the batch axis would line up
+/// with `B*H`. So this mirrors the arithmetic without the flatten:
+/// `QK^T · scale → + bias → softmax → · V`.
+fn math_attention_biased_impl(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f32,
+    bias: &Tensor,
+    chunk_size: Option<usize>,
+) -> Result<Tensor> {
+    let k_t = k.transpose(D::Minus2, D::Minus1)?;
+    let biased_chunk = |q_chunk: &Tensor, bias_chunk: &Tensor| -> Result<Tensor> {
+        let attn_weights = (q_chunk.matmul(&k_t)? * f64::from(scale))?;
+        let attn_weights = attn_weights.broadcast_add(bias_chunk)?;
+        candle_nn::ops::softmax_last_dim(&attn_weights)?.matmul(v)
+    };
+
+    let Some(chunk_size) = chunk_size else {
+        return biased_chunk(q, bias);
+    };
+
+    let q_len = q.dim(D::Minus2)?;
+    // The Qwen bias is `[B, 1, 1, K]`, so in practice it never narrows; a bias
+    // that does vary along the query axis has to follow the chunk.
+    let bias_is_per_query = bias.dim(D::Minus2)? > 1;
+    let mut chunks = Vec::with_capacity(q_len.div_ceil(chunk_size));
+    let mut start = 0;
+    while start < q_len {
+        let len = (q_len - start).min(chunk_size);
+        let q_chunk = q.narrow(D::Minus2, start, len)?;
+        let bias_chunk = if bias_is_per_query {
+            bias.narrow(D::Minus2, start, len)?
+        } else {
+            bias.clone()
+        };
+        chunks.push(biased_chunk(&q_chunk, &bias_chunk)?);
+        start += len;
+    }
+
+    CHUNKED_MATH_LOGGED.get_or_init(|| {
+        tracing::info!(
+            chunk_size,
+            q_len,
+            "using chunked math attention to reduce peak VRAM"
+        );
+    });
+
+    let refs: Vec<&Tensor> = chunks.iter().collect();
+    Tensor::cat(&refs, D::Minus2)
 }
 
 /// Convenience: derive `scale` from `head_dim` and dispatch.
@@ -398,6 +484,94 @@ mod tests {
             max_abs_diff(&chunked, &full) < 1e-5,
             "chunked math attention diverged from full math"
         );
+    }
+
+    /// The invariant the whole Qwen mask removal rests on: attending over
+    /// zero-padded keys with an additive `-inf` bias on the pad columns is the
+    /// same operation as attending over the keys sliced to their true length.
+    ///
+    /// If this did not hold, dropping the padding in the pipeline would change
+    /// the image stream's output.
+    #[test]
+    fn padded_keys_with_bias_match_sliced_attention() {
+        let dev = cpu();
+        let q = Tensor::randn(0.0_f32, 1.0_f32, (1, 2, 4, 8), &dev).unwrap();
+        let k_real = Tensor::randn(0.0_f32, 1.0_f32, (1, 2, 3, 8), &dev).unwrap();
+        let v_real = Tensor::randn(0.0_f32, 1.0_f32, (1, 2, 3, 8), &dev).unwrap();
+        let pad = Tensor::zeros((1, 2, 2, 8), DType::F32, &dev).unwrap();
+        let k = Tensor::cat(&[&k_real, &pad], 2).unwrap();
+        let v = Tensor::cat(&[&v_real, &pad], 2).unwrap();
+        let bias = Tensor::from_vec(
+            vec![0.0_f32, 0.0, 0.0, f32::NEG_INFINITY, f32::NEG_INFINITY],
+            (1, 1, 1, 5),
+            &dev,
+        )
+        .unwrap();
+        let scale = 1.0 / (8f32).sqrt();
+
+        let padded = attention_with_bias(&q, &k, &v, scale, Some(&bias)).unwrap();
+        let sliced = attention(&q, &k_real, &v_real, scale).unwrap();
+
+        assert_eq!(padded.dims(), sliced.dims());
+        assert!(
+            max_abs_diff(&padded, &sliced) < 1e-5,
+            "masked padding must equal slicing the padding away"
+        );
+    }
+
+    /// `MOLD_ATTN_CHUNK` must keep working with a bias: the chunked biased
+    /// path is the mirror of `test_chunked_math_attention_matches_full_math`.
+    /// Both a key-only bias (`[B,1,1,K]`, the Qwen shape) and a per-query bias
+    /// (`[B,1,Q,K]`, which forces the query-axis narrow) are covered.
+    #[test]
+    fn chunked_biased_matches_full_biased() {
+        let dev = cpu();
+        let (q, k, v) = rand_qkv((1, 3, 17, 16));
+        let scale = 1.0 / (16f32).sqrt();
+
+        let mut key_bias = vec![0.0_f32; 17];
+        key_bias[15] = f32::NEG_INFINITY;
+        key_bias[16] = f32::NEG_INFINITY;
+        let key_bias = Tensor::from_vec(key_bias, (1, 1, 1, 17), &dev).unwrap();
+
+        let full = math_attention_biased_impl(&q, &k, &v, scale, &key_bias, None).unwrap();
+        let chunked = math_attention_biased_impl(&q, &k, &v, scale, &key_bias, Some(5)).unwrap();
+        assert_eq!(chunked.dims(), full.dims());
+        assert!(
+            max_abs_diff(&chunked, &full) < 1e-5,
+            "chunked biased attention diverged from the full biased pass"
+        );
+
+        // Per-query bias: the chunk loop has to narrow the bias too.
+        let query_bias = Tensor::randn(0.0_f32, 1.0_f32, (1, 1, 17, 17), &dev).unwrap();
+        let full = math_attention_biased_impl(&q, &k, &v, scale, &query_bias, None).unwrap();
+        let chunked = math_attention_biased_impl(&q, &k, &v, scale, &query_bias, Some(4)).unwrap();
+        assert!(
+            max_abs_diff(&chunked, &full) < 1e-5,
+            "a per-query bias must be narrowed alongside the query chunk"
+        );
+    }
+
+    /// FA2 has no additive-bias entry point here, so a bias always takes the
+    /// math path — pinned as a pure predicate so the dispatch is testable
+    /// without a GPU.
+    #[test]
+    fn bias_forces_math_path() {
+        let dev = cpu();
+        let bias = Tensor::zeros((1, 1, 1, 4), DType::F32, &dev).unwrap();
+        assert!(bias_forces_math(Some(&bias)));
+        assert!(!bias_forces_math(None));
+    }
+
+    /// A `None` bias must be byte-for-byte the existing dispatch, so nothing
+    /// that does not pad text changes behaviour.
+    #[test]
+    fn attention_with_no_bias_matches_plain_attention() {
+        let (q, k, v) = rand_qkv((1, 2, 8, 16));
+        let scale = 1.0 / (16f32).sqrt();
+        let plain = attention(&q, &k, &v, scale).unwrap();
+        let biased = attention_with_bias(&q, &k, &v, scale, None).unwrap();
+        assert_eq!(max_abs_diff(&plain, &biased), 0.0);
     }
 
     /// CPU never auto-chunks: its allocator handles the score matrix and the
