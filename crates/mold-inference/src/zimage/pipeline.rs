@@ -463,8 +463,29 @@ const MAX_WHOLE_VAE_DECODE_LATENT_AXIS: usize = 120;
 /// returns a wrong tensor instead of an error, even across a device
 /// synchronization, so the only defence is to not ask it for a decode that
 /// large in the first place.
-fn requires_tiled_vae_decode(on_cpu: bool, latent_h: usize, latent_w: usize) -> bool {
-    !on_cpu && latent_h.max(latent_w) > MAX_WHOLE_VAE_DECODE_LATENT_AXIS
+///
+/// Metal only. The corruption was measured on Metal (its transient buffer
+/// pool crosses the GPU working set past latent ~121 — see the candle-side
+/// allocator issue); CUDA and CPU decode the same shapes whole and correctly,
+/// and CUDA's genuine OOMs are already covered by the reactive ladder.
+fn requires_tiled_vae_decode(on_metal: bool, latent_h: usize, latent_w: usize) -> bool {
+    on_metal && latent_h.max(latent_w) > MAX_WHOLE_VAE_DECODE_LATENT_AXIS
+}
+
+/// Latent-space overlap between adjacent proactive tiles. The value all three
+/// upstream tilers converge on (diffusers 0.25·64, ComfyUI's fallback, and
+/// sd.cpp's recomputed half-tile target at its defaults).
+const PROACTIVE_TILE_OVERLAP: usize = 16;
+
+/// Tile configuration for the proactive Metal decode: fewest tiles whose
+/// every tile fits the measured whole-decode cap, single pass.
+fn proactive_zimage_tile_config(latent_h: usize, latent_w: usize) -> crate::vae_tiling::TileConfig {
+    crate::vae_tiling::proactive_tile_config(
+        MAX_WHOLE_VAE_DECODE_LATENT_AXIS,
+        PROACTIVE_TILE_OVERLAP,
+        latent_h,
+        latent_w,
+    )
 }
 
 fn zimage_debug_enabled() -> bool {
@@ -1551,7 +1572,31 @@ impl ZImageEngine {
             .squeeze(2)?
             .to_device(&vae_device)?
             .to_dtype(vae_dtype)?;
-        let image = vae.decode(&latents)?;
+        // Same Metal whole-decode span guard as the eager path. This decode
+        // ran unguarded, so every sequential-mode render (Sequential load
+        // strategy, --offload, or any LoRA request) past latent 120 hit the
+        // silent Metal corruption the eager path was already tiling around.
+        let (_, _, latent_h, latent_w) = latents.dims4()?;
+        let image = if requires_tiled_vae_decode(vae_device.is_metal(), latent_h, latent_w) {
+            let cfg = proactive_zimage_tile_config(latent_h, latent_w);
+            tracing::info!(
+                latent_h,
+                latent_w,
+                tile_size = cfg.tile_size,
+                overlap = cfg.overlap,
+                "Z-Image latent exceeds the whole-decode span; tiling VAE decode"
+            );
+            self.base
+                .progress
+                .info("VAE decode tiled (latent exceeds whole-decode span)");
+            crate::vae_tiling::decode_tiled(
+                &latents,
+                |tile| vae.decode(tile).map_err(Into::into),
+                &cfg,
+            )?
+        } else {
+            vae.decode(&latents)?
+        };
         let image = postprocess_image(&image)?;
         let image = image.i(0)?;
 
@@ -1942,17 +1987,12 @@ impl ZImageEngine {
                 },
             )?;
             let (_, _, latent_h, latent_w) = decode_latents.dims4()?;
-            if requires_tiled_vae_decode(loaded.vae_device.is_cpu(), latent_h, latent_w) {
-                // Past the span candle's GPU decode handles whole. Tiling is
+            if requires_tiled_vae_decode(loaded.vae_device.is_metal(), latent_h, latent_w) {
+                // Past the span candle's Metal decode handles whole. Tiling is
                 // proactive rather than a reaction to an OOM because the
                 // failure is silent — a whole decode here returns a wrong
-                // tensor, not an error, so there is nothing to catch. Every
-                // other image family already routes through this helper.
-                let cfg = crate::vae_tiling::shrink_tile_for_latent(
-                    crate::vae_tiling::TileConfig::default(),
-                    latent_h,
-                    latent_w,
-                );
+                // tensor, not an error, so there is nothing to catch.
+                let cfg = proactive_zimage_tile_config(latent_h, latent_w);
                 tracing::info!(
                     latent_h,
                     latent_w,
@@ -3079,20 +3119,20 @@ mod tests {
     // ── Tiled VAE decode threshold ─────────────────────────────────────────
 
     #[test]
-    fn large_latents_are_decoded_in_tiles_on_gpu() {
+    fn large_latents_are_decoded_in_tiles_on_metal_only() {
         // Measured on an M4 Max against a CPU reference: candle's Metal decode
         // of this VAE is exact at latent 96, 104, 112 and 120, and returns
         // partial or all-zero data at 128 — silently, with no error to catch,
         // which is why the reactive OOM ladder cannot help here.
         for latent in [64usize, 96, 112, 120] {
             assert!(
-                !requires_tiled_vae_decode(false, latent, latent),
+                !requires_tiled_vae_decode(true, latent, latent),
                 "latent {latent} decodes correctly whole; tiling would only cost time"
             );
         }
         for latent in [128usize, 160, 256] {
             assert!(
-                requires_tiled_vae_decode(false, latent, latent),
+                requires_tiled_vae_decode(true, latent, latent),
                 "latent {latent} is past the measured-safe span and must be tiled"
             );
         }
@@ -3102,16 +3142,28 @@ mod tests {
     fn a_non_square_latent_is_judged_by_its_longest_axis() {
         // 1024x768 is a supported Z-Image shape and puts one axis past the
         // span while the other stays inside it.
-        assert!(requires_tiled_vae_decode(false, 96, 128));
-        assert!(requires_tiled_vae_decode(false, 128, 96));
+        assert!(requires_tiled_vae_decode(true, 96, 128));
+        assert!(requires_tiled_vae_decode(true, 128, 96));
     }
 
     #[test]
-    fn a_cpu_decode_is_never_tiled() {
-        // The CPU path has no such limit, and tiling it would only add seams
-        // and work. Tiling exists here for the GPU backends.
+    fn non_metal_decodes_are_never_proactively_tiled() {
+        // The corruption was measured on Metal only. CUDA and CPU decode
+        // whole — charging CUDA the tiled-work multiple for a Metal bug cost
+        // every 1024² render ~7× the decode work, and the reactive
+        // decode_with_oom_fallback ladder still covers genuine CUDA OOMs.
         for latent in [128usize, 256, 512] {
-            assert!(!requires_tiled_vae_decode(true, latent, latent));
+            assert!(!requires_tiled_vae_decode(false, latent, latent));
         }
+    }
+
+    #[test]
+    fn proactive_tiling_uses_the_cap_derived_single_pass_config() {
+        // The forced-tiling path must size tiles from the measured cap
+        // (fewest tiles that fit 120), not reuse the OOM-fallback default —
+        // 64/16/3 cost 27 decode calls (6.75×) where 72/16/1 costs 4 (1.27×).
+        let cfg = proactive_zimage_tile_config(128, 128);
+        assert_eq!((cfg.tile_size, cfg.overlap, cfg.offsets), (72, 16, 1));
+        assert!(cfg.tile_size <= MAX_WHOLE_VAE_DECODE_LATENT_AXIS);
     }
 }
