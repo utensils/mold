@@ -1885,10 +1885,14 @@ fn stage_directory_prefix_for_this_process() -> String {
 }
 
 /// A legacy stage directory (no embedded owner PID) is removed only past
-/// this age. Pre-PID binaries created and dropped their stages within one
-/// admission attempt — minutes — so a day-old legacy directory is
+/// this age. Every released pre-PID binary created and dropped its stage
+/// within one admission attempt — minutes — so a day-old legacy directory is
 /// conclusively a crash leftover, while a fresh one may belong to a live
-/// older server sharing the root during a rolling restart.
+/// older server sharing the root during a rolling restart. (The only build
+/// that retains a legacy-named stage for its whole lifetime is this change's
+/// own unreleased intermediate — the staged cache and PID tagging ship
+/// together in the squashed release commit, so no fielded binary can hold a
+/// legacy name past this expiry.)
 const LEGACY_STAGE_EXPIRY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Remove staged directories abandoned by dead processes.
