@@ -880,7 +880,7 @@ mod tests {
             crate::minimax_h3::REF2VA_COMFY,
         ] {
             assert!(catalog.iter().any(|entry| entry.name == model));
-            assert!(crate::require_model_activation(model, Some("minimax-h3")).is_err());
+            crate::require_model_activation(model, Some("minimax-h3")).unwrap();
         }
     }
 

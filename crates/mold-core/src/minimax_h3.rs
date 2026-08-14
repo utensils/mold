@@ -3499,7 +3499,7 @@ mod tests {
     }
 
     #[test]
-    fn request_wire_round_trip_preserves_contract_then_public_admission_stays_gated() {
+    fn request_wire_round_trip_preserves_contract_then_reviewed_model_is_admitted() {
         let mut req = request();
         req.output_format = None;
         req.normalise_output_format(Some(FAMILY));
@@ -3513,9 +3513,7 @@ mod tests {
             Mode::TextToAudioVideo
         );
 
-        let error = crate::validate_generate_request_with_family(&parsed, Some(FAMILY))
-            .expect_err("public admission must remain compliance-gated");
-        assert!(error.contains(crate::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+        crate::validate_generate_request_with_family(&parsed, Some(FAMILY)).unwrap();
     }
 
     #[test]

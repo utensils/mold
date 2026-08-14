@@ -36,6 +36,36 @@ mod tests {
         crate::test_support::env_lock()
     }
 
+    struct EnvVarGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &std::ffi::OsStr) -> Self {
+            let lock = env_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self {
+                _lock: lock,
+                name,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
     /// Parse response body as JSON and return the value.
     async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {
         let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
@@ -638,24 +668,32 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn chain_validation_surfaces_normalization_errors_without_queueing() {
-        let app = app_empty();
-        let mut request = route_chain_request();
-        request.stages[0].frames = 10;
+        let response = {
+            let models_dir = tempfile::tempdir().unwrap();
+            let _models_root = EnvVarGuard::set("MOLD_MODELS_DIR", models_dir.path().as_os_str());
+            populate_manifest_files(models_dir.path(), "ltx-2-19b-distilled:fp8");
+            let app = app_empty();
+            let mut request = route_chain_request();
+            request.stages[0].frames = 10;
 
-        let response = app
-            .oneshot(
+            app.oneshot(
                 Request::post("/api/generate/chain/validate")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&request).unwrap()))
                     .unwrap(),
             )
             .await
-            .unwrap();
+            .unwrap()
+        };
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = json_body(response).await;
         assert_eq!(body["code"], "VALIDATION_ERROR");
-        assert!(body["error"].as_str().unwrap().contains("8k+1"));
+        assert!(
+            body["error"].as_str().unwrap().contains("8k+1"),
+            "response body: {body}"
+        );
     }
 
     fn seed_chain_job(
@@ -1230,47 +1268,56 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn chain_validation_rejects_19b_camera_preset_on_ltx23_without_downloading() {
-        let app = app_empty();
-        let response = app
-            .oneshot(
-                Request::post("/api/generate/chain/validate")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "model": "ltx-2.3-22b-distilled:fp8",
-                            "stages": [
-                                {
-                                    "prompt": "orbit the subject",
-                                    "frames": 25,
-                                    "loras": [
-                                        {
-                                            "path": "camera-control:dolly-left",
-                                            "scale": 1.0,
-                                            "name": "Dolly left"
-                                        }
-                                    ]
-                                }
-                            ],
-                            "motion_tail_frames": 17,
-                            "width": 704,
-                            "height": 416,
-                            "fps": 24,
-                            "steps": 8,
-                            "guidance": 3.0,
-                            "output_format": "mp4"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = {
+            let models_dir = tempfile::tempdir().unwrap();
+            let _models_root = EnvVarGuard::set("MOLD_MODELS_DIR", models_dir.path().as_os_str());
+            populate_manifest_files(models_dir.path(), "ltx-2.3-22b-distilled:fp8");
+            app_empty()
+                .oneshot(
+                    Request::post("/api/generate/chain/validate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "model": "ltx-2.3-22b-distilled:fp8",
+                                "stages": [
+                                    {
+                                        "prompt": "orbit the subject",
+                                        "frames": 25,
+                                        "loras": [
+                                            {
+                                                "path": "camera-control:dolly-left",
+                                                "scale": 1.0,
+                                                "name": "Dolly left"
+                                            }
+                                        ]
+                                    }
+                                ],
+                                "motion_tail_frames": 17,
+                                "width": 704,
+                                "height": 416,
+                                "fps": 24,
+                                "steps": 8,
+                                "guidance": 3.0,
+                                "output_format": "mp4"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        };
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(json_body(response).await["error"]
-            .as_str()
-            .unwrap()
-            .contains("published for LTX-2 19B only"));
+        let body = json_body(response).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("published for LTX-2 19B only"),
+            "response body: {body}"
+        );
     }
 
     #[tokio::test]
@@ -6159,7 +6206,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reference_upload_session_requires_explicit_auth_then_451s_before_staging() {
+    async fn reviewed_reference_upload_session_requires_explicit_auth_before_staging() {
         let state = AppState::for_tests();
         let app = app_with_state(state.clone());
         let body = serde_json::json!({
@@ -6209,14 +6256,16 @@ mod tests {
             .insert(crate::auth::ApiKeyAuthenticated {
                 identity: "test-key".to_string(),
             });
-        let blocked = app.oneshot(request).await.unwrap();
-        assert_eq!(blocked.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
-        let blocked = json_body(blocked).await;
-        assert_eq!(
-            blocked["code"],
-            mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
-        );
-        assert!(!state.reference_uploads.staging_exists());
+        let created = app.oneshot(request).await.unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let created = json_body(created).await;
+        assert_eq!(created["uploads"].as_array().unwrap().len(), 1);
+        assert!(state.reference_uploads.staging_exists());
+        state
+            .reference_uploads
+            .cancel_session("test-key", created["session_handle"].as_str().unwrap())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -2491,7 +2491,7 @@ mod tests {
     fn reviewed_h3_manifest_is_accepted_for_upstream_acquisition() {
         let manifest = crate::manifest::find_manifest(crate::minimax_h3::FL2VA_COMFY).unwrap();
         require_manifest_acquisition(manifest).unwrap();
-        assert!(crate::require_model_activation(&manifest.name, Some(&manifest.family)).is_err());
+        crate::require_model_activation(&manifest.name, Some(&manifest.family)).unwrap();
     }
 
     #[test]
