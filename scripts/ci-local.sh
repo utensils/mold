@@ -277,7 +277,7 @@ if wants contracts; then
                   docker-web-context desktop-candle-lock-sync \
                   desktop-candle-nix-source-hash cuda-distribution-contract \
                   install-cuda-arch cuda-qualification-contract \
-                  minimax-h3-attention-release-contract \
+                  minimax-h3-attention-release-contract bench-qwen-parse \
                   regression-matrix-aggregate-failures regression-matrix-concurrency \
                   regression-matrix-family-sizing regression-matrix-source-image \
                   regression-matrix-transient-retry wan-regression-matrix; do
