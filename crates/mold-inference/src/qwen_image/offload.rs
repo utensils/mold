@@ -502,6 +502,30 @@ pub(crate) struct OffloadedQwenImageTransformer {
     blocks: Vec<BlockResidency>,
     gpu_device: Device,
     gpu_resident_count: usize,
+    /// Whether the streamed-block loop uploads block `i + 1` before waiting on
+    /// block `i`. See [`should_double_buffer_streamed_blocks`].
+    double_buffer_streamed_blocks: bool,
+}
+
+/// Whether the streamed-block loop may hold a second block on the GPU.
+///
+/// Double buffering costs exactly one extra streamed block resident at a time,
+/// and offload is the low-VRAM path — trading an OOM for an overlap is a bad
+/// trade — so it is only taken when the measurement after placement shows room
+/// for that block *on top of* the activation budget the residency plan already
+/// reserved. Fewer than two streamed blocks has nothing to overlap, and a
+/// failed VRAM probe (`0`) is treated as "no room", not as "unlimited".
+pub(crate) fn should_double_buffer_streamed_blocks(
+    requested: bool,
+    streamed_block_count: usize,
+    block_size_bytes: u64,
+    activation_budget: u64,
+    free_vram_bytes: u64,
+) -> bool {
+    if !requested || streamed_block_count < 2 || free_vram_bytes == 0 {
+        return false;
+    }
+    free_vram_bytes >= block_size_bytes.saturating_add(activation_budget)
 }
 
 impl OffloadedQwenImageTransformer {
@@ -609,6 +633,29 @@ impl OffloadedQwenImageTransformer {
         }
         let gpu_count = plan.resident_count();
 
+        // Measured after every block is placed, so it is the room that is
+        // actually left for a second streamed block.
+        gpu_device.synchronize()?;
+        let free_after_placement = crate::device::usable_free_vram_bytes(gpu_ordinal).unwrap_or(0);
+        let double_buffer_streamed_blocks = should_double_buffer_streamed_blocks(
+            crate::flux::pinned::prefetch_enabled_from_env(),
+            plan.streamed_count(),
+            block_size,
+            activation_budget,
+            free_after_placement,
+        );
+        if plan.streamed_count() > 0 {
+            progress.info(&format!(
+                "Qwen-Image streamed-block upload overlap: {} ({:.2} GB free after placement)",
+                if double_buffer_streamed_blocks {
+                    "on"
+                } else {
+                    "off"
+                },
+                free_after_placement as f64 / 1_000_000_000.0,
+            ));
+        }
+
         Ok(Self {
             time_embed,
             img_in,
@@ -620,6 +667,7 @@ impl OffloadedQwenImageTransformer {
             blocks,
             gpu_device: gpu_device.clone(),
             gpu_resident_count: gpu_count,
+            double_buffer_streamed_blocks,
         })
     }
 
@@ -724,6 +772,25 @@ impl OffloadedQwenImageTransformer {
             "denoising step"
         );
         //    Block returns (text, image) — matching ComfyUI convention
+        //
+        //    Streamed blocks used to run strictly serially: upload, forward,
+        //    synchronize, drop. The synchronize is what serialized them — the
+        //    host waited for the whole block's kernels before it began the
+        //    next block's ~666 MB upload, so the transfer was fully exposed.
+        //    The upload for block `i + 1` is now issued *before* that wait, so
+        //    the host-side half of it — the pageable→pinned staging copies
+        //    candle's `to_device` makes per tensor, and the driver calls that
+        //    enqueue them — runs while block `i`'s kernels are still in
+        //    flight.
+        //
+        //    Residual exposure, stated honestly: candle routes every
+        //    `Tensor::to_device` through the device's one stream (there is no
+        //    stream-aware tensor copy in its public API — `flux/offload.rs`
+        //    calls its second-stream scaffolding "scaffold-only" for exactly
+        //    this reason), so the DMA itself is still enqueued behind block
+        //    `i`'s kernels and is not overlapped. What this recovers is the
+        //    host-side staging, not the wire time.
+        let mut prefetched: Option<OffloadedQwenBlock> = None;
         for (i, residency) in self.blocks.iter().enumerate() {
             match residency {
                 BlockResidency::Gpu(block) => {
@@ -742,7 +809,10 @@ impl OffloadedQwenImageTransformer {
                 }
                 BlockResidency::Cpu(block) => {
                     // Stream CPU → GPU, execute, drop GPU copy
-                    let gpu_block = block.to_device(device)?;
+                    let gpu_block = match prefetched.take() {
+                        Some(prefetched) => prefetched,
+                        None => block.to_device(device)?,
+                    };
                     (txt, img) = gpu_block.forward(
                         &img,
                         &txt,
@@ -754,12 +824,22 @@ impl OffloadedQwenImageTransformer {
                         &txt_sin,
                         None,
                     )?;
+                    // Only ever one block ahead, and only when the next block
+                    // is itself streamed — a GPU-resident neighbour needs no
+                    // upload, and prefetching past it would hold a block whose
+                    // turn is two iterations away.
+                    if self.double_buffer_streamed_blocks {
+                        if let Some(BlockResidency::Cpu(next)) = self.blocks.get(i + 1) {
+                            prefetched = Some(next.to_device(device)?);
+                        }
+                    }
                     device.synchronize()?;
                     drop(gpu_block);
                 }
             }
             tracing::trace!("qwen block {i} done");
         }
+        drop(prefetched);
 
         // 6. Output layer (on GPU)
         let img_out = self.output_layer.forward(&img, &temb)?;
@@ -979,5 +1059,197 @@ mod tests {
         let layer = linear(4, 3, vb).unwrap();
         assert_eq!(layer.weight().dtype(), DType::F32);
         assert_eq!(max_abs_diff(layer.weight(), &dense), 0.0);
+    }
+
+    #[test]
+    fn streamed_block_double_buffering_needs_room_for_a_second_block() {
+        let block = 666_000_000u64;
+        let activations = 2_000_000_000u64;
+
+        // Room for the extra block on top of the activation budget.
+        assert!(should_double_buffer_streamed_blocks(
+            true,
+            30,
+            block,
+            activations,
+            3_000_000_000,
+        ));
+        // Enough for the activations but not for a second block.
+        assert!(!should_double_buffer_streamed_blocks(
+            true,
+            30,
+            block,
+            activations,
+            2_100_000_000,
+        ));
+        // Opted out.
+        assert!(!should_double_buffer_streamed_blocks(
+            false,
+            30,
+            block,
+            activations,
+            32_000_000_000,
+        ));
+        // Nothing to overlap.
+        assert!(!should_double_buffer_streamed_blocks(
+            true,
+            1,
+            block,
+            activations,
+            32_000_000_000,
+        ));
+        // A failed VRAM probe is "no room", never "unlimited".
+        assert!(!should_double_buffer_streamed_blocks(
+            true,
+            30,
+            block,
+            activations,
+            0
+        ));
+    }
+
+    /// Deterministic stand-in for a checkpoint: every requested `(name, shape)`
+    /// yields the same values on every load, so two forwards over the same
+    /// weights are comparable bit-for-bit.
+    struct DeterministicBackend;
+
+    fn deterministic_tensor(
+        shape: &Shape,
+        name: &str,
+        dtype: DType,
+        dev: &Device,
+    ) -> candle_core::Result<Tensor> {
+        let seed = name
+            .bytes()
+            .fold(1u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+        let values: Vec<f32> = (0..shape.elem_count())
+            .map(|i| {
+                let h = seed
+                    .wrapping_add(i as u64)
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .rotate_left(29);
+                ((h % 2_000) as f32 / 1_000.0) - 1.0
+            })
+            .collect();
+        Tensor::from_vec(values, shape.clone(), dev)?.to_dtype(dtype)
+    }
+
+    impl candle_nn::var_builder::SimpleBackend for DeterministicBackend {
+        fn get(
+            &self,
+            shape: Shape,
+            name: &str,
+            _: candle_nn::Init,
+            dtype: DType,
+            dev: &Device,
+        ) -> candle_core::Result<Tensor> {
+            deterministic_tensor(&shape, name, dtype, dev)
+        }
+
+        fn get_unchecked(&self, name: &str, _: DType, _: &Device) -> candle_core::Result<Tensor> {
+            // Nothing in this fixture is FP8, so `scale_weight` must be absent.
+            Err(candle_core::Error::CannotFindTensor {
+                path: name.to_string(),
+            }
+            .bt())
+        }
+
+        fn contains_tensor(&self, _: &str) -> bool {
+            true
+        }
+    }
+
+    fn tiny_offload_config() -> QwenImageConfig {
+        QwenImageConfig {
+            num_attention_heads: 2,
+            attention_head_dim: 8,
+            inner_dim: 16,
+            joint_attention_dim: 16,
+            num_layers: 3,
+            in_channels: 16,
+            out_channels: 4,
+            patch_size: 2,
+            axes_dims_rope: vec![4, 2, 2],
+            norm_eps: 1e-6,
+            zero_cond_t: false,
+        }
+    }
+
+    /// Prefetching changes *when* a block is uploaded, never which block runs
+    /// or what it runs on. With every block streamed (CPU device, zero
+    /// reported VRAM), the forward must be bit-identical either way.
+    #[test]
+    fn streamed_block_prefetch_does_not_change_the_output() {
+        let dev = Device::Cpu;
+        let cfg = tiny_offload_config();
+        let vb =
+            || VarBuilder::from_backend(Box::new(DeterministicBackend), DType::F32, dev.clone());
+
+        let mut transformer = OffloadedQwenImageTransformer::load(
+            vb(),
+            vb(),
+            &cfg,
+            &dev,
+            0,
+            0,
+            &ProgressReporter::default(),
+        )
+        .unwrap();
+        assert!(
+            transformer
+                .blocks
+                .iter()
+                .all(|b| matches!(b, BlockResidency::Cpu(_))),
+            "the fixture must stream every block for the prefetch path to run"
+        );
+
+        let x = deterministic_tensor(
+            &Shape::from((1, cfg.out_channels, 4, 4)),
+            "latents",
+            DType::F32,
+            &dev,
+        )
+        .unwrap();
+        let t = Tensor::new(&[0.5f32], &dev).unwrap();
+        let cond = deterministic_tensor(
+            &Shape::from((1, 3, cfg.joint_attention_dim)),
+            "cond",
+            DType::F32,
+            &dev,
+        )
+        .unwrap();
+
+        transformer.double_buffer_streamed_blocks = false;
+        let serial = transformer.forward(&x, &t, &cond, None).unwrap();
+        transformer.double_buffer_streamed_blocks = true;
+        let prefetched = transformer.forward(&x, &t, &cond, None).unwrap();
+
+        // A degenerate (all-zero or non-finite) forward would compare equal
+        // for the wrong reason.
+        let spread = serial
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
+            - serial
+                .flatten_all()
+                .unwrap()
+                .min(0)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+        assert!(
+            spread.is_finite() && spread > 0.0,
+            "the fixture forward must produce real output, got spread {spread}"
+        );
+
+        assert_eq!(serial.dims(), prefetched.dims());
+        assert_eq!(
+            max_abs_diff(&serial, &prefetched),
+            0.0,
+            "uploading a block earlier must not change a single output value"
+        );
     }
 }
