@@ -13,8 +13,10 @@ the family natively in Rust.
 > **Note**: Video output defaults to MP4. Also supports GIF, WebP, and APNG
 > via `--format`. Frame count must be 4n+1 (77, 81, 121, ...) due to the
 > VAE's 4x temporal compression. Width and height must be multiples of 16 —
-> except `wan22-ti2v-5b`, whose 2.2 VAE requires multiples of 32. Wan
-> generation currently targets CUDA; CPU runs are correctness-only.
+> except `wan22-ti2v-5b`, whose 2.2 VAE requires multiples of 32. Wan is
+> performance-qualified on CUDA; Apple Metal and CPU runs are
+> correctness-only. fp8-scaled checkpoints stay CUDA-only — Metal has no
+> fp8 widening kernel; use the bf16 or GGUF tier there.
 
 ## Variants
 

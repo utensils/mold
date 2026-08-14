@@ -6,6 +6,7 @@
 //! <https://github.com/Wan-Video/Wan2.1> and <https://github.com/Wan-Video/Wan2.2>
 //! (cloned under gitignored `tmp/`).
 
+pub(crate) mod backend;
 pub mod block_offload;
 pub(crate) mod conditioning;
 pub(crate) mod experts;

@@ -1303,7 +1303,7 @@ impl WanTransformer {
         let scaled_fp8 = fp8::probe_scaled_fp8(paths)?;
         if let Some(checkpoint) = &scaled_fp8 {
             let first = paths.first().map(PathBuf::as_path).unwrap_or(Path::new(""));
-            checkpoint.ensure_supported(first)?;
+            checkpoint.ensure_supported(first, device)?;
             if !loras.is_empty() {
                 bail!(
                     "{} is fp8-scaled, and mold merges LoRAs into bf16 and GGUF checkpoints \

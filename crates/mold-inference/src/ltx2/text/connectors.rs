@@ -168,7 +168,7 @@ pub fn norm_and_concat_per_token_rms(
     // Rank-4 `[batch, seq, hidden, layers]` reduced over a non-final axis:
     // candle's Metal reduction is wrong there, which rescales the prompt
     // embedding and makes the render ignore the prompt. See `metal_reduce`.
-    let variance = crate::ltx2::metal_reduce::mean_keepdim_stable(&encoded.sqr()?, 2)?;
+    let variance = crate::metal_reduce::mean_keepdim_stable(&encoded.sqr()?, 2)?;
     let normed = encoded.broadcast_div(&(variance + 1e-6)?.sqrt()?)?;
     let (batch, seq, hidden, layers) = normed.dims4()?;
     let normed = normed.reshape((batch, seq, hidden * layers))?;

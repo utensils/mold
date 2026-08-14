@@ -32,7 +32,7 @@ use mold_core::{
     GenerateRequest, GenerateResponse, ImageData, ModelPaths, OutputFormat, VideoData,
 };
 
-use crate::engine::{gpu_dtype, rand_seed, seeded_randn, LoadStrategy};
+use crate::engine::{rand_seed, seeded_randn, LoadStrategy};
 use crate::engine_base::EngineBase;
 use crate::ltx_video::video_enc;
 use crate::progress::{ProgressCallback, ProgressEvent, ProgressPhase};
@@ -1659,7 +1659,7 @@ impl WanEngine {
         let needs_cfg = needs_cfg_pass(guidance_plan.max());
 
         let device = crate::device::create_device(self.base.gpu_ordinal, progress)?;
-        let dtype = gpu_dtype(&device);
+        let dtype = super::backend::compute_dtype(&device);
 
         let guidance_label = match guidance_plan {
             WanGuidancePlan::Uniform(scale) => format!("{scale:.1}"),

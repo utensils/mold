@@ -211,7 +211,13 @@ fn math_attention_chunk_size(q: &Tensor) -> Option<usize> {
         AttentionChunkPolicy::Auto => {}
     }
 
-    if matches!(q.device(), Device::Cuda(_)) && q_len > 1024 {
+    // Metal chunks for the same reason CUDA does, but harder: there is no
+    // flash path there, so an unchunked math attention materializes the full
+    // `[b·h, N, N]` score matrix — 9.5 GB at Wan 1.3B's smallest production
+    // shape, 71 GB at TI2V-5B 720p — as a single buffer past every Mac's
+    // `maxBufferLength`. CPU stays unchunked: its allocator handles the
+    // shape, and the chunk loop only adds overhead there.
+    if matches!(q.device(), Device::Cuda(_) | Device::Metal(_)) && q_len > 1024 {
         Some(512)
     } else {
         None
@@ -392,6 +398,28 @@ mod tests {
             max_abs_diff(&chunked, &full) < 1e-5,
             "chunked math attention diverged from full math"
         );
+    }
+
+    /// CPU never auto-chunks: its allocator handles the score matrix and the
+    /// chunk loop only adds overhead there.
+    #[test]
+    fn cpu_math_attention_is_not_auto_chunked() {
+        let q = Tensor::zeros((1, 1, 2048, 8), DType::F32, &cpu()).unwrap();
+        assert_eq!(math_attention_chunk_size(&q), None);
+    }
+
+    /// Metal must auto-chunk above the same threshold CUDA does: with no
+    /// flash path, an unchunked math attention materializes the full score
+    /// matrix as one buffer, which exceeds `maxBufferLength` at every real
+    /// Wan shape.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_math_attention_auto_chunks_long_sequences() {
+        let metal = Device::new_metal(0).unwrap();
+        let long = Tensor::zeros((1, 1025, 8), DType::F32, &metal).unwrap();
+        assert_eq!(math_attention_chunk_size(&long), Some(512));
+        let short = Tensor::zeros((1, 1024, 8), DType::F32, &metal).unwrap();
+        assert_eq!(math_attention_chunk_size(&short), None);
     }
 
     #[test]

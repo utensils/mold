@@ -175,8 +175,9 @@ bounds, profile hashes, and pinned upstream provenance.
 All image families and `LTX Video` run on CUDA, Apple Metal, and CPU. LTX-2 /
 LTX-2.3 is performance-qualified on CUDA; its CPU and Apple Metal paths are
 correctness-oriented and can be extremely slow. Metal checkpoint-backed UAT
-remains pending. Wan is CUDA-only for real generation; its CPU path is
-correctness-oriented and Metal is unsupported. MiniMax H3 compact checkpoints
+remains pending. Wan is performance-qualified on CUDA; its CPU and Apple
+Metal paths are correctness-oriented (fp8-scaled Wan checkpoints stay
+CUDA-only — Metal has no fp8 widening kernel). MiniMax H3 compact checkpoints
 are downloadable, but only the exact reviewed FL2VA route can execute on an
 authenticated CUDA server; Ref2VA execution, Metal, and CPU are unsupported.
 :::
