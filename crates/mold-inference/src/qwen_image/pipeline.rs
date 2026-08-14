@@ -2141,6 +2141,13 @@ impl QwenImageEngine {
                     Some(retained)
                 }
                 stale => {
+                    if stale.is_some() {
+                        // Visible on purpose: a silent rejection here is a
+                        // 16 GB disk re-read that looks like a cold load.
+                        tracing::warn!(
+                            "retained Qwen2.5 encoder rejected as stale (paths/device/dtype changed); reloading from disk"
+                        );
+                    }
                     // Explicit: a `_` arm would keep the stale encoder's
                     // several GB alive until the end of the match, i.e.
                     // across the fresh load.

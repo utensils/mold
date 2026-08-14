@@ -1139,7 +1139,16 @@ impl Qwen2TextEncoder {
     /// of the key because they are a function of the family and of these same
     /// resolved paths. Mirrors `wan::text::umt5`'s retention rule.
     pub fn matches(&self, paths: &[PathBuf], device: &Device, dtype: DType) -> bool {
-        self.encoder_paths == paths && self.device.same_device(device) && self.dtype == dtype
+        // Compare device LOCATIONS, not instances: `same_device` on CUDA
+        // compares candle's unique per-`CudaDevice` id, and the server
+        // resolves a fresh `Device::new_cuda(ordinal)` for every planned
+        // request — so an instance comparison judged every parked encoder
+        // stale and silently re-read 16 GB from disk on each new prompt.
+        // Two handles to one physical ordinal are the same device for
+        // weight-residency purposes.
+        self.encoder_paths == paths
+            && self.device.location() == device.location()
+            && self.dtype == dtype
     }
 
     /// Whether this encoder is currently parked, on either dtype path.
