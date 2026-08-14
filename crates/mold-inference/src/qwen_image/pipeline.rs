@@ -26,7 +26,7 @@ use std::time::Instant;
 use tokenizers::Tokenizer;
 
 use super::quantized_transformer::QuantizedQwenImageTransformer2DModel;
-use super::sampling::{image_seq_len, QwenImageScheduler};
+use super::sampling::{image_seq_len, shift_policy_for_model, QwenImageScheduler};
 use super::transformer::{QwenImageConfig, QwenImageTransformer2DModel};
 use super::vae::QwenImageVae;
 use crate::cache::{
@@ -1977,6 +1977,8 @@ impl QwenImageEngine {
     fn generate_sequential(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         let text_tokenizer_path = self.validate_paths()?;
         let transformer_cfg = self.transformer_config();
+        // The checkpoint's own packaged scheduler config, not the family's.
+        let shift_policy = shift_policy_for_model(&self.base.model_name);
 
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
@@ -2293,6 +2295,7 @@ impl QwenImageEngine {
                 req.steps as usize,
                 image_seq_len(latent_h, latent_w, transformer_cfg.patch_size),
                 req.strength,
+                shift_policy,
             )
             .0
             .initial_sigma();
@@ -2324,9 +2327,14 @@ impl QwenImageEngine {
 
         let image_seq_len = image_seq_len(latent_h, latent_w, transformer_cfg.patch_size);
         let (mut scheduler, num_steps) = if is_img2img {
-            QwenImageScheduler::new_img2img(req.steps as usize, image_seq_len, req.strength)
+            QwenImageScheduler::new_img2img(
+                req.steps as usize,
+                image_seq_len,
+                req.strength,
+                shift_policy,
+            )
         } else {
-            let sched = QwenImageScheduler::new(req.steps as usize, image_seq_len);
+            let sched = QwenImageScheduler::new(req.steps as usize, image_seq_len, shift_policy);
             let n = sched.num_steps();
             (sched, n)
         };
@@ -2605,6 +2613,8 @@ impl QwenImageEngine {
     fn generate_edit_loaded(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
         let progress = &self.base.progress;
         let start = Instant::now();
+        // The checkpoint's own packaged scheduler config, not the family's.
+        let shift_policy = shift_policy_for_model(&self.base.model_name);
 
         let loaded_ref = self
             .base
@@ -2778,8 +2788,11 @@ impl QwenImageEngine {
             &loaded.device,
             loaded.dtype,
         )?;
-        let mut scheduler =
-            QwenImageScheduler::new(req.steps as usize, (height / 16) * (width / 16));
+        let mut scheduler = QwenImageScheduler::new(
+            req.steps as usize,
+            (height / 16) * (width / 16),
+            shift_policy,
+        );
         let num_steps = scheduler.num_steps();
         let mut latents = Self::pack_latents_4d(&(noise * scheduler.initial_sigma())?)?;
         let output_seq_len = latents.dim(1)?;
@@ -3010,6 +3023,10 @@ impl QwenImageEngine {
             self.base.loaded = Some(loaded_mut);
         }
 
+        // The checkpoint's own packaged scheduler config, not the family's.
+        // Read before `loaded` takes the mutable borrow of `self.base`.
+        let shift_policy = shift_policy_for_model(&self.base.model_name);
+
         let loaded = self
             .base
             .loaded
@@ -3206,6 +3223,7 @@ impl QwenImageEngine {
                     req.steps as usize,
                     image_seq_len(latent_h, latent_w, loaded.transformer_cfg.patch_size),
                     req.strength,
+                    shift_policy,
                 )
                 .0
                 .initial_sigma();
@@ -3229,9 +3247,14 @@ impl QwenImageEngine {
         // 4. Initialize scheduler
         let image_seq_len = image_seq_len(latent_h, latent_w, loaded.transformer_cfg.patch_size);
         let (mut scheduler, num_steps) = if is_img2img {
-            QwenImageScheduler::new_img2img(req.steps as usize, image_seq_len, req.strength)
+            QwenImageScheduler::new_img2img(
+                req.steps as usize,
+                image_seq_len,
+                req.strength,
+                shift_policy,
+            )
         } else {
-            let sched = QwenImageScheduler::new(req.steps as usize, image_seq_len);
+            let sched = QwenImageScheduler::new(req.steps as usize, image_seq_len, shift_policy);
             let n = sched.num_steps();
             (sched, n)
         };
