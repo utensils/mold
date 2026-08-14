@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Run the gates `main` has to pass, locally and hermetically.
 #
-# PR CI is path-gated: a green PR does not mean a green `main`, because the
-# full test suite, the frontend jobs, the docs build and the contract scripts
-# only run once a change lands. This runs those same commands here, so a branch
-# can be checked before it merges rather than after.
+# PR CI is path-gated and now runs every deterministic check for the changed
+# surfaces before merge. This script provides the same suites locally, plus an
+# opt-in GPU/Nix loop for machine-dependent checks.
 #
 # The other half of the job is the environment. This machine's own
 # `~/.config/mold/config.toml` and its direnv `MOLD_*` exports leak into
@@ -22,7 +21,7 @@
 set -uo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-cd "$repo_root"
+cd "$repo_root" || exit 1
 
 keep_going=0
 list_only=0
@@ -274,7 +273,7 @@ if wants contracts; then
   # The protected release contracts main runs when release-classified files
   # change. They are cheap, so run them every time rather than reimplementing
   # the workflow's path classification here and getting it subtly wrong.
-  for contract in release-sync-pr crates-publish-contract ci-coverage-disk-guard \
+  for contract in release-sync-pr crates-publish-contract \
                   docker-web-context desktop-candle-lock-sync \
                   desktop-candle-nix-source-hash cuda-distribution-contract \
                   install-cuda-arch cuda-qualification-contract \
@@ -394,7 +393,7 @@ for line in "${results[@]}"; do
 done
 
 if [ "$failed" -gt 0 ]; then
-  printf '\n\033[31m%d step(s) failed\033[0m'"${skipped:+, $skipped skipped}"'\n' "$failed"
+  printf '\n\033[31m%d step(s) failed\033[0m%s\n' "$failed" "${skipped:+, $skipped skipped}"
   exit 1
 fi
-printf '\n\033[32mall steps passed\033[0m'"${skipped:+ ($skipped skipped)}"'\n'
+printf '\n\033[32mall steps passed\033[0m%s\n' "${skipped:+ ($skipped skipped)}"
