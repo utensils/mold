@@ -12,6 +12,13 @@ per phase. The default phases are:
   2. server model load request
   3. warm server streaming request
 
+This is the request-path harness: one small fixed size, three transports.
+scripts/bench-qwen.sh is the engine harness — the fixed resolution and
+quantization matrix, plus the Qwen-Image performance milestone's exit gates.
+Both are supported and their NDJSON schemas are deliberately separate; reach
+for this one to compare local/server/warm transports, and for bench-qwen.sh to
+judge a change against the milestone.
+
 Options:
   --mold-bin PATH     mold binary to use for local runs. Defaults to ./target/release/mold, then mold
   --host URL          Server URL. Defaults to $MOLD_HOST or http://localhost:7680

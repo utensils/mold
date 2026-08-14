@@ -187,6 +187,8 @@ jobs:
               - 'scripts/tests/install-cuda-arch.sh'
               - 'scripts/tests/cuda-qualification-contract.sh'
               - 'scripts/tests/minimax-h3-attention-release-contract.sh'
+              - 'scripts/bench-qwen.sh'
+              - 'scripts/tests/bench-qwen-parse.sh'
               - 'scripts/regression-matrix.sh'
               - 'scripts/tests/regression-matrix-aggregate-failures.sh'
               - 'scripts/tests/regression-matrix-concurrency.sh'
@@ -392,6 +394,7 @@ jobs:
           bash scripts/tests/install-cuda-arch.sh
           bash scripts/tests/cuda-qualification-contract.sh
           bash scripts/tests/minimax-h3-attention-release-contract.sh
+          bash scripts/tests/bench-qwen-parse.sh
           bash scripts/tests/regression-matrix-aggregate-failures.sh
           bash scripts/tests/regression-matrix-concurrency.sh
           bash scripts/tests/regression-matrix-family-sizing.sh
