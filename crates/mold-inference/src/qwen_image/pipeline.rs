@@ -1205,6 +1205,18 @@ impl QwenImageEngine {
         Ok(text_tokenizer_path.clone())
     }
 
+    /// Non-weight VRAM the quantized CUDA denoise needs on top of the resident
+    /// transformer, scaled from a measurement at the native 1328² shape.
+    ///
+    /// It is deliberately pixel-proportional rather than weight-proportional:
+    /// since the linears run through candle's MMQ kernels, the dominant
+    /// transient is no longer a dequantized weight but the F32 copy
+    /// `fast_mmq::try_fwd` makes of the *activation* before quantizing it to
+    /// Q8_1 (`tokens x in_features x 4` — every image-stream linear takes that
+    /// path, since the BF16-native MMVQ kernel caps at 8 rows). That is the
+    /// same axis this function already scales on, so the shape of the estimate
+    /// still holds; the constant itself is empirical and only a measurement on
+    /// hardware should move it.
     fn quantized_cuda_cfg_headroom(width: usize, height: usize) -> u64 {
         let native_pixels = (QWEN_NATIVE_WIDTH * QWEN_NATIVE_HEIGHT) as f64;
         let pixels = (width.max(1) * height.max(1)) as f64;

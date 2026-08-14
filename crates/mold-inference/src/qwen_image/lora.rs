@@ -541,12 +541,18 @@ pub(crate) fn wrap_backend_with_lora(
 /// QTensor")`. Every patched layer therefore has to land on the same device as
 /// the rest of the checkpoint; on the dequant arm it additionally removes a
 /// per-forward CPU dequantization plus host-to-device copy.
+///
+/// Routed through `mold_candle::quantized::quantize_onto` — the same helper
+/// FLUX, SD3, Z-Image and Flux.2 use for this exact merge step — which
+/// quantizes on the CPU it already has the source on and transfers the compact
+/// bytes, rather than allocating a full-sized destination on the target device
+/// first.
 fn requantize_merged_tensor(
     merged: &Tensor,
     dtype: candle_core::quantized::GgmlDType,
     device: &Device,
 ) -> Result<candle_core::quantized::QTensor> {
-    Ok(candle_core::quantized::QTensor::quantize_onto(
+    Ok(mold_candle::quantized::quantize_onto(
         merged, dtype, device,
     )?)
 }
