@@ -90,10 +90,12 @@ mold run qwen-image-2512:q8 "a snowy mountain cabin at twilight" \
   --steps 8 --guidance 1.0
 ```
 
-Set `--steps` to the adapter's step count and `--guidance 1.0` — a distilled
-adapter left at the model's default guidance does twice the work and renders
-worse. See [Qwen-Image](/models/qwen-image#lightning-loras-on-a-checkpoint-you-already-have)
-for the exact adapter files and which checkpoint line each belongs to.
+Set `--steps` to the adapter's step count and `--guidance 1.0` — mold turns on
+classifier-free guidance above `1.0`, which costs a second forward pass per step
+that a CFG-free distilled adapter was not trained for. See
+[Qwen-Image](/models/qwen-image#lightning-loras-on-a-checkpoint-you-already-have)
+for the exact adapter files, which checkpoint line each belongs to, and the
+caveat that these recipes come from upstream rather than from a mold test run.
 
 ## Browsing & Installing LoRAs
 

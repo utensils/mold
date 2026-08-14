@@ -148,11 +148,14 @@ mold run qwen-image-2512:q8 "a snowy mountain cabin at twilight" \
 **Qwen-Image Lightning adapters** (user-supplied files, no manifest entry — the
 pre-merged route is `qwen-image-lightning:fp8` / `:fp8-8step` and
 `qwen-image-edit-lightning:fp8`):
-`ModelTC/Qwen-Image-Lightning` ships
+`lightx2v/Qwen-Image-Lightning` ships
 `Qwen-Image-Lightning-{4,8}steps-V2.0-bf16.safetensors` for the `qwen-image:*`
 line, and `lightx2v/Qwen-Image-2512-Lightning` ships
 `Qwen-Image-2512-Lightning-{4,8}steps-V1.0-bf16.safetensors` for
-`qwen-image-2512:*`. Match the adapter's line to the checkpoint's.
+`qwen-image-2512:*`. Match the adapter's line to the checkpoint's. ModelTC
+authors the distill; `lightx2v` is the Hugging Face org that hosts the weights,
+so the HF path is always `lightx2v/...`. These step/guidance recipes are
+upstream's — no on-disk Qwen-Image adapter is in mold's test suite yet.
 
 **Repeated stacks reuse the merge:** FLUX and Qwen-Image fingerprint the active
 adapter set, its order, and its scales; a still-resident transformer built with

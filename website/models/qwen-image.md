@@ -136,8 +136,8 @@ files rather than checkpoints.
 
 | Adapter                                                                                                                                                      | Base line           | Steps | Guidance |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------- | ----- | -------- |
-| [`ModelTC/Qwen-Image-Lightning`](https://huggingface.co/ModelTC/Qwen-Image-Lightning) → `Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors`                  | `qwen-image:*`      | 4     | 1.0      |
-| [`ModelTC/Qwen-Image-Lightning`](https://huggingface.co/ModelTC/Qwen-Image-Lightning) → `Qwen-Image-Lightning-8steps-V2.0-bf16.safetensors`                  | `qwen-image:*`      | 8     | 1.0      |
+| [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) → `Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors`                | `qwen-image:*`      | 4     | 1.0      |
+| [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) → `Qwen-Image-Lightning-8steps-V2.0-bf16.safetensors`                | `qwen-image:*`      | 8     | 1.0      |
 | [`lightx2v/Qwen-Image-2512-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-2512-Lightning) → `Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors` | `qwen-image-2512:*` | 4     | 1.0      |
 | [`lightx2v/Qwen-Image-2512-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-2512-Lightning) → `Qwen-Image-2512-Lightning-8steps-V1.0-bf16.safetensors` | `qwen-image-2512:*` | 8     | 1.0      |
 
@@ -153,10 +153,20 @@ mold run qwen-image:q8 "a hot air balloon over a misty valley" \
   --steps 4 --guidance 1.0
 ```
 
-Match the adapter's line to the checkpoint's — a 2512 adapter belongs on
-`qwen-image-2512:*`, the base adapter on `qwen-image:*`. Guidance `1.0` is not
-optional: these adapters are distilled to run CFG-free, and leaving guidance
-above `1.0` both doubles the work and degrades the render.
+The adapters are authored by [ModelTC](https://github.com/ModelTC/Qwen-Image-Lightning)
+and published on Hugging Face under `lightx2v`. Match the adapter's line to the
+checkpoint's — a 2512 adapter belongs on `qwen-image-2512:*`, the base adapter on
+`qwen-image:*`. Use `--guidance 1.0`: upstream distils these adapters to run
+CFG-free, and mold enables classifier-free guidance for any `--guidance` above
+`1.0`, which runs a second forward pass per step that the adapter was not
+trained for.
+
+::: warning Untested on this family
+Mold's LoRA loader has no on-disk Qwen-Image adapter in its test suite, and these
+recipes are transcribed from the adapters' own upstream documentation rather than
+verified end-to-end on this engine. Treat the step/guidance values as upstream's,
+and please report a mismatch.
+:::
 
 ::: tip What the merge costs
 Merging a LoRA into a GGUF transformer dequantizes, merges, and re-quantizes
