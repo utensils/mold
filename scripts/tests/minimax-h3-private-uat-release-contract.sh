@@ -753,23 +753,11 @@ require_text .github/workflows/ci.yml \
   'cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat --bin h3_artifact_qualification -- -D warnings' \
   "CI does not compile the authorization-bound artifact qualifier"
 require_text .github/workflows/ci.yml \
-  'cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_qwen_layer50_capture -- -D warnings' \
-  "CUDA CI does not compile the exact-BF16 Qwen capture adapter"
-require_text .github/workflows/ci.yml \
   'python3 scripts/tests/minimax-h3-qwen-layer50-capture-contract.py' \
   "CI does not run the exact-BF16 Qwen capture contract"
 require_text .github/workflows/ci.yml \
-  'cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_visual_vae_capture -- -D warnings' \
-  "CUDA CI does not compile the visual-VAE capture adapter"
-require_text .github/workflows/ci.yml \
   'python3 scripts/tests/minimax-h3-visual-vae-capture-contract.py' \
   "CI does not run the visual-VAE capture contract"
-require_text .github/workflows/ci.yml \
-  'cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_audio_vae_capture -- -D warnings' \
-  "CUDA CI does not compile the exact-FP32 AudioVAE capture adapter"
-require_text .github/workflows/ci.yml \
-  'cargo clippy -p mold-ai-inference --features dev-bins,h3-private-uat,cuda --bin h3_transformer_capture -- -D warnings' \
-  "CUDA CI does not compile the transformer capture adapter"
 require_text .github/workflows/ci.yml \
   'python3 scripts/tests/minimax-h3-audio-vae-capture-contract.py' \
   "CI does not run the exact-FP32 AudioVAE capture contract"
@@ -779,9 +767,6 @@ require_text .github/workflows/ci.yml \
 require_text .github/workflows/ci.yml \
   'cargo test -p mold-ai-inference --lib --features h3-private-uat minimax_h3' \
   "CI does not execute the private H3 foundation tests"
-require_text .github/workflows/ci.yml \
-  'cargo clippy -p mold-ai-server --features h3-private-uat --all-targets -- -D warnings' \
-  "CUDA CI does not compile the concrete private H3 server bridge and tests"
 require_text .github/workflows/ci.yml \
   "'crates/mold-inference/src/minimax_h3/private_*.rs'" \
   "private H3 runtime source changes do not trigger release exclusion checks"

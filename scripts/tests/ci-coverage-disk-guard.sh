@@ -30,10 +30,14 @@ grep -Fq '/usr/local/lib/android' <<< "$coverage_job" \
   || fail "coverage cleanup does not remove the preinstalled Android SDK"
 grep -Fq 'df -h' <<< "$coverage_job" \
   || fail "coverage cleanup does not report disk capacity"
-grep -Fq 'timeout-minutes: 60' <<< "$coverage_job" \
+grep -Fq 'timeout-minutes: 30' <<< "$coverage_job" \
   || fail "coverage job does not have a bounded runtime"
-grep -Fq 'run: timeout --signal=TERM --kill-after=60s 45m cargo llvm-cov --workspace --lcov --output-path lcov.info' <<< "$coverage_job" \
+grep -Fq 'run: timeout --signal=TERM --kill-after=60s 25m cargo llvm-cov --workspace --lcov --output-path lcov.info' <<< "$coverage_job" \
   || fail "coverage generation does not have a bounded runtime"
+grep -Fq "github.event_name == 'push'" <<< "$coverage_job" \
+  || fail "coverage runs on pull requests"
+grep -Fq 'uses: codecov/codecov-action@v5' <<< "$coverage_job" \
+  || fail "coverage is not uploaded to Codecov"
 
 fixture="$(mktemp)"
 trap 'rm -f "$fixture"' EXIT

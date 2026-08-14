@@ -111,43 +111,32 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: .
       - run: ../scripts/tests/ios-release-assets.sh
-        if: github.event_name == 'push'
       - run: ../scripts/tests/ios-testflight-distribution.sh
-        if: github.event_name == 'push'
       - run: ../scripts/tests/ios-sim-pick.sh
-        if: github.event_name == 'push'
       # The full desktop + Studio suite runs in Desktop CI. Keep iOS focused on
       # its 29 mobile tests and mobile-only formatting; the release-assets
       # contract above already performs the authoritative mobile typecheck/build.
       - run: bunx vitest run src/mobile
-        if: github.event_name == 'push'
       - run: bunx prettier --check "src/mobile/**/*.{ts,vue,css}" vite.mobile.config.ts index.mobile.html
 
   simulator-rust:
     name: iOS simulator Rust
     needs: changes
-    # PRs only need rustfmt and stay on Linux. Main retains the simulator Clippy
-    # compiler gate on macOS for the standalone mobile crate.
-    if: github.event_name != 'pull_request' || needs.changes.outputs.rust_format == 'true'
-    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'macos-14' }}
+    # This is the only compiler gate for the standalone mobile crate, so native
+    # changes must pass simulator Clippy before merge.
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
+    runs-on: macos-14
     defaults:
       run:
         working-directory: apps/mobile/src-tauri
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-        if: github.event_name == 'pull_request'
-        with:
-          components: rustfmt
-      - uses: dtolnay/rust-toolchain@stable
-        if: github.event_name == 'push'
         with:
           targets: aarch64-apple-ios-sim
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
-        if: github.event_name == 'push'
         with:
           workspaces: apps/mobile/src-tauri
       - run: cargo fmt -- --check
       - run: cargo clippy --target aarch64-apple-ios-sim -- -D warnings
-        if: github.event_name == 'push'
