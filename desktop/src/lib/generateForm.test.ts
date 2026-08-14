@@ -150,6 +150,64 @@ describe("recipe defaults", () => {
     });
     expect(form.guidanceOverrides.stgScale).toBeNull();
   });
+
+  it("reconciles stale values to fixed recipe controls on inventory refresh", () => {
+    const profiled = profiledLtx2Model();
+    const recipe = profiled.generation_profile!.recipes[0]!;
+    recipe.defaults.steps = 8;
+    recipe.defaults.guidance = 1;
+    recipe.steps = { ...recipe.steps, mode: "fixed", default: 8, min: 8, max: 8 };
+    recipe.guidance = {
+      ...recipe.guidance,
+      mode: "fixed",
+      default: 1,
+      min: 1,
+      max: 1,
+    };
+    const form = newGenerateForm();
+    form.model = profiled.name;
+    form.family = profiled.family;
+    form.steps = 30;
+    form.guidance = 3.5;
+
+    reconcileModelCapabilities(form, profiled);
+
+    expect(form.steps).toBe(8);
+    expect(form.guidance).toBe(1);
+    expect(profiled.generation_profile?.default_recipe_id).toBe("one-stage");
+  });
+
+  it("reconciles fixed controls from the selected recipe instead of the default", () => {
+    const profiled = profiledLtx2Model();
+    const selectedRecipe = profiled.generation_profile!.recipes[1]!;
+    selectedRecipe.defaults.steps = 12;
+    selectedRecipe.defaults.guidance = 2;
+    selectedRecipe.steps = {
+      ...selectedRecipe.steps,
+      mode: "fixed",
+      default: 12,
+      min: 12,
+      max: 12,
+    };
+    selectedRecipe.guidance = {
+      ...selectedRecipe.guidance,
+      mode: "fixed",
+      default: 2,
+      min: 2,
+      max: 2,
+    };
+    const form = newGenerateForm();
+    form.model = profiled.name;
+    form.family = profiled.family;
+    form.pipeline = "two-stage";
+    form.steps = 30;
+    form.guidance = 3.5;
+
+    reconcileModelCapabilities(form, profiled);
+
+    expect(form.steps).toBe(12);
+    expect(form.guidance).toBe(2);
+  });
 });
 
 function ltx2Form() {

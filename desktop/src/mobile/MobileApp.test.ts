@@ -648,6 +648,34 @@ describe("MobileApp Output field", () => {
     expect(wrapper.find("[data-test='mobile-sequence-composer']").exists()).toBe(false);
   });
 
+  it("keeps the one-shot Develop action outside the scrolling form", async () => {
+    installModels([model, sequenceModel]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const action = wrapper.get("[data-test='mobile-create-action']");
+    expect(action.find("[data-test='mobile-develop-button']").exists()).toBe(true);
+    expect(
+      wrapper.get(".mobile-content").find("[data-test='mobile-develop-button']").exists(),
+    ).toBe(false);
+
+    await outputSegment("Sequence").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-create-action']").exists()).toBe(false);
+  });
+
+  it("keeps a corrective explanation beside a disabled persistent Develop action", async () => {
+    installModels([]);
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const action = wrapper.get("[data-test='mobile-create-action']");
+    expect(action.get("[data-test='mobile-develop-button']").attributes("disabled")).toBeDefined();
+    expect(action.get("[data-test='mobile-develop-blocker']").text()).toContain(
+      "Choose an installed model before generating.",
+    );
+  });
+
   it("migrates the legacy create-mode key into the shared draft and retires it", async () => {
     localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
     installModels([model, sequenceModel]);
@@ -1367,6 +1395,11 @@ describe("MobileApp generation queue", () => {
     expect(stale.text()).not.toContain("cv:1759168");
     expect(stale.find("[data-test='mobile-reexpand-and-develop']").exists()).toBe(true);
     expect(stale.find("[data-test='mobile-develop-expanded-anyway']").exists()).toBe(true);
+    const action = wrapper.get("[data-test='mobile-create-action']");
+    expect(action.get("[data-test='mobile-develop-button']").attributes("disabled")).toBeDefined();
+    expect(action.get("[data-test='mobile-develop-blocker']").text()).toContain(
+      "Use a recovery action above.",
+    );
 
     await stale.get("[data-test='mobile-develop-expanded-anyway']").trigger("click");
     await flushPromises();
