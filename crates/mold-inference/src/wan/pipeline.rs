@@ -1034,15 +1034,18 @@ fn run_denoise_loop(inputs: DenoiseInputs<'_>) -> Result<Tensor> {
     // exposes no reader, so it goes through `crate::quantized_dmmv` — the
     // engines that dispatch on the quantized fast path (Qwen-Image's GGUF
     // transformer) have to be able to see this run's flip afterwards.
+    // The mirror now self-initializes from the frozen env on first read, so
+    // the process-global is constant before any engine's kernel dispatch —
+    // flipping it here raced a concurrent Qwen GGUF forward. This site only
+    // reports the diagnostic once.
     {
-        static FORCE_DMMV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let force = *FORCE_DMMV
-            .get_or_init(|| std::env::var("MOLD_WAN_FORCE_DMMV").is_ok_and(|value| value == "1"));
-        if force {
-            crate::quantized_dmmv::set_force_dmmv(true);
-            tracing::warn!(
-                "wan: MOLD_WAN_FORCE_DMMV=1 — quantized matmuls on the dequant fallback"
-            );
+        static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if crate::quantized_dmmv::force_dmmv_enabled() {
+            WARNED.get_or_init(|| {
+                tracing::warn!(
+                    "wan: MOLD_WAN_FORCE_DMMV=1 — quantized matmuls on the dequant fallback"
+                );
+            });
         }
     }
 

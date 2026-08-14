@@ -1325,11 +1325,23 @@ impl QwenImageEngine {
             // FP8 weights stay as F8E4M3 in VRAM (~19.5GB, 1 byte/param).
             // Per-layer dequant to BF16 during forward adds ~113MB transient.
             // BF16 weights are 2 bytes/param (~40GB).
-            let mem_size: u64 = xformer_paths
+            let mut mem_size: u64 = xformer_paths
                 .iter()
                 .filter_map(|p| std::fs::metadata(p).ok())
                 .map(|m| m.len())
                 .sum();
+            // `MOLD_QWEN_FP8_CACHE=1` retains a BF16 copy of every widened
+            // FP8 layer (2 bytes/param on top of the 1-byte artifact), so the
+            // budget admission and `should_offload` reason about must include
+            // it — otherwise a card that fits plain FP8 is admitted
+            // non-offloaded and OOMs on the first forward.
+            if is_fp8
+                && super::transformer::parse_qwen_fp8_cache(
+                    crate::runtime_env::value("MOLD_QWEN_FP8_CACHE").as_deref(),
+                )
+            {
+                mem_size = mem_size.saturating_mul(3);
+            }
             // Reserve-adjusted reading: should_offload budgets against this.
             let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
             // Qwen-Image runs CFG by default; activation budget scales with

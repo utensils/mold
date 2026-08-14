@@ -17,13 +17,43 @@
 //! it per forward, not only at load.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 static FORCE_DMMV: AtomicBool = AtomicBool::new(false);
+
+/// Process-constant initialization from the frozen environment.
+///
+/// `MOLD_WAN_FORCE_DMMV` is an env-driven diagnostic, so its value is fixed
+/// for the process lifetime — but the flip used to happen at Wan's first
+/// denoise loop, which raced a concurrent Qwen forward: Qwen could read the
+/// mirror as `false` and then candle's global could flip to `true` before the
+/// kernel dispatch read it, landing BF16 activations in the f32-only dequant
+/// fallback. Initializing on FIRST READ (from any engine) makes the value
+/// constant before any dispatch that consults it.
+fn env_initialized() -> bool {
+    static INIT: OnceLock<bool> = OnceLock::new();
+    *INIT.get_or_init(|| {
+        let force = crate::runtime_env::value("MOLD_WAN_FORCE_DMMV").as_deref() == Some("1");
+        if force {
+            FORCE_DMMV.store(true, Ordering::Relaxed);
+            #[cfg(feature = "cuda")]
+            candle_core::quantized::cuda::set_force_dmmv(true);
+        }
+        force
+    })
+}
 
 /// Force (or release) candle's quantized matmuls onto the
 /// dequantize-per-forward fallback, recording the choice for mold's own
 /// readers.
+///
+/// No production call site remains — the env diagnostic initializes through
+/// [`env_initialized`] — but the setter stays as the ONLY sanctioned way to
+/// flip candle's write-only global, so a future scoped user cannot bypass the
+/// mirror. The tests drive it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn set_force_dmmv(enabled: bool) {
+    env_initialized();
     FORCE_DMMV.store(enabled, Ordering::Relaxed);
     #[cfg(feature = "cuda")]
     candle_core::quantized::cuda::set_force_dmmv(enabled);
@@ -31,7 +61,7 @@ pub(crate) fn set_force_dmmv(enabled: bool) {
 
 /// Whether candle's quantized fast paths are disabled for this process.
 pub(crate) fn force_dmmv_enabled() -> bool {
-    FORCE_DMMV.load(Ordering::Relaxed)
+    env_initialized() || FORCE_DMMV.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
