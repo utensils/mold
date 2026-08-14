@@ -73,6 +73,22 @@ describe("ComposerCard", () => {
     expect(wrapper.emitted("submit")).toBeUndefined();
   });
 
+  it("shows an actionable prerequisite and disables Generate", async () => {
+    const wrapper = factory({
+      disabledReason:
+        "This reviewed MiniMax H3 runtime requires a first frame.",
+    });
+
+    expect(wrapper.text()).toContain("requires a first frame");
+    expect(
+      wrapper.get("[data-test='composer-submit']").attributes("disabled"),
+    ).toBeDefined();
+    await wrapper
+      .get("[data-test='composer-prompt']")
+      .trigger("keydown", { key: "Enter", metaKey: true });
+    expect(wrapper.emitted("submit")).toBeUndefined();
+  });
+
   it("emits the prompt on input without touching style", async () => {
     const wrapper = factory();
     const ta = wrapper.get("[data-test='composer-prompt']")

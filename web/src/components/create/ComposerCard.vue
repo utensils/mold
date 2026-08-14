@@ -11,6 +11,7 @@ import { computed, nextTick, ref, watch } from "vue";
 import Chip from "@ui/components/Chip.vue";
 import Icon from "@ui/components/Icon.vue";
 import Keycap from "@ui/components/Keycap.vue";
+import ActionBlocker from "@ui/components/ActionBlocker.vue";
 import { STYLE_PRESETS, stylePresetById } from "../../lib/stylePresets";
 import {
   PromptCycler,
@@ -35,6 +36,8 @@ const props = withDefaults(
     expanded?: boolean;
     /** Disable submit/expand (e.g. a job is mid-flight). */
     busy?: boolean;
+    /** Actionable request prerequisite shown beside Generate. */
+    disabledReason?: string | null;
     /** The visual conditioning lets this render go out undescribed. */
     promptOptional?: boolean;
     /** Model-specific required-prompt wording. */
@@ -45,6 +48,7 @@ const props = withDefaults(
   {
     expanded: false,
     busy: false,
+    disabledReason: null,
     promptOptional: false,
     requiredPlaceholder: "Describe the image you want to create…",
     history: () => [],
@@ -80,6 +84,9 @@ const placeholder = computed(() =>
 const expandLabel = computed(() =>
   props.batchSize > 1 ? `Expand to ${props.batchSize}` : "Expand prompt",
 );
+const generateDisabled = computed(
+  () => props.busy || Boolean(props.disabledReason),
+);
 
 // Shell-style ↑/↓ prompt-history recall. The cycler is fed the latest history
 // and gated on caret line so ↑/↓ still move the caret within a multi-line
@@ -99,7 +106,7 @@ function onInput(event: Event) {
 function onKeydown(event: KeyboardEvent) {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
     event.preventDefault();
-    if (!props.busy) emit("submit");
+    if (!generateDisabled.value) emit("submit");
     return;
   }
   const el = event.target as HTMLTextAreaElement;
@@ -236,7 +243,7 @@ watch(
         type="button"
         class="composer__generate"
         data-test="composer-submit"
-        :disabled="busy"
+        :disabled="generateDisabled"
         @click="emit('submit')"
       >
         <Icon name="sparkle" :size="16" :stroke-width="2" />
@@ -244,6 +251,11 @@ watch(
         <Keycap on-accent>⌘<span class="composer__return">↵</span></Keycap>
       </button>
     </div>
+    <ActionBlocker
+      v-if="disabledReason"
+      class="composer__blocker"
+      :reason="disabledReason"
+    />
   </div>
 </template>
 
@@ -312,6 +324,10 @@ watch(
   gap: 14px;
   margin-top: 12px;
   flex-wrap: wrap;
+}
+
+.composer__blocker {
+  margin-top: 12px;
 }
 
 .composer__summary {

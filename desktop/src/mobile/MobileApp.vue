@@ -735,8 +735,7 @@ const h3AuthoringError = computed(() =>
     form.family,
     form.model,
     form.h3Authoring,
-    effectiveGenerationRecipe(selectedGenerationModel.value, form.pipeline)?.capabilities
-      .source_image === "required",
+    caps.value.requiresSourceImage,
   ),
 );
 const effectiveBatchSize = computed(() =>
@@ -4912,6 +4911,7 @@ onBeforeUnmount(() => {
             >
               <MobileGenerateParameters
                 :form="form"
+                :target="selectedTarget"
                 :upscalers="upscalers"
                 :selected-model="selectedGenerationModel"
                 :audio-output-supported="selectedGenerationModel?.supports_audio !== false"

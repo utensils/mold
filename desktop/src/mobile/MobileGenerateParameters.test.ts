@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { buildRequest, newGenerateForm, type GenerateForm } from "../lib/generateForm";
 import type { Ltx2CameraControlInfo, Ltx2ControlAdapterInfo, ModelEntry } from "../lib/api/types";
 import MobileGenerateParameters from "./MobileGenerateParameters.vue";
+import MobileImagePickerSheet from "./MobileImagePickerSheet.vue";
 
 const { fileToBase64 } = vi.hoisted(() => ({ fileToBase64: vi.fn() }));
 
@@ -72,6 +73,38 @@ async function attachFile(wrapper: VueWrapper, selector: string, file: File): Pr
 }
 
 describe("MobileGenerateParameters", () => {
+  it("reuses the mobile local/gallery picker for the required H3 first frame", async () => {
+    const model = {
+      name: "minimax-h3-fl2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      source_image: "required",
+    } as ModelEntry;
+    const { wrapper, form } = mountParameters(
+      formFor(model.family, model.name),
+      [],
+      true,
+      [],
+      [],
+      model,
+    );
+
+    expect(wrapper.find("[data-test='h3-first-file']").exists()).toBe(false);
+    await wrapper.get("[data-test='h3-first-picker']").trigger("click");
+    const picker = wrapper.getComponent(MobileImagePickerSheet);
+    expect(picker.props("open")).toBe(true);
+    picker.vm.$emit("pick", {
+      filename: "opening.png",
+      base64: "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC",
+    });
+    await flushPromises();
+
+    expect(form.h3Authoring?.firstFrame).toMatchObject({
+      filename: "opening.png",
+      width: 7,
+      height: 4,
+    });
+  });
+
   it("resets model-owned controls when the recipe changes", async () => {
     const model = {
       name: "ltx2:test",

@@ -2390,7 +2390,9 @@ const promptMissing = computed(() => promptRequired(form) && !form.prompt.trim()
 const h3RequireFirstFrame = computed(
   () =>
     effectiveGenerationRecipe(selectedEntry.value, form.pipeline)?.capabilities.source_image ===
-    "required",
+      "required" ||
+    selectedEntry.value?.source_image === "required" ||
+    form.sourceImageCapability === "required",
 );
 const h3AuthoringError = computed(() =>
   minimaxH3AuthoringError(form.family, form.model, form.h3Authoring, h3RequireFirstFrame.value),
@@ -2402,8 +2404,11 @@ const h3AuthoringError = computed(() =>
  * conditions the user can correct or explicitly resolve.
  */
 const generationInputBlockerReason = computed<string | null>(() => {
-  if (promptMissing.value) return "Add a prompt before generating.";
+  // Required media is the first actionable step for a conditioned model. The
+  // ordinary empty-prompt blocker stays visually quiet, but must not hide the
+  // H3 opening-frame correction until the user starts typing.
   if (h3AuthoringError.value) return h3AuthoringError.value;
+  if (promptMissing.value) return "Add a prompt before generating.";
   if (!form.model) return "Choose an installed model before generating.";
   if (chainValidationError.value) return chainValidationError.value;
   if (quickStaleReasons.value.length > 0) {
@@ -2414,7 +2419,7 @@ const generationInputBlockerReason = computed<string | null>(() => {
 });
 
 const composerBlockerReason = computed<string | null>(() => {
-  if (promptMissing.value) return null;
+  if (promptMissing.value && !h3AuthoringError.value) return null;
   if (generationInputBlockerReason.value) return generationInputBlockerReason.value;
   if (preparedBatch.value) {
     return "Use the reviewed variations panel to generate this prepared batch, or discard it to return to one-shot generation.";
