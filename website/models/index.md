@@ -40,6 +40,8 @@ community checkpoints and LoRAs. See the
 | `qwen-image:q4`                     | Q4      | ~14 GB       | Slow, 50 steps                  | Good, stable at 1024x1024                 |
 | `qwen-image-2512:q4`                | Q4      | ~14 GB       | Slow, 50 steps                  | Good, stable at 1024x1024                 |
 | `qwen-image:q8`                     | Q8      | ~22 GB       | Slow, 50 steps                  | Best GGUF, validated at 768               |
+| `qwen-image-flash:q4`               | Q4      | ~13 GB       | Fast, 4 steps                   | DMD2 distill; softer on fine detail       |
+| `qwen-image-distill:q4`             | Q4      | ~14 GB       | Medium, 15 steps                | Distill-Full merge, closer to base        |
 | `ltx-video-0.9.6-distilled:bf16`    | BF16    | ~10 GB       | Fast, 8 steps                   | Video, low-VRAM default                   |
 | `ltx-video-0.9.8-2b-distilled:bf16` | BF16    | ~10-12 GB    | Fast, 7+3 steps                 | Newer video checkpoint, multiscale refine |
 | `ltx-2-19b-distilled:fp8`           | FP8     | ~24 GB       | Slow, 8 steps                   | Joint audio-video, recommended LTX-2      |
