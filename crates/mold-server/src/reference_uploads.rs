@@ -1833,7 +1833,7 @@ fn authenticated_identity(
         (status = 200, description = "Request-bound one-use upload handles", body = ReferenceUploadSessionResponse),
         (status = 401, description = "Explicit API-key authentication is required"),
         (status = 422, description = "Invalid ordered reference descriptor"),
-        (status = 451, description = "MiniMax H3 use is not legally activated"),
+        (status = 451, description = "MiniMax H3 model use requires explicit authorization"),
     )
 )]
 pub(crate) async fn create_reference_upload_session(
@@ -1850,7 +1850,7 @@ pub(crate) async fn create_reference_upload_session(
             StatusCode::UNPROCESSABLE_ENTITY,
         ));
     }
-    // Compliance must run before directory/session allocation or download.
+    // Activation policy must run before directory/session allocation or download.
     crate::routes::require_server_generation_request_activation(&state, &payload.request, None)
         .await?;
     if minimax_h3::resolve_model_name(&payload.request.model).is_none() {

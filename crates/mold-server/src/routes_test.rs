@@ -6159,7 +6159,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reference_upload_session_requires_explicit_auth_then_451s_before_staging() {
+    async fn reviewed_reference_upload_session_requires_explicit_auth_before_staging() {
         let state = AppState::for_tests();
         let app = app_with_state(state.clone());
         let body = serde_json::json!({
@@ -6209,14 +6209,16 @@ mod tests {
             .insert(crate::auth::ApiKeyAuthenticated {
                 identity: "test-key".to_string(),
             });
-        let blocked = app.oneshot(request).await.unwrap();
-        assert_eq!(blocked.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
-        let blocked = json_body(blocked).await;
-        assert_eq!(
-            blocked["code"],
-            mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED
-        );
-        assert!(!state.reference_uploads.staging_exists());
+        let created = app.oneshot(request).await.unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let created = json_body(created).await;
+        assert_eq!(created["uploads"].as_array().unwrap().len(), 1);
+        assert!(state.reference_uploads.staging_exists());
+        state
+            .reference_uploads
+            .cancel_session("test-key", created["session_handle"].as_str().unwrap())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

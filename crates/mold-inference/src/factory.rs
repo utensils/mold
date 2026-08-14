@@ -940,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_factory_never_calls_h3_loader_before_the_legal_gate() {
+    fn frozen_factory_never_calls_h3_loader_before_the_runtime_gate() {
         for model in [
             mold_core::minimax_h3::FL2VA_COMFY,
             mold_core::minimax_h3::REF2VA_COMFY,
@@ -965,11 +965,11 @@ mod tests {
                 },
             )
             .err()
-            .expect("compliance-gated H3 must fail closed");
+            .expect("contract-only H3 runtime must fail closed");
 
-            assert!(error
-                .to_string()
-                .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+            assert!(error.to_string().contains(
+                "public capability or production factory registry remains runtime unavailable"
+            ));
             assert!(!called.load(Ordering::SeqCst));
         }
     }
