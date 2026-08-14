@@ -105,8 +105,12 @@ with no scheduler of their own, so they keep the base contract.
 | `qwen-image-distill:q8`    | 15    | 1.0      | 21.8 GB | DiffSynth Distill-Full merge, closer to base fidelity     |
 | `qwen-image-distill:q4`    | 15    | 1.0      | 13.1 GB | Same merge, the 24 GB-friendly tier                       |
 | `qwen-image-edit-rapid:q4` | 8     | 1.0      | 13.3 GB | 8-step edit merge; `qwen-image-edit` family, `--image` in |
+| `qwen-image-edit-lightning:fp8` | 4 | 1.0  | 20.4 GB | Official lightx2v 4-step fused Lightning edit distill     |
 
 ::: danger 18+ NSFW
+`qwen-image-edit-lightning:fp8` is the official pre-merged Lightning edit
+distill (lightx2v fuses ModelTC's 4-step LoRA into the Edit-2511 transformer,
+exported as ComfyUI-named fp8_scaled weights).
 `qwen-image-edit-rapid:q4` tracks the `v23` release of Phr00t's Rapid AIO merge
 (`v23/Qwen-Rapid-NSFW-v23_Q4_K.gguf`), which upstream classifies
 `not-for-all-audiences`. It is an uncensored community merge, and mold flags it
@@ -220,7 +224,8 @@ using it by default with `qwen-image:q2` through `qwen-image:q8` or
 GGUF quantized matrix above and have different memory and scheduler behavior.
 
 The few-step GGUF distills — `qwen-image-flash:{q8,q4}`,
-`qwen-image-distill:{q8,q4}`, and `qwen-image-edit-rapid:q4` — are listed with
+`qwen-image-distill:{q8,q4}`, `qwen-image-edit-rapid:q4`, and
+`qwen-image-edit-lightning:fp8` — are listed with
 their steps and sizes under
 [Few-step distilled variants](#few-step-distilled-variants) above.
 

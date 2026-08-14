@@ -2927,6 +2927,11 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         guidance: 1.0,
         ..qwen_edit_defaults.clone()
     };
+    let qwen_edit_lightning_defaults = ManifestDefaults {
+        steps: 4,
+        guidance: 1.0,
+        ..qwen_edit_defaults.clone()
+    };
 
     vec![
         // Base Qwen-Image.
@@ -3621,8 +3626,8 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
         },
         // Few-step edit merge. Phr00t's Rapid AIO fuses the edit transformer
         // with step-distillation LoRAs, so it edits in 8 steps at CFG 1. The
-        // upstream merge is uncensored; the description says so because the
-        // manifest has no maturity flag for a client badge to read.
+        // upstream merge is uncensored; `MATURE_MODELS` records that so every
+        // surface's `18+ NSFW` badge can read it.
         ModelManifest {
             name: "qwen-image-edit-rapid:q4".to_string(),
             family: "qwen-image-edit".to_string(),
@@ -3641,6 +3646,34 @@ fn qwen_image_manifests() -> Vec<ModelManifest> {
                 files
             },
             defaults: qwen_edit_rapid_defaults.clone(),
+            hidden: false,
+        },
+        // Official pre-merged Lightning edit distill: lightx2v fuses the
+        // Edit-2511 transformer with ModelTC's 4-step Lightning LoRA and
+        // exports ComfyUI-named fp8_e4m3fn_scaled weights, which is exactly
+        // the FP8 transformer path mold already runs. Transformer-only
+        // export: it publishes no scheduler, so it keeps the base contract.
+        ModelManifest {
+            name: "qwen-image-edit-lightning:fp8".to_string(),
+            family: "qwen-image-edit".to_string(),
+            description:
+                "Qwen-Image-Edit-2511 Lightning FP8 — official 4-step fused distill (lightx2v)"
+                    .to_string(),
+            files: {
+                let mut files = shared_qwen_image_edit_files();
+                files.push(ModelFile {
+                    hf_repo: "lightx2v/Qwen-Image-Edit-2511-Lightning".to_string(),
+                    hf_filename:
+                        "qwen_image_edit_2511_fp8_e4m3fn_scaled_lightning_comfyui_4steps_v1.0.safetensors"
+                            .to_string(),
+                    component: ModelComponent::Transformer,
+                    size_bytes: 20_447_469_486,
+                    gated: false,
+                    sha256: None,
+                });
+                files
+            },
+            defaults: qwen_edit_lightning_defaults.clone(),
             hidden: false,
         },
     ]
@@ -3761,6 +3794,9 @@ pub fn resolve_model_name(input: &str) -> String {
     // does not exist, and the bare model is unreachable.
     if input == "qwen-image-edit-rapid" {
         return "qwen-image-edit-rapid:q4".to_string();
+    }
+    if input == "qwen-image-edit-lightning" {
+        return "qwen-image-edit-lightning:fp8".to_string();
     }
     // These high-memory BF16 variants are opt-in. Bare LTX-2.3 22B names
     // continue to resolve to the smaller FP8 checkpoints.
@@ -6844,6 +6880,42 @@ mod tests {
         assert_eq!(transformer.size_bytes, 13_342_416_352);
     }
 
+    /// The official lightx2v fused Lightning edit distill: a transformer-only
+    /// fp8_scaled export on the existing FP8 path, four steps at CFG 1.0.
+    #[test]
+    fn qwen_edit_lightning_manifest_is_a_four_step_official_distill() {
+        let manifest = find_manifest("qwen-image-edit-lightning:fp8").unwrap();
+        assert_eq!(manifest.family, "qwen-image-edit");
+        assert_eq!(manifest.defaults.steps, 4);
+        assert_eq!(manifest.defaults.guidance, 1.0);
+        assert_eq!(manifest.defaults.width, 1024);
+        assert_eq!(manifest.defaults.height, 1024);
+        let transformer = manifest
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::Transformer)
+            .expect("edit-lightning has no transformer file");
+        assert_eq!(
+            transformer.hf_repo,
+            "lightx2v/Qwen-Image-Edit-2511-Lightning"
+        );
+        assert_eq!(
+            transformer.hf_filename,
+            "qwen_image_edit_2511_fp8_e4m3fn_scaled_lightning_comfyui_4steps_v1.0.safetensors"
+        );
+        assert_eq!(transformer.size_bytes, 20_447_469_486);
+        // The FP8 loader keys off "fp8" in the filename; a rename would
+        // silently reroute this checkpoint through the BF16 path.
+        assert!(transformer.hf_filename.contains("fp8"));
+        // Official distill of the official edit checkpoint: not mature.
+        assert!(!model_is_mature("qwen-image-edit-lightning:fp8"));
+        // Single-tier bare name resolves to its only build.
+        assert_eq!(
+            resolve_model_name("qwen-image-edit-lightning"),
+            "qwen-image-edit-lightning:fp8"
+        );
+    }
+
     #[test]
     fn qwen_edit_rapid_is_flagged_mature() {
         // Upstream `Phr00t/Qwen-Image-Edit-Rapid-AIO` carries Hugging Face's
@@ -6938,6 +7010,18 @@ mod tests {
         assert!(rapid_path.starts_with("shared/qwen-image-edit"));
         assert_eq!(rapid_path, edit_path);
         assert_ne!(rapid_path, base_path);
+
+        let lightning = find_manifest("qwen-image-edit-lightning:fp8").unwrap();
+        let lightning_encoder = lightning
+            .files
+            .iter()
+            .find(|f| f.component == ModelComponent::TextEncoder)
+            .unwrap();
+        let lightning_path = storage_path(lightning, lightning_encoder);
+        assert_eq!(
+            lightning_path, edit_path,
+            "edit-lightning must share the edit bucket"
+        );
     }
 
     #[test]
@@ -7417,7 +7501,7 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 29 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 14 Wan + 4 MiniMax H3 contracts (2 visible compact + 2 hidden official) + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 157
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 9 Flux.2 + 30 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 6 LTX-2 + 14 Wan + 4 MiniMax H3 contracts (2 visible compact + 2 hidden official) + 7 LTX-2 controls + 7 LTX-2 camera controls + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 20 Companion = 158
         // Wan fp8 bump (#777): +wan22-{t2v,i2v}-a14b:fp8 — the Comfy-Org
         // fp8-scaled expert pairs.
         // Wan bump: +wan22-{t2v,i2v}-a14b:{q5,q8} — the two-expert A14B tiers.
@@ -7436,7 +7520,7 @@ mod tests {
         // Qwen distilled bump (#1042): +qwen-image-flash:{q4,q8} (NVIDIA DMD2
         // 4-step), +qwen-image-distill:{q4,q8} (DiffSynth Distill-Full 15-step),
         // +qwen-image-edit-rapid:q4 (8-step edit merge).
-        assert_eq!(known_manifests().len(), 157);
+        assert_eq!(known_manifests().len(), 158);
     }
 
     #[test]
