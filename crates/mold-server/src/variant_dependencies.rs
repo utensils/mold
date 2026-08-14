@@ -1127,7 +1127,16 @@ fn materialize_gemma(
     // network or discovery after scheduler admission.
     let root = gemma_root(paths)?;
     let bf16 = complete_gemma_bf16_files(&root)?;
-    let gguf = sorted_matching_files(&root, |name| name.ends_with(".gguf"));
+    // Case-insensitive, matching `ltx2::text::gemma::discover_gguf`. Counting
+    // only lowercase names here would let `a.GGUF` beside `b.gguf` look like a
+    // single unambiguous Q4 to preparation while inference sorts both and can
+    // load the one that was never frozen.
+    let gguf = sorted_matching_files(&root, |name| {
+        std::path::Path::new(name)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+    });
     let tag = match preference.map(|value| value.trim().to_ascii_lowercase()) {
         Some(value) if matches!(value.as_str(), "q4" | "gguf" | "q4_gguf") => "q4",
         Some(value) if matches!(value.as_str(), "bf16" | "safetensors" | "bf16_safetensors") => {
@@ -1274,10 +1283,14 @@ async fn prepare_inputs_for_devices(
             .is_none_or(|value| value.is_empty() || value == "auto"),
         // An unpinned Gemma is chosen from live host memory the same way, so a
         // plan frozen under one pressure must be replanned under another.
-        "ltx2" | "ltx-2" | "ltx2.3" => base
-            .ltx2_gemma_variant
-            .as_deref()
-            .is_none_or(|value| value.is_empty() || value == "auto"),
+        // `materialize_gemma` trims and lowercases the preference before
+        // matching it, so this must too — otherwise `AUTO` or ` auto ` selects
+        // automatically and then never replans. The arms above compare the raw
+        // string and carry the same latent gap.
+        "ltx2" | "ltx-2" | "ltx2.3" => base.ltx2_gemma_variant.as_deref().is_none_or(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            value.is_empty() || value == "auto"
+        }),
         _ => false,
     };
 
@@ -2548,6 +2561,43 @@ mod tests {
             super::choose_gemma_tag(u64::MAX, true, Some(u64::MAX), mac48),
             "q4"
         );
+    }
+
+    /// Preparation must enumerate GGUFs exactly as inference does, or a
+    /// mixed-case pair looks unambiguous here and ambiguous at load time.
+    #[test]
+    fn gemma_gguf_discovery_is_case_insensitive_like_the_runtime() {
+        let root = TempDir::new().unwrap();
+        std::fs::write(root.path().join("a-gemma.GGUF"), b"x").unwrap();
+        std::fs::write(root.path().join("b-gemma.gguf"), b"x").unwrap();
+        let found = super::sorted_matching_files(root.path(), |name| {
+            std::path::Path::new(name)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+        });
+        assert_eq!(
+            found.len(),
+            2,
+            "both casings must be seen, so the set reads as ambiguous"
+        );
+    }
+
+    /// `materialize_gemma` trims and lowercases the preference, so the
+    /// capacity-sensitivity predicate has to agree or an `AUTO` plan selects
+    /// on live memory and is then never replanned when pressure changes.
+    #[test]
+    fn gemma_auto_detection_ignores_case_and_surrounding_space() {
+        let is_auto = |value: &str| {
+            let value = value.trim().to_ascii_lowercase();
+            value.is_empty() || value == "auto"
+        };
+        for value in ["auto", "AUTO", " auto ", "Auto", ""] {
+            assert!(is_auto(value), "{value:?} should count as automatic");
+        }
+        for value in ["q4", "bf16", "gguf"] {
+            assert!(!is_auto(value), "{value:?} is an explicit pin");
+        }
     }
 
     /// An ambiguous GGUF set must not trigger the downgrade: inference loads
