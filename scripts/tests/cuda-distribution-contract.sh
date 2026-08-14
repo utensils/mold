@@ -75,6 +75,7 @@ require_release_job_need() {
 }
 
 release=".github/workflows/release.yml"
+cache_workflow=".github/workflows/nix-cache.yml"
 require_text "$release" \
   "MOLD_DISTRIBUTION_IMAGE_VERSION: \${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'latest' }}"
 require_text ".github/workflows/desktop-distribution.yml" \
@@ -284,8 +285,26 @@ for target in 80 86 90 100 120; do
 done
 require_release_job_text "docker" 'cuda_cap: "89"'
 require_release_job_text "docker" 'suffix: ""'
+require_ci_release_path "$cache_workflow"
+require_text "$cache_workflow" 'branches: [main]'
+require_text "$cache_workflow" 'tags: ["v*"]'
+require_text "$cache_workflow" 'permissions:'
+require_text "$cache_workflow" 'contents: read'
+require_text "$cache_workflow" 'continue-on-error: true'
+require_text "$cache_workflow" 'uses: cachix/cachix-action@v17'
+require_text "$cache_workflow" 'name: mold'
+require_text "$cache_workflow" 'authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}'
+require_text "$cache_workflow" 'useDaemon: false'
+require_text "$cache_workflow" 'pathsToPush: result-mold'
+require_text "$cache_workflow" 'nix build .#mold --out-link result-mold'
+if grep -Fq 'cachix/cachix-action' "$repo_root/$release"; then
+  fail "$release must not wait for best-effort Cachix publication"
+fi
 require_release_job_text "build-nix-distribution" \
   'nix build .#mold-sm86 .#mold-sm100 .#mold-desktop-sm86 --no-link'
+require_text "flake.nix" 'extra-substituters = [ "https://mold.cachix.org" ];'
+require_text "flake.nix" \
+  '"mold.cachix.org-1:9HBc/bEXDdpbxMjOwpaIDpjZqBh9JYg0h5Fipm+D8m4="'
 require_release_job_need "publish" "release-version"
 require_release_job_text "release-version" \
   'scripts/create-container-digest-manifest.sh'
