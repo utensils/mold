@@ -23,15 +23,45 @@ const BLOCK_OUT_CHANNELS: [usize; 4] = [96, 192, 384, 384];
 const LATENT_CHANNELS: usize = 16;
 const NUM_RES_BLOCKS: usize = 2;
 
+/// Width the mid block runs at, in both the encoder and the decoder.
+///
+/// `QwenImageEncoder2d::new` and `QwenImageDecoder2d::new` both hand
+/// `BLOCK_OUT_CHANNELS[3]` to `QwenImageMidBlock2d::new`; this is that value,
+/// named so `qwen_image::pipeline`'s decode-workspace arithmetic can reach one
+/// authority instead of restating `384`.
+pub(crate) const VAE_MID_BLOCK_CHANNELS: usize = BLOCK_OUT_CHANNELS[3];
+
+/// Width of the decoder's last up-block, `norm_out`, and `conv_out` — the only
+/// stages that run at the full output resolution.
+pub(crate) const VAE_FINAL_BLOCK_CHANNELS: usize = BLOCK_OUT_CHANNELS[0];
+
+/// Input width of the upsampler that first reaches the full output resolution.
+///
+/// Up-block 2's `out_dim` is `BLOCK_OUT_CHANNELS[1]`, and `QwenImageUpBlock2d`
+/// gives its upsampler `in_dim = out_dim`, `out_dim = out_dim / 2`. Because
+/// `QwenImageUpsample2d::forward` upsamples *before* convolving, that
+/// `192 -> 96` 3x3 conv is the first one evaluated on the full pixel grid.
+pub(crate) const VAE_FULL_RES_UPSAMPLE_IN_CHANNELS: usize = BLOCK_OUT_CHANNELS[1];
+
+/// Elements in the VAE's 3x3 convolution kernels — the im2col column blow-up
+/// factor on top of the input channel count.
+pub(crate) const VAE_CONV_KERNEL_ELEMS: usize = 3 * 3;
+
+/// Spatial compression: every up-block except the last carries an upsampler,
+/// and each doubles both axes.
+pub(crate) const VAE_SPATIAL_COMPRESSION: usize = 1 << (BLOCK_OUT_CHANNELS.len() - 1);
+
 /// Query rows per pass in the mid-block attention.
 ///
 /// The mid block attends over every latent token at once as a single head, so
 /// the score matrix is `[1, 1, N, N]` F32 with `N = (H/8) * (W/8)`. At a native
 /// 1328² render that is 27_556 tokens — a 3.0 GB buffer, materialised twice
-/// (scores, then the softmax of them), which is the largest allocation in the
-/// whole decode. Chunking the query axis replaces it with a `[chunk, N]` buffer
-/// (113 MB at 1328²) per pass and is arithmetically identical, because each
-/// chunk still softmaxes over the complete key axis.
+/// (scores, then the softmax of them), and the largest allocation the decode
+/// makes at *latent* resolution. Chunking the query axis replaces it with a
+/// `[chunk, N]` buffer (113 MB at 1328²) per pass and is arithmetically
+/// identical, because each chunk still softmaxes over the complete key axis.
+/// (The decode's true peak is a full-resolution im2col column buffer in the
+/// decoder's convolutions — see `qwen_vae_decode_workspace_bytes`.)
 ///
 /// 1024 rows keeps the per-pass matmul large enough to stay compute-bound
 /// while capping the transient at ~1/27th of the full matrix at native size.
@@ -143,9 +173,13 @@ impl Module for QwenImageAttentionBlock2d {
         let qkv = x.apply(&self.to_qkv)?;
         let qkv = qkv.reshape((b, 1, c * 3, h * w))?.transpose(2, 3)?;
         let chunks = qkv.chunk(3, D::Minus1)?;
-        // `chunk` over a transposed tensor hands back strided views. The
-        // attention helper flattens its inputs, which a non-contiguous view
-        // cannot do, so materialise them here (the same reason `wan`'s VAE
+        // `chunk` over a transposed tensor hands back strided views. Candle
+        // would copy them anyway — `flatten_to` reaches `Tensor::reshape`,
+        // whose non-contiguous arm allocates and `copy_strided_src`s — so this
+        // is not correctness, it just makes the copy explicit and local: one
+        // materialisation per operand, here, where the decode-workspace
+        // arithmetic in `qwen_image::pipeline` counts it, rather than three
+        // buried inside the attention helper (the same reason `wan`'s VAE
         // `head()` closure calls `contiguous`).
         let q = chunks[0].contiguous()?;
         let k = chunks[1].contiguous()?;
@@ -593,6 +627,39 @@ mod tests {
     use candle_core::{Device, Shape};
     use candle_nn::{Module, VarBuilder};
     use std::collections::HashMap;
+
+    /// The decode-workspace constants `qwen_image::pipeline` reads are the
+    /// decoder's own channel plan, not numbers that happen to agree with it.
+    /// This re-derives them the way `QwenImageDecoder2d::new` does.
+    #[test]
+    fn decode_workspace_constants_track_the_decoder_channel_plan() {
+        let dims = [
+            BLOCK_OUT_CHANNELS[3],
+            BLOCK_OUT_CHANNELS[3],
+            BLOCK_OUT_CHANNELS[2],
+            BLOCK_OUT_CHANNELS[1],
+            BLOCK_OUT_CHANNELS[0],
+        ];
+        // `QwenImageDecoder2d::new` hands the mid block `BLOCK_OUT_CHANNELS[3]`.
+        assert_eq!(VAE_MID_BLOCK_CHANNELS, dims[0]);
+
+        // Up-blocks `0..len-1` carry an upsampler, so the last one is the first
+        // to run on the full pixel grid: `QwenImageUpBlock2d::new` gives it
+        // `in_dim = out_dim` and `out_dim = out_dim / 2`.
+        let last_upsampling_block = BLOCK_OUT_CHANNELS.len() - 2;
+        let upsampler_in = dims[last_upsampling_block + 1];
+        assert_eq!(VAE_FULL_RES_UPSAMPLE_IN_CHANNELS, upsampler_in);
+        assert_eq!(VAE_FINAL_BLOCK_CHANNELS, upsampler_in / 2);
+
+        // …and that is the width the last up-block and `conv_out` then run at.
+        assert_eq!(VAE_FINAL_BLOCK_CHANNELS, *dims.last().unwrap());
+
+        // One doubling per upsampler, and every up-block but the last has one.
+        let upsamplers = last_upsampling_block + 1;
+        assert_eq!(upsamplers, BLOCK_OUT_CHANNELS.len() - 1);
+        assert_eq!(VAE_SPATIAL_COMPRESSION, 1 << upsamplers);
+        assert_eq!(VAE_SPATIAL_COMPRESSION, 8);
+    }
 
     fn vb_from_tensors(tensors: Vec<(&str, Tensor)>) -> VarBuilder<'static> {
         let map = tensors

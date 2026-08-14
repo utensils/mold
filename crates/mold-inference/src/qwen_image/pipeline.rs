@@ -28,7 +28,7 @@ use tokenizers::Tokenizer;
 use super::quantized_transformer::QuantizedQwenImageTransformer2DModel;
 use super::sampling::{image_seq_len, shift_policy_for_model, QwenImageScheduler};
 use super::transformer::{QwenImageConfig, QwenImageTransformer2DModel};
-use super::vae::QwenImageVae;
+use super::vae::{self, QwenImageVae};
 use crate::cache::{
     clear_cache, prompt_text_key, CachedTensor, LruCache, DEFAULT_PROMPT_CACHE_CAPACITY,
 };
@@ -47,6 +47,10 @@ use crate::upscaler::tiling::{upscale_with_tiling, TilingConfig};
 /// Minimum free VRAM (bytes) required to place Qwen-Image VAE on GPU.
 /// The VAE weights are ~300MB; decode workspace at 1024x1024 needs ~1-2GB.
 const VAE_DECODE_VRAM_THRESHOLD: u64 = 2_500_000_000;
+/// The Qwen-Image VAE always decodes in F32 (BF16 convolutions accumulate
+/// quantization noise across the decoder), so every buffer the decode-workspace
+/// arithmetic counts is four bytes an element.
+const VAE_F32_BYTES: u64 = 4;
 // Use a single space rather than an empty string so the unconditional CFG path
 // stays explicit after Qwen prompt templating and token windowing.
 const QWEN_EMPTY_NEGATIVE_PROMPT: &str = " ";
@@ -625,56 +629,113 @@ impl QwenImageEngine {
 
     /// Transient VRAM the VAE decode needs on top of its weights.
     ///
-    /// Derived from the two allocation shapes that dominate it rather than from
-    /// a flat per-pixel factor, because chunking the mid-block attention
-    /// (`VAE_ATTENTION_CHUNK_ROWS`) changed one of them by an order of
-    /// magnitude. With `P` output pixels and `N = P / 64` latent tokens (the
-    /// VAE is 8x per axis), all F32:
+    /// Derived from the allocation shapes of the decode's three phases rather
+    /// than from a flat per-pixel factor. The phases run one after another and
+    /// each one's buffers are freed before the next allocates, so the reserve
+    /// is their **max**, not their sum. Every buffer is F32; see the
+    /// `qwen_vae_*_phase_bytes` helpers for the arithmetic.
     ///
-    /// * mid-block score buffers — two `[chunk, N]` matrices (the scores and
-    ///   their softmax) = `2 * 1024 * N * 4`. This term used to be `2 * N * N * 4`,
-    ///   i.e. 6.1 GB at native 1328²; it is now 226 MB.
-    /// * mid-block operands — the `[N, 3C]` qkv projection, the three
-    ///   contiguous `[N, C]` q/k/v copies, the `[N, C]` output and its
-    ///   transpose, at `C = 384`: `8 * 384 * N * 4`.
-    /// * decoder conv stack — the last up-block runs at full resolution with 96
-    ///   channels, and its residual chain keeps eight of those buffers alive to
-    ///   the end of the statement (`x`, five chained temporaries, `h`, and the
-    ///   `residual + h` result): `8 * 96 * P * 4`. Untouched by this change and
-    ///   now the dominant term.
+    /// The term that dominates is not in the model at all — it is candle's. mold
+    /// does not enable candle's `cudnn` feature, so `CudaStorage::conv2d` takes
+    /// the im2col path (`USE_IM2COL_CONV2D = true`): every convolution first
+    /// materialises a `[b * h_out * w_out, c_in * k_h * k_w]` column buffer,
+    /// matmuls it, and copies the result out of NHWC into NCHW. For the
+    /// `192 -> 96` 3x3 conv the decoder runs on the full pixel grid, that column
+    /// buffer alone is `P * 192 * 9 * 4` — 12.2 GB at native 1328², an order of
+    /// magnitude past every activation tensor in the same phase and the single
+    /// largest allocation in the whole decode.
     ///
-    /// The mid block runs to completion before the up-blocks allocate anything,
-    /// so summing the two phases instead of taking their max is the deliberate
-    /// margin — it covers cuDNN conv workspaces and the norm temporaries this
-    /// arithmetic does not model. Native 1328² reserves ~5.98 GB (was ~7.2 GB),
-    /// and small 512² requests stay below the proactive tiling threshold.
+    /// Native 1328² therefore reserves ~15.2 GB, and the proactive gate below
+    /// asks for ~17.7 GB free.
     fn qwen_vae_decode_workspace_bytes(width: u32, height: u32) -> u64 {
-        const F32_BYTES: u64 = 4;
-        const MID_BLOCK_CHANNELS: u64 = 384;
-        const MID_BLOCK_OPERANDS: u64 = 8;
-        const FINAL_UP_BLOCK_CHANNELS: u64 = 96;
-        const FINAL_UP_BLOCK_LIVE_BUFFERS: u64 = 8;
-        const VAE_SPATIAL_COMPRESSION: u64 = 8;
+        let pixels = (width as u64).saturating_mul(height as u64);
 
-        let pixels = width as u64 * height as u64;
-        let latent_tokens = pixels / (VAE_SPATIAL_COMPRESSION * VAE_SPATIAL_COMPRESSION);
+        Self::qwen_vae_mid_block_phase_bytes(pixels)
+            .max(Self::qwen_vae_full_res_upsample_phase_bytes(pixels))
+            .max(Self::qwen_vae_final_up_block_phase_bytes(pixels))
+    }
 
-        let scores = 2 * (super::vae::VAE_ATTENTION_CHUNK_ROWS as u64) * latent_tokens * F32_BYTES;
-        let operands = MID_BLOCK_OPERANDS * MID_BLOCK_CHANNELS * latent_tokens * F32_BYTES;
-        let conv_stack = FINAL_UP_BLOCK_LIVE_BUFFERS * FINAL_UP_BLOCK_CHANNELS * pixels * F32_BYTES;
+    /// Mid block, at latent resolution: `N = P / compression²` tokens of width
+    /// `C = VAE_MID_BLOCK_CHANNELS`.
+    ///
+    /// * score buffers — two `[chunk, N]` matrices (the scores and their
+    ///   softmax) = `2 * VAE_ATTENTION_CHUNK_ROWS * N * 4`. This term used to be
+    ///   `2 * N * N * 4`, i.e. 6.1 GB at native 1328²; it is now 226 MB, which
+    ///   is what took this phase out of contention for the peak.
+    /// * operands — the `[N, 3C]` qkv projection, the three contiguous `[N, C]`
+    ///   q/k/v copies, the `[N, C]` output and its transpose: `8 * C * N * 4`.
+    fn qwen_vae_mid_block_phase_bytes(pixels: u64) -> u64 {
+        const OPERANDS: u64 = 8;
 
-        scores.saturating_add(operands).saturating_add(conv_stack)
+        let compression = vae::VAE_SPATIAL_COMPRESSION as u64;
+        let latent_tokens = pixels / compression.saturating_mul(compression);
+        let scores = 2u64.saturating_mul(vae::VAE_ATTENTION_CHUNK_ROWS as u64);
+        let operands = OPERANDS.saturating_mul(vae::VAE_MID_BLOCK_CHANNELS as u64);
+
+        scores
+            .saturating_add(operands)
+            .saturating_mul(latent_tokens)
+            .saturating_mul(VAE_F32_BYTES)
+    }
+
+    /// The first convolution evaluated on the full pixel grid, and the decode's
+    /// peak: up-block 2's upsampler nearest-doubles its input and *then*
+    /// convolves `192 -> 96` at the doubled shape. Live at once — the
+    /// quarter-area input, the upsampled input, the im2col column buffer, the
+    /// matmul result and the transposed copy candle makes of it.
+    fn qwen_vae_full_res_upsample_phase_bytes(pixels: u64) -> u64 {
+        let c_in = vae::VAE_FULL_RES_UPSAMPLE_IN_CHANNELS as u64;
+        let c_out = vae::VAE_FINAL_BLOCK_CHANNELS as u64;
+
+        let input = c_in.saturating_mul(pixels / 4);
+        let upsampled = c_in.saturating_mul(pixels);
+        let conv = Self::qwen_vae_conv2d_phase_bytes(pixels, c_in, c_out);
+
+        input
+            .saturating_add(upsampled)
+            .saturating_mul(VAE_F32_BYTES)
+            .saturating_add(conv)
+    }
+
+    /// The last up-block's three `96 -> 96` residual blocks, at full resolution:
+    /// the residual chain keeps eight of those buffers alive to the end of the
+    /// statement (`x`, five chained temporaries, `h`, and the `residual + h`
+    /// result), and one of its convolutions is in flight on top of them.
+    fn qwen_vae_final_up_block_phase_bytes(pixels: u64) -> u64 {
+        const LIVE_BUFFERS: u64 = 8;
+
+        let channels = vae::VAE_FINAL_BLOCK_CHANNELS as u64;
+        let chain = LIVE_BUFFERS
+            .saturating_mul(channels)
+            .saturating_mul(pixels)
+            .saturating_mul(VAE_F32_BYTES);
+
+        chain.saturating_add(Self::qwen_vae_conv2d_phase_bytes(
+            pixels, channels, channels,
+        ))
+    }
+
+    /// What one candle im2col `conv2d` holds while it runs: the column buffer
+    /// `[P, c_in * k]`, the matmul result `[P, c_out]`, and the transposed copy
+    /// that reorders it into NCHW.
+    fn qwen_vae_conv2d_phase_bytes(pixels: u64, in_channels: u64, out_channels: u64) -> u64 {
+        let columns = in_channels.saturating_mul(vae::VAE_CONV_KERNEL_ELEMS as u64);
+        let result_and_transpose = 2u64.saturating_mul(out_channels);
+
+        columns
+            .saturating_add(result_and_transpose)
+            .saturating_mul(pixels)
+            .saturating_mul(VAE_F32_BYTES)
     }
 
     /// Skip the full-resolution decode and go straight to tiles when the card
     /// cannot hold the reserve above.
     ///
-    /// The machinery is unchanged; chunking the mid-block attention only moved
-    /// where it engages. Native 1328² now asks for 8.48 GB free rather than
-    /// 9.72 GB, so a 12 GB card with a resident transformer that used to tile
-    /// proactively runs the full decode instead — while an actually starved
-    /// card still tiles, and the OOM-triggered fallback below stays the
-    /// backstop for everything this estimate gets wrong.
+    /// The machinery is unchanged. Native 1328² asks for ~17.7 GB free, which
+    /// is what the im2col column buffer in the decoder's full-resolution
+    /// convolutions actually costs — a card with less than that would reach the
+    /// OOM-triggered fallback below and tile anyway, having paid for the failed
+    /// allocation and a device synchronize first.
     fn should_proactively_tile_vae_decode(
         width: u32,
         height: u32,
@@ -4697,29 +4758,47 @@ mod tests {
         assert!(err.to_string().contains("bad tiled decode"));
     }
 
-    /// The decode workspace reserve is arithmetic over the two allocations that
-    /// dominate it, so it is pinned exactly rather than described as "about N
-    /// GB". Chunking the mid-block attention replaced an `N x N` score matrix
-    /// with a `chunk x N` one, and this test is what stops the reserve from
-    /// silently drifting back to the pre-chunking factor.
+    /// Each decode phase is pinned separately, so a drift names the term that
+    /// moved rather than only the total. The numbers are per-pixel constants:
+    /// 320 B for the mid block, 8_640 B for the full-resolution upsampler,
+    /// 7_296 B for the final up-block.
     #[test]
-    fn qwen_vae_decode_workspace_matches_chunked_allocation_shape() {
+    fn qwen_vae_decode_workspace_phases_match_their_allocation_shapes() {
         // 1024²: 1_048_576 px, 16_384 latent tokens.
-        //   score buffers   2 * 1024 * 16_384 * 4 =   134_217_728
-        //   attn operands   8 *  384 * 16_384 * 4 =   201_326_592
-        //   conv stack      8 *   96 * 1_048_576 * 4 = 3_221_225_472
+        //   scores    2 * 1_024 * 16_384 * 4 =   134_217_728
+        //   operands  8 *   384 * 16_384 * 4 =   201_326_592
         assert_eq!(
-            QwenImageEngine::qwen_vae_decode_workspace_bytes(1024, 1024),
-            3_556_769_792
+            QwenImageEngine::qwen_vae_mid_block_phase_bytes(1_048_576),
+            335_544_320
+        );
+        //   input       192 *   262_144 * 4 =   201_326_592
+        //   upsampled   192 * 1_048_576 * 4 =   805_306_368
+        //   im2col  192 * 9 * 1_048_576 * 4 = 7_247_757_312
+        //   result + its transpose
+        //           2 *  96 * 1_048_576 * 4 =   805_306_368
+        assert_eq!(
+            QwenImageEngine::qwen_vae_full_res_upsample_phase_bytes(1_048_576),
+            9_059_696_640
+        );
+        //   residual chain 8 * 96 * 1_048_576 * 4 = 3_221_225_472
+        //   im2col      96 * 9 * 1_048_576 * 4    = 3_623_878_656
+        //   result + transpose 2 * 96 * 1_048_576 * 4 = 805_306_368
+        assert_eq!(
+            QwenImageEngine::qwen_vae_final_up_block_phase_bytes(1_048_576),
+            7_650_410_496
         );
 
-        // 1328² (native): 1_763_584 px, 27_556 latent tokens.
-        //   score buffers   2 * 1024 * 27_556 * 4 =   225_738_752
-        //   attn operands   8 *  384 * 27_556 * 4 =   338_608_128
-        //   conv stack      8 *   96 * 1_763_584 * 4 = 5_417_730_048
+        // The phases are sequential, so the reserve is the largest of them —
+        // the full-resolution upsampler, whose im2col column buffer is the
+        // biggest single allocation the decode makes.
+        assert_eq!(
+            QwenImageEngine::qwen_vae_decode_workspace_bytes(1024, 1024),
+            9_059_696_640
+        );
+        // 1328² (native): 1_763_584 px → 8_640 B/px.
         assert_eq!(
             QwenImageEngine::qwen_vae_decode_workspace_bytes(1328, 1328),
-            5_982_076_928
+            15_237_365_760
         );
 
         // Every term is linear in pixel count, so the reserve is too.
@@ -4729,29 +4808,64 @@ mod tests {
         );
     }
 
-    /// The unchunked score matrix was `N x N`; at native 1328² that alone was
-    /// ~3 GB per buffer. The reserve must now sit strictly below what the old
-    /// `pixels * 4KiB` factor asked for, or the whole change bought nothing.
+    /// The workspace arithmetic reads the VAE's own channel plan rather than
+    /// restating it. If `BLOCK_OUT_CHANNELS` ever changes, this is the
+    /// assertion that says so in the language of the architecture, and the
+    /// byte totals above are what say which term drifted.
     #[test]
-    fn qwen_vae_decode_workspace_is_below_the_prechunking_reserve() {
-        for (w, h) in [(1024u32, 1024u32), (1328, 1328), (1664, 928)] {
-            let pre_chunking = (w as u64) * (h as u64) * 4 * 1024;
-            let now = QwenImageEngine::qwen_vae_decode_workspace_bytes(w, h);
-            assert!(
-                now < pre_chunking,
-                "{w}x{h}: {now} must be below the pre-chunking {pre_chunking}"
-            );
-        }
+    fn qwen_vae_decode_workspace_derives_from_the_vae_channel_plan() {
+        assert_eq!(vae::VAE_MID_BLOCK_CHANNELS, 384);
+        assert_eq!(vae::VAE_FULL_RES_UPSAMPLE_IN_CHANNELS, 192);
+        assert_eq!(vae::VAE_FINAL_BLOCK_CHANNELS, 96);
+        assert_eq!(vae::VAE_SPATIAL_COMPRESSION, 8);
+        assert_eq!(vae::VAE_CONV_KERNEL_ELEMS, 9);
     }
 
-    /// Tiling still engages, just later: the gate reads the workspace reserve,
-    /// so a smaller reserve means native 1328² now fits in free VRAM that used
-    /// to force a proactive tiled decode.
+    /// Dimensions are `u32`, so `pixels` reaches `(2^32 - 1)²` and every factor
+    /// on top of it overflows `u64`. Upstream validation stops requests long
+    /// before that, but the reserve is a gate: it saturates to "more VRAM than
+    /// exists" — which tiles — rather than panicking in a debug build or
+    /// wrapping to a tiny reserve in a release one.
+    #[test]
+    fn qwen_vae_decode_workspace_saturates_instead_of_overflowing() {
+        assert_eq!(
+            QwenImageEngine::qwen_vae_decode_workspace_bytes(u32::MAX, u32::MAX),
+            u64::MAX
+        );
+        assert!(QwenImageEngine::should_proactively_tile_vae_decode(
+            u32::MAX,
+            u32::MAX,
+            true,
+            u64::MAX - 1
+        ));
+    }
+
+    /// What chunking the mid-block attention bought: the unchunked score matrix
+    /// was `N x N`, materialised twice, which at native 1328² is 6.1 GB — on its
+    /// own more than a third of the whole reserve. The chunked phase must stay
+    /// an order of magnitude below it.
+    #[test]
+    fn qwen_vae_mid_block_phase_is_far_below_the_unchunked_score_matrix() {
+        let pixels = 1328u64 * 1328;
+        let latent_tokens = pixels / 64;
+        let unchunked_scores = 2 * latent_tokens * latent_tokens * 4;
+        let now = QwenImageEngine::qwen_vae_mid_block_phase_bytes(pixels);
+
+        assert_eq!(unchunked_scores, 6_074_665_088);
+        assert!(
+            now * 10 < unchunked_scores,
+            "chunked mid block {now} must stay far below {unchunked_scores}"
+        );
+    }
+
+    /// The gate reads the workspace reserve, so it moved with it: modelling the
+    /// im2col column buffer the decoder's full-resolution convolutions actually
+    /// allocate raised native 1328² from ~9.7 GB free to ~17.7 GB.
     #[test]
     fn qwen_proactive_tiling_engages_at_the_rederived_reserve() {
         let required = VAE_DECODE_VRAM_THRESHOLD
             + QwenImageEngine::qwen_vae_decode_workspace_bytes(1328, 1328);
-        assert_eq!(required, 8_482_076_928);
+        assert_eq!(required, 17_737_365_760);
         assert!(QwenImageEngine::should_proactively_tile_vae_decode(
             1328,
             1328,
@@ -4761,9 +4875,10 @@ mod tests {
         assert!(!QwenImageEngine::should_proactively_tile_vae_decode(
             1328, 1328, true, required
         ));
-        // A card that had to tile under the old ~9.7 GB requirement but has
-        // more than the re-derived one now runs the full decode.
-        assert!(!QwenImageEngine::should_proactively_tile_vae_decode(
+        // 12.2 GB of that is one column buffer, so a card holding 9 GB free
+        // cannot run the full decode — it tiles up front instead of paying for
+        // the failed allocation first.
+        assert!(QwenImageEngine::should_proactively_tile_vae_decode(
             1328,
             1328,
             true,
@@ -4791,11 +4906,21 @@ mod tests {
             false,
             6_000_000_000
         ));
-        assert!(!QwenImageEngine::should_proactively_tile_vae_decode(
+        // A card with room for the full decode still takes it. 16 GB used to
+        // be on this side of the gate, but the reserve now models the im2col
+        // column buffer the decoder's full-resolution convolutions allocate —
+        // 12.2 GB of the 15.2 GB total at this size — so it no longer is.
+        assert!(QwenImageEngine::should_proactively_tile_vae_decode(
             1328,
             1328,
             true,
             16_000_000_000
+        ));
+        assert!(!QwenImageEngine::should_proactively_tile_vae_decode(
+            1328,
+            1328,
+            true,
+            20_000_000_000
         ));
     }
 
