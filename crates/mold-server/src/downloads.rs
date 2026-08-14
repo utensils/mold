@@ -587,6 +587,11 @@ impl DownloadQueue {
     /// the most recent 20.
     pub(crate) fn push_history(&self, job: DownloadJob) {
         let mut history = self.history.lock().expect("history lock poisoned");
+        if job.status == JobStatus::Completed {
+            history.retain(|attempt| {
+                attempt.model != job.model || attempt.status != JobStatus::Failed
+            });
+        }
         if history.len() >= HISTORY_CAP {
             history.pop_front();
         }

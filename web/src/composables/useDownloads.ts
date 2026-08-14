@@ -133,6 +133,10 @@ export function applyDownloadEvent(
       };
       state.activeJobs = state.activeJobs.filter((job) => job.id !== event.id);
       state.active = state.activeJobs[0] ?? null;
+      state.history = state.history.filter(
+        (attempt) =>
+          attempt.model !== completed.model || attempt.status !== "failed",
+      );
       state.history.push(completed);
       while (state.history.length > HISTORY_CAP) state.history.shift();
       return;
