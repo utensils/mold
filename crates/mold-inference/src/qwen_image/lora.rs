@@ -532,6 +532,25 @@ pub(crate) fn wrap_backend_with_lora(
     }))
 }
 
+/// Re-quantise a merged (CPU, F32) tensor back to its original GGML dtype
+/// **on `device`**.
+///
+/// `QTensor::quantize` would leave the result on the CPU, and a CPU `QTensor`
+/// meeting a CUDA activation is not a slow path — `candle-core`'s CUDA matmul
+/// answers it with `unreachable!("Cannot call cuda matmul on non cuda
+/// QTensor")`. Every patched layer therefore has to land on the same device as
+/// the rest of the checkpoint; on the dequant arm it additionally removes a
+/// per-forward CPU dequantization plus host-to-device copy.
+fn requantize_merged_tensor(
+    merged: &Tensor,
+    dtype: candle_core::quantized::GgmlDType,
+    device: &Device,
+) -> Result<candle_core::quantized::QTensor> {
+    Ok(candle_core::quantized::QTensor::quantize_onto(
+        merged, dtype, device,
+    )?)
+}
+
 /// Build a LoRA-patching `VarBuilder` for the **GGUF** transformer
 /// path. Selectively dequantises every patched tensor to F32 on CPU,
 /// merges `B @ A · scale` (or the appropriate row-slice for Splat
@@ -638,7 +657,7 @@ pub(crate) fn gguf_lora_var_builder(
             };
         }
 
-        let merged_q = QTensor::quantize(&t, orig_dtype)?;
+        let merged_q = requantize_merged_tensor(&t, orig_dtype, device)?;
         data.insert(tensor_key, Arc::new(merged_q));
         applied += 1;
         if i % 16 == 0 {
@@ -687,6 +706,36 @@ mod tests {
     use super::*;
     use crate::flux::lora::LoraLayer;
     use safetensors::tensor::TensorView;
+
+    /// The merged weight must land on the checkpoint's device, not on the CPU.
+    /// On CUDA a CPU `QTensor` reaching `QMatMul` is an `unreachable!` panic,
+    /// so this pins the device argument into the call path; CI exercises the
+    /// CPU device, where the assertion is still the one that matters.
+    #[test]
+    fn gguf_lora_merge_keeps_weights_on_the_target_device() {
+        let device = Device::Cpu;
+        let merged = Tensor::randn(0f32, 1f32, (4, 64), &device).unwrap();
+        let requantized =
+            requantize_merged_tensor(&merged, candle_core::quantized::GgmlDType::Q8_0, &device)
+                .unwrap();
+
+        assert!(requantized.device().same_device(&device));
+        assert_eq!(requantized.dtype(), candle_core::quantized::GgmlDType::Q8_0);
+        assert_eq!(requantized.shape().dims(), &[4, 64]);
+
+        let round_trip = requantized.dequantize(&device).unwrap();
+        let diff = (round_trip - &merged)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert!(diff < 0.1, "merge round-trip drifted by {diff}");
+    }
 
     // ── map_qwen_image_lora_key — Direct (split) attention leaves ─────────
 
