@@ -5,9 +5,15 @@
 //! pipeline retries by splitting the latent into overlapping tiles, decoding
 //! each independently, and blending the results back together.
 //!
-//! See `comfy/sd.py:980-1032` for the reference behavior — full decode is
-//! attempted first, OOM falls back to `decode_tiled_*` with three different
-//! starting offsets averaged together to cancel seam artifacts.
+//! See ComfyUI's `comfy/sd.py` (`VAE.decode` / `decode_tiled_`) for the
+//! reference behavior — full decode is attempted first, and only an OOM falls
+//! back to a tiled decode. ComfyUI's fallback averages three *tile shapes*
+//! (square, wide, tall) at the same overlap; mold's `offsets == 3` variant
+//! achieves the same seam cancellation by shifting the grid anchor instead.
+//! Neither is ComfyUI's default decode path, and no upstream tiles
+//! proactively at 1024² — a single feathered pass (`offsets == 1`) is what
+//! diffusers (`AutoencoderKL.tiled_decode`) and stable-diffusion.cpp
+//! (`process_tiles_2d` + smootherstep merge) use whenever they tile at all.
 //!
 //! ## Tile units
 //!
@@ -26,13 +32,15 @@
 //! the fallback path so the retry always uses less memory than the full
 //! decode that just failed.
 //!
-//! ## Three-offset averaging
+//! ## Offset averaging vs a single feathered pass
 //!
 //! `offsets == 3` runs the tile pass three times: `(0, 0)`, `(tile/2, 0)`,
 //! `(0, tile/2)`. Tile boundaries land in different image positions on each
-//! pass, so pixel-wise averaging cancels seams without any per-tile context
-//! sharing. `offsets == 1` skips averaging — fastest, but tile seams are
-//! visible at low overlap. ComfyUI defaults to 3.
+//! pass, so pixel-wise averaging cancels residual seams. It costs three
+//! times the decode work and is reserved for the reactive OOM fallback,
+//! whose halved tiles have less context per tile. `offsets == 1` runs one
+//! pass; the normalized smootherstep blend already crossfades overlaps with
+//! zero slope at both ends, which is all any upstream tiler does.
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
@@ -40,11 +48,13 @@ use candle_core::{DType, Device, Tensor};
 /// Configuration for tiled VAE decode.
 ///
 /// Sizes are in **latent** coordinates. Default is 64 latent-px tile with
-/// 16 latent-px overlap and 3-offset averaging — matches ComfyUI's
-/// `VAE.decode_tiled` defaults (`comfy/sd.py`) and produces a 512×512 image
-/// tile through an 8× VAE. At 1024² generation (latent 128²) this gives a
-/// 3×3 grid per offset pass, which is the smallest grid that genuinely
-/// reduces VRAM pressure relative to a full decode.
+/// 16 latent-px overlap and 3-offset averaging — the same numbers as
+/// ComfyUI's *OOM-fallback* `decode_tiled_` (`comfy/sd.py`), producing a
+/// 512×512 image tile through an 8× VAE. This default exists for the
+/// reactive OOM retry, where minimizing per-tile memory matters more than
+/// decode count. Proactive tiling (a correctness cap, not an OOM) should use
+/// [`proactive_tile_config`] instead, which sizes the fewest cap-fitting
+/// tiles and runs a single pass.
 #[derive(Debug, Clone, Copy)]
 pub struct TileConfig {
     /// Tile edge length in latent space. The VAE upsample factor multiplies
@@ -234,6 +244,49 @@ where
 /// to keep the decode count bounded — for very small latents (sub-256² gen)
 /// the full decode shouldn't OOM in the first place, so this floor is
 /// preferred over collapsing to micro-tiles.
+/// Tile configuration for a *proactive* tiled decode, where tiling exists to
+/// stay under a measured per-axis correctness cap rather than to recover from
+/// an OOM.
+///
+/// Sizes the tile with the fewest-tiles policy (the same one
+/// `ltx2::tiling::axis_tiling` uses): split each axis into the minimum number
+/// of tiles that all fit `cap`, then size the tile so the grid covers the
+/// latent with the requested overlap. Single pass — the seam-cancellation
+/// offset passes exist for OOM-fallback quality on tiny tiles and cost a
+/// linear multiple of the whole decode; a 2×2 grid of near-cap tiles with a
+/// normalized feathered blend does not need them.
+pub(crate) fn proactive_tile_config(
+    cap: usize,
+    overlap: usize,
+    lat_h: usize,
+    lat_w: usize,
+) -> TileConfig {
+    debug_assert!(overlap < cap, "overlap {overlap} must be below cap {cap}");
+    let lat = lat_h.max(lat_w);
+    if lat <= cap || cap <= overlap {
+        // Nothing to split (or a degenerate cap): one tile covering the
+        // latent. decode_tiled short-circuits this into a single decode.
+        return TileConfig {
+            tile_size: cap.max(overlap + 1),
+            overlap,
+            offsets: 1,
+        };
+    }
+    // Fewest tiles n whose every tile fits `cap` after accounting for the
+    // shared overlap, then the smallest tile that still covers the axis:
+    // n·tile - (n-1)·overlap >= lat. The closed form for n (not a naive
+    // ceil(lat/cap)) is what keeps tile <= cap at every size — at lat 240,
+    // 2 tiles would need tile 128 > cap.
+    let n = (lat - overlap).div_ceil(cap - overlap);
+    let tile_size = (lat + (n - 1) * overlap).div_ceil(n);
+    debug_assert!(tile_size <= cap);
+    TileConfig {
+        tile_size,
+        overlap,
+        offsets: 1,
+    }
+}
+
 pub(crate) fn shrink_tile_for_latent(
     mut cfg: TileConfig,
     lat_h: usize,
@@ -471,10 +524,24 @@ fn axis_starts(len: usize, tile_size: usize, step: usize, offset: usize) -> Vec<
     out
 }
 
+/// Blend-ramp weight at position `i` (0-based, counted from the tile edge)
+/// over a ramp of `ramp_len` cells.
+///
+/// Smootherstep `S(t) = 6t⁵ - 15t⁴ + 10t³` over `t = (i+1)/(ramp_len+1)` —
+/// the `+1` denominator keeps opposing ramps exactly complementary
+/// (`t_out = 1 - t_in` cell for cell, the same trick as
+/// `ltx2::tiling::trapezoidal_mask`), so `S(t) + S(1-t) = 1` makes the
+/// normalized blend a pure crossfade with zero slope at both ends of the
+/// overlap. sd.cpp uses the same curve (`ggml_extend.hpp` smootherstep).
+fn ramp_weight(i: usize, ramp_len: usize) -> f32 {
+    let t = (i as f32 + 1.0) / (ramp_len as f32 + 1.0);
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
 /// Build a feathered blend-weight buffer for one tile, output as a flat
 /// `out_h * out_w` `f32` vector. Edges that touch the latent boundary get
-/// weight 1.0; interior edges ramp linearly from 0 → 1 over the overlap
-/// region in image space.
+/// weight 1.0; interior edges ramp from 0 → 1 over the overlap region in
+/// image space via [`ramp_weight`]'s smootherstep.
 #[allow(clippy::too_many_arguments)]
 fn build_blend_weights_2d(
     tile_x: usize,
@@ -495,15 +562,14 @@ fn build_blend_weights_2d(
         let ramp_len = out_overlap.min(out_w);
         for row in 0..out_h {
             for col in 0..ramp_len {
-                let factor = (col as f32 + 1.0) / ramp_len as f32;
-                weights[row * out_w + col] *= factor;
+                weights[row * out_w + col] *= ramp_weight(col, ramp_len);
             }
         }
     }
     if tile_y > 0 && out_overlap > 0 {
         let ramp_len = out_overlap.min(out_h);
         for row in 0..ramp_len {
-            let factor = (row as f32 + 1.0) / ramp_len as f32;
+            let factor = ramp_weight(row, ramp_len);
             for col in 0..out_w {
                 weights[row * out_w + col] *= factor;
             }
@@ -513,15 +579,14 @@ fn build_blend_weights_2d(
         let ramp_len = out_overlap.min(out_w);
         for row in 0..out_h {
             for col in 0..ramp_len {
-                let factor = (col as f32 + 1.0) / ramp_len as f32;
-                weights[row * out_w + (out_w - 1 - col)] *= factor;
+                weights[row * out_w + (out_w - 1 - col)] *= ramp_weight(col, ramp_len);
             }
         }
     }
     if tile_y + tile_h < lat_h && out_overlap > 0 {
         let ramp_len = out_overlap.min(out_h);
         for row in 0..ramp_len {
-            let factor = (row as f32 + 1.0) / ramp_len as f32;
+            let factor = ramp_weight(row, ramp_len);
             for col in 0..out_w {
                 weights[(out_h - 1 - row) * out_w + col] *= factor;
             }
@@ -851,5 +916,129 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0f32, f32::max);
         assert!(max_diff < 1e-3, "single-tile decode mismatch: {max_diff}");
+    }
+
+    #[test]
+    fn proactive_config_at_1024_is_a_2x2_single_pass() {
+        // Latent 128 with a 120-per-axis cap must become a 2×2 grid of
+        // 72-tiles with the standard 16 overlap and no offset passes: 4
+        // decode calls, 1.27× the whole-decode work, versus the 27 calls /
+        // 6.75× the previous 64/16/3 config cost.
+        let cfg = proactive_tile_config(120, 16, 128, 128);
+        assert_eq!(
+            (cfg.tile_size, cfg.overlap, cfg.offsets),
+            (72, 16, 1),
+            "expected fewest-tiles sizing from the cap"
+        );
+        let starts = axis_starts(128, cfg.tile_size, cfg.tile_size - cfg.overlap, 0);
+        assert_eq!(
+            starts,
+            vec![0, 56],
+            "grid must be exactly two tiles per axis"
+        );
+    }
+
+    #[test]
+    fn proactive_config_tiles_fit_cap_and_cover_every_latent() {
+        // The closed form must keep every tile at or under the cap and cover
+        // the full axis at any latent size — a naive ceil(lat/cap) split
+        // breaks at latent 240, where 2 tiles would need size 128 > cap.
+        for lat in [121usize, 128, 160, 192, 240, 256, 320, 512] {
+            let cfg = proactive_tile_config(120, 16, lat, lat);
+            assert!(
+                cfg.tile_size <= 120,
+                "latent {lat}: tile {} exceeds the correctness cap",
+                cfg.tile_size
+            );
+            assert!(
+                cfg.overlap < cfg.tile_size,
+                "latent {lat}: degenerate overlap"
+            );
+            assert_eq!(
+                cfg.offsets, 1,
+                "latent {lat}: proactive tiling is single-pass"
+            );
+            let starts = axis_starts(lat, cfg.tile_size, cfg.tile_size - cfg.overlap, 0);
+            let last = *starts.last().unwrap();
+            assert!(
+                last + cfg.tile_size >= lat,
+                "latent {lat}: grid ends at {} and leaves a gap",
+                last + cfg.tile_size
+            );
+            // Adjacent tiles must genuinely overlap so the blend has a seam
+            // region to feather.
+            for pair in starts.windows(2) {
+                assert!(
+                    pair[0] + cfg.tile_size > pair[1],
+                    "latent {lat}: tiles at {} and {} do not overlap",
+                    pair[0],
+                    pair[1]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn proactive_config_decodes_exactly_four_tiles_at_1024() {
+        use std::cell::Cell;
+        let latents = random_latent(16, 128, 128);
+        let cfg = proactive_tile_config(120, 16, 128, 128);
+        let calls = Cell::new(0usize);
+        let counting_decode = |t: &Tensor| {
+            calls.set(calls.get() + 1);
+            synthetic_decode(t)
+        };
+        let full = synthetic_decode(&latents).unwrap();
+        let tiled = decode_tiled(&latents, counting_decode, &cfg).unwrap();
+        assert_eq!(calls.get(), 4, "2×2 single-pass grid must decode 4 tiles");
+        let full_data: Vec<f32> = full.flatten_all().unwrap().to_vec1().unwrap();
+        let tiled_data: Vec<f32> = tiled.flatten_all().unwrap().to_vec1().unwrap();
+        let max_diff = full_data
+            .iter()
+            .zip(tiled_data.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(
+            max_diff < 1e-3,
+            "proactive tiled decode mismatch: {max_diff}"
+        );
+    }
+
+    #[test]
+    fn blend_ramps_normalize_to_a_smooth_crossfade() {
+        // With two opposing ramps normalized by weight_acc, the effective
+        // crossfade weight at ramp position t is S(t)/(S(t)+S(1-t)). For the
+        // smootherstep ramp this is exactly S(t) (its symmetry identity), so
+        // the crossfade has zero slope at both ends of the overlap — no C1
+        // kink where a tile takes over, unlike a linear ramp.
+        let overlap = 4usize;
+        let scale = 8usize;
+        let ramp = overlap * scale;
+        // Right edge of a left tile vs left edge of a right tile, mid-row.
+        let left = build_blend_weights_2d(0, 0, 8, 8, 12, 8, overlap, scale);
+        let right = build_blend_weights_2d(4, 0, 8, 8, 12, 8, overlap, scale);
+        // First cell of the fade-in ramp: smootherstep((col+1)/(ramp+1)) with
+        // the LTX-2 trapezoid denominator (ramp+1, so opposing ramps are
+        // exactly complementary). A linear ramp would put ~0.03 here;
+        // smootherstep is an order of magnitude smaller and has zero slope.
+        let first_in = right[0];
+        let t = 1.0f32 / (ramp as f32 + 1.0);
+        let s = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+        assert!(
+            (first_in - s).abs() < 1e-6,
+            "expected smootherstep ramp start {s}, got {first_in}"
+        );
+        // Partition check at an interior fade position: the left tile's
+        // fade-out and the right tile's fade-in must still sum to one so the
+        // normalized blend is a pure crossfade.
+        // Left tile spans x 0..8 (cols 0..64); right tile x 4..12 (cols 32..96).
+        // Overlap in image space: cols 32..64 → left col 32+k, right col k.
+        for k in 0..ramp {
+            let sum = left[32 + k] + right[k];
+            assert!(
+                (sum - 1.0).abs() < 1e-5,
+                "ramp position {k}: weights sum to {sum}, not 1"
+            );
+        }
     }
 }
