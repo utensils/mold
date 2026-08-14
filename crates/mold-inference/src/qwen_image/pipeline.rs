@@ -126,6 +126,19 @@ struct Qwen2TextEncoderResidencyInput {
     required_vram_bytes: u64,
 }
 
+/// Inputs to the edit path's post-conditioning encoder release. The edit
+/// pipeline never consults free VRAM the way the hot text-to-image path does —
+/// it always releases the encoder — so the only question is park or drop.
+#[derive(Debug, Clone, Copy)]
+struct Qwen2EditTextEncoderReleaseInput {
+    on_gpu: bool,
+    is_metal: bool,
+    keep_te_ram: bool,
+    /// The engine unloads the whole `LoadedQwenImage` as soon as this request
+    /// returns (sequential edit generation).
+    engine_unloads_after: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct QwenTensorStats {
     min: f32,
@@ -647,6 +660,23 @@ impl QwenImageEngine {
             return Qwen2TextEncoderPostEncodeAction::ParkCpu;
         }
         Qwen2TextEncoderPostEncodeAction::Drop
+    }
+
+    /// Park or drop the edit path's text encoder once conditioning is done.
+    ///
+    /// Three gates, each of which was a real regression when it was missing:
+    ///
+    /// * `on_gpu` — dynamic placement can put the encoder on the CPU, where a
+    ///   "park" moves nothing (`to_device` short-circuits on the same device)
+    ///   and simply retains host RAM the drop used to release. With a
+    ///   three-engine model-cache LRU that is up to three encoders' worth of
+    ///   unreleased host RAM on a box that was already short of VRAM.
+    /// * `!is_metal` — unified memory makes host RAM the same pool.
+    /// * `!engine_unloads_after` — sequential edit generation calls `unload()`
+    ///   as soon as the request returns, dropping the parked map microseconds
+    ///   after a multi-gigabyte device→host copy paid for it.
+    fn qwen2_edit_text_encoder_should_park(input: Qwen2EditTextEncoderReleaseInput) -> bool {
+        input.keep_te_ram && input.on_gpu && !input.is_metal && !input.engine_unloads_after
     }
 
     fn qwen2_hot_text_encoder_required_vram(
@@ -2588,6 +2618,10 @@ impl QwenImageEngine {
         let start = Instant::now();
         // The checkpoint's own packaged scheduler config, not the family's.
         let shift_policy = shift_policy_for_model(&self.base.model_name);
+        // Read before the long `&mut self.base.loaded` borrow below: the
+        // sequential edit route in `generate_inner` unloads the engine the
+        // moment this returns, which decides park vs drop.
+        let engine_unloads_after = self.base.load_strategy == LoadStrategy::Sequential;
 
         let loaded_ref = self
             .base
@@ -2688,13 +2722,19 @@ impl QwenImageEngine {
 
         let drop_text_encoder = is_edit_family || loaded.text_encoder.on_gpu;
         if drop_text_encoder {
-            let park_mode = crate::device::keep_te_in_ram_for_encoder_bytes(
-                loaded.text_encoder.weights_size_bytes(),
-            ) && !loaded.device.is_metal();
+            let park_mode =
+                Self::qwen2_edit_text_encoder_should_park(Qwen2EditTextEncoderReleaseInput {
+                    on_gpu: loaded.text_encoder.on_gpu,
+                    is_metal: loaded.device.is_metal(),
+                    keep_te_ram: crate::device::keep_te_in_ram(),
+                    engine_unloads_after,
+                });
             if park_mode {
+                let parked_bytes = loaded.text_encoder.weights_size_bytes();
                 loaded.text_encoder.park_to_cpu()?;
                 tracing::info!(
                     on_gpu = loaded.text_encoder.on_gpu,
+                    parked_bytes,
                     "Qwen2.5 text encoder parked to CPU host RAM after edit conditioning"
                 );
             } else {
@@ -3097,9 +3137,7 @@ impl QwenImageEngine {
                 Self::qwen2_text_encoder_post_encode_action(Qwen2TextEncoderResidencyInput {
                     on_gpu: loaded.text_encoder.on_gpu,
                     is_metal: loaded.device.is_metal(),
-                    keep_te_ram: crate::device::keep_te_in_ram_for_encoder_bytes(
-                        loaded.text_encoder.weights_size_bytes(),
-                    ),
+                    keep_te_ram: crate::device::keep_te_in_ram(),
                     prompt_cache_miss: !both_cached,
                     transformer_resident: loaded.transformer.is_some(),
                     free_vram_bytes: free_after_encode,
@@ -4695,6 +4733,61 @@ mod tests {
         );
 
         assert_eq!(action, Qwen2TextEncoderPostEncodeAction::Drop);
+    }
+
+    /// The edit path's release rule. `keep_te_ram` alone is not enough:
+    /// parking a CPU-resident encoder retains host RAM the drop used to
+    /// release, and parking right before `unload()` pays a multi-gigabyte
+    /// device→host copy for a map that is discarded microseconds later.
+    #[test]
+    fn qwen_edit_text_encoder_parks_only_when_the_park_can_pay_off() {
+        let resident_gpu_edit = Qwen2EditTextEncoderReleaseInput {
+            on_gpu: true,
+            is_metal: false,
+            keep_te_ram: true,
+            engine_unloads_after: false,
+        };
+        assert!(
+            QwenImageEngine::qwen2_edit_text_encoder_should_park(resident_gpu_edit),
+            "an opted-in GPU encoder that survives the request parks"
+        );
+
+        assert!(
+            !QwenImageEngine::qwen2_edit_text_encoder_should_park(
+                Qwen2EditTextEncoderReleaseInput {
+                    keep_te_ram: false,
+                    ..resident_gpu_edit
+                }
+            ),
+            "parking stays opt-in"
+        );
+        assert!(
+            !QwenImageEngine::qwen2_edit_text_encoder_should_park(
+                Qwen2EditTextEncoderReleaseInput {
+                    on_gpu: false,
+                    ..resident_gpu_edit
+                }
+            ),
+            "a CPU-placed encoder must be dropped, not retained in host RAM"
+        );
+        assert!(
+            !QwenImageEngine::qwen2_edit_text_encoder_should_park(
+                Qwen2EditTextEncoderReleaseInput {
+                    is_metal: true,
+                    ..resident_gpu_edit
+                }
+            ),
+            "unified memory makes the park pointless"
+        );
+        assert!(
+            !QwenImageEngine::qwen2_edit_text_encoder_should_park(
+                Qwen2EditTextEncoderReleaseInput {
+                    engine_unloads_after: true,
+                    ..resident_gpu_edit
+                }
+            ),
+            "a park the engine unloads immediately afterwards is pure cost"
+        );
     }
 
     /// Without the knob, the encoder still drops — parking is a host-RAM

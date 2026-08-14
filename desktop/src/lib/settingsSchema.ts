@@ -363,7 +363,7 @@ export const ENV_KNOB_SCHEMAS: KeySchema[] = [
     key: "env.MOLD_KEEP_TE_RAM",
     section: "performance",
     label: "Park text encoders in RAM",
-    help: "Keep FP16/BF16 text encoders on CPU between requests instead of reloading from disk. No effect on Metal (unified memory).",
+    help: "Keep text encoders on CPU between requests instead of reloading from disk — FP16/BF16 everywhere, plus Qwen-Image's quantized GGUF encoder. Costs several GB of host RAM per parked encoder. No effect on Metal (unified memory).",
     editor: "select",
     options: [
       { value: "", label: "Off (default)" },
