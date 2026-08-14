@@ -36,6 +36,36 @@ mod tests {
         crate::test_support::env_lock()
     }
 
+    struct UnsetEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl UnsetEnvGuard {
+        fn new(name: &'static str) -> Self {
+            let lock = env_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self {
+                _lock: lock,
+                name,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for UnsetEnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
     /// Parse response body as JSON and return the value.
     async fn json_body(resp: axum::http::Response<Body>) -> serde_json::Value {
         let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
@@ -640,20 +670,21 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn chain_validation_surfaces_normalization_errors_without_queueing() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let app = app_empty();
-        let mut request = route_chain_request();
-        request.stages[0].frames = 10;
+        let response = {
+            let _models_dir = UnsetEnvGuard::new("MOLD_MODELS_DIR");
+            let app = app_empty();
+            let mut request = route_chain_request();
+            request.stages[0].frames = 10;
 
-        let response = app
-            .oneshot(
+            app.oneshot(
                 Request::post("/api/generate/chain/validate")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&request).unwrap()))
                     .unwrap(),
             )
             .await
-            .unwrap();
+            .unwrap()
+        };
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = json_body(response).await;
         assert_eq!(body["code"], "VALIDATION_ERROR");
@@ -1234,42 +1265,43 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn chain_validation_rejects_19b_camera_preset_on_ltx23_without_downloading() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let app = app_empty();
-        let response = app
-            .oneshot(
-                Request::post("/api/generate/chain/validate")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "model": "ltx-2.3-22b-distilled:fp8",
-                            "stages": [
-                                {
-                                    "prompt": "orbit the subject",
-                                    "frames": 25,
-                                    "loras": [
-                                        {
-                                            "path": "camera-control:dolly-left",
-                                            "scale": 1.0,
-                                            "name": "Dolly left"
-                                        }
-                                    ]
-                                }
-                            ],
-                            "motion_tail_frames": 17,
-                            "width": 704,
-                            "height": 416,
-                            "fps": 24,
-                            "steps": 8,
-                            "guidance": 3.0,
-                            "output_format": "mp4"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = {
+            let _models_dir = UnsetEnvGuard::new("MOLD_MODELS_DIR");
+            app_empty()
+                .oneshot(
+                    Request::post("/api/generate/chain/validate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "model": "ltx-2.3-22b-distilled:fp8",
+                                "stages": [
+                                    {
+                                        "prompt": "orbit the subject",
+                                        "frames": 25,
+                                        "loras": [
+                                            {
+                                                "path": "camera-control:dolly-left",
+                                                "scale": 1.0,
+                                                "name": "Dolly left"
+                                            }
+                                        ]
+                                    }
+                                ],
+                                "motion_tail_frames": 17,
+                                "width": 704,
+                                "height": 416,
+                                "fps": 24,
+                                "steps": 8,
+                                "guidance": 3.0,
+                                "output_format": "mp4"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        };
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert!(json_body(response).await["error"]
             .as_str()
