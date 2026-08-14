@@ -266,6 +266,23 @@ describe("DownloadsTray a11y", () => {
     expect(list.text()).toContain("connection reset");
   });
 
+  it("replaces a failed attempt with the completed retry in rendered history", async () => {
+    const store = useDownloadsStore();
+    store.apply({ type: "enqueued", id: "first", model: "minimax-h3:fp8", position: 0 });
+    store.apply({ type: "started", id: "first", files_total: 6, bytes_total: 100 });
+    store.apply({ type: "job_failed", id: "first", error: "permission denied" });
+    store.apply({ type: "enqueued", id: "retry", model: "minimax-h3:fp8", position: 0 });
+    store.apply({ type: "started", id: "retry", files_total: 6, bytes_total: 100 });
+    store.apply({ type: "job_done", id: "retry", model: "minimax-h3:fp8" });
+    const wrapper = mount(DownloadsTray);
+
+    expect(wrapper.get('[data-test="history-toggle"]').text()).toContain("History (1)");
+    await wrapper.get('[data-test="history-toggle"]').trigger("click");
+    const statuses = wrapper.findAll('[data-test="history-status"]');
+    expect(statuses.map((status) => status.text())).toEqual(["completed"]);
+    expect(wrapper.text()).not.toContain("permission denied");
+  });
+
   it("retries a failed history job on its own host", async () => {
     const store = useDownloadsStore();
     store.hostStates.hal9000 = {
