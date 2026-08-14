@@ -724,6 +724,26 @@ impl OffloadedQwenImageTransformer {
             "denoising step"
         );
         //    Block returns (text, image) — matching ComfyUI convention
+        //
+        //    This loop is deliberately serial, and double buffering it does
+        //    NOT work here — it was tried and removed. Issuing block `i + 1`'s
+        //    `to_device` before the `device.synchronize()` below recovers
+        //    nothing, because the copy is a pageable host→device transfer on
+        //    the *same* stream: `JointAttention`/`FeedForward::to_device` use
+        //    plain `Tensor::to_device` on CPU tensors (nothing on this path is
+        //    pinned — `flux::pinned` is only read for its env flag), candle's
+        //    `storage_from_cpu_storage` reaches cudarc's `clone_htod` →
+        //    `memcpy_htod_async`, and the `HostSlice` impls for `[T]`/`Vec<T>`
+        //    record no sync of their own. CUDA specifies that a pageable
+        //    `cuMemcpyHtoDAsync` synchronizes the stream *before* the copy is
+        //    initiated and returns only once the buffer has been staged — so
+        //    the host blocks on block `i`'s kernels inside the prefetch, at
+        //    exactly the point the explicit synchronize would have blocked it.
+        //    The staging is not recovered either; only a second resident
+        //    ~666 MB block is spent, on the low-VRAM path. Overlapping this
+        //    needs pinned host staging plus a stream-aware copy, neither of
+        //    which candle's public API offers (`flux/offload.rs` calls its own
+        //    second-stream work "scaffold-only" for the same reason).
         for (i, residency) in self.blocks.iter().enumerate() {
             match residency {
                 BlockResidency::Gpu(block) => {

@@ -56,8 +56,73 @@ const VAE_F32_BYTES: u64 = 4;
 const QWEN_EMPTY_NEGATIVE_PROMPT: &str = " ";
 const QWEN_NATIVE_WIDTH: usize = 1328;
 const QWEN_NATIVE_HEIGHT: usize = 1328;
-const QWEN_GGUF_NATIVE_CFG_HEADROOM: u64 = 14_000_000_000;
 const QWEN_GGUF_MIN_CFG_HEADROOM: u64 = 3_000_000_000;
+/// Transformer geometry the denoise working set is derived from.
+/// `QwenImageConfig` names the same numbers; these are the `u64` copies the
+/// byte arithmetic below uses, pinned to the config by a unit test.
+const QWEN_DIT_INNER_DIM: u64 = 3072;
+const QWEN_DIT_HEADS: u64 = 24;
+const QWEN_DIT_FF_DIM: u64 = 4 * QWEN_DIT_INNER_DIM;
+/// Pixels per image token: the VAE's 8x spatial downsample times the
+/// transformer's 2x patch.
+const QWEN_DIT_PIXELS_PER_TOKEN_AXIS: u64 = 16;
+/// Every transformer tensor in the denoise runs BF16 on CUDA.
+const QWEN_DIT_BF16_BYTES: u64 = 2;
+/// The batch batched true CFG puts through one forward. This whole estimate
+/// exists to answer "can this request afford *batched* CFG", so it is always
+/// priced at two rows.
+const QWEN_CFG_BATCH: u64 = 2;
+
+/// Largest image-token count at which batched CFG measured neutral-or-better
+/// against split CFG (4096 = 1024x1024). See `should_split_cfg_quantized_cuda`
+/// for the 4090 measurements; raise only with new measurements.
+const QWEN_CFG_BATCH_MAX_IMAGE_TOKENS: u64 = 4096;
+/// Joint-stream (`[batch, text + image, inner_dim]`) BF16 buffers alive at the
+/// attention peak of one block.
+///
+/// Shadowed `let` bindings do not drop in Rust, so the attention forward holds
+/// every intermediate to the end of the call: three generations each of q and
+/// k (projection, QK-norm, RoPE) and one of v (7), their `cat`ed joint forms
+/// (3), the transposed contiguous copies the matmul needs (3), the attention
+/// output plus its transpose/reshape/narrow copies (4), and the block's own
+/// hidden states and normalized attention inputs (3).
+const QWEN_DIT_ATTENTION_LIVE_STREAMS: u64 = 20;
+/// Score buffers alive inside one query chunk.
+///
+/// Three, not two, because this estimate prices *batched* CFG specifically —
+/// and putting two different prompt lengths in one forward is exactly when
+/// `qwen_image::attention::joint_key_bias` returns `Some`, which routes to
+/// `attention::attention_with_bias` → `math_attention_biased_impl`. That
+/// closure is `let attn_weights = QK^T * scale; let attn_weights =
+/// attn_weights.broadcast_add(bias); softmax(&attn_weights).matmul(v)`, and by
+/// the same no-drop rule the live-stream count above relies on, the shadowed
+/// scaled matrix stays alive alongside the biased one and the softmax. The
+/// unbiased path (equal prompt lengths) peaks at two, so this is the
+/// conservative side of the one decision the estimate makes.
+const QWEN_DIT_ATTENTION_SCORE_BUFFERS: u64 = 3;
+/// Joint-stream buffers alive at the MLP peak: both hidden states, both
+/// normalized MLP inputs, and the modulation temporaries around them.
+const QWEN_DIT_MLP_LIVE_STREAMS: u64 = 8;
+/// Feed-forward buffers alive at once: the `inner -> 4*inner` projection and
+/// its GELU, which the `proj.forward(x)?.apply(gelu)` temporary keeps live
+/// together.
+const QWEN_DIT_MLP_LIVE_FF_BUFFERS: u64 = 2;
+/// Dequantized weight copies in flight. The default CUDA arm widens each GGUF
+/// weight to BF16 per forward; the largest is the feed-forward `4*inner x
+/// inner` pair, and two can overlap across a statement boundary.
+const QWEN_DIT_DEQUANT_WEIGHT_BUFFERS: u64 = 2;
+/// Bytes per element of the F32 activation copy candle's MMQ kernels make
+/// before quantizing to Q8_1 (`MOLD_QWEN_QMATMUL=1`, #1045).
+const QWEN_DIT_MMQ_ACTIVATION_BYTES: u64 = 4;
+/// Margin over the derived working set.
+///
+/// The derivation counts allocation shapes, not allocator behaviour: candle
+/// hands each tensor straight to CUDA, so fragmentation across a 60-block
+/// forward is real and unmodelled, and the block counts above are read off
+/// today's forward rather than measured. 1.5x is the same order of slack the
+/// VAE decode reserve carries.
+const QWEN_CFG_HEADROOM_SAFETY_NUM: u64 = 3;
+const QWEN_CFG_HEADROOM_SAFETY_DEN: u64 = 2;
 const QWEN_VAE_TILE_SIZES: [u32; 3] = [64, 32, 16];
 const QWEN_IMAGE_EDIT_VAE_AREA: u32 = 1024 * 1024;
 const QWEN_IMAGE_EDIT_SYSTEM_PROMPT: &str = "Describe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.";
@@ -153,6 +218,48 @@ struct QwenTensorStats {
     neg_inf_count: u64,
     total: usize,
 }
+
+/// The on-device half of a boundary check: four scalars, one transfer.
+///
+/// `min`/`max` are `±Inf` when the tensor holds an infinity, and NaN when it
+/// holds a NaN, so [`is_clean`](Self::is_clean) needs no separate ±Inf counts —
+/// the full breakdown is only ever wanted for the error message, and that path
+/// pays for the complete scan anyway.
+#[derive(Debug, Clone, Copy)]
+struct QwenFinitenessProbe {
+    nan_count: u64,
+    min: f32,
+    max: f32,
+    mean: f32,
+    total: usize,
+}
+
+impl QwenFinitenessProbe {
+    fn is_clean(&self) -> bool {
+        self.nan_count == 0 && self.min.is_finite() && self.max.is_finite() && self.mean.is_finite()
+    }
+
+    /// Promote a clean probe to the stats shape callers already consume. Only
+    /// valid for a clean probe: the ±Inf counts are asserted zero rather than
+    /// measured, which is exactly what `is_clean` established.
+    fn into_stats(self) -> QwenTensorStats {
+        QwenTensorStats {
+            min: self.min,
+            max: self.max,
+            mean: self.mean,
+            nan_count: 0,
+            pos_inf_count: 0,
+            neg_inf_count: 0,
+            total: self.total,
+        }
+    }
+}
+
+/// Counts full CPU-side stats downloads so a test can prove the clean boundary
+/// path never takes one. Test-only: the hot path must not pay for a counter.
+#[cfg(test)]
+static FULL_TENSOR_STATS_DOWNLOADS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Check if a Qwen-Image safetensors checkpoint stores weights in FP8 (F8_E4M3).
 /// Uses filename pattern first, then dtype probing as fallback.
@@ -315,6 +422,25 @@ impl QwenImageTransformer {
         }
     }
 
+    /// Re-take the quantized CUDA CFG-batching budget decision in place.
+    ///
+    /// Returns whether the flag moved, so the caller can report a change
+    /// without printing a line on every request. Only the quantized arm
+    /// carries the flag — the others always batch — so every other arm is a
+    /// no-op.
+    fn set_supports_cfg_batching(&mut self, supports_cfg_batching: bool) -> bool {
+        match self {
+            Self::Quantized(model) => {
+                if model.supports_cfg_batching() == supports_cfg_batching {
+                    return false;
+                }
+                model.set_supports_cfg_batching(supports_cfg_batching);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn forward(
         &self,
         latents: &Tensor,
@@ -406,6 +532,15 @@ pub struct QwenImageEngine {
     /// `LoadedQwenImage`, so the retention has to live on the engine.
     /// Mirrors `WanEngine::retained_encoder`.
     retained_sequential_text_encoder: Option<encoders::qwen2_text::Qwen2TextEncoder>,
+}
+
+/// One quantized CUDA split-vs-batched CFG decision plus the readings it was
+/// taken from, so the caller can report the same numbers it decided on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuantizedCfgDecision {
+    split: bool,
+    transformer_size: u64,
+    free: u64,
 }
 
 /// Order-sensitive fingerprint of a single LoRA adapter (path-hash + scale).
@@ -1061,7 +1196,57 @@ impl QwenImageEngine {
         }
     }
 
+    /// Four scalars reduced on the tensor's own device.
+    ///
+    /// This is the cheap half of the boundary check: `[nan_count, min, max,
+    /// mean]` are computed with tensor ops that stay where the tensor lives
+    /// and are concatenated into one 4-element vector, so a clean boundary
+    /// costs one 16-byte transfer instead of a full `to_vec1` of the whole
+    /// tensor — which at the decoded-image boundary is 5.3M f32 elements, run
+    /// twice per image.
+    ///
+    /// `min`/`max` over a tensor containing NaN are backend-defined, which is
+    /// fine: `nan_count` is what decides, and a probe that trips hands over to
+    /// the full CPU-side stats for the message.
+    fn tensor_finiteness_probe(tensor: &Tensor) -> Result<QwenFinitenessProbe> {
+        let flat = tensor.to_dtype(DType::F32)?.flatten_all()?;
+        let total = flat.elem_count();
+        if total == 0 {
+            return Ok(QwenFinitenessProbe {
+                nan_count: 0,
+                min: f32::NAN,
+                max: f32::NAN,
+                mean: f32::NAN,
+                total,
+            });
+        }
+        // `x != x` is true exactly for NaN, so the sum counts them.
+        let nan = flat
+            .ne(&flat)?
+            .to_dtype(DType::F32)?
+            .sum_all()?
+            .reshape(1)?;
+        let min = flat.min(0)?.reshape(1)?;
+        let max = flat.max(0)?.reshape(1)?;
+        let mean = flat.mean_all()?.reshape(1)?;
+        let probe = Tensor::cat(&[&nan, &min, &max, &mean], 0)?.to_vec1::<f32>()?;
+        Ok(QwenFinitenessProbe {
+            nan_count: probe[0] as u64,
+            min: probe[1],
+            max: probe[2],
+            mean: probe[3],
+            total,
+        })
+    }
+
+    /// Full CPU-side stats: one complete GPU→CPU copy plus a scalar loop.
+    ///
+    /// Only reached when the cheap probe trips or `MOLD_QWEN_DEBUG` is set —
+    /// the boundary validator's common path is
+    /// [`tensor_finiteness_probe`].
     fn tensor_stats(tensor: &Tensor) -> Result<QwenTensorStats> {
+        #[cfg(test)]
+        FULL_TENSOR_STATS_DOWNLOADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let t = tensor.to_dtype(DType::F32)?;
         let values = t.flatten_all()?.to_vec1::<f32>()?;
         let mut min = f32::INFINITY;
@@ -1133,7 +1318,29 @@ impl QwenImageEngine {
         stats.max <= 0.02 * scale && stats.mean <= 0.01 * scale
     }
 
+    /// Whether a boundary has to fall back to the full CPU-side stats.
+    ///
+    /// Two reasons, and only two: the operator asked for the numbers, or the
+    /// cheap probe found something non-finite and the error message needs the
+    /// NaN/±Inf breakdown that only the full scan produces.
+    fn boundary_needs_full_stats(probe: QwenFinitenessProbe, debug: bool) -> bool {
+        debug || !probe.is_clean()
+    }
+
+    /// Fail loudly on a non-finite boundary tensor — this is what caught the
+    /// MMQ kernel defect in #1045 — without paying for a full GPU→CPU copy
+    /// when nothing is wrong.
+    ///
+    /// The common path is four scalars reduced on-device
+    /// ([`tensor_finiteness_probe`]). The full download happens only when that
+    /// probe trips, or when `MOLD_QWEN_DEBUG` asks for the numbers, so a clean
+    /// render transfers 16 bytes per boundary instead of the whole tensor.
     fn validate_qwen_tensor_boundary(name: &str, tensor: &Tensor) -> Result<QwenTensorStats> {
+        let probe = Self::tensor_finiteness_probe(tensor)?;
+        if !Self::boundary_needs_full_stats(probe, std::env::var_os("MOLD_QWEN_DEBUG").is_some()) {
+            return Ok(probe.into_stats());
+        }
+
         let stats = Self::tensor_stats(tensor)?;
         if stats.nan_count > 0
             || stats.pos_inf_count > 0
@@ -1311,24 +1518,125 @@ impl QwenImageEngine {
         Ok(text_tokenizer_path.clone())
     }
 
-    /// Non-weight VRAM the quantized CUDA denoise needs on top of the resident
-    /// transformer, scaled from a measurement at the native 1328² shape.
+    /// Image tokens one CFG row carries: the VAE's 8x downsample times the
+    /// transformer's 2x patch, on each axis.
+    fn qwen_dit_image_tokens(width: usize, height: usize) -> u64 {
+        let w = (width.max(1) as u64) / QWEN_DIT_PIXELS_PER_TOKEN_AXIS;
+        let h = (height.max(1) as u64) / QWEN_DIT_PIXELS_PER_TOKEN_AXIS;
+        w.max(1).saturating_mul(h.max(1))
+    }
+
+    /// Joint sequence length: image tokens plus the widest text window
+    /// `Qwen2TextEncoder` can emit.
+    fn qwen_dit_joint_tokens(width: usize, height: usize) -> u64 {
+        Self::qwen_dit_image_tokens(width, height)
+            .saturating_add(encoders::qwen2_text::MAX_SEQUENCE_LENGTH as u64)
+    }
+
+    /// One BF16 `[cfg_batch, joint_tokens, inner_dim]` buffer.
+    fn qwen_dit_joint_stream_bytes(joint_tokens: u64) -> u64 {
+        QWEN_CFG_BATCH
+            .saturating_mul(joint_tokens)
+            .saturating_mul(QWEN_DIT_INNER_DIM)
+            .saturating_mul(QWEN_DIT_BF16_BYTES)
+    }
+
+    /// The widest dequantized weight the forward materializes, times the
+    /// number that can be in flight at once.
+    fn qwen_dit_dequant_weight_bytes() -> u64 {
+        QWEN_DIT_DEQUANT_WEIGHT_BUFFERS
+            .saturating_mul(QWEN_DIT_FF_DIM)
+            .saturating_mul(QWEN_DIT_INNER_DIM)
+            .saturating_mul(QWEN_DIT_BF16_BYTES)
+    }
+
+    /// What one block's joint attention holds while it runs: the live joint
+    /// streams, the score buffers for one query chunk, and a dequantized
+    /// projection weight.
     ///
-    /// It is deliberately pixel-proportional rather than weight-proportional:
-    /// since the linears run through candle's MMQ kernels, the dominant
-    /// transient is no longer a dequantized weight but the F32 copy
-    /// `fast_mmq::try_fwd` makes of the *activation* before quantizing it to
-    /// Q8_1 (`tokens x in_features x 4` — every image-stream linear takes that
-    /// path, since the BF16-native MMVQ kernel caps at 8 rows). That is the
-    /// same axis this function already scales on, so the shape of the estimate
-    /// still holds; the constant itself is empirical and only a measurement on
-    /// hardware should move it.
+    /// `query_chunk_rows` is what `crate::attention` would actually chunk the
+    /// query axis by — `None` means it materializes the whole score matrix,
+    /// which is the pre-#1043 behaviour the retired 14 GB constant was aimed
+    /// at.
+    fn qwen_dit_attention_phase_bytes(joint_tokens: u64, query_chunk_rows: Option<u64>) -> u64 {
+        let rows = query_chunk_rows.unwrap_or(joint_tokens).min(joint_tokens);
+        let streams = QWEN_DIT_ATTENTION_LIVE_STREAMS
+            .saturating_mul(Self::qwen_dit_joint_stream_bytes(joint_tokens));
+        let scores = QWEN_DIT_ATTENTION_SCORE_BUFFERS
+            .saturating_mul(QWEN_CFG_BATCH)
+            .saturating_mul(QWEN_DIT_HEADS)
+            .saturating_mul(rows)
+            .saturating_mul(joint_tokens)
+            .saturating_mul(QWEN_DIT_BF16_BYTES);
+
+        streams
+            .saturating_add(scores)
+            .saturating_add(Self::qwen_dit_dequant_weight_bytes())
+    }
+
+    /// What one block's feed-forward holds: the live joint streams, the
+    /// `4 x inner` projection and its GELU, a dequantized weight, and the F32
+    /// activation copy the opt-in MMQ arm makes before quantizing to Q8_1.
+    fn qwen_dit_mlp_phase_bytes(joint_tokens: u64) -> u64 {
+        let streams = QWEN_DIT_MLP_LIVE_STREAMS
+            .saturating_mul(Self::qwen_dit_joint_stream_bytes(joint_tokens));
+        let ff_elems = QWEN_CFG_BATCH
+            .saturating_mul(joint_tokens)
+            .saturating_mul(QWEN_DIT_FF_DIM);
+        let ff = QWEN_DIT_MLP_LIVE_FF_BUFFERS
+            .saturating_mul(ff_elems)
+            .saturating_mul(QWEN_DIT_BF16_BYTES);
+        let mmq_activation = ff_elems.saturating_mul(QWEN_DIT_MMQ_ACTIVATION_BYTES);
+
+        streams
+            .saturating_add(ff)
+            .saturating_add(mmq_activation)
+            .saturating_add(Self::qwen_dit_dequant_weight_bytes())
+    }
+
+    /// Non-weight VRAM the quantized CUDA denoise needs on top of the resident
+    /// transformer, derived from the shapes one block actually allocates.
+    ///
+    /// The 60 blocks run one at a time and each releases before the next, so
+    /// the peak is the widest single block, and inside a block the attention
+    /// and feed-forward phases are sequential — hence the max of the two, not
+    /// their sum, exactly as the VAE decode reserve treats its phases (#1046).
+    ///
+    /// This replaces a flat `14 GB scaled by pixel count`, which priced the
+    /// pre-#1043 attention. That is where the order of magnitude came from:
+    /// unchunked `[batch, heads, seq, seq]` BF16 score buffers are 15.8 GB at
+    /// 1328² with batched CFG, and this same derivation with
+    /// `query_chunk_rows = None` returns 17.7 GB. The derivation deliberately
+    /// makes **no claim to reproduce** the retired constant — it does not, and
+    /// the two are not even the same quantity: 17.7 GB is a phase, which only
+    /// becomes a headroom after the 1.5x margin (26.6 GB). Chunking the query
+    /// axis 512 rows at a time (`attention::CUDA_AUTO_QUERY_CHUNK`) drops the
+    /// score term to 1.09 GB and the whole estimate to 4.59 GB at 1328², which
+    /// is what makes batched CFG admissible for a q4 checkpoint on a 24 GB
+    /// card at native resolution.
+    ///
+    /// The chunk is read from `crate::attention` rather than restated, so
+    /// `MOLD_ATTN_CHUNK` moves the estimate with the allocation — including
+    /// `off`, which restores the full matrix and forces split CFG back.
     fn quantized_cuda_cfg_headroom(width: usize, height: usize) -> u64 {
-        let native_pixels = (QWEN_NATIVE_WIDTH * QWEN_NATIVE_HEIGHT) as f64;
-        let pixels = (width.max(1) * height.max(1)) as f64;
-        let scaled =
-            (QWEN_GGUF_NATIVE_CFG_HEADROOM as f64 * (pixels / native_pixels)).round() as u64;
-        scaled.max(QWEN_GGUF_MIN_CFG_HEADROOM)
+        let joint_tokens = Self::qwen_dit_joint_tokens(width, height);
+        let chunk_rows =
+            crate::attention::cuda_query_chunk_rows(joint_tokens.min(usize::MAX as u64) as usize)
+                .map(|rows| rows as u64);
+        Self::quantized_cuda_cfg_headroom_for_chunk(joint_tokens, chunk_rows)
+    }
+
+    /// [`quantized_cuda_cfg_headroom`] with the query chunk supplied, so the
+    /// formula can be pinned without depending on process-frozen env.
+    fn quantized_cuda_cfg_headroom_for_chunk(
+        joint_tokens: u64,
+        query_chunk_rows: Option<u64>,
+    ) -> u64 {
+        let peak = Self::qwen_dit_attention_phase_bytes(joint_tokens, query_chunk_rows)
+            .max(Self::qwen_dit_mlp_phase_bytes(joint_tokens));
+        peak.saturating_mul(QWEN_CFG_HEADROOM_SAFETY_NUM)
+            .saturating_div(QWEN_CFG_HEADROOM_SAFETY_DEN)
+            .max(QWEN_GGUF_MIN_CFG_HEADROOM)
     }
 
     fn should_split_cfg_quantized_cuda(
@@ -1351,9 +1659,103 @@ impl QwenImageEngine {
             // instead of assuming batched CFG will fit.
             return true;
         }
+        // Batching stops being a win as the sequence grows: measured on an
+        // RTX 4090 (2026-08-14, qwen-image-2512:q4, 20 steps, seed 42, this
+        // branch's chunked attention), batched CFG is exactly split parity at
+        // 1024² (71.4 s vs 71.5 s denoise, 4096 image tokens) and 24% SLOWER
+        // at 1328² (164.9 s vs 133.2 s, 6889 tokens) — the doubled per-chunk
+        // score transients outweigh the shared per-step work. Above the
+        // measured-neutral point the two sequential passes win regardless of
+        // how much VRAM is free.
+        if Self::image_tokens(width, height) > QWEN_CFG_BATCH_MAX_IMAGE_TOKENS {
+            return true;
+        }
         let estimated_peak =
             transformer_size.saturating_add(Self::quantized_cuda_cfg_headroom(width, height));
         estimated_peak > free_vram
+    }
+
+    /// Image-token count of a request: latent grid (`/8`) then `2x2` patchify.
+    fn image_tokens(width: usize, height: usize) -> u64 {
+        ((width / 16) as u64) * ((height / 16) as u64)
+    }
+
+    /// Transformer weight bytes on disk.
+    ///
+    /// Two things read the same number: the weight term of the quantized CUDA
+    /// CFG decision, and the VRAM that dropping a resident quantized
+    /// transformer hands back to the free pool.
+    fn transformer_file_bytes(&self) -> u64 {
+        std::fs::metadata(&self.base.paths.transformer)
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    /// The quantized CUDA split-vs-batched CFG decision for one request,
+    /// together with the readings it was taken from (both wanted by the
+    /// progress line the load path prints).
+    ///
+    /// `resident_transformer_bytes` is added back to the free reading because
+    /// the caller may be asking *while the transformer this decision covers is
+    /// still resident*: the comparison `should_split_cfg_quantized_cuda` makes
+    /// is `transformer_size + headroom > free`, and on the load path `free` is
+    /// read before those weights land. Adding them back is what makes a
+    /// resident engine ask the same question as a fresh load at the same
+    /// resolution — the two must agree, or the decision would depend on when
+    /// it was taken. It is zero on the load/reload path, where nothing is
+    /// resident. The add-back is skipped when the VRAM probe itself failed, so
+    /// a failed probe still reads as zero free and biases to the safer split
+    /// path.
+    fn decide_quantized_split_cfg(
+        &self,
+        device: &Device,
+        width: usize,
+        height: usize,
+        resident_transformer_bytes: u64,
+    ) -> QuantizedCfgDecision {
+        let transformer_size = self.transformer_file_bytes();
+        let free = usable_free_vram_bytes(self.base.gpu_ordinal)
+            .map(|free| free.saturating_add(resident_transformer_bytes))
+            .unwrap_or(0);
+        let split = device.is_cuda()
+            && (self.offload
+                || Self::should_split_cfg_quantized_cuda(
+                    self.is_edit_family(),
+                    transformer_size,
+                    free,
+                    width,
+                    height,
+                ));
+        QuantizedCfgDecision {
+            split,
+            transformer_size,
+            free,
+        }
+    }
+
+    /// The CFG-batching flag a resident quantized transformer should carry for
+    /// this request, or `None` when it already carries it.
+    ///
+    /// The flag is a **budget** decision, not a property of the built weights:
+    /// `QuantizedQwenImageTransformer2DModel::new` ignores it entirely and the
+    /// forward is shape-agnostic in the batch axis. So a model loaded at the
+    /// native 1328² shape does not have to be rebuilt to batch CFG for a 768²
+    /// request that fits — the `bool` is simply re-set in place, which is also
+    /// why nothing here can oscillate: no rebuild means no second, differently
+    /// sourced VRAM reading to disagree with the first.
+    ///
+    /// The `None` input is every non-quantized transformer (BF16, FP8,
+    /// offloaded): they carry no flag, so there is nothing to move.
+    fn qwen_cfg_batching_update(
+        current_supports_batching: Option<bool>,
+        request_splits_cfg: bool,
+    ) -> Option<bool> {
+        // `supports_cfg_batching` is the negation of the split decision.
+        let wanted = !request_splits_cfg;
+        match current_supports_batching {
+            Some(current) if current != wanted => Some(wanted),
+            _ => None,
+        }
     }
 
     /// Load transformer from disk.
@@ -1368,20 +1770,14 @@ impl QwenImageEngine {
         let active_loras = &self.pending_loras;
         let has_lora = !active_loras.is_empty();
         if self.detect_is_quantized() {
-            let transformer_size = std::fs::metadata(&self.base.paths.transformer)
-                .map(|m| m.len())
-                .unwrap_or(0);
             // Reserve-adjusted reading: split-CFG is a budget decision.
-            let free = usable_free_vram_bytes(self.base.gpu_ordinal).unwrap_or(0);
-            let split_cfg_for_memory = device.is_cuda()
-                && (self.offload
-                    || Self::should_split_cfg_quantized_cuda(
-                        self.is_edit_family(),
-                        transformer_size,
-                        free,
-                        width,
-                        height,
-                    ));
+            // Nothing is resident here — every build site drops the old
+            // transformer first — so no bytes are added back.
+            let QuantizedCfgDecision {
+                split: split_cfg_for_memory,
+                transformer_size,
+                free,
+            } = self.decide_quantized_split_cfg(device, width, height, 0);
             if self.offload && device.is_cuda() {
                 self.base.progress.info(
                     "Quantized Qwen CUDA offload requested — using low-memory split-CFG mode until GGUF block offload lands",
@@ -1800,6 +2196,14 @@ impl QwenImageEngine {
     /// whose baked stack is byte-for-byte the request's stack is reused;
     /// any difference — adapter set, order, scale — invalidates it, as
     /// does having no resident transformer at all.
+    ///
+    /// The LoRA merge is the *only* thing baked into the built weights. The
+    /// quantized transformer's `supports_cfg_batching` is deliberately not a
+    /// rebuild input: it has no structural effect, so it is re-set in place
+    /// per request (`qwen_cfg_batching_update`). Making it one paid a full
+    /// GGUF dequantize → merge → re-quantize to flip a `bool`, and — because
+    /// the check and the rebuild read free VRAM from two different,
+    /// systematically unequal sources — could repeat that on every request.
     fn qwen_transformer_rebuild_needed(
         transformer_resident: bool,
         baked_lora: &[QwenImageLoraFingerprint],
@@ -2206,39 +2610,77 @@ impl QwenImageEngine {
     /// every request. A changed stack drops the old transformer (and
     /// synchronizes) before the rebuild so the merge is not asked to fit
     /// two transformers into VRAM at once.
+    ///
+    /// It also makes a resident *quantized* transformer re-decide split vs
+    /// batched CFG at this request's real resolution — a 1328²-loaded engine
+    /// would otherwise keep two-pass CFG for every smaller request that fits
+    /// batched. That re-decision is a `bool` write on the resident model, not
+    /// a rebuild: the flag has no structural effect, so paying a rebuild for
+    /// it would be pure waste, and the two VRAM readings a rebuild-and-check
+    /// cycle needs are systematically unequal (the drop returns more than the
+    /// GGUF's disk size — dequantized norms and cached RoPE views have no
+    /// on-disk counterpart), which made the rebuild able to repeat forever
+    /// for any request whose estimate landed between them.
     fn ensure_transformer_for_request(&mut self, width: usize, height: usize) -> Result<()> {
         let requested = fingerprint_stack(&self.pending_loras);
-        let resident = self
-            .base
-            .loaded
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("model not loaded"))?
-            .transformer
-            .is_some();
+        let (resident, current_cfg_batching, device) = {
+            let loaded = self
+                .base
+                .loaded
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
+            let current = match loaded.transformer.as_ref() {
+                Some(QwenImageTransformer::Quantized(model)) => Some(model.supports_cfg_batching()),
+                _ => None,
+            };
+            (loaded.transformer.is_some(), current, loaded.device.clone())
+        };
+        let lora_stack_changed = self.active_lora_fingerprint != requested;
         if !Self::qwen_transformer_rebuild_needed(
             resident,
             &self.active_lora_fingerprint,
             &requested,
         ) {
+            // Nothing to rebuild — but a resident quantized transformer still
+            // re-takes its CFG budget decision at this request's resolution.
+            // Only that arm carries the flag, so only it pays for the VRAM
+            // probe the decision needs.
+            if current_cfg_batching.is_some() {
+                let split = self
+                    .decide_quantized_split_cfg(
+                        &device,
+                        width,
+                        height,
+                        // The load path reads free VRAM before the weights
+                        // land; adding the resident bytes back is what makes
+                        // this ask the same question at the same resolution.
+                        self.transformer_file_bytes(),
+                    )
+                    .split;
+                if let Some(supports) = Self::qwen_cfg_batching_update(current_cfg_batching, split)
+                {
+                    self.set_resident_cfg_batching(supports, width, height);
+                }
+            }
             return Ok(());
         }
 
-        // Past the check above, a resident transformer can only mean its
-        // baked stack differs from the one this request asks for.
-        let stack_changed = resident;
         let mut loaded_mut = self
             .base
             .loaded
             .take()
             .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
-        if stack_changed {
+        if resident {
             Self::release_resident_transformer(
                 &mut loaded_mut.transformer,
                 &mut self.active_lora_fingerprint,
             );
             loaded_mut.device.synchronize()?;
         }
-        let label = if stack_changed {
+        // Reaching here means `!resident || lora_stack_changed`, so these two
+        // labels are exhaustive.
+        debug_assert!(!resident || lora_stack_changed);
+        let label = if resident {
             "Rebuilding Qwen-Image transformer for the requested LoRA stack"
         } else {
             "Reloading Qwen-Image transformer"
@@ -2254,6 +2696,32 @@ impl QwenImageEngine {
         // rather than silently unloading every other component.
         self.base.loaded = Some(loaded_mut);
         result
+    }
+
+    /// Move the resident quantized transformer's CFG-batching flag and say so.
+    ///
+    /// The load path prints its split-CFG choice, so a later change to that
+    /// choice has to be visible too — otherwise the log claims a mode the
+    /// request did not run in.
+    fn set_resident_cfg_batching(&mut self, supports: bool, width: usize, height: usize) {
+        let moved = self
+            .base
+            .loaded
+            .as_mut()
+            .and_then(|loaded| loaded.transformer.as_mut())
+            .is_some_and(|transformer| transformer.set_supports_cfg_batching(supports));
+        if moved {
+            self.base.progress.info(&format!(
+                "Switching resident quantized Qwen transformer to {} CFG at {}x{}",
+                if supports {
+                    "batched"
+                } else {
+                    "low-memory split"
+                },
+                width,
+                height,
+            ));
+        }
     }
 
     /// Generate using sequential loading strategy (load-use-drop each component).
@@ -4530,20 +4998,105 @@ mod tests {
         );
     }
 
+    /// The transformer geometry the byte arithmetic restates as `u64` must
+    /// stay the checkpoint's own.
     #[test]
-    fn quantized_cuda_cfg_headroom_scales_with_resolution() {
-        let native = QwenImageEngine::quantized_cuda_cfg_headroom(1328, 1328);
-        let reduced = QwenImageEngine::quantized_cuda_cfg_headroom(512, 512);
-        assert_eq!(native, QWEN_GGUF_NATIVE_CFG_HEADROOM);
-        assert_eq!(reduced, QWEN_GGUF_MIN_CFG_HEADROOM);
+    fn qwen_dit_working_set_constants_match_the_transformer_config() {
+        let cfg = QwenImageConfig::qwen_image_2512();
+        assert_eq!(QWEN_DIT_INNER_DIM, cfg.inner_dim as u64);
+        assert_eq!(QWEN_DIT_HEADS, cfg.num_attention_heads as u64);
+        assert_eq!(
+            QWEN_DIT_PIXELS_PER_TOKEN_AXIS,
+            (vae::VAE_SPATIAL_COMPRESSION * cfg.patch_size) as u64
+        );
     }
 
+    /// Both shapes are pinned exactly: the estimate decides whether a q4
+    /// checkpoint batches CFG at all, so a silent drift in any buffer count is
+    /// a silent change to that decision.
     #[test]
-    fn qwen_quantized_native_resolution_uses_split_cfg_on_24gb_cuda() {
+    fn quantized_cuda_cfg_headroom_is_pinned_at_the_two_common_shapes() {
+        // 1328²: 6889 image + 512 text = 7401 joint tokens, chunked 512 rows.
+        assert_eq!(
+            QwenImageEngine::quantized_cuda_cfg_headroom_for_chunk(7401, Some(512)),
+            4_591_779_840
+        );
+        // 1024²: 4096 + 512 = 4608 joint tokens. The derivation lands at
+        // 2.94 GB, under the floor, so the floor is what ships.
+        assert_eq!(
+            QwenImageEngine::quantized_cuda_cfg_headroom_for_chunk(4608, Some(512)),
+            QWEN_GGUF_MIN_CFG_HEADROOM
+        );
+        // The resolution-derived path agrees with the token-derived one.
+        assert_eq!(
+            QwenImageEngine::quantized_cuda_cfg_headroom(1024, 1024),
+            QWEN_GGUF_MIN_CFG_HEADROOM
+        );
+        assert_eq!(QwenImageEngine::qwen_dit_joint_tokens(1328, 1328), 7401);
+        assert_eq!(QwenImageEngine::qwen_dit_joint_tokens(1024, 1024), 4608);
+    }
+
+    /// The query chunk is the whole reason the estimate moved, and the
+    /// unchunked figure is pinned exactly.
+    ///
+    /// It is deliberately NOT asserted to reproduce the retired 14 GB
+    /// constant: it does not (17.7 GB), and it is not the same quantity — a
+    /// phase becomes a headroom only after the 1.5x margin, which puts the
+    /// comparable number at 26.6 GB. A range assertion wide enough to make the
+    /// old claim look true is how the misstatement survived, so this pins the
+    /// value.
+    #[test]
+    fn the_query_chunk_is_what_moved_the_attention_estimate() {
+        let chunked = QwenImageEngine::qwen_dit_attention_phase_bytes(7401, Some(512));
+        let unchunked = QwenImageEngine::qwen_dit_attention_phase_bytes(7401, None);
+
+        assert_eq!(chunked, 3_061_186_560);
+        assert_eq!(unchunked, 17_745_007_392);
+        assert!(
+            chunked < unchunked / 5,
+            "chunking must be the reason the estimate moved: {chunked} vs {unchunked}"
+        );
+        // The comparable headroom is the phase plus the margin, and it is
+        // nowhere near the constant this replaced.
+        assert_eq!(
+            QwenImageEngine::quantized_cuda_cfg_headroom_for_chunk(7401, None),
+            26_617_511_088
+        );
+    }
+
+    /// Native 1328² splits CFG by the MEASURED token cap even with the whole
+    /// card free: batched CFG ran 24% slower there (164.9 s vs 133.2 s on the
+    /// 4090), so free VRAM is not the deciding input past 4096 image tokens.
+    #[test]
+    fn qwen_quantized_native_resolution_splits_cfg_by_the_measured_token_cap() {
         assert!(QwenImageEngine::should_split_cfg_quantized_cuda(
             false,
             12_300_000_000,
             24_600_000_000,
+            1328,
+            1328,
+        ));
+    }
+
+    /// 1024² (4096 image tokens, measured split-parity) batches when it fits.
+    #[test]
+    fn qwen_quantized_1024_batches_cfg_on_24gb_cuda() {
+        assert!(!QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
+            12_300_000_000,
+            24_600_000_000,
+            1024,
+            1024,
+        ));
+    }
+
+    /// A 16 GB card still cannot, which is what keeps the decision meaningful.
+    #[test]
+    fn qwen_quantized_native_resolution_still_splits_cfg_on_16gb_cuda() {
+        assert!(QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
+            12_300_000_000,
+            16_000_000_000,
             1328,
             1328,
         ));
@@ -4573,15 +5126,24 @@ mod tests {
 
     #[test]
     fn qwen_quantized_cfg_split_boundary_does_not_split_when_estimate_exactly_fits() {
-        let headroom = QwenImageEngine::quantized_cuda_cfg_headroom(1328, 1328);
+        // At 1024² — inside the measured token cap — the memory boundary is
+        // what decides, and an exactly-fitting estimate batches.
+        let headroom = QwenImageEngine::quantized_cuda_cfg_headroom(1024, 1024);
         let transformer_size = 12_300_000_000;
         let free_vram = transformer_size + headroom;
         assert!(!QwenImageEngine::should_split_cfg_quantized_cuda(
             false,
             transformer_size,
             free_vram,
-            1328,
-            1328,
+            1024,
+            1024,
+        ));
+        assert!(QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
+            transformer_size,
+            free_vram - 1,
+            1024,
+            1024,
         ));
     }
 
@@ -4603,6 +5165,9 @@ mod tests {
 
     #[test]
     fn qwen_debug_stats_counts_nan_and_inf() {
+        let _guard = FULL_STATS_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tensor = Tensor::from_vec(
             vec![0.0f32, 1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY],
             Shape::from((5,)),
@@ -4619,6 +5184,125 @@ mod tests {
         assert_eq!(stats.min, 0.0);
         assert_eq!(stats.max, 1.0);
         assert_eq!(stats.mean, 0.5);
+    }
+
+    /// The two tests below read a process-global counter, so they must not
+    /// interleave with each other or with anything else that calls
+    /// `tensor_stats`.
+    static FULL_STATS_COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn full_stats_downloads() -> usize {
+        FULL_TENSOR_STATS_DOWNLOADS.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[test]
+    fn qwen_boundary_probe_reports_the_same_numbers_as_the_full_scan() {
+        let _guard = FULL_STATS_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tensor = Tensor::from_vec(
+            vec![-1.0f32, 0.0, 1.0, 2.0],
+            Shape::from((4,)),
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let probe = QwenImageEngine::tensor_finiteness_probe(&tensor).unwrap();
+        let stats = QwenImageEngine::tensor_stats(&tensor).unwrap();
+
+        assert!(probe.is_clean());
+        assert_eq!(probe.total, stats.total);
+        assert_eq!(probe.min, stats.min);
+        assert_eq!(probe.max, stats.max);
+        assert_eq!(probe.mean, stats.mean);
+        assert_eq!(probe.nan_count, stats.nan_count);
+    }
+
+    #[test]
+    fn qwen_boundary_probe_sees_nan_and_infinities() {
+        let device = Device::Cpu;
+        let nan = Tensor::from_vec(vec![0.0f32, f32::NAN], Shape::from((2,)), &device).unwrap();
+        let pos_inf =
+            Tensor::from_vec(vec![0.0f32, f32::INFINITY], Shape::from((2,)), &device).unwrap();
+        let neg_inf =
+            Tensor::from_vec(vec![0.0f32, f32::NEG_INFINITY], Shape::from((2,)), &device).unwrap();
+
+        let nan_probe = QwenImageEngine::tensor_finiteness_probe(&nan).unwrap();
+        assert_eq!(nan_probe.nan_count, 1);
+        assert!(!nan_probe.is_clean());
+        assert!(!QwenImageEngine::tensor_finiteness_probe(&pos_inf)
+            .unwrap()
+            .is_clean());
+        assert!(!QwenImageEngine::tensor_finiteness_probe(&neg_inf)
+            .unwrap()
+            .is_clean());
+    }
+
+    #[test]
+    fn qwen_boundary_needs_the_full_scan_only_when_asked_or_tripped() {
+        let clean = QwenFinitenessProbe {
+            nan_count: 0,
+            min: -1.0,
+            max: 1.0,
+            mean: 0.0,
+            total: 4,
+        };
+        let tripped = QwenFinitenessProbe {
+            nan_count: 3,
+            ..clean
+        };
+
+        assert!(!QwenImageEngine::boundary_needs_full_stats(clean, false));
+        assert!(QwenImageEngine::boundary_needs_full_stats(clean, true));
+        assert!(QwenImageEngine::boundary_needs_full_stats(tripped, false));
+    }
+
+    /// The clean boundary must never take the full CPU-side scan. Asserted on
+    /// the download counter rather than on timing.
+    #[test]
+    fn qwen_clean_boundary_never_downloads_the_whole_tensor() {
+        let _guard = FULL_STATS_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tensor =
+            Tensor::from_vec(vec![0.1f32, 0.2, 0.3, 0.4], Shape::from((4,)), &Device::Cpu).unwrap();
+
+        let before = full_stats_downloads();
+        let stats = QwenImageEngine::validate_qwen_tensor_boundary("clean", &tensor).unwrap();
+
+        assert_eq!(
+            full_stats_downloads(),
+            before,
+            "a finite boundary must be settled by the on-device probe alone"
+        );
+        assert_eq!(stats.total, 4);
+        assert_eq!(stats.nan_count, 0);
+        assert_eq!(stats.min, 0.1);
+    }
+
+    /// The fail-loud half is unchanged: an injected NaN still aborts, and the
+    /// message still carries the full breakdown, which costs the scan.
+    #[test]
+    fn qwen_injected_nan_boundary_still_errors_with_the_full_breakdown() {
+        let _guard = FULL_STATS_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tensor = Tensor::from_vec(
+            vec![0.0f32, f32::NAN, 1.0, f32::INFINITY],
+            Shape::from((4,)),
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let before = full_stats_downloads();
+        let err = QwenImageEngine::validate_qwen_tensor_boundary("noise_pred[0]", &tensor)
+            .expect_err("a NaN boundary must abort the render");
+
+        assert!(full_stats_downloads() > before);
+        let message = err.to_string();
+        assert!(message.contains("noise_pred[0]"), "{message}");
+        assert!(message.contains("NaN=1/4"), "{message}");
+        assert!(message.contains("+Inf=1"), "{message}");
     }
 
     #[test]
@@ -5444,6 +6128,138 @@ mod tests {
         ));
         assert!(QwenImageEngine::qwen_transformer_rebuild_needed(
             false, &empty, &empty
+        ));
+    }
+
+    #[test]
+    fn qwen_cfg_batching_moves_only_when_the_flag_contradicts_this_request() {
+        // Currently batched (`supports = true`), request wants batched too.
+        assert_eq!(
+            QwenImageEngine::qwen_cfg_batching_update(Some(true), false),
+            None
+        );
+        // Currently split (`supports = false`), request wants split too.
+        assert_eq!(
+            QwenImageEngine::qwen_cfg_batching_update(Some(false), true),
+            None
+        );
+        // Loaded split at 1328², but this smaller request batches — the whole
+        // point of re-deciding per request.
+        assert_eq!(
+            QwenImageEngine::qwen_cfg_batching_update(Some(false), false),
+            Some(true)
+        );
+        // Currently batched, but this request no longer fits batched.
+        assert_eq!(
+            QwenImageEngine::qwen_cfg_batching_update(Some(true), true),
+            Some(false)
+        );
+        // BF16 / FP8 / offloaded transformers carry no flag.
+        assert_eq!(QwenImageEngine::qwen_cfg_batching_update(None, true), None);
+        assert_eq!(QwenImageEngine::qwen_cfg_batching_update(None, false), None);
+    }
+
+    /// The CFG-batching mode is a `bool` with no structural effect, so it must
+    /// never reach the rebuild decision: a rebuild is a full GGUF dequantize →
+    /// merge → re-quantize across every block, and because the stale check and
+    /// the rebuild's own decision read free VRAM from systematically unequal
+    /// sources, making it a rebuild input let one resolution rebuild on every
+    /// single request, forever.
+    #[test]
+    fn cfg_batching_mode_never_triggers_a_qwen_transformer_rebuild() {
+        let stack = fingerprint_stack(&[lora("/loras/lightning-8.safetensors", 1.0)]);
+        let empty: Vec<QwenImageLoraFingerprint> = Vec::new();
+
+        // Same stack, resident transformer — elides regardless of any CFG
+        // re-decision, which is handled in place.
+        assert!(!QwenImageEngine::qwen_transformer_rebuild_needed(
+            true, &stack, &stack
+        ));
+        assert!(!QwenImageEngine::qwen_transformer_rebuild_needed(
+            true, &empty, &empty
+        ));
+        // The LoRA rebuild is untouched.
+        assert!(QwenImageEngine::qwen_transformer_rebuild_needed(
+            true, &stack, &empty
+        ));
+    }
+
+    /// The same request, taken repeatedly against a free-VRAM reading that
+    /// wobbles around the split/batched boundary, must cost zero rebuilds.
+    #[test]
+    fn oscillating_cfg_decisions_cost_no_qwen_transformer_rebuilds() {
+        let stack = [lora("/loras/lightning-8.safetensors", 1.0)];
+        let mut engine = RebuildCounter::new();
+        engine.request(&stack);
+        assert_eq!(engine.builds, 1, "the first load always builds");
+
+        let mut supports = Some(false);
+        for request_splits in [false, true, false, true, false] {
+            if let Some(wanted) =
+                QwenImageEngine::qwen_cfg_batching_update(supports, request_splits)
+            {
+                supports = Some(wanted);
+            }
+            engine.request(&stack);
+        }
+
+        assert_eq!(
+            engine.builds, 1,
+            "flipping the CFG mode must never rebuild the transformer"
+        );
+        assert_eq!(supports, Some(true), "the last request batched");
+    }
+
+    #[test]
+    fn resident_quantized_transformer_re_decides_cfg_at_the_request_resolution() {
+        // A 12.3 GB q4 checkpoint loaded at 1328² on a 16 GB card chose split
+        // CFG. The load path read free VRAM before those weights landed, so a
+        // resident engine has to add them back to ask the same question.
+        let transformer_size = 12_300_000_000u64;
+        let card = 16_000_000_000u64;
+        let free_while_resident = card - transformer_size;
+
+        let loaded_supports_batching = !QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
+            transformer_size,
+            card,
+            1328,
+            1328,
+        );
+        assert!(
+            !loaded_supports_batching,
+            "1328² loads with split CFG on 16 GB"
+        );
+
+        // The same engine now serves 768². Read free VRAM while the
+        // transformer is resident, then add its bytes back.
+        let free_for_decision = free_while_resident + transformer_size;
+        let request_splits = QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
+            transformer_size,
+            free_for_decision,
+            768,
+            768,
+        );
+        assert!(!request_splits, "768² fits batched CFG on 16 GB");
+
+        assert_eq!(
+            QwenImageEngine::qwen_cfg_batching_update(
+                Some(loaded_supports_batching),
+                request_splits
+            ),
+            Some(true),
+            "the split flag must move to batched for a request that fits batched"
+        );
+
+        // Forgetting the add-back is the bug this guards: the resident
+        // reading alone makes even 768² look like it must split.
+        assert!(QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
+            transformer_size,
+            free_while_resident,
+            768,
+            768,
         ));
     }
 
