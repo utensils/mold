@@ -1024,6 +1024,96 @@ fn complete_gemma_bf16_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(sharded)
 }
 
+/// Floor of the host headroom admission keeps free, mirroring
+/// `local_engine::plan_local_batch`: `max(15% of installed RAM, 8 GiB)`.
+///
+/// Reserving a flat 8 GiB here would disagree with admission on any host above
+/// ~53 GB, letting this pick BF16 for a plan the scheduler then rejects while
+/// Q4 would have fitted.
+const GEMMA_HOST_SAFETY_FLOOR_MIN: u64 = 8 << 30;
+
+/// Base transient admission charges every plan on top of its artifacts
+/// (`execution_plan::BASE_HOST_TRANSIENT`).
+const GEMMA_HOST_BASE_TRANSIENT: u64 = 256 * 1024 * 1024;
+
+/// Headroom that must remain beside a resident BF16 Gemma encoder for the plan
+/// carrying it to be admissible on a unified-memory host, where the encoder
+/// shares one pool with the transformer it sits beside.
+fn gemma_host_headroom(total_bytes: u64) -> u64 {
+    total_bytes
+        .saturating_mul(15)
+        .saturating_div(100)
+        .max(GEMMA_HOST_SAFETY_FLOOR_MIN)
+        .saturating_add(GEMMA_HOST_BASE_TRANSIENT)
+}
+
+/// Pick a Gemma variant when nothing is pinned, given a memory reading.
+///
+/// Selection used to be presence-based: BF16 won whenever its shards existed,
+/// however little memory was left. That is the one encoder in the tree without
+/// the quantized auto-fallback T5, Qwen3, Qwen2 and UMT5 all perform, and on a
+/// 48 GB unified-memory Mac it left LTX-2 permanently unadmittable — 24.5 GB of
+/// resident Gemma plus a ~20 GB transformer does not fit, so every plan was
+/// refused before a weight was read.
+///
+/// Quantizing this encoder is the normal path elsewhere rather than a
+/// compromise: ComfyUI ships Gemma-3-12B for LTX-2 at BF16 (24.4 GB), FP8
+/// (13.2 GB) and FP4-mixed (9.45 GB), and steers 16-24 GB cards to the smallest
+/// of those, reserving BF16 for 32 GB+. Mold's Q4 is Google's quantization-aware
+/// `q4_0` release, which holds up better than a post-training cast of the same
+/// width.
+///
+/// `available` and `total` are `None` off macOS, where no reclaimable-memory
+/// figure is published; BF16 stays the default there, so CUDA is unaffected.
+///
+/// `has_gguf` means *exactly one* GGUF is present. Inference loads only the
+/// lexicographically first file in the Gemma root
+/// (`ltx2::text::gemma::discover_gguf`), so an ambiguous set would let this
+/// choose Q4 and then load a file nobody selected. Ambiguity keeps BF16, whose
+/// shard set is validated as a complete five-way group.
+fn choose_gemma_tag(
+    bf16_bytes: u64,
+    has_gguf: bool,
+    available: Option<u64>,
+    total: Option<u64>,
+) -> &'static str {
+    if !has_gguf {
+        return "bf16";
+    }
+    let (Some(available), Some(total)) = (available, total) else {
+        return "bf16";
+    };
+    // checked_add, not saturating: a saturated sum would compare equal to a
+    // saturated `available` and wrongly read as "fits".
+    match bf16_bytes.checked_add(gemma_host_headroom(total)) {
+        Some(required) if required <= available => "bf16",
+        _ => "q4",
+    }
+}
+
+/// Resolve [`choose_gemma_tag`] against live host memory, disclosing a
+/// downgrade rather than silently substituting different weights.
+fn auto_gemma_tag(bf16: &[PathBuf], gguf: &[PathBuf]) -> &'static str {
+    let bf16_bytes = bf16
+        .iter()
+        .filter_map(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .fold(0u64, u64::saturating_add);
+    let available = mold_inference::device::available_system_memory_bytes();
+    let total = mold_inference::device::total_system_memory_bytes();
+    let tag = choose_gemma_tag(bf16_bytes, gguf.len() == 1, available, total);
+    if tag == "q4" {
+        tracing::warn!(
+            bf16_bytes,
+            available_bytes = available.unwrap_or(0),
+            "the BF16 Gemma prompt encoder does not fit in available host memory; \
+             using the Q4 encoder instead — prompt adherence may differ. Pin it with \
+             MOLD_LTX2_GEMMA_VARIANT=bf16 or q4 to choose explicitly."
+        );
+    }
+    tag
+}
+
 fn materialize_gemma(
     preference: Option<&str>,
     paths: &ModelPaths,
@@ -1037,16 +1127,27 @@ fn materialize_gemma(
     // network or discovery after scheduler admission.
     let root = gemma_root(paths)?;
     let bf16 = complete_gemma_bf16_files(&root)?;
-    let gguf = sorted_matching_files(&root, |name| name.ends_with(".gguf"));
+    // Case-insensitive, matching `ltx2::text::gemma::discover_gguf`. Counting
+    // only lowercase names here would let `a.GGUF` beside `b.gguf` look like a
+    // single unambiguous Q4 to preparation while inference sorts both and can
+    // load the one that was never frozen.
+    let gguf = sorted_matching_files(&root, |name| {
+        std::path::Path::new(name)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+    });
     let tag = match preference.map(|value| value.trim().to_ascii_lowercase()) {
         Some(value) if matches!(value.as_str(), "q4" | "gguf" | "q4_gguf") => "q4",
         Some(value) if matches!(value.as_str(), "bf16" | "safetensors" | "bf16_safetensors") => {
             "bf16"
         }
-        Some(value) if (value.is_empty() || value == "auto") && !bf16.is_empty() => "bf16",
+        Some(value) if (value.is_empty() || value == "auto") && !bf16.is_empty() => {
+            auto_gemma_tag(&bf16, &gguf)
+        }
         Some(value) if value.is_empty() || value == "auto" => "q4",
         Some(value) => return Err(format!("unknown LTX-2 Gemma variant '{value}'")),
-        None if !bf16.is_empty() => "bf16",
+        None if !bf16.is_empty() => auto_gemma_tag(&bf16, &gguf),
         None => "q4",
     };
     let selected = if tag == "bf16" { bf16 } else { gguf };
@@ -1180,6 +1281,16 @@ async fn prepare_inputs_for_devices(
             .umt5_variant
             .as_deref()
             .is_none_or(|value| value.is_empty() || value == "auto"),
+        // An unpinned Gemma is chosen from live host memory the same way, so a
+        // plan frozen under one pressure must be replanned under another.
+        // `materialize_gemma` trims and lowercases the preference before
+        // matching it, so this must too — otherwise `AUTO` or ` auto ` selects
+        // automatically and then never replans. The arms above compare the raw
+        // string and carry the same latent gap.
+        "ltx2" | "ltx-2" | "ltx2.3" => base.ltx2_gemma_variant.as_deref().is_none_or(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            value.is_empty() || value == "auto"
+        }),
         _ => false,
     };
 
@@ -2372,6 +2483,144 @@ mod tests {
                 reason,
             }) if dependency == "encoder.gguf" && reason == "still downloading"
         ));
+    }
+
+    /// BF16 Gemma is ~24.5 GB resident, so on a host that cannot hold it beside
+    /// the transformer the quantized encoder is the only admittable choice.
+    /// Presence-based selection pinned BF16 regardless and left LTX-2
+    /// unrunnable on a 48 GB unified-memory Mac.
+    #[test]
+    fn an_unpinned_gemma_falls_back_to_q4_only_when_bf16_cannot_fit() {
+        const GB: u64 = 1 << 30;
+        let bf16 = 24 * GB;
+        let mac48 = 48 * GB;
+        let headroom = super::gemma_host_headroom(mac48);
+
+        // Comfortable host: BF16 wins.
+        assert_eq!(
+            super::choose_gemma_tag(bf16, true, Some(120 * GB), Some(128 * GB)),
+            "bf16"
+        );
+        // Exactly at the boundary: still BF16, the comparison is inclusive.
+        assert_eq!(
+            super::choose_gemma_tag(bf16, true, Some(bf16 + headroom), Some(mac48)),
+            "bf16"
+        );
+        // One byte short: downgrade.
+        assert_eq!(
+            super::choose_gemma_tag(bf16, true, Some(bf16 + headroom - 1), Some(mac48)),
+            "q4"
+        );
+        // A 48 GB Mac with 24 GB reclaimable — the case that was refused.
+        assert_eq!(
+            super::choose_gemma_tag(bf16, true, Some(24 * GB), Some(mac48)),
+            "q4"
+        );
+    }
+
+    /// The headroom must track admission's own floor rather than a flat 8 GiB,
+    /// which only coincides below ~53 GB of installed RAM.
+    #[test]
+    fn gemma_headroom_tracks_the_admission_safety_floor() {
+        const GB: u64 = 1 << 30;
+        let transient = super::GEMMA_HOST_BASE_TRANSIENT;
+        // 15% of 48 GB is 7.2 GiB, so the 8 GiB minimum governs.
+        assert_eq!(
+            super::gemma_host_headroom(48 * GB),
+            super::GEMMA_HOST_SAFETY_FLOOR_MIN + transient
+        );
+        // 15% of 128 GB is 19.2 GiB and governs instead.
+        assert_eq!(
+            super::gemma_host_headroom(128 * GB),
+            (128 * GB) * 15 / 100 + transient
+        );
+        assert!(super::gemma_host_headroom(u64::MAX) > 0);
+    }
+
+    /// Never downgrade to a variant that is not unambiguously there, and never
+    /// change behaviour on a host that publishes no memory figures.
+    #[test]
+    fn gemma_selection_holds_bf16_without_one_q4_or_a_memory_reading() {
+        const GB: u64 = 1 << 30;
+        let mac48 = Some(48 * GB);
+        // No GGUF on disk: BF16 even under pressure, so the caller's
+        // "selected variant is not locally available" error still governs.
+        assert_eq!(
+            super::choose_gemma_tag(24 * GB, false, Some(GB), mac48),
+            "bf16"
+        );
+        // Off macOS there are no readings; CUDA hosts keep their behaviour.
+        assert_eq!(super::choose_gemma_tag(24 * GB, true, None, mac48), "bf16");
+        assert_eq!(
+            super::choose_gemma_tag(24 * GB, true, Some(GB), None),
+            "bf16"
+        );
+        // A saturating sum must not read as "fits" against a saturated
+        // available figure.
+        assert_eq!(
+            super::choose_gemma_tag(u64::MAX, true, Some(u64::MAX), mac48),
+            "q4"
+        );
+    }
+
+    /// Preparation must enumerate GGUFs exactly as inference does, or a
+    /// mixed-case pair looks unambiguous here and ambiguous at load time.
+    #[test]
+    fn gemma_gguf_discovery_is_case_insensitive_like_the_runtime() {
+        let root = TempDir::new().unwrap();
+        std::fs::write(root.path().join("a-gemma.GGUF"), b"x").unwrap();
+        std::fs::write(root.path().join("b-gemma.gguf"), b"x").unwrap();
+        let found = super::sorted_matching_files(root.path(), |name| {
+            std::path::Path::new(name)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+        });
+        assert_eq!(
+            found.len(),
+            2,
+            "both casings must be seen, so the set reads as ambiguous"
+        );
+    }
+
+    /// `materialize_gemma` trims and lowercases the preference, so the
+    /// capacity-sensitivity predicate has to agree or an `AUTO` plan selects
+    /// on live memory and is then never replanned when pressure changes.
+    #[test]
+    fn gemma_auto_detection_ignores_case_and_surrounding_space() {
+        let is_auto = |value: &str| {
+            let value = value.trim().to_ascii_lowercase();
+            value.is_empty() || value == "auto"
+        };
+        for value in ["auto", "AUTO", " auto ", "Auto", ""] {
+            assert!(is_auto(value), "{value:?} should count as automatic");
+        }
+        for value in ["q4", "bf16", "gguf"] {
+            assert!(!is_auto(value), "{value:?} is an explicit pin");
+        }
+    }
+
+    /// An ambiguous GGUF set must not trigger the downgrade: inference loads
+    /// only the lexicographically first file, so choosing Q4 here would load a
+    /// checkpoint nobody selected.
+    #[test]
+    fn an_ambiguous_gguf_set_never_triggers_the_gemma_downgrade() {
+        const GB: u64 = 1 << 30;
+        let root = TempDir::new().unwrap();
+        let bf16 = Vec::new();
+        let two = vec![
+            root.path().join("a-gemma.gguf"),
+            root.path().join("b-unrelated.gguf"),
+        ];
+        for path in &two {
+            std::fs::write(path, b"x").unwrap();
+        }
+        assert_eq!(super::auto_gemma_tag(&bf16, &two), "bf16");
+        // Starved host, still ambiguous, still no downgrade.
+        assert_eq!(
+            super::choose_gemma_tag(24 * GB, two.len() == 1, Some(GB), Some(48 * GB)),
+            "bf16"
+        );
     }
 
     #[test]
