@@ -745,14 +745,31 @@ impl ChainRequest {
     /// - Each stage's `frames` is `8k+1` and `> 0`.
     /// - `self.stages.len() <= MAX_CHAIN_STAGES`.
     /// - All auto-expand fields are `None` (caller must use `self.stages`).
-    pub fn normalise(mut self) -> Result<Self> {
+    pub fn normalise(self) -> Result<Self> {
+        self.normalise_with_family(None)
+    }
+
+    /// [`normalise`](Self::normalise) with the family already resolved.
+    ///
+    /// The manifest cannot classify an installed `cv:` / `hf:` id, so a
+    /// manifest-only lookup fell back to the LTX `8k+1` grid and rejected a
+    /// 53-frame wan stage as "this family requires 8k+1" — immediately after
+    /// the server had resolved it as wan from the sidecar overlay (#783).
+    /// Callers holding a resolved family pass it; `None` keeps the historical
+    /// manifest-only behaviour for callers that do not.
+    pub fn normalise_with_family(mut self, family_hint: Option<&str>) -> Result<Self> {
         // Resolve the family from the manifest rather than passing `None`.
         // With a family-aware ceiling and grid, a `None` check is not merely
         // loose — it is a different answer: it would reject a 1920x1088 LTX-2
         // sequence the HTTP path admits, and accept a 16-aligned size the
-        // LTX-2 VAE's /32 grid cannot render. `None` remains correct for an
-        // opaque catalog ID with no manifest, exactly as before.
-        let family = crate::manifest::find_manifest(&self.model).map(|m| m.family.clone());
+        // LTX-2 VAE's /32 grid cannot render.
+        let family = crate::manifest::find_manifest(&self.model)
+            .map(|m| m.family.clone())
+            .or_else(|| {
+                family_hint
+                    .filter(|hint| !hint.is_empty())
+                    .map(str::to_string)
+            });
         // A sequence clip is one generation, so it is bound by exactly the
         // same ceiling — including the composed one. Resolving the
         // composition from the model keeps a 4K sequence admissible wherever a
@@ -1074,6 +1091,74 @@ fn build_auto_expand_stages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An installed catalog wan checkpoint normalises on wan's grid (#783).
+    ///
+    /// `normalise` resolved the family from the built-in manifest alone, and
+    /// `find_manifest` cannot classify a `cv:` / `hf:` id — so the grid fell
+    /// back to `8k+1` and a 53-frame wan stage was rejected with "this family
+    /// requires 8k+1", immediately after the server had correctly resolved it
+    /// as wan from the sidecar overlay. Catalog-installed checkpoints are
+    /// exactly the models the sequence work targets.
+    #[test]
+    fn an_installed_catalog_wan_checkpoint_normalises_on_wans_grid() {
+        let installed_wan = || ChainRequest {
+            model: "cv:2041121".into(),
+            stages: vec![
+                wan_stage("a paper boat drifting down a rain gutter", 53),
+                wan_stage("the boat reaches a storm drain", 53),
+            ],
+            motion_tail_frames: 1,
+            width: 832,
+            height: 480,
+            fps: 16,
+            ..auto_expand_request("unused", 106, 53, 1, None)
+        };
+
+        // Without the hint the id is opaque and the LTX grid rejects it —
+        // this is the defect, kept explicit so the fix cannot silently lapse.
+        let unhinted = installed_wan().normalise();
+        assert!(
+            unhinted.is_err(),
+            "a `cv:` id has no manifest, so an unhinted normalise still cannot know the grid"
+        );
+
+        // The server and CLI both resolve the family before calling, so the
+        // hint is what they actually have in hand.
+        let normalised = installed_wan()
+            .normalise_with_family(Some("wan"))
+            .expect("53 is 4k+1, which is wan's own grid");
+        assert_eq!(normalised.stages.len(), 2);
+        assert!(normalised.stages.iter().all(|stage| stage.frames == 53));
+        assert_eq!(normalised.motion_tail_frames, 1);
+
+        // Wan's grid is still enforced, just wan's and not LTX-2's.
+        let off_grid = ChainRequest {
+            stages: vec![wan_stage("one", 50), wan_stage("two", 50)],
+            ..installed_wan()
+        };
+        let error = off_grid.normalise_with_family(Some("wan")).unwrap_err();
+        assert!(error.to_string().contains("4k+1"), "got: {error}");
+
+        // An explicit hint never overrides a model the manifest does know.
+        let ltx2 = auto_expand_request("a drone shot", 194, 97, 17, None);
+        assert!(ltx2.normalise_with_family(Some("ltx2")).is_ok());
+    }
+
+    fn wan_stage(prompt: &str, frames: u32) -> ChainStage {
+        ChainStage {
+            prompt: prompt.into(),
+            frames,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition: TransitionMode::Smooth,
+            fade_frames: None,
+            model: None,
+            loras: Vec::new(),
+            references: Vec::new(),
+        }
+    }
 
     /// Build a minimal auto-expand request with the given knobs. All other
     /// fields use their v1 defaults so tests can focus on the logic under

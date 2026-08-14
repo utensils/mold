@@ -670,7 +670,8 @@ async fn run_chain_local(
         let renderer = engine.as_chain_renderer().ok_or_else(|| {
             anyhow::anyhow!(
                 "model '{}' does not support chained video generation \
-                 (only LTX-2 distilled engines expose a ChainStageRenderer view)",
+                 (LTX-2, LTX-Video, and Wan Video engines expose a \
+                 ChainStageRenderer view)",
                 req_clone.model,
             )
         })?;
@@ -1044,7 +1045,15 @@ pub async fn run_from_script(
     let script = mold_core::chain_toml::read_script_resolving_paths(&toml_src, script_dir)
         .map_err(|e| anyhow::anyhow!("invalid chain TOML in {}: {e}", path.display()))?;
 
-    let req = build_request_from_script(&script)?.normalise()?;
+    // Before `normalise()`: a stage shorter than the requested tail would
+    // otherwise be rejected for a seam that was never going to be applied,
+    // and the dry-run totals below would describe a render that cannot happen.
+    let mut built = build_request_from_script(&script)?;
+    let authority =
+        resolve_chain_model_authority(&built.model, &mold_core::Config::load_or_default());
+    let substitution = normalize_script_motion_tail(&mut built, &authority);
+    report_motion_tail_substitution(substitution, &built.model);
+    let req = built.normalise_with_family(authority.family_hint())?;
 
     if dry_run {
         print_dry_run_summary(&req);
@@ -1072,6 +1081,209 @@ pub async fn run_from_script(
         offload,
     )
     .await
+}
+
+/// Round a frame count down onto the family's own `step*k + offset` grid,
+/// never below the first renderable clip.
+fn snap_down_to_family_grid(frames: u32, family: &str) -> u32 {
+    let step = mold_core::validation::frame_step_for_family(family).unwrap_or(1);
+    let offset = mold_core::validation::frame_offset_for_family(family).unwrap_or(0);
+    if step == 0 || frames <= offset {
+        return frames;
+    }
+    offset + ((frames - offset) / step) * step
+}
+
+/// The generation recipe repeated `--prompt` renders a chain with.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SugarRecipe {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub steps: u32,
+    pub guidance: f64,
+    /// Default frames per clip, on the family's own grid.
+    pub clip_frames: u32,
+    /// Per-clip ceiling an explicit `--frames-per-clip` is clamped to.
+    pub clip_cap: u32,
+    /// Family the cap and grid were resolved from, for the clamp warning.
+    pub family: Option<String>,
+}
+
+/// Resolve the multi-prompt sugar recipe from the model's own configuration.
+///
+/// This path accepts any known model — `main.rs` gates only MiniMax H3 — but
+/// used to hardcode LTX-2's 1216x704, 24 fps, 8 steps, guidance 3.0, a
+/// 97-frame clip default, and a cap resolved against a literal `"ltx2"`. Those
+/// values reach the engine unchanged through the orchestrator's
+/// `build_stage_generate_request`, so `wan22-t2v-a14b:q5` was encoded at 24
+/// fps rather than its own 16 and denoised for 8 steps against a 4-step
+/// Lightning recipe, which renders noise (#783).
+///
+/// `resolved_model_config` is the same authority the single-shot `run` path
+/// uses, so config overrides and manifest defaults layer identically. A model
+/// neither can classify keeps the historical LTX-2 shape rather than an
+/// invented one.
+pub(crate) fn sugar_recipe(model: &str, config: &mold_core::Config) -> SugarRecipe {
+    let resolved = mold_core::manifest::resolve_model_name(model);
+    let model_cfg = config.resolved_model_config(&resolved);
+    let family = crate::commands::generate::resolve_family(&resolved, config);
+
+    let fps = model_cfg
+        .effective_fps()
+        .unwrap_or(mold_core::validation::LTX2_DEFAULT_FPS);
+
+    // The cap is a per-clip ceiling, so it is resolved at the fps this chain
+    // will actually render at — LTX-2's budget is a runtime, not a count.
+    let clip_cap = family
+        .as_deref()
+        .and_then(|family| mold_core::validation::max_frames_for_family_at_fps(family, fps))
+        .unwrap_or(LTX2_DEFAULT_CLIP_FRAMES);
+
+    // The clip default is the routing envelope, not the ceiling: wan's
+    // two-expert A14B measures near 24 GB well before its 257-frame cap.
+    //
+    // `wan_default_clip_frames` reads the tier name, which an opaque `cv:` /
+    // `hf:` ID does not carry — it would pick the 121-frame non-A14B floor
+    // for an installed A14B checkpoint and blow past the envelope its own
+    // sidecar records. Prefer the resolved default there, snapped onto the
+    // family's grid so the value stays submittable.
+    let clip_frames = match family.as_deref() {
+        Some("wan") if mold_core::manifest::find_manifest(&resolved).is_some() => {
+            wan_default_clip_frames(&resolved)
+        }
+        Some("wan") => model_cfg
+            .effective_frames()
+            .map(|frames| snap_down_to_family_grid(frames, "wan"))
+            .unwrap_or_else(|| wan_default_clip_frames(&resolved)),
+        _ => model_cfg
+            .effective_frames()
+            .unwrap_or(LTX2_DEFAULT_CLIP_FRAMES),
+    }
+    .min(clip_cap);
+
+    SugarRecipe {
+        width: model_cfg.effective_width(config),
+        height: model_cfg.effective_height(config),
+        fps,
+        steps: model_cfg.effective_steps(config),
+        guidance: model_cfg.effective_guidance(),
+        clip_frames,
+        clip_cap,
+        family,
+    }
+}
+
+/// Replace a script-authored motion tail with the one the family and the
+/// selected checkpoint can actually honour, returning `(original, applied)`
+/// when a substitution was made.
+///
+/// The server has done this since #936 (`routes_chain::validate_and_normalize_
+/// chain_family`); the CLI never did, so a forced-local `--script` run,
+/// `mold chain validate`, and `--dry-run` all carried the caller's value into
+/// the stitcher. `17 % 4 == 1`, so LTX-2's default clears wan's own `4k+1`
+/// grid check and then discards sixteen good frames at every Smooth seam —
+/// the engine seeds the continuation from one frame while the stitch drops
+/// seventeen. Both surfaces now read one authority in `mold-core`.
+///
+/// This runs **before** `normalise()`: a wan stage shorter than the requested
+/// tail would otherwise be rejected for a tail that was never going to be
+/// applied, and a dry run would report frame totals for a seam that will not
+/// render.
+///
+/// The family and contract come from the same places the server reads them:
+/// the sidecar-derived `ModelConfig` an installed `cv:` / `hf:` checkpoint
+/// carries, then the checkpoint's own headers, then the manifest. A
+/// manifest-only lookup left every catalog wan checkpoint unclassified, which
+/// is not merely conservative — an unclassified family also means the LTX
+/// `8k+1` grid, so a valid 53-frame wan chain was rejected outright and a
+/// 97-frame one silently kept its 17-frame tail.
+pub(crate) fn normalize_script_motion_tail(
+    req: &mut ChainRequest,
+    authority: &ChainModelAuthority,
+) -> Option<(u32, u32)> {
+    let applied = mold_core::validation::chain_motion_tail_frames_for_family(
+        &authority.family,
+        authority.source_image,
+        req.motion_tail_frames,
+    );
+    if applied == req.motion_tail_frames {
+        return None;
+    }
+    let original = req.motion_tail_frames;
+    req.motion_tail_frames = applied;
+    Some((original, applied))
+}
+
+/// What a chain needs to know about the selected checkpoint before it can
+/// validate or render: the family that owns the frame grid and per-clip cap,
+/// and the conditioning contract that decides the seam.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ChainModelAuthority {
+    /// Empty when neither the config nor the manifest can classify the model.
+    pub family: String,
+    pub source_image: Option<mold_core::SourceImageCapability>,
+}
+
+impl ChainModelAuthority {
+    /// `None` when the model is unclassified, which callers pass through to
+    /// `normalise_with_family` as "no hint".
+    pub fn family_hint(&self) -> Option<&str> {
+        (!self.family.is_empty()).then_some(self.family.as_str())
+    }
+}
+
+/// Resolve the family and conditioning contract for a chain's model.
+///
+/// Mirrors the server's `resolve_chain_family` plus its wan header probe, so
+/// a forced-local render and an HTTP submission classify the same checkpoint
+/// the same way.
+pub(crate) fn resolve_chain_model_authority(
+    model: &str,
+    config: &mold_core::Config,
+) -> ChainModelAuthority {
+    let resolved = mold_core::manifest::resolve_model_name(model);
+    let manifest = mold_core::manifest::find_manifest(&resolved);
+    // The installed sidecar's config wins: it is what an opaque catalog ID
+    // resolves to, and the manifest cannot classify one at all.
+    let family = config
+        .resolved_model_config(model)
+        .family
+        .clone()
+        .or_else(|| manifest.map(|model| model.family.to_string()))
+        .unwrap_or_default();
+
+    let manifest_contract = manifest.and_then(|model| model.defaults.source_image);
+    // Wan's contract is a property of the weights, so read the headers of the
+    // artifacts that will actually load; path overrides can point one manifest
+    // name at a different checkpoint.
+    let source_image = if family == "wan" {
+        mold_core::ModelPaths::resolve(model, config)
+            .and_then(|paths| {
+                mold_inference::wan_source_image_capability(&paths.transformer, &paths.vae)
+            })
+            .or(manifest_contract)
+    } else {
+        manifest_contract
+    };
+
+    ChainModelAuthority {
+        family,
+        source_image,
+    }
+}
+
+/// Tell the user which seam actually rendered. A substituted tail changes the
+/// stitched length, so it is disclosed rather than applied silently.
+fn report_motion_tail_substitution(substitution: Option<(u32, u32)>, model: &str) {
+    if let Some((original, applied)) = substitution {
+        status!(
+            "{} {model} carries {} frame(s) across a seam, not {original}; using --motion-tail {}",
+            theme::prefix_warning(),
+            applied,
+            applied,
+        );
+    }
 }
 
 /// Build a canonical `ChainRequest` from the parsed TOML script.
@@ -1150,25 +1362,25 @@ pub async fn run_from_sugar(
     };
     let model = resolve_model_name(&model_raw);
 
-    // Default to the routing clip size, but let an explicit --frames-per-clip
-    // go up to the model's real single-request budget. The sugar path always
-    // renders at the default fps (see `fps` below), so resolve the cap there.
-    let sugar_fps = mold_core::validation::LTX2_DEFAULT_FPS;
-    let clip_cap = mold_core::validation::max_frames_for_family_at_fps("ltx2", sugar_fps)
-        .unwrap_or(LTX2_DEFAULT_CLIP_FRAMES);
+    // Every dimension of the render is the selected model's own, resolved
+    // through the same `resolved_model_config` the single-shot path uses.
+    // Hardcoding LTX-2's here encoded wan A14B at 24 fps instead of 16 and
+    // denoised it for 8 steps against a 4-step recipe (#783).
+    let recipe = sugar_recipe(&model, &config);
     let clip_frames = frames_per_clip
-        .unwrap_or(LTX2_DEFAULT_CLIP_FRAMES)
-        .min(clip_cap);
+        .unwrap_or(recipe.clip_frames)
+        .min(recipe.clip_cap);
     if let Some(requested) = frames_per_clip {
-        if requested > clip_cap {
+        if requested > recipe.clip_cap {
             crate::output::status!(
-                "{} --frames-per-clip {} exceeds the LTX-2 per-clip budget of {} frames \
-                 ({}s at {sugar_fps} fps), clamping to {}",
+                "{} --frames-per-clip {} exceeds the per-clip budget for '{}' at {} fps \
+                 ({} frames), clamping to {}",
                 theme::prefix_warning(),
                 requested,
-                clip_cap,
-                mold_core::validation::LTX2_MAX_RUNTIME_SECONDS,
-                clip_cap,
+                recipe.family.as_deref().unwrap_or("this model"),
+                recipe.fps,
+                recipe.clip_cap,
+                recipe.clip_cap,
             );
         }
     }
@@ -1190,17 +1402,17 @@ pub async fn run_from_sugar(
         })
         .collect();
 
-    // LTX-2 19B/22B distilled defaults: 1216×704, 24 fps, 8 steps, 3.0 guidance.
+    // Geometry, timing, and the denoise recipe all come from the model.
     let req = ChainRequest {
         model: model.clone(),
         stages,
         motion_tail_frames: motion_tail,
-        width: 1216,
-        height: 704,
-        fps: 24,
+        width: recipe.width,
+        height: recipe.height,
+        fps: recipe.fps,
         seed: None,
-        steps: 8,
-        guidance: 3.0,
+        steps: recipe.steps,
+        guidance: recipe.guidance,
         strength: 1.0,
         output_format: OutputFormat::Mp4,
         placement: None,
@@ -1214,8 +1426,17 @@ pub async fn run_from_sugar(
         clip_frames: None,
         source_image: None,
         enable_audio,
-    }
-    .normalise()?;
+    };
+
+    // `--motion-tail` defaults to LTX-2's 17 for every family, so repeated
+    // `--prompt` on a wan model inherited a seam its checkpoint cannot
+    // honour. Resolve it before `normalise()` for the same reason the
+    // script path does (#783).
+    let mut built = req;
+    let authority = resolve_chain_model_authority(&built.model, &config);
+    let substitution = normalize_script_motion_tail(&mut built, &authority);
+    report_motion_tail_substitution(substitution, &built.model);
+    let req = built.normalise_with_family(authority.family_hint())?;
 
     if dry_run {
         print_dry_run_summary(&req);
@@ -1266,6 +1487,293 @@ fn print_dry_run_summary(req: &ChainRequest) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A script-authored wan chain renders with the checkpoint's seam, not
+    /// the caller's (#783).
+    ///
+    /// The server has normalized this since #936; the CLI never did. A wan
+    /// TOML carrying LTX-2's 17 passes `normalise()` clean — `17 % 4 == 1`
+    /// sits on wan's own `4k+1` grid — and then the Smooth stitch drops all
+    /// seventeen incoming frames while the engine seeded the continuation
+    /// from one. Sixteen good frames vanish per seam, with correct-looking
+    /// validation output. This is the regression test for that.
+    #[test]
+    fn a_script_authored_wan_chain_takes_the_checkpoints_seam() {
+        let wan_script_request = |model: &str, tail: u32| ChainRequest {
+            model: model.to_string(),
+            stages: vec![
+                stage_with_frames("a paper boat drifting down a rain gutter", 49),
+                stage_with_frames("the boat reaches a storm drain", 49),
+            ],
+            motion_tail_frames: tail,
+            width: 704,
+            height: 384,
+            fps: 24,
+            ..empty_chain_request()
+        };
+
+        let config = mold_core::Config::default();
+        let authority_for = |model: &str| resolve_chain_model_authority(model, &config);
+
+        // TI2V-5B is `Optional` — it can be seeded, so the seam is one frame.
+        let mut ti2v = wan_script_request("wan22-ti2v-5b:q8", 17);
+        let substitution =
+            normalize_script_motion_tail(&mut ti2v, &authority_for("wan22-ti2v-5b:q8"));
+        assert_eq!(
+            ti2v.motion_tail_frames,
+            mold_core::validation::WAN_HANDOFF_DUPLICATED_FRAMES,
+            "wan re-renders exactly the frame it was seeded with"
+        );
+        assert_eq!(
+            substitution,
+            Some((17, 1)),
+            "a substituted seam must be reported, never applied silently"
+        );
+        // And it still normalises — the value we wrote is on wan's grid.
+        assert!(ti2v.normalise().is_ok());
+
+        // A text-to-video checkpoint has no channel to be seeded through, so
+        // its Smooth boundaries concatenate.
+        let mut t2v = wan_script_request("wan21-t2v-1.3b:bf16", 17);
+        assert_eq!(
+            normalize_script_motion_tail(&mut t2v, &authority_for("wan21-t2v-1.3b:bf16")),
+            Some((17, 0))
+        );
+        assert_eq!(t2v.motion_tail_frames, 0);
+
+        // An already-correct script is left alone and reports nothing.
+        let mut correct = wan_script_request("wan22-ti2v-5b:q8", 1);
+        assert_eq!(
+            normalize_script_motion_tail(&mut correct, &authority_for("wan22-ti2v-5b:q8")),
+            None
+        );
+        assert_eq!(correct.motion_tail_frames, 1);
+
+        // LTX-2's tail is a real latent window; the script still owns it.
+        let mut ltx2 = ChainRequest {
+            model: "ltx-2-19b-distilled:fp8".to_string(),
+            stages: vec![
+                stage_with_frames("a drone shot over pine forest", 97),
+                stage_with_frames("the trees give way to a lake", 97),
+            ],
+            motion_tail_frames: 17,
+            width: 1216,
+            height: 704,
+            fps: 24,
+            ..empty_chain_request()
+        };
+        assert_eq!(
+            normalize_script_motion_tail(&mut ltx2, &authority_for("ltx-2-19b-distilled:fp8")),
+            None
+        );
+        assert_eq!(ltx2.motion_tail_frames, 17);
+    }
+
+    /// Repeated `--prompt` renders with the selected model's own recipe, not
+    /// LTX-2's (#783).
+    ///
+    /// `run_from_sugar` accepts any known model — `main.rs` gates only
+    /// MiniMax H3 — and then hardcoded 1216x704, 24 fps, 8 steps, guidance
+    /// 3.0, a 97-frame clip default, and a cap resolved against a literal
+    /// `"ltx2"`. Those values reach wan unchanged through the orchestrator's
+    /// `build_stage_generate_request`, so `wan22-t2v-a14b:q5` was encoded at
+    /// 24 fps instead of its own 16 — 1.5x fast playback — and denoised for 8
+    /// steps against a 4-step Lightning recipe, which renders noise.
+    #[test]
+    fn multi_prompt_sugar_uses_the_selected_models_own_recipe() {
+        let config = mold_core::Config::default();
+
+        // A14B Lightning: its own geometry, 16 fps, and a 4-step recipe.
+        let a14b = sugar_recipe("wan22-t2v-a14b:q5", &config);
+        assert_eq!(
+            (a14b.width, a14b.height, a14b.fps, a14b.steps, a14b.guidance),
+            (832, 480, 16, 4, 1.0),
+            "sugar sent 1216x704 / 24 fps / 8 steps / 3.0 for this checkpoint"
+        );
+        // The Quality tier is the same checkpoint family on a different
+        // recipe, which is exactly why one hardcoded tuple cannot serve both.
+        let a14b_q8 = sugar_recipe("wan22-t2v-a14b:q8", &config);
+        assert_eq!(
+            (a14b_q8.fps, a14b_q8.steps, a14b_q8.guidance),
+            (16, 20, 3.5)
+        );
+
+        assert_eq!(
+            (a14b.clip_frames - 1) % mold_core::validation::WAN_TEMPORAL_SCALE,
+            0,
+            "the clip default must sit on wan's own 4k+1 grid"
+        );
+        assert!(
+            a14b.clip_frames <= a14b.clip_cap,
+            "clip default {} exceeds the resolved cap {}",
+            a14b.clip_frames,
+            a14b.clip_cap
+        );
+        assert_eq!(
+            a14b.clip_cap,
+            mold_core::validation::max_frames_for_family_at_fps("wan", 16).unwrap(),
+            "the cap is wan's flat request ceiling, not LTX-2's runtime budget"
+        );
+        // The routing envelope, matching what `decide_chain_routing` picks so
+        // sugar and auto-chain cannot disagree about the same model.
+        assert_eq!(
+            a14b.clip_frames,
+            wan_default_clip_frames("wan22-t2v-a14b:q5")
+        );
+
+        // TI2V-5B is 24 fps, but for its own reason, and 1280x704.
+        let ti2v = sugar_recipe("wan22-ti2v-5b:q8", &config);
+        assert_eq!(
+            (ti2v.width, ti2v.height, ti2v.fps, ti2v.steps, ti2v.guidance),
+            (1280, 704, 24, 20, 5.0)
+        );
+        assert_eq!(
+            (ti2v.clip_frames - 1) % mold_core::validation::WAN_TEMPORAL_SCALE,
+            0
+        );
+
+        // LTX-2 keeps exactly what it had, so nothing regresses for it.
+        let ltx2 = sugar_recipe("ltx-2-19b-distilled:fp8", &config);
+        assert_eq!(ltx2.fps, 24);
+        assert_eq!(ltx2.steps, 8);
+        assert_eq!(ltx2.width, 1216);
+        assert_eq!(ltx2.height, 704);
+        assert_eq!(ltx2.clip_frames, LTX2_DEFAULT_CLIP_FRAMES);
+        assert_eq!(
+            ltx2.clip_cap,
+            mold_core::validation::max_frames_for_family_at_fps(
+                "ltx2",
+                mold_core::validation::LTX2_DEFAULT_FPS
+            )
+            .unwrap()
+        );
+
+        // An unresolvable model keeps the historical LTX-2 shape rather than
+        // inventing one.
+        let unknown = sugar_recipe("cv:2041121", &config);
+        assert_eq!(unknown.fps, 24);
+        assert_eq!(unknown.clip_frames, LTX2_DEFAULT_CLIP_FRAMES);
+    }
+
+    /// Everything a `ChainRequest` needs that these tests do not care about.
+    /// `model`, `stages`, `motion_tail_frames`, `width`, `height`, and `fps`
+    /// are always spelled out at the call site.
+    fn empty_chain_request() -> ChainRequest {
+        ChainRequest {
+            model: String::new(),
+            stages: vec![],
+            motion_tail_frames: 0,
+            width: 0,
+            height: 0,
+            fps: 24,
+            seed: None,
+            steps: 8,
+            guidance: 3.0,
+            strength: 1.0,
+            output_format: mold_core::OutputFormat::Mp4,
+            placement: None,
+            original_prompt: None,
+            prompt_transform: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
+            prompt: None,
+            total_frames: None,
+            clip_frames: None,
+            source_image: None,
+            enable_audio: None,
+        }
+    }
+
+    /// An installed `cv:` / `hf:` wan checkpoint is classified from its
+    /// sidecar, not its name (#783).
+    ///
+    /// `find_manifest` cannot classify a catalog id, so a manifest-only
+    /// lookup left the family empty — and an empty family is not merely
+    /// "unknown", it is the LTX `8k+1` grid and a preserved 17-frame tail.
+    /// A valid 53-frame wan chain was rejected outright, and a 97-frame one
+    /// (which also clears `8k+1`) kept a seam that discards sixteen frames.
+    /// The tier name is likewise absent, so the routing default cannot be
+    /// sniffed from it either.
+    #[test]
+    fn an_opaque_catalog_wan_model_is_classified_from_its_sidecar() {
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            "cv:2041121".to_string(),
+            mold_core::ModelConfig {
+                family: Some("wan".to_string()),
+                default_frames: Some(81),
+                default_fps: Some(16),
+                default_width: Some(832),
+                default_height: Some(480),
+                ..Default::default()
+            },
+        );
+
+        // The family now comes from the sidecar, so wan's grid applies.
+        let authority = resolve_chain_model_authority("cv:2041121", &config);
+        assert_eq!(authority.family, "wan");
+        assert_eq!(authority.family_hint(), Some("wan"));
+
+        // A 53-frame chain is on wan's grid and must survive normalisation.
+        let mut req = ChainRequest {
+            model: "cv:2041121".into(),
+            stages: vec![
+                stage_with_frames("a paper boat", 53),
+                stage_with_frames("it reaches the drain", 53),
+            ],
+            motion_tail_frames: 17,
+            width: 832,
+            height: 480,
+            fps: 16,
+            ..empty_chain_request()
+        };
+        normalize_script_motion_tail(&mut req, &authority);
+        assert!(
+            req.normalise_with_family(authority.family_hint()).is_ok(),
+            "53 is 4k+1; the LTX fallback grid rejected it"
+        );
+
+        // Its routing default comes from the sidecar rather than the
+        // 121-frame non-A14B floor the tier name would have selected.
+        let recipe = sugar_recipe("cv:2041121", &config);
+        assert_eq!(recipe.family.as_deref(), Some("wan"));
+        assert_eq!(recipe.fps, 16);
+        assert_eq!(
+            recipe.clip_frames, 81,
+            "the sidecar records this checkpoint's measured envelope"
+        );
+        assert_eq!(
+            (recipe.clip_frames - 1) % mold_core::validation::WAN_TEMPORAL_SCALE,
+            0
+        );
+    }
+
+    /// An off-grid recorded default is snapped down, never submitted as-is.
+    #[test]
+    fn a_catalog_default_off_the_family_grid_snaps_down() {
+        assert_eq!(snap_down_to_family_grid(80, "wan"), 77);
+        assert_eq!(snap_down_to_family_grid(81, "wan"), 81);
+        assert_eq!(snap_down_to_family_grid(97, "ltx2"), 97);
+        assert_eq!(snap_down_to_family_grid(96, "ltx2"), 89);
+        // Never below the first renderable clip.
+        assert_eq!(snap_down_to_family_grid(1, "wan"), 1);
+    }
+
+    fn stage_with_frames(prompt: &str, frames: u32) -> mold_core::chain::ChainStage {
+        mold_core::chain::ChainStage {
+            prompt: prompt.to_string(),
+            frames,
+            source_image: None,
+            negative_prompt: None,
+            seed_offset: None,
+            transition: mold_core::chain::TransitionMode::Smooth,
+            fade_frames: None,
+            model: None,
+            loras: vec![],
+            references: vec![],
+        }
+    }
 
     /// Wan auto-chains instead of being rejected, on its own grid and with a
     /// seam its checkpoint can actually honour (#783).

@@ -93,8 +93,12 @@ pub async fn create_chain_job(
     crate::routes_chain::validate_chain_build_features(&req)?;
     let authority = crate::routes_chain::resolve_chain_model_authority(&state, &req.model).await?;
     crate::routes_chain::validate_and_normalize_chain_family(&authority.config, &mut req)?;
+    // The sidecar-derived family, so an installed `cv:` / `hf:` wan
+    // checkpoint normalises on wan's `4k+1` grid rather than the LTX
+    // fallback a manifest-only lookup leaves behind (#783).
+    let family = crate::routes_chain::resolve_chain_family(&authority.config, &req.model);
     let req = req
-        .normalise()
+        .normalise_with_family(Some(&family))
         .map_err(|e| ApiError::validation(e.to_string()))?;
     if req.output_format != mold_core::OutputFormat::Mp4 {
         return Err(ApiError::validation(
@@ -185,7 +189,8 @@ pub async fn preview_chain_job_placement(
     {
         return Json(unavailable(error.error));
     }
-    let req = match req.normalise() {
+    let family = crate::routes_chain::resolve_chain_family(&validation_config, &req.model);
+    let req = match req.normalise_with_family(Some(&family)) {
         Ok(req) => req,
         Err(error) => return Json(unavailable(error.to_string())),
     };
@@ -528,8 +533,10 @@ pub async fn amend_chain_job(
             &validation_config,
             &mut candidate,
         )?;
+        let family =
+            crate::routes_chain::resolve_chain_family(&validation_config, &candidate.model);
         let candidate = candidate
-            .normalise()
+            .normalise_with_family(Some(&family))
             .map_err(|error| ApiError::validation(error.to_string()))?;
         if candidate.output_format != mold_core::OutputFormat::Mp4 {
             return Err(ApiError::validation(
