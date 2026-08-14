@@ -2669,7 +2669,12 @@ async function onSubmit(allowStaleQuick = false) {
     const boundaryRoute: HostRoute | null = route || null;
     const fitBoundary = async (
       base64: string,
-      boundary: { filename: string; width: number; height: number; mimeType: string },
+      boundary: {
+        filename: string;
+        width: number;
+        height: number;
+        mimeType: string;
+      },
     ): Promise<string | false> => {
       const fitted = await prepareStillSourceToRequest(boundaryRoute, {
         source: {
@@ -3847,8 +3852,12 @@ onBeforeUnmount(() => {
                   @open-end-frame-picker="showEndFramePicker = true"
                   @clear-end-frame="onClearEndFrame"
                   @open-mask="showMask = true"
-                  @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
-                  @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
+                  @open-h3-first-frame-picker="
+                    h3BoundaryPickerTarget = 'firstFrame'
+                  "
+                  @open-h3-last-frame-picker="
+                    h3BoundaryPickerTarget = 'lastFrame'
+                  "
                 />
               </div>
             </template>
@@ -4144,7 +4153,9 @@ onBeforeUnmount(() => {
     />
     <ImagePickerModal
       :open="h3BoundaryPickerTarget !== null"
-      :title="h3BoundaryPickerTarget === 'lastFrame' ? 'Last frame' : 'First frame'"
+      :title="
+        h3BoundaryPickerTarget === 'lastFrame' ? 'Last frame' : 'First frame'
+      "
       :multiple="false"
       gallery-only
       @pick="onPickH3Boundary"

@@ -417,7 +417,6 @@ describe("AdvancedDrawer capability matrix", () => {
       wrapper.getComponent({ name: "PlacementPanel" }).props("modelValue"),
     ).toEqual(placement);
   });
-
 });
 
 describe("AdvancedDrawer always-open sections", () => {

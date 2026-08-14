@@ -1,10 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
-import {
-  resolutionValidationError,
-  resolutionValidationWarning,
-} from "../lib/generateValidation";
+import { resolutionValidationError, resolutionValidationWarning } from "../lib/generateValidation";
 import {
   aspectRatioLabel,
   matchPreset,

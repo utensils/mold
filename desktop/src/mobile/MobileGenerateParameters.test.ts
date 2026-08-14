@@ -78,14 +78,7 @@ describe("MobileGenerateParameters", () => {
       family: "minimax-h3",
       source_image: "required",
     } as ModelEntry;
-    const boundaries = mountParameters(
-      formFor(fl2va.family, fl2va.name),
-      [],
-      true,
-      [],
-      [],
-      fl2va,
-    );
+    const boundaries = mountParameters(formFor(fl2va.family, fl2va.name), [], true, [], [], fl2va);
     // FL2VA boundaries render as the shared source wells in the primary form.
     expect(boundaries.wrapper.find("[data-test='mobile-h3-authoring']").exists()).toBe(false);
 

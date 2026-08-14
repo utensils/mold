@@ -138,9 +138,7 @@ describe("resolutionValidationWarning", () => {
           {
             id: "16:9",
             label: "16:9",
-            presets: [
-              { id: "1280x704", width: 1280, height: 704, tier: "recommended" },
-            ],
+            presets: [{ id: "1280x704", width: 1280, height: 704, tier: "recommended" }],
           },
         ],
       },
@@ -194,8 +192,6 @@ describe("resolutionValidationWarning", () => {
     // (no blocking error) and earns the advisory instead.
     expect(resolutionValidationWarning(1280, 704, model)).toBeNull();
     expect(resolutionValidationError(1024, 1024, model)).toBeNull();
-    expect(resolutionValidationWarning(1024, 1024, model)).toContain(
-      "results may vary",
-    );
+    expect(resolutionValidationWarning(1024, 1024, model)).toContain("results may vary");
   });
 });

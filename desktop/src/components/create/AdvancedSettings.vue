@@ -654,10 +654,7 @@ function reset() {
         :header-interactive="false"
         data-test="section-h3-authoring"
       >
-        <MinimaxH3AuthoringPanel
-          :model-value="h3Authoring"
-          @update:model-value="setH3Authoring"
-        />
+        <MinimaxH3AuthoringPanel :model-value="h3Authoring" @update:model-value="setH3Authoring" />
       </AccordionSection>
 
       <!-- 4 · LoRA stack -->

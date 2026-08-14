@@ -422,10 +422,7 @@ function applyMask(mask: string): void {
       />
       <!-- The same client-side fit as an ordinary source, coerced maskless
            and applied to both boundaries at submit. -->
-      <label
-        v-if="h3Authoring.firstFrame || h3Authoring.lastFrame"
-        class="field"
-      >
+      <label v-if="h3Authoring.firstFrame || h3Authoring.lastFrame" class="field">
         <span>Source fit</span>
         <select
           class="control"

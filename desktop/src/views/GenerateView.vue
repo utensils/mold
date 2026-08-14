@@ -2336,23 +2336,24 @@ async function preprocessSourceFit(
   // coerced maskless (H3 has no repaint mask).
   if (draftCaps.sourceImageMode === "h3-boundaries") {
     try {
-      draft.h3Authoring = (await applyH3BoundaryFit(
-        draft.h3Authoring,
-        draft.sourceFit,
-        { width: draft.width, height: draft.height },
-        {
-          ops: domCanvasOps,
-          cache: sourceFitCache,
-          upscale: (image, model) =>
-            upscaleImage({
-              model,
-              image,
-              ...(route ? { target: route.target } : {}),
-              onProgress: (message) => (preprocessingStatus.value = message),
-            }),
-          onStatus: (message) => (preprocessingStatus.value = message),
-        },
-      )) ?? emptyMinimaxH3AuthoringState();
+      draft.h3Authoring =
+        (await applyH3BoundaryFit(
+          draft.h3Authoring,
+          draft.sourceFit,
+          { width: draft.width, height: draft.height },
+          {
+            ops: domCanvasOps,
+            cache: sourceFitCache,
+            upscale: (image, model) =>
+              upscaleImage({
+                model,
+                image,
+                ...(route ? { target: route.target } : {}),
+                onProgress: (message) => (preprocessingStatus.value = message),
+              }),
+            onStatus: (message) => (preprocessingStatus.value = message),
+          },
+        )) ?? emptyMinimaxH3AuthoringState();
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

@@ -904,7 +904,6 @@ function setSequenceCameraMode(mode: string) {
           </div>
         </AccordionSection>
 
-
         <AccordionSection
           v-if="caps.supportsLora"
           icon="layers"

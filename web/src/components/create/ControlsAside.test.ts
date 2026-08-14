@@ -541,7 +541,6 @@ describe("ControlsAside", () => {
   });
 });
 
-
 describe("ControlsAside — explicit shape pick vs source tie", () => {
   it("lets the user select the canonical aspect even when it equals the source", async () => {
     // A source whose size IS a canonical aspect describes the same canvas as

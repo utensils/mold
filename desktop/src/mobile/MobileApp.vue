@@ -3217,28 +3217,33 @@ async function prepareGenerationRequest(
   );
   if (draftCaps.sourceImageMode === "h3-boundaries") {
     // H3 FL2VA boundaries take the same client-side fit, coerced maskless.
-    draft.h3Authoring = (await applyH3BoundaryFit(
-      draft.h3Authoring,
-      draft.sourceFit,
-      { width: draft.width, height: draft.height },
-      {
-        ops: domCanvasOps,
-        cache: sourceFitCache,
-        upscale: (image, model) =>
-          upscaleImage({
-            image,
-            model,
-            target,
-            onProgress: (message) => {
-              if (isCurrent()) setGenerationStatus(message);
-            },
-          }),
-        onStatus: (message) => {
-          if (isCurrent()) setGenerationStatus(message);
+    draft.h3Authoring =
+      (await applyH3BoundaryFit(
+        draft.h3Authoring,
+        draft.sourceFit,
+        { width: draft.width, height: draft.height },
+        {
+          ops: domCanvasOps,
+          cache: sourceFitCache,
+          upscale: (image, model) =>
+            upscaleImage({
+              image,
+              model,
+              target,
+              onProgress: (message) => {
+                if (isCurrent()) setGenerationStatus(message);
+              },
+            }),
+          onStatus: (message) => {
+            if (isCurrent()) setGenerationStatus(message);
+          },
         },
-      },
-    )) ?? emptyMinimaxH3AuthoringState();
-  } else if (draftCaps.supportsImg2img && draftCaps.sourceImageMode === "single" && draft.sourceImage) {
+      )) ?? emptyMinimaxH3AuthoringState();
+  } else if (
+    draftCaps.supportsImg2img &&
+    draftCaps.sourceImageMode === "single" &&
+    draft.sourceImage
+  ) {
     const result = await applySourceFitPreprocess(
       {
         source: draft.sourceImage,

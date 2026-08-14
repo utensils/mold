@@ -580,7 +580,6 @@ describe("InspectorPanel — model picker", () => {
   });
 });
 
-
 describe("InspectorPanel — source media in the primary form", () => {
   const wanModel = (sourceImage?: string): ModelEntry =>
     ({
@@ -665,7 +664,6 @@ describe("InspectorPanel — source media in the primary form", () => {
     expect(wrapper.find("[data-test='inspector-source-media']").exists()).toBe(false);
   });
 });
-
 
 describe("InspectorPanel — explicit shape pick vs source tie", () => {
   it("lets the user select the canonical aspect even when it equals the source", async () => {

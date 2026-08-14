@@ -204,12 +204,12 @@ describe("SourceMediaPanel — source fit", () => {
 
 describe("SourceMediaPanel — ControlNet block", () => {
   it("shows the ControlNet block for a controlnet family (sd15) only", () => {
-    expect(factory("sd15").find("[data-test='controlnet-block']").exists()).toBe(
-      true,
-    );
-    expect(factory("flux").find("[data-test='controlnet-block']").exists()).toBe(
-      false,
-    );
+    expect(
+      factory("sd15").find("[data-test='controlnet-block']").exists(),
+    ).toBe(true);
+    expect(
+      factory("flux").find("[data-test='controlnet-block']").exists(),
+    ).toBe(false);
   });
 
   it("only surfaces control model + scale once an image is attached", () => {

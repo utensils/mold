@@ -21,9 +21,7 @@ import { useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
 import { attachPickedImage } from "../../lib/sourceAttachment";
 import ImageDropWell from "@studio/components/ImageDropWell.vue";
-import SourceMediaWells, {
-  type SourceMediaSlot,
-} from "@studio/components/SourceMediaWells.vue";
+import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/SourceMediaWells.vue";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
 import {
@@ -306,7 +304,6 @@ function setSourceFitMode(e: Event) {
   }
   props.form.sourceFit = { mode: raw === "pad-fit" ? "pad-fit" : "pad-repaint" };
 }
-
 </script>
 
 <template>
@@ -403,9 +400,7 @@ function setSourceFitMode(e: Event) {
   <div v-else-if="plan.kind === 'single'" data-test="source-media-controls">
     <SourceMediaWells
       :plan="plan"
-      :source="
-        form.sourceImage ? { data: form.sourceImage, filename: form.sourceImageName } : null
-      "
+      :source="form.sourceImage ? { data: form.sourceImage, filename: form.sourceImageName } : null"
       :end-frame="
         form.endFrame ? { data: form.endFrame.base64, filename: form.endFrame.filename } : null
       "

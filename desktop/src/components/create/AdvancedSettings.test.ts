@@ -202,13 +202,7 @@ describe("AdvancedSettings — section ordering contract", () => {
 
   it("renders still-image sections in the canonical order", () => {
     const wrapper = mountSettings(formFor("sdxl"), { upscalers: [upscaler] });
-    expect(sectionIds(wrapper)).toEqual([
-      "scheduler",
-      "negative",
-      "lora",
-      "upscale",
-      "output",
-    ]);
+    expect(sectionIds(wrapper)).toEqual(["scheduler", "negative", "lora", "upscale", "output"]);
   });
 
   it("renders video sections in the canonical order", () => {

@@ -137,7 +137,6 @@ describe("ImagePickerModal", () => {
     expect(wrapper.emitted("close")).toBeTruthy();
   });
 
-
   it("opens straight onto the gallery with no redundant upload tab when gallery-only", async () => {
     seedTwoHostGallery();
     mount(ImagePickerModal, {

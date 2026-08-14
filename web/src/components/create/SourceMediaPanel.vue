@@ -90,9 +90,7 @@ const kicker = computed(() =>
       : "Source image",
 );
 
-const hasSource = computed(
-  () => props.modelValue.imageAttachments.length > 0,
-);
+const hasSource = computed(() => props.modelValue.imageAttachments.length > 0);
 const sourceAttachment = computed<SourceImageState | null>(
   () => props.modelValue.imageAttachments[0] ?? null,
 );
@@ -387,9 +385,17 @@ function clearControl() {
       </template>
 
       <!-- ControlNet (guidance image + model + scale). -->
-      <div v-if="showControlNet" class="smp__controlnet" data-test="controlnet-block">
+      <div
+        v-if="showControlNet"
+        class="smp__controlnet"
+        data-test="controlnet-block"
+      >
         <div class="smp__subhead">ControlNet</div>
-        <label v-if="!hasControl" class="smp__filezone" data-test="control-attach">
+        <label
+          v-if="!hasControl"
+          class="smp__filezone"
+          data-test="control-attach"
+        >
           <span
             >Attach a control image or
             <span class="smp__accent">browse</span></span
