@@ -106,14 +106,10 @@ with no scheduler of their own, so they keep the base contract.
 | `qwen-image-distill:q4`    | 15    | 1.0      | 13.1 GB | Same merge, the 24 GB-friendly tier                       |
 | `qwen-image-edit-lightning:fp8` | 4 | 1.0  | 20.4 GB | Official lightx2v 4-step fused Lightning edit distill     |
 
-::: danger 18+ NSFW
 `qwen-image-edit-lightning:fp8` is the official pre-merged Lightning edit
-distill (lightx2v fuses ModelTC's 4-step LoRA into the Edit-2511 transformer,
-exported as ComfyUI-named fp8_scaled weights).
-`not-for-all-audiences`. It is an uncensored community merge, and mold flags it
-as mature: `/api/models[].nsfw` is `true` for it, so every Models surface shows
-the `18+ NSFW` badge.
-:::
+distill: lightx2v fuses ModelTC's 4-step LoRA into the Edit-2511 transformer
+and exports ComfyUI-named fp8_scaled weights, which run on the existing FP8
+transformer path.
 
 ::: warning Distillation trade-off
 `qwen-image-flash:*` collapses the schedule to four steps. Dense small text,
