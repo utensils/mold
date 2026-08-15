@@ -40,8 +40,11 @@ button {
   --radius-card: 16px;
   --radius-pill: 20px;
   --text-large-title: 1.875rem;
+  /* The native WKWebView already owns the safe-area-constrained viewport.
+     iOS can leave `dvh` stuck at the keyboard-reduced height after dismissal,
+     while `svh` can exceed Tauri's constrained WebView and push tabs below
+     the screen. Follow the stable app container instead. */
   height: 100%;
-  height: 100dvh;
   min-height: 0;
   box-sizing: border-box;
   overflow: hidden;
@@ -1757,6 +1760,13 @@ textarea.control {
   background: color-mix(in srgb, var(--stop) 8%, transparent);
   color: var(--stop);
   font-size: var(--text-body);
+}
+
+.mobile-generate-hint {
+  margin: 8px 0 0;
+  color: var(--ink-3);
+  font-size: var(--text-caption);
+  line-height: 1.45;
 }
 
 .mobile-generate-validation-copy,

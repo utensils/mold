@@ -1086,7 +1086,11 @@ const stepsError = computed(() =>
   profileStepsValidationError(form.steps, selectedGenerationModel.value, form.pipeline),
 );
 const guidanceError = computed(() =>
-  profileGuidanceValidationError(form.guidance, selectedGenerationModel.value, form.pipeline),
+  profileGuidanceValidationError(
+    caps.value.fixedGuidance ?? form.guidance,
+    selectedGenerationModel.value,
+    form.pipeline,
+  ),
 );
 const basicParametersValid = computed(() => !stepsError.value && !guidanceError.value);
 const mobileMediaBudgetError = computed(() => mobileMediaBudgetValidationError(form));

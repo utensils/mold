@@ -7,19 +7,28 @@
 import type { SequenceSharedParams } from "@studio/lib/sequenceForm";
 import type { GenerateForm } from "./generateForm";
 import type { ModelEntry } from "./api/types";
+import { generationCapabilitiesForFamily } from "./capabilities";
+import { effectiveGenerationGuidance } from "@studio/lib/generationCapabilities";
 
 export function sequenceParams(
   form: GenerateForm,
   selectedModel: ModelEntry | null = null,
 ): SequenceSharedParams {
+  const family = selectedModel?.family || form.family;
+  const capabilities = generationCapabilitiesForFamily(
+    family,
+    form.model,
+    form.pipeline,
+    selectedModel?.guidance_capabilities ?? form.guidanceCapabilities,
+  );
   return {
     model: form.model,
-    family: selectedModel?.family || form.family,
+    family,
     width: form.width,
     height: form.height,
     fps: form.fps,
     steps: form.steps,
-    guidance: form.guidance,
+    guidance: effectiveGenerationGuidance(capabilities, form.guidance),
     strength: form.strength,
     sourceFitPolicy: form.sourceFit,
     upscalerModel: form.upscaleModel,

@@ -212,13 +212,15 @@ describe("mobile style row", () => {
 });
 
 describe("mobile safe areas", () => {
-  it("keeps the shell inside the dynamic viewport and clears both landscape notches", () => {
+  it("keeps the shell on the stable viewport after iOS dismisses the keyboard", () => {
     const shell = css.match(/\.mobile-shell\s*\{([^}]*)\}/s);
     const header = css.match(/\.mobile-header\s*\{([^}]*)\}/s);
     const content = css.match(/\.mobile-content\s*\{([^}]*)\}/s);
     const tabs = css.match(/\.mobile-tabs\s*\{([^}]*)\}/s);
 
-    expect(shell?.[1]).toMatch(/height:\s*100dvh\s*;/);
+    expect(shell?.[1]).toMatch(/height:\s*100%\s*;/);
+    expect(shell?.[1]).not.toMatch(/height:\s*100svh\s*;/);
+    expect(shell?.[1]).not.toMatch(/height:\s*100dvh\s*;/);
     expect(shell?.[1]).toMatch(/box-sizing:\s*border-box\s*;/);
     for (const rule of [header?.[1], content?.[1], tabs?.[1]]) {
       expect(rule).toContain("env(safe-area-inset-left)");

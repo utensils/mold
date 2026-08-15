@@ -58,7 +58,7 @@ import {
 } from "@studio/lib/negativePrompt";
 import { pipelineForControlId } from "@studio/lib/ltx2Control";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
-import { isWanFamily } from "@studio/lib/generationCapabilities";
+import { effectiveGenerationGuidance, isWanFamily } from "@studio/lib/generationCapabilities";
 import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
 import {
   effectiveGenerationRecipe,
@@ -765,7 +765,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     width: form.width,
     height: form.height,
     steps: form.steps,
-    guidance: form.guidance,
+    guidance: effectiveGenerationGuidance(caps, form.guidance),
     batch_size:
       caps.forcesBatchSizeOne ||
       (caps.sourceImageMode === "references" && form.imageAttachments.length > 0)

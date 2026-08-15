@@ -90,6 +90,21 @@ export interface AdvertisedGuidanceCapabilities {
   fixed_scale?: number | null;
 }
 
+/**
+ * Resolve the guidance value that may cross a request boundary.
+ *
+ * Forms deliberately retain the user's adjustable value so switching back to
+ * a guided recipe restores it. A fixed distilled recipe still owns the wire
+ * value; sending the hidden form value makes the server reject a control the
+ * user cannot edit.
+ */
+export function effectiveGenerationGuidance(
+  capabilities: Pick<BaseGenerationCapabilities, "fixedGuidance">,
+  formGuidance: number,
+): number {
+  return capabilities.fixedGuidance ?? formGuidance;
+}
+
 const SCHEDULER_OPTIONS: GenerationScheduler[] = [
   "default",
   "ddim",
