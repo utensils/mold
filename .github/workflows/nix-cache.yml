@@ -6,8 +6,10 @@ on:
     tags: ["v*"]
 
 concurrency:
+  # CUDA builds routinely outlive the interval between main pushes. Queue them
+  # so each completed build reaches Cachix instead of cancelling every upload.
   group: nix-cache-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
