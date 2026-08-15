@@ -2631,6 +2631,67 @@ fn maybe_apply_temporal_upsampler(
     Ok(upsampled)
 }
 
+/// The video-modality state entering the denoise loop: conditioned start
+/// latents, widened positions, the per-step clean target, and the denoise
+/// mask.
+struct VideoStageInit {
+    latents: Tensor,
+    positions: Tensor,
+    clean: Tensor,
+    denoise_mask: Tensor,
+}
+
+/// Build the initial conditioned video latents exactly once (#1055).
+///
+/// Upstream constructs the noisy state with a single lerp
+/// (`noisers.py:32-33` @ fd4ded7): a conditioned token starts as
+/// `s·C + (1-s)·N` and its per-token timestep says `(1-s)·σ` — the two
+/// must agree. `apply_stage_video_conditioning` already performs that
+/// blend for soft replacements (the i2v source path), so re-blending the
+/// result toward the clean target — which this function's pre-fix caller
+/// did for every conditioned render — double-counted the source:
+/// `(2s-s²)·C + (1-s)²·N` under a timestep still claiming `(1-s)` noise.
+/// That latent/timestep mismatch suppressed I2V motion at soft strengths.
+///
+/// The freeze blend itself is still upstream's lerp and remains
+/// load-bearing when the caller supplies an *explicit* clean tensor over
+/// pure-noise start latents (retake's temporal window; lip-dub's frozen
+/// audio mirrors this on the audio side): there the blend is what installs
+/// the source into the frozen (mask = 0) regions, and it runs exactly
+/// once. For conditioning-derived cleans it is removed rather than kept:
+/// hard replacements and appended tokens already equal their clean values
+/// (identity blend), and soft replacements are the double-count.
+fn initialize_video_stage_latents(
+    patched_start_latents: &Tensor,
+    video_positions: &Tensor,
+    conditioning: &StageVideoConditioning,
+    clean_override: Option<&Tensor>,
+    mask_override: Option<&Tensor>,
+    base_token_count: usize,
+    device: &candle_core::Device,
+) -> Result<VideoStageInit> {
+    let (latents, positions) =
+        apply_stage_video_conditioning(patched_start_latents, video_positions, conditioning)?;
+    let clean = match clean_override {
+        Some(clean) => clean.clone(),
+        None => clean_latents_for_conditioning(&latents, conditioning)?,
+    };
+    let denoise_mask = match mask_override {
+        Some(mask) => mask.to_device(device)?.to_dtype(DType::F32)?,
+        None => build_video_conditioning_denoise_mask(base_token_count, conditioning, device)?,
+    };
+    let latents = match clean_override {
+        Some(_) => blend_conditioned_denoised(&latents, &clean, &denoise_mask)?,
+        None => latents,
+    };
+    Ok(VideoStageInit {
+        latents,
+        positions,
+        clean,
+        denoise_mask,
+    })
+}
+
 fn blend_conditioned_denoised(
     denoised: &Tensor,
     clean_latents: &Tensor,
@@ -4542,30 +4603,29 @@ fn run_real_distilled_stage(
     let mut run_sigmas = sigmas_no_terminal.to_vec();
     run_sigmas.push(0.0);
     let base_video_token_count = video_patchifier.get_token_count(video_shape);
-    let (mut video_latents, conditioned_video_positions) = apply_stage_video_conditioning(
+    let clean_video_override = video_clean_latents
+        .map(|latents| video_patchifier.patchify(latents))
+        .transpose()?;
+    let init = initialize_video_stage_latents(
         &video_patchifier.patchify(video_start_latents)?,
         video_positions,
         video_conditioning,
+        clean_video_override.as_ref(),
+        video_denoise_mask,
+        base_video_token_count,
+        &device,
     )?;
-    let clean_video_latents = match video_clean_latents {
-        Some(latents) => video_patchifier.patchify(latents)?,
-        None => clean_latents_for_conditioning(&video_latents, video_conditioning)?,
-    };
-    let video_denoise_mask = match video_denoise_mask {
-        Some(mask) => mask.to_device(&device)?.to_dtype(DType::F32)?,
-        None => build_video_conditioning_denoise_mask(
-            base_video_token_count,
-            video_conditioning,
-            &device,
-        )?,
-    };
+    let mut video_latents = init.latents;
+    let conditioned_video_positions = init.positions;
+    let clean_video_latents = init.clean;
+    let video_denoise_mask = init.denoise_mask;
     let video_self_attention_mask = build_video_conditioning_self_attention_mask(
         base_video_token_count,
         video_conditioning,
         &device,
     )?;
     let video_positions = &conditioned_video_positions;
-    let uses_video_freeze_mask = video_clean_latents.is_some() || !video_conditioning.is_empty();
+    let uses_video_freeze_mask = clean_video_override.is_some() || !video_conditioning.is_empty();
     let video_sampler_noise = video_sampler_noise
         .map(|noise| video_patchifier.patchify(noise))
         .transpose()?;
@@ -4577,6 +4637,7 @@ fn run_real_distilled_stage(
         (Some(_), Some(latents)) => Some(audio_patchifier.patchify(latents)?),
         _ => None,
     };
+    let has_explicit_audio_clean = audio_shape.is_some() && audio_clean_latents.is_some();
     let clean_audio_latents = match (audio_shape, audio_clean_latents) {
         (Some(_), Some(latents)) => Some(audio_patchifier.patchify(latents)?),
         _ => audio_latents.clone(),
@@ -4627,21 +4688,27 @@ fn run_real_distilled_stage(
             .transpose()?,
     };
     let audio_positions = conditioned_audio_positions.as_ref();
-    if uses_video_freeze_mask {
-        video_latents =
-            blend_conditioned_denoised(&video_latents, &clean_video_latents, &video_denoise_mask)?;
-    }
-    if let Some(blended_audio_latents) = match (
-        audio_latents.as_ref(),
-        clean_audio_latents.as_ref(),
-        audio_denoise_mask.as_ref(),
-    ) {
-        (Some(audio_latents), Some(clean_audio_latents), Some(audio_denoise_mask)) => Some(
-            blend_conditioned_denoised(audio_latents, clean_audio_latents, audio_denoise_mask)?,
-        ),
-        _ => None,
-    } {
-        audio_latents = Some(blended_audio_latents);
+    // The audio pre-loop freeze blend mirrors the video one inside
+    // `initialize_video_stage_latents`: it installs explicit caller-supplied
+    // clean latents (retake windows, lip-dub's frozen stage-2 audio) into the
+    // masked regions of the fresh start latents. Without an explicit clean
+    // tensor it is an exact identity — the derived clean *is* the start
+    // latents, appended reference tokens included — so it runs only for the
+    // explicit case (#1055: the equivalent video blend double-counted soft
+    // source strength when applied to conditioning-derived cleans).
+    if has_explicit_audio_clean {
+        if let Some(blended_audio_latents) = match (
+            audio_latents.as_ref(),
+            clean_audio_latents.as_ref(),
+            audio_denoise_mask.as_ref(),
+        ) {
+            (Some(audio_latents), Some(clean_audio_latents), Some(audio_denoise_mask)) => Some(
+                blend_conditioned_denoised(audio_latents, clean_audio_latents, audio_denoise_mask)?,
+            ),
+            _ => None,
+        } {
+            audio_latents = Some(blended_audio_latents);
+        }
     }
     let use_cfg = guidance_scale > 1.0;
     let multimodal_guiders = multimodal_guidance.map(|(video_params, audio_params)| {
@@ -8184,10 +8251,11 @@ mod tests {
         build_static_multimodal_guidance_batch, build_video_conditioning_self_attention_mask,
         clean_latents_for_conditioning, convert_velocity_to_x0, convert_x0_to_velocity,
         decoded_video_to_frames, effective_native_guidance_scale, emit_denoise_progress,
-        guided_velocity_from_cfg, keyframe_only_conditioning, ltx2_video_transformer_config,
-        plan_stage2_tiles_with_policy, reapply_stage_video_conditioning,
-        resize_tail_frames_to_pixel_shape, should_inspect_step_velocity,
-        source_image_only_conditioning, stage2_carried_audio, strip_appended_video_conditioning,
+        guided_velocity_from_cfg, initialize_video_stage_latents, keyframe_only_conditioning,
+        ltx2_video_transformer_config, plan_stage2_tiles_with_policy,
+        reapply_stage_video_conditioning, resize_tail_frames_to_pixel_shape,
+        should_inspect_step_velocity, source_image_only_conditioning, stage2_carried_audio,
+        strip_appended_video_conditioning, timestep_from_sigma_and_mask,
         write_hdr_frames_streaming, HdrExrTarget, Ltx2RuntimeSession, Ltx2VaeLatentStats,
         Stage2AudioPolicy, StageAudioConditioning, StageVideoConditioning, TiledStage2Pass,
         VideoTokenAppendCondition, VideoTokenReplacement, LTX2_AUDIO_LATENT_CHANNELS,
@@ -10743,6 +10811,224 @@ mod tests {
         let values = replaced.flatten_all().unwrap().to_vec1::<f32>().unwrap();
 
         assert_eq!(values, vec![0.0, 1.0, 4.0, 7.25, 4.0, 5.0]);
+    }
+
+    /// #1055 witness: the initial conditioned latent handed to the first
+    /// transformer pass must hold exactly `s·C + (1-s)·N` at replacement
+    /// tokens — the single upstream noiser blend — while the denoise mask
+    /// (and therefore the per-token timestep) says `1-s`. Before the fix
+    /// the pre-loop freeze blend re-applied the clean target, producing
+    /// `(2s-s²)·C + (1-s)²·N` under an unchanged `(1-s)·σ` timestep.
+    #[test]
+    fn initialized_latents_hold_single_blend_at_soft_strengths() {
+        let noise = Tensor::from_vec(
+            vec![2.0f32, -4.0, 6.0, -8.0, 10.0, -12.0],
+            (1, 3, 2),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let positions = Tensor::zeros((1, 3, 3, 2), DType::F32, &Device::Cpu).unwrap();
+        for strength in [0.0f64, 0.25, 0.75, 1.0] {
+            let source = Tensor::from_vec(vec![100.0f32, 200.0], (1, 1, 2), &Device::Cpu).unwrap();
+            let conditioning = StageVideoConditioning {
+                replacements: vec![VideoTokenReplacement {
+                    start_token: 0,
+                    tokens: source.clone(),
+                    strength,
+                }],
+                appended: vec![],
+            };
+            let init = initialize_video_stage_latents(
+                &noise,
+                &positions,
+                &conditioning,
+                None,
+                None,
+                3,
+                &Device::Cpu,
+            )
+            .unwrap();
+            let values = init
+                .latents
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let s = strength as f32;
+            // Replacement token (index 0..2): exactly s·C + (1-s)·N.
+            assert_eq!(
+                &values[..2],
+                &[s * 100.0 + (1.0 - s) * 2.0, s * 200.0 + (1.0 - s) * -4.0],
+                "strength {strength}: initialized latent is not the single blend"
+            );
+            // Unconditioned tokens keep the pure start noise.
+            assert_eq!(&values[2..], &[6.0, -8.0, 10.0, -12.0]);
+            // Clean target stays the pure source.
+            let clean = init.clean.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            assert_eq!(&clean[..2], &[100.0, 200.0]);
+            // Mask (→ timestep scale) agrees with the actual noise fraction.
+            let mask = init
+                .denoise_mask
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            assert_eq!(mask, vec![1.0 - s, 1.0, 1.0]);
+        }
+    }
+
+    /// The per-token timestep derived from the init's mask must describe
+    /// the noise actually present in the initialized latent: `(1-s)·σ`
+    /// for a latent whose noise coefficient is exactly `(1-s)`.
+    #[test]
+    fn initialized_timesteps_match_actual_noise_fraction() {
+        let noise = Tensor::from_vec(vec![1.0f32, 1.0, 1.0, 1.0], (1, 2, 2), &Device::Cpu).unwrap();
+        let positions = Tensor::zeros((1, 3, 2, 2), DType::F32, &Device::Cpu).unwrap();
+        let source = Tensor::from_vec(vec![0.0f32, 0.0], (1, 1, 2), &Device::Cpu).unwrap();
+        let strength = 0.75f64;
+        let conditioning = StageVideoConditioning {
+            replacements: vec![VideoTokenReplacement {
+                start_token: 0,
+                tokens: source,
+                strength,
+            }],
+            appended: vec![],
+        };
+        let init = initialize_video_stage_latents(
+            &noise,
+            &positions,
+            &conditioning,
+            None,
+            None,
+            2,
+            &Device::Cpu,
+        )
+        .unwrap();
+        // With C = 0 and N = 1 the latent literally holds its own noise
+        // coefficient at the conditioned token.
+        let latent = init
+            .latents
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let noise_fraction = latent[0];
+        assert_eq!(noise_fraction, 0.25);
+        let sigma = 0.8f32;
+        let timestep =
+            timestep_from_sigma_and_mask(sigma, 1, Some(&init.denoise_mask), &Device::Cpu)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+        assert!((timestep[0] - sigma * noise_fraction).abs() < 1e-6);
+        assert!((timestep[1] - sigma).abs() < 1e-6);
+    }
+
+    /// Appended conditioning (keyframes, references, the chain anchor)
+    /// initializes to its clean token values — for those tokens the old
+    /// pre-loop blend was an exact identity, so removing it changes
+    /// nothing.
+    #[test]
+    fn appended_tokens_initialize_to_their_clean_values() {
+        let noise = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 2, 2), &Device::Cpu).unwrap();
+        let positions = Tensor::zeros((1, 3, 2, 2), DType::F32, &Device::Cpu).unwrap();
+        let conditioning = StageVideoConditioning {
+            replacements: vec![],
+            appended: vec![VideoTokenAppendCondition {
+                tokens: Tensor::from_vec(vec![9.0f32, 10.0], (1, 1, 2), &Device::Cpu).unwrap(),
+                positions: Tensor::zeros((1, 3, 1, 2), DType::F32, &Device::Cpu).unwrap(),
+                strength: 0.4,
+                latent_grid: (1, 1, 1),
+                spatial_downscale_factor: 1,
+            }],
+        };
+        let init = initialize_video_stage_latents(
+            &noise,
+            &positions,
+            &conditioning,
+            None,
+            None,
+            2,
+            &Device::Cpu,
+        )
+        .unwrap();
+        let values = init
+            .latents
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0, 9.0, 10.0]);
+        let mask = init
+            .denoise_mask
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert_eq!(mask, vec![1.0, 1.0, 0.6]);
+    }
+
+    /// The retake shape: an explicit clean override with a binary mask
+    /// keeps the pre-loop freeze blend, which installs the source into the
+    /// frozen (mask = 0) regions of pure-noise start latents — exactly the
+    /// pre-fix behaviour, bit for bit.
+    #[test]
+    fn explicit_clean_override_installs_source_into_frozen_regions() {
+        let noise = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 2, 2), &Device::Cpu).unwrap();
+        let positions = Tensor::zeros((1, 3, 2, 2), DType::F32, &Device::Cpu).unwrap();
+        let clean =
+            Tensor::from_vec(vec![50.0f32, 60.0, 70.0, 80.0], (1, 2, 2), &Device::Cpu).unwrap();
+        let mask = Tensor::from_vec(vec![0.0f32, 1.0], (1, 2), &Device::Cpu).unwrap();
+        let init = initialize_video_stage_latents(
+            &noise,
+            &positions,
+            &StageVideoConditioning::default(),
+            Some(&clean),
+            Some(&mask),
+            2,
+            &Device::Cpu,
+        )
+        .unwrap();
+        let values = init
+            .latents
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert_eq!(values, vec![50.0, 60.0, 3.0, 4.0]);
+    }
+
+    /// T2V: no conditioning, no overrides — the seam is an exact identity.
+    #[test]
+    fn no_conditioning_returns_start_latents_untouched() {
+        let noise = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 2, 2), &Device::Cpu).unwrap();
+        let positions = Tensor::zeros((1, 3, 2, 2), DType::F32, &Device::Cpu).unwrap();
+        let init = initialize_video_stage_latents(
+            &noise,
+            &positions,
+            &StageVideoConditioning::default(),
+            None,
+            None,
+            2,
+            &Device::Cpu,
+        )
+        .unwrap();
+        let values = init
+            .latents
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0]);
+        let mask = init
+            .denoise_mask
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert_eq!(mask, vec![1.0, 1.0]);
     }
 
     #[test]
