@@ -180,6 +180,7 @@ import {
   useHostRouting,
   type FeasibilityResult,
 } from "../composables/useHostRouting";
+import { profileConflictMessage } from "@studio/lib/profileFleet";
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
 import {
   canOfferExtend,
@@ -2595,8 +2596,7 @@ function feasibilityMessage(
   subject: string,
 ): string {
   if (result.kind === "profile_mismatch") {
-    const machines = result.perHost.map((host) => host.label).join(", ");
-    return `Settings differ by machine${machines ? ` (${machines})` : ""}. Choose a specific machine before generating. Nothing was queued.`;
+    return profileConflictMessage(result.perHost);
   }
   const unreachableMessages = (
     hosts: ReadonlyArray<{ label: string; error: string }>,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { profileHashConflict } from "./profileFleet";
+import { profileConflictMessage, profileHashConflict } from "./profileFleet";
 
 const model = (hash: string | null, downloaded = true) => ({
   name: "z-image-turbo:q4",
@@ -60,5 +60,27 @@ describe("profileHashConflict", () => {
         ["local", "catalog"],
       ),
     ).toBeNull();
+  });
+});
+
+describe("profileConflictMessage", () => {
+  it("names conflicting machines and gives an immediate recovery action", () => {
+    expect(
+      profileConflictMessage([
+        { label: "This Mac", profileHash: "local-profile" },
+        { label: "plato", profileHash: "remote-profile" },
+      ]),
+    ).toBe(
+      "Auto can't safely choose a machine because This Mac and plato use different generation settings for this model. They may be running different Mold versions or builds, so the same controls could produce different results. Update and reconnect them, or choose one machine for this print. Nothing was queued.",
+    );
+  });
+
+  it("explains when an older machine may lack a generation profile", () => {
+    expect(
+      profileConflictMessage([
+        { label: "This Mac", profileHash: "current-profile" },
+        { label: "studio", profileHash: null },
+      ]),
+    ).toContain("At least one may be running an older Mold version");
   });
 });
