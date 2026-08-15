@@ -4467,6 +4467,9 @@ watch(
  */
 function handleForegroundResume(): void {
   if (unmounted || document.visibilityState === "hidden") return;
+  if ("__TAURI_INTERNALS__" in window) {
+    void invoke("restore_mobile_viewport").catch(() => undefined);
+  }
   probeHosts();
   void refreshMobileActivity();
   if (modelLoadError.value && !loadingModels.value) void refreshModels();
@@ -4481,6 +4484,7 @@ watch(resultPreviewError, (error) => {
 
 onMounted(async () => {
   if ("__TAURI_INTERNALS__" in window) {
+    void invoke("restore_mobile_viewport").catch(() => undefined);
     void import("@tauri-apps/api/app")
       .then(({ getVersion }) => getVersion())
       .then((version) => {

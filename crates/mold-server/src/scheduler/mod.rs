@@ -2510,9 +2510,11 @@ impl Coordinator {
                     },
                     available_at_ms: active_lease.map(|lease| lease.estimated_finish_ms),
                     worker_generation: ready.map_or(0, |ready| ready.generation),
-                    available_vram_bytes: effective_available_vram_bytes(
+                    available_vram_bytes: schedulable_available_vram_bytes(
                         device.sampled_free_vram_bytes,
                         reclaimable_cache_bytes,
+                        device.sampled_mold_vram_bytes,
+                        active_lease.is_some(),
                         worker.map_or(0, |worker| worker.gpu.total_vram_bytes),
                     ),
                     warm_execution_fingerprints: warm,
@@ -6118,6 +6120,32 @@ pub(crate) fn effective_available_vram_bytes(
         .min(total_vram_bytes)
 }
 
+/// Effective capacity for serialized work on a device. While a lease is
+/// active, the sampler's Mold-owned bytes belong to work that must finish
+/// before the next lease can start, so those bytes are future-reclaimable.
+/// Unknown attribution and memory owned by other processes remain excluded.
+pub(crate) fn schedulable_available_vram_bytes(
+    sampled_free_bytes: u64,
+    reclaimable_cache_bytes: u64,
+    sampled_mold_bytes: Option<u64>,
+    has_active_lease: bool,
+    total_vram_bytes: u64,
+) -> u64 {
+    let immediate = effective_available_vram_bytes(
+        sampled_free_bytes,
+        reclaimable_cache_bytes,
+        total_vram_bytes,
+    );
+    if !has_active_lease {
+        return immediate;
+    }
+    sampled_mold_bytes.map_or(immediate, |mold_bytes| {
+        immediate
+            .max(sampled_free_bytes.saturating_add(mold_bytes))
+            .min(total_vram_bytes)
+    })
+}
+
 fn monotonic_deadline_ms(deadline: Instant) -> u64 {
     monotonic_ms().saturating_add(
         deadline
@@ -7772,6 +7800,32 @@ mod tests {
         assert_eq!(
             coordinator.device_snapshots()[0].available_vram_bytes,
             5 << 30
+        );
+    }
+
+    #[test]
+    fn queued_capacity_reclaims_only_known_mold_vram_from_active_work() {
+        const GIB: u64 = 1 << 30;
+
+        assert_eq!(
+            schedulable_available_vram_bytes(10 * GIB, 0, Some(14 * GIB), true, 24 * GIB),
+            24 * GIB,
+            "a sibling session should queue behind active Mold work"
+        );
+        assert_eq!(
+            schedulable_available_vram_bytes(10 * GIB, 0, Some(14 * GIB), false, 24 * GIB),
+            10 * GIB,
+            "idle Mold attribution is not automatically reclaimable"
+        );
+        assert_eq!(
+            schedulable_available_vram_bytes(10 * GIB, 0, None, true, 24 * GIB),
+            10 * GIB,
+            "unknown attribution must remain fail closed"
+        );
+        assert_eq!(
+            schedulable_available_vram_bytes(4 * GIB, 0, Some(14 * GIB), true, 24 * GIB),
+            18 * GIB,
+            "external allocations remain unavailable after active Mold work completes"
         );
     }
 

@@ -4459,6 +4459,21 @@ describe("MobileApp foreground resume", () => {
     },
   };
 
+  it("restores the native WKWebView frame on launch and after a picker resume", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: {},
+      configurable: true,
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith("restore_mobile_viewport");
+
+    invoke.mockClear();
+    window.dispatchEvent(new Event("pageshow"));
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith("restore_mobile_viewport");
+  });
+
   async function submitSeededPrompt(prompt: string, seed: number): Promise<void> {
     const liveForm = wrapper!.getComponent(MobileLoraControls).props("form") as GenerateForm;
     liveForm.seed = String(seed);
