@@ -1654,12 +1654,32 @@ impl BatchTransaction {
         sync_dir(path.parent().expect("staging path has parent"))?;
 
         let size = fs::metadata(&path)?.len();
+        let record_size =
+            i64::try_from(size).context("staged gallery import exceeds SQLite size range")?;
+        let receipt = BatchChildReceipt {
+            version: BatchChildReceipt::VERSION,
+            parent_id: self.manifest.parent_id.clone(),
+            attempt_generation: self.manifest.attempt_generation,
+            child_index,
+            lease_generation: 0,
+            checksum_sha256: checksum_file(&path)?,
+            size_bytes: size,
+            record_identity_sha256: immutable_record_identity(
+                self.manifest
+                    .children
+                    .get(child_index)
+                    .context("batch child index out of range")?,
+            )?,
+        };
+        self.append_journal(BatchJournalEvent::ChildStaged {
+            receipt: receipt.clone(),
+        })?;
         let child = &mut self.manifest.children[child_index];
-        child.checksum_sha256 = Some(checksum_file(&path)?);
+        child.checksum_sha256 = Some(receipt.checksum_sha256.clone());
         child.size_bytes = Some(size);
-        child.record.file_size_bytes =
-            Some(i64::try_from(size).context("staged gallery import exceeds SQLite size range")?);
-        self.persist_manifest()
+        child.record.file_size_bytes = Some(record_size);
+        self.staged_receipts.insert(child_index, receipt);
+        Ok(())
     }
 
     /// Retire an unpublished staging/prepared attempt immediately. Startup
@@ -2569,7 +2589,21 @@ impl BatchJournalReplay {
         );
         let legal = match (self.manifest.state, next.state) {
             (BatchManifestState::Staging, BatchManifestState::Staging) => {
-                self.manifest.version == MANIFEST_VERSION_V1
+                // 0.21.0 gallery imports wrote this full snapshot before the
+                // v2 receipt delta below replaced that legacy writer path.
+                (self.manifest.version == MANIFEST_VERSION_V1
+                    || (self.manifest.version == MANIFEST_VERSION
+                        && self.manifest.children.len() == 1
+                        && self
+                            .manifest
+                            .normalized_request
+                            .get("kind")
+                            .and_then(|kind| kind.as_str())
+                            == Some("gallery_import")
+                        && self.staged_receipts.is_empty()
+                        && self.record_lease_generations.is_empty()
+                        && self.auxiliary_receipts.is_empty()
+                        && self.cleared_auxiliary_leases.is_empty()))
                     && is_staging_successor(&self.manifest, next)?
             }
             (BatchManifestState::Staging, BatchManifestState::Prepared) => {
@@ -2618,6 +2652,44 @@ impl BatchJournalReplay {
             && next.state == BatchManifestState::Committing
         {
             self.post_publish_snapshot = true;
+        }
+        if self.manifest.version == MANIFEST_VERSION
+            && self.manifest.state == BatchManifestState::Staging
+            && next.state == BatchManifestState::Staging
+        {
+            // Reconstruct the receipt that the legacy full-snapshot writer
+            // omitted so every later v2 transition retains its normal proof.
+            let mut refreshed = None;
+            for (child_index, (previous, next)) in self
+                .manifest
+                .children
+                .iter()
+                .zip(&next.children)
+                .enumerate()
+            {
+                if !manifest_child_eq(previous, next)? {
+                    refreshed = Some((child_index, next));
+                    break;
+                }
+            }
+            let (child_index, child) =
+                refreshed.context("v2 staging snapshot refresh has no changed child")?;
+            let receipt = BatchChildReceipt {
+                version: BatchChildReceipt::VERSION,
+                parent_id: next.parent_id.clone(),
+                attempt_generation: next.attempt_generation,
+                child_index,
+                lease_generation: 0,
+                checksum_sha256: child
+                    .checksum_sha256
+                    .clone()
+                    .context("v2 staging snapshot refresh has no checksum")?,
+                size_bytes: child
+                    .size_bytes
+                    .context("v2 staging snapshot refresh has no size")?,
+                record_identity_sha256: immutable_record_identity(child)?,
+            };
+            self.staged_receipts.insert(child_index, receipt);
         }
         self.manifest = next.clone();
         self.manifest_history.push(next.clone());
@@ -10550,6 +10622,124 @@ mod tests {
                 "recovery could not decide the durable prefix after {failpoint:?}: {recovered:?}"
             );
         }
+    }
+
+    #[test]
+    fn sealed_stream_uses_v2_child_receipt_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "gallery-import",
+            0,
+            serde_json::json!({"kind": "gallery_import"}),
+            vec![record("import.mp4", 0)],
+        )
+        .unwrap();
+        fs::write(transaction.staging_path(0).unwrap(), b"streamed video").unwrap();
+
+        transaction.seal_staged_file(0).unwrap();
+        transaction.mark_prepared().unwrap();
+
+        let journal = load_journal(&transaction.attempt_dir.join(JOURNAL_FILE)).unwrap();
+        assert!(matches!(
+            journal[1].event,
+            BatchJournalEvent::ChildStaged { .. }
+        ));
+        assert_eq!(transaction.staged_receipts.len(), 1);
+        let manifest_path = transaction.attempt_dir.join(MANIFEST_FILE);
+        drop(transaction);
+        let loaded = BatchTransaction::load(dir.path(), &manifest_path).unwrap();
+        assert_eq!(loaded.manifest.state, BatchManifestState::Prepared);
+        assert_eq!(loaded.staged_receipts.len(), 1);
+    }
+
+    #[test]
+    fn legacy_v2_snapshot_does_not_bypass_lease_bound_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "gallery-import",
+            0,
+            serde_json::json!({"kind": "gallery_import"}),
+            vec![record("import.mp4", 0)],
+        )
+        .unwrap();
+        let lease = BatchChildLease {
+            parent_id: "gallery-import".into(),
+            child_index: 0,
+            attempt_generation: 0,
+            lease_generation: 7,
+        };
+        let mut updated = record("import.mp4", 0);
+        updated.generation_time_ms = Some(42);
+        transaction
+            .update_child_record_for_lease(&lease, updated)
+            .unwrap();
+        fs::write(transaction.staging_path(0).unwrap(), b"leased video").unwrap();
+        transaction.manifest.children[0].checksum_sha256 = Some(checksum_bytes(b"leased video"));
+        transaction.manifest.children[0].size_bytes = Some(12);
+        transaction.manifest.children[0].record.file_size_bytes = Some(12);
+        transaction.persist_manifest().unwrap();
+
+        let error =
+            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
+                .unwrap_err();
+
+        assert!(format!("{error:#}").contains("illegal batch manifest transition"));
+    }
+
+    #[tokio::test]
+    async fn legacy_v2_staging_snapshot_recovers_published_gallery_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "gallery-import-legacy",
+            0,
+            serde_json::json!({"kind": "gallery_import"}),
+            vec![record("import.mp4", 0)],
+        )
+        .unwrap();
+        let bytes = b"published video";
+        fs::write(transaction.staging_path(0).unwrap(), bytes).unwrap();
+
+        transaction.manifest.children[0].checksum_sha256 = Some(checksum_bytes(bytes));
+        transaction.manifest.children[0].size_bytes = Some(bytes.len() as u64);
+        transaction.manifest.children[0].record.file_size_bytes = Some(bytes.len() as i64);
+        transaction.persist_manifest().unwrap();
+        transaction.manifest.state = BatchManifestState::Prepared;
+        transaction.persist_manifest().unwrap();
+        transaction.manifest.state = BatchManifestState::Committing;
+        transaction.persist_manifest().unwrap();
+
+        let final_path = dir.path().join("import.mp4");
+        fs::hard_link(transaction.staging_path(0).unwrap(), &final_path).unwrap();
+        File::open(&final_path).unwrap().sync_all().unwrap();
+        transaction.manifest.children[0]
+            .record
+            .stat_from_disk(&final_path);
+        transaction
+            .append_journal(BatchJournalEvent::FinalPublished { child_index: 0 })
+            .unwrap();
+        transaction.persist_manifest().unwrap();
+
+        let manifest_path = transaction.attempt_dir.join(MANIFEST_FILE);
+        let loaded = BatchTransaction::load(dir.path(), &manifest_path).unwrap();
+        assert_eq!(loaded.staged_receipts.len(), 1);
+        assert_eq!(loaded.journaled_final_children, BTreeSet::from([0]));
+        drop(loaded);
+        transaction.relinquish_attempt_authority_for_recovery();
+
+        let report = recover_transactions(
+            dir.path(),
+            &GalleryPublicationGate::default(),
+            Arc::new(None),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.rolled_forward, 1);
+        assert_eq!(fs::read(final_path).unwrap(), bytes);
+        assert!(!attempt_dir(dir.path(), "gallery-import-legacy", 0).exists());
     }
 
     #[test]
