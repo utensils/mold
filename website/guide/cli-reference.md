@@ -28,98 +28,59 @@ other run, including img2img on an image family, still errors with
 
 ### Options
 
-| Flag                                                                                         | Description                                                                                                       |
-| -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `-o, --output <PATH>`                                                                        | Output path; `-` writes media bytes to stdout                                                                     |
-| `--format <FMT>`                                                                             | `png`, `jpeg`, `gif`, `apng`, `webp`, or `mp4`                                                                    |
-| `--width <N>`, `--height <N>`                                                                | Output dimensions                                                                                                 |
-| `--steps <N>`, `--guidance <N>`, `--seed <N>`, `--batch <N>`                                 | Core generation controls                                                                                          |
-| `--prompt <TEXT>`                                                                            | Repeat for multi-stage LTX-2 chain sugar                                                                          |
-| `--frames-per-clip <N>`                                                                      | Per-stage frame count for repeated `--prompt`                                                                     |
-| `--script <PATH>`                                                                            | Submit a `mold.chain.v1` TOML chain script                                                                        |
-| `--dry-run`                                                                                  | Parse/normalise repeated prompts or scripts without generating                                                    |
-| `--frames <N>`, `--fps <N>`                                                                  | Video frame count and output FPS                                                                                  |
-| `--clip-frames <N>`                                                                          | Per-clip cap for chained LTX-2 renders                                                                            |
-| `--motion-tail <N>`                                                                          | Overlap frames reused between chained clips                                                                       |
-| `--audio`, `--no-audio`                                                                      | Keep or strip synchronized LTX-2 MP4 audio                                                                        |
-| `--audio-file <PATH>`                                                                        | LTX-2 audio-to-video conditioning                                                                                 |
-| `--video <PATH>`                                                                             | LTX-2 source video for retake/video-conditioning                                                                  |
-| `--ic-lora-control <ID>`                                                                     | Official compatible LTX-2 reference control; requires `--video` and selects `ic-lora` (or `lip-dub` for `lipdub`) |
-| `--keyframe <FRAME:PATH>`                                                                    | Repeatable LTX-2 keyframe conditioning                                                                            |
-| `--pipeline <MODE>`                                                                          | `one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2-vid`, `retake`, or `lip-dub`    |
-| `--retake <START:END>`                                                                       | LTX-2 retake range in seconds                                                                                     |
-| `--camera-control <NAME\|PATH>`                                                              | LTX-2 camera-control preset or `.safetensors` path                                                                |
-| `--spatial-upscale <MODE>`                                                                   | LTX-2 spatial upscaling, such as `x1.5` or `x2`                                                                   |
-| `--temporal-upscale <MODE>`                                                                  | LTX-2 temporal upscaling, currently `x2`                                                                          |
-| `--stg-scale <SCALE>`, `--stg-blocks <BLOCKS>`                                               | LTX-2 spatiotemporal guidance strength and the perturbed transformer blocks                                       |
-| `--rescale-scale <SCALE>`, `--modality-scale <SCALE>`                                        | LTX-2 CFG-rescale factor and audio/video cross-modality guidance                                                  |
-| `--guidance-skip-step <N>`                                                                   | Apply LTX-2 guidance every `N + 1` steps instead of every step                                                    |
-| `-i, --image <PATH>`                                                                         | Source image; repeat for `qwen-image-edit`; `-` is stdin for single-image families                                |
-| `--strength <FLOAT>`, `--mask <PATH>`                                                        | img2img/inpainting controls                                                                                       |
-| `--control <PATH>`, `--control-model <NAME>`, `--control-scale <FLOAT>`                      | SD1.5 ControlNet controls                                                                                         |
-| `-n, --negative-prompt <TEXT>`, `--no-negative`                                              | CFG-family negative prompt controls                                                                               |
-| `--lora <PATH>`, `--lora-scale <FLOAT>`                                                      | LoRA adapter path and scale; `--lora` is repeatable                                                               |
-| `--upscale <MODEL>`                                                                          | Apply a Real-ESRGAN upscaler after generation                                                                     |
-| `--no-metadata`                                                                              | Disable embedded PNG metadata for this run                                                                        |
-| `--preview`                                                                                  | Display output inline in the terminal                                                                             |
-| `--expand`, `--no-expand`, `--expand-backend <URL>`, `--expand-model <MODEL>`                | Prompt expansion controls                                                                                         |
-| `--local`                                                                                    | Skip the server and run local inference                                                                           |
-| `--host <URL>`                                                                               | Override `MOLD_HOST`                                                                                              |
-| `--gpus <SPEC>`                                                                              | Local GPUs: `all`, `none`, ordinals, or stable `cuda:`/`metal:`/`GPU-`/`MIG-` IDs                                 |
-| `--eager`, `--offload`                                                                       | VRAM/performance placement modes                                                                                  |
-| `--t5-variant <TAG>`, `--qwen3-variant <TAG>`, `--qwen2-variant <TAG>`                       | Text encoder variant overrides                                                                                    |
-| `--qwen2-text-encoder-mode <MODE>`                                                           | `auto`, `gpu`, `cpu-stage`, or `cpu`                                                                              |
-| `--scheduler <SCHED>`                                                                        | `ddim`, `euler-ancestral`, or `uni-pc`                                                                            |
-| `--cfg-plus`                                                                                 | Enable CFG++ on supported SD-family paths                                                                         |
-| `--device-text-encoders <DEV>`                                                               | Place all text encoders on `auto`, `cpu`, `gpu:N`, or an exact `/api/devices` ID                                  |
-| `--device-transformer <DEV>`, `--device-vae <DEV>`                                           | Advanced family placement overrides; accepts the same device forms                                                |
-| `--device-t5 <DEV>`, `--device-clip-l <DEV>`, `--device-clip-g <DEV>`, `--device-qwen <DEV>` | Per-encoder placement overrides                                                                                   |
-| Flag                                                                                         | Description                                                                                                       |
-| -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------        |
-| `-o, --output <PATH>`                                                                        | Output path; `-` writes media bytes to stdout                                                                     |
-| `--format <FMT>`                                                                             | `png`, `jpeg`, `gif`, `apng`, `webp`, `mp4`, or `wav` (LTX-2 `--pipeline t2a`)                                    |
-| `--width <N>`, `--height <N>`                                                                | Output dimensions                                                                                                 |
-| `--steps <N>`, `--guidance <N>`, `--seed <N>`, `--batch <N>`                                 | Core generation controls                                                                                          |
-| `--prompt <TEXT>`                                                                            | Repeat for multi-stage LTX-2 chain sugar                                                                          |
-| `--frames-per-clip <N>`                                                                      | Per-stage frame count for repeated `--prompt`                                                                     |
-| `--script <PATH>`                                                                            | Submit a `mold.chain.v1` TOML chain script                                                                        |
-| `--dry-run`                                                                                  | Parse/normalise repeated prompts or scripts without generating                                                    |
-| `--frames <N>`, `--fps <N>`                                                                  | Video frame count and output FPS                                                                                  |
-| `--clip-frames <N>`                                                                          | Per-clip cap for chained LTX-2 renders                                                                            |
-| `--motion-tail <N>`                                                                          | Overlap frames reused between chained clips                                                                       |
-| `--audio`, `--no-audio`                                                                      | Keep or strip synchronized LTX-2 MP4 audio                                                                        |
-| `--audio-file <PATH>`                                                                        | LTX-2 audio-to-video conditioning                                                                                 |
-| `--video <PATH>`                                                                             | LTX-2 source video for retake/video-conditioning                                                                  |
-| `--ic-lora-control <ID>`                                                                     | Official compatible LTX-2 reference control; requires `--video` and selects `ic-lora`                             |
-| `--keyframe <FRAME:PATH>`                                                                    | Repeatable LTX-2 keyframe conditioning                                                                            |
-| `--pipeline <MODE>`                                                                          | `one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2-vid`, `retake`, or `t2a`        |
-| `--retake <START:END>`                                                                       | LTX-2 retake range in seconds                                                                                     |
-| `--camera-control <NAME\|PATH>`                                                              | LTX-2 camera-control preset or `.safetensors` path                                                                |
-| `--spatial-upscale <MODE>`                                                                   | LTX-2 spatial upscaling, such as `x1.5` or `x2`                                                                   |
-| `--temporal-upscale <MODE>`                                                                  | LTX-2 temporal upscaling, currently `x2`                                                                          |
-| `--stg-scale <SCALE>`, `--stg-blocks <BLOCKS>`                                               | LTX-2 spatiotemporal guidance strength and the perturbed transformer blocks                                       |
-| `--rescale-scale <SCALE>`, `--modality-scale <SCALE>`                                        | LTX-2 CFG-rescale factor and audio/video cross-modality guidance                                                  |
-| `--guidance-skip-step <N>`                                                                   | Apply LTX-2 guidance every `N + 1` steps instead of every step                                                    |
-| `-i, --image <PATH>`                                                                         | Source image; repeat for `qwen-image-edit`; `-` is stdin for single-image families                                |
-| `--strength <FLOAT>`, `--mask <PATH>`                                                        | img2img/inpainting controls                                                                                       |
-| `--control <PATH>`, `--control-model <NAME>`, `--control-scale <FLOAT>`                      | SD1.5 ControlNet controls                                                                                         |
-| `-n, --negative-prompt <TEXT>`, `--no-negative`                                              | CFG-family negative prompt controls                                                                               |
-| `--lora <PATH>`, `--lora-scale <FLOAT>`                                                      | LoRA adapter path and scale; `--lora` is repeatable                                                               |
-| `--upscale <MODEL>`                                                                          | Apply a Real-ESRGAN upscaler after generation                                                                     |
-| `--no-metadata`                                                                              | Disable embedded PNG metadata for this run                                                                        |
-| `--preview`                                                                                  | Display output inline in the terminal                                                                             |
-| `--expand`, `--no-expand`, `--expand-backend <URL>`, `--expand-model <MODEL>`                | Prompt expansion controls                                                                                         |
-| `--local`                                                                                    | Skip the server and run local inference                                                                           |
-| `--host <URL>`                                                                               | Override `MOLD_HOST`                                                                                              |
-| `--gpus <SPEC>`                                                                              | Local GPUs: `all`, `none`, ordinals, or stable `cuda:`/`metal:`/`GPU-`/`MIG-` IDs                                 |
-| `--eager`, `--offload`                                                                       | VRAM/performance placement modes                                                                                  |
-| `--t5-variant <TAG>`, `--qwen3-variant <TAG>`, `--qwen2-variant <TAG>`                       | Text encoder variant overrides                                                                                    |
-| `--qwen2-text-encoder-mode <MODE>`                                                           | `auto`, `gpu`, `cpu-stage`, or `cpu`                                                                              |
-| `--scheduler <SCHED>`                                                                        | `ddim`, `euler-ancestral`, or `uni-pc`                                                                            |
-| `--cfg-plus`                                                                                 | Enable CFG++ on supported SD-family paths                                                                         |
-| `--device-text-encoders <DEV>`                                                               | Place all text encoders on `auto`, `cpu`, `gpu:N`, or an exact `/api/devices` ID                                  |
-| `--device-transformer <DEV>`, `--device-vae <DEV>`                                           | Advanced family placement overrides; accepts the same device forms                                                |
-| `--device-t5 <DEV>`, `--device-clip-l <DEV>`, `--device-clip-g <DEV>`, `--device-qwen <DEV>` | Per-encoder placement overrides                                                                                   |
+| Flag                                                                                         | Description                                                                                                                 |
+| -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `-o, --output <PATH>`                                                                        | Output path; `-` writes media bytes to stdout                                                                               |
+| `--format <FMT>`                                                                             | `png`, `jpeg`, `gif`, `apng`, `webp`, `mp4`, or `wav` (LTX-2 `--pipeline t2a`)                                              |
+| `--width <N>`, `--height <N>`                                                                | Output dimensions                                                                                                           |
+| `--steps <N>`, `--guidance <N>`, `--seed <N>`, `--batch <N>`                                 | Core generation controls                                                                                                    |
+| `--prompt <TEXT>`                                                                            | Repeat for multi-stage video chain sugar (LTX-2, LTX-Video, Wan)                                                            |
+| `--frames-per-clip <N>`                                                                      | Per-stage frame count for repeated `--prompt`                                                                               |
+| `--script <PATH>`                                                                            | Submit a `mold.chain.v1` TOML chain script                                                                                  |
+| `--dry-run`                                                                                  | Parse/normalise repeated prompts or scripts without generating                                                              |
+| `--frames <N>`, `--fps <N>`                                                                  | Video frame count and output FPS                                                                                            |
+| `--clip-frames <N>`                                                                          | Per-clip cap for chained video renders                                                                                      |
+| `--motion-tail <N>`                                                                          | Overlap frames reused between chained clips                                                                                 |
+| `--extend <PATH>`                                                                            | Continue an existing video clip (LTX-2 and image-conditioned Wan); mutually exclusive with `--video`/`--image`/`--keyframe` |
+| `--extend-overlap <N>`                                                                       | Source-tail frames reused as motion context for `--extend`; family grid (8k+1 LTX-2, exactly 1 for Wan)                     |
+| `--audio`, `--no-audio`                                                                      | Keep or strip synchronized LTX-2 MP4 audio                                                                                  |
+| `--audio-file <PATH>`                                                                        | LTX-2 audio-to-video conditioning                                                                                           |
+| `--video <PATH>`                                                                             | LTX-2 source video for retake/video-conditioning                                                                            |
+| `--ic-lora-control <ID>`                                                                     | Official compatible LTX-2 reference control; requires `--video` and selects `ic-lora` (or `lip-dub` for `lipdub`)           |
+| `--keyframe <FRAME:PATH>`                                                                    | Repeatable LTX-2 keyframe conditioning                                                                                      |
+| `--last-image <PATH>`                                                                        | Closing frame for a Wan first/last-frame render; pairs with `--image`                                                       |
+| `--pipeline <MODE>`                                                                          | `one-stage`, `two-stage`, `two-stage-hq`, `distilled`, `ic-lora`, `keyframe`, `a2-vid`, `retake`, `lip-dub`, or `t2a`       |
+| `--retake <START:END>`                                                                       | LTX-2 retake range in seconds                                                                                               |
+| `--camera-control <NAME\|PATH>`                                                              | LTX-2 camera-control preset or `.safetensors` path                                                                          |
+| `--spatial-upscale <MODE>`                                                                   | LTX-2 spatial upscaling, such as `x1.5` or `x2`                                                                             |
+| `--temporal-upscale <MODE>`                                                                  | LTX-2 temporal upscaling, currently `x2`                                                                                    |
+| `--stg-scale <SCALE>`, `--stg-blocks <BLOCKS>`                                               | LTX-2 spatiotemporal guidance strength and the perturbed transformer blocks                                                 |
+| `--rescale-scale <SCALE>`, `--modality-scale <SCALE>`                                        | LTX-2 CFG-rescale factor and audio/video cross-modality guidance                                                            |
+| `--guidance-skip-step <N>`                                                                   | Apply LTX-2 guidance every `N + 1` steps instead of every step                                                              |
+| `--spatial-tile <off\|auto\|PX[:OVERLAP]>`                                                   | LTX-2 spatial tiling for stage 2 and VAE decode (env: `MOLD_LTX2_SPATIAL_TILE`)                                             |
+| `--sample-solver <SOLVER>`                                                                   | Wan denoise solver: `unipc` (default), `euler`, or `dpm++`                                                                  |
+| `--sample-shift <SHIFT>`                                                                     | Wan flow shift; overrides the per-tier default                                                                              |
+| `--distill-strength <SPEC>`                                                                  | Wan Lightning distill strength: `high=X,low=Y` or one number for both experts                                               |
+| `-i, --image <PATH>`                                                                         | Source image; repeat for `qwen-image-edit`; `-` is stdin for single-image families                                          |
+| `--strength <FLOAT>`, `--mask <PATH>`                                                        | img2img/inpainting controls                                                                                                 |
+| `--control <PATH>`, `--control-model <NAME>`, `--control-scale <FLOAT>`                      | SD1.5 ControlNet controls                                                                                                   |
+| `-n, --negative-prompt <TEXT>`, `--no-negative`                                              | CFG-family negative prompt controls                                                                                         |
+| `--lora <PATH>`, `--lora-scale <FLOAT>`                                                      | LoRA adapter path and scale; `--lora` is repeatable; suffix `@high`/`@low` binds an adapter to one Wan 2.2 A14B expert      |
+| `--upscale <MODEL>`                                                                          | Apply a Real-ESRGAN upscaler after generation                                                                               |
+| `--no-metadata`                                                                              | Disable embedded PNG metadata for this run                                                                                  |
+| `--preview`                                                                                  | Display output inline in the terminal                                                                                       |
+| `--expand`, `--no-expand`, `--expand-backend <URL>`, `--expand-model <MODEL>`                | Prompt expansion controls                                                                                                   |
+| `--local`                                                                                    | Skip the server and run local inference                                                                                     |
+| `--host <URL>`                                                                               | Override `MOLD_HOST`                                                                                                        |
+| `--gpus <SPEC>`                                                                              | Local GPUs: `all`, `none`, ordinals, or stable `cuda:`/`metal:`/`GPU-`/`MIG-` IDs                                           |
+| `--eager`, `--offload`                                                                       | VRAM/performance placement modes                                                                                            |
+| `--t5-variant <TAG>`, `--qwen3-variant <TAG>`, `--qwen2-variant <TAG>`                       | Text encoder variant overrides                                                                                              |
+| `--qwen2-text-encoder-mode <MODE>`                                                           | `auto`, `gpu`, `cpu-stage`, or `cpu`                                                                                        |
+| `--scheduler <SCHED>`                                                                        | `ddim`, `euler-ancestral`, or `uni-pc`                                                                                      |
+| `--cfg-plus`                                                                                 | Enable CFG++ on supported SD-family paths                                                                                   |
+| `--device-text-encoders <DEV>`                                                               | Place all text encoders on `auto`, `cpu`, `gpu:N`, or an exact `/api/devices` ID                                            |
+| `--device-transformer <DEV>`, `--device-vae <DEV>`                                           | Advanced family placement overrides; accepts the same device forms                                                          |
+| `--device-t5 <DEV>`, `--device-clip-l <DEV>`, `--device-clip-g <DEV>`, `--device-qwen <DEV>` | Per-encoder placement overrides                                                                                             |
 
 For video, the `--output` extension outranks the family's container default:
 `mold run <video-model> "…" -o clip.gif` writes a real GIF even where the family
@@ -141,8 +102,10 @@ extension, so stdout keeps whatever container the family resolved.
 ### LTX-2 Notes
 
 LTX-2 defaults to MP4, supports synchronized audio, and runs real generation on
-CUDA. CPU is correctness-only and Metal is unsupported for this family. Chaining
-works through repeated `--prompt`, `--script`, or large `--frames` requests.
+CUDA and Apple Metal (Metal is performance-qualified on the 19B/22B distilled
+FP8 tiers, slower than a comparable CUDA card); CPU is correctness-only.
+Chaining works through repeated `--prompt`, `--script`, or large `--frames`
+requests.
 
 ## `mold chain validate`
 
@@ -326,7 +289,7 @@ mold config edit
 
 | Section   | Keys                                                                                                                                                                                                                               |
 | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| General   | `default_model`, `models_dir`, `output_dir`, `server_port`, `default_width`, `default_height`, `default_steps`, `embed_metadata`, `t5_variant`, `qwen3_variant`, `default_negative_prompt`                                         |
+| General   | `default_model`, `models_dir`, `output_dir`, `server_port`, `default_width`, `default_height`, `default_steps`, `embed_metadata`, `t5_variant`, `qwen3_variant`, `umt5_variant`, `default_negative_prompt`                         |
 | Expand    | `expand.enabled`, `expand.backend`, `expand.model`, `expand.api_model`, `expand.temperature`, `expand.top_p`, `expand.max_tokens`, `expand.thinking`                                                                               |
 | Logging   | `logging.level`, `logging.file`, `logging.dir`, `logging.max_days`                                                                                                                                                                 |
 | RunPod    | `runpod.api_key`, `runpod.default_gpu`, `runpod.default_datacenter`, `runpod.default_network_volume_id`, `runpod.auto_teardown`, `runpod.auto_teardown_idle_mins`, `runpod.cost_alert_usd`, `runpod.endpoint`                      |

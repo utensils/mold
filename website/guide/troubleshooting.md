@@ -89,7 +89,10 @@ Slow generation is often expected when mold is preserving VRAM:
 
 - `--offload` can reduce VRAM dramatically. FLUX, Flux.2, Z-Image, and
   Qwen-Image keep fitting blocks GPU-resident and stream only the remainder;
-  LTX-2 and SD3 full-stream transformer blocks when offload is forced.
+  LTX-2 and SD3 full-stream transformer blocks when offload is forced; Wan
+  (GGUF tiers) parks trailing transformer blocks in host RAM automatically
+  under VRAM pressure, and `--offload` parks all of them
+  (`MOLD_WAN_OFFLOAD_BLOCKS=N` pins the count).
 - Text encoders may be placed on CPU automatically when VRAM is tight.
 - `--eager` can improve throughput if your GPU has enough free memory.
 

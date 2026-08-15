@@ -10,7 +10,12 @@ resources, models-disk usage, and queue depth; selecting a card opens that
 host's detail view.
 
 Host detail aggregates telemetry across every GPU and shows CPU, system RAM,
-models-disk storage, downloads, installed models, and the live queue. Current
+models-disk storage, downloads, installed models, and the live queue. On
+Apple-silicon hosts, whose GPU and system memory share one physical pool, the
+VRAM and RAM bars collapse into a single Memory row; CUDA machines keep both.
+Below the live instruments, hosts that support MiniMax H3 show an **H3 on this
+machine** panel reporting that machine's runtime qualification (memory floors,
+attention and quantization profiles, and component readiness). Current
 servers expose capability-gated **Pause/Resume** and confirmed **Cancel all**
 actions; GPU lane selection is available only while a job is still queued.
 Saved remotes can be renamed or forgotten from the same page. Forgetting also

@@ -66,7 +66,7 @@ back to quantized GGUF variants when that resident encoder would be too heavy.
 | `qwen-image-2512:q8` | 50    | 21.8 GB | `768x768`          | Highest-quality 2512 GGUF tier       |
 | `qwen-image-2512:q6` | 50    | 16.8 GB | `1024x1024`        | Quality/size trade-off               |
 | `qwen-image-2512:q5` | 50    | 15.0 GB | `1024x1024`        | Dynamic `K_M` quant                  |
-| `qwen-image-2512:q4` | 50    | 13.2 GB | `1024x1024`        | Stable 24 GB choice                  |
+| `qwen-image-2512:q4` | 50    | 13.2 GB | `1328x1328`        | Stable 24 GB choice                  |
 | `qwen-image-2512:q3` | 50    | 9.9 GB  | `1024x1024`        | Lower bitrate, still prompt-faithful |
 | `qwen-image-2512:q2` | 50    | 7.3 GB  | `1024x1024`        | Smallest published 2512 GGUF         |
 
@@ -243,7 +243,9 @@ On the 24 GB validation machine used for mold development:
 
 - `q2` through `q6` were validated at `1024x1024`
 - `q8` was validated at `768x768`
-- `qwen-image-2512:q4` still ran out of memory at `1328x1328`
+- `qwen-image-2512:q4` now completes native `1328x1328` on 24 GB (~148 s cold
+  on an RTX 4090; CFG runs split above 1024², which measured faster than
+  batching there)
 
 ## Negative Prompts
 

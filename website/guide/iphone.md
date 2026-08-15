@@ -73,8 +73,10 @@ The mobile composer includes:
 - scheduler, CFG++, steps, guidance, output format, and post-generation
   upscaling where the selected family supports them;
 - validated video frames/FPS, audio, camera motion, source media, keyframes,
-  retake, LTX-2 pipeline/spatial/temporal controls, and optional STG,
-  CFG-rescale, modality-scale, and guidance-skip overrides;
+  retake, **Continue a video** (extending an existing clip on models that
+  advertise it, including capable Wan checkpoints — resolution and fps stay
+  locked to the source clip), LTX-2 pipeline/spatial/temporal controls, and
+  optional STG, CFG-rescale, modality-scale, and guidance-skip overrides;
 - an **Output** field (One shot | Sequence) above the model field that turns
   the composer into a multi-clip sequence; and
 - a host-aware memory estimate before submission.
@@ -97,7 +99,7 @@ you continue composing. Mold limits simultaneous streams so generation does
 not starve gallery or download requests.
 
 For model families that stream live latent previews (FLUX.1, Flux.2,
-Z-Image), the active print develops right on the Create screen: the preview
+Z-Image, and Wan 2.1/2.2), the active print develops right on the Create screen: the preview
 sharpens as denoising progresses under a thinning film-grain wash, in a bed
 matching the print's aspect ratio. Hosts without previews keep the plain
 status line.
@@ -291,7 +293,11 @@ without storing the host API key outside the Keychain; if the saved server
 identity cannot be verified, Mold discards the recovery record instead of
 attaching to an unproven machine. LTX-Video joins independent clips without a
 motion tail and labels its seams **Join**, while LTX-2 offers only
-durations longer than its continuation overlap. Use desktop or the CLI for a
+durations longer than its continuation overlap. Wan checkpoints sequence too:
+clip durations snap to Wan's 4n+1 frame grid, image-conditioned checkpoints
+(A14B I2V, TI2V-5B) continue motion across the seam from a single carried
+frame, and text-to-video Wan checkpoints join independent clips like
+LTX-Video. Use desktop or the CLI for a
 local engine, in-place sequence editing and the Sequences history tab, the TOML
 chain editor and full jobs-administration workspace, RunPod provisioning,
 engine configuration, and desktop Stable/Nightly self-update controls.

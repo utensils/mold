@@ -614,9 +614,11 @@ stays visually coherent.
 `mold run` routes automatically: when `--frames` is `≤ 97` you stay on the
 single-clip path; above 97 the request is rewritten into a chain and dispatched
 to the new `/api/generate/chain/stream` endpoint. Chaining is supported for
-LTX-2 19B and 22B distilled today. Other model families reject `--frames` past
-their own single-request ceiling with an actionable error rather than silently
-over-producing.
+every LTX-2 pipeline (two-stage included), for LTX-Video (independent clips),
+and for Wan (checkpoint-dependent seam — see the [Wan page](./wan.md#sequences)).
+Image-family models reject `--frames` past their single-request ceiling with an
+actionable error rather than silently over-producing. `/api/models` advertises
+`supports_sequence` per model.
 
 ::: tip 97 is a routing default, not the model's ceiling
 LTX-2's real single-request limit is a **20-second runtime budget** — 484 frames
@@ -631,8 +633,8 @@ seams, at the cost of far more VRAM and time.
 $ mold run ltx-2-19b-distilled:fp8 "a cat walking through autumn leaves" \
     --image cat.png --frames 400
 
-→ Chain mode: 400 frames → 5 stages × 97 frames (tail 4)
-Chain [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━] 385/385 frames (stages 5)
+→ Chain mode: 400 frames → 5 stages × 97 frames (tail 17)
+Chain [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━] 417/417 frames (stages 5)
   Stage 1  [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━] 8/8 steps
   Stage 2  [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━] 8/8 steps
   Stage 3  [━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━] 8/8 steps
@@ -644,7 +646,7 @@ Chain [━━━━━━━━━━━━━━━━━━━━━━━━�
 
 ### Motion-tail carryover
 
-`--motion-tail N` (default 4) controls how many trailing pixel frames of each
+`--motion-tail N` (default 17) controls how many trailing pixel frames of each
 clip are reused as latent-space conditioning for the next. Instead of decoding
 the prior clip's last frame back to RGB and re-encoding it through the VAE as
 a new `source_image`, mold narrows the final denoise tensor along its time
@@ -655,9 +657,10 @@ those are the overlap region shared with the prior clip.
 
 - `--motion-tail 0` — hard concatenation, no overlap. Visible seams are common
   at clip boundaries; useful when you _want_ discrete shots.
-- `--motion-tail 4` — the default. One latent frame of carryover at `fps=24`
-  gives the transformer enough temporal context to continue motion, object
-  identity, and lighting across the seam without wasting new frames.
+- `--motion-tail 17` — the default: three latent frames of carryover (one
+  causal plus two continuation) after the VAE's 8× temporal compression,
+  enough temporal context to continue motion, object identity, and lighting
+  across the seam.
 - Higher values buy more seam-smoothing at the cost of fewer fresh pixel
   frames per clip. Must stay strictly below `--clip-frames`.
 
@@ -667,7 +670,7 @@ those are the overlap region shared with the prior clip.
 | ----------------- | ------------- | ----------------------------------------------------------------------------------- |
 | `--frames N`      | model default | Total stitched length. Above `--clip-frames`, auto-chains.                          |
 | `--clip-frames N` | `97`          | Per-clip length. Must be `8k+1`; clamped to the model's real budget with a warning. |
-| `--motion-tail N` | `4`           | Pixel-frame overlap between clips. `0` disables carryover.                          |
+| `--motion-tail N` | `17`          | Pixel-frame overlap between clips. `0` disables carryover.                          |
 
 ### Continuing an existing video
 
@@ -739,8 +742,10 @@ at the head stays intact.
 
 ### v1 constraints
 
-- **LTX-2 19B and 22B distilled only.** Other LTX-2 / LTX-Video variants and
-  every image-family model reject `--frames` above their single-clip budget.
+- **Video families only.** Every LTX-2 pipeline chains; LTX-Video concatenates
+  independent clips; Wan chains per checkpoint (see
+  [Wan sequences](./wan.md#sequences)). Image-family models reject `--frames`
+  above their single-clip budget.
 - **Single GPU per chain.** Every stage runs on the GPU the engine was loaded
   onto — multi-GPU stage fan-out is a v2 movie-maker feature.
 - **Fail-closed.** If any stage errors, the whole chain returns `502` and

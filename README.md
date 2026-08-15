@@ -9,15 +9,10 @@
 [![Agent ready](https://img.shields.io/badge/agents-ready-0891b2.svg)](https://utensils.io/mold/guide/openclaw)
 [![REST + SSE](https://img.shields.io/badge/API-REST_%2B_SSE-16a34a.svg)](https://utensils.io/mold/api/)
 
-Local AI image and video generation on your own GPU. Mold runs on NVIDIA CUDA
-and Apple Silicon Metal with no Python, no cloud account, and no usage fees.
-
-Mold began at the command line and remains **CLI-native**: every core workflow
-is available as a composable command with predictable stdin, stdout, files, and
-exit behavior. Use it interactively, script it in a pipeline, give it to an
-agent, run it in CI, or build on the same engine through REST and SSE. The
-desktop, web, TUI, and iPhone experiences are additional interfaces—not
-replacements for the CLI foundation.
+Local AI image and video generation on your own GPU — NVIDIA CUDA and Apple
+Silicon Metal, no Python, no cloud account, no usage fees. CLI-native and
+pipe-friendly, with a native desktop app, web studio, TUI, iPhone companion,
+Discord bot, and REST/SSE API built on the same engine.
 
 **[Documentation](https://utensils.io/mold/)** ·
 **[Models](https://utensils.io/mold/models/)** ·
@@ -26,138 +21,18 @@ replacements for the CLI foundation.
 
 ![Mold Studio desktop app generating an owl](website/public/screenshots/mold-studio-desktop.png)
 
-## Mold Studio
-
-Mold Studio brings local and remote generation into one native desktop app for
-macOS and Linux:
-
-- **Create** images, edits, upscales, and multi-stage videos with
-  capability-aware controls, conditioning-aware prompt expansion, batches,
-  LoRAs, ControlNet, and reproducible seeds. Video expansion follows the actual
-  T2V, I2V, V2V, retake, keyframe, or audio-driven task without uploading source
-  media to the expansion endpoint.
-- **Library** merges prints from every connected machine into a fast,
-  searchable gallery with saved prompts, settings, provenance, and native media
-  actions, multi-select on every GUI surface, delete-across-devices semantics,
-  runtime-resolved video pipeline provenance, and a remembered thumbnail-size
-  control on web and desktop.
-- **Models** discovers and installs checkpoints from Mold, Hugging Face, and
-  Civitai, with live download progress and per-machine routing.
-- **Machines** connects this device, LAN/Tailscale hosts, and RunPod while
-  showing GPU telemetry, queues, downloads, and installed models.
-- **Settings** includes Mold and Safelight themes, Stable/Nightly updates, local
-  performance controls, secure provider credentials, and a two-minute,
-  one-time QR flow for pairing Mold for iPhone without placing the API key in
-  the code.
-
-**[Download Mold for macOS (Apple Silicon)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)**
-· [Explore the desktop app](https://utensils.io/mold/guide/desktop)
-
-Mold also ships a responsive web studio with every `mold serve`, a
-keyboard-first terminal UI, a REST/SSE API, and a remote iPhone companion.
-On CUDA servers, resource telemetry is joined to CUDA's startup-visible
-devices by UUID. `CUDA_VISIBLE_DEVICES` remains a hard boundary even when it
-reorders cards or uses GPU/MIG UUID selectors: hidden GPUs are not published,
-and a MIG worker never inherits its parent GPU's full-memory sample.
-One versioned device registry supplies those telemetry targets, worker
-construction, scheduler candidates, `/api/devices`, and legacy status, so a
-device cannot silently acquire a different identity between subsystems.
-GPU startup defaults to `all`. `--gpus` / `MOLD_GPUS` also accepts `none`
-(maintenance mode), visible ordinals, Mold stable IDs (`cuda:<uuid>` or
-`metal:default`), and NVIDIA `GPU-...` / `MIG-...` UUIDs. Prefer stable IDs in
-persistent configuration because ordinals are process-local. Maintenance mode
-keeps inventory, telemetry, downloads, and settings available but rejects
-generation and model-load requests.
-Use `mold gpu list`, `mold gpu disable <ID>`, and `mold gpu enable <ID>` for
-runtime administration when `/api/capabilities.devices.lifecycle` is true.
-That flag is true only while authoritative scheduler V2 owns live GPU workers;
-legacy, observe, CPU-fallback, and maintenance runtimes are read-only and
-reject lifecycle mutation. Busy devices drain their current generation before
-disabling; startup-excluded devices require a restart.
-Scheduler admission uses each device's sampled free VRAM rather than total
-capacity and freezes a concrete per-component execution plan before dispatch.
-Explicit CPU/device placement is a hard constraint; missing devices and
-cross-GPU component pins fail instead of falling back. `mold run --local
---batch N` uses the same deterministic assignment core across every GPU
-selected by `--gpus`/`MOLD_GPUS`; single-item local runs retain best-free-GPU
-selection.
-
-Web, desktop, and iPhone preview each finalized ordinary-generation request on
-candidate hosts before queueing. The read-only preview preserves the sibling
-count without reserving a GPU or loading weights, redacts prompt/media content,
-and keeps prepared work pinned to the same endpoint, key, and server instance.
-A strict non-authoritative `unsupported` response or legacy `404`/`405` keeps
-backward-compatible routing; infeasible, malformed, authentication, upgrade,
-and server failures queue nothing. Exact chain and local prompt-expansion/
-post-generation-upscale utility previewing is deliberately deferred rather
-than guessed.
-
-Scheduler V2 learns cold load, warm reload, and execution time separately, so
-ETA planning adds the applicable setup cost exactly once. Machine detail,
-status, TUI, CLI, MCP, and Discord surfaces report every device; interactive
-device buttons appear only for authoritative live lifecycle control, with the
-supported restart-enable recovery shown for read-only dispatch modes.
-
-Scheduler V2 is the default GPU dispatch owner. During the one-release rollback
-window, restart with `MOLD_DISPATCH_MODE=legacy` to restore the previous
-depth-two dispatcher or `MOLD_DISPATCH_MODE=observe` to keep legacy dispatch
-authoritative while recording read-only V2 decisions. The mode is restart-only;
-Mold never switches CUDA owners or contexts live. Queue pause applies to
-generation, utility, and admin GPU work in every mode.
-
 ## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
 ```
 
-The installer downloads the latest release to `~/.local/bin/mold`, verifies
-its SHA-256 checksum, inspects every Linux GPU visible through
-`CUDA_VISIBLE_DEVICES`, and selects one compatible NVIDIA build independent of
-device order. Unsupported mixed architecture groups fail with an actionable
-override/source-build error instead of silently targeting GPU 0. macOS installs
-the Metal build.
-
-<details>
-<summary>Other install options</summary>
-
-```bash
-# Nix — NVIDIA Ada / RTX 40-series
-nix run github:utensils/mold -- run "a cat"
-
-# Nix — NVIDIA Ampere / RTX 3090 or A40
-nix run github:utensils/mold#mold-sm86 -- run "a cat"
-
-# Nix — NVIDIA datacenter Blackwell / B200 or B300
-nix run github:utensils/mold#mold-sm100 -- run "a cat"
-
-# Nix — NVIDIA consumer Blackwell / RTX 50-series
-nix run github:utensils/mold#mold-sm120 -- run "a cat"
-
-# Arch Linux
-paru -S mold-ai-bin
-
-# Build from source on Linux
-./scripts/ensure-web-dist.sh
-cargo build --release -p mold-ai --features cuda
-
-# Build from source on Apple Silicon
-./scripts/ensure-web-dist.sh
-cargo build --release -p mold-ai --features metal
-```
-
-B200/B300 sm_100 builds and synthetic multi-device coverage are simulated,
-not hardware-qualified. Real 8×B200 qualification remains deferred.
-GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
-The deferred RTX 3090 acceptance runner and evidence schema live in
-[`docs/qualification/`](docs/qualification/); no passing report is claimed.
-
-Prebuilt binaries and checksums are available on the
-[releases page](https://github.com/utensils/mold/releases/latest). See the
-[installation guide](https://utensils.io/mold/guide/installation) for platform
-details.
-
-</details>
+The installer picks the right prebuilt binary for your GPU and verifies its
+checksum. Nix (`nix run github:utensils/mold`), Arch (`paru -S mold-ai-bin`),
+and source builds are covered in the
+[installation guide](https://utensils.io/mold/guide/installation);
+binaries and checksums are on the
+[releases page](https://github.com/utensils/mold/releases/latest).
 
 ## Quick start
 
@@ -183,47 +58,39 @@ with prompt, model, seed, and generation metadata.
 
 ## What it supports
 
-- FLUX.1, Flux.2 Klein and Dev, SD 1.5, SDXL, SD 3.5, Z-Image, Qwen-Image,
-  Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3, and Wan 2.1/2.2
-  text-to-video
-- MiniMax H3 compact FL2VA and Ref2VA models as 42.482 GB, revision-pinned
-  upstream downloads. FL2VA generation is supported by the SM89 CUDA release;
-  Ref2VA, Metal, CPU, and other CUDA architectures remain unavailable until
-  those backends are implemented and tested. H3 weights use the
-  [MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/bfc8ed0353f5a9733be73e6b2c98ec0948195b86/LICENSE),
-  not Mold's MIT license. H3 may be used through Mold in every territory and
-  through local, remote-client, shared-server, hosted, output-distribution, and
-  redistribution workflows; technical availability still depends on the
-  implemented model, request, and hardware route. Review the linked terms for
-  your use. No separate Mold acceptance or H3-specific product control is
-  required. See the [H3 model guide](https://utensils.io/mold/models/minimax-h3).
-- Text-to-image, image-to-image, multimodal editing, inpainting, ControlNet,
-  LoRA, prompt expansion, and Real-ESRGAN upscaling
-- Text/image-to-video, multi-prompt video chains, one-request continuation of
-  an existing clip (`--extend`), lip dub / re-voicing of an existing clip
-  (`--pipeline lip-dub`), native MP4 output, checkpoint-dependent generated
-  audio, and LTX-2 guidance overrides across CLI, web, desktop, iPhone, and TUI
-  — LTX-2 / LTX-Video image-to-video can even run without a prompt
-- LTX-2 text-to-audio (`--pipeline t2a`): speech, ambience, or music from a
-  prompt with no video at all, as a WAV, from the CLI, web, and desktop
-- Sequence authoring inside Create with per-clip prompts, duration, source
-  images, Smooth / Cut / Fade seams, resumable jobs, in-place editing that
-  re-renders only the changed clips, explicit remote-machine routing, and a
-  web/desktop/iPhone preflight that shows the server-normalized plan before
-  anything is queued
-- Quantized model variants, encoder fallback, smart VRAM placement, FLUX
-  block offloading, and LTX-2 spatial tiling (`--spatial-tile`) for stage-2
-  refinement and VAE decode past the resolutions the checkpoints were
-  trained on
-- LTX-2 output up to 4K by composition — stage 1 at half size, a learned x2
-  upsample, then a tiled stage-2 refinement — with a 1280x704 → 3840x2112
-  ladder and portrait transposes. 4K needs `--spatial-tile 768` on a 24 GB
-  card; see [the resolution notes](https://utensils.io/mold/models/ltx2#resolution)
-- Local CLI, native desktop, browser, TUI, iPhone, Discord, and authenticated
-  REST/SSE clients
+- **Models**: FLUX.1, Flux.2 Klein/Dev, SD 1.5, SDXL, SD 3.5, Z-Image,
+  Qwen-Image, Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3,
+  Wan 2.1/2.2, and MiniMax H3 — see the
+  [model catalog](https://utensils.io/mold/models/) for sizes, VRAM needs, and
+  settings
+- **Images**: text-to-image, img2img, multimodal editing, inpainting,
+  ControlNet, LoRA, prompt expansion, and Real-ESRGAN upscaling
+- **Video and audio**: text/image-to-video, multi-prompt sequences, clip
+  continuation (`--extend`), lip dub (`--pipeline lip-dub`), text-to-audio
+  (`--pipeline t2a`), native MP4 with generated audio, and LTX-2 output up to
+  4K via [tiled composition](https://utensils.io/mold/models/ltx2#resolution)
+- **Fits your hardware**: quantized variants, encoder fallback, smart VRAM
+  placement, block offloading, and spatial tiling (`--spatial-tile`)
+- **Multi-machine**: connect LAN/Tailscale hosts and RunPod, route jobs by
+  capability, and browse every machine's gallery in one place
 
-Browse the [model catalog](https://utensils.io/mold/models/) for sizes, VRAM
-requirements, and recommended settings.
+MiniMax H3 weights use the
+[MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/bfc8ed0353f5a9733be73e6b2c98ec0948195b86/LICENSE),
+not Mold's MIT license. H3 may be used through Mold in every territory and
+workflow — local, remote, shared, hosted, output distribution, and
+redistribution — with no separate acceptance step; review the linked terms for
+your use. Current capability limits (FL2VA on SM89 CUDA only) are documented in
+the [H3 model guide](https://utensils.io/mold/models/minimax-h3).
+
+## Mold Studio
+
+One native desktop app for macOS and Linux with five workspaces — Create,
+Library, Models, Machines, and Settings — spanning local and remote generation,
+a merged multi-machine gallery, model discovery from Hugging Face and Civitai,
+GPU telemetry, and QR pairing for the iPhone companion.
+
+**[Download Mold for macOS (Apple Silicon)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)**
+· [Explore the desktop app](https://utensils.io/mold/guide/desktop)
 
 ## More ways to create
 
@@ -239,20 +106,7 @@ mold run "a cat" --preview
   <em>Inline image generation in Ghostty with <code>--preview</code></em>
 </p>
 
-Or open the keyboard-first Mold Studio terminal interface:
-
-```bash
-mold tui
-```
-
-Its Advanced → Video section exposes Frames/FPS for video models, a
-checkpoint-aware `default` / `on` / `off` synchronized-audio control, and
-native/1.5×/2× spatial plus native/2× temporal upscale controls for LTX-2,
-plus optional STG scale/blocks, CFG rescale, modality scale, and guidance skip
-controls using the same absent-by-default request contract as the CLI and apps.
-During denoising, preview-capable families stream the same forming image shown
-by the graphical apps into this Create panel through Ghostty/Kitty, Sixel, or
-iTerm2 graphics, with centered aspect fit and a live step readout.
+Or open the keyboard-first terminal interface with `mold tui`:
 
 <p align="center">
   <img src="website/public/gallery/tui-generate.png" alt="Mold TUI Create workspace with image preview" width="720" />
@@ -260,29 +114,20 @@ iTerm2 graphics, with centered aspect fit and a live step readout.
   <em>The TUI Create workspace with a native terminal image preview</em>
 </p>
 
-## Remote and cloud GPUs
-
-Run the engine where the GPU lives and use any Mold client over HTTP:
+Run the engine where the GPU lives and point any client at it:
 
 ```bash
-# GPU machine
-mold serve
-
-# Laptop or another client
-MOLD_HOST=http://gpu-server:7680 mold run "a cat"
+mold serve                                      # GPU machine
+MOLD_HOST=http://gpu-server:7680 mold run "a cat"  # laptop
 ```
 
-For managed cloud jobs, `mold runpod` can provision a GPU, reuse network
-volumes, stream progress, and save the result locally. See the
-[remote workflow](https://utensils.io/mold/guide/remote-workflows) and
+See the [remote workflow](https://utensils.io/mold/guide/remote-workflows) and
 [RunPod](https://utensils.io/mold/deployment/runpod-cli) guides.
 
 ## Project
 
 Mold is a Rust workspace built on
-[candle](https://github.com/huggingface/candle). Its CLI-native architecture
-keeps the engine useful from a terminal, shell pipeline, agent, CI job, native
-app, or custom client. The documentation covers the
+[candle](https://github.com/huggingface/candle). The documentation covers the
 [CLI](https://utensils.io/mold/guide/cli-reference),
 [configuration](https://utensils.io/mold/guide/configuration),
 [deployment](https://utensils.io/mold/deployment/), and
