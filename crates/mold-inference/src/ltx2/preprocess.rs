@@ -59,17 +59,38 @@ pub(crate) fn decode_oriented_srgb(bytes: &[u8]) -> Result<RgbImage> {
     // Upstream order (decode.py:143-163): orient, flatten to RGB, then
     // convert color to sRGB.
     decoded.apply_orientation(orientation);
+    // A grayscale source with a Gray ICC profile must be transformed in
+    // its own layout — moxcms (correctly) refuses an Rgb-layout transform
+    // from a Gray profile, and pre-flattening to RGB would turn the
+    // conversion into the assume-sRGB fallback (codex review, PR #1072).
+    let is_grayscale = matches!(
+        decoded.color(),
+        image::ColorType::L8
+            | image::ColorType::La8
+            | image::ColorType::L16
+            | image::ColorType::La16
+    );
     let rgb = decoded.to_rgb8();
     Ok(match icc {
-        Some(profile) if !profile.is_empty() => convert_icc_to_srgb(rgb, &profile),
+        Some(profile) if !profile.is_empty() => {
+            let layout = if is_grayscale {
+                moxcms::Layout::Gray
+            } else {
+                moxcms::Layout::Rgb
+            };
+            convert_icc_to_srgb(rgb, &profile, layout)
+        }
         _ => rgb,
     })
 }
 
-/// Convert `rgb` from the embedded `profile` to sRGB. Any failure —
-/// malformed profile, unsupported connection — logs and returns the
-/// pixels unchanged (assume-sRGB), exactly upstream's fallback.
-fn convert_icc_to_srgb(rgb: RgbImage, profile: &[u8]) -> RgbImage {
+/// Convert `rgb` from the embedded `profile` to sRGB, reading the source
+/// pixels in `source_layout` (`Gray` collapses the flattened RGB back to
+/// one channel — the three are identical for a decoded grayscale image).
+/// Any failure — malformed profile, unsupported connection — logs and
+/// returns the pixels unchanged (assume-sRGB), exactly upstream's
+/// fallback.
+fn convert_icc_to_srgb(rgb: RgbImage, profile: &[u8], source_layout: moxcms::Layout) -> RgbImage {
     let source = match moxcms::ColorProfile::new_from_slice(profile) {
         Ok(profile) => profile,
         Err(error) => {
@@ -82,24 +103,29 @@ fn convert_icc_to_srgb(rgb: RgbImage, profile: &[u8]) -> RgbImage {
         rendering_intent: moxcms::RenderingIntent::Perceptual,
         ..Default::default()
     };
-    let transform = match source.create_transform_8bit(
-        moxcms::Layout::Rgb,
-        &srgb,
-        moxcms::Layout::Rgb,
-        options,
-    ) {
-        Ok(transform) => transform,
-        Err(error) => {
-            tracing::warn!("cannot convert embedded ICC profile to sRGB: {error}");
-            return rgb;
-        }
-    };
+    let transform =
+        match source.create_transform_8bit(source_layout, &srgb, moxcms::Layout::Rgb, options) {
+            Ok(transform) => transform,
+            Err(error) => {
+                tracing::warn!("cannot convert embedded ICC profile to sRGB: {error}");
+                return rgb;
+            }
+        };
     let (width, height) = rgb.dimensions();
-    let src = rgb.into_raw();
-    let mut dst = vec![0u8; src.len()];
+    let src_rgb = rgb.into_raw();
+    let src: std::borrow::Cow<'_, [u8]> = match source_layout {
+        moxcms::Layout::Gray => src_rgb
+            .chunks_exact(3)
+            .map(|px| px[0])
+            .collect::<Vec<_>>()
+            .into(),
+        _ => (&src_rgb).into(),
+    };
+    let mut dst = vec![0u8; width as usize * height as usize * 3];
     if let Err(error) = transform.transform(&src, &mut dst) {
         tracing::warn!("ICC-to-sRGB conversion failed: {error}");
-        return RgbImage::from_raw(width, height, src).expect("source buffer matches dimensions");
+        return RgbImage::from_raw(width, height, src_rgb)
+            .expect("source buffer matches dimensions");
     }
     RgbImage::from_raw(width, height, dst).expect("destination buffer matches dimensions")
 }
@@ -570,11 +596,48 @@ mod tests {
     }
 
     #[test]
+    fn grayscale_source_with_gray_icc_profile_is_transformed_not_skipped() {
+        // Codex review (PR #1072): a Gray-profile image flattened to RGB
+        // before the transform made moxcms reject the Rgb layout and fall
+        // back to assume-sRGB — silently skipping the conversion.
+        let gray_profile = moxcms::ColorProfile::new_gray_with_gamma(1.0)
+            .encode()
+            .unwrap();
+        let img = image::GrayImage::from_pixel(8, 8, image::Luma([128]));
+        let mut png = Vec::new();
+        {
+            let mut encoder = image::codecs::png::PngEncoder::new(&mut png);
+            image::ImageEncoder::set_icc_profile(&mut encoder, gray_profile).unwrap();
+            image::ImageEncoder::write_image(
+                encoder,
+                img.as_raw(),
+                8,
+                8,
+                image::ExtendedColorType::L8,
+            )
+            .unwrap();
+        }
+        let decoded = decode_oriented_srgb(&png).unwrap();
+        assert_eq!(decoded.dimensions(), (8, 8));
+        // A gamma-1.0 (linear) gray profile maps mid-gray 128 (~0.502
+        // linear) to a noticeably brighter sRGB value (~0.737 → ~188); an
+        // untransformed fallback would leave it at exactly 128.
+        let px = decoded.get_pixel(4, 4).0;
+        assert_eq!(px[0], px[1]);
+        assert_eq!(px[1], px[2]);
+        assert!(
+            px[0] > 150,
+            "gray ICC profile was not applied (pixel stayed {})",
+            px[0]
+        );
+    }
+
+    #[test]
     fn malformed_icc_profile_falls_back_to_srgb() {
         let rgb = image::load_from_memory(&fixture_bytes("gradient_96x64.png"))
             .unwrap()
             .to_rgb8();
-        let out = convert_icc_to_srgb(rgb.clone(), b"not an icc profile");
+        let out = convert_icc_to_srgb(rgb.clone(), b"not an icc profile", moxcms::Layout::Rgb);
         assert_eq!(out.as_raw(), rgb.as_raw());
     }
 
