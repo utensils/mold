@@ -1191,7 +1191,12 @@ pub struct GenerateRequest {
     /// their existing source/edit fields and must reject this additive field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub references: Option<Vec<GenerationReference>>,
-    /// Denoising strength for img2img (0.0 = no change, 1.0 = full noise / txt2img).
+    /// Strength for img2img/I2V source conditioning. Two family-specific
+    /// conventions share this field (#1055): SD-lineage img2img reads it as
+    /// DENOISE strength (0.0 = no change, 1.0 = full noise), while LTX-2
+    /// reads it as SOURCE strength (1.0 = pin the opening frame; lower
+    /// allows more change). The wire value is never inverted — clients
+    /// label it per family via `studio/lib/strengthSemantics.ts`..
     #[serde(default = "default_strength")]
     pub strength: f64,
     /// Mask image for inpainting (raw PNG/JPEG bytes, base64-encoded in JSON).

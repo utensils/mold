@@ -21,7 +21,12 @@ export { isMinimaxH3Family } from "./minimaxH3Authoring";
  * wan solver off-family and a UNet scheduler on wan.
  */
 export type GenerationScheduler =
-  "default" | "ddim" | "euler-ancestral" | "uni-pc" | "euler" | "dpm-pp";
+  | "default"
+  | "ddim"
+  | "euler-ancestral"
+  | "uni-pc"
+  | "euler"
+  | "dpm-pp";
 
 export type SourceImageMode =
   | "single"

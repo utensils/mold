@@ -15,7 +15,12 @@ import type {
 import { friendlySequenceError } from "./sequence";
 
 export type ActivityAction =
-  "cancel" | "watch" | "retake" | "edit" | "resume" | "delete";
+  | "cancel"
+  | "watch"
+  | "retake"
+  | "edit"
+  | "resume"
+  | "delete";
 
 export type PrintPhase = "queued" | "running" | "done" | "failed" | "cancelled";
 

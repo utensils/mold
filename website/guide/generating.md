@@ -101,7 +101,10 @@ more reference images.
 
 In Mold Studio's web Create workspace, open **Advanced → Edit images** to attach
 the ordered target and reference images. Ordinary source-image families instead
-show denoise strength plus all five fit policies; SD1.5 also suggests installed
+show a strength slider plus all five fit policies — labelled **Denoise
+strength** for SD-lineage img2img (higher = more change) and **Source
+strength** for LTX-2 image-to-video (higher keeps more of the source; 1.0
+pins the opening frame); SD1.5 also suggests installed
 ControlNet checkpoints while allowing a custom checkpoint name.
 
 On a phone, Create follows one vertical workflow: prompt and style, model and

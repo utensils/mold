@@ -129,7 +129,12 @@ export interface ChainScript {
 }
 
 export type ChainJobState =
-  "queued" | "running" | "interrupted" | "failed" | "completed" | "cancelled";
+  | "queued"
+  | "running"
+  | "interrupted"
+  | "failed"
+  | "completed"
+  | "cancelled";
 export type ChainExecutionPhase = "queued" | "running" | "finalizing";
 
 export type ChainStageState = "pending" | "running" | "completed" | "failed";

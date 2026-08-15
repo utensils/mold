@@ -1018,8 +1018,9 @@ Examples:
         #[arg(short = 'i', long, help_heading = "img2img", value_hint = ValueHint::FilePath)]
         image: Vec<String>,
 
-        /// Denoising strength for img2img (default: 0.75; 0.0 = no change,
-        /// 1.0 = full noise)
+        /// img2img/I2V strength (default: 0.75). SD-family img2img: higher
+        /// = more change (1.0 = full noise). LTX-2 I2V: higher = more
+        /// source preservation (1.0 pins the opening frame).
         #[arg(long, help_heading = "img2img")]
         strength: Option<f64>,
 

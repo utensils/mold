@@ -76,12 +76,12 @@ export function hasVisualConditioning(
   if (!input) return false;
   return Boolean(
     input.sourceImage ||
-    (input.imageAttachments?.length ?? 0) > 0 ||
-    (input.keyframes?.length ?? 0) > 0 ||
-    input.sourceVideo ||
-    input.sourceVideoPath?.trim() ||
-    input.extendVideo ||
-    input.extendVideoPath?.trim(),
+      (input.imageAttachments?.length ?? 0) > 0 ||
+      (input.keyframes?.length ?? 0) > 0 ||
+      input.sourceVideo ||
+      input.sourceVideoPath?.trim() ||
+      input.extendVideo ||
+      input.extendVideoPath?.trim(),
   );
 }
 

@@ -12,7 +12,10 @@ export interface SourceDimensions {
 }
 
 export type SourceResolutionReason =
-  "exact" | "aligned" | "downscaled" | "minimum";
+  | "exact"
+  | "aligned"
+  | "downscaled"
+  | "minimum";
 
 export interface SourceResolutionResult {
   source: SourceDimensions;

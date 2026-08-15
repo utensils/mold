@@ -39,16 +39,17 @@ function withStageState(
   },
 ): ChainJobDetail | null {
   if (!detail) return detail;
-  const stages = detail.stages.map((s): ChainJobStageDetail =>
-    s.idx === idx
-      ? {
-          ...s,
-          state,
-          has_preview: availability?.hasPreview ?? s.has_preview,
-          has_media: availability?.hasMedia ?? s.has_media,
-          cache_ready: availability?.cacheReady ?? s.cache_ready,
-        }
-      : s,
+  const stages = detail.stages.map(
+    (s): ChainJobStageDetail =>
+      s.idx === idx
+        ? {
+            ...s,
+            state,
+            has_preview: availability?.hasPreview ?? s.has_preview,
+            has_media: availability?.hasMedia ?? s.has_media,
+            cache_ready: availability?.cacheReady ?? s.cache_ready,
+          }
+        : s,
   );
   return { ...detail, stages };
 }

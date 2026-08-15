@@ -922,7 +922,7 @@ pub async fn generate(
     #[description = "Number of inference steps"] steps: Option<u32>,
     #[description = "Guidance scale (0.0 for schnell, ~3.5 for dev)"] guidance: Option<f64>,
     #[description = "Random seed for reproducibility"] seed: Option<u64>,
-    #[description = "img2img strength (0.0 = preserve source, 1.0 = full noise)"] strength: Option<
+    #[description = "Strength: SD img2img 1.0 = full noise; LTX-2 I2V 1.0 = pin source frame"] strength: Option<
         f64,
     >,
     #[description = "Enable synchronized audio (LTX-2 + MP4 only)"] audio: Option<bool>,
