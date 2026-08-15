@@ -1848,6 +1848,17 @@ pub struct BatchGenerateOutput {
     pub response: GenerateResponse,
 }
 
+/// LTX-2 still-image conditioning preprocessing as actually executed —
+/// the executed-recipe mirror of `VideoData::pipeline`. `codec` names the
+/// real round-trip implementation (e.g. `"openh264-cqp33"`, deliberately
+/// not a CRF claim) and `fit_policy` the resize/crop contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct Ltx2SourcePreprocessing {
+    pub profile: crate::ltx2_preprocess::Ltx2ImagePreprocessingProfile,
+    pub codec: String,
+    pub fit_policy: String,
+}
+
 /// Video output from a video model family.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VideoData {
@@ -1874,6 +1885,10 @@ pub struct VideoData {
     /// and pipelines without a terminal provenance contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline_provenance_sha256: Option<String>,
+    /// LTX-2 source-image conditioning preprocessing actually applied.
+    /// Absent for T2V, other families, and older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_preprocessing: Option<Ltx2SourcePreprocessing>,
     /// First frame as PNG thumbnail for gallery grid.
     pub thumbnail: Vec<u8>,
     /// Animated GIF preview for gallery detail view / TUI playback.
@@ -2038,6 +2053,10 @@ pub struct OutputMetadata {
     /// exact additive SHA-256 identity. Absent for legacy and other outputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline_provenance_sha256: Option<String>,
+    /// LTX-2 source-image conditioning preprocessing actually applied
+    /// (recorded from the response, like `pipeline`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_preprocessing: Option<Ltx2SourcePreprocessing>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ic_lora_control: Option<String>,
     /// Where the HDR EXR sidecar was written. The gallery holds the tonemapped
@@ -2198,6 +2217,7 @@ impl OutputMetadata {
                 .then_some(req.effective_extend_overlap_frames()),
             pipeline: req.pipeline,
             pipeline_provenance_sha256: None,
+            source_preprocessing: None,
             ic_lora_control: req.ic_lora_control.clone(),
             hdr_exr_dir: req.hdr_exr_dir.clone(),
             hdr_exr_full_float: req.hdr_exr_full_float,
@@ -2232,6 +2252,9 @@ impl OutputMetadata {
             self.pipeline = Some(pipeline);
         }
         self.pipeline_provenance_sha256 = video.pipeline_provenance_sha256.clone();
+        if let Some(preprocessing) = &video.source_preprocessing {
+            self.source_preprocessing = Some(preprocessing.clone());
+        }
     }
 }
 
@@ -4165,6 +4188,7 @@ mod tests {
             fps: 24,
             pipeline: None,
             pipeline_provenance_sha256: Some(provenance.clone()),
+            source_preprocessing: None,
             thumbnail: vec![2],
             gif_preview: Vec::new(),
             has_audio: true,
@@ -4647,6 +4671,61 @@ mod tests {
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("negative_prompt"));
+    }
+
+    #[test]
+    fn output_metadata_source_preprocessing_serde_is_additive() {
+        // Older rows/servers without the field must keep deserializing…
+        let metadata: OutputMetadata =
+            serde_json::from_str(r#"{"version":"1","prompt":"p","model":"m","seed":1,"steps":8,"guidance":3.0,"width":8,"height":8}"#)
+                .unwrap();
+        assert!(metadata.source_preprocessing.is_none());
+        // …absent values serialize to nothing…
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert!(!json.contains("source_preprocessing"));
+        // …and present values round-trip.
+        let preprocessing = Ltx2SourcePreprocessing {
+            profile: crate::ltx2_preprocess::ltx2_image_preprocessing_profile(
+                crate::ltx2_preprocess::Ltx2Generation::V2_3,
+            ),
+            codec: "openh264-cqp33".to_string(),
+            fit_policy: "fill-center-crop".to_string(),
+        };
+        let mut stamped = metadata.clone();
+        stamped.source_preprocessing = Some(preprocessing.clone());
+        let round: OutputMetadata =
+            serde_json::from_str(&serde_json::to_string(&stamped).unwrap()).unwrap();
+        assert_eq!(round.source_preprocessing, Some(preprocessing));
+    }
+
+    #[test]
+    fn apply_video_output_records_source_preprocessing_from_the_response() {
+        let mut metadata: OutputMetadata =
+            serde_json::from_str(r#"{"version":"1","prompt":"p","model":"m","seed":1,"steps":8,"guidance":3.0,"width":8,"height":8}"#)
+                .unwrap();
+        let preprocessing = Ltx2SourcePreprocessing {
+            profile: crate::ltx2_preprocess::ltx2_image_preprocessing_profile(
+                crate::ltx2_preprocess::Ltx2Generation::V2,
+            ),
+            codec: "openh264-cqp33".to_string(),
+            fit_policy: "fill-center-crop".to_string(),
+        };
+        let video: VideoData = serde_json::from_value(serde_json::json!({
+            "data": [], "format": "mp4", "width": 8, "height": 8,
+            "frames": 9, "fps": 24, "thumbnail": [],
+            "source_preprocessing": preprocessing,
+        }))
+        .unwrap();
+        metadata.apply_video_output(&video);
+        assert_eq!(metadata.source_preprocessing, Some(preprocessing));
+        // A T2V response (no field) must not erase a recorded value.
+        let t2v: VideoData = serde_json::from_value(serde_json::json!({
+            "data": [], "format": "mp4", "width": 8, "height": 8,
+            "frames": 9, "fps": 24, "thumbnail": [],
+        }))
+        .unwrap();
+        metadata.apply_video_output(&t2v);
+        assert!(metadata.source_preprocessing.is_some());
     }
 
     #[test]

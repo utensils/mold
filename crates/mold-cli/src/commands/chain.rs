@@ -802,6 +802,7 @@ fn encode_local_frames(
         fps,
         pipeline: None,
         pipeline_provenance_sha256: None,
+        source_preprocessing: None,
         thumbnail,
         gif_preview,
         has_audio,

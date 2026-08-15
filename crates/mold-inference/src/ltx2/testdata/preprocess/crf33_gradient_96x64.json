@@ -1,0 +1,10 @@
+{
+  "shape": [
+    64,
+    96,
+    3
+  ],
+  "dtype": "u8",
+  "desc": "preprocess(decode_image(gradient_96x64.png), crf=33) -- libx264 yuv420p round trip. 96x64 synthetic gradient + checkerboard + diagonal edge",
+  "crf": 33
+}

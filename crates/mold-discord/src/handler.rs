@@ -231,6 +231,7 @@ mod tests {
                 fps: 24,
                 pipeline: None,
                 pipeline_provenance_sha256: None,
+                source_preprocessing: None,
                 thumbnail: vec![],
                 gif_preview: preview,
                 has_audio: false,

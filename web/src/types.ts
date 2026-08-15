@@ -34,6 +34,13 @@ export type Ltx2PipelineMode =
   | "lip-dub"
   | "t2a";
 export type Ltx2SpatialUpscale = "x1-5" | "x2";
+
+/** LTX-2 source-image conditioning preprocessing as actually executed. */
+export interface Ltx2SourcePreprocessing {
+  profile: { generation: "v2" | "v2_3"; image_crf: number };
+  codec: string;
+  fit_policy: string;
+}
 export type Ltx2TemporalUpscale = "x2";
 
 export interface TimeRange {
@@ -99,6 +106,8 @@ export interface OutputMetadata {
   extend_video_path?: string | null;
   extend_overlap_frames?: number | null;
   pipeline?: Ltx2PipelineMode | null;
+  /** LTX-2 source-image preprocessing actually applied (newer servers). */
+  source_preprocessing?: Ltx2SourcePreprocessing | null;
   ic_lora_control?: string | null;
   retake_range?: TimeRange | null;
   spatial_upscale?: Ltx2SpatialUpscale | null;

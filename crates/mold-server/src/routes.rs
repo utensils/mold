@@ -2030,6 +2030,13 @@ pub(crate) fn apply_media_headers(
                 headers.insert("x-mold-video-pipeline-provenance-sha256", v);
             }
         }
+        if let Some(preprocessing) = video.source_preprocessing.as_ref() {
+            if let Ok(json) = serde_json::to_string(preprocessing) {
+                if let Ok(v) = HeaderValue::from_str(&json) {
+                    headers.insert("x-mold-video-source-preprocessing", v);
+                }
+            }
+        }
         if video.has_audio {
             headers.insert("x-mold-video-has-audio", HeaderValue::from_static("1"));
         }

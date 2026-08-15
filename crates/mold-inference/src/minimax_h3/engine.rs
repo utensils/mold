@@ -335,6 +335,7 @@ impl H3Fl2VaEngine {
                 fps: output.fps,
                 pipeline: None,
                 pipeline_provenance_sha256: None,
+                source_preprocessing: None,
                 thumbnail: output.thumbnail_png,
                 gif_preview: Vec::new(),
                 has_audio: true,

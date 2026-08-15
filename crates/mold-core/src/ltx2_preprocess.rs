@@ -18,7 +18,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A known LTX-2 checkpoint generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Ltx2Generation {
     /// LTX-2 2.0/2.1/2.2 (the 19B lineage).
@@ -38,7 +38,7 @@ impl Ltx2Generation {
 
 /// The still-image conditioning preprocessing contract for a checkpoint
 /// generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Ltx2ImagePreprocessingProfile {
     pub generation: Ltx2Generation,
     /// H.264 compression level the conditioning image is round-tripped

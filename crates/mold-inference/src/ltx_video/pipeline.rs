@@ -1711,6 +1711,7 @@ impl LtxVideoEngine {
                 fps,
                 pipeline: None,
                 pipeline_provenance_sha256: None,
+                source_preprocessing: None,
                 thumbnail: thumbnail_bytes,
                 gif_preview,
                 has_audio: false,

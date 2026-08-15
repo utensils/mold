@@ -5861,6 +5861,7 @@ mod tests {
             fps: facts.media.fps,
             pipeline: None,
             pipeline_provenance_sha256: Some(std::iter::repeat_n('f', 64).collect()),
+            source_preprocessing: None,
             thumbnail: vec![0x89, b'P', b'N', b'G'],
             gif_preview: Vec::new(),
             has_audio: true,

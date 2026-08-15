@@ -1,0 +1,9 @@
+{
+  "shape": [
+    96,
+    64,
+    3
+  ],
+  "dtype": "u8",
+  "desc": "decode_image(portrait_exif6.jpg): EXIF Orientation=6 applied (rotate 270 CCW, expand), sRGB RGB8"
+}

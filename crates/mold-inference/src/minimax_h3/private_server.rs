@@ -3160,6 +3160,7 @@ fn private_run_output(
             audio_sample_rate: Some(output.mux_report.sample_rate),
             audio_channels: Some(u32::from(output.mux_report.channels)),
             pipeline_provenance_sha256: Some(pipeline_provenance_sha256),
+            source_preprocessing: None,
         }),
         audio: None,
         generation_time_ms,

@@ -14,6 +14,7 @@ mod model;
 mod nvfp4;
 mod pipeline;
 mod plan;
+pub(crate) mod preprocess;
 mod preset;
 mod runtime;
 mod sampler;

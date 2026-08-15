@@ -137,6 +137,7 @@ candle-flash-attn = { version = "0.11", optional = true }
 gif = "0.13"
 webp-animation = { version = "0.10", features = ["static"], optional = true }
 image = "0.25"
+moxcms = "0.8"
 half = "2"
 # Already vendored transitively through candle-core, so these add no new
 # crates to the Nix vendor set. `float8` must resolve to the same version

@@ -1233,6 +1233,9 @@ fn build_cors_layer() -> Result<CorsLayer> {
                     axum::http::header::HeaderName::from_static(
                         "x-mold-video-pipeline-provenance-sha256",
                     ),
+                    axum::http::header::HeaderName::from_static(
+                        "x-mold-video-source-preprocessing",
+                    ),
                     axum::http::header::HeaderName::from_static("x-mold-video-has-audio"),
                     axum::http::header::HeaderName::from_static("x-mold-video-duration-ms"),
                     axum::http::header::HeaderName::from_static("x-mold-video-audio-sample-rate"),

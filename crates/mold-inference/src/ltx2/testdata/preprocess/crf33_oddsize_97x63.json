@@ -1,0 +1,10 @@
+{
+  "shape": [
+    62,
+    96,
+    3
+  ],
+  "dtype": "u8",
+  "desc": "preprocess(decode_image(oddsize_97x63.png), crf=33) -- libx264 yuv420p round trip. 97x63 gradient; encode_single_frame floors both dims to even",
+  "crf": 33
+}
