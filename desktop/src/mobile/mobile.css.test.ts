@@ -212,7 +212,7 @@ describe("mobile style row", () => {
 });
 
 describe("mobile safe areas", () => {
-  it("keeps the shell on the stable viewport after iOS dismisses the keyboard", () => {
+  it("follows the native viewport instead of a picker-reduced dynamic viewport", () => {
     const shell = css.match(/\.mobile-shell\s*\{([^}]*)\}/s);
     const header = css.match(/\.mobile-header\s*\{([^}]*)\}/s);
     const content = css.match(/\.mobile-content\s*\{([^}]*)\}/s);

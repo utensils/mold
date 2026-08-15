@@ -40,10 +40,8 @@ button {
   --radius-card: 16px;
   --radius-pill: 20px;
   --text-large-title: 1.875rem;
-  /* The native WKWebView already owns the safe-area-constrained viewport.
-     iOS can leave `dvh` stuck at the keyboard-reduced height after dismissal,
-     while `svh` can exceed Tauri's constrained WebView and push tabs below
-     the screen. Follow the stable app container instead. */
+  /* UIKit restores the WKWebView frame after native pickers dismiss. Follow
+     that stable native container instead of WebKit's transient dvh. */
   height: 100%;
   min-height: 0;
   box-sizing: border-box;

@@ -5,6 +5,7 @@ mod appearance;
 mod discovery;
 mod keychain;
 mod media;
+mod viewport;
 
 fn app_context() -> tauri::Context<tauri::Wry> {
     tauri::generate_context!()
@@ -44,6 +45,7 @@ pub fn run() {
             media::save_image_to_photos,
             media::save_video_to_photos,
             media::share_exported_animation,
+            viewport::restore_mobile_viewport,
         ])
         .run(app_context())
         .expect("error while running mold-mobile");
