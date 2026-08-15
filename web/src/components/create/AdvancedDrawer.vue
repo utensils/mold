@@ -45,6 +45,7 @@ import {
   wanRecipeError,
   type WanRecipeState,
 } from "@studio/lib/wanRecipe";
+import { emptyGuidanceOverrides } from "@studio/lib/guidanceOverrides";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { OutputMode } from "@studio/lib/sequence";
@@ -77,7 +78,10 @@ import {
   MINIMAX_H3_MIN_FRAMES,
   type MinimaxH3AuthoringState,
 } from "@studio/lib/minimaxH3Authoring";
-import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import {
+  effectiveGenerationRecipe,
+  resolutionProfileFinding,
+} from "@studio/lib/generationProfile";
 
 const props = withDefaults(
   defineProps<{
@@ -342,6 +346,19 @@ function setSequenceFit(mode: SourceFitMode) {
 const showLtx2 = computed(() => caps.value.supportsAudio && !h3Family.value);
 
 // ── Output & seed: exact size follows the active recipe grid ──────────
+/** Advisory beside the exact-size inputs — a size the recipe would refuse
+ * still submits (the server is the authority) but says so right here, where
+ * the custom size is typed. */
+const exactSizeAdvisory = computed(() => {
+  const finding = resolutionProfileFinding(
+    props.modelValue.width,
+    props.modelValue.height,
+    effectiveGenerationRecipe(selectedModel.value, props.modelValue.pipeline)
+      ?.resolution,
+  );
+  return finding?.message ?? null;
+});
+
 const resolutionAlignment = computed(
   () =>
     effectiveGenerationRecipe(selectedModel.value, props.modelValue.pipeline)
@@ -408,16 +425,15 @@ function clampFrames(n: number): number {
     : Math.max(frameMinimum.value, snapVideoFrames(value, videoContract.value));
 }
 
-// ── Reset (advanced fields only — prompt/model/shape/seed survive) ────
+// ── Reset (advanced fields only — prompt/model/shape/seed survive; source
+// media lives in the primary form now and must survive too) ───────────
 function resetAdvanced() {
   if (sequenceMode.value) {
-    draft.openingImage = null;
     draft.enableAudio = false;
     for (const clip of draft.clips) {
       clip.negativePrompt = "";
       clip.cameraControl = null;
     }
-    patch({ strength: 0.75, sourceFitPolicy: { mode: "crop-fill" } });
     return;
   }
   patch({
@@ -426,28 +442,17 @@ function resetAdvanced() {
     negativePrompt: props.modelValue.negativePromptDefault,
     scheduler: null,
     cfgPlus: false,
-    imageAttachments: [],
-    endFrame: null,
-    maskImage: null,
-    controlImage: null,
-    controlModel: "",
-    controlScale: 1.0,
-    strength: 0.75,
-    sourceFitPolicy: { mode: "pad-repaint" },
     loras: [],
     upscaleModel: "",
     // Video suite (frames/fps survive as core video params, like resolution).
     gifPreview: false,
-    audioFile: null,
-    audioFilePath: "",
-    sourceVideo: null,
-    sourceVideoPath: "",
-    keyframes: [],
     pipeline: null,
     icLoraControl: null,
     retakeRange: null,
     spatialUpscale: null,
     temporalUpscale: null,
+    guidanceOverrides: emptyGuidanceOverrides(),
+    cameraControl: null,
     wanRecipe: emptyWanRecipe(),
   });
 }
@@ -985,6 +990,13 @@ function setSequenceCameraMode(mode: string) {
             <p class="adv__hint">
               snaps to the nearest {{ resolutionAlignment }}px.
             </p>
+            <p
+              v-if="exactSizeAdvisory"
+              class="adv__hint adv__hint--warn"
+              data-test="exact-size-advisory"
+            >
+              {{ exactSizeAdvisory }}
+            </p>
           </div>
           <div class="adv__field">
             <label class="adv__label">Seed</label>
@@ -1323,6 +1335,9 @@ function setSequenceCameraMode(mode: string) {
   font-size: 10.5px;
   color: var(--ink-3);
   margin-top: 6px;
+}
+.adv__hint--warn {
+  color: var(--warning);
 }
 .adv__pair {
   display: grid;

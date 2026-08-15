@@ -113,7 +113,9 @@ describe("MachinesPage", () => {
     });
     const menu = w.get('[data-test="machine-context-menu"]');
     expect(menu.text()).toContain("Open details");
-    expect(menu.text()).toContain("Generation target");
+    // The default target is model-aware Auto, so even the origin offers the
+    // explicit pin rather than claiming to already be the target.
+    expect(menu.text()).toContain("Set as generation target");
     expect(menu.text()).toContain("Copy address");
     expect(menu.text()).not.toContain("Disconnect");
     expect(menu.text()).not.toContain("Forget");

@@ -1,24 +1,34 @@
 <script setup lang="ts">
-withDefaults(
+const props = withDefaults(
   defineProps<{
     reason: string;
     title?: string;
     compact?: boolean;
+    /** "warn" renders a non-blocking advisory (amber, "Heads up"); the
+     * default "error" keeps the blocking red treatment. */
+    variant?: "error" | "warn";
   }>(),
-  { title: "Before you generate", compact: false },
+  { compact: false, variant: "error" },
 );
+const effectiveTitle = () =>
+  props.title ??
+  (props.variant === "warn" ? "Heads up" : "Before you generate");
 </script>
 
 <template>
   <div
     class="ms-action-blocker"
-    :class="{ 'ms-action-blocker--compact': compact }"
+    :class="{
+      'ms-action-blocker--compact': compact,
+      'ms-action-blocker--warn': variant === 'warn',
+    }"
     role="status"
     data-test="action-blocker"
+    :data-variant="variant"
   >
     <span class="ms-action-blocker__mark" aria-hidden="true">!</span>
     <span class="ms-action-blocker__copy">
-      <strong>{{ title }}</strong>
+      <strong>{{ effectiveTitle() }}</strong>
       <span>{{ reason }}</span>
     </span>
   </div>
@@ -48,6 +58,14 @@ withDefaults(
   font-family: var(--f-mono);
   font-size: 12px;
   font-weight: 700;
+}
+.ms-action-blocker--warn {
+  border-color: color-mix(in srgb, var(--warning) 32%, var(--edge));
+  background: color-mix(in srgb, var(--warning) 8%, var(--bath));
+}
+.ms-action-blocker--warn .ms-action-blocker__mark {
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: var(--warning);
 }
 .ms-action-blocker__copy {
   display: flex;

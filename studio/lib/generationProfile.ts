@@ -671,6 +671,25 @@ export function profileAspectIdForResolution(
   return nearest && nearest.diff <= tolerance ? nearest.id : null;
 }
 
+/**
+ * The values a recipe's FIXED controls demand. A form value that disagrees
+ * with a fixed control is never user authority — the control renders
+ * disabled — so callers snap the hidden value instead of stranding Generate
+ * behind an error the user cannot correct. Desktop's
+ * `reconcileModelCapabilities` and web's model-defaults/submit paths share
+ * this so the two surfaces cannot drift.
+ */
+export function fixedRecipeControlOverrides(
+  recipe: GenerationRecipeProfile | null | undefined,
+): { steps?: number; guidance?: number } {
+  const overrides: { steps?: number; guidance?: number } = {};
+  if (recipe?.steps.mode === "fixed") overrides.steps = recipe.steps.default;
+  if (recipe?.guidance.mode === "fixed") {
+    overrides.guidance = recipe.guidance.default;
+  }
+  return overrides;
+}
+
 export function integerControlError(
   label: string,
   value: number,
@@ -749,6 +768,142 @@ export function resolutionProfileError(
       return "Choose one of this recipe's supported resolution buckets.";
   }
   return null;
+}
+
+export interface ResolutionFinding {
+  level: "block" | "warn";
+  message: string;
+}
+
+/**
+ * The client-side resolution verdict: the server is the authority on whether
+ * a size renders, so every profile constraint (minimums, alignment, span,
+ * pixel budget, aspect range, bucket membership) is an ADVISORY here — the
+ * request still submits and a real refusal comes back as the server's error.
+ * Only input that cannot form a coherent request at all (non-integer / NaN /
+ * < 1) blocks. `resolutionProfileError` keeps its strict semantics for the
+ * Rust-parity contract and the recipe-shape guard; render THIS on surfaces.
+ */
+export function resolutionProfileFinding(
+  width: number,
+  height: number,
+  resolution: ResolutionProfile | null | undefined,
+): ResolutionFinding | null {
+  if (!resolution || resolution.domain === "none") return null;
+  if (
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    width < 1 ||
+    height < 1
+  ) {
+    return {
+      level: "block",
+      message: "Width and height must be whole numbers.",
+    };
+  }
+  if (width < resolution.min_width || height < resolution.min_height) {
+    return {
+      level: "warn",
+      message: `This model expects at least ${resolution.min_width} × ${resolution.min_height} — the server may reject or adjust this size.`,
+    };
+  }
+  if (
+    width % resolution.alignment !== 0 ||
+    height % resolution.alignment !== 0
+  ) {
+    return {
+      level: "warn",
+      message: `This model expects multiples of ${resolution.alignment} — the server may reject this size.`,
+    };
+  }
+  if (
+    resolution.max_axis_pixels &&
+    Math.max(width, height) > resolution.max_axis_pixels
+  ) {
+    return {
+      level: "warn",
+      message: `${width} × ${height} exceeds the ${resolution.max_axis_pixels}px span this recipe was trained for — the server may reject it.`,
+    };
+  }
+  if (width * height > resolution.max_pixels) {
+    return {
+      level: "warn",
+      message: `${width} × ${height} exceeds this recipe's ${(resolution.max_pixels / 1_000_000).toFixed(1)} MP budget — the server may reject it.`,
+    };
+  }
+  const ratio = width / height;
+  if (resolution.min_aspect_ratio && ratio < resolution.min_aspect_ratio) {
+    return {
+      level: "warn",
+      message: `The ${ratio.toFixed(2)} aspect ratio is narrower than this recipe was trained for — the server may reject it.`,
+    };
+  }
+  if (resolution.max_aspect_ratio && ratio > resolution.max_aspect_ratio) {
+    return {
+      level: "warn",
+      message: `The ${ratio.toFixed(2)} aspect ratio is wider than this recipe was trained for — the server may reject it.`,
+    };
+  }
+  const exact = resolution.aspect_groups.some((group) =>
+    group.presets.some(
+      (preset) => preset.width === width && preset.height === height,
+    ),
+  );
+  if (resolution.domain === "buckets" && !exact) {
+    return resolution.off_bucket === "warn"
+      ? {
+          level: "warn",
+          message: `This model isn't optimized for ${width}×${height} — results may vary.`,
+        }
+      : {
+          level: "warn",
+          message: `${width} × ${height} isn't one of this model's trained sizes — the server may reject it.`,
+        };
+  }
+  return null;
+}
+
+export interface ClosestProfileAspect {
+  id: string;
+  label: string;
+  ratio: number;
+  /** False when the size matches no preset — the chip is an approximation. */
+  exact: boolean;
+}
+
+/**
+ * The aspect group a custom size should highlight. Unlike
+ * {@link profileAspectIdForResolution} (exact presets, nearest-ratio only in
+ * a dynamic domain), this always answers for any domain with no tolerance
+ * cutoff, flagging approximations so surfaces can mark the chip "≈" — the
+ * Advanced exact size drives the shape, never the other way around.
+ */
+export function closestProfileAspect(
+  model: GenerationProfileModel | null | undefined,
+  pipeline: string | null | undefined,
+  width: number,
+  height: number,
+): ClosestProfileAspect | null {
+  const recipe = effectiveGenerationRecipe(model, pipeline);
+  if (!recipe || !(width > 0) || !(height > 0)) return null;
+  const options = profileAspectOptions(model, pipeline);
+  if (options.length === 0) return null;
+  const exactGroup = recipe.resolution.aspect_groups.find((group) =>
+    group.presets.some(
+      (preset) => preset.width === width && preset.height === height,
+    ),
+  );
+  if (exactGroup) {
+    const option = options.find((candidate) => candidate.id === exactGroup.id);
+    if (option) return { ...option, exact: true };
+  }
+  const ratio = width / height;
+  const nearest = [...options].sort(
+    (left, right) =>
+      Math.abs(left.ratio - ratio) / left.ratio -
+      Math.abs(right.ratio - ratio) / right.ratio,
+  )[0];
+  return nearest ? { ...nearest, exact: false } : null;
 }
 
 /**

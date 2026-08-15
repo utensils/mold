@@ -680,6 +680,7 @@ pub async fn run(
                     })?;
                     let control = ic_lora_control.clone().unwrap_or_else(|| "hdr".to_string());
                     let mut probe_req = GenerateRequest {
+                        source_fit: None,
                         hdr_exr_dir: Some(dir.clone()),
                         hdr_exr_full_float,
                         guidance_overrides: None,
@@ -824,6 +825,7 @@ pub async fn run(
     };
 
     let mut req = GenerateRequest {
+        source_fit: None,
         hdr_exr_dir,
         hdr_exr_full_float,
         guidance_overrides,

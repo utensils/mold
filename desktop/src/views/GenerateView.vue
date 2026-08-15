@@ -49,6 +49,7 @@ import { OPTIONAL_PROMPT_GUIDANCE, promptRequired } from "@studio/lib/promptRequ
 import {
   emptyMinimaxH3AuthoringState,
   minimaxH3AuthoringError,
+  setMinimaxH3PickedImageBoundary,
 } from "@studio/lib/minimaxH3Authoring";
 import { firstLastFrameRestoreNotice } from "@studio/lib/sourceImageCapability";
 import {
@@ -112,6 +113,7 @@ import {
   profileGuidanceValidationError,
   profileStepsValidationError,
   resolutionValidationError,
+  resolutionValidationWarning,
   sourceConditioningValidationError,
   wanRecipeValidationError,
 } from "../lib/generateValidation";
@@ -148,6 +150,7 @@ import { saveGalleryMedia, showSavedMediaToast } from "../lib/mediaSave";
 import {
   metadataReferencesSource,
   restoreEditImages,
+  restoreH3Boundaries,
   restoreSourceImage,
   sha256HexOfBase64,
   type SourceRestoreDeps,
@@ -2473,6 +2476,20 @@ const composerDisabled = computed(
   () => generationInputBlockerReason.value !== null || preparedBatch.value !== null,
 );
 
+/** Non-blocking pre-generate advisory: an off-profile custom size submits
+ * anyway (the server is the authority), but the inspector can be scrolled
+ * away from the Generate button, so the advisory rides the composer too. */
+const composerWarningReason = computed<string | null>(() =>
+  composerBlockerReason.value
+    ? null
+    : resolutionValidationWarning(
+        form.width,
+        form.height,
+        selectedEntry.value ?? null,
+        form.pipeline,
+      ),
+);
+
 const emptyCanvasGuidance = computed(() =>
   promptRequired(form)
     ? "Describe an image below, pick a look, and press Generate. Everything runs on your own machine."
@@ -2930,6 +2947,57 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
       return blobToBase64(await res.blob());
     },
   };
+  if (caps.value.sourceImageMode === "h3-boundaries") {
+    // FL2VA restores its endpoints into the boundary slots, not the single
+    // source well. Reuse leaves bytes-less reattach descriptors there; each
+    // one keyed with provenance resolves stash-first, then by gallery
+    // filename across every connected host.
+    // Snapshot the descriptors this restore is answering, so a slot the user
+    // cleared or reattached while the fetch was in flight is never clobbered.
+    const wantedFirst =
+      form.h3Authoring?.firstFrame && !form.h3Authoring.firstFrame.data
+        ? form.h3Authoring.firstFrame
+        : null;
+    const wantedLast =
+      form.h3Authoring?.lastFrame && !form.h3Authoring.lastFrame.data
+        ? form.h3Authoring.lastFrame
+        : null;
+    if (!wantedFirst && !wantedLast) return;
+    const boundaries = await restoreH3Boundaries(metadata, deps);
+    if (epoch !== restoreEpoch || form.model !== modelAtStart) return;
+    if (caps.value.sourceImageMode !== "h3-boundaries") return;
+    let failed = 0;
+    const commit = (
+      endpoint: "firstFrame" | "lastFrame",
+      restored: { base64: string; filename: string | null } | null,
+      wanted: { filename: string } | null,
+    ) => {
+      if (!wanted) return;
+      const slot = form.h3Authoring?.[endpoint];
+      // Cleared (null), reattached (data), or replaced with a different
+      // descriptor while we fetched — the user's action wins.
+      if (!slot || slot.data || slot.filename !== wanted.filename) return;
+      if (!restored) {
+        failed += 1;
+        return;
+      }
+      const result = setMinimaxH3PickedImageBoundary(form.h3Authoring, endpoint, {
+        filename: restored.filename ?? slot.filename,
+        base64: restored.base64,
+      });
+      if (result.ok) form.h3Authoring = result.state;
+      else failed += 1;
+    };
+    commit("firstFrame", boundaries.firstFrame, wantedFirst);
+    commit("lastFrame", boundaries.lastFrame, wantedLast);
+    if (failed > 0) {
+      toasts.push(
+        "Couldn't restore the original frame media — the file wasn't found on any connected host. Reattach it to generate.",
+        "error",
+      );
+    }
+    return;
+  }
   const editRestore = attachmentMode ? await restoreEditImages(metadata, deps) : null;
   const restored = attachmentMode ? null : await restoreSourceImage(metadata, deps);
   // The lookups can take seconds (cold gallery, cross-host fetch). Bail if
@@ -3598,6 +3666,7 @@ onBeforeUnmount(() => {
             :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
             :disabled="composerDisabled"
             :disabled-reason="composerBlockerReason"
+            :warning-reason="composerWarningReason"
             :submitting="submissionPlanning"
             :button-label="buttonLabel"
             :estimate-request="estimateRequest"

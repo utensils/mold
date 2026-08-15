@@ -13,6 +13,7 @@ import {
   minimaxH3AuthoringCapabilities,
   minimaxH3AuthoringError,
   minimaxH3BoundaryFromSourceMetadata,
+  minimaxH3BoundaryFromStagedImage,
   minimaxH3ClosingBoundaryFromMetadata,
   minimaxH3Mode,
   minimaxH3ReferenceBudget,
@@ -25,6 +26,7 @@ import {
   setMinimaxH3GalleryImageFirstFrame,
   setMinimaxH3PickedImageBoundary,
   setMinimaxH3PickedImageFirstFrame,
+  stagedImageFromMinimaxH3Boundary,
 } from "./minimaxH3Authoring";
 
 const image = (name: string): GenerationReference => ({
@@ -565,5 +567,74 @@ describe("MiniMax H3 Studio authority", () => {
       data: "",
       sha256: "b".repeat(64),
     });
+  });
+});
+
+describe("model-switch boundary bridge", () => {
+  it("builds a boundary from a staged single-source image", () => {
+    expect(
+      minimaxH3BoundaryFromStagedImage({
+        base64: "QUJD",
+        filename: "pic.png",
+        width: 1024,
+        height: 576,
+        mime: "image/png",
+        draftId: "d1",
+      }),
+    ).toEqual({
+      filename: "pic.png",
+      mimeType: "image/png",
+      width: 1024,
+      height: 576,
+      data: "QUJD",
+      sha256: null,
+      draftId: "d1",
+    });
+  });
+
+  it("defaults missing staged metadata instead of failing", () => {
+    expect(minimaxH3BoundaryFromStagedImage({ base64: "QUJD" })).toMatchObject({
+      filename: "First frame",
+      mimeType: "image/*",
+      width: 0,
+      height: 0,
+      data: "QUJD",
+    });
+  });
+
+  it("refuses to build a boundary without bytes", () => {
+    expect(minimaxH3BoundaryFromStagedImage({ base64: "" })).toBeNull();
+    expect(minimaxH3BoundaryFromStagedImage({ base64: "   " })).toBeNull();
+    expect(minimaxH3BoundaryFromStagedImage(null)).toBeNull();
+  });
+
+  it("round-trips a boundary back into a staged image", () => {
+    const staged = stagedImageFromMinimaxH3Boundary({
+      filename: "first.png",
+      mimeType: "image/png",
+      width: 1344,
+      height: 768,
+      data: "REVG",
+      sha256: "c".repeat(64),
+      draftId: "d2",
+    });
+    expect(staged).toEqual({
+      base64: "REVG",
+      filename: "first.png",
+      width: 1344,
+      height: 768,
+      mime: "image/png",
+      sha256: "c".repeat(64),
+      draftId: "d2",
+    });
+  });
+
+  it("never promotes a bytes-less reattach descriptor into a source well", () => {
+    expect(
+      stagedImageFromMinimaxH3Boundary(
+        minimaxH3BoundaryFromSourceMetadata("pic.png", "a".repeat(64)),
+      ),
+    ).toBeNull();
+    expect(stagedImageFromMinimaxH3Boundary(null)).toBeNull();
   });
 });

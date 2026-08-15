@@ -2013,30 +2013,310 @@ describe("useGenerateForm — source image & first/last frames", () => {
     expect(form.state.value.sourceImageCapability).toBeNull();
   });
 
-  it("clears the end frame and staged source when the new model cannot take one", () => {
+  it("retains staged wells across a text-to-video-only switch but ships neither", () => {
     const form = useGenerateForm();
     form.applyModelDefaults(wanEndFrameModel());
     attachEnds(form);
 
-    // Still a wan checkpoint, but text-to-video only: neither well applies.
+    // Still a wan checkpoint, but text-to-video only: retention keeps the
+    // authored media staged while the wire prune keeps it off the request.
     form.applyModelDefaults(
       wanEndFrameModel({
         name: "wan22-t2v-a14b:q5",
         source_image: "unsupported",
       }),
     );
-    expect(form.state.value.endFrame).toBeNull();
-    expect(form.state.value.imageAttachments).toEqual([]);
+    expect(form.state.value.endFrame?.base64).toBe("LAST");
+    expect(form.state.value.imageAttachments).toHaveLength(1);
+    const req = form.toRequest();
+    expect(req.source_image ?? null).toBeNull();
+    expect(req.keyframes).toBeUndefined();
   });
 
-  it("keeps the source but drops the end frame on a family with no first/last layout", () => {
+  it("keeps the source and parks the end frame on a family with no first/last layout", () => {
     const form = useGenerateForm();
     form.applyModelDefaults(wanEndFrameModel());
     attachEnds(form);
 
     form.applyModelDefaults(makeModel({ name: "flux-dev:q4", family: "flux" }));
-    expect(form.state.value.endFrame).toBeNull();
+    expect(form.state.value.endFrame?.base64).toBe("LAST");
     expect(form.state.value.imageAttachments).toHaveLength(1);
+    const req = form.toRequest();
+    expect(req.keyframes).toBeUndefined();
+    expect(req.source_image).toBe("FIRST");
+  });
+
+  it("bridges the staged source into the H3 first frame and back", () => {
+    const h3Model = makeModel({
+      name: "minimax-h3-fl2va:official-bf16",
+      family: "minimax-h3",
+      source_image: "required",
+      default_frames: 124,
+      default_fps: 24,
+    });
+    const form = useGenerateForm();
+    form.applyModelDefaults(makeModel({ name: "flux-dev:q4", family: "flux" }));
+    form.state.value.imageAttachments = [
+      {
+        kind: "upload",
+        filename: "pic.png",
+        base64: "QUJD",
+        width: 1024,
+        height: 576,
+        mime: "image/png",
+      },
+    ];
+
+    form.applyModelDefaults(h3Model);
+    expect(form.state.value.h3Authoring?.firstFrame).toMatchObject({
+      filename: "pic.png",
+      data: "QUJD",
+      width: 1024,
+      height: 576,
+    });
+    expect(form.state.value.imageAttachments).toEqual([]);
+
+    form.applyModelDefaults(makeModel({ name: "flux-dev:q4", family: "flux" }));
+    expect(form.state.value.imageAttachments[0]).toMatchObject({
+      filename: "pic.png",
+      base64: "QUJD",
+    });
+    expect(form.state.value.h3Authoring?.firstFrame ?? null).toBeNull();
+  });
+
+  it("never seeds a last frame into a first-frame-only H3 checkpoint", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(wanEndFrameModel());
+    attachEnds(form);
+    form.applyModelDefaults(
+      makeModel({
+        name: "minimax-h3-fl2va:official-bf16",
+        family: "minimax-h3",
+        source_image: "required",
+      }),
+    );
+    expect(form.state.value.h3Authoring?.firstFrame?.data).toBe("FIRST");
+    expect(form.state.value.h3Authoring?.lastFrame ?? null).toBeNull();
+    // The closing frame stays parked for the next first/last-capable model.
+    expect(form.state.value.endFrame?.base64).toBe("LAST");
+  });
+
+  it("keeps a bytes-less reattach descriptor out of the source well when leaving H3", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(
+      makeModel({
+        name: "minimax-h3-fl2va:official-bf16",
+        family: "minimax-h3",
+        source_image: "required",
+      }),
+    );
+    form.state.value.h3Authoring = {
+      firstFrame: {
+        filename: "provenance.png",
+        mimeType: "image/*",
+        width: 0,
+        height: 0,
+        data: "",
+        sha256: "a".repeat(64),
+      },
+      lastFrame: null,
+      references: [],
+    };
+    form.applyModelDefaults(makeModel({ name: "flux-dev:q4", family: "flux" }));
+    expect(form.state.value.imageAttachments).toEqual([]);
+    // The descriptor survives for a later H3 return.
+    expect(form.state.value.h3Authoring?.firstFrame?.filename).toBe(
+      "provenance.png",
+    );
+  });
+
+  it("retains LTX-2 staged media across a switch away and back", () => {
+    const ltx2 = makeModel({ name: "ltx-2-19b-distilled:fp8", family: "ltx2" });
+    const form = useGenerateForm();
+    form.applyModelDefaults(ltx2);
+    form.state.value.sourceVideo = {
+      kind: "upload",
+      filename: "clip.mp4",
+      base64: "VklE",
+    };
+    form.state.value.audioFile = {
+      kind: "upload",
+      filename: "voice.wav",
+      base64: "QVVE",
+    };
+    form.state.value.keyframes = [
+      {
+        frame: 9,
+        image: { kind: "upload", filename: "k.png", base64: "S0VZ" },
+      },
+    ];
+
+    form.applyModelDefaults(makeModel({ name: "flux-dev:q4", family: "flux" }));
+    expect(form.state.value.sourceVideo?.filename).toBe("clip.mp4");
+    expect(form.state.value.audioFile?.filename).toBe("voice.wav");
+    expect(form.state.value.keyframes).toHaveLength(1);
+    // Settings knobs still clear with the suite, and nothing ships.
+    expect(form.state.value.pipeline).toBeNull();
+    const req = form.toRequest();
+    expect(req.source_video).toBeUndefined();
+    expect(req.audio_file).toBeUndefined();
+    expect(req.keyframes).toBeUndefined();
+
+    form.applyModelDefaults(ltx2);
+    expect(form.state.value.sourceVideo?.filename).toBe("clip.mp4");
+  });
+
+  it("snaps stale values onto fixed recipe controls instead of stranding Generate", () => {
+    // A distilled LTX recipe fixes guidance at 1. A form carrying an older
+    // model's 3.5 must normalize on switch (shared with desktop) — the
+    // disabled slider displays 1, so 3.5 was never user authority.
+    const distilled = makeModel({
+      name: "ltx-2.3-22b-distilled:fp8",
+      family: "ltx2",
+      default_guidance: 1,
+      default_steps: 8,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "ltx2.v1",
+        profile_hash: "hash",
+        default_recipe_id: "distilled",
+        recipes: [
+          {
+            id: "distilled",
+            label: "Distilled",
+            request_selector: {},
+            defaults: { width: 1216, height: 704, steps: 8, guidance: 1 },
+            resolution: {
+              domain: "dynamic",
+              alignment: 32,
+              min_width: 64,
+              min_height: 64,
+              max_pixels: 4_000_000,
+              aspect_groups: [
+                {
+                  id: "19:11",
+                  label: "19:11",
+                  presets: [
+                    {
+                      id: "1216x704",
+                      width: 1216,
+                      height: 704,
+                      tier: "recommended",
+                    },
+                  ],
+                },
+              ],
+            },
+            steps: {
+              default: 8,
+              min: 1,
+              max: 100,
+              step: 1,
+              mode: "adjustable",
+            },
+            guidance: { default: 1, min: 1, max: 1, step: 0.1, mode: "fixed" },
+            capabilities: {
+              guidance: {
+                adjustable: false,
+                supports_negative_prompt: false,
+                fixed_scale: 1,
+              },
+              negative_prompt: { mode: "hidden", required: false },
+              supports_lora: true,
+              supports_controlnet: false,
+              supports_sequence: true,
+              supports_extend: true,
+              supports_audio: true,
+              source_video: { mode: "adjustable", required: false },
+              mask: { mode: "hidden", required: false },
+              keyframes: { mode: "adjustable", required: false },
+              audio: { mode: "adjustable", required: false },
+              lora: { mode: "adjustable", max_count: 4 },
+              controlnet: { mode: "hidden", max_count: 0 },
+              output: {
+                default_format: "mp4",
+                formats: ["mp4"],
+                audio_requires_mp4: false,
+              },
+              wan_recipe: {
+                mode: "hidden",
+                supports_distill_strength: false,
+                supports_first_last_frame: false,
+              },
+              schedulers: [],
+            },
+            provenance: [],
+          },
+        ],
+      },
+    } as never);
+    const form = useGenerateForm();
+    form.applyModelDefaults(makeModel({ name: "flux-dev:q4", family: "flux" }));
+    form.state.value.guidance = 3.5;
+    form.applyModelDefaults(distilled);
+    expect(form.state.value.guidance).toBe(1);
+  });
+
+  it("ships and restores the source-fit crop provenance", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(makeModel({ name: "flux-dev:q4", family: "flux" }));
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "pic.png", base64: "QUJD" },
+    ];
+    form.state.value.sourceFitPolicy = { mode: "crop-fill", alignX: "left" };
+    expect(form.toRequest().source_fit).toEqual({
+      mode: "crop-fill",
+      alignX: "left",
+    });
+
+    // No staged media → no provenance field at all.
+    form.state.value.imageAttachments = [];
+    expect(form.toRequest().source_fit).toBeUndefined();
+
+    // Restore round-trips through metadata; malformed values are ignored.
+    const restored = applyMetadataToForm(form.state.value, {
+      prompt: "p",
+      model: "flux-dev:q4",
+      seed: 1,
+      steps: 4,
+      guidance: 3.5,
+      width: 1024,
+      height: 1024,
+      source_fit: { mode: "lanczos-resize" },
+    } as never);
+    expect(restored.sourceFitPolicy).toEqual({ mode: "lanczos-resize" });
+    const poisoned = applyMetadataToForm(form.state.value, {
+      prompt: "p",
+      model: "flux-dev:q4",
+      seed: 1,
+      steps: 4,
+      guidance: 3.5,
+      width: 1024,
+      height: 1024,
+      source_fit: { mode: "teleport" },
+    } as never);
+    expect(poisoned.sourceFitPolicy).toEqual(form.state.value.sourceFitPolicy);
+  });
+
+  it("gates retained media off the wire for a model with no source support", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(makeModel({ name: "flux-dev:q4", family: "flux" }));
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "pic.png", base64: "QUJD" },
+    ];
+    form.state.value.maskImage = {
+      kind: "upload",
+      filename: "mask.png",
+      base64: "TUFTSw==",
+    };
+    form.applyModelDefaults(
+      makeModel({ name: "ltx-video:q8", family: "ltx-video" }),
+    );
+    expect(form.state.value.imageAttachments).toHaveLength(1);
+    expect(form.state.value.maskImage?.base64).toBe("TUFTSw==");
+    const req = form.toRequest();
+    expect(req.source_image ?? null).toBeNull();
+    expect(req.mask_image).toBeUndefined();
   });
 
   it("persists the end frame as a descriptor and hydrates its bytes from the draft store", async () => {

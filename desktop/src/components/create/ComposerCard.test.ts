@@ -94,6 +94,27 @@ describe("ComposerCard", () => {
     ).toBeDefined();
   });
 
+  it("shows a non-blocking size advisory while Generate stays enabled", () => {
+    const wrapper = mountComposer(baseForm(), {
+      warningReason: "This model expects at least 1344 × 768 — the server may reject this size.",
+    });
+    const blocker = wrapper.get("[data-test='action-blocker']");
+    expect(blocker.attributes("data-variant")).toBe("warn");
+    expect(blocker.text()).toContain("server may reject");
+    expect(wrapper.get("[data-test='generate-button']").attributes("disabled")).toBeUndefined();
+  });
+
+  it("lets a real blocker win over the advisory", () => {
+    const wrapper = mountComposer(baseForm(), {
+      disabled: true,
+      disabledReason: "Use the reviewed variations panel.",
+      warningReason: "The server may reject this size.",
+    });
+    const blocker = wrapper.get("[data-test='action-blocker']");
+    expect(blocker.attributes("data-variant")).toBe("error");
+    expect(blocker.text()).toContain("reviewed variations");
+  });
+
   it("keeps Generate visible for multi-image batches", () => {
     const wrapper = mountComposer(baseForm(), { effectiveBatchSize: 3 });
     expect(wrapper.get("[data-test='generate-button']").text()).toContain("Generate");

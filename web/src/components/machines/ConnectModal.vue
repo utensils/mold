@@ -176,9 +176,14 @@ async function connectTo(
   try {
     const status = await hostStatus(probe);
     const instanceId = status.instance_id || advertisedInstanceId;
+    // Desktop parity: with no typed display name, the server's own hostname
+    // labels the machine — never the raw URL, which reads as debris in every
+    // card, chip, and activity row.
+    const resolvedName =
+      displayName.trim() || status.hostname?.trim() || probe.name;
     const entry = addHost({
       url,
-      name: displayName,
+      name: resolvedName,
       ...(apiKey.value.trim() ? { apiKey: apiKey.value.trim() } : {}),
       ...(instanceId ? { instanceId } : {}),
     });

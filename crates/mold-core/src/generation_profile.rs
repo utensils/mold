@@ -541,6 +541,22 @@ pub fn off_bucket_resolution_warning(
     (!exact).then(|| format!("This model isn't optimized for {width}x{height} — results may vary."))
 }
 
+/// Client-surface advisory for a custom size: the server (or forced-local
+/// engine) is the admission authority, so a recipe refusal is reported as a
+/// warning rather than blocking entry — the request still submits and the
+/// authoritative refusal comes back as the job's own error. Falls through to
+/// the warn-policy off-bucket advisory for admitted sizes.
+pub fn resolution_advisory(
+    recipe: &GenerationRecipeProfile,
+    width: u32,
+    height: u32,
+) -> Option<String> {
+    match validate_dimensions_against_recipe(recipe, width, height) {
+        Err(error) => Some(format!("{error} — the server may reject this size")),
+        Ok(()) => off_bucket_resolution_warning(recipe, width, height),
+    }
+}
+
 fn validate_resolution(profile: &ResolutionProfile, width: u32, height: u32) -> Result<(), String> {
     if width < profile.min_width || height < profile.min_height {
         return Err(format!(
@@ -1854,6 +1870,27 @@ mod tests {
         assert!(off_bucket_resolution_warning(recipe, 1023, 768).is_none());
         let strict_recipe = strict.default_recipe().unwrap();
         assert!(off_bucket_resolution_warning(strict_recipe, 1024, 768).is_none());
+    }
+
+    #[test]
+    fn resolution_advisory_downgrades_refusals_for_client_surfaces() {
+        // The TUI (like the other shells) never blocks a custom size: a
+        // recipe refusal becomes an advisory naming the server as authority,
+        // an admitted warn-policy off-bucket keeps the softer message, and an
+        // exact preset stays silent.
+        let mut wan_input = input("wan22-t2v-a14b:q5", "wan");
+        wan_input.default_width = 1280;
+        wan_input.default_height = 720;
+        wan_input.default_frames = Some(81);
+        wan_input.default_fps = Some(16);
+        let wan = resolve_generation_profile(wan_input);
+        let recipe = wan.default_recipe().unwrap();
+        let refused = resolution_advisory(recipe, 1023, 768).unwrap();
+        assert!(refused.contains("server may reject"));
+        assert!(resolution_advisory(recipe, 1024, 768)
+            .unwrap()
+            .contains("results may vary"));
+        assert!(resolution_advisory(recipe, 1280, 720).is_none());
     }
 
     #[test]

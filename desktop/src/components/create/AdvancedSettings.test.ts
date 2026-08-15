@@ -641,6 +641,24 @@ describe("AdvancedSettings — reset and summary", () => {
     expect(form.batchSize).toBe(4); // prepared state preserved
   });
 
+  it("preserves staged source media across Reset — it lives in the primary form", () => {
+    const form = formFor("sdxl");
+    form.sourceImage = "SRC";
+    form.sourceImageName = "pic.png";
+    form.strength = 0.4;
+    form.sourceFit = { mode: "crop-fill" };
+    form.maskImage = "MASK";
+    form.negativePrompt = "blurry";
+    const wrapper = mountSettings(form, { selectedModel: model });
+    wrapper.get("[data-test='advanced-reset']").trigger("click");
+    expect(form.sourceImage).toBe("SRC");
+    expect(form.sourceImageName).toBe("pic.png");
+    expect(form.strength).toBe(0.4);
+    expect(form.sourceFit).toEqual({ mode: "crop-fill" });
+    expect(form.maskImage).toBe("MASK");
+    expect(form.negativePrompt).toBe("");
+  });
+
   it("badges the active advanced count in the header", () => {
     const form = formFor("sdxl");
     form.negativePrompt = "blurry";

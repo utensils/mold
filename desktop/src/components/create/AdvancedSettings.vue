@@ -9,7 +9,7 @@ import {
   applyRecipeDefaults,
   buildRequest,
   formExtendOverlapFrames,
-  resetFormToModelDefaults,
+  resetAdvancedToModelDefaults,
   seedMode,
   type GenerateForm,
   type PickedImage,
@@ -446,9 +446,11 @@ function snapFramesField() {
       : Math.max(frameMinimum.value, snapVideoFrames(props.form.frames, videoContract.value));
 }
 
-// ── Reset — restore the model's defaults, preserve prompt + prepared state ────
+// ── Reset — restore the model's defaults, preserve prompt + prepared state.
+// Source media lives in the primary inspector stack, so it survives too; the
+// inspector's top-level Reset keeps the deliberate wholesale clear. ─────────
 function reset() {
-  resetFormToModelDefaults(props.form, props.selectedModel);
+  resetAdvancedToModelDefaults(props.form, props.selectedModel);
 }
 </script>
 

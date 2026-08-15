@@ -1268,6 +1268,7 @@ mod tests {
 
     fn request() -> GenerateRequest {
         GenerateRequest {
+            source_fit: None,
             prompt: "a brass automaton conducting an orchestra".into(),
             negative_prompt: None,
             model: contract::REF2VA_COMFY.into(),

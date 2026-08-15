@@ -86,6 +86,22 @@ describe("ShapePicker", () => {
     expect(wrapper.text()).toContain("21:9");
   });
 
+  it("marks the active chip approximate for a custom size from Advanced", () => {
+    const wrapper = make("square", { approximate: true });
+    const active = wrapper.get("[data-on='true']");
+    expect(active.attributes("data-approximate")).toBe("true");
+    expect(active.text()).toContain("≈");
+    expect(active.attributes("title")).toContain("set in Advanced");
+    // Inactive chips carry no approximation marks.
+    const others = wrapper
+      .findAll("[role=radio]")
+      .filter((chip) => chip.attributes("data-on") !== "true");
+    for (const chip of others) {
+      expect(chip.attributes("data-approximate")).toBeUndefined();
+      expect(chip.text()).not.toContain("≈");
+    }
+  });
+
   it("ignores interaction when disabled", async () => {
     const wrapper = make("square", { disabled: true });
     await wrapper.find("[role=radiogroup]").trigger("keydown", {

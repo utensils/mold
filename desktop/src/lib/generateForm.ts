@@ -24,7 +24,11 @@ import {
   outputFormatsForFamily,
   pruneRequestForFamily,
 } from "./capabilities";
-import { coerceSourceFitForMaskless, type SourceFitPolicy } from "@studio/lib/sourceFit";
+import {
+  coerceSourceFitForMaskless,
+  parseSourceFitPolicy,
+  type SourceFitPolicy,
+} from "@studio/lib/sourceFit";
 import { defaultVideoFps } from "@studio/lib/sequence";
 import { familySupportsExtend, resolveExtendOverlapFrames } from "@studio/lib/extend";
 import { findInstalledModel } from "./generateModels";
@@ -56,17 +60,22 @@ import { pipelineForControlId } from "@studio/lib/ltx2Control";
 import { firstLastFrameKeyframes } from "@studio/lib/sourceImageCapability";
 import { isWanFamily } from "@studio/lib/generationCapabilities";
 import { stripAudioOnlyIncompatibleFields } from "@studio/lib/ltx2Pipeline";
-import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import {
+  effectiveGenerationRecipe,
+  fixedRecipeControlOverrides,
+} from "@studio/lib/generationProfile";
 import {
   MINIMAX_H3_MIN_FRAMES,
   cloneMinimaxH3AuthoringState,
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Family,
   minimaxH3BoundaryFromSourceMetadata,
+  minimaxH3BoundaryFromStagedImage,
   minimaxH3ClosingBoundaryFromMetadata,
   minimaxH3ReferenceDraftsFromMetadata,
   minimaxH3TaskForModel,
   serializeMinimaxH3Authoring,
+  stagedImageFromMinimaxH3Boundary,
   type MinimaxH3AuthoringState,
 } from "@studio/lib/minimaxH3Authoring";
 
@@ -405,6 +414,16 @@ export function applyRecipeDefaults(
  * authority; two remotes may advertise corrected or aliased family metadata.
  */
 export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): void {
+  // The outgoing model's source layout, read before the row overwrites
+  // model/family. A same-model re-reconcile (host refresh, template load)
+  // sees no transition and the bridge below stays a no-op.
+  const prevMode = generationCapabilitiesForFamily(
+    form.family,
+    form.model,
+    null,
+    null,
+    form.sourceImageCapability,
+  ).sourceImageMode;
   form.model = m.name;
   form.family = m.family;
   form.sourceImageCapability = m.source_image ?? null;
@@ -435,8 +454,8 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
   // authoritative recipe. Fixed controls are not user choices: normalize the
   // hidden form value to the same value the disabled control displays, or the
   // validator can strand Generate behind an error the user cannot correct.
-  if (recipe?.steps.mode === "fixed") form.steps = recipe.steps.default;
-  if (recipe?.guidance.mode === "fixed") form.guidance = recipe.guidance.default;
+  // Shared with web so the surfaces cannot drift.
+  Object.assign(form, fixedRecipeControlOverrides(recipe));
   const caps = generationCapabilitiesForFamily(
     m.family,
     m.name,
@@ -465,26 +484,86 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     };
   }
   if (caps.forcesBatchSizeOne) form.batchSize = 1;
-  // The closing still belongs to wan's first/last-frame contract alone; a
-  // model that cannot read one must not keep it staged where nothing shows it.
-  if (!caps.supportsEndFrame) form.endFrame = null;
-  if (!caps.supportsImg2img) {
-    form.sourceImage = null;
-    form.sourceImageName = null;
-    form.sourceImageWidth = null;
-    form.sourceImageHeight = null;
-    form.maskImage = null;
-    form.imageAttachments = [];
+  // ── Source-media bridge + retention ─────────────────────────────────────
+  // Staged media survives capability-losing switches: `buildRequest`'s
+  // capability gates plus `pruneRequestForFamily` keep it off the wire, and
+  // switching back restores the picture instead of losing authored work.
+  // Layout *moves* between the three source authorities (single source ↔
+  // qwen-edit strip ↔ H3 boundaries) so the visible well keeps the image.
+  const enteringH3 = caps.sourceImageMode === "h3-boundaries" && prevMode !== "h3-boundaries";
+  const leavingH3 = prevMode === "h3-boundaries" && caps.sourceImageMode !== "h3-boundaries";
+  // Pre-#-era snapshots restored via Object.assign may lack the slot.
+  form.h3Authoring ??= emptyMinimaxH3AuthoringState();
+  if (enteringH3) {
+    if (!form.h3Authoring.firstFrame) {
+      const boundary = minimaxH3BoundaryFromStagedImage(
+        form.sourceImage
+          ? {
+              base64: form.sourceImage,
+              filename: form.sourceImageName,
+              width: form.sourceImageWidth,
+              height: form.sourceImageHeight,
+            }
+          : form.imageAttachments[0]
+            ? { base64: form.imageAttachments[0] }
+            : null,
+      );
+      if (boundary) {
+        form.h3Authoring.firstFrame = boundary;
+        form.sourceImage = null;
+        form.sourceImageName = null;
+        form.sourceImageWidth = null;
+        form.sourceImageHeight = null;
+        form.imageAttachments = [];
+      }
+    }
+    // A first-frame-only checkpoint (`required`) rejects a lastFrame outright
+    // (minimaxH3AuthoringError), so the closing frame stays parked instead.
+    if (!form.h3Authoring.lastFrame && form.endFrame && !caps.requiresSourceImage) {
+      const closing = minimaxH3BoundaryFromStagedImage({
+        base64: form.endFrame.base64,
+        filename: form.endFrame.filename,
+      });
+      if (closing) {
+        form.h3Authoring.lastFrame = closing;
+        form.endFrame = null;
+      }
+    }
+  } else if (leavingH3) {
+    // Promote authored boundaries back into the target layout. Bytes-less
+    // reattach descriptors stay parked in h3Authoring for a later H3 return.
+    const promoted = stagedImageFromMinimaxH3Boundary(form.h3Authoring.firstFrame);
+    if (promoted) {
+      if (caps.sourceImageMode === "single") {
+        if (!form.sourceImage) {
+          form.sourceImage = promoted.base64;
+          form.sourceImageName = promoted.filename;
+          form.sourceImageWidth = promoted.width ?? null;
+          form.sourceImageHeight = promoted.height ?? null;
+          form.h3Authoring.firstFrame = null;
+        }
+      } else if (form.imageAttachments.length === 0) {
+        form.imageAttachments = [promoted.base64];
+        form.h3Authoring.firstFrame = null;
+      }
+    }
+    const closing = stagedImageFromMinimaxH3Boundary(form.h3Authoring.lastFrame);
+    if (closing && caps.supportsEndFrame && !form.endFrame) {
+      form.endFrame = { filename: closing.filename, base64: closing.base64 };
+      form.h3Authoring.lastFrame = null;
+    }
+  }
+  if (caps.sourceImageMode === "h3-boundaries") {
+    // Boundaries are the only source authority here; nothing else moves.
   } else if (caps.sourceImageMode !== "single") {
-    // Entering qwen-edit: a single-mode source seeds the strip as the Target
-    // (web parity — the Composer's attachment survives the model switch).
+    // Entering qwen-edit/references: a single-mode source seeds the strip as
+    // the Target (web parity — the attachment survives the model switch).
     if (form.imageAttachments.length === 0 && form.sourceImage) {
       form.imageAttachments = [form.sourceImage];
     }
     form.sourceImage = null;
     // The picture strip carries no per-image labels.
     form.sourceImageName = null;
-    form.maskImage = null;
   } else if (form.imageAttachments.length > 0) {
     // Leaving qwen-edit: the Target becomes the single img2img source (web
     // parity — attachments truncate to one, which single mode reads).
@@ -495,16 +574,12 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     form.imageAttachments = [];
   }
   if (!caps.supportsMask) {
-    form.maskImage = null;
     // Maskless img2img (LTX-2 image-to-video) can't repaint pad bands, so a
-    // mask-dependent fit policy flips to crop-fill on entry.
+    // mask-dependent fit policy flips to crop-fill on entry. The mask itself
+    // is staged media and survives; `pruneRequestForFamily` gates the wire.
     if (caps.supportsImg2img && caps.sourceImageMode === "single") {
       form.sourceFit = coerceSourceFitForMaskless(form.sourceFit);
     }
-  }
-  if (!caps.supportsControlNet) {
-    form.controlImage = null;
-    form.controlModel = "";
   }
   if (!caps.supportsAudio || m.supports_audio === false) form.enableAudio = false;
   // Continuation is per family, not part of the LTX-2 advanced-video suite
@@ -516,15 +591,15 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     form.extendOverlapFrames = null;
   }
   if (!caps.supportsAdvancedVideo) {
-    form.sourceVideo = null;
-    form.keyframes = [];
+    // Settings knobs clear with the suite; staged media (sourceVideo,
+    // keyframes, audioFile) is retained — the wire prune gates it and a
+    // return to LTX-2 finds it where the user left it.
     form.pipeline = null;
     form.icLoraControl = null;
     form.retakeRange = null;
     form.spatialUpscale = null;
     form.temporalUpscale = null;
     form.guidanceOverrides = emptyGuidanceOverrides();
-    form.audioFile = null;
     form.loras = syncCameraMotionLora(form.loras, form.cameraControl, null, (path, scale) => ({
       path,
       name: path,
@@ -595,6 +670,42 @@ export function resetFormToModelDefaults(
   form.batchSize = generationCapabilitiesForFamily(form.family, form.model).forcesBatchSizeOne
     ? 1
     : batchSize;
+}
+
+/**
+ * The Advanced ("Fine controls") Reset. Source media lives in the primary
+ * form now, so unlike {@link resetFormToModelDefaults} — the inspector's
+ * deliberate wholesale reset — this one restores model defaults while every
+ * staged media field (and the conditioning knobs rendered beside the wells:
+ * strength, source fit) survives untouched.
+ */
+export function resetAdvancedToModelDefaults(
+  form: GenerateForm,
+  m: ModelEntry | null | undefined,
+): void {
+  const media = {
+    strength: form.strength,
+    sourceImage: form.sourceImage,
+    sourceImageName: form.sourceImageName,
+    sourceImageWidth: form.sourceImageWidth,
+    sourceImageHeight: form.sourceImageHeight,
+    endFrame: form.endFrame,
+    imageAttachments: form.imageAttachments,
+    sourceFit: form.sourceFit,
+    maskImage: form.maskImage,
+    controlImage: form.controlImage,
+    controlModel: form.controlModel,
+    controlScale: form.controlScale,
+    sourceVideo: form.sourceVideo,
+    extendVideo: form.extendVideo,
+    extendOverlapFrames: form.extendOverlapFrames,
+    extendDefaultOverlapFrames: form.extendDefaultOverlapFrames,
+    keyframes: form.keyframes,
+    audioFile: form.audioFile,
+    h3Authoring: form.h3Authoring,
+  };
+  resetFormToModelDefaults(form, m);
+  Object.assign(form, media);
 }
 
 /**
@@ -788,7 +899,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   // so every conditioning input, upscaler, and a `false` audio flag is
   // something the server refuses. Stripping here rather than on the pipeline
   // transition keeps the user's source media intact if they switch back.
-  return stripAudioOnlyIncompatibleFields(
+  const finalized = stripAudioOnlyIncompatibleFields(
     serializeMinimaxH3Authoring(
       pruneRequestForFamily(req, form.family, form.model, form.sourceImageCapability),
       form.family,
@@ -796,6 +907,13 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
       form.h3Authoring ?? emptyMinimaxH3AuthoringState(),
     ),
   );
+  // Crop provenance rides only when the wire actually carries fitted source
+  // media (the server echoes it verbatim into OutputMetadata so Reuse
+  // settings and running-job selection can restore the crop controls).
+  if (finalized.source_image || finalized.edit_images?.length || finalized.keyframes?.length) {
+    finalized.source_fit = form.sourceFit;
+  }
+  return finalized;
 }
 
 const KNOWN_SCHEDULERS: readonly Scheduler[] = [
@@ -877,6 +995,10 @@ export function applyMetadataToForm(
   form.scheduler = normalizeMetadataScheduler(metadata.scheduler);
   form.cfgPlus = metadata.cfg_plus ?? false;
   if (metadata.strength != null) form.strength = metadata.strength;
+  // Additive crop provenance: restore only a policy that parses exactly —
+  // corrupt or future-shaped values must never poison the live form.
+  const recordedFit = parseSourceFitPolicy(metadata.source_fit);
+  if (recordedFit) form.sourceFit = recordedFit;
 
   const loras =
     metadata.loras ??

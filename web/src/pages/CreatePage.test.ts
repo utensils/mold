@@ -816,6 +816,58 @@ describe("CreatePage layout and behavior", () => {
     );
   });
 
+  it("acknowledges Generate immediately and swallows a double click", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a cat";
+    await nextTick();
+
+    const submit = wrapper.get("[data-test='composer-submit']");
+    // Two rapid clicks with no microtask flush between them — the second
+    // must be swallowed by the in-flight guard, never double-queued.
+    void submit.trigger("click");
+    void submit.trigger("click");
+    await flushPromises();
+
+    expect(submitMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("submits an off-profile custom size — the server is the authority", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a cat";
+    // Off any recipe grid and below common minimums — advisory only.
+    form.state.value.width = 320;
+    form.state.value.height = 320;
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).toHaveBeenCalled();
+  });
+
+  it("still blocks a malformed non-integer size", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a cat";
+    form.state.value.width = 1024.5;
+    form.state.value.height = 576;
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("whole numbers");
+  });
+
   it("blocks non-Qwen mask submissions until a source image is selected", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();

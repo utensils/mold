@@ -200,17 +200,35 @@ describe("MobileResolutionPicker", () => {
     expect(toggle.text()).toBe("Hide custom size");
   });
 
-  it("blocks custom sizes above the server's 1.8 MP ceiling", async () => {
+  it("highlights the closest aspect chip as approximate for a custom size", () => {
+    const { wrapper } = mountPicker(1000, 600, "flux");
+    const approximate = wrapper.findAll(".mobile-resolution-aspect.is-approximate");
+    expect(approximate).toHaveLength(1);
+    expect(approximate[0]!.classes()).toContain("is-selected");
+    expect(approximate[0]!.text()).toContain("≈");
+    expect(approximate[0]!.attributes("aria-label")).toContain("Approximately");
+  });
+
+  it("keeps exact presets unmarked", () => {
+    const { wrapper } = mountPicker(1024, 1024, "flux");
+    expect(wrapper.findAll(".mobile-resolution-aspect.is-approximate")).toHaveLength(0);
+    expect(wrapper.get("[data-aspect='1:1']").text()).not.toContain("≈");
+  });
+
+  it("advises on custom sizes above the 1.8 MP guideline without blocking", async () => {
+    // The server is the authority: an oversized custom size submits anyway
+    // and its refusal (if any) comes back as the job's own error.
     const { wrapper, state } = mountPicker(2000, 2000);
     const picker = wrapper.getComponent(MobileResolutionPicker);
 
-    expect(wrapper.get("[data-test='mobile-resolution-error']").text()).toContain("1.8 MP");
-    expect(picker.emitted("validity-change")?.at(-1)).toEqual([false]);
+    expect(wrapper.find("[data-test='mobile-resolution-error']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-resolution-warning']").text()).toContain("1.8 MP");
+    expect(picker.emitted("validity-change")?.at(-1)).toEqual([true]);
 
     state.width = 1328;
     state.height = 1328;
     await flushPromises();
-    expect(wrapper.find("[data-test='mobile-resolution-error']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-resolution-warning']").exists()).toBe(false);
     expect(picker.emitted("validity-change")?.at(-1)).toEqual([true]);
   });
 

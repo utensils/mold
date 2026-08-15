@@ -3,6 +3,7 @@ import {
   coerceSourceFitForMaskless,
   describeSourceFit,
   maskPaddingRectangles,
+  parseSourceFitPolicy,
   resolveSourceFitTransform,
   sourceFitPolicyForMode,
 } from "./sourceFit";
@@ -192,5 +193,61 @@ describe("source fit policies", () => {
       const lanczos = { mode: "lanczos-resize" } as const;
       expect(coerceSourceFitForMaskless(lanczos)).toBe(lanczos);
     });
+  });
+});
+
+describe("parseSourceFitPolicy (metadata provenance restore)", () => {
+  it("accepts every wire-shaped policy", () => {
+    expect(parseSourceFitPolicy({ mode: "pad-repaint" })).toEqual({
+      mode: "pad-repaint",
+    });
+    expect(
+      parseSourceFitPolicy({
+        mode: "crop-fill",
+        alignX: "left",
+        alignY: "top",
+      }),
+    ).toEqual({ mode: "crop-fill", alignX: "left", alignY: "top" });
+    expect(parseSourceFitPolicy({ mode: "lanczos-resize" })).toEqual({
+      mode: "lanczos-resize",
+    });
+    expect(
+      parseSourceFitPolicy({
+        mode: "upscale-then-fit",
+        upscalerModel: "real-esrgan-x4plus:fp16",
+        fit: { mode: "crop-fill" },
+      }),
+    ).toEqual({
+      mode: "upscale-then-fit",
+      upscalerModel: "real-esrgan-x4plus:fp16",
+      fit: { mode: "crop-fill" },
+    });
+  });
+
+  it("rejects malformed provenance instead of poisoning the form", () => {
+    expect(parseSourceFitPolicy(null)).toBeNull();
+    expect(parseSourceFitPolicy("crop-fill")).toBeNull();
+    expect(parseSourceFitPolicy({ mode: "teleport" })).toBeNull();
+    expect(
+      parseSourceFitPolicy({ mode: "crop-fill", alignX: "sideways" }),
+    ).toBeNull();
+    expect(
+      parseSourceFitPolicy({
+        mode: "upscale-then-fit",
+        upscalerModel: 4,
+        fit: { mode: "pad-fit" },
+      }),
+    ).toBeNull();
+    expect(
+      parseSourceFitPolicy({
+        mode: "upscale-then-fit",
+        upscalerModel: "u",
+        fit: {
+          mode: "upscale-then-fit",
+          upscalerModel: "u",
+          fit: { mode: "pad-fit" },
+        },
+      }),
+    ).toBeNull();
   });
 });

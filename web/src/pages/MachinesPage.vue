@@ -156,7 +156,10 @@ async function contextForget() {
 </script>
 
 <template>
-  <div class="mx-auto max-w-[1800px] px-4 pb-40 pt-6 sm:px-6 lg:px-10">
+  <!-- w-full is load-bearing: the app frame is a column flexbox and an
+       mx-auto child otherwise shrinks to its content width, making the page
+       grow sideways as async content lands. -->
+  <div class="mx-auto w-full max-w-[1800px] px-4 pb-40 pt-6 sm:px-6 lg:px-10">
     <div class="mb-5 flex items-center gap-4">
       <h1
         class="font-display text-2xl font-bold tracking-tight text-ink"

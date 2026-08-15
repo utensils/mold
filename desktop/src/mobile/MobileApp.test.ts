@@ -3,7 +3,7 @@ import { createPinia, type Pinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
 import type { GalleryImage, ModelEntry, ServerStatus } from "../lib/api/types";
-import type { GenerateForm } from "../lib/generateForm";
+import { applyModelDefaults, type GenerateForm } from "../lib/generateForm";
 
 const {
   invoke,
@@ -1915,8 +1915,11 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("input[aria-label='Custom width']").setValue("2000");
     await wrapper.get("input[aria-label='Custom height']").setValue("2000");
     await flushPromises();
-    expect(wrapper.get("[data-test='mobile-resolution-error']").text()).toContain("1.8 MP");
-    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).toHaveProperty(
+    // An oversized custom size is advisory only — the server is the
+    // authority, so Develop stays enabled and the size still submits.
+    expect(wrapper.find("[data-test='mobile-resolution-error']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-resolution-warning']").text()).toContain("1.8 MP");
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).not.toHaveProperty(
       "disabled",
     );
   });
@@ -4715,6 +4718,75 @@ describe("MobileApp create settings reset", () => {
     liveForm.family = "flux";
     await flushPromises();
     expect(wrapper.find("[data-test='mobile-advanced-trigger-count']").exists()).toBe(false);
+  });
+
+  it("keeps the visible source across an H3 round trip via the shared bridge", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceImage = "QUJD";
+    liveForm.sourceImageName = "pic.png";
+    await flushPromises();
+
+    const h3: ModelEntry = {
+      name: "minimax-h3-fl2va:official-bf16",
+      family: "minimax-h3",
+      downloaded: true,
+      source_image: "required",
+      default_frames: 124,
+      default_fps: 24,
+      default_steps: 30,
+      default_guidance: 7,
+      default_width: 1344,
+      default_height: 768,
+    } as ModelEntry;
+    applyModelDefaults(liveForm, h3);
+    expect(liveForm.h3Authoring?.firstFrame?.data).toBe("QUJD");
+    expect(liveForm.sourceImage).toBeNull();
+
+    applyModelDefaults(liveForm, {
+      ...h3,
+      name: "flux:q8",
+      family: "flux",
+      source_image: null,
+    } as ModelEntry);
+    expect(liveForm.sourceImage).toBe("QUJD");
+    expect(liveForm.sourceImageName).toBe("pic.png");
+  });
+
+  it("Advanced reset preserves staged source media — it lives in the primary form", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceImage = "SRC";
+    liveForm.sourceImageName = "pic.png";
+    await flushPromises(); // the new-source watcher re-derives sourceFit
+    liveForm.strength = 0.4;
+    liveForm.sourceFit = { mode: "crop-fill" };
+    liveForm.maskImage = "MASK";
+    liveForm.controlImage = "CTRL";
+    liveForm.controlModel = "canny";
+    liveForm.controlScale = 0.8;
+    liveForm.imageAttachments = ["ATT"];
+    liveForm.negativePrompt = "blurry";
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-open-advanced']").trigger("click");
+    await wrapper.get("[data-test='mobile-advanced-reset']").trigger("click");
+    await flushPromises();
+
+    expect(liveForm.sourceImage).toBe("SRC");
+    expect(liveForm.sourceImageName).toBe("pic.png");
+    expect(liveForm.strength).toBe(0.4);
+    expect(liveForm.sourceFit).toEqual({ mode: "crop-fill" });
+    expect(liveForm.maskImage).toBe("MASK");
+    expect(liveForm.controlImage).toBe("CTRL");
+    expect(liveForm.controlModel).toBe("canny");
+    expect(liveForm.controlScale).toBe(0.8);
+    expect(liveForm.imageAttachments).toEqual(["ATT"]);
+    expect(liveForm.negativePrompt).toBe("");
   });
 });
 

@@ -3432,19 +3432,13 @@ impl App {
                         let text = input.trim().to_string();
                         self.close_popup();
                         if let Some((w, h)) = parse_size_input(&text) {
-                            let mut advisory = None;
-                            if let Some(recipe) = self.active_generation_recipe() {
-                                if let Err(error) =
-                                    mold_core::validate_dimensions_against_recipe(&recipe, w, h)
-                                {
-                                    self.generate.error_message = Some(error);
-                                    return;
-                                }
-                                // Warn-policy bucket recipes admit the size but
-                                // are not tuned for it (parity with the other
-                                // four shells' Resolution advisory).
-                                advisory = mold_core::off_bucket_resolution_warning(&recipe, w, h);
-                            }
+                            // The client never blocks a custom size (parity with
+                            // the other four shells): a recipe refusal becomes an
+                            // advisory, the entry is applied, and the server's own
+                            // admission is the authority at submit time.
+                            let advisory = self
+                                .active_generation_recipe()
+                                .and_then(|recipe| mold_core::resolution_advisory(&recipe, w, h));
                             self.generate.params.width = w;
                             self.generate.params.height = h;
                             self.generate.error_message = advisory;
@@ -7340,6 +7334,7 @@ impl App {
                         && !saved_path.as_os_str().is_empty()
                     {
                         let meta = mold_core::OutputMetadata {
+                            source_fit: None,
                             guidance_overrides: submitted_params
                                 .guidance_overrides
                                 .clone()
@@ -7757,6 +7752,7 @@ impl App {
                         .map(|e| e.metadata.clone());
 
                     let meta = mold_core::OutputMetadata {
+                        source_fit: None,
                         guidance_overrides: None,
                         sample_shift: None,
                         distill_strength_high: None,
@@ -8949,6 +8945,7 @@ mod tests {
         let entry = GalleryEntry {
             path: std::path::PathBuf::from("/home/user/.mold/output/mold-flux-1234.png"),
             metadata: mold_core::OutputMetadata {
+                source_fit: None,
                 guidance_overrides: None,
                 sample_shift: None,
                 distill_strength_high: None,
@@ -9017,6 +9014,7 @@ mod tests {
         let entry = GalleryEntry {
             path: std::path::PathBuf::new(),
             metadata: mold_core::OutputMetadata {
+                source_fit: None,
                 guidance_overrides: None,
                 sample_shift: None,
                 distill_strength_high: None,
@@ -9146,6 +9144,7 @@ mod tests {
 
     fn make_test_metadata() -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            source_fit: None,
             guidance_overrides: None,
             sample_shift: None,
             distill_strength_high: None,
@@ -12590,6 +12589,52 @@ mod tests {
         )));
         assert_eq!(app.generate.params.width, 1152);
         assert_eq!(app.generate.params.height, 832);
+    }
+
+    #[tokio::test]
+    async fn size_input_popup_applies_off_recipe_sizes_with_an_advisory() {
+        // The client never blocks a custom size: an off-recipe entry is
+        // applied and the recipe refusal surfaces as an advisory — the
+        // server's own admission is the authority at submit time.
+        use crate::ui::create_form::CreateRow;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        app.generate.focus = GenerateFocus::Parameters;
+        let size_idx = app
+            .generate
+            .rows
+            .iter()
+            .position(|r| *r == CreateRow::Field(ParamField::Size))
+            .unwrap();
+        app.generate.param_index = size_idx;
+        app.dispatch_action(Action::Confirm);
+        assert!(matches!(app.popup, Some(Popup::SizeInput { .. })));
+        for _ in 0..12 {
+            app.handle_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+            )));
+        }
+        // 1000x600 is off every recipe grid (not a multiple of any shipped
+        // alignment), so a recipe-carrying model advises; the size applies
+        // either way.
+        for c in "1001x601".chars() {
+            app.handle_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.generate.params.width, 1001);
+        assert_eq!(app.generate.params.height, 601);
+        if app.active_generation_recipe().is_some() {
+            let advisory = app.generate.error_message.as_deref().unwrap_or_default();
+            assert!(advisory.contains("server may reject"), "got: {advisory}");
+        }
     }
 
     // ── Regression: batch_remaining tracks multi-image generation (#162) ────

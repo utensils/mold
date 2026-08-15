@@ -59,13 +59,14 @@ pub use error::{MoldError, Result as MoldResult};
 pub use generation_profile::{
     generation_profile_default_output_format, generation_profile_for_manifest,
     generation_profile_for_manifest_with_defaults, materialize_generation_profile_output_default,
-    off_bucket_resolution_warning, qualify_generation_profile_delivery, resolve_generation_profile,
-    validate_dimensions_against_recipe, validate_request_against_generation_profile,
-    validate_request_against_recipe, AspectGroup, ControlMode, FloatControl, FpsControl,
-    GenerationCapabilitiesProfile, GenerationDefaultsProfile, GenerationDeliveryCapabilities,
-    GenerationProfileInput, GenerationProfileSet, GenerationRecipeProfile, IntegerControl,
-    ProfileProvenance, ProvenanceKind, RecipeSelector, ResolutionDomain, ResolutionPreset,
-    ResolutionProfile, TemporalProfile, GENERATION_PROFILE_SCHEMA_VERSION,
+    off_bucket_resolution_warning, qualify_generation_profile_delivery, resolution_advisory,
+    resolve_generation_profile, validate_dimensions_against_recipe,
+    validate_request_against_generation_profile, validate_request_against_recipe, AspectGroup,
+    ControlMode, FloatControl, FpsControl, GenerationCapabilitiesProfile,
+    GenerationDefaultsProfile, GenerationDeliveryCapabilities, GenerationProfileInput,
+    GenerationProfileSet, GenerationRecipeProfile, IntegerControl, ProfileProvenance,
+    ProvenanceKind, RecipeSelector, ResolutionDomain, ResolutionPreset, ResolutionProfile,
+    TemporalProfile, GENERATION_PROFILE_SCHEMA_VERSION,
 };
 pub use install_error::InstallError;
 pub use media_paths::{configured_media_roots, parse_media_roots_env, resolve_server_media_path};

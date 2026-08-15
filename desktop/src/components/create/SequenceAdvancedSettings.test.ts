@@ -80,6 +80,21 @@ describe("SequenceAdvancedSettings camera motion", () => {
     expect(draft.clips.map((clip) => clip.cameraControl)).toEqual([null, null]);
   });
 
+  it("preserves the opening image and source conditioning across Reset", async () => {
+    const draft = useSequenceDraftStore();
+    draft.openingImage = { filename: "opening.png", base64: "QUJD" };
+    const form = newGenerateForm();
+    form.strength = 0.55;
+    form.sourceFit = { mode: "pad-repaint" };
+    const wrapper = mount(SequenceAdvancedSettings, {
+      props: { form, cameraControls, cameraControlsEnabled: true },
+    });
+    await wrapper.get("[data-test='sequence-advanced-reset']").trigger("click");
+    expect(draft.openingImage?.filename).toBe("opening.png");
+    expect(form.strength).toBe(0.55);
+    expect(form.sourceFit).toEqual({ mode: "pad-repaint" });
+  });
+
   it("hides camera motion outside the LTX-2 family", () => {
     const wrapper = mount(SequenceAdvancedSettings, {
       props: { form: newGenerateForm(), cameraControls, cameraControlsEnabled: false },

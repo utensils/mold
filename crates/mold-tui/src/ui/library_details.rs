@@ -196,6 +196,7 @@ mod tests {
 
     fn test_metadata() -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            source_fit: None,
             guidance_overrides: None,
             sample_shift: None,
             distill_strength_high: None,

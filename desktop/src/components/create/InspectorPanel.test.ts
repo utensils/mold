@@ -155,6 +155,87 @@ describe("InspectorPanel — shape + resolution projection", () => {
     ]);
   });
 
+  it("marks the nearest aspect chip approximate for a custom Advanced size", () => {
+    const model = {
+      name: "minimax-h3-fl2va:official-bf16",
+      family: "minimax-h3",
+      downloaded: true,
+      default_width: 1344,
+      default_height: 768,
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "h3.v1",
+        profile_hash: "hash",
+        default_recipe_id: "default",
+        recipes: [
+          {
+            id: "default",
+            label: "Default",
+            request_selector: {},
+            defaults: { width: 1344, height: 768, steps: 21, guidance: 1 },
+            resolution: {
+              domain: "buckets",
+              alignment: 32,
+              min_width: 1344,
+              min_height: 768,
+              max_pixels: 1_032_192,
+              off_bucket: "reject",
+              aspect_groups: [
+                {
+                  id: "7:4",
+                  label: "7:4",
+                  presets: [{ id: "1344x768", width: 1344, height: 768, tier: "recommended" }],
+                },
+              ],
+            },
+            steps: { default: 21, min: 1, max: 100, step: 1, mode: "adjustable" },
+            guidance: { default: 1, min: 0, max: 20, step: 0.1, mode: "fixed" },
+            capabilities: {
+              guidance: { adjustable: false, supports_negative_prompt: false, fixed_scale: 1 },
+              negative_prompt: { mode: "hidden", required: false },
+              supports_lora: false,
+              supports_controlnet: false,
+              supports_sequence: false,
+              supports_extend: false,
+              supports_audio: false,
+              source_video: { mode: "hidden", required: false },
+              mask: { mode: "hidden", required: false },
+              keyframes: { mode: "hidden", required: false },
+              audio: { mode: "hidden", required: false },
+              lora: { mode: "hidden", max_count: 0 },
+              controlnet: { mode: "hidden", max_count: 0 },
+              output: { default_format: "mp4", formats: ["mp4"], audio_requires_mp4: false },
+              wan_recipe: {
+                mode: "hidden",
+                supports_distill_strength: false,
+                supports_first_last_frame: false,
+              },
+              schedulers: [],
+            },
+            provenance: [],
+          },
+        ],
+      },
+    } as unknown as ModelEntry;
+    useModelStore().all = [model];
+    const form = formFor("minimax-h3");
+    form.model = model.name;
+    form.width = 1024;
+    form.height = 576;
+
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    const shape = wrapper.getComponent(ShapePicker);
+    expect(shape.props("modelValue")).toBe("7:4");
+    expect(shape.props("approximate")).toBe(true);
+
+    // The exact bucket clears the mark.
+    form.width = 1344;
+    form.height = 768;
+    return wrapper.vm.$nextTick().then(() => {
+      expect(shape.props("approximate")).toBe(false);
+    });
+  });
+
   it("hides aspect ratios the selected wan checkpoint does not support", () => {
     const model = {
       name: "wan22-i2v-a14b:q5",

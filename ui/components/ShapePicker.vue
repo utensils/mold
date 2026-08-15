@@ -14,8 +14,11 @@ const props = withDefaults(
     /** Accessible name for the group. */
     label?: string;
     disabled?: boolean;
+    /** The active chip is the CLOSEST match to a custom size from Advanced,
+     * not an exact preset — rendered with an "≈" prefix. */
+    approximate?: boolean;
   }>(),
-  { options: () => ASPECTS, disabled: false },
+  { options: () => ASPECTS, disabled: false, approximate: false },
 );
 
 const emit = defineEmits<{ "update:modelValue": [value: string] }>();
@@ -67,14 +70,30 @@ function onKeydown(event: KeyboardEvent) {
       role="radio"
       :aria-checked="option.id === modelValue"
       :data-on="option.id === modelValue ? 'true' : undefined"
+      :data-approximate="
+        option.id === modelValue && approximate ? 'true' : undefined
+      "
       :tabindex="option.id === modelValue ? 0 : -1"
       :disabled="disabled"
+      :title="
+        option.id === modelValue && approximate
+          ? 'Closest match to your custom size (set in Advanced)'
+          : undefined
+      "
+      :aria-label="
+        option.id === modelValue && approximate
+          ? `${option.label} — closest match to your custom size (set in Advanced)`
+          : undefined
+      "
       @click="pick(option.id)"
     >
       <span class="ms-shape__well" aria-hidden="true">
         <span class="ms-shape__swatch" :style="swatchStyle(option.ratio)" />
       </span>
-      <span class="ms-shape__label">{{ option.label }}</span>
+      <span class="ms-shape__label">
+        {{ option.id === modelValue && approximate ? "≈" : ""
+        }}{{ option.label }}
+      </span>
     </button>
   </div>
 </template>

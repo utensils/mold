@@ -177,8 +177,10 @@ describe("dedupe by instance id", () => {
 });
 
 describe("generation target", () => {
-  it("defaults to the primary origin and persists a selection", () => {
-    expect(getGenerateTargetId()).toBe(ORIGIN_HOST_ID);
+  it("defaults to model-aware Auto and persists a selection", () => {
+    // Desktop parity (null = auto): a fresh install pinned to the origin hid
+    // every connected machine's models from the Create picker.
+    expect(getGenerateTargetId()).toBe("auto");
     setGenerateTargetId("192-168-1-20-7680");
     expect(getGenerateTargetId()).toBe("192-168-1-20-7680");
   });

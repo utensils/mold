@@ -85,6 +85,13 @@ watch(resolutionError, (next) => emit("validity-change", !next), { immediate: tr
 const aspectOptions = computed(() =>
   aspectsForOrientation(presets.value, currentOrientation.value),
 );
+/** With no exact preset match (custom size from the manual fields), the
+ * closest preset's aspect chip lights up marked "≈" — never left blank. */
+const approximateAspect = computed(() =>
+  currentPreset.value
+    ? null
+    : (closestResolutionPreset(presets.value, width.value, height.value)?.aspect ?? null),
+);
 const tierOptions = computed(() =>
   currentPreset.value ? sortedResolutionTiers(presets.value, currentPreset.value.aspect) : [],
 );
@@ -261,9 +268,12 @@ function matchSource(): void {
           :key="aspect"
           type="button"
           class="mobile-resolution-aspect"
-          :class="{ 'is-selected': currentPreset?.aspect === aspect }"
-          :aria-pressed="currentPreset?.aspect === aspect"
-          :aria-label="aspectAccessibleLabel(aspect)"
+          :class="{
+            'is-selected': currentPreset?.aspect === aspect || approximateAspect === aspect,
+            'is-approximate': approximateAspect === aspect,
+          }"
+          :aria-pressed="currentPreset?.aspect === aspect || approximateAspect === aspect"
+          :aria-label="aspectAccessibleLabel(approximateAspect === aspect ? `≈${aspect}` : aspect)"
           :data-aspect="aspect"
           @click="setAspect(aspect)"
         >
@@ -275,7 +285,9 @@ function matchSource(): void {
               :style="aspectOptionShapeStyle(aspect)"
             />
           </span>
-          <span class="mobile-resolution-aspect-label">{{ aspect }}</span>
+          <span class="mobile-resolution-aspect-label">
+            {{ approximateAspect === aspect ? "≈" : "" }}{{ aspect }}
+          </span>
         </button>
       </div>
     </div>

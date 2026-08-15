@@ -38,6 +38,53 @@ export const SOURCE_FIT_OPTIONS: readonly {
   { value: "upscale-then-fit", label: "Upscale + crop" },
 ];
 
+const ALIGN_X = new Set(["left", "center", "right"]);
+const ALIGN_Y = new Set(["top", "center", "bottom"]);
+
+/**
+ * Defensive parse of a policy recovered from provenance (the additive
+ * `source_fit` metadata field, echoed verbatim by the server). Anything that
+ * is not exactly a wire-shaped policy returns null so a corrupt or future
+ * value can never poison the live form.
+ */
+export function parseSourceFitPolicy(value: unknown): SourceFitPolicy | null {
+  if (typeof value !== "object" || value === null) return null;
+  const candidate = value as Record<string, unknown>;
+  switch (candidate.mode) {
+    case "pad-repaint":
+    case "pad-fit":
+    case "lanczos-resize":
+      return { mode: candidate.mode };
+    case "crop-fill": {
+      const alignX = candidate.alignX;
+      const alignY = candidate.alignY;
+      if (alignX !== undefined && !ALIGN_X.has(alignX as string)) return null;
+      if (alignY !== undefined && !ALIGN_Y.has(alignY as string)) return null;
+      return {
+        mode: "crop-fill",
+        ...(alignX !== undefined
+          ? { alignX: alignX as "left" | "center" | "right" }
+          : {}),
+        ...(alignY !== undefined
+          ? { alignY: alignY as "top" | "center" | "bottom" }
+          : {}),
+      };
+    }
+    case "upscale-then-fit": {
+      if (typeof candidate.upscalerModel !== "string") return null;
+      const fit = parseSourceFitPolicy(candidate.fit);
+      if (!fit || fit.mode === "upscale-then-fit") return null;
+      return {
+        mode: "upscale-then-fit",
+        upscalerModel: candidate.upscalerModel,
+        fit,
+      };
+    }
+    default:
+      return null;
+  }
+}
+
 /** Build the complete policy represented by a compact mode control. */
 export function sourceFitPolicyForMode(
   mode: SourceFitMode,

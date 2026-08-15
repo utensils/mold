@@ -27,6 +27,7 @@ import {
   supportsScheduler,
 } from "../lib/generateCapabilities";
 import { composeStyle } from "../lib/stylePresets";
+import { parseSourceFitPolicy } from "@studio/lib/sourceFit";
 import {
   effectiveNegativeDefault,
   negativePromptOnDefaultChange,
@@ -39,7 +40,10 @@ import {
   familySupportsExtend,
   resolveExtendOverlapFrames,
 } from "@studio/lib/extend";
-import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import {
+  effectiveGenerationRecipe,
+  fixedRecipeControlOverrides,
+} from "@studio/lib/generationProfile";
 import {
   cameraMotionLoraPath,
   normalizeCameraMotionLoraState,
@@ -63,10 +67,12 @@ import {
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Family,
   minimaxH3BoundaryFromSourceMetadata,
+  minimaxH3BoundaryFromStagedImage,
   minimaxH3ClosingBoundaryFromMetadata,
   minimaxH3ReferenceDraftsFromMetadata,
   minimaxH3TaskForModel,
   serializeMinimaxH3Authoring,
+  stagedImageFromMinimaxH3Boundary,
   type MinimaxH3AuthoringState,
   type MinimaxH3BoundaryImage,
   type MinimaxH3ReferenceDraft,
@@ -326,11 +332,9 @@ function modelDefaultsPatch(
     next.extendOverlapFrames = null;
   }
   if (model.family !== "ltx2" && model.family !== "ltx-2") {
-    next.audioFile = null;
-    next.audioFilePath = "";
-    next.sourceVideo = null;
-    next.sourceVideoPath = "";
-    next.keyframes = [];
+    // Settings knobs clear with the LTX-2 suite; staged media (audio, source
+    // video, keyframes) is retained — `toRequest`'s family spread keeps it
+    // off the wire, and a return to LTX-2 finds it where the user left it.
     next.pipeline = null;
     next.icLoraControl = null;
     next.retakeRange = null;
@@ -339,30 +343,112 @@ function modelDefaultsPatch(
     next.guidanceOverrides = emptyGuidanceOverrides();
     next.cameraControl = null;
   }
-  // The closing still belongs to wan's first/last-frame contract alone; a
-  // checkpoint that cannot read one must not keep it staged where nothing
-  // shows it, and a checkpoint that reads no source image at all keeps
-  // neither well's contents.
-  if (!capabilities.supportsEndFrame) next.endFrame = null;
-  if (!capabilities.supportsSourceImage) {
-    next.imageAttachments = [];
-    next.maskImage = null;
+  // ── Source-media bridge + retention ─────────────────────────────────────
+  // Staged media survives capability-losing switches (`toRequest`'s
+  // capability gates keep it off the wire); the layout *moves* between the
+  // source authorities (attachment well ↔ H3 boundaries) so the visible
+  // well keeps the image across e.g. H3 ↔ LTX-2 switches.
+  const prevMode = generationCapabilitiesForFamily(
+    selectedFamily(current),
+    current.model,
+    null,
+    null,
+    current.sourceImageCapability,
+  ).sourceImageMode;
+  const enteringH3 =
+    capabilities.sourceImageMode === "h3-boundaries" &&
+    prevMode !== "h3-boundaries";
+  const leavingH3 =
+    prevMode === "h3-boundaries" &&
+    capabilities.sourceImageMode !== "h3-boundaries";
+  if (enteringH3) {
+    const authoring = next.h3Authoring ?? emptyMinimaxH3AuthoringState();
+    if (!authoring.firstFrame) {
+      const staged = current.imageAttachments[0];
+      const boundary = minimaxH3BoundaryFromStagedImage(
+        staged
+          ? {
+              base64: staged.base64,
+              filename: staged.filename,
+              width: staged.width,
+              height: staged.height,
+              mime: staged.mime,
+              draftId: staged.draftId,
+            }
+          : null,
+      );
+      if (boundary) {
+        authoring.firstFrame = boundary;
+        next.imageAttachments = [];
+      }
+    }
+    // A first-frame-only checkpoint (`required`) rejects a lastFrame
+    // outright (minimaxH3AuthoringError); the closing frame stays parked.
+    if (
+      !authoring.lastFrame &&
+      current.endFrame?.base64 &&
+      !capabilities.requiresSourceImage
+    ) {
+      const closing = minimaxH3BoundaryFromStagedImage({
+        base64: current.endFrame.base64,
+        filename: current.endFrame.filename,
+        width: current.endFrame.width,
+        height: current.endFrame.height,
+        mime: current.endFrame.mime,
+        draftId: current.endFrame.draftId,
+      });
+      if (closing) {
+        authoring.lastFrame = closing;
+        next.endFrame = null;
+      }
+    }
+    next.h3Authoring = authoring;
+  } else if (leavingH3 && next.h3Authoring) {
+    // Promote authored boundaries back into the attachment layout. Bytes-less
+    // reattach descriptors stay parked in h3Authoring for a later H3 return.
+    const promoted = stagedImageFromMinimaxH3Boundary(
+      next.h3Authoring.firstFrame,
+    );
+    if (promoted && next.imageAttachments.length === 0) {
+      next.imageAttachments = [
+        {
+          kind: "upload",
+          filename: promoted.filename,
+          base64: promoted.base64,
+          width: promoted.width ?? null,
+          height: promoted.height ?? null,
+          mime: promoted.mime ?? null,
+          ...(promoted.draftId ? { draftId: promoted.draftId } : {}),
+        },
+      ];
+      next.h3Authoring.firstFrame = null;
+    }
+    const closing = stagedImageFromMinimaxH3Boundary(
+      next.h3Authoring.lastFrame,
+    );
+    if (closing && capabilities.supportsEndFrame && !next.endFrame) {
+      next.endFrame = {
+        kind: "upload",
+        filename: closing.filename,
+        base64: closing.base64,
+        width: closing.width ?? null,
+        height: closing.height ?? null,
+        mime: closing.mime ?? null,
+        ...(closing.draftId ? { draftId: closing.draftId } : {}),
+      };
+      next.h3Authoring.lastFrame = null;
+    }
   }
-  // Wan reads a source image but rejects a repaint mask outright.
-  if (!capabilities.supportsMask) next.maskImage = null;
   if (capabilities.sourceImageMode !== "single") {
-    if (capabilities.sourceImageMode !== "references") {
+    if (
+      capabilities.sourceImageMode !== "references" &&
+      capabilities.sourceImageMode !== "h3-boundaries"
+    ) {
       next.batchSize = 1;
     }
-    next.maskImage = null;
-    next.controlImage = null;
-    next.controlModel = "";
+    if (capabilities.forcesBatchSizeOne) next.batchSize = 1;
   } else if (next.imageAttachments.length > 1) {
     next.imageAttachments = next.imageAttachments.slice(0, 1);
-  }
-  if (!capabilities.supportsControlNet) {
-    next.controlImage = null;
-    next.controlModel = "";
   }
   if (next.cameraControl) {
     const cameraPath = cameraMotionLoraPath(next.cameraControl);
@@ -377,6 +463,16 @@ function modelDefaultsPatch(
       (path, scale) => ({ path, scale, trainedWords: [] }),
     );
   }
+  // Fixed recipe controls are not user choices: normalize the hidden form
+  // value to what the disabled control displays, or the submit validator can
+  // strand Generate behind an error the user cannot correct (shared with
+  // desktop's `reconcileModelCapabilities`).
+  Object.assign(
+    next,
+    fixedRecipeControlOverrides(
+      effectiveGenerationRecipe(model, next.pipeline ?? null),
+    ),
+  );
   return next;
 }
 
@@ -520,6 +616,12 @@ export function applyMetadataToForm(
       metadata.strength !== undefined && metadata.strength !== null
         ? metadata.strength
         : next.strength,
+    // Additive crop provenance: restore only a policy that parses exactly —
+    // corrupt or future-shaped values must never poison the live form.
+    sourceFitPolicy:
+      parseSourceFitPolicy(metadata.source_fit) ??
+      next.sourceFitPolicy ??
+      current.sourceFitPolicy,
     loras: camera.loras,
     cameraControl: camera.cameraControl,
     controlModel: metadata.control_model ?? "",
@@ -1081,24 +1183,34 @@ export function useGenerateForm(): UseGenerateForm {
               // A first/last-frame render ships BOTH stills as `keyframes`
               // and no `source_image` — the engine refuses a request
               // carrying both, and admission counts keyframes as source
-              // presence for an I2V-required checkpoint.
-              source_image: firstLastFrames
-                ? null
-                : (attachments[0]?.base64 ?? null),
+              // presence for an I2V-required checkpoint. Retained media on
+              // a model with no source support stays off the wire entirely.
+              source_image:
+                firstLastFrames || !capabilities.supportsSourceImage
+                  ? null
+                  : (attachments[0]?.base64 ?? null),
               source_image_name:
-                !firstLastFrames && attachments[0]?.base64
+                !firstLastFrames &&
+                capabilities.supportsSourceImage &&
+                attachments[0]?.base64
                   ? attachments[0].filename
                   : undefined,
               // Wan pins the first frame exactly; it never reads strength.
               strength:
                 !firstLastFrames &&
+                capabilities.supportsSourceImage &&
                 capabilities.supportsStrength &&
                 attachments[0]?.base64
                   ? s.strength
                   : undefined,
-              mask_image: firstLastFrames
-                ? undefined
-                : (s.maskImage?.base64 ?? undefined),
+              // A repaint mask is meaningless without a source image, so it
+              // shares the source gate on top of its own capability.
+              mask_image:
+                firstLastFrames ||
+                !capabilities.supportsMask ||
+                !capabilities.supportsSourceImage
+                  ? undefined
+                  : (s.maskImage?.base64 ?? undefined),
               control_image: capabilities.supportsControlNet
                 ? (s.controlImage?.base64 ?? undefined)
                 : undefined,
@@ -1179,7 +1291,7 @@ export function useGenerateForm(): UseGenerateForm {
         // distill strengths in place.
         ...wanRecipeToWire(s.wanRecipe, capabilities.wanRecipe),
       };
-      return stripAudioOnlyIncompatibleFields(
+      const finalized = stripAudioOnlyIncompatibleFields(
         serializeMinimaxH3Authoring(
           request,
           family,
@@ -1187,6 +1299,17 @@ export function useGenerateForm(): UseGenerateForm {
           s.h3Authoring ?? emptyMinimaxH3AuthoringState(),
         ),
       );
+      // Crop provenance rides only when the wire actually carries fitted
+      // source media (the server echoes it verbatim into OutputMetadata so
+      // Reuse settings and running-job selection restore the crop controls).
+      if (
+        finalized.source_image ||
+        finalized.edit_images?.length ||
+        finalized.keyframes?.length
+      ) {
+        finalized.source_fit = s.sourceFitPolicy ?? { mode: "pad-repaint" };
+      }
+      return finalized;
     },
     isVideoFamily,
     supportsNegativePrompt,

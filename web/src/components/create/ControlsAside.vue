@@ -20,8 +20,8 @@ import Icon from "@ui/components/Icon.vue";
 import { aspectsSupportedByPresets } from "@ui/lib/resolution";
 import {
   effectiveGenerationRecipe,
-  resolutionProfileWarning,
-  profileAspectIdForResolution,
+  resolutionProfileFinding,
+  closestProfileAspect,
   profileAspectOptions,
 } from "@studio/lib/generationProfile";
 import type { GenerateFormState, ModelInfoExtended } from "../../types";
@@ -100,14 +100,16 @@ const capabilities = computed(() =>
 const activeRecipe = computed(() =>
   effectiveGenerationRecipe(props.model, props.modelValue.pipeline),
 );
-/** Warn-policy bucket recipes admit this size but are not tuned for it. */
-const resolutionWarning = computed(() =>
-  resolutionProfileWarning(
+/** Every size constraint is advisory — the server is the authority, so a
+ * custom size renders a warning here rather than blocking Generate. */
+const resolutionWarning = computed(() => {
+  const finding = resolutionProfileFinding(
     props.modelValue.width,
     props.modelValue.height,
     activeRecipe.value?.resolution,
-  ),
-);
+  );
+  return finding?.level === "warn" ? finding.message : null;
+});
 const sequenceMode = computed(() => props.output === "sequence");
 // Edit families (Qwen image edit) render one print at a time; a sequence
 // renders one timeline.
@@ -188,16 +190,22 @@ const shapeOptions = computed(() => {
       ]
     : canonicalShapeOptions.value;
 });
+/** Always answers, any domain: an exact preset keeps `exact: true`, a custom
+ * size from Advanced maps to the nearest group so a chip still lights up —
+ * marked approximate ("≈") rather than left blank. */
+const closestAspect = computed(() =>
+  props.model
+    ? closestProfileAspect(
+        props.model,
+        props.modelValue.pipeline,
+        props.modelValue.width,
+        props.modelValue.height,
+      )
+    : null,
+);
 const canonicalAspectId = computed(
   () =>
-    (props.model
-      ? profileAspectIdForResolution(
-          props.model,
-          props.modelValue.pipeline,
-          props.modelValue.width,
-          props.modelValue.height,
-        )
-      : projection.value.aspectId) ?? "",
+    (props.model ? closestAspect.value?.id : projection.value.aspectId) ?? "",
 );
 /** The user's explicit Shape pick disambiguates a canvas that satisfies both
  * a canonical aspect and the source (a 1280×704 source IS wan's 20:11
@@ -216,6 +224,13 @@ const aspectId = computed(() => {
   }
   return followsSource.value ? "source" : canonicalAspectId.value;
 });
+/** The active chip approximates a custom size (never the Source chip). */
+const aspectApproximate = computed(
+  () =>
+    aspectId.value !== "source" &&
+    aspectId.value !== "" &&
+    closestAspect.value?.exact === false,
+);
 const mp = computed(() => projection.value.mp);
 
 const currentRatio = computed(() => {
@@ -404,6 +419,7 @@ function lockLastSeed() {
       <ShapePicker
         :model-value="aspectId"
         :options="shapeOptions"
+        :approximate="aspectApproximate"
         label="Shape"
         @update:model-value="setAspect"
       />
