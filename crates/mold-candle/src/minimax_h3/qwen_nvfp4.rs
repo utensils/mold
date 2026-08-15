@@ -23,7 +23,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 use std::os::unix::fs::PermissionsExt;
 
 use super::artifacts::{expected_checkpoint_shapes, expected_materialized_keys};
@@ -909,12 +909,6 @@ fn checked_path_identity(
             "{operation}: artifact path must be a regular file"
         )));
     }
-    #[cfg(unix)]
-    if metadata.permissions().mode() & 0o022 != 0 {
-        return Err(H3QwenNvfp4AwqError::Io(format!(
-            "{operation}: artifact path must not be group/other writable"
-        )));
-    }
     let identity = file_identity(&metadata);
     if expected.is_some_and(|expected| *expected != identity) {
         return Err(H3QwenNvfp4AwqError::Io(format!(
@@ -1422,14 +1416,11 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn bounded_inspector_rejects_group_writable_weights() {
+    fn path_identity_accepts_group_writable_weights() {
         let path = temp_path("writable");
         std::fs::write(&path, b"not opened while writable").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
-        let error = inspect_h3_qwen_nvfp4_awq_header(&path).unwrap_err();
-        assert!(
-            matches!(error, H3QwenNvfp4AwqError::Io(message) if message.contains("group/other writable"))
-        );
+        checked_path_identity(&path, None, "test setup").unwrap();
         std::fs::remove_file(path).unwrap();
     }
 

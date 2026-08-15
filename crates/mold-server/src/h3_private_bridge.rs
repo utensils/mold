@@ -1155,8 +1155,8 @@ impl H3PrivateUatPathSet {
 
     /// Create the server-owned staging root when it is missing.
     ///
-    /// Admission strictly validates this directory (process-owned, not
-    /// group/other writable, canonical) but nothing ever created it, so a
+    /// Admission strictly validates this directory (real and canonical), but
+    /// nothing ever created it, so a
     /// fresh public-H3 deployment could never admit a request — the VAE load
     /// plan failed with "cannot inspect private H3 staging root". Creation is
     /// owner-only and non-recursive in spirit: an existing directory is left
@@ -1632,7 +1632,7 @@ mod tests {
         paths.ensure_staging_root();
         let metadata = fs::symlink_metadata(&staging).unwrap();
         assert!(metadata.is_dir());
-        // Admission requires process-owned, not group/other writable.
+        // Fresh runtime-owned storage remains private by default.
         assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
 
         // A pre-existing directory keeps its mode — ensure never loosens or

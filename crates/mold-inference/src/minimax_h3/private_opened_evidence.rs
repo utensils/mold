@@ -161,14 +161,6 @@ impl H3PrivateOpenedTaskConfigAuthority {
         if requested.file_type().is_symlink() || !requested.file_type().is_file() {
             bail!("private H3 task config must be a regular non-symlink file")
         }
-        #[cfg(unix)]
-        {
-            // SAFETY: `geteuid` has no preconditions and only reads process state.
-            let effective_uid = unsafe { libc::geteuid() };
-            if requested.uid() != effective_uid || requested.mode() & 0o022 != 0 {
-                bail!("private H3 task config must be process-owned and not group/other writable")
-            }
-        }
         let path = std::fs::canonicalize(path)?;
         let file = open_regular_file_no_follow(&path)?;
         fs2::FileExt::lock_shared(&file)?;
@@ -503,14 +495,6 @@ fn validate_storage_root(path: &Path) -> Result<(PathBuf, H3PrivateStorageRootId
         std::fs::symlink_metadata(path).context("failed to inspect private H3 models root")?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         bail!("private H3 models root must be a real non-symlink directory")
-    }
-    #[cfg(unix)]
-    {
-        // SAFETY: `geteuid` has no preconditions and only reads process state.
-        let effective_uid = unsafe { libc::geteuid() };
-        if metadata.uid() != effective_uid || metadata.mode() & 0o022 != 0 {
-            bail!("private H3 models root must be process-owned and not group/other writable")
-        }
     }
     #[cfg(not(unix))]
     bail!("private H3 opened storage currently requires Unix ownership semantics");
@@ -1761,7 +1745,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn opened_task_config_rejects_symlink_and_group_writable_sources() {
+    fn opened_task_config_rejects_symlink_and_accepts_group_writable_sources() {
         use std::os::unix::fs::{symlink, PermissionsExt};
 
         let root = tempfile::tempdir().unwrap();
@@ -1783,11 +1767,11 @@ mod tests {
             bytes.len() as u64,
             &sha256(bytes),
         )
-        .is_err());
+        .is_ok());
     }
 
     #[test]
-    fn hidden_storage_resolution_is_canonical_and_permission_bound() {
+    fn hidden_storage_resolution_is_canonical_and_identity_bound() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path().canonicalize().unwrap();
         let authority = H3PrivateComfyStorageAuthority::resolve(&root).unwrap();
@@ -1804,7 +1788,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn hidden_storage_rejects_symlink_and_group_writable_roots() {
+    fn hidden_storage_rejects_symlink_and_accepts_group_writable_roots() {
         use std::os::unix::fs::{symlink, PermissionsExt};
 
         let parent = tempfile::tempdir().unwrap();
@@ -1816,7 +1800,7 @@ mod tests {
         assert!(H3PrivateComfyStorageAuthority::resolve(&alias).is_err());
 
         std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(H3PrivateComfyStorageAuthority::resolve(&real).is_err());
+        assert!(H3PrivateComfyStorageAuthority::resolve(&real).is_ok());
     }
 
     #[cfg(unix)]

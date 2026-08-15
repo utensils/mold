@@ -290,6 +290,7 @@ pub fn validate_audio_safetensors(
             path.display()
         ))
     })?;
+    file.seek(SeekFrom::Start(0)).map_err(io_error)?;
     let file_len = file.metadata().map_err(io_error)?.len();
     let mut len = [0u8; 8];
     file.read_exact(&mut len).map_err(io_error)?;

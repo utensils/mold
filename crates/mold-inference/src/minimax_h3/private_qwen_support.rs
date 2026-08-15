@@ -403,14 +403,6 @@ fn load_support_from_contracts_at_boundary(
     if !root_metadata.file_type().is_dir() || root_metadata.file_type().is_symlink() {
         bail!("private H3 models root must be a real non-symlink directory")
     }
-    #[cfg(unix)]
-    {
-        // SAFETY: `geteuid` has no preconditions and only reads process state.
-        let effective_uid = unsafe { libc::geteuid() };
-        if root_metadata.uid() != effective_uid || root_metadata.mode() & 0o022 != 0 {
-            bail!("private H3 models root must be process-owned and not group/other writable")
-        }
-    }
     let root_identity = FileIdentity::from_metadata(&root_metadata);
     root_validated(models_root)?;
     validate_models_root_identity(models_root, &root_identity)?;
@@ -556,17 +548,6 @@ fn authenticate_support_file(
         )
     })?;
     let opened_metadata = file.metadata()?;
-    #[cfg(unix)]
-    {
-        // SAFETY: `geteuid` has no preconditions and only reads process state.
-        let effective_uid = unsafe { libc::geteuid() };
-        if opened_metadata.uid() != effective_uid || opened_metadata.mode() & 0o022 != 0 {
-            bail!(
-                "private H3 {} must be process-owned and not group/other writable",
-                contract.role.stable_id()
-            )
-        }
-    }
     let before = FileIdentity::from_metadata(&opened_metadata);
     if before.len != contract.size_bytes {
         bail!(
@@ -993,29 +974,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn group_writable_models_root_fails_before_support_open() {
+    fn group_writable_models_root_is_accepted() {
         use std::os::unix::fs::PermissionsExt;
 
         let root = tempfile::tempdir().unwrap();
         let contracts = synthetic_contracts(root.path());
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o770)).unwrap();
 
-        let error = match load_support_from_contracts(root.path(), contract::FL2VA_COMFY, contracts)
-        {
-            Ok(_) => panic!("group-writable models root must fail closed"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("process-owned and not group/other writable"),
-            "{error}"
-        );
+        load_support_from_contracts(root.path(), contract::FL2VA_COMFY, contracts).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
-    fn group_writable_support_file_fails_before_authentication() {
+    fn group_writable_support_file_is_accepted() {
         use std::os::unix::fs::PermissionsExt;
 
         let root = tempfile::tempdir().unwrap();
@@ -1030,17 +1001,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = match load_support_from_contracts(root.path(), contract::FL2VA_COMFY, contracts)
-        {
-            Ok(_) => panic!("group-writable support file must fail closed"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("process-owned and not group/other writable"),
-            "{error}"
-        );
+        load_support_from_contracts(root.path(), contract::FL2VA_COMFY, contracts).unwrap();
     }
 
     #[test]

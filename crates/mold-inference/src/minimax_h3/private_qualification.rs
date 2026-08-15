@@ -296,7 +296,7 @@ pub(crate) fn qualify_private_artifacts_with_control(
             .ok_or_else(|| anyhow!("private H3 artifact byte count overflow"))
     })?;
     for artifact in &artifacts {
-        require_owner_only_regular_artifact(artifact)?;
+        require_regular_artifact(artifact)?;
     }
 
     let mut verified_before = 0_u64;
@@ -516,13 +516,13 @@ fn validate_private_scope_against_evidence(
     }
 
     let mut protected_paths = Vec::new();
-    let campaign = require_private_directory(campaign_root, None)?;
-    let owner = campaign.owner();
+    protected_paths.push(require_storage_directory(campaign_root)?);
+    protected_paths.push(require_storage_directory(mold_home)?);
+    protected_paths.push(require_storage_directory(&models_root)?);
+    let compliance = require_private_directory(&compliance_root, None)?;
+    let owner = compliance.owner();
     require_effective_process_owner(owner)?;
-    protected_paths.push(campaign);
-    protected_paths.push(require_private_directory(mold_home, Some(owner))?);
-    protected_paths.push(require_private_directory(&models_root, Some(owner))?);
-    protected_paths.push(require_private_directory(&compliance_root, Some(owner))?);
+    protected_paths.push(compliance);
     let record_path = require_private_file(&authorization_record, owner)?;
     let record_bytes = read_protected_file(
         &record_path,
@@ -681,6 +681,19 @@ fn require_private_directory(path: &Path, expected_owner: Option<u32>) -> Result
     }
     #[cfg(not(unix))]
     bail!("private H3 qualification currently requires Unix permission semantics");
+    Ok(ProtectedPath {
+        path: path.to_path_buf(),
+        kind: ProtectedPathKind::Directory,
+        identity: FileIdentity::from_metadata(&metadata),
+    })
+}
+
+fn require_storage_directory(path: &Path) -> Result<ProtectedPath> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect storage directory {}", path.display()))?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        bail!("private H3 model storage path must be a real directory")
+    }
     Ok(ProtectedPath {
         path: path.to_path_buf(),
         kind: ProtectedPathKind::Directory,
@@ -885,22 +898,13 @@ fn resolve_artifact<'a>(
     })
 }
 
-/// Cheap fail-closed policy gate applied to every artifact BEFORE bulk
-/// hashing. Every H3 artifact reader (Comfy DiT, Qwen NVFP4-AWQ, VAEs)
-/// independently refuses symlinks and group/other-writable files, but those
-/// checks only ran during structural inspection — after the artifact's full
-/// bytes (and every earlier artifact's) were already hashed, so a mode-bit
-/// problem surfaced minutes into a placement preview instead of instantly.
-fn require_owner_only_regular_artifact(artifact: &ResolvedArtifact<'_>) -> Result<()> {
+/// Cheap file-type gate applied to every artifact before bulk hashing.
+fn require_regular_artifact(artifact: &ResolvedArtifact<'_>) -> Result<()> {
     let relative_path = portable_path(&artifact.relative_path)?;
     let metadata = fs::symlink_metadata(&artifact.canonical_path)
         .with_context(|| format!("failed to inspect private H3 artifact {relative_path}"))?;
     if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
         bail!("private H3 artifact {relative_path} must be a regular non-symlink file")
-    }
-    #[cfg(unix)]
-    if metadata.permissions().mode() & 0o022 != 0 {
-        bail!("private H3 artifact {relative_path} must not be group/other writable")
     }
     Ok(())
 }
@@ -1568,7 +1572,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn authorization_record_and_owner_only_campaign_layout_are_required() {
+    fn authorization_evidence_stays_private_while_model_storage_modes_are_accepted() {
         let fixture = PrivateCampaignFixture::new();
         validate_fixture_scope(
             &fixture,
@@ -1580,6 +1584,16 @@ mod tests {
         assert!(
             require_effective_process_owner(effective_process_owner().wrapping_add(1)).is_err()
         );
+
+        set_mode(&fixture.campaign_root, 0o777);
+        set_mode(fixture.models_root.parent().unwrap(), 0o777);
+        set_mode(&fixture.models_root, 0o777);
+        validate_fixture_scope(
+            &fixture,
+            &fixture.models_root,
+            &fixture.authorization_record,
+        )
+        .unwrap();
 
         let other = PrivateCampaignFixture::new();
         assert!(validate_fixture_scope(
@@ -1768,7 +1782,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cheap_policy_precheck_rejects_writable_artifacts_before_any_hashing() {
+    fn cheap_precheck_accepts_writable_artifacts_and_rejects_symlinks() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("artifact.safetensors");
         fs::write(&path, b"artifact bytes").unwrap();
@@ -1781,17 +1795,12 @@ mod tests {
         };
 
         set_mode(&path, 0o644);
-        require_owner_only_regular_artifact(&artifact).unwrap();
+        require_regular_artifact(&artifact).unwrap();
 
-        // Group- or other-writable artifacts fail the same policy every H3
-        // reader enforces — but here, before tens of gigabytes are hashed.
         set_mode(&path, 0o664);
-        assert!(require_owner_only_regular_artifact(&artifact)
-            .unwrap_err()
-            .to_string()
-            .contains("group/other writable"));
+        require_regular_artifact(&artifact).unwrap();
         set_mode(&path, 0o646);
-        assert!(require_owner_only_regular_artifact(&artifact).is_err());
+        require_regular_artifact(&artifact).unwrap();
 
         // A symlinked artifact is refused outright.
         use std::os::unix::fs::symlink;
@@ -1804,7 +1813,7 @@ mod tests {
             relative_path: PathBuf::from("link.safetensors"),
             canonical_path: link,
         };
-        assert!(require_owner_only_regular_artifact(&aliased).is_err());
+        assert!(require_regular_artifact(&aliased).is_err());
     }
 
     #[test]

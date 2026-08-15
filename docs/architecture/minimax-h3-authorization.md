@@ -35,6 +35,17 @@ directory, ControlNet, LoRA, upscaler, or nested component below any root
 remains gated, and every proposed `MOLD_HOME` must independently pass the
 storage qualification gate.
 
+Ordinary model storage is operator-managed. Mold does not treat Unix ownership
+or group/other write-mode bits as an execution eligibility signal: shared model
+roots and files created with collaborative modes such as `0664` remain valid.
+H3 instead authenticates pinned content, refuses symlinks and non-regular model
+files, validates canonical containment, and fences opened descriptor identity
+through admission and use. Staged VAE construction reads retained process
+descriptors, so replacing a path beneath a shared staging parent cannot replace
+the authenticated bytes. The stricter owner-only rules below describe the
+private authorization/evidence campaign, not a requirement for runnable model
+weights or public upstream-direct downloads.
+
 The earlier operational exclusion of `/Volumes/ExternalStorage` was superseded
 on 2026-08-08 after the maintainer explicitly selected it for private H3 UAT and
 a fresh qualification campaign completed successfully. The isolated root is

@@ -32,7 +32,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 use std::os::unix::fs::PermissionsExt;
 
 use super::attention::{
@@ -637,13 +637,6 @@ fn open_h3_comfy_int8_checkpoint(
         return Err(failure(
             H3ComfyCheckpointErrorCode::FileIdentityChanged,
             "H3 Comfy execution authority must be opened from a regular non-symlink file",
-        ));
-    }
-    #[cfg(unix)]
-    if symlink_metadata.permissions().mode() & 0o022 != 0 {
-        return Err(failure(
-            H3ComfyCheckpointErrorCode::FileIdentityChanged,
-            "H3 Comfy execution authority must not be group/other writable",
         ));
     }
     let canonical_path = std::fs::canonicalize(path).map_err(|error| {
@@ -4014,11 +4007,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn opened_int8_runtime_rejects_group_writable_source() {
+    fn opened_int8_runtime_accepts_group_writable_source() {
         let (config, header, data) = runtime_fixture();
         let path = write_fixture(&header, &data, "opened-permissions");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
-        let error = open_h3_comfy_int8_checkpoint(
+        let opened = open_h3_comfy_int8_checkpoint(
             &path,
             config,
             H3TransformerTask::T2VaFl2Va,
@@ -4026,8 +4019,11 @@ mod tests {
             None,
             &H3ComfyNeverCancel,
         )
-        .unwrap_err();
-        assert_eq!(error.code, H3ComfyCheckpointErrorCode::FileIdentityChanged);
+        .unwrap();
+        assert_eq!(
+            opened.verified_file_bytes(),
+            std::fs::metadata(&path).unwrap().len()
+        );
         let _ = std::fs::remove_file(path);
     }
 
