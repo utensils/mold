@@ -8,8 +8,9 @@ Setting **Output** to **Sequence** filters the model picker to compatible
 installed video checkpoints and selects one when possible, remembering your
 one-shot model for the way back. If none are installed, **Browse video models**
 opens Models → Discover with the Video and Models filters already applied.
-Two-stage LTX-2 dev checkpoints render single clips; multi-stage sequences
-require a distilled or one-stage checkpoint.
+Every LTX-2 checkpoint renders multi-clip sequences, two-stage dev checkpoints
+included — a dev checkpoint renders each clip through the two-stage pipeline,
+so expect roughly twice the wall time per clip as a distilled one.
 
 On phone-sized web views, Create keeps every interactive target at least 44px
 high and editable fields at a zoom-safe 16px.
@@ -151,8 +152,9 @@ raises.
 ## Video Generation
 
 mold supports text-to-video generation with the LTX Video, LTX-2 (next
-section), and Wan 2.1/2.2 model families. LTX Video output defaults to APNG,
-with GIF, WebP, and MP4 also supported; LTX-2 and Wan default to MP4.
+section), and Wan 2.1/2.2 model families. LTX Video, LTX-2, and Wan all
+default to MP4 output (GIF, APNG, and feature-gated WebP are also supported);
+a build compiled without the `mp4` feature falls back to APNG.
 
 ```bash
 # Generate a 25-frame video clip with the fast distilled path
@@ -206,7 +208,7 @@ mold run wan21-t2v-1.3b "a red fox trotting through fresh snow, golden hour"
 mold run wan22-ti2v-5b "waves breaking on a black sand beach" \
   --width 1280 --height 704 --frames 121 --fps 24
 
-# Wan 2.2 A14B, 4-step Lightning tier (defaults: 53 frames @ 16 fps)
+# Wan 2.2 A14B, 4-step Lightning tier (defaults: 81 frames @ 16 fps)
 mold run wan22-t2v-a14b:q5 "a paper boat drifting down a rain gutter"
 
 # A14B image-to-video from a still
@@ -215,8 +217,10 @@ mold run wan22-i2v-a14b:q5 "the balloon lifts off" --image balloon.png
 
 Wan checkpoints were tuned against a specific negative prompt; mold applies it
 automatically when `--negative` is not given. A14B is a two-expert mixture
-with one 14B expert resident at a time, and its 53/33-frame defaults are the
-measured 24 GB envelope — larger cards pass `--frames 81` explicitly. See
+with one 14B expert resident at a time. The `:q5`/`:q4` tiers default to the
+checkpoint's trained 81 frames — automatic partial block offload fits them on
+a 24 GB card — while `:q8` defaults to 73 frames and `:fp8` to 45, their
+measured 24 GB envelopes. See
 [Wan Video](/models/wan) for variants, defaults, and limits.
 
 ## Joint Audio-Video Generation
@@ -260,8 +264,7 @@ LTX-2 also adds:
 - `--audio-file`
 - `--video`
 - repeatable `--keyframe <frame:path>`
-- `--pipeline one-stage|two-stage|two-stage-hq|distilled|ic-lora|keyframe|a2-vid|retake|lip-dub`
-- `--pipeline one-stage|two-stage|two-stage-hq|distilled|ic-lora|keyframe|a2-vid|retake|t2a`
+- `--pipeline one-stage|two-stage|two-stage-hq|distilled|ic-lora|keyframe|a2-vid|retake|lip-dub|t2a`
 - `--retake <start:end>`
 - repeatable `--lora`
 - `--camera-control <preset-or-path>`
@@ -277,8 +280,8 @@ ConvRot W4A4 exports use automatic full block streaming because their packed
 on-disk byte size understates the BF16 weights reconstructed by the runtime.
 If the Gemma prompt encoder exhausts VRAM, Mold retries only Gemma on CPU while
 keeping the transformer and video VAE on CUDA.
-Multi-prompt chains support both one-stage and distilled LTX-2 checkpoints;
-multi-pass and specialized conditioning pipelines remain explicit non-chain
+Multi-prompt chains support every source-free LTX-2 pipeline, two-stage
+included; specialized conditioning pipelines remain explicit non-chain
 modes. Mold checks this before creating a durable job and keeps server, stage,
 cancel, resume, and retake errors visible on the job card.
 
@@ -294,16 +297,17 @@ image-to-video, audio-to-video, keyframe, retake, public IC-LoRA, spatial
 upscale, and temporal upscale workflows.
 
 ::: warning Backend policy
-LTX-2 now runs natively in Rust inside `mold-inference`. CUDA is the supported
-backend for real local generation, CPU is correctness-only, and Metal is
-unsupported for this family.
+LTX-2 runs natively in Rust inside `mold-inference`. CUDA and Apple Metal are
+both supported backends for real local generation — Metal is
+performance-qualified on the 19B/22B distilled FP8 tiers, though slower than a
+comparable CUDA card — and CPU is correctness-only.
 :::
 
 ## Negative Prompts
 
 Guide what the model should avoid. Works with CFG-based models (SD1.5, SDXL,
-SD3, Wuerstchen, Qwen-Image, Qwen-Image-Edit); ignored by FLUX, Z-Image, and
-Flux.2 Klein.
+SD3, Wuerstchen, Qwen-Image, Qwen-Image-Edit, Wan); ignored by FLUX, Z-Image,
+and Flux.2 Klein.
 
 ```bash
 mold run sd15:fp16 "a portrait" -n "blurry, watermark, ugly, bad anatomy"

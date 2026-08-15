@@ -105,9 +105,12 @@ The main workspace with four panels:
   a source image attached, where an empty prompt is accepted and prompt
   expansion is skipped for that run
 - **Parameters** — six essentials rows plus the Advanced accordion
-- **Preview** — idle hint, live "Developing…" progress, then the finished
-  print with a `model · seed · time · host` caption
-  (Kitty/sixel/halfblock rendering)
+- **Preview** — idle hint; while generating, the latest live latent preview
+  frame (for families that stream denoise previews — FLUX.1, Flux.2, Z-Image,
+  and Wan 2.1/2.2) with the denoise progress line beneath it; then the
+  finished print with a `model · seed · time · host` caption
+  (Kitty/sixel/halfblock rendering). `MOLD_STEP_PREVIEW=0` disables server
+  preview streaming
 - **Timeline** — the glyph-styled session log (`•` info, `✓` done with
   stage timings, `!` warning, `✗` error, `★` model loaded), including a
   `✓ Saved <file>` entry per print; shows "— idle. no runs this session."
@@ -151,7 +154,7 @@ open state and expanded section persist across sessions
 | LoRA                   | LoRA path + scale                                                                                                                                                                    |
 | Upscale after generate | post-generate upscaler (Enter picks, `(off)` clears)                                                                                                                                 |
 | Output format          | png / jpeg / gif / apng / webp / mp4                                                                                                                                                 |
-| Video                  | Frames, FPS; LTX-2 Pipeline, Audio default/on/off, Spatial native/1.5×/2×, Temporal native/2×                                                                                        |
+| Video                  | Frames, FPS; Wan Flow shift; LTX-2 Pipeline, Audio default/on/off, Spatial native/1.5×/2×, Temporal native/2×, STG scale/blocks, CFG rescale, Modality scale, Guidance skip          |
 
 The LTX-2 Pipeline row cycles through **Auto**, **one-stage**, **two-stage**,
 **two-stage-hq**, and **distilled**. Auto omits the request field so the server
@@ -161,6 +164,12 @@ Negative prompt section follow the selected recipe's CFG contract. Pipelines
 that require an audio file, source video, keyframes, a retake window, or an
 IC-LoRA—and the audio-only `t2a` output—remain intentionally absent until the
 TUI can author and handle those inputs and outputs end to end.
+
+For Wan models the Video section instead exposes **Flow shift** (the family's
+primary quality/character knob, request field `sample_shift`); it is absent
+until touched and never appears for other families. LTX-2's optional STG
+scale/blocks, CFG rescale, modality scale, and guidance-skip rows keep their
+request fields absent until edited, so pipeline constants stay authoritative.
 
 The Audio row is capability-driven: a checkpoint that advertises missing
 audio assets does not show it. `default` leaves the field absent so the
@@ -275,7 +284,12 @@ regeneration.
 
 ## Chain Composer
 
-The chain composer authors `mold.chain.v1` TOML for LTX-2 chains. Press
+The chain composer authors `mold.chain.v1` TOML for multi-clip video chains —
+LTX-2, LTX-Video, and Wan 2.1/2.2. Frame counts validate on the selected
+family's own grid (`8n+1` for LTX-2, `4n+1` for Wan) and the seam carryover is
+per family: LTX-2 carries a 17-frame motion tail, Wan's image-conditioned
+checkpoints continue from a single seed frame, and text-to-video checkpoints
+join independent clips. Press
 **c** from Create's navigation mode to open it (Esc returns to composing —
 a chain in progress survives switching workspaces). It lets you build
 per-stage prompts, frame counts, source images, and `smooth` / `cut` / `fade`

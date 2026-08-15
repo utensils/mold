@@ -78,6 +78,13 @@ Repeating the same stack is cheap: FLUX and Qwen-Image fingerprint the adapters,
 their order, and their scales, and reuse the merged transformer when the next
 request asks for exactly that stack. Changing any of the three rebuilds it.
 
+Wan 2.2 A14B adapters usually ship as a high-noise/low-noise pair; bind an
+adapter to one expert with `--lora file.safetensors@high` or `@low`. When the
+marker is omitted mold infers the binding from the adapter's filename and
+discloses the inference in progress output; an adapter with no expert affinity
+applies to both experts. The fp8-scaled A14B tiers refuse LoRA stacks — use
+the GGUF or bf16 tiers for adapters.
+
 ## Step-Distilled LoRAs
 
 Some adapters change the sampling schedule rather than the style. Qwen-Image's
@@ -135,7 +142,7 @@ comma-separation — no more flipping back to the Civitai page to copy/paste.
 ## LoRA Rules
 
 - Supported families: **FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image
-  (+ Qwen-Image-Edit), Z-Image**. Wuerstchen and LTX-Video are not yet wired —
+  (+ Qwen-Image-Edit), Wan, Z-Image**. Wuerstchen and LTX-Video are not yet wired —
   attaching a LoRA there returns a 400 with the current supported-family list.
   (Source of truth: `mold-core::validation::require_lora_capable_family`.)
 - `.safetensors` only

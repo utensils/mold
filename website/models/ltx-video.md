@@ -15,8 +15,9 @@ _"Underwater footage of a jellyfish pulsing through deep blue water, bioluminesc
 - **HuggingFace**:
   [Lightricks/LTX-Video](https://huggingface.co/Lightricks/LTX-Video)
 
-> **Note**: Video output defaults to APNG format (lossless, with embedded
-> metadata). Also supports GIF, WebP, and MP4 via `--format`.
+> **Note**: Video output defaults to MP4. Also supports GIF, WebP, and APNG
+> via `--format`. (Builds compiled without the `mp4` feature fall back to
+> APNG; release builds ship MP4.)
 > Frame count must be 8n+1 (9, 17, 25, 33, 49, ...) due to the VAE's 8x
 > temporal compression.
 
@@ -48,16 +49,16 @@ compatible `LTX-Video-0.9.5` VAE source until the newer VAE layout is ported.
 - **FPS**: 30
 - **Default model**: `ltx-video-0.9.6-distilled:bf16`
 - **Steps**: 8 on `0.9.6-distilled`, 40 on `0.9.6`, 7+3 on `0.9.8` distilled multiscale presets
-- **Output format**: APNG (animated PNG with metadata)
+- **Output format**: MP4 (APNG fallback on builds without the `mp4` feature)
 
 ## Output Formats
 
-| Format | Flag                      | Quality    | Metadata          | Notes                      |
-| ------ | ------------------------- | ---------- | ----------------- | -------------------------- |
-| APNG   | `--format apng` (default) | Lossless   | Yes (tEXt chunks) | Opens as `.png` everywhere |
-| GIF    | `--format gif`            | 256 colors | No                | Pipe-friendly              |
-| WebP   | `--format webp`           | Lossy      | No                | Requires `webp` feature    |
-| MP4    | `--format mp4`            | H.264      | No                | Requires `mp4` feature     |
+| Format | Flag                     | Quality    | Metadata          | Notes                                                       |
+| ------ | ------------------------ | ---------- | ----------------- | ----------------------------------------------------------- |
+| MP4    | `--format mp4` (default) | H.264      | No                | Requires `mp4` feature                                      |
+| APNG   | `--format apng`          | Lossless   | Yes (tEXt chunks) | Opens as `.png` everywhere; default on builds without `mp4` |
+| GIF    | `--format gif`           | 256 colors | No                | Pipe-friendly                                               |
+| WebP   | `--format webp`          | Lossy      | No                | Requires `webp` feature                                     |
 
 ## Recommended Dimensions
 

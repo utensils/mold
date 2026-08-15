@@ -37,9 +37,9 @@ features:
       src: /icons/grid.svg
     title: Broad Model Support
     details: FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein, Qwen-Image,
-      Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3, and Wan 2.1/2.2. Images,
-      native joint audio-video, and quantized variants that fit a wide range of
-      GPUs.
+      Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3, Wan 2.1/2.2,
+      and MiniMax H3 (compact FL2VA, SM89 CUDA). Images, native joint
+      audio-video, and quantized variants that fit a wide range of GPUs.
   - icon:
       src: /icons/rust.svg
     title: Linux NVIDIA + macOS Metal

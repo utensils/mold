@@ -206,6 +206,15 @@ surface powers it, so anything the app does maps to a documented endpoint.
   create), and Advanced — every remaining `/api/config` row with its provenance
   tag (⌂ db / ⛁ file / ⚿ env); environment-overridden rows are locked with the
   variable that owns them.
+  Settings also shows the effective **Mold home** (the shared root holding
+  config, the SQLite DB, models, outputs, and logs) with a native folder picker
+  or typed path. Changing it offers a recommended copy-everything migration —
+  validated first, staged through a sibling directory without overwriting a
+  non-empty destination, preserving the old root, and relaunching only after
+  the new location is ready — or an explicit use-as-is alternative; an
+  unavailable external drive shows as a recoverable offline state. The choice
+  is stored outside the selected root, so the CLI, TUI, server, and desktop all
+  resolve the same root (an explicit `MOLD_HOME` env override still wins).
   About credits core contributors James Brink and Jeffrey Dilley in both the
   Settings workspace and the native app menu.
 - **Command palette** — **Cmd/Ctrl+K** for navigation, actions, model search, and
@@ -216,6 +225,11 @@ surface powers it, so anything the app does maps to a documented endpoint.
   **Install `<name>` · not installed** and queues the pull. The palette picks
   the install target itself and names it in the toast — open **Models** when you
   want to choose the machine explicitly.
+- **Notifications bell** — in the title bar next to Search, with an unread
+  badge. Toasts stay transient, but the bell opens the durable session history
+  of every toast — complete untruncated messages and error bodies, per-host
+  context where known, timestamps, and collapsed ×N repeats (newest first,
+  capped at 100). Opening the panel marks everything read; Clear empties it.
 - **Native desktop integration** — platform menus and shortcuts, Linux native
   window decorations, macOS overlay chrome, and background notifications on
   generation, chain, and pull completion. macOS uses UserNotifications so a

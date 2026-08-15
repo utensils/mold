@@ -65,18 +65,20 @@ features today?
 
 ## Video Generation
 
-| Family     | txt2vid | img2vid | audio2vid | keyframe | retake | lip dub | IC-LoRA | audio track |
-| ---------- | ------- | ------- | --------- | -------- | ------ | ------- | ------- | ----------- |
-| LTX Video  | Yes     | Not yet | No        | No       | No     | No      | No      | No          |
-| LTX-2      | Yes     | Yes     | Yes       | Yes      | Yes    | Yes     | Yes     | Yes         |
-| Wan Video  | Yes     | Yes     | No        | No       | No     | No      | No      | No          |
-| All others | No      | No      | No        | No       | No     | No      | No      | No          |
+| Family     | txt2vid | img2vid | audio2vid | keyframe   | retake | lip dub | IC-LoRA | audio track |
+| ---------- | ------- | ------- | --------- | ---------- | ------ | ------- | ------- | ----------- |
+| LTX Video  | Yes     | Not yet | No        | No         | No     | No      | No      | No          |
+| LTX-2      | Yes     | Yes     | Yes       | Yes        | Yes    | Yes     | Yes     | Yes         |
+| Wan Video  | Yes     | Yes     | No        | First/last | No     | No      | No      | No          |
+| All others | No      | No      | No        | No         | No     | No      | No      | No          |
 
-LTX Video defaults to APNG (lossless, metadata-rich). LTX-2 and Wan default to
-MP4 — LTX-2 so it can preserve synchronized audio when requested; Wan renders
-video only and has no audio path. All three families also support GIF, and
-feature-gated WebP/MP4 outputs where applicable. Use
-`--format apng|gif|webp|mp4`. Frame grids are per family: LTX Video and LTX-2
+LTX Video, LTX-2, and Wan all default to MP4 — LTX-2 so it can preserve
+synchronized audio when requested; Wan renders video only and has no audio
+path. A build compiled without the `mp4` feature falls back to APNG. GIF and
+APNG remain available for all three families, plus feature-gated WebP. Use
+`--format apng|gif|webp|mp4`. Wan keyframing is first/last-frame interpolation
+only (`--image` + `--last-image`); other keyframe layouts are refused at
+admission. Frame grids are per family: LTX Video and LTX-2
 take 8n+1 frame counts (9, 17, 25, 33, ...) with dimensions in multiples of
 32 — 64 for LTX-2 lip dub, which always renders in two stages and takes its
 frame count and rate from the reference clip. Wan takes 4n+1 frame counts
@@ -97,17 +99,18 @@ the full multiscale refinement path.
 
 ## Backend Support
 
-| Family          | CUDA | Metal | CPU              |
-| --------------- | ---- | ----- | ---------------- |
-| FLUX.1 / FLUX.2 | Yes  | Yes   | Yes (slow)       |
-| SDXL / SD 1.5   | Yes  | Yes   | Yes              |
-| SD 3.5          | Yes  | Yes   | Yes              |
-| Z-Image         | Yes  | Yes   | Yes              |
-| Wuerstchen v2   | Yes  | Yes   | Yes              |
-| Qwen-Image      | Yes  | Yes   | Yes              |
-| Qwen-Image-Edit | Yes  | Yes   | Yes              |
-| LTX Video       | Yes  | Yes   | Yes              |
-| **LTX-2**       | Yes  | Yes   | Correctness-only |
+| Family          | CUDA | Metal            | CPU              |
+| --------------- | ---- | ---------------- | ---------------- |
+| FLUX.1 / FLUX.2 | Yes  | Yes              | Yes (slow)       |
+| SDXL / SD 1.5   | Yes  | Yes              | Yes              |
+| SD 3.5          | Yes  | Yes              | Yes              |
+| Z-Image         | Yes  | Yes              | Yes              |
+| Wuerstchen v2   | Yes  | Yes              | Yes              |
+| Qwen-Image      | Yes  | Yes              | Yes              |
+| Qwen-Image-Edit | Yes  | Yes              | Yes              |
+| LTX Video       | Yes  | Yes              | Yes              |
+| **LTX-2**       | Yes  | Yes              | Correctness-only |
+| Wan Video       | Yes  | Correctness-only | Correctness-only |
 
 ::: tip LTX-2 Metal qualification
 LTX-2 / LTX-2.3's Apple Metal path is performance-qualified: BF16 transformer
@@ -116,6 +119,10 @@ chunks, measured end-to-end on the 19B and 22B distilled FP8 tiers on Apple
 Silicon. Metal remains slower than a comparable CUDA card — streaming trades
 speed for fitting the model in unified memory.
 :::
+
+Wan Video's Metal path is correctness-qualified (family-scoped BF16, chunked
+attention; fp8-scaled Wan checkpoints are refused on Metal), pending
+performance UAT.
 
 ## Native app surfaces
 
@@ -163,12 +170,9 @@ complete workflows.
   still loading the Qwen2.5-VL vision tower for image conditioning.
 - LTX-2 now wires `x2` spatial upscaling across the family, `x1.5` spatial
   upscaling for `ltx-2.3-*`, and `x2` temporal upscaling in the native runtime.
-- LTX-2's native CUDA path is validated across text+audio-video, image-to-video,
-  audio-to-video, keyframe, retake, lip dub, public IC-LoRA, spatial upscale,
-  and temporal upscale workflows.
 - LTX-2's native CUDA path is validated across text+audio-video, text-to-audio,
-  image-to-video, audio-to-video, keyframe, retake, public IC-LoRA, spatial
-  upscale, and temporal upscale workflows.
+  image-to-video, audio-to-video, keyframe, retake, lip dub, public IC-LoRA,
+  spatial upscale, and temporal upscale workflows.
 - LTX-2 renders audio on its own with `--pipeline t2a` (`pipeline: "t2a"`):
   no video, duration from `frames`/`fps`, and a 16-bit PCM stereo `wav`
   artifact that lands in the gallery with a rendered waveform tile.

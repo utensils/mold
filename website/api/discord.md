@@ -25,17 +25,17 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 
 ## Slash Commands
 
-| Command              | Description                                                                                                           |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes              |
-| `/sequence`          | Submit 2–16 `\|`-separated prompts as a durable LTX-2 sequence, with per-clip progress and final MP4 delivery         |
-| `/expand`            | Expand a short prompt into detailed generation prompts                                                                |
-| `/models`            | List available models with download/loaded status                                                                     |
-| `/status`            | Show server health, queue summary, and every GPU/MIG device; large fleets paginate across limit-safe follow-up embeds |
-| `/quota`             | Check your remaining daily generation quota                                                                           |
-| `/admin reset-quota` | Reset a user's daily quota (requires Manage Server)                                                                   |
-| `/admin block`       | Temporarily block a user from generating (requires Manage Server)                                                     |
-| `/admin unblock`     | Unblock a previously blocked user (requires Manage Server)                                                            |
+| Command              | Description                                                                                                                                                                                                                       |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes                                                                                                                          |
+| `/sequence`          | Submit 2–16 `\|`-separated prompts as a durable video sequence (LTX-2, LTX-Video — which joins independently rendered clips — or Wan, per the model's advertised sequence support), with per-clip progress and final MP4 delivery |
+| `/expand`            | Expand a short prompt into detailed generation prompts                                                                                                                                                                            |
+| `/models`            | List available models with download/loaded status                                                                                                                                                                                 |
+| `/status`            | Show server health, queue summary, and every GPU/MIG device; large fleets paginate across limit-safe follow-up embeds                                                                                                             |
+| `/quota`             | Check your remaining daily generation quota                                                                                                                                                                                       |
+| `/admin reset-quota` | Reset a user's daily quota (requires Manage Server)                                                                                                                                                                               |
+| `/admin block`       | Temporarily block a user from generating (requires Manage Server)                                                                                                                                                                 |
+| `/admin unblock`     | Unblock a previously blocked user (requires Manage Server)                                                                                                                                                                        |
 
 ## Configuration
 
@@ -48,14 +48,15 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 | `MOLD_DISCORD_DAILY_QUOTA`   | —                       | Max generations per user per UTC day (unset = unlimited; 0 = block all) |
 
 ::: tip Video generation
-Running `/generate` against a video model (`ltx-video-*`, `ltx-2-*`) produces an
-MP4 by default. Pass `video_format: Animated GIF` to receive a GIF instead. You
+Running `/generate` against a video model (`ltx-video-*`, `ltx-2-*`, `wan*`)
+produces an MP4 by default. Pass `video_format: Animated GIF` to receive a GIF instead. You
 can also attach a `source_image` for img2img on regular models, or as the first
 frame for LTX-2 image-to-video. When the rendered MP4 exceeds Discord's upload
 ceiling the bot falls back to the always-bundled GIF preview.
 
 Use `duration` for the simple path: `duration: 10` uses the selected model's
-default FPS and converts ten seconds to the nearest valid LTX frame count. The
+default FPS and converts ten seconds to the nearest frame count on the selected
+model's advertised grid (`8n+1` for the LTX families, `4n+1` for Wan). The
 bot uses the same advertised frame/FPS defaults as Studio, supports LTX-2's
 full 20-second single-generation limit, and rejects a duration beyond the
 selected model's limit. The existing `frames` and `fps` options remain
@@ -66,6 +67,12 @@ audio-to-video, `source_video` plus both retake times regenerates that time
 range, and two or three `keyframe_*` images are spaced across the requested
 frame count for interpolation. These modes are mutually exclusive in one
 command and do not need the `pipeline` option.
+
+Negative prompts: leaving `negative_prompt` unset applies the model's
+advertised default negative (Wan ships a tuned one). To explicitly disable the
+negative prompt, pass `negative_prompt: none` (case-insensitive; `-` also
+accepted) — Discord's 25-option cap means the opt-out rides the existing
+option as a sentinel rather than its own toggle.
 :::
 
 ::: tip Durable sequences

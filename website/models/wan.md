@@ -20,24 +20,36 @@ the family natively in Rust.
 
 ## Variants
 
-| Model                 | Steps | Approx total pull | Notes                                        |
-| --------------------- | ----- | ----------------- | -------------------------------------------- |
-| `wan21-t2v-1.3b:bf16` | 30    | ~14.5 GB          | 480p text-to-video; smallest, fastest pull   |
-| `wan21-t2v-14b:q5`    | 30    | ~23 GB            | Q5_K_M 2.1 14B; 480p text-to-video           |
-| `wan21-t2v-14b:q8`    | 30    | ~27.5 GB          | Q8_0 2.1 14B; the 2.1 quality tier           |
-| `wan22-ti2v-5b:fp16`  | 20    | ~22.8 GB          | 720p24 text- and image-to-video              |
-| `wan22-ti2v-5b:q8`    | 20    | ~18 GB            | Q8_0 5B; 8-12 GB cards at reduced settings   |
-| `wan22-ti2v-5b:turbo` | 4     | ~22.8 GB          | Self-Forcing 4-step distill, no CFG          |
-| `wan22-t2v-a14b:q5`   | 4     | ~36 GB            | 480p16 text-to-video, 4-step Lightning tier  |
-| `wan22-t2v-a14b:q8`   | 20    | ~42 GB            | Same weights at Q8_0, no distill             |
-| `wan22-t2v-a14b:q4`   | 4     | ~33 GB            | Q4_K_M Lightning; 12-16 GB needs reduced use |
-| `wan22-i2v-a14b:q5`   | 4     | ~36 GB            | 480p16 image-to-video, 4-step Lightning tier |
-| `wan22-i2v-a14b:q8`   | 20    | ~42 GB            | Same weights at Q8_0, no distill             |
-| `wan22-i2v-a14b:q4`   | 4     | ~33 GB            | Q4_K_M Lightning; 12-16 GB needs reduced use |
+| Model                 | Steps | Approx total pull | Notes                                                                                         |
+| --------------------- | ----- | ----------------- | --------------------------------------------------------------------------------------------- |
+| `wan21-t2v-1.3b:bf16` | 30    | ~14.5 GB          | 480p text-to-video; smallest, fastest pull                                                    |
+| `wan21-t2v-14b:q5`    | 30    | ~23 GB            | Q5_K_M 2.1 14B; 480p text-to-video                                                            |
+| `wan21-t2v-14b:q8`    | 30    | ~27.5 GB          | Q8_0 2.1 14B; the 2.1 quality tier                                                            |
+| `wan22-ti2v-5b:fp16`  | 20    | ~22.8 GB          | 720p24 text- and image-to-video                                                               |
+| `wan22-ti2v-5b:q8`    | 20    | ~18 GB            | Q8_0 5B; 8-12 GB cards at reduced settings                                                    |
+| `wan22-ti2v-5b:turbo` | 4     | ~22.8 GB          | Self-Forcing 4-step distill, no CFG                                                           |
+| `wan22-t2v-a14b:q5`   | 4     | ~36 GB            | 480p16 text-to-video, 4-step Lightning tier                                                   |
+| `wan22-t2v-a14b:q8`   | 20    | ~42 GB            | Same weights at Q8_0, no distill                                                              |
+| `wan22-t2v-a14b:q4`   | 4     | ~33 GB            | Q4_K_M Lightning; 12-16 GB needs reduced use                                                  |
+| `wan22-i2v-a14b:q5`   | 4     | ~36 GB            | 480p16 image-to-video, 4-step Lightning tier                                                  |
+| `wan22-i2v-a14b:q8`   | 20    | ~42 GB            | Same weights at Q8_0, no distill                                                              |
+| `wan22-i2v-a14b:q4`   | 4     | ~33 GB            | Q4_K_M Lightning; 12-16 GB needs reduced use                                                  |
+| `wan22-t2v-a14b:fp8`  | 20    | ~40.5 GB          | Comfy-Org fp8-scaled experts; ~2.6 GB more VRAM headroom than `:q8`, refuses LoRAs, CUDA-only |
+| `wan22-i2v-a14b:fp8`  | 20    | ~40.5 GB          | fp8-scaled image-to-video pair; same recipe and constraints                                   |
 
 Totals include the shared UMT5-XXL encoder (~11.4 GB), tokenizer, and the
 variant's VAE. The encoder is shared across every Wan model under
 `shared/wan/`, so a second Wan pull only fetches the checkpoint and VAE.
+
+The encoder is also selectable: set the `umt5_variant` config key or the
+`MOLD_UMT5_VARIANT` env var to `q8`, `q6`, or `q5` (there is no dedicated CLI
+flag) to swap the 11.4 GB FP16 encoder for
+city96's GGUF export at 6.0, 4.7, or 4.1 GB. `auto` (the default) prefers FP16
+on GPU when it fits and otherwise the largest GGUF that does — the encoder is
+the floor of a wan render's memory estimate, so this is the lever that moves
+every tier at once. Nothing below the publisher's Q5_K_M floor ships.
+`MOLD_KEEP_TE_RAM=1` additionally parks the FP16 encoder in host RAM between
+renders instead of re-reading it from disk.
 
 ### A14B is two models
 
@@ -489,7 +501,8 @@ its published timesteps exactly.
 ## Recipe controls
 
 Three request-level knobs reproduce published Wan recipes; each stays absent
-by default so the tier defaults above remain authoritative.
+by default so the tier defaults above remain authoritative. A fourth,
+env-scoped knob trades denoise steps for time on the quality tiers.
 
 **Flow shift** (`--sample-shift`, env fallback `MOLD_WAN_SHIFT`) is the
 family's primary quality/character knob — upstream ships per-task values from
@@ -518,6 +531,19 @@ community mitigation (lightx2v-acknowledged) is high-noise strength 1.5–2.0
 with low at 1.0, and/or 5–6 steps at guidance 1. A strength on a tier that
 ships no distill in that slot (the `:q8` quality tier) is refused, not
 ignored.
+
+**Step cache** (`MOLD_WAN_STEP_CACHE=off|auto|<threshold>`, env-scoped) applies
+the FBCache formulation to the quality tiers: block 0 runs every step, and when
+its residual moves less than the relative-L1 threshold, the remaining blocks
+are skipped and their previous contribution replayed. `auto` uses threshold
+0.10, measured at 1.85× on `wan22-t2v-a14b:q8` (605.6 s → 327.4 s at
+33f/832x480) with no visible artifacting. A cached run is a different sample of
+comparable quality, not the same frames faster — skipping steps changes the
+trajectory. The conditional and unconditional passes keep independent caches
+and the cache resets at the A14B expert swap. It refuses (with a message rather
+than a silent no-op) on the 4-step Lightning distill tiers and on schedules
+under 12 steps — neither has redundant steps to skip. `off` (the default) is
+bit-identical to the uncached engine.
 
 ## Quantized checkpoints and adapters
 
