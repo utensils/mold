@@ -3163,6 +3163,7 @@ async fn placement_preview_for_request_authenticated(
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
         request.normalise_output_format(Some(mold_core::minimax_h3::FAMILY));
+        crate::h3_private_bridge::substitute_redacted_preview_endpoints(&mut request);
         crate::h3_private_bridge::pin_private_preview_seed(&mut request)?;
     }
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]

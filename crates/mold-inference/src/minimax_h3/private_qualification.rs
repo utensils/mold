@@ -295,6 +295,9 @@ pub(crate) fn qualify_private_artifacts_with_control(
             .checked_add(artifact.file.size_bytes)
             .ok_or_else(|| anyhow!("private H3 artifact byte count overflow"))
     })?;
+    for artifact in &artifacts {
+        require_owner_only_regular_artifact(artifact)?;
+    }
 
     let mut verified_before = 0_u64;
     let mut authenticated_identities = BTreeMap::new();
@@ -882,6 +885,86 @@ fn resolve_artifact<'a>(
     })
 }
 
+/// Cheap fail-closed policy gate applied to every artifact BEFORE bulk
+/// hashing. Every H3 artifact reader (Comfy DiT, Qwen NVFP4-AWQ, VAEs)
+/// independently refuses symlinks and group/other-writable files, but those
+/// checks only ran during structural inspection — after the artifact's full
+/// bytes (and every earlier artifact's) were already hashed, so a mode-bit
+/// problem surfaced minutes into a placement preview instead of instantly.
+fn require_owner_only_regular_artifact(artifact: &ResolvedArtifact<'_>) -> Result<()> {
+    let relative_path = portable_path(&artifact.relative_path)?;
+    let metadata = fs::symlink_metadata(&artifact.canonical_path)
+        .with_context(|| format!("failed to inspect private H3 artifact {relative_path}"))?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        bail!("private H3 artifact {relative_path} must be a regular non-symlink file")
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o022 != 0 {
+        bail!("private H3 artifact {relative_path} must not be group/other writable")
+    }
+    Ok(())
+}
+
+/// Process-lifetime SHA-256 digest cache for the bulk artifact reads.
+///
+/// Placement previews and admission run full artifact qualification per
+/// request — and per candidate device — which re-hashed the same ~42 GB
+/// checkpoint set every time and made an H3 preview take minutes (the desktop
+/// sat in "Planning…" with no feedback). A digest may be reused only when the
+/// file's complete metadata identity (device, inode, size, mode, owner,
+/// mtime, ctime — the same `FileIdentity` the admission→dispatch revalidation
+/// already trusts) is byte-for-byte unchanged AND the pinned manifest hash
+/// matches; anything else re-hashes. Every structural, scope, and support
+/// check still runs on each qualification — only the redundant bulk read is
+/// skipped.
+static ARTIFACT_DIGEST_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, (FileIdentity, String)>>,
+> = std::sync::OnceLock::new();
+
+fn artifact_digest_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, (FileIdentity, String)>> {
+    ARTIFACT_DIGEST_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn lookup_cached_artifact_digest(
+    canonical_path: &Path,
+    identity: &FileIdentity,
+    expected_sha: &str,
+) -> Option<String> {
+    let cache = artifact_digest_cache().lock().ok()?;
+    let (cached_identity, cached_sha) = cache.get(canonical_path)?;
+    if cached_identity == identity && cached_sha.eq_ignore_ascii_case(expected_sha) {
+        Some(cached_sha.clone())
+    } else {
+        None
+    }
+}
+
+fn store_cached_artifact_digest(canonical_path: &Path, identity: FileIdentity, sha256: String) {
+    if let Ok(mut cache) = artifact_digest_cache().lock() {
+        cache.insert(canonical_path.to_path_buf(), (identity, sha256));
+    }
+}
+
+/// Per-canonical-path single-flight guard: concurrent qualifications that both
+/// miss the digest cache must not duplicate a cold multi-gigabyte hash. The
+/// loser blocks until the winner stores its digest, then reuses it through the
+/// ordinary cache lookup. Poisoning is deliberately ignored — a panicking
+/// winner leaves no cache entry, so the next holder simply re-hashes.
+static ARTIFACT_HASH_FLIGHTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>>,
+> = std::sync::OnceLock::new();
+
+fn artifact_hash_flight(canonical_path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let flights = ARTIFACT_HASH_FLIGHTS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut map = match flights.lock() {
+        Ok(map) => map,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    map.entry(canonical_path.to_path_buf()).or_default().clone()
+}
+
 fn hash_exact_file(
     artifact: &ResolvedArtifact<'_>,
     expected_sha: &str,
@@ -913,6 +996,39 @@ fn hash_exact_file(
             before.len,
             artifact.file.size_bytes
         )
+    }
+    let flight = artifact_hash_flight(&artifact.canonical_path);
+    let _hash_flight = loop {
+        match flight.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                // A zero-progress heartbeat keeps the caller's cooperative
+                // cancellation live while another attempt owns the flight.
+                progress(H3ArtifactHashProgress {
+                    relative_path: relative_path.clone(),
+                    artifact_bytes_verified: 0,
+                    artifact_bytes_total: before.len,
+                    total_bytes_verified: verified_before,
+                    total_bytes,
+                })?;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    };
+    if let Some(cached_sha) =
+        lookup_cached_artifact_digest(&artifact.canonical_path, &before, expected_sha)
+    {
+        progress(H3ArtifactHashProgress {
+            relative_path,
+            artifact_bytes_verified: before.len,
+            artifact_bytes_total: before.len,
+            total_bytes_verified: verified_before
+                .checked_add(before.len)
+                .ok_or_else(|| anyhow!("private H3 progress byte count overflow"))?,
+            total_bytes,
+        })?;
+        return Ok((cached_sha, before));
     }
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
@@ -964,6 +1080,7 @@ fn hash_exact_file(
             "private H3 artifact {relative_path} SHA-256 mismatch: expected {expected_sha}, found {actual}"
         )
     }
+    store_cached_artifact_digest(&artifact.canonical_path, before.clone(), actual.clone());
     Ok((actual, before))
 }
 
@@ -1647,6 +1764,121 @@ mod tests {
             12.0,
         )
         .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cheap_policy_precheck_rejects_writable_artifacts_before_any_hashing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("artifact.safetensors");
+        fs::write(&path, b"artifact bytes").unwrap();
+
+        let manifest = qualification_manifest(contract::FL2VA_COMFY).unwrap().0;
+        let artifact = ResolvedArtifact {
+            file: &manifest.files[0],
+            relative_path: PathBuf::from("artifact.safetensors"),
+            canonical_path: path.clone(),
+        };
+
+        set_mode(&path, 0o644);
+        require_owner_only_regular_artifact(&artifact).unwrap();
+
+        // Group- or other-writable artifacts fail the same policy every H3
+        // reader enforces — but here, before tens of gigabytes are hashed.
+        set_mode(&path, 0o664);
+        assert!(require_owner_only_regular_artifact(&artifact)
+            .unwrap_err()
+            .to_string()
+            .contains("group/other writable"));
+        set_mode(&path, 0o646);
+        assert!(require_owner_only_regular_artifact(&artifact).is_err());
+
+        // A symlinked artifact is refused outright.
+        use std::os::unix::fs::symlink;
+        let target = directory.path().join("target.safetensors");
+        fs::write(&target, b"aliased").unwrap();
+        let link = directory.path().join("link.safetensors");
+        symlink(&target, &link).unwrap();
+        let aliased = ResolvedArtifact {
+            file: &manifest.files[0],
+            relative_path: PathBuf::from("link.safetensors"),
+            canonical_path: link,
+        };
+        assert!(require_owner_only_regular_artifact(&aliased).is_err());
+    }
+
+    #[test]
+    fn digest_cache_reuses_only_byte_identical_metadata_identities() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("artifact.safetensors");
+        fs::write(&path, b"cached artifact bytes").unwrap();
+        let identity = FileIdentity::from_metadata(&fs::symlink_metadata(&path).unwrap());
+        let sha = "a".repeat(64);
+
+        // Nothing cached yet.
+        assert!(lookup_cached_artifact_digest(&path, &identity, &sha).is_none());
+
+        store_cached_artifact_digest(&path, identity.clone(), sha.clone());
+        assert_eq!(
+            lookup_cached_artifact_digest(&path, &identity, &sha).as_deref(),
+            Some(sha.as_str())
+        );
+        // The pinned manifest digest is part of the hit condition — a cache
+        // entry can never satisfy a different expected hash.
+        assert!(lookup_cached_artifact_digest(&path, &identity, &"b".repeat(64)).is_none());
+
+        // Any metadata drift (here: a rewrite bumping mtime/ctime/size) is a
+        // miss, so changed bytes are always re-hashed.
+        fs::write(&path, b"replaced artifact bytes!").unwrap();
+        let changed = FileIdentity::from_metadata(&fs::symlink_metadata(&path).unwrap());
+        assert!(lookup_cached_artifact_digest(&path, &changed, &sha).is_none());
+
+        // Storing the new identity evicts the stale entry.
+        let new_sha = "c".repeat(64);
+        store_cached_artifact_digest(&path, changed.clone(), new_sha.clone());
+        assert_eq!(
+            lookup_cached_artifact_digest(&path, &changed, &new_sha).as_deref(),
+            Some(new_sha.as_str())
+        );
+        assert!(lookup_cached_artifact_digest(&path, &identity, &sha).is_none());
+    }
+
+    #[test]
+    fn hash_flight_serializes_cold_fills_per_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("flight.safetensors");
+        fs::write(&path, b"flight artifact bytes").unwrap();
+        let other = directory.path().join("other.safetensors");
+
+        // One flight per canonical path, shared across callers.
+        assert!(std::sync::Arc::ptr_eq(
+            &artifact_hash_flight(&path),
+            &artifact_hash_flight(&path)
+        ));
+        assert!(!std::sync::Arc::ptr_eq(
+            &artifact_hash_flight(&path),
+            &artifact_hash_flight(&other)
+        ));
+
+        // A loser blocked on the winner's flight observes the winner's stored
+        // digest as soon as it acquires the lock — it never re-hashes.
+        let identity = FileIdentity::from_metadata(&fs::symlink_metadata(&path).unwrap());
+        let sha = "d".repeat(64);
+        let flight = artifact_hash_flight(&path);
+        let winner_guard = flight.lock().unwrap();
+        let loser = std::thread::spawn({
+            let flight = artifact_hash_flight(&path);
+            let path = path.clone();
+            let identity = identity.clone();
+            let sha = sha.clone();
+            move || {
+                let _guard = flight.lock().unwrap();
+                lookup_cached_artifact_digest(&path, &identity, &sha)
+            }
+        });
+        store_cached_artifact_digest(&path, identity, sha.clone());
+        drop(winner_guard);
+        assert_eq!(loser.join().unwrap().as_deref(), Some(sha.as_str()));
     }
 
     #[cfg(unix)]

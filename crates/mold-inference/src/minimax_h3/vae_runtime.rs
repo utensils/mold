@@ -575,7 +575,7 @@ impl ComponentLoadFacts {
 pub(crate) struct H3AuthenticatedComfyVaeAuthority {
     plan: FrozenH3ComfyVaeLoadPlan,
     opened: Vec<OpenedArtifact>,
-    staged: StagedWeights,
+    staged: std::sync::Arc<StagedWeights>,
     visual_config: Vec<u8>,
     audio_config: Vec<u8>,
     visual_facts: ComponentLoadFacts,
@@ -780,8 +780,7 @@ pub(crate) fn open_h3_comfy_vae_authority(
     let audio_config = opened_for_mut(&mut opened, H3ComfyVaeArtifactRole::AudioConfig)?
         .read_authenticated_config(observer)?;
     let required_staging_bytes = required_staging_bytes(plan)?;
-    ensure_staging_capacity(plan, required_staging_bytes)?;
-    let staged = StagedWeights::create(plan, &mut opened, observer)?;
+    let staged = staged_weights_for_plan(plan, &mut opened, observer)?;
     for artifact in &opened {
         artifact.validate_source("before VAE pre-allocation inspection")?;
     }
@@ -1775,6 +1774,191 @@ struct StagedWeight {
     file: File,
 }
 
+/// Process-lifetime reuse of the private authenticated staging copies.
+///
+/// Every production VAE open previously copied both weight files (~5.8 GB)
+/// into a fresh tempdir under the staging root — and admission opens the VAE
+/// once per candidate device, so a single placement preview on a multi-GPU
+/// host paid several full copies. A staged pair is reused only while BOTH the
+/// opened source metadata identities (the same identities `stage_weight`'s
+/// own held-descriptor fences trust) are byte-for-byte unchanged AND the
+/// staged files themselves still validate; any drift evicts and re-stages.
+/// The cross-attempt validation identity deliberately excludes staging facts,
+/// so reuse cannot leak between evidence domains. Per-root single-flight
+/// keeps concurrent cold opens from duplicating the copy.
+struct CachedStagedWeights {
+    visual_source: FileIdentity,
+    audio_source: FileIdentity,
+    staged: std::sync::Arc<StagedWeights>,
+}
+
+static STAGED_WEIGHTS_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, CachedStagedWeights>>,
+> = std::sync::OnceLock::new();
+
+static STAGING_FLIGHTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>>,
+> = std::sync::OnceLock::new();
+
+fn staging_flight(staging_root: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let flights =
+        STAGING_FLIGHTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut map = match flights.lock() {
+        Ok(map) => map,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    map.entry(staging_root.to_path_buf()).or_default().clone()
+}
+
+fn staged_weights_for_plan(
+    plan: &FrozenH3ComfyVaeLoadPlan,
+    opened: &mut [OpenedArtifact],
+    observer: &mut dyn H3ComfyVaeLoadObserver,
+) -> LoadResult<std::sync::Arc<StagedWeights>> {
+    let visual_source = opened_for_mut(opened, H3ComfyVaeArtifactRole::VisualWeights)?
+        .identity
+        .clone();
+    let audio_source = opened_for_mut(opened, H3ComfyVaeArtifactRole::AudioWeights)?
+        .identity
+        .clone();
+    let flight = staging_flight(&plan.staging_root);
+    let staging_total = required_staging_bytes(plan)?;
+    let _flight_guard = loop {
+        match flight.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                // A zero-progress heartbeat keeps the caller's cooperative
+                // cancellation live while another attempt owns the flight.
+                if !checkpoint(
+                    observer,
+                    H3ComfyVaeArtifactRole::VisualWeights,
+                    H3ComfyVaeLoadPhase::Stage,
+                    0,
+                    staging_total,
+                ) {
+                    return Err(H3ComfyVaeLoadError::Cancelled {
+                        role: H3ComfyVaeArtifactRole::VisualWeights,
+                        phase: H3ComfyVaeLoadPhase::Stage,
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    };
+    let cache = STAGED_WEIGHTS_CACHE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(mut entries) = cache.lock() {
+        if let Some(entry) = entries.get(&plan.staging_root) {
+            if entry.visual_source == visual_source
+                && entry.audio_source == audio_source
+                && entry
+                    .staged
+                    .validate("while reusing the cached private stage")
+                    .is_ok()
+            {
+                return Ok(entry.staged.clone());
+            }
+            entries.remove(&plan.staging_root);
+        }
+    }
+    sweep_stale_stage_directories(&plan.staging_root);
+    ensure_staging_capacity(plan, staging_total)?;
+    let staged = std::sync::Arc::new(StagedWeights::create(plan, opened, observer)?);
+    if let Ok(mut entries) = cache.lock() {
+        entries.insert(
+            plan.staging_root.clone(),
+            CachedStagedWeights {
+                visual_source,
+                audio_source,
+                staged: staged.clone(),
+            },
+        );
+    }
+    Ok(staged)
+}
+
+const STAGE_DIRECTORY_PREFIX: &str = ".mold-h3-vae-stage-";
+
+fn stage_directory_prefix_for_this_process() -> String {
+    format!("{STAGE_DIRECTORY_PREFIX}{}-", std::process::id())
+}
+
+/// A legacy stage directory (no embedded owner PID) is removed only past
+/// this age. Every released pre-PID binary created and dropped its stage
+/// within one admission attempt — minutes — so a day-old legacy directory is
+/// conclusively a crash leftover, while a fresh one may belong to a live
+/// older server sharing the root during a rolling restart. (The only build
+/// that retains a legacy-named stage for its whole lifetime is this change's
+/// own unreleased intermediate — the staged cache and PID tagging ship
+/// together in the squashed release commit, so no fielded binary can hold a
+/// legacy name past this expiry.)
+const LEGACY_STAGE_EXPIRY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Remove staged directories abandoned by dead processes.
+///
+/// The process-lifetime staged cache deliberately never drops its `TempDir`
+/// at normal exit (Rust runs no destructors for statics), so every restart
+/// would otherwise strand ~5.8 GB under the staging root. Stage directories
+/// embed their owner's PID; a sweep — always under this root's staging
+/// flight, right before a fresh stage is created — removes only directories
+/// whose owner is provably gone, or legacy unowned names old enough that no
+/// live process can still be using them.
+fn sweep_stale_stage_directories(staging_root: &Path) {
+    sweep_stale_stage_directories_with_expiry(staging_root, LEGACY_STAGE_EXPIRY)
+}
+
+fn sweep_stale_stage_directories_with_expiry(
+    staging_root: &Path,
+    legacy_expiry: std::time::Duration,
+) {
+    let Ok(entries) = std::fs::read_dir(staging_root) else {
+        return;
+    };
+    let own = stage_directory_prefix_for_this_process();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(suffix) = name.strip_prefix(STAGE_DIRECTORY_PREFIX) else {
+            continue;
+        };
+        if name.starts_with(&own) {
+            // This process's own stages are governed by the cache eviction
+            // above; a directory here without a live cache entry is stale.
+        } else if let Some(owner) = suffix
+            .split('-')
+            .next()
+            .and_then(|pid| pid.parse::<i32>().ok())
+        {
+            #[cfg(unix)]
+            {
+                // SAFETY: signal 0 performs permission/existence checks only.
+                let alive = unsafe { libc::kill(owner, 0) } == 0
+                    || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+                if alive {
+                    continue;
+                }
+            }
+            #[cfg(not(unix))]
+            continue;
+        } else {
+            // Legacy unowned name: without an owner to test, only age proves
+            // abandonment.
+            let stale = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age >= legacy_expiry);
+            if !stale {
+                continue;
+            }
+        }
+        // A removal failure is not fatal — capacity enforcement reports it.
+        let _ = std::fs::remove_dir_all(entry.path());
+    }
+}
+
 impl StagedWeights {
     fn create(
         plan: &FrozenH3ComfyVaeLoadPlan,
@@ -1782,7 +1966,7 @@ impl StagedWeights {
         observer: &mut dyn H3ComfyVaeLoadObserver,
     ) -> LoadResult<Self> {
         let directory = tempfile::Builder::new()
-            .prefix(".mold-h3-vae-stage-")
+            .prefix(&stage_directory_prefix_for_this_process())
             .tempdir_in(&plan.staging_root)
             .map_err(|error| {
                 H3ComfyVaeLoadError::InvalidPlan(format!(
@@ -2691,7 +2875,8 @@ mod tests {
             .unwrap()
             .read_authenticated_config(&mut observer)
             .unwrap();
-        let staged = StagedWeights::create(plan, &mut opened, &mut observer).unwrap();
+        let staged =
+            std::sync::Arc::new(StagedWeights::create(plan, &mut opened, &mut observer).unwrap());
         let (_, visual_facts) = fake_load(
             H3ComfyVaeArtifactRole::VisualWeights,
             staged.path(H3ComfyVaeArtifactRole::VisualWeights).unwrap(),
@@ -2910,6 +3095,95 @@ mod tests {
         std::fs::write(&paths.visual_weights, b"replacement").unwrap();
         assert!(!bundle.artifact_lease.is_active());
         assert_eq!(bundle.visual_vae.decode(3), b'v'.wrapping_add(3));
+    }
+
+    #[test]
+    fn staged_weights_are_reused_across_opens_until_sources_drift() {
+        fn reopen(
+            plan: &FrozenH3ComfyVaeLoadPlan,
+            observer: &mut RecordingObserver,
+        ) -> Vec<OpenedArtifact> {
+            H3ComfyVaeArtifactRole::ALL
+                .into_iter()
+                .map(|role| {
+                    OpenedArtifact::open(
+                        plan.artifact(role).unwrap().clone(),
+                        plan.paths.get(role),
+                        observer,
+                    )
+                    .unwrap()
+                })
+                .collect()
+        }
+        fn stage_events(observer: &RecordingObserver) -> usize {
+            observer
+                .events
+                .iter()
+                .filter(|event| event.phase == H3ComfyVaeLoadPhase::Stage)
+                .count()
+        }
+
+        let source = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let (paths, artifacts) = write_artifacts(source.path(), b"\x08visual");
+        let plan = FrozenH3ComfyVaeLoadPlan::synthetic(
+            paths.clone(),
+            staging.path().to_path_buf(),
+            artifacts,
+        )
+        .unwrap();
+
+        let mut first_observer = RecordingObserver::default();
+        let mut opened = reopen(&plan, &mut first_observer);
+        let first = staged_weights_for_plan(&plan, &mut opened, &mut first_observer).unwrap();
+        assert!(stage_events(&first_observer) > 0);
+
+        // A second open with unchanged sources reuses the exact staged pair
+        // without copying a byte.
+        let mut second_observer = RecordingObserver::default();
+        let mut reopened = reopen(&plan, &mut second_observer);
+        let second = staged_weights_for_plan(&plan, &mut reopened, &mut second_observer).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert_eq!(stage_events(&second_observer), 0);
+
+        // Any source drift — here a rewrite bumping mtime/ctime with identical
+        // bytes — evicts the cached stage and re-stages.
+        std::fs::write(&paths.visual_weights, b"\x08visual").unwrap();
+        let mut third_observer = RecordingObserver::default();
+        let mut redrifted = reopen(&plan, &mut third_observer);
+        let third = staged_weights_for_plan(&plan, &mut redrifted, &mut third_observer).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&second, &third));
+        assert!(stage_events(&third_observer) > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_stage_directories_are_swept_only_with_dead_owner_or_expiry_proof() {
+        let staging = tempfile::tempdir().unwrap();
+        let dead = staging.path().join(".mold-h3-vae-stage-999999999-dead");
+        let legacy = staging.path().join(".mold-h3-vae-stage-legacy");
+        // PID 1 is always alive (kill(1, 0) answers EPERM), standing in for
+        // another live process's active stage.
+        let live = staging.path().join(".mold-h3-vae-stage-1-live");
+        let unrelated = staging.path().join("unrelated-directory");
+        for path in [&dead, &legacy, &live, &unrelated] {
+            std::fs::create_dir(path).unwrap();
+        }
+
+        // A fresh legacy directory may belong to a live pre-PID server during
+        // a rolling restart — the production expiry preserves it.
+        sweep_stale_stage_directories(staging.path());
+        assert!(!dead.exists());
+        assert!(legacy.exists());
+        assert!(live.exists());
+        assert!(unrelated.exists());
+
+        // Once its age passes the expiry, the legacy directory is provably
+        // abandoned and removed; live-owner stages still survive.
+        sweep_stale_stage_directories_with_expiry(staging.path(), std::time::Duration::ZERO);
+        assert!(!legacy.exists());
+        assert!(live.exists());
+        assert!(unrelated.exists());
     }
 
     #[test]

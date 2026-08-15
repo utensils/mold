@@ -1,13 +1,21 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   comparePlacementPreviews,
   classifyPlacementPreview,
+  previewChainPlacement,
+  previewGenerationPlacement,
   previewRequestForSiblingFanout,
   redactChainForPlacement,
   redactGenerationForPlacement,
   requiresAuthoritativePlacement,
   type GenerationPlacementPreview,
 } from "./generationPlacement";
+
+const apiJsonTo = vi.hoisted(() => vi.fn().mockResolvedValue({}));
+vi.mock("./client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./client")>()),
+  apiJsonTo,
+}));
 
 function planned(
   completion: number,
@@ -382,5 +390,59 @@ describe("generation placement preview", () => {
         { prompt: "", frames: 121, transition: "cut" },
       ],
     });
+  });
+
+  test("both preview probes carry a bounded timeout so a hung server can never leave planning stuck forever", async () => {
+    apiJsonTo.mockClear();
+    const target = { baseUrl: "http://plato:7680", apiKey: null };
+    await previewGenerationPlacement(target, { model: "m", prompt: "p" });
+    await previewChainPlacement(target, { model: "m", prompt: "p" });
+
+    expect(apiJsonTo).toHaveBeenCalledTimes(2);
+    for (const call of apiJsonTo.mock.calls) {
+      const init = call[2] as RequestInit;
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+    }
+  });
+
+  test("falls back to a timer-armed controller when AbortSignal.timeout is unavailable (Safari 15)", async () => {
+    apiJsonTo.mockClear();
+    vi.useFakeTimers();
+    const timeoutFactory = AbortSignal.timeout;
+    Object.defineProperty(AbortSignal, "timeout", {
+      configurable: true,
+      value: undefined,
+    });
+    expect(typeof AbortSignal.timeout).toBe("undefined");
+    try {
+      // A probe that never settles hits the deadline and aborts.
+      apiJsonTo.mockImplementationOnce(() => new Promise(() => {}));
+      const pending = previewGenerationPlacement(
+        { baseUrl: "http://plato:7680", apiKey: null },
+        { model: "m", prompt: "p" },
+      );
+      void pending.catch(() => {});
+      const init = apiJsonTo.mock.calls[0]![2] as RequestInit;
+      const signal = init.signal as AbortSignal;
+      expect(signal).toBeInstanceOf(AbortSignal);
+      expect(signal.aborted).toBe(false);
+      vi.advanceTimersByTime(900_000);
+      expect(signal.aborted).toBe(true);
+
+      // A completed probe disarms its fallback timer instead of retaining
+      // the controller for the full deadline (Codex review).
+      apiJsonTo.mockResolvedValueOnce({});
+      await previewGenerationPlacement(
+        { baseUrl: "http://plato:7680", apiKey: null },
+        { model: "m", prompt: "p" },
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      Object.defineProperty(AbortSignal, "timeout", {
+        configurable: true,
+        value: timeoutFactory,
+      });
+      vi.useRealTimers();
+    }
   });
 });

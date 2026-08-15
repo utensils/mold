@@ -1055,6 +1055,31 @@ struct EncodedVideo {
     thumbnail_png: Vec<u8>,
 }
 
+/// Solid endpoint placeholder for redacted placement probes.
+///
+/// Placement previews redact media, so a present FL2VA endpoint arrives as
+/// zero bytes. Admission decodes endpoints for real submissions, which made
+/// every H3 preview refuse with "endpoint is empty" even though the client
+/// validated the real image locally. The probe substitutes this placeholder
+/// at the request's exact target geometry so the preview prices the same
+/// shape; real admission at submit still decodes the real bytes.
+pub fn placeholder_endpoint_png(width: u32, height: u32) -> Vec<u8> {
+    let width = width.clamp(1, MAX_REFERENCE_DIMENSION);
+    let height = height.clamp(1, MAX_REFERENCE_DIMENSION);
+    // Keep the placeholder inside the bounded image contract even for a
+    // pathological request shape — admission must reject the SHAPE, not
+    // choke on an undecodable probe substitute.
+    let height = height
+        .min(u32::try_from(MAX_REFERENCE_IMAGE_PIXELS / u64::from(width)).unwrap_or(u32::MAX));
+    let height = height.max(1);
+    let image = RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
+    let mut bytes = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image)
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("in-memory PNG encoding of a bounded solid image cannot fail");
+    bytes.into_inner()
+}
+
 pub(crate) fn collect_endpoint_bytes(
     req: &GenerateRequest,
     mode: Mode,
@@ -1813,6 +1838,20 @@ mod tests {
             distill_strength_low: None,
             placement: None,
         }
+    }
+
+    #[test]
+    fn placeholder_endpoint_matches_requested_geometry_and_stays_bounded() {
+        let bytes = placeholder_endpoint_png(1344, 768);
+        let decoded = decode_endpoint(&bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (1344, 768));
+
+        // Degenerate and oversized requests clamp inside the bounded image
+        // contract instead of producing an undecodable or refused endpoint.
+        let clamped = placeholder_endpoint_png(0, 10_000_000);
+        let decoded = decode_endpoint(&clamped).unwrap();
+        assert_eq!(decoded.width(), 1);
+        assert_eq!(decoded.height(), MAX_REFERENCE_DIMENSION);
     }
 
     fn png(width: u32, height: u32, color: [u8; 3]) -> Vec<u8> {

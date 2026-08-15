@@ -33,6 +33,8 @@ pub(crate) mod metal_reduce;
 // future pipeline to consume.
 #[allow(dead_code)]
 pub(crate) mod minimax_h3;
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+pub use minimax_h3::pipeline::placeholder_endpoint_png as h3_placeholder_endpoint_png;
 #[cfg(any(all(feature = "h3", feature = "dev-bins"), feature = "h3-private-uat"))]
 pub use minimax_h3::private_qualification;
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]

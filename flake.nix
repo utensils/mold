@@ -126,7 +126,7 @@
           commonArgs = {
             inherit src;
             pname = "mold";
-            version = "0.10.0";
+            version = workspaceVersion;
             strictDeps = true;
 
             # Pass git metadata so build.rs can embed it (no .git in Nix sandbox).
@@ -415,7 +415,7 @@
           # `mold` binary by `rust-embed` (see `crates/mold-server/build.rs`).
           mold-web = pkgs.stdenv.mkDerivation {
             pname = "mold-web";
-            version = "0.10.0";
+            version = workspaceVersion;
             # Keep the workspace root so Bun can link @mold/studio and @mold/ui.
             src = lib.fileset.toSource {
               root = ./.;

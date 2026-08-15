@@ -1469,6 +1469,11 @@ async fn prepare_h3_private_inputs_for_devices(
         crate::h3_admission::current_h3_host_memory().headroom_bytes();
     let uat_paths =
         crate::h3_private_bridge::H3PrivateUatPathSet::resolve(config.resolved_models_dir());
+    // The public runtime owns its MOLD_HOME-derived staging root; create it
+    // when absent so a fresh deployment can admit. The private-UAT campaign
+    // layout stays fail-closed — its hand-built scope must already exist.
+    #[cfg(feature = "h3")]
+    uat_paths.ensure_staging_root();
     let mut resolved_request = request.clone();
     let mut evidence_by_device = BTreeMap::new();
     let mut failures = BTreeMap::new();
