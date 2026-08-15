@@ -614,8 +614,11 @@ stays visually coherent.
 `mold run` routes automatically: when `--frames` is `≤ 97` you stay on the
 single-clip path; above 97 the request is rewritten into a chain and dispatched
 to the new `/api/generate/chain/stream` endpoint. Chaining is supported for
-every LTX-2 pipeline (two-stage included), for LTX-Video (independent clips),
-and for Wan (checkpoint-dependent seam — see the [Wan page](./wan.md#sequences)).
+the LTX-2 generation pipelines — `one-stage`, `distilled`, `two-stage`, and
+`two-stage-hq` (the specialized keyframe, audio-to-video, IC-LoRA, retake,
+lip-dub, and audio-only modes render single clips only) — for LTX-Video
+(independent clips), and for Wan (checkpoint-dependent seam — see the
+[Wan page](./wan.md#sequences)).
 Image-family models reject `--frames` past their single-request ceiling with an
 actionable error rather than silently over-producing. `/api/models` advertises
 `supports_sequence` per model.
@@ -742,7 +745,9 @@ at the head stays intact.
 
 ### v1 constraints
 
-- **Video families only.** Every LTX-2 pipeline chains; LTX-Video concatenates
+- **Video families only.** The LTX-2 `one-stage`, `distilled`, `two-stage`,
+  and `two-stage-hq` pipelines chain (specialized keyframe, A2V, IC-LoRA,
+  retake, lip-dub, and audio-only modes do not); LTX-Video concatenates
   independent clips; Wan chains per checkpoint (see
   [Wan sequences](./wan.md#sequences)). Image-family models reject `--frames`
   above their single-clip budget.

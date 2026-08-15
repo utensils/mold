@@ -41,8 +41,9 @@ Totals include the shared UMT5-XXL encoder (~11.4 GB), tokenizer, and the
 variant's VAE. The encoder is shared across every Wan model under
 `shared/wan/`, so a second Wan pull only fetches the checkpoint and VAE.
 
-The encoder is also selectable: `--umt5-variant q8|q6|q5` (env
-`MOLD_UMT5_VARIANT`, config `umt5_variant`) swaps the 11.4 GB FP16 encoder for
+The encoder is also selectable: set the `umt5_variant` config key or the
+`MOLD_UMT5_VARIANT` env var to `q8`, `q6`, or `q5` (there is no dedicated CLI
+flag) to swap the 11.4 GB FP16 encoder for
 city96's GGUF export at 6.0, 4.7, or 4.1 GB. `auto` (the default) prefers FP16
 on GPU when it fits and otherwise the largest GGUF that does — the encoder is
 the floor of a wan render's memory estimate, so this is the lever that moves

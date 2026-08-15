@@ -25,17 +25,17 @@ MOLD_HOST=http://gpu-host:7680 MOLD_DISCORD_TOKEN="your-token" mold discord
 
 ## Slash Commands
 
-| Command              | Description                                                                                                                                                               |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes                                                                  |
-| `/sequence`          | Submit 2–16 `\|`-separated prompts as a durable video sequence (LTX-2 or Wan, per the model's advertised sequence support), with per-clip progress and final MP4 delivery |
-| `/expand`            | Expand a short prompt into detailed generation prompts                                                                                                                    |
-| `/models`            | List available models with download/loaded status                                                                                                                         |
-| `/status`            | Show server health, queue summary, and every GPU/MIG device; large fleets paginate across limit-safe follow-up embeds                                                     |
-| `/quota`             | Check your remaining daily generation quota                                                                                                                               |
-| `/admin reset-quota` | Reset a user's daily quota (requires Manage Server)                                                                                                                       |
-| `/admin block`       | Temporarily block a user from generating (requires Manage Server)                                                                                                         |
-| `/admin unblock`     | Unblock a previously blocked user (requires Manage Server)                                                                                                                |
+| Command              | Description                                                                                                                                                                                                                       |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/generate`          | Generate an image or video, including attachment-driven LTX-2 audio-to-video, retake, and keyframe modes                                                                                                                          |
+| `/sequence`          | Submit 2–16 `\|`-separated prompts as a durable video sequence (LTX-2, LTX-Video — which joins independently rendered clips — or Wan, per the model's advertised sequence support), with per-clip progress and final MP4 delivery |
+| `/expand`            | Expand a short prompt into detailed generation prompts                                                                                                                                                                            |
+| `/models`            | List available models with download/loaded status                                                                                                                                                                                 |
+| `/status`            | Show server health, queue summary, and every GPU/MIG device; large fleets paginate across limit-safe follow-up embeds                                                                                                             |
+| `/quota`             | Check your remaining daily generation quota                                                                                                                                                                                       |
+| `/admin reset-quota` | Reset a user's daily quota (requires Manage Server)                                                                                                                                                                               |
+| `/admin block`       | Temporarily block a user from generating (requires Manage Server)                                                                                                                                                                 |
+| `/admin unblock`     | Unblock a previously blocked user (requires Manage Server)                                                                                                                                                                        |
 
 ## Configuration
 
