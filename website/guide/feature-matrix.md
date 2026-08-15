@@ -97,17 +97,17 @@ the full multiscale refinement path.
 
 ## Backend Support
 
-| Family          | CUDA | Metal            | CPU              |
-| --------------- | ---- | ---------------- | ---------------- |
-| FLUX.1 / FLUX.2 | Yes  | Yes              | Yes (slow)       |
-| SDXL / SD 1.5   | Yes  | Yes              | Yes              |
-| SD 3.5          | Yes  | Yes              | Yes              |
-| Z-Image         | Yes  | Yes              | Yes              |
-| Wuerstchen v2   | Yes  | Yes              | Yes              |
-| Qwen-Image      | Yes  | Yes              | Yes              |
-| Qwen-Image-Edit | Yes  | Yes              | Yes              |
-| LTX Video       | Yes  | Yes              | Yes              |
-| **LTX-2**       | Yes  | Yes              | Correctness-only |
+| Family          | CUDA | Metal | CPU              |
+| --------------- | ---- | ----- | ---------------- |
+| FLUX.1 / FLUX.2 | Yes  | Yes   | Yes (slow)       |
+| SDXL / SD 1.5   | Yes  | Yes   | Yes              |
+| SD 3.5          | Yes  | Yes   | Yes              |
+| Z-Image         | Yes  | Yes   | Yes              |
+| Wuerstchen v2   | Yes  | Yes   | Yes              |
+| Qwen-Image      | Yes  | Yes   | Yes              |
+| Qwen-Image-Edit | Yes  | Yes   | Yes              |
+| LTX Video       | Yes  | Yes   | Yes              |
+| **LTX-2**       | Yes  | Yes   | Correctness-only |
 
 ::: tip LTX-2 Metal qualification
 LTX-2 / LTX-2.3's Apple Metal path is performance-qualified: BF16 transformer
