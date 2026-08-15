@@ -57,6 +57,7 @@ const setDeviceEnabled = vi.hoisted(() =>
     }),
   ),
 );
+const toastMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@studio/api/devices", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/devices")>()),
@@ -67,7 +68,7 @@ const hostCapabilitiesCall = vi.hoisted(() => vi.fn());
 const hostQueueCall = vi.hoisted(() => vi.fn());
 
 vi.mock("../lib/toasts", () => ({
-  toast: vi.fn(),
+  toast: toastMock,
   requestConfirm,
   requestText,
 }));
@@ -239,6 +240,7 @@ beforeEach(() => {
   models = [];
   downloadsListing = { active: null, active_jobs: [], queued: [], history: [] };
   cancelQueueJob.mockClear();
+  toastMock.mockClear();
   setQueueJobLane.mockClear();
   moveQueueJob.mockClear();
   pauseHostQueue.mockClear();
@@ -589,6 +591,21 @@ describe("HostDetailPage — queue", () => {
     expect(cancelQueueJob).toHaveBeenCalledWith(
       expect.objectContaining({ id: routeHolder.id }),
       "a",
+    );
+  });
+
+  it("keeps a queued job visible and reports an unconfirmed cancellation", async () => {
+    queueEntries = [queued("a", 0)];
+    cancelQueueJob.mockRejectedValueOnce(new Error("DELETE failed: 404"));
+    const w = await mountDetail();
+
+    await w.get('[data-test="queue-cancel"]').trigger("click");
+    await flushPromises();
+
+    expect(w.find('[data-test="queue-cancel"]').exists()).toBe(true);
+    expect(toastMock).toHaveBeenCalledWith(
+      "error",
+      "Couldn't cancel job: DELETE failed: 404",
     );
   });
 

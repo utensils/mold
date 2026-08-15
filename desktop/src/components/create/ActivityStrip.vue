@@ -99,7 +99,12 @@ watchEffect(() => {
 });
 
 function cancel(job: Job) {
-  void generation.cancel(job.clientId).then(() => toasts.push("Cancelled"));
+  void generation
+    .cancel(job.clientId)
+    .then((cancelled) => {
+      if (cancelled) toasts.push("Cancelled");
+    })
+    .catch((error) => toasts.push(error instanceof Error ? error.message : String(error), "error"));
 }
 
 // ── Sequences via the shared activity merge ──────────────────────────────────

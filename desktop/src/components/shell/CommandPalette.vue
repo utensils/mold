@@ -329,7 +329,14 @@ const staticCommands = computed<Command[]>(() => {
       id: "act-cancel",
       title: "Cancel job",
       run: () => {
-        void generation.cancel().then(() => toasts.push("Cancelled"));
+        void generation
+          .cancel()
+          .then((cancelled) => {
+            if (cancelled) toasts.push("Cancelled");
+          })
+          .catch((error) =>
+            toasts.push(error instanceof Error ? error.message : String(error), "error"),
+          );
         close();
       },
     });
@@ -341,9 +348,18 @@ const staticCommands = computed<Command[]>(() => {
       keywords: ["queue", "stop"],
       run: () => {
         const ids = generation.pending.map((j) => j.clientId);
-        void Promise.all(ids.map((id) => generation.cancel(id))).then(() =>
-          toasts.push("Cancelled all jobs"),
-        );
+        void Promise.all(ids.map((id) => generation.cancel(id)))
+          .then((outcomes) => {
+            const cancelled = outcomes.filter(Boolean).length;
+            if (cancelled === outcomes.length) toasts.push("Cancelled all jobs");
+            else if (cancelled > 0)
+              toasts.push(
+                `Cancelled ${cancelled} ${cancelled === 1 ? "job" : "jobs"}; remaining jobs already settled`,
+              );
+          })
+          .catch((error) =>
+            toasts.push(error instanceof Error ? error.message : String(error), "error"),
+          );
         close();
       },
     });

@@ -195,7 +195,15 @@ function jobMenu(job: Job): MenuEntry[] {
       label: "Cancel",
       danger: true,
       disabled: !live,
-      action: () => void generation.cancel(job.clientId).then(() => toasts.push("Cancelled")),
+      action: () =>
+        void generation
+          .cancel(job.clientId)
+          .then((cancelled) => {
+            if (cancelled) toasts.push("Cancelled");
+          })
+          .catch((error) =>
+            toasts.push(error instanceof Error ? error.message : String(error), "error"),
+          ),
     },
     { separator: true },
     {

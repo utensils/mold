@@ -25,6 +25,8 @@ import { useHostsStore } from "../../stores/hosts";
 import { useConnectionStore } from "../../stores/connection";
 import { useDownloadsStore } from "../../stores/downloads";
 import { useComposerStore } from "../../stores/composer";
+import { useGenerationStore } from "../../stores/generation";
+import { useToastStore } from "../../stores/toasts";
 import type { GalleryImage, ModelEntry } from "../../lib/api/types";
 
 beforeEach(() => {
@@ -112,6 +114,29 @@ describe("CommandPalette command registry", () => {
     const texts = wrapper.findAll("[role='option']").map((o) => o.text());
     expect(texts.some((t) => t.includes("Switch to built-in engine"))).toBe(false);
     expect(texts.some((t) => t.includes("Restart engine"))).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("reports the confirmed count when bulk cancellation races terminal jobs", async () => {
+    const generation = useGenerationStore();
+    generation.jobs = [
+      { clientId: 1, status: "queued" },
+      { clientId: 2, status: "queued" },
+    ] as never;
+    vi.spyOn(generation, "cancel").mockImplementation(async (id) => id === 1);
+    const wrapper = await openPalette();
+    await wrapper.get("input").setValue("cancel all");
+
+    await wrapper
+      .findAll("[role='option']")
+      .find((option) => option.text().includes("Cancel all 2 jobs"))!
+      .trigger("click");
+    await flushPromises();
+
+    expect(useToastStore().items.map((item) => item.message)).toContain(
+      "Cancelled 1 job; remaining jobs already settled",
+    );
+    expect(useToastStore().items.map((item) => item.message)).not.toContain("Cancelled all jobs");
     wrapper.unmount();
   });
 });

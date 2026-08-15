@@ -7,6 +7,7 @@ import { useGenerationStore } from "../../stores/generation";
 import { useHostsStore } from "../../stores/hosts";
 import { useRunPodStore } from "../../stores/runpod";
 import { useLiveActivityStore } from "../../stores/liveActivity";
+import { useToastStore } from "../../stores/toasts";
 import type { ChainJobSummary } from "@studio/lib/api/chainTypes";
 import type { Job } from "../../stores/generation";
 
@@ -82,13 +83,25 @@ describe("ActivityStrip", () => {
 
   it("lists queued siblings with a working cancel", async () => {
     const generation = useGenerationStore();
-    const cancel = vi.spyOn(generation, "cancel").mockResolvedValue(undefined as never);
+    const cancel = vi.spyOn(generation, "cancel").mockResolvedValue(true);
     generation.jobs = [{ ...baseJob(), clientId: 7, status: "queued", prompt: "queued one" }];
     const wrapper = mount(ActivityStrip);
     const pill = wrapper.get("[data-test='activity-queued']");
     expect(pill.text()).toContain("queued one");
     await pill.get("button").trigger("click");
     expect(cancel).toHaveBeenCalledWith(7);
+    expect(useToastStore().items.map((item) => item.message)).toContain("Cancelled");
+  });
+
+  it("does not claim cancellation when a terminal server event won the race", async () => {
+    const generation = useGenerationStore();
+    vi.spyOn(generation, "cancel").mockResolvedValue(false);
+    generation.jobs = [{ ...baseJob(), clientId: 7, status: "queued" }];
+    const wrapper = mount(ActivityStrip);
+
+    await wrapper.get("[data-test='activity-queued'] button").trigger("click");
+
+    expect(useToastStore().items).toHaveLength(0);
   });
 
   it("selects queued prints with Space", async () => {

@@ -1,6 +1,6 @@
 import { reactive } from "vue";
 import { defineStore } from "pinia";
-import { apiFetchTo, currentTarget, ApiError, type ApiTarget } from "../lib/api/client";
+import { apiFetchTo, currentTarget, type ApiTarget } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
 import { evictMedia, galleryMediaPath, streamableMediaUrl } from "../lib/gallery/media";
 import { ipc } from "../lib/ipc";
@@ -244,11 +244,11 @@ const MIME: Record<string, string> = {
 
 /**
  * Held generation SSE requests share the browser's per-origin HTTP pool with
- * gallery reads and queue cancellation. Keep two slots per host globally —
- * not merely per batch — so repeated Generate taps cannot starve those other
- * requests. Later jobs remain visible as locally queued until a slot opens.
+ * gallery reads and queue cancellation. Four slots match the web surface and
+ * let a four-worker host stay busy while retaining connection headroom. The
+ * limit is global per host, not merely per batch.
  */
-const MAX_STREAMS_PER_TARGET = 2;
+const MAX_STREAMS_PER_TARGET = 4;
 
 interface StreamSlotWaiter {
   signal: AbortSignal;
@@ -482,7 +482,7 @@ export const useGenerationStore = defineStore("generation", {
         if (job.status === "error") return Promise.resolve();
         return this.streamJob(job, plans[i]!);
       });
-      const settled = runWithConcurrency(tasks, 2).then(() => {
+      const settled = runWithConcurrency(tasks, MAX_STREAMS_PER_TARGET).then(() => {
         // Background notification (the view toasts in the foreground).
         const failed = jobs.find((s) => s.status === "error");
         const completed = jobs.find((s) => s.status === "complete");
@@ -517,15 +517,15 @@ export const useGenerationStore = defineStore("generation", {
      * Cancel one job (default: the canvas job). Ordinary queued jobs leave
      * the server queue via DELETE /api/queue/:id; automatic chains use their
      * durable shim id with POST /api/chain-jobs/:id/cancel. The stream is
-     * aborted either way and the job is marked cancelled.
+     * aborted only after the server confirms cancellation. A running job's
+     * 409 response leaves its stream and local state intact.
      */
-    async cancel(clientId?: number): Promise<void> {
+    async cancel(clientId?: number): Promise<boolean> {
       const job =
         clientId !== undefined
           ? (this.jobs.find((j) => j.clientId === clientId) ?? null)
           : this.active;
-      if (!job || job.status === "complete" || job.status === "error") return;
-      let cancellationError: unknown = null;
+      if (!job || job.status === "complete" || job.status === "error") return false;
       if (job.id) {
         try {
           const chainRoute = chainRoutes.get(job.clientId);
@@ -537,28 +537,23 @@ export const useGenerationStore = defineStore("generation", {
             { method: chainRoute ? "POST" : "DELETE" },
           );
         } catch (err) {
-          if (!(err instanceof ApiError && (err.status === 409 || err.status === 404))) {
-            cancellationError = err;
-          }
+          // A terminal SSE frame may win while DELETE is in flight. Preserve
+          // that authoritative outcome; otherwise the failed DELETE means the
+          // server still owns the job and the live stream must remain open.
+          if (jobHasSettled(job)) return false;
+          throw err;
         }
       } else if (job.streamStarted) {
-        cancellationError = new Error(
-          "Remote cancellation was not confirmed before the queue ID arrived.",
-        );
+        throw new Error("Remote cancellation was not confirmed before the queue ID arrived.");
       }
       // A terminal SSE frame may win while DELETE is in flight. Preserve that
       // authoritative outcome, even if the DELETE request itself then fails.
-      if (jobHasSettled(job)) return;
+      if (jobHasSettled(job)) return false;
       aborts.get(job.clientId)?.abort();
       aborts.delete(job.clientId);
       settleJob(job, "error");
-      if (cancellationError) {
-        // Release the local stream permit even when the host did not confirm
-        // cancellation. The server may still finish the queued work.
-        job.error = "Cancelled locally; remote cancellation was not confirmed.";
-        throw cancellationError;
-      }
       job.error = "Cancelled";
+      return true;
     },
     /** Single generation — a batch of one. */
     async generate(req: GenerateRequest): Promise<Job> {
