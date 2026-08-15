@@ -3,8 +3,9 @@
 Mold's H3 implementation is developed against one revision-locked numerical
 contract. The checked-in harness contains no MiniMax weights, generated media,
 or real-checkpoint activations. It gives ordinary CI a deterministic synthetic
-fixture while keeping real evidence outside the repository and behind the
-[authorization gate](https://github.com/utensils/mold/issues/831).
+fixture while keeping private real evidence outside the repository and behind
+the evidence controls recorded by the completed
+[governance decision](https://github.com/utensils/mold/issues/831).
 
 The manifest at
 `tests/fixtures/minimax_h3/conformance-manifest.json` pins the official code and
@@ -86,7 +87,7 @@ python3 scripts/minimax-h3-conformance.py verify-sources \
 ```
 
 This record does not claim that command was run against a populated model
-checkout. While the authorization gate is closed, model-repository paths must
+checkout. While the private-evidence gate is closed, model-repository paths must
 contain only Git metadata and the named small text files, with Git LFS smudge
 disabled. Do not run `git lfs pull`, fetch checkpoint objects, open
 `.safetensors` files, or populate these paths merely to satisfy the verifier.
@@ -148,7 +149,7 @@ python3 scripts/minimax-h3-conformance.py compare \
 
 Without those last two arguments, `compare` accepts only the exact checked-in
 synthetic pair. Any other paths—even files labeled synthetic—must be inside the
-external root and pass the existing authorization gate. Non-synthetic producer
+external root and pass the existing private-evidence gate. Non-synthetic producer
 documents must additionally bind the authorization source-document hash. The
 comparison command consumes adapter JSON only; it never opens checkpoints or
 media itself.

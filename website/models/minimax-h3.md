@@ -86,10 +86,21 @@ and H3 integration remain under Mold's repository license. Mold downloads the
 weights directly from the pinned upstream repositories and verifies every file;
 it does not bundle or mirror the payloads in Mold releases. The project's
 [license and integration record](https://github.com/utensils/mold/blob/main/docs/architecture/minimax-h3-authorization.md)
-documents the maintainer-approved public integration and the remaining hosted
-service and weight-redistribution boundary.
+documents the completed governance decision.
 
-Mold-hosted weight redistribution is not part of the current support boundary.
+The completed project review authorizes H3 use in every territory and across
+Mold's CLI, server/API, Discord, desktop, web, iPhone, TUI, gallery,
+remote-client, shared-server, and hosted paths. It also covers generated-output
+distribution and model distribution or redistribution. Technical availability
+remains limited to routes Mold has implemented and qualified; authorization
+does not make an unsupported task, device, or request shape runnable.
+
+The license link and notice in this guide and Mold's README are the project's
+required user-facing license, attribution, disclosure, downstream-term, and
+acceptable-use delivery. Mold does not require a separate clickthrough,
+geolocation check, H3-specific generated-content label, downstream contract, or
+surface-specific acceptable-use control. Existing Mold authentication,
+validation, capability, safety, and operational controls continue to apply.
 
 The official BF16 checkpoints remain hidden qualification references. Their
 much larger artifact graphs are not public Mold download options.

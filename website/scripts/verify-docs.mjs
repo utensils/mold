@@ -143,7 +143,10 @@ const requiredH3DownloadFacts = [
   'exactly 124 frames at 24 fps',
   '21 terminal-inclusive sampler grid points',
   'Ref2VA execution and the Metal and CPU backends',
-  'Mold-hosted weight redistribution',
+  'every territory',
+  'shared-server, and hosted paths',
+  'model distribution or redistribution',
+  'does not require a separate clickthrough',
 ]
 for (const fact of requiredH3DownloadFacts) {
   if (!h3ModelDoc.includes(fact)) {
@@ -203,6 +206,9 @@ const ignoredEnvVars = new Set([
   'MOLD_TEST_INCOMPLETE_PARENT_TAIL',
   'MOLD_TEST_PREDECESSOR_MODE',
   'MOLD_TEST_CLIP_TOKENIZER',
+  'MOLD_TEST_GEMMA_GGUF',
+  'MOLD_TEST_GEMMA_ROOT',
+  'MOLD_TEST_LTX2_CHECKPOINT',
   // Private H3 qualification/capture inputs. These are feature-gated evidence
   // authorities, not supported configuration for ordinary Mold releases.
   'MOLD_H3_AUTHORIZATION_RECORD',
