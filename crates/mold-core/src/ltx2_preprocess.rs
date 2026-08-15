@@ -1,0 +1,184 @@
+//! LTX-2 checkpoint-generation identity and image-conditioning
+//! preprocessing profiles.
+//!
+//! Upstream LTX-2 re-compresses every still-image conditioning input
+//! through a one-frame H.264/YUV420 round-trip so the tensor the VAE sees
+//! matches the compressed-video-frame distribution the model was trained
+//! on. The compression level is a property of the checkpoint *generation*
+//! (upstream `ltx_pipelines/utils/constants.py`: CRF 33 for LTX-2/2.3,
+//! CRF 18 for the future 2.4), so the profile must be resolved from
+//! authoritative model identity and must fail closed for generations this
+//! build does not know — a guessed CRF silently degrades conditioning.
+//!
+//! This module is the single authority shared by admission, the engine,
+//! and diagnostics; `mold-inference`'s `preset_for_model_with_hint`
+//! delegates its 2.0-vs-2.3 split here (a contract test pins the two
+//! together).
+
+use serde::{Deserialize, Serialize};
+
+/// A known LTX-2 checkpoint generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ltx2Generation {
+    /// LTX-2 2.0/2.1/2.2 (the 19B lineage).
+    V2,
+    /// LTX-2.3 (the 22B lineage).
+    V2_3,
+}
+
+impl Ltx2Generation {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::V2 => "LTX-2",
+            Self::V2_3 => "LTX-2.3",
+        }
+    }
+}
+
+/// The still-image conditioning preprocessing contract for a checkpoint
+/// generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ltx2ImagePreprocessingProfile {
+    pub generation: Ltx2Generation,
+    /// H.264 compression level the conditioning image is round-tripped
+    /// at, matching upstream's per-generation CRF constant. `0` means
+    /// lossless/no round-trip (upstream parity).
+    pub image_crf: u8,
+}
+
+/// Upstream `DEFAULT_IMAGE_CRF` — LTX-2 and LTX-2.3 were both trained
+/// against CRF 33 conditioning (constants.py:36, 80-88 @ fd4ded7).
+const LTX2_IMAGE_CRF: u8 = 33;
+
+/// Resolve the checkpoint generation from the model name and, failing
+/// that, the safetensors `__metadata__.model_version` header hint.
+///
+/// Returns `None` for anything unrecognised — including a future
+/// `model_version: "2.4.x"`, which upstream maps to CRF 18 but which this
+/// build has no runnable preset for. Callers that need a preprocessing
+/// profile must treat `None` as fail-closed rather than guessing.
+pub fn ltx2_generation(
+    model_name: &str,
+    model_version_hint: Option<&str>,
+) -> Option<Ltx2Generation> {
+    if model_name.contains("ltx-2.3") || model_name.contains("ltx2.3") {
+        return Some(Ltx2Generation::V2_3);
+    }
+    // "ltx-2" followed by ".<digit>" is some *other* generation (2.4, …):
+    // never fold it into V2 by substring accident.
+    if let Some(idx) = model_name.find("ltx-2") {
+        let rest = &model_name[idx + "ltx-2".len()..];
+        let names_unknown_minor = rest
+            .strip_prefix('.')
+            .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()));
+        if !names_unknown_minor {
+            return Some(Ltx2Generation::V2);
+        }
+        return None;
+    }
+    match model_version_hint {
+        Some(v) if version_has_minor(v, 3) => Some(Ltx2Generation::V2_3),
+        Some(v) if [0u32, 1, 2].iter().any(|&m| version_has_minor(v, m)) => {
+            Some(Ltx2Generation::V2)
+        }
+        _ => None,
+    }
+}
+
+/// True when `version` is `2.<minor>` or `2.<minor>.<anything>`.
+fn version_has_minor(version: &str, minor: u32) -> bool {
+    let Some(rest) = version.strip_prefix("2.") else {
+        return false;
+    };
+    let digits = rest.split(['.', '-', '+']).next().unwrap_or("");
+    digits.parse::<u32>() == Ok(minor)
+}
+
+/// The preprocessing profile for a known generation. Both currently
+/// supported generations were trained against CRF 33.
+pub fn ltx2_image_preprocessing_profile(
+    generation: Ltx2Generation,
+) -> Ltx2ImagePreprocessingProfile {
+    Ltx2ImagePreprocessingProfile {
+        generation,
+        image_crf: LTX2_IMAGE_CRF,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ltx2_generation_resolves_known_names_and_hints() {
+        assert_eq!(ltx2_generation("ltx-2-19b", None), Some(Ltx2Generation::V2));
+        assert_eq!(
+            ltx2_generation("ltx-2-19b-distilled:fp8", None),
+            Some(Ltx2Generation::V2)
+        );
+        assert_eq!(
+            ltx2_generation("ltx-2.3-22b", None),
+            Some(Ltx2Generation::V2_3)
+        );
+        assert_eq!(
+            ltx2_generation("ltx-2.3-22b-distilled:q8", None),
+            Some(Ltx2Generation::V2_3)
+        );
+        // Companion naming without the dash.
+        assert_eq!(
+            ltx2_generation("ltx2.3-vae", None),
+            Some(Ltx2Generation::V2_3)
+        );
+        // Catalog IDs carry no family marker; the safetensors
+        // `model_version` header hint decides.
+        assert_eq!(
+            ltx2_generation("cv:2752735", Some("2.3.0")),
+            Some(Ltx2Generation::V2_3)
+        );
+        assert_eq!(
+            ltx2_generation("hf:someone/some-repo", Some("2.0.1")),
+            Some(Ltx2Generation::V2)
+        );
+        assert_eq!(
+            ltx2_generation("cv:1", Some("2.1.0")),
+            Some(Ltx2Generation::V2)
+        );
+        assert_eq!(
+            ltx2_generation("cv:1", Some("2.2")),
+            Some(Ltx2Generation::V2)
+        );
+    }
+
+    #[test]
+    fn ltx2_generation_fails_closed_on_unknown() {
+        // Upstream 2.4 exists (CRF 18) but this build cannot load it —
+        // it must not inherit either known profile.
+        assert_eq!(ltx2_generation("cv:1", Some("2.4.0")), None);
+        assert_eq!(ltx2_generation("cv:1", Some("3.0")), None);
+        assert_eq!(ltx2_generation("cv:1", Some("2.30")), None);
+        assert_eq!(ltx2_generation("cv:1", Some("garbage")), None);
+        assert_eq!(ltx2_generation("cv:1", None), None);
+        assert_eq!(ltx2_generation("some-model", None), None);
+        // A future name marker is not folded into V2 by substring.
+        assert_eq!(ltx2_generation("ltx-2.4-24b", None), None);
+    }
+
+    #[test]
+    fn profile_maps_both_generations_to_crf_33() {
+        for generation in [Ltx2Generation::V2, Ltx2Generation::V2_3] {
+            let profile = ltx2_image_preprocessing_profile(generation);
+            assert_eq!(profile.generation, generation);
+            assert_eq!(profile.image_crf, 33);
+        }
+    }
+
+    #[test]
+    fn profile_serde_round_trips() {
+        let profile = ltx2_image_preprocessing_profile(Ltx2Generation::V2_3);
+        let json = serde_json::to_string(&profile).unwrap();
+        assert_eq!(json, r#"{"generation":"v2_3","image_crf":33}"#);
+        let back: Ltx2ImagePreprocessingProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, profile);
+    }
+}
