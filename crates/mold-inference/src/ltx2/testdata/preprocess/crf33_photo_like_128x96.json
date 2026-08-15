@@ -1,0 +1,10 @@
+{
+  "shape": [
+    96,
+    128,
+    3
+  ],
+  "dtype": "u8",
+  "desc": "preprocess(decode_image(photo_like_128x96.png), crf=33) -- libx264 yuv420p round trip. 128x96 photo-like blurred noise + solid shapes",
+  "crf": 33
+}

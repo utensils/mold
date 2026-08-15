@@ -43,6 +43,7 @@ use super::model::{
     VideoPixelShape,
 };
 use super::plan::{Ltx2GeneratePlan, PipelineKind};
+use super::preprocess;
 use super::sampler::sampler_step;
 use super::text::connectors::EmbeddingsProcessorOutput;
 use super::text::prompt_encoder::{NativePromptEncoder, NativePromptEncoding};
@@ -58,7 +59,6 @@ use crate::device::{
     try_synchronize_device, usable_free_vram_bytes, PhaseVramProbe, PhaseVramReport,
 };
 use crate::engine::seeded_randn;
-use crate::img_utils::{decode_source_image, NormalizeRange};
 use crate::ltx_video::latent_upsampler::LatentUpsampler;
 use crate::progress::{InferenceCancellationToken, ProgressCallback, ProgressEvent, ProgressPhase};
 use crate::vae_tiling::is_out_of_memory_error;
@@ -2065,17 +2065,23 @@ fn maybe_load_stage_video_conditioning_inner(
         let vae = vae.as_mut().expect(
             "need_vae guarantees the VAE is loaded whenever plan.conditioning.images is non-empty",
         );
-        let bytes = std::fs::read(&image.path).with_context(|| {
+        // Upstream parity (#1055): oriented sRGB decode + the checkpoint
+        // generation's H.264 round-trip happen once at native resolution,
+        // then each stage fits the same preprocessed image to its own
+        // conditioning canvas. Materialization guarantees the profile is
+        // resolved whenever images are staged.
+        let profile = plan.image_preprocessing.with_context(|| {
             format!(
-                "failed to read staged LTX-2 conditioning image '{}'",
+                "staged LTX-2 conditioning image '{}' has no preprocessing profile; \
+                 materialization must resolve the checkpoint generation first",
                 image.path
             )
         })?;
-        let decoded = decode_source_image(
-            &bytes,
+        let native = preprocess::cached_native_conditioning_image(&image.path, &profile)?;
+        let decoded = preprocess::fit_conditioning_image(
+            &native,
             pixel_shape.width as u32,
             pixel_shape.height as u32,
-            NormalizeRange::MinusOneToOne,
             device,
             dtype,
         )?;

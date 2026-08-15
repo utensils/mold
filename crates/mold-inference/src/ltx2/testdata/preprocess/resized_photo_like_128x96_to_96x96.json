@@ -1,0 +1,12 @@
+{
+  "shape": [
+    96,
+    96,
+    3
+  ],
+  "dtype": "f32",
+  "desc": "resize_and_center_crop(decode_image(photo_like_128x96.png).float32, height=96, width=96) squeezed to HWC; values remain in the 0..255 domain (no normalize_images). scale=max(96/96,96/128)=1.0 -> 96x128, crop_left=(128-96)//2=16 (pure center crop)",
+  "source": "photo_like_128x96.png",
+  "target_height": 96,
+  "target_width": 96
+}

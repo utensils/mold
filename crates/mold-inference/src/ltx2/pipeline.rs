@@ -17,6 +17,7 @@ use super::execution;
 use super::lora;
 use super::media::{self, ProbeMetadata};
 use super::plan::{Ltx2GeneratePlan, PipelineKind};
+use super::preprocess;
 use super::preset;
 use super::runtime::{Ltx2RuntimeSession, NativeRenderedVideo};
 use super::text::gemma::GemmaAssets;
@@ -976,6 +977,13 @@ impl Ltx2Engine {
                 fps,
                 pipeline: Some(plan.pipeline.wire_mode()),
                 pipeline_provenance_sha256: None,
+                source_preprocessing: plan.image_preprocessing.map(|profile| {
+                    mold_core::Ltx2SourcePreprocessing {
+                        profile,
+                        codec: preprocess::roundtrip_codec_label(&profile),
+                        fit_policy: preprocess::FIT_POLICY_LABEL.to_string(),
+                    }
+                }),
                 thumbnail: thumbnail_bytes,
                 gif_preview,
                 has_audio: false,
@@ -1129,6 +1137,13 @@ impl Ltx2Engine {
                 fps,
                 pipeline: Some(plan.pipeline.wire_mode()),
                 pipeline_provenance_sha256: None,
+                source_preprocessing: plan.image_preprocessing.map(|profile| {
+                    mold_core::Ltx2SourcePreprocessing {
+                        profile,
+                        codec: preprocess::roundtrip_codec_label(&profile),
+                        fit_policy: preprocess::FIT_POLICY_LABEL.to_string(),
+                    }
+                }),
                 thumbnail: thumbnail_bytes,
                 gif_preview,
                 has_audio,

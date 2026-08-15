@@ -306,6 +306,7 @@ impl MoldClient {
             fps: meta.fps,
             pipeline: meta.pipeline,
             pipeline_provenance_sha256: meta.pipeline_provenance_sha256,
+            source_preprocessing: meta.source_preprocessing,
             thumbnail: Vec::new(),
             gif_preview: Vec::new(),
             has_audio: meta.has_audio,
@@ -575,6 +576,10 @@ impl MoldClient {
                                 pipeline_provenance_sha256: complete.metadata.as_ref().and_then(
                                     |metadata| metadata.pipeline_provenance_sha256.clone(),
                                 ),
+                                source_preprocessing: complete
+                                    .metadata
+                                    .as_ref()
+                                    .and_then(|metadata| metadata.source_preprocessing.clone()),
                                 thumbnail,
                                 gif_preview,
                                 has_audio: complete.video_has_audio,
@@ -727,6 +732,10 @@ impl MoldClient {
                                 .metadata
                                 .as_ref()
                                 .and_then(|metadata| metadata.pipeline_provenance_sha256.clone()),
+                            source_preprocessing: complete
+                                .metadata
+                                .as_ref()
+                                .and_then(|metadata| metadata.source_preprocessing.clone()),
                             thumbnail,
                             gif_preview,
                             has_audio: complete.has_audio,
@@ -1386,6 +1395,7 @@ struct VideoMeta {
     height: Option<u32>,
     pipeline: Option<crate::Ltx2PipelineMode>,
     pipeline_provenance_sha256: Option<String>,
+    source_preprocessing: Option<crate::Ltx2SourcePreprocessing>,
     has_audio: bool,
     duration_ms: Option<u64>,
     audio_sample_rate: Option<u32>,
@@ -1420,6 +1430,10 @@ fn parse_video_headers(headers: &reqwest::header::HeaderMap) -> Option<VideoMeta
         .get("x-mold-video-pipeline-provenance-sha256")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    let source_preprocessing = headers
+        .get("x-mold-video-source-preprocessing")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|json| serde_json::from_str(json).ok());
     let has_audio = headers
         .get("x-mold-video-has-audio")
         .and_then(|v| v.to_str().ok())
@@ -1445,6 +1459,7 @@ fn parse_video_headers(headers: &reqwest::header::HeaderMap) -> Option<VideoMeta
         height,
         pipeline,
         pipeline_provenance_sha256,
+        source_preprocessing,
         has_audio,
         duration_ms,
         audio_sample_rate,

@@ -1,0 +1,11 @@
+{
+  "shape": [
+    64,
+    64,
+    3
+  ],
+  "dtype": "u8",
+  "desc": "decode_image(display_p3.png): sP3 ICC converted to sRGB via ImageCms.profileToProfile",
+  "icc_profile": "sP3",
+  "mean_abs_shift_vs_untagged": 13.25
+}

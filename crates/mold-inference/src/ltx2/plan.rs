@@ -131,8 +131,6 @@ pub(crate) struct Ltx2GeneratePlan {
     /// checkpoint generation (`mold_core::ltx2_preprocess`). `Some` exactly
     /// when `conditioning.images` is non-empty — materialization fails
     /// closed for an unknown generation rather than guessing a CRF.
-    // TODO(#1055 PR2): consumed by the conditioning-image H.264 round-trip.
-    #[allow(dead_code)]
     pub(crate) image_preprocessing:
         Option<mold_core::ltx2_preprocess::Ltx2ImagePreprocessingProfile>,
     pub(crate) loras: Vec<LoraWeight>,

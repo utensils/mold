@@ -7402,6 +7402,10 @@ impl App {
                             extend_video_path: None,
                             extend_overlap_frames: None,
                             pipeline: response.video.as_ref().and_then(|video| video.pipeline),
+                            source_preprocessing: response
+                                .video
+                                .as_ref()
+                                .and_then(|video| video.source_preprocessing.clone()),
                             pipeline_provenance_sha256: response
                                 .video
                                 .as_ref()
@@ -7823,6 +7827,9 @@ impl App {
                             .as_ref()
                             .and_then(|m| m.extend_overlap_frames),
                         pipeline: source_meta.as_ref().and_then(|m| m.pipeline),
+                        source_preprocessing: source_meta
+                            .as_ref()
+                            .and_then(|m| m.source_preprocessing.clone()),
                         pipeline_provenance_sha256: source_meta
                             .as_ref()
                             .and_then(|metadata| metadata.pipeline_provenance_sha256.clone()),
@@ -8984,6 +8991,7 @@ mod tests {
                 extend_overlap_frames: None,
                 pipeline: None,
                 pipeline_provenance_sha256: None,
+                source_preprocessing: None,
                 ic_lora_control: None,
                 hdr_exr_dir: None,
                 hdr_exr_full_float: false,
@@ -9051,6 +9059,7 @@ mod tests {
                 extend_overlap_frames: None,
                 pipeline: None,
                 pipeline_provenance_sha256: None,
+                source_preprocessing: None,
                 ic_lora_control: None,
                 hdr_exr_dir: None,
                 hdr_exr_full_float: false,
@@ -9184,6 +9193,7 @@ mod tests {
             extend_overlap_frames: None,
             pipeline: None,
             pipeline_provenance_sha256: None,
+            source_preprocessing: None,
             ic_lora_control: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
@@ -11550,6 +11560,7 @@ mod tests {
                     fps: 24,
                     pipeline: Some(mold_core::Ltx2PipelineMode::TwoStageHq),
                     pipeline_provenance_sha256: None,
+                    source_preprocessing: None,
                     thumbnail: Vec::new(),
                     gif_preview: Vec::new(),
                     has_audio: true,

@@ -1,0 +1,12 @@
+{
+  "shape": [
+    64,
+    64,
+    3
+  ],
+  "dtype": "f32",
+  "desc": "resize_and_center_crop(decode_image(gradient_96x64.png).float32, height=64, width=64) squeezed to HWC; values remain in the 0..255 domain (no normalize_images). scale=max(64/64,64/96)=1.0 -> 64x96, crop_left=(96-64)//2=16 (pure center crop)",
+  "source": "gradient_96x64.png",
+  "target_height": 64,
+  "target_width": 64
+}
