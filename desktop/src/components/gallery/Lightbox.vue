@@ -114,9 +114,7 @@ const meta = computed(() => props.item.metadata);
 // no `pipeline`), with the model-id name markers as the offline fallback.
 const strengthCaption = computed(() => {
   const model = meta.value?.model;
-  const family = hostModels.unionInstalled.find(
-    (entry) => entry.name === model,
-  )?.family;
+  const family = hostModels.unionInstalled.find((entry) => entry.name === model)?.family;
   return strengthSemanticsForModel(model, family).label;
 });
 const upscaled = computed(() => isUpscaledImage(props.item));

@@ -601,8 +601,7 @@ function applyMask(mask: string): void {
         <!-- Wan pins the first frame exactly and never reads strength. -->
         <label v-if="caps.supportsStrength" class="mobile-range-field">
           <span
-            >{{ strength.label }}
-            <output>{{ form.strength.toFixed(2) }}</output></span
+            >{{ strength.label }} <output>{{ form.strength.toFixed(2) }}</output></span
           >
           <input
             v-model.number="form.strength"
