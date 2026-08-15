@@ -334,6 +334,27 @@ tile carries no statement about an audio track, so refining one once per tile
 would denoise the same track once per tile with no defensible way to recombine
 the results.
 
+## Image-to-video conditioning matches upstream
+
+The still you pass with `--image` is not fed to the VAE untouched. Matching
+the official pipeline, mold decodes it with EXIF orientation applied and any
+embedded ICC profile converted to sRGB, round-trips it through a one-frame
+H.264/YUV420 compression at the checkpoint generation's training level
+(LTX-2 and LTX-2.3 were trained against CRF-33 conditioning; mold's bundled
+encoder expresses this as a constant-quantizer-33 frame and records
+`openh264-cqp33` in the saved metadata), and then fill-resizes and
+center-crops to the render canvas — the source is never stretched to a
+mismatched aspect ratio. The round-trip is deliberate: the conditioner was
+trained on compressed video frames, and a pristine still sits outside that
+distribution. A checkpoint whose generation mold cannot identify refuses
+image conditioning with an actionable error instead of guessing; plain
+text-to-video on the same checkpoint keeps working.
+
+`--strength` for LTX-2 is **source strength**: `1.0` pins the opening frame
+exactly, lower values allow more change. (SD-family img2img uses the same
+flag with the opposite denoise convention; the value is passed through
+unchanged either way.) The default is `0.75`.
+
 ## The prompt is optional for image-to-video
 
 LTX-2 and the older `ltx-video` family accept an **empty prompt**, but only when

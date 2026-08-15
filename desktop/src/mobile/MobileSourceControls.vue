@@ -17,6 +17,7 @@ import {
 } from "../lib/generateValidation";
 import { base64ToDataUrl, fileToBase64, isStillImageFile } from "../lib/image";
 import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
+import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/SourceMediaWells.vue";
@@ -65,6 +66,8 @@ const caps = computed(() =>
     effectiveGenerationRecipe(props.model, props.form.pipeline),
   ),
 );
+// Family-scoped label for the shared `strength` wire field (#1055).
+const strength = computed(() => strengthSemantics(props.form.family));
 /** The model's own image-attachment shape — the single shared policy. */
 const plan = computed(() => sourceMediaPlan(caps.value));
 const isAttachmentMode = computed(() => plan.value.kind === "attachments");
@@ -598,7 +601,7 @@ function applyMask(mask: string): void {
         <!-- Wan pins the first frame exactly and never reads strength. -->
         <label v-if="caps.supportsStrength" class="mobile-range-field">
           <span
-            >Strength <output>{{ form.strength.toFixed(2) }}</output></span
+            >{{ strength.label }} <output>{{ form.strength.toFixed(2) }}</output></span
           >
           <input
             v-model.number="form.strength"
@@ -606,7 +609,8 @@ function applyMask(mask: string): void {
             min="0.05"
             max="1"
             step="0.05"
-            aria-label="Source strength"
+            :aria-label="strength.label"
+            :title="strength.hint"
             data-test="mobile-source-strength"
           />
         </label>

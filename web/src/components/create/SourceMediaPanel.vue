@@ -14,6 +14,7 @@ import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import { sourceImageValidationError } from "@studio/lib/sourceImageCapability";
 import { submitsExtend } from "@studio/lib/extend";
 import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
+import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { blobToBase64 } from "../../lib/base64";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
@@ -78,6 +79,8 @@ const caps = computed(() =>
 );
 /** The model's own image-attachment shape — the single shared policy. */
 const plan = computed(() => sourceMediaPlan(caps.value));
+/** Family-scoped label for the shared `strength` wire field (#1055). */
+const strength = computed(() => strengthSemantics(props.family));
 const flux2Dev = computed(() => isFlux2DevModel(props.modelValue.model));
 
 const kicker = computed(() =>
@@ -363,7 +366,7 @@ function clearControl() {
         </div>
         <SliderRow
           v-if="caps.supportsStrength"
-          label="Denoise strength"
+          :label="strength.label"
           :model-value="modelValue.strength"
           :min="0"
           :max="1"
@@ -371,6 +374,9 @@ function clearControl() {
           :value-label="modelValue.strength.toFixed(2)"
           @update:model-value="patch({ strength: $event })"
         />
+        <p v-if="caps.supportsStrength" class="smp__hint">
+          {{ strength.hint }}
+        </p>
         <button
           v-if="caps.supportsMask"
           type="button"

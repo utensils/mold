@@ -24,6 +24,8 @@ mold run flux-dev:q4 "a sunset over mountains"      # Specific model
 mold run "a portrait" -o portrait.png               # Custom output path
 mold run "a dog" --seed 42 --steps 20               # Reproducible generation
 mold run "watercolor" --image photo.png --strength 0.7  # img2img
+# NOTE --strength is family-specific: SD img2img higher = more change;
+# LTX-2 I2V higher = MORE source preservation (1.0 pins the opening frame)
 mold run qwen-image-edit-2511:q4 "make the chair red leather" --image chair.png --image swatch.png --qwen2-variant q4
 mold run qwen-image:q2 "a poster" --qwen2-variant q6    # Qwen-Image quantized text encoder
 mold run flux-dev:bf16 "portrait" --lora style.safetensors --lora-scale 0.8  # LoRA adapter

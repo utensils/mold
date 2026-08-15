@@ -23,6 +23,7 @@ import { attachPickedImage } from "../../lib/sourceAttachment";
 import ImageDropWell from "@studio/components/ImageDropWell.vue";
 import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/SourceMediaWells.vue";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
+import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
 import {
   emptyMinimaxH3AuthoringState,
@@ -63,6 +64,8 @@ const caps = computed(() =>
     props.selectedModel?.source_image ?? props.form.sourceImageCapability,
   ),
 );
+// Family-scoped label for the shared `strength` wire field (#1055).
+const strength = computed(() => strengthSemantics(props.form.family));
 /** The model's own image-attachment shape — the single policy every surface
  * renders (`@studio/lib/sourceMediaPlan`). `none` and `h3-references` render
  * nothing here. */
@@ -443,7 +446,8 @@ function setSourceFitMode(e: Event) {
     <!-- Strength (wan pins the first frame exactly and never reads it) -->
     <template v-if="form.sourceImage && caps.supportsStrength">
       <label class="mt-3 flex items-center justify-between text-caption text-ink-2">
-        Strength <span class="data-mono text-ink">{{ form.strength.toFixed(2) }}</span>
+        {{ strength.label }}
+        <span class="data-mono text-ink">{{ form.strength.toFixed(2) }}</span>
       </label>
       <input
         v-model.number="form.strength"
@@ -452,6 +456,8 @@ function setSourceFitMode(e: Event) {
         max="1"
         step="0.05"
         class="mt-1 w-full accent-[var(--safelight)]"
+        :aria-label="strength.label"
+        :title="strength.hint"
       />
     </template>
 
