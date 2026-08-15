@@ -75,6 +75,7 @@ async function send(
   path: string,
   method: string,
   body?: unknown,
+  allowNotFound = true,
 ): Promise<void> {
   const headers: Record<string, string> = { ...authHeaders(host.apiKey) };
   if (body !== undefined) headers["content-type"] = "application/json";
@@ -83,8 +84,9 @@ async function send(
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
-  // DELETE routes answer 204; treat a 404 cancel as already-gone.
-  if (!res.ok && res.status !== 204 && res.status !== 404) {
+  // DELETE routes answer 204. A missing queue id is not proof that this
+  // client's job stopped, so cancellation callers must observe 404.
+  if (!res.ok && res.status !== 204 && (res.status !== 404 || !allowNotFound)) {
     throw new Error(`${method} ${path} failed: ${res.status}`);
   }
 }
@@ -229,7 +231,13 @@ export async function hostCapabilities(
 }
 
 export function cancelQueueJob(host: HostEntry, id: string): Promise<void> {
-  return send(host, `/api/queue/${encodeURIComponent(id)}`, "DELETE");
+  return send(
+    host,
+    `/api/queue/${encodeURIComponent(id)}`,
+    "DELETE",
+    undefined,
+    false,
+  );
 }
 
 export function pauseHostQueue(host: HostEntry): Promise<void> {

@@ -153,7 +153,14 @@ function onKeydown(e: KeyboardEvent) {
     case "cancel-job": {
       const job = generation.active;
       if (job && job.status !== "complete" && job.status !== "error") {
-        void generation.cancel(job.clientId).then(() => toasts.push("Cancelled"));
+        void generation
+          .cancel(job.clientId)
+          .then((cancelled) => {
+            if (cancelled) toasts.push("Cancelled");
+          })
+          .catch((error) =>
+            toasts.push(error instanceof Error ? error.message : String(error), "error"),
+          );
       }
       break;
     }
@@ -198,7 +205,15 @@ async function listenForMenu() {
       case "randomize-seed":
         return ui.randomizeSeed();
       case "cancel-job":
-        if (generation.active) void generation.cancel().then(() => toasts.push("Cancelled"));
+        if (generation.active)
+          void generation
+            .cancel()
+            .then((cancelled) => {
+              if (cancelled) toasts.push("Cancelled");
+            })
+            .catch((error) =>
+              toasts.push(error instanceof Error ? error.message : String(error), "error"),
+            );
         return;
       case "toggle-sidebar":
         void appPrefs.update({ sidebarCollapsed: !appPrefs.sidebarCollapsed });

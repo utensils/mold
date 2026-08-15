@@ -120,50 +120,59 @@ describe("submitBatch connection cap", () => {
     store.resetJobs();
   });
 
-  it("holds at most two sibling streams open at once", async () => {
+  it("holds at most four sibling streams open at once", async () => {
     const store = useGenerationStore();
-    store.submitBatch(req, 4);
+    store.submitBatch(req, 5);
     await flushPromises();
-    // Seeds 100 and 101 open; 102 and 103 wait their turn.
-    expect(streams.map((s) => s.seed).sort()).toEqual([100, 101]);
+    expect(streams.map((s) => s.seed).sort()).toEqual([100, 101, 102, 103]);
 
     resolveStream(100);
     await flushPromises();
-    expect(streams.map((s) => s.seed).sort()).toEqual([101, 102]);
+    expect(streams.map((s) => s.seed).sort()).toEqual([101, 102, 103, 104]);
   });
 
-  it("holds at most two streams across separate Generate submissions", async () => {
+  it("holds at most four streams across separate Generate submissions", async () => {
     const store = useGenerationStore();
     const first = store.submitBatch({ ...req, seed: 200 }, 1);
     const second = store.submitBatch({ ...req, seed: 201 }, 1);
     const third = store.submitBatch({ ...req, seed: 202 }, 1);
+    const fourth = store.submitBatch({ ...req, seed: 203 }, 1);
+    const fifth = store.submitBatch({ ...req, seed: 204 }, 1);
     await flushPromises();
 
-    expect(streams.map((stream) => stream.seed).sort()).toEqual([200, 201]);
+    expect(streams.map((stream) => stream.seed).sort()).toEqual([200, 201, 202, 203]);
 
     resolveStream(200);
     await flushPromises();
-    expect(streams.map((stream) => stream.seed).sort()).toEqual([201, 202]);
+    expect(streams.map((stream) => stream.seed).sort()).toEqual([201, 202, 203, 204]);
 
     resolveStream(201);
     resolveStream(202);
-    await Promise.all([first.settled, second.settled, third.settled]);
+    resolveStream(203);
+    resolveStream(204);
+    await Promise.all([
+      first.settled,
+      second.settled,
+      third.settled,
+      fourth.settled,
+      fifth.settled,
+    ]);
   });
 
-  it("shares the two-stream host cap across overlapping batches", async () => {
+  it("shares the four-stream host cap across overlapping batches", async () => {
     const store = useGenerationStore();
     const first = store.submitBatch({ ...req, seed: 400 }, 3);
     const second = store.submitBatch({ ...req, seed: 500 }, 3);
     await flushPromises();
 
-    expect(streams.map((stream) => stream.seed).sort()).toEqual([400, 401]);
+    expect(streams).toHaveLength(4);
 
     resolveStream(400);
     await flushPromises();
-    expect(streams).toHaveLength(2);
+    expect(streams).toHaveLength(4);
     resolveStream(401);
     await flushPromises();
-    expect(streams).toHaveLength(2);
+    expect(streams).toHaveLength(4);
 
     while (streams.length > 0) {
       streams[0]!.resolve();
@@ -177,8 +186,10 @@ describe("submitBatch connection cap", () => {
     const first = store.submitBatch({ ...req, seed: 300 }, 1);
     const second = store.submitBatch({ ...req, seed: 301 }, 1);
     const third = store.submitBatch({ ...req, seed: 302 }, 1);
+    const fourth = store.submitBatch({ ...req, seed: 303 }, 1);
+    const fifth = store.submitBatch({ ...req, seed: 304 }, 1);
     await flushPromises();
-    expect(streams.map((stream) => stream.seed).sort()).toEqual([300, 301]);
+    expect(streams.map((stream) => stream.seed).sort()).toEqual([300, 301, 302, 303]);
 
     streams
       .find((stream) => stream.seed === 300)!
@@ -196,20 +207,28 @@ describe("submitBatch connection cap", () => {
       );
     await flushPromises();
 
-    expect(streams.map((stream) => stream.seed).sort()).toEqual([301, 302]);
+    expect(streams.map((stream) => stream.seed).sort()).toEqual([301, 302, 303, 304]);
     resolveStream(301);
     resolveStream(302);
-    await Promise.all([first.settled, second.settled, third.settled]);
+    resolveStream(303);
+    resolveStream(304);
+    await Promise.all([
+      first.settled,
+      second.settled,
+      third.settled,
+      fourth.settled,
+      fifth.settled,
+    ]);
   });
 
   it("never opens a stream for a sibling cancelled before its turn", async () => {
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch(req, 4);
+    const { jobs, settled } = store.submitBatch(req, 5);
     await flushPromises();
 
-    // Cancel the last sibling while the first two hold the pool.
-    jobs[3]!.status = "error";
-    jobs[3]!.error = "Cancelled";
+    // Cancel the last sibling while the first four hold the pool.
+    jobs[4]!.status = "error";
+    jobs[4]!.error = "Cancelled";
 
     resolveStream(100);
     await flushPromises();
@@ -217,10 +236,12 @@ describe("submitBatch connection cap", () => {
     await flushPromises();
     resolveStream(102);
     await flushPromises();
+    resolveStream(103);
+    await flushPromises();
     await settled;
 
     const openedSeeds = mockSse.mock.calls.map((c) => (c[1].body as { seed: number }).seed);
     expect(openedSeeds).toContain(102);
-    expect(openedSeeds).not.toContain(103);
+    expect(openedSeeds).not.toContain(104);
   });
 });

@@ -360,7 +360,10 @@ describe("workStarted tracking", () => {
     const stream = useGenerateStream();
     stream.canvasErrorJobId.value = null;
     for (const j of stream.jobs.value) {
-      if (j.state === "running") stream.cancel(j.id);
+      if (j.state === "running") {
+        j.controller.abort();
+        j.state = "canceled";
+      }
     }
     stream.clearDone();
   });
@@ -548,7 +551,10 @@ describe("auto-remove completed jobs", () => {
     stream.canvasErrorJobId.value = null;
     // Cancel anything still "running" then drop everything settled.
     for (const j of stream.jobs.value) {
-      if (j.state === "running") stream.cancel(j.id);
+      if (j.state === "running") {
+        j.controller.abort();
+        j.state = "canceled";
+      }
     }
     stream.clearDone();
   });
@@ -649,12 +655,14 @@ describe("auto-remove completed jobs", () => {
     );
   });
 
-  it("does NOT auto-remove a canceled job", () => {
+  it("does NOT auto-remove a locally waiting canceled job", async () => {
     const stream = useGenerateStream();
     const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
     stream.select(id);
     expect(stream.selectedJob.value?.id).toBe(id);
-    stream.cancel(id);
+    const submitted = stream.jobs.value.find((j) => j.id === id)!;
+    submitted.streamStarted = false;
+    await stream.cancel(id);
     const job = stream.jobs.value.find((j) => j.id === id);
     expect(job?.state).toBe("canceled");
     expect(stream.selectedJob.value).toBeNull();
@@ -683,26 +691,21 @@ describe("auto-remove completed jobs", () => {
     expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
   });
 
-  it("does NOT auto-remove if user cancels during the grace period (no flash)", () => {
-    // Regression: prior code unconditionally removed at +1500ms, so a
-    // cancel landing between done-flip and timer-fire would briefly show
-    // "canceled" on the card and then auto-dismiss anyway, losing the
-    // user's signal. Timer must re-check `state === "done"` at fire time.
+  it("keeps a completed result authoritative if cancel is clicked during its grace period", () => {
     const stream = useGenerateStream();
     const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
     expect(lastSingleHandlers).not.toBeNull();
     lastSingleHandlers!.onComplete(fakeCompleteEvent());
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("done");
 
-    // User clicks Cancel during the 1500ms grace window.
+    // A late Cancel cannot rewrite the server's completed terminal result.
     vi.advanceTimersByTime(500);
     stream.cancel(id);
-    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("canceled");
+    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("done");
 
-    // Timer fires; job must still be present and still in `canceled`.
+    // It follows the normal completed-row removal path.
     vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS + 100);
-    expect(stream.jobs.value.find((j) => j.id === id)).toBeDefined();
-    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("canceled");
+    expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
   });
 
   it("auto-removes a chain job ~1500ms after chain complete", () => {
@@ -753,7 +756,10 @@ describe("live latent preview", () => {
     }
     const stream = useGenerateStream();
     for (const j of stream.jobs.value) {
-      if (j.state === "running") stream.cancel(j.id);
+      if (j.state === "running") {
+        j.controller.abort();
+        j.state = "canceled";
+      }
     }
     stream.clearDone();
   });
@@ -938,6 +944,7 @@ describe("activeCanvasJob", () => {
       hostLabel: null,
       target: null,
       serverId: null,
+      streamStarted: false,
       previewUrl: null,
       seedVisual: "seed",
       ...overrides,
@@ -1000,6 +1007,7 @@ describe("latestUnresolvedError", () => {
       hostLabel: null,
       target: null,
       serverId: null,
+      streamStarted: false,
       previewUrl: null,
       seedVisual: "seed",
       ...overrides,
@@ -1102,6 +1110,46 @@ describe("useGenerateStream host routing", () => {
       studioRoute.target,
     );
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("canceled");
+  });
+
+  it("keeps a server-owned job running when cancellation is refused", async () => {
+    vi.mocked(cancelQueueJob).mockRejectedValueOnce(
+      new Error("already running"),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+    lastSingleHandlers?.onProgress({
+      type: "queued",
+      id: "server-job-running",
+      position: 0,
+    });
+
+    await expect(stream.cancel(id)).rejects.toThrow("already running");
+
+    const job = stream.jobs.value.find((candidate) => candidate.id === id);
+    expect(job?.state).toBe("running");
+    expect(job?.controller.signal.aborted).toBe(false);
+  });
+
+  it("keeps an opened stream live until its queue id can be cancelled", async () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+
+    await expect(stream.cancel(id)).rejects.toThrow(
+      "Remote cancellation was not confirmed before the queue ID arrived.",
+    );
+
+    const job = stream.jobs.value.find((candidate) => candidate.id === id);
+    expect(job?.state).toBe("running");
+    expect(job?.controller.signal.aborted).toBe(false);
   });
 
   it("leaves an unrouted job unattributed rather than guessing", () => {

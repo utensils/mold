@@ -1764,6 +1764,14 @@ function onSequenceAction(action: ActivityAction, vm: ActivityJobVM) {
   }
 }
 
+function cancelPrint(id: string) {
+  void stream
+    .cancel(id)
+    .catch((error) =>
+      toast("error", error instanceof Error ? error.message : String(error)),
+    );
+}
+
 /**
  * Reuse a sequence print's recorded clips as a BRAND-NEW draft: no edit
  * session, nothing cached, Generate queues a fresh job. Shared params ride
@@ -3535,7 +3543,7 @@ onBeforeUnmount(() => {
           :jobs="stream.jobs.value"
           :sequences="sequenceVMs"
           :shared="sharedActivityRows"
-          @cancel="stream.cancel"
+          @cancel="cancelPrint"
           @dismiss="stream.remove"
           @open="openJob"
           @sequence-action="onSequenceAction"

@@ -1476,6 +1476,7 @@ describe("MobileApp generation queue", () => {
     expect(openStreams.map((stream) => stream.options.body.prompt)).toEqual([
       "three storm studies · prepared 1",
       "three storm studies · prepared 2",
+      "three storm studies · prepared 3",
     ]);
   });
 
@@ -1997,24 +1998,27 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe(
       "Develop 3 prints (+3 queued)",
     );
-    expect(openStreams).toHaveLength(2);
+    expect(openStreams).toHaveLength(3);
     const firstSeed = openStreams[0]?.options.body.seed as number;
-    expect(openStreams.map((stream) => stream.options.body.batch_size)).toEqual([1, 1]);
+    expect(openStreams.map((stream) => stream.options.body.batch_size)).toEqual([1, 1, 1]);
     expect(openStreams.map((stream) => stream.options.body.seed)).toEqual([
       firstSeed,
       firstSeed + 1,
+      firstSeed + 2,
     ]);
     expect(openStreams.map((stream) => stream.options.body.prompt)).toEqual([
       "three variations of a storm · prepared 1",
       "an edited middle storm",
+      "three variations of a storm · prepared 3",
     ]);
     expect(openStreams.map((stream) => stream.options.body.original_prompt)).toEqual([
       "three variations of a storm",
       "three variations of a storm",
+      "three variations of a storm",
     ]);
     expect(openStreams[0]?.options.body.batch_id).toEqual(expect.any(String));
-    expect(openStreams.map((stream) => stream.options.body.batch_index)).toEqual([1, 2]);
-    expect(openStreams.map((stream) => stream.options.body.batch_count)).toEqual([3, 3]);
+    expect(openStreams.map((stream) => stream.options.body.batch_index)).toEqual([1, 2, 3]);
+    expect(openStreams.map((stream) => stream.options.body.batch_count)).toEqual([3, 3, 3]);
   });
 
   it.each([
@@ -2251,7 +2255,7 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.find("img.result-media").exists()).toBe(true);
   });
 
-  it("composes prepared sibling failures with an unconfirmed cancellation caveat", async () => {
+  it("keeps a prepared sibling live when cancellation is unconfirmed", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
@@ -2286,6 +2290,22 @@ describe("MobileApp generation queue", () => {
       .find((row) => row.text().includes("cancelled dusk"))!;
     await cancelRow.get("[data-test='mobile-generation-cancel']").trigger("click");
     await flushPromises();
+    expect(openStreams[2]!.options.signal.aborted).toBe(false);
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]!.text()).toContain(
+      "Cancellation failed",
+    );
+    openStreams[2]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: btoa("third"),
+        format: "png",
+        width: 768,
+        height: 512,
+        seed_used: 3,
+        generation_time_ms: 700,
+        model: model.name,
+      }),
+    );
     openStreams[2]!.resolve();
     openStreams[1]!.options.onEvent("error", JSON.stringify({ message: "host ran out of memory" }));
     openStreams[1]!.resolve();
@@ -2296,8 +2316,7 @@ describe("MobileApp generation queue", () => {
     expect(liveSummary).toContain(
       "Studio ran out of memory. Try a smaller model, image size, or batch.",
     );
-    expect(liveSummary).toContain("Cancellation failed");
-    expect(liveSummary).toContain("remote cancellation was not confirmed");
+    expect(liveSummary).not.toContain("remote cancellation was not confirmed");
     expect(wrapper.find("img.result-media").exists()).toBe(true);
   });
 
@@ -3321,28 +3340,34 @@ describe("MobileApp generation queue", () => {
     expect(firstSignal?.aborted).toBe(true);
   });
 
-  it("keeps an unconfirmed remote-cancellation warning after the stream settles", async () => {
+  it("keeps a pre-ID job live when remote cancellation is unconfirmed", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("cancel before the remote queue id arrives");
 
     await wrapper.get("[data-test='mobile-generation-cancel']").trigger("click");
     await flushPromises();
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toMatch(
-      /remote cancellation was not confirmed/i,
-    );
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("Queued");
+    expect(openStreams[0]?.options.signal.aborted).toBe(false);
     expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toContain(
       "Cancellation failed",
     );
 
+    openStreams[0]?.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: btoa("finished after failed cancellation"),
+        format: "png",
+        width: 768,
+        height: 512,
+        seed_used: 1,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
     openStreams[0]?.resolve();
     await flushPromises();
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toMatch(
-      /remote cancellation was not confirmed/i,
-    );
-    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toContain(
-      "Cancellation failed",
-    );
+    expect(wrapper.find("img.result-media").exists()).toBe(true);
   });
 
   it("keeps a completed result visible while a queued sibling settles independently", async () => {

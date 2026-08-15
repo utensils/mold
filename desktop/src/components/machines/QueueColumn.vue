@@ -48,9 +48,11 @@ function progressPct(row: QueueSurfaceRow): number {
 
 async function cancel(row: QueueSurfaceRow) {
   try {
-    if (row.entry.clientId !== null) await generation.cancel(row.entry.clientId);
-    else await jobs.cancelJob(row.hostId, row.entry.id);
-    toasts.push("Cancelled");
+    const cancelled =
+      row.entry.clientId !== null
+        ? await generation.cancel(row.entry.clientId)
+        : await jobs.cancelJob(row.hostId, row.entry.id).then(() => true);
+    if (cancelled) toasts.push("Cancelled");
   } catch (err) {
     toasts.push(String(err), "error");
   }

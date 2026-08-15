@@ -79,6 +79,10 @@ export interface Job {
    * `null` until the required queued event arrives. The reconciliation poller
    * only sweeps cards whose `serverId` is known. */
   serverId: string | null;
+  /** True once the generation endpoint has been opened. Before this flips the
+   * job is only waiting for a local browser slot and can be safely aborted;
+   * afterward cancellation requires a server queue id and confirmed DELETE. */
+  streamStarted?: boolean;
   /** Latest live latent preview as a `data:image/png;base64,…` URI.
    * Deliberately a data URI rather than a blob URL: the module-singleton job
    * list is persisted and shared across consumers, so there is no sane place
@@ -595,6 +599,7 @@ function loadPersistedState(raw: string | null): LoadedJobsState {
         hostLabel: p.hostLabel,
         target: null,
         serverId: p.serverId,
+        streamStarted: false,
         // Previews are ephemeral SSE payload — never persisted.
         previewUrl: null,
         seedVisual: seedVisualFor(p.request),
@@ -746,12 +751,10 @@ function failRunningJob(id: string, error: string) {
 const AUTO_REMOVE_DONE_MS = 1500;
 
 /** Schedule auto-removal of a successfully-completed job. The timer
- * re-checks `state` at fire time and bails if the job has since flipped
- * to `canceled` (user clicked Cancel during the grace period) — without
- * this, the card would briefly flash "canceled" then auto-dismiss
- * anyway, losing the user's signal. Safe to call for jobs that have
- * already been manually dismissed: `removeJob` filters by id, so a
- * missing id is a no-op. */
+ * re-checks `state` at fire time so any later terminal reconciliation
+ * remains authoritative. Safe to call for jobs that have already been
+ * manually dismissed: `removeJob` filters by id, so a missing id is a
+ * no-op. */
 function scheduleAutoRemoveOnDone(id: string) {
   setTimeout(() => {
     const job = jobs.value.find((j) => j.id === id);
@@ -822,6 +825,7 @@ function submitJob(
     hostLabel: route?.label ?? null,
     target: route?.target ?? null,
     serverId: null,
+    streamStarted: false,
     previewUrl: null,
     seedVisual: seedVisualFor(req),
   }) as Job;
@@ -851,6 +855,7 @@ function submitJob(
   const startStream = async () => {
     if (decision.kind === "chain") {
       const chainReq = resolveChainRequest(req, decision);
+      job.streamStarted = true;
       await generateChainStream(
         chainReq,
         {
@@ -901,6 +906,7 @@ function submitJob(
           lease = prepared;
           transportRequest = prepared.request;
         }
+        job.streamStarted = true;
         await generateStream(
           transportRequest,
           {
@@ -945,19 +951,27 @@ function submitJob(
 
 async function cancelJob(id: string): Promise<void> {
   const job = jobs.value.find((j) => j.id === id);
-  if (!job) return;
+  if (!job || job.state !== "running") return;
+  if (job.serverId) {
+    try {
+      await cancelQueueJob(job.serverId, job.target ?? undefined);
+    } catch (error) {
+      // Completion can race the DELETE. If the stream already settled, its
+      // terminal frame is authoritative; otherwise cancellation was not
+      // confirmed and the server-owned job must remain live locally.
+      if (job.state !== "running") return;
+      throw error;
+    }
+  } else if (job.streamStarted) {
+    throw new Error(
+      "Remote cancellation was not confirmed before the queue ID arrived.",
+    );
+  }
   job.controller.abort();
   job.state = "canceled";
   job.settledAt = Date.now();
   job.previewUrl = null;
   if (selectedJobId.value === id) selectedJobId.value = null;
-  if (!job.serverId) return;
-  try {
-    await cancelQueueJob(job.serverId, job.target ?? undefined);
-  } catch (error) {
-    job.error = error instanceof Error ? error.message : String(error);
-    recordFailedSettlement(job);
-  }
 }
 
 function clearDoneJobs() {

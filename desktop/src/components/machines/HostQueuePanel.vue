@@ -155,9 +155,11 @@ function laneDroppable(laneKey: LaneKey): boolean {
 
 async function cancelEntry(entry: EnrichedQueueEntry) {
   try {
-    if (entry.clientId !== null) await generation.cancel(entry.clientId);
-    else await jobs.cancelJob(props.host.id, entry.id);
-    toasts.push("Cancelled");
+    const cancelled =
+      entry.clientId !== null
+        ? await generation.cancel(entry.clientId)
+        : await jobs.cancelJob(props.host.id, entry.id).then(() => true);
+    if (cancelled) toasts.push("Cancelled");
   } catch (err) {
     toasts.push(String(err), "error");
   }

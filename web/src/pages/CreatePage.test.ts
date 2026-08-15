@@ -153,6 +153,7 @@ const gcChainJobsMock = vi.hoisted(() =>
   vi.fn(async () => ({ swept_ephemeral_jobs: 0, pruned_artifact_dirs: 0 })),
 );
 const amendChainJobMock = vi.hoisted(() => vi.fn());
+const cancelPrintMock = vi.hoisted(() => vi.fn(async () => undefined));
 
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
@@ -195,7 +196,7 @@ vi.mock("../composables/useGenerateStream", async (importOriginal) => ({
     canvasErrorJobId: streamCanvasErrorJobIdRef,
     selectedJob: streamSelectedJobRef,
     submit: submitMock,
-    cancel: vi.fn(),
+    cancel: cancelPrintMock,
     failRunning: vi.fn(),
     remove: vi.fn(),
     clearDone: vi.fn(),
@@ -307,6 +308,8 @@ describe("CreatePage layout and behavior", () => {
     streamCanvasErrorJobIdRef.value = null;
     streamSelectedJobRef.value = null;
     streamSelectMock.mockReset();
+    cancelPrintMock.mockReset();
+    cancelPrintMock.mockResolvedValue(undefined);
     upscaleStreamMock.mockReset();
     upscaleStreamMock.mockResolvedValue(undefined);
     createChainJobMock.mockClear();
@@ -2333,6 +2336,22 @@ describe("CreatePage layout and behavior", () => {
     expect(
       (strip.props("sequences") as { jobId: string }[]).map((s) => s.jobId),
     ).toEqual(["chain-9"]);
+  });
+
+  it("reports an unconfirmed print cancellation instead of claiming success", async () => {
+    cancelPrintMock.mockRejectedValueOnce(new Error("job is already running"));
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    wrapper
+      .getComponent({ name: "ActivityStrip" })
+      .vm.$emit("cancel", "print-9");
+    await flushPromises();
+
+    expect(cancelPrintMock).toHaveBeenCalledWith("print-9");
+    expect(useNotifications().toasts.map((item) => item.text)).toContain(
+      "job is already running",
+    );
   });
 
   it("clears stale advanced fields when a selected job omits optional keys", async () => {

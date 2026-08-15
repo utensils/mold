@@ -124,21 +124,15 @@ describe("generation queueing", () => {
     expect(store.active?.clientId).toBe(jobs[0]!.clientId);
   });
 
-  it("creates every batch sibling but holds at most two streams open", async () => {
+  it("creates every batch sibling and opens enough streams to fill a four-GPU host", async () => {
     const store = useGenerationStore();
-    const { jobs } = store.submitBatch({ ...req, seed: 100 }, 3);
+    const { jobs } = store.submitBatch({ ...req, seed: 100 }, 5);
     await flushPromises();
-    expect(jobs).toHaveLength(3);
-    // All three jobs exist immediately, but the connection cap keeps only two
-    // SSE streams open at once so the browser's per-host budget isn't drained.
-    expect(openStreams).toHaveLength(2);
-    expect(jobs.map((j) => j.batchId)).toEqual([
-      jobs[0]!.batchId,
-      jobs[0]!.batchId,
-      jobs[0]!.batchId,
-    ]);
+    expect(jobs).toHaveLength(5);
+    expect(openStreams).toHaveLength(4);
+    expect(jobs.map((j) => j.batchId)).toEqual(Array(5).fill(jobs[0]!.batchId));
     // The active job's siblings drive the batch dots.
-    expect(store.siblings).toHaveLength(3);
+    expect(store.siblings).toHaveLength(5);
   });
 
   it("cancel marks the job cancelled and asks the server to drop it", async () => {
@@ -158,6 +152,26 @@ describe("generation queueing", () => {
     );
     expect(store.jobs[0]!.status).toBe("error");
     expect(store.jobs[0]!.error).toBe("Cancelled");
+  });
+
+  it("keeps a running job and its stream alive when the server refuses cancellation", async () => {
+    const store = useGenerationStore();
+    const { jobs } = store.submitBatch({ ...req }, 1);
+    await flushPromises();
+    openStreams[0]!.onEvent(
+      "progress",
+      JSON.stringify({ type: "denoise_step", step: 1, total: 4, id: "running-job" }),
+    );
+    jobs[0]!.id = "running-job";
+    const { apiFetchTo, ApiError } = await import("../lib/api/client");
+    vi.mocked(apiFetchTo).mockRejectedValueOnce(
+      new ApiError("queue job running-job is already running", 409),
+    );
+
+    await expect(store.cancel(jobs[0]!.clientId)).rejects.toThrow("already running");
+
+    expect(openStreams[0]!.signal.aborted).toBe(false);
+    expect(jobs[0]).toMatchObject({ status: "denoising", error: null });
   });
 
   it("keeps a server cancellation frame classified as cancellation during DELETE", async () => {
@@ -269,12 +283,12 @@ describe("generation queueing", () => {
       throw new Error("DELETE connection reset");
     });
 
-    await expect(store.cancel(jobs[0]!.clientId)).resolves.toBeUndefined();
+    await expect(store.cancel(jobs[0]!.clientId)).resolves.toBe(false);
     await settled;
     expect(jobs[0]).toMatchObject({ status: "complete", error: null, result: { seed_used: 12 } });
   });
 
-  it("releases the local stream when remote cancellation cannot be confirmed", async () => {
+  it("keeps the local stream when remote cancellation cannot be confirmed", async () => {
     const store = useGenerationStore();
     const { jobs, settled } = store.submitBatch({ ...req }, 1);
     await flushPromises();
@@ -286,11 +300,8 @@ describe("generation queueing", () => {
     vi.mocked(apiFetchTo).mockRejectedValueOnce(new Error("host went offline"));
 
     await expect(store.cancel(jobs[0]!.clientId)).rejects.toThrow("host went offline");
-    expect(openStreams[0]!.signal.aborted).toBe(true);
-    expect(jobs[0]).toMatchObject({
-      status: "error",
-      error: "Cancelled locally; remote cancellation was not confirmed.",
-    });
+    expect(openStreams[0]!.signal.aborted).toBe(false);
+    expect(jobs[0]).toMatchObject({ status: "queued", error: null });
     openStreams[0]!.resolve();
     await settled;
   });
@@ -307,11 +318,8 @@ describe("generation queueing", () => {
 
     const { apiFetchTo } = await import("../lib/api/client");
     expect(vi.mocked(apiFetchTo)).not.toHaveBeenCalled();
-    expect(openStreams[0]!.signal.aborted).toBe(true);
-    expect(jobs[0]).toMatchObject({
-      status: "error",
-      error: "Cancelled locally; remote cancellation was not confirmed.",
-    });
+    expect(openStreams[0]!.signal.aborted).toBe(false);
+    expect(jobs[0]).toMatchObject({ status: "queued", error: null });
 
     openStreams[0]!.resolve();
     await settled;

@@ -100,9 +100,11 @@ describe("hostClient auth + requests", () => {
     expect(JSON.parse(init.body as string)).toEqual({ position: 0 });
   });
 
-  it("treats a 404 cancel as already gone", async () => {
+  it("rejects a 404 cancel because cancellation was not confirmed", async () => {
     fetchMock.mockResolvedValueOnce(ok({}, 404));
-    await expect(cancelQueueJob(remote, "job1")).resolves.toBeUndefined();
+    await expect(cancelQueueJob(remote, "job1")).rejects.toThrow(
+      "DELETE /api/queue/job1 failed: 404",
+    );
   });
 
   it("routes queue-wide controls to the selected host", async () => {

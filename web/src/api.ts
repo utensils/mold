@@ -132,7 +132,7 @@ export async function fetchQueue(
   return (await res.json()) as QueueListing;
 }
 
-/** Cancel a queued or running generation on the exact host that owns it. */
+/** Cancel a queued generation on the exact host that owns it. */
 export async function cancelQueueJob(
   id: string,
   target?: StreamTarget,
@@ -141,7 +141,7 @@ export async function cancelQueueJob(
     `${targetBase(target)}/api/queue/${encodeURIComponent(id)}`,
     { method: "DELETE", headers: targetHeaders(target) },
   );
-  if (!res.ok && res.status !== 404) {
+  if (!res.ok) {
     const detail = await res.text().catch(() => "");
     throw new Error(
       `Cancel failed (${res.status})${detail ? `: ${detail}` : ""}`,
