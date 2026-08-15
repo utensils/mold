@@ -8630,6 +8630,7 @@ mod tests {
             quantization: Some("fp8-cast".to_string()),
             streaming_prefetch_count: Some(2),
             conditioning,
+            image_preprocessing: None,
             loras,
             retake_range: req.retake_range.clone(),
             spatial_upscale: req.spatial_upscale,

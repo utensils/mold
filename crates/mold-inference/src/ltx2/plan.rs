@@ -127,6 +127,14 @@ pub(crate) struct Ltx2GeneratePlan {
     pub(crate) quantization: Option<String>,
     pub(crate) streaming_prefetch_count: Option<u32>,
     pub(crate) conditioning: StagedConditioning,
+    /// Still-image conditioning preprocessing contract, resolved from the
+    /// checkpoint generation (`mold_core::ltx2_preprocess`). `Some` exactly
+    /// when `conditioning.images` is non-empty — materialization fails
+    /// closed for an unknown generation rather than guessing a CRF.
+    // TODO(#1055 PR2): consumed by the conditioning-image H.264 round-trip.
+    #[allow(dead_code)]
+    pub(crate) image_preprocessing:
+        Option<mold_core::ltx2_preprocess::Ltx2ImagePreprocessingProfile>,
     pub(crate) loras: Vec<LoraWeight>,
     pub(crate) retake_range: Option<TimeRange>,
     pub(crate) spatial_upscale: Option<Ltx2SpatialUpscale>,

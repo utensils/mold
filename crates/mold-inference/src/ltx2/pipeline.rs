@@ -427,6 +427,34 @@ impl Ltx2Engine {
         lora::camera_control_preset(name)
     }
 
+    /// The still-image conditioning preprocessing contract for this
+    /// checkpoint, resolved through the shared
+    /// `mold_core::ltx2_preprocess` authority from the model name and the
+    /// safetensors `model_version` header hint. Errors — naming both —
+    /// when the generation is unknown: upstream's conditioning CRF is a
+    /// per-generation training property (33 for LTX-2/2.3, 18 for 2.4),
+    /// so guessing one for an unrecognised checkpoint silently degrades
+    /// I2V instead of failing actionably.
+    pub(crate) fn image_preprocessing_profile(
+        &self,
+    ) -> Result<mold_core::ltx2_preprocess::Ltx2ImagePreprocessingProfile> {
+        let hint = self.preset_hint.as_deref();
+        let generation = mold_core::ltx2_preprocess::ltx2_generation(&self.model_name, hint)
+            .with_context(|| {
+                format!(
+                    "cannot resolve the LTX-2 checkpoint generation for model '{}'{} — \
+                     image conditioning needs the generation's training-time compression \
+                     profile and refuses to guess; text-to-video remains available",
+                    self.model_name,
+                    match hint {
+                        Some(h) => format!(" (header hint: model_version={h:?})"),
+                        None => String::new(),
+                    }
+                )
+            })?;
+        Ok(mold_core::ltx2_preprocess::ltx2_image_preprocessing_profile(generation))
+    }
+
     pub(crate) fn materialize_request(
         &self,
         req: &GenerateRequest,
@@ -439,6 +467,16 @@ impl Ltx2Engine {
         let prompt_tokens = GemmaAssets::discover(&gemma_root)?
             .encode_prompt_pair(&req.prompt, req.negative_prompt.as_deref())?;
         let conditioning = conditioning::stage_conditioning(req, work_dir)?;
+        // Still-image conditioning is re-compressed to match the
+        // checkpoint generation's training distribution; an unknown
+        // generation has no known CRF, so I2V/keyframe requests fail
+        // closed here — before any GPU work — while T2V on the same
+        // checkpoint stays unaffected.
+        let image_preprocessing = if conditioning.images.is_empty() {
+            None
+        } else {
+            Some(self.image_preprocessing_profile()?)
+        };
         let loras = lora::resolve_loras(&self.paths, req)?;
         let preset =
             preset::preset_for_model_with_hint(&self.model_name, self.preset_hint.as_deref())?;
@@ -539,6 +577,7 @@ impl Ltx2Engine {
             quantization: self.request_quantization(),
             streaming_prefetch_count: Some(preset.streaming_prefetch_count),
             conditioning,
+            image_preprocessing,
             loras,
             retake_range: req.retake_range.clone(),
             spatial_upscale: req.spatial_upscale,
@@ -2712,6 +2751,69 @@ mod tests {
     /// a stage-level EXR target is the orchestrator's per-stage window, so a
     /// continuation can never stream clip-local `frame_00000.exr..` over
     /// another stage's frames (the latent extend-path bug #688 predicted).
+    #[test]
+    fn i2v_on_unknown_generation_fails_closed_with_model_name() {
+        let gemma_dir = tempfile::tempdir().unwrap();
+        write_test_gemma_assets(gemma_dir.path());
+        let mut engine = Ltx2Engine::with_runtime_session(
+            "cv:12345".to_string(),
+            dummy_paths_with_gemma_root(gemma_dir.path()),
+            runtime_session(),
+        );
+        // Upstream 2.4 maps to CRF 18, which this build has no runnable
+        // checkpoint to verify — the generation resolver refuses it while
+        // the architecture preset keeps its historical 19B fall-through.
+        engine.preset_hint = Some("2.4.0".to_string());
+
+        let work_dir = tempfile::tempdir().unwrap();
+        let output = work_dir.path().join("out.mp4");
+
+        // T2V on the same checkpoint stays available.
+        let t2v = request(OutputFormat::Mp4, Some(false));
+        let plan = engine
+            .materialize_request(&t2v, work_dir.path(), &output)
+            .unwrap();
+        assert!(plan.image_preprocessing.is_none());
+
+        // I2V fails closed, naming the model and the header hint.
+        let mut i2v = request(OutputFormat::Mp4, Some(false));
+        i2v.source_image = Some(vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']);
+        let err = engine
+            .materialize_request(&i2v, work_dir.path(), &output)
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("cv:12345"), "got: {msg}");
+        assert!(msg.contains("model_version=\"2.4.0\""), "got: {msg}");
+        assert!(
+            msg.contains("text-to-video remains available"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn i2v_on_known_generation_resolves_crf_33_profile() {
+        let gemma_dir = tempfile::tempdir().unwrap();
+        write_test_gemma_assets(gemma_dir.path());
+        let engine = Ltx2Engine::with_runtime_session(
+            "ltx-2.3-22b-distilled:fp8".to_string(),
+            dummy_paths_with_gemma_root(gemma_dir.path()),
+            runtime_session(),
+        );
+        let work_dir = tempfile::tempdir().unwrap();
+        let output = work_dir.path().join("out.mp4");
+        let mut i2v = request(OutputFormat::Mp4, Some(false));
+        i2v.source_image = Some(vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']);
+        let plan = engine
+            .materialize_request(&i2v, work_dir.path(), &output)
+            .unwrap();
+        let profile = plan.image_preprocessing.expect("profile for staged image");
+        assert_eq!(
+            profile.generation,
+            mold_core::ltx2_preprocess::Ltx2Generation::V2_3
+        );
+        assert_eq!(profile.image_crf, 33);
+    }
+
     #[test]
     fn stage_sidecar_is_the_only_route_to_a_stage_exr_target() {
         let gemma_dir = tempfile::tempdir().unwrap();

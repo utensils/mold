@@ -20,6 +20,7 @@ pub mod lambda;
 pub mod ltx2_camera;
 pub use ltx2_camera::{Ltx2CameraControlAvailability, Ltx2CameraControlInfo};
 pub mod ltx2_control;
+pub mod ltx2_preprocess;
 pub use ltx2_control::Ltx2ControlAdapterInfo;
 pub mod manifest;
 pub mod media_paths;

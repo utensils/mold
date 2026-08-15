@@ -204,6 +204,18 @@ pub(crate) fn preset_for_model_with_hint(
     model_name: &str,
     hint: Option<&str>,
 ) -> Result<Ltx2ModelPreset> {
+    // The 2.0-vs-2.3 generation split is owned by the shared
+    // `mold_core::ltx2_preprocess` resolver so admission, preprocessing,
+    // and this architecture pick can never disagree; the looser arms
+    // below survive only as architecture fall-through for inputs the
+    // strict resolver refuses (it fails closed on e.g. a future
+    // `model_version: "2.4"`, which for *architecture* selection keeps
+    // its historical 19B mapping).
+    match mold_core::ltx2_preprocess::ltx2_generation(model_name, hint) {
+        Some(mold_core::ltx2_preprocess::Ltx2Generation::V2_3) => return Ok(PRESET_22B),
+        Some(mold_core::ltx2_preprocess::Ltx2Generation::V2) => return Ok(PRESET_19B),
+        None => {}
+    }
     if model_name.contains("ltx-2.3") {
         return Ok(PRESET_22B);
     }
@@ -278,6 +290,34 @@ mod tests {
         let err = preset_for_model_with_hint("cv:42", Some("3.0.0")).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("model_version=\"3.0.0\""), "got: {msg}");
+    }
+
+    #[test]
+    fn preset_and_generation_resolvers_agree_for_shipped_names() {
+        // Contract: wherever the shared `mold_core::ltx2_preprocess`
+        // resolver recognises a generation, the architecture preset must
+        // match — V2 → 19B, V2_3 → 22B. Divergence would let admission
+        // preprocess for one generation while the engine loads the other.
+        use mold_core::ltx2_preprocess::{ltx2_generation, Ltx2Generation};
+        let cases: &[(&str, Option<&str>)] = &[
+            ("ltx-2-19b", None),
+            ("ltx-2-19b-distilled:fp8", None),
+            ("ltx-2.3-22b-dev:fp8", None),
+            ("ltx-2.3-22b-distilled:bf16", None),
+            ("cv:2752735", Some("2.3.0")),
+            ("cv:9999", Some("2.0.0")),
+            ("hf:someone/repo", Some("2.1.0")),
+        ];
+        for (name, hint) in cases {
+            let generation = ltx2_generation(name, *hint)
+                .unwrap_or_else(|| panic!("generation resolver must recognise {name}"));
+            let preset = preset_for_model_with_hint(name, *hint).unwrap();
+            let expected = match generation {
+                Ltx2Generation::V2 => "ltx-2-19b",
+                Ltx2Generation::V2_3 => "ltx-2.3-22b",
+            };
+            assert_eq!(preset.name, expected, "for model {name} hint {hint:?}");
+        }
     }
 
     #[test]
