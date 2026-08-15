@@ -84,6 +84,11 @@ export async function restoreH3Boundaries(
       if (stashed) return { base64: stashed, filename };
     }
     if (filename) {
+      // Deliberately NOT digest-verified (same contract as
+      // `restoreSourceImage`): the recorded sha256 hashes the WIRE bytes —
+      // post client-side source-fit preprocessing — while the gallery holds
+      // the pre-fit original the user picked. Restoring that original is the
+      // intent; the fit re-applies on the next submit.
       const fromGallery = await deps.galleryLookup(filename).catch(() => null);
       if (fromGallery) return { base64: fromGallery, filename };
     }

@@ -4002,10 +4002,13 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
   }
 }
 
-/** Fetch bytes for the reuse-restored FL2VA boundary descriptors from the
- * print's own host, within the mobile media budget. Failures leave the
+/** Fetch bytes for the reuse-restored FL2VA boundary descriptors, within the
+ * mobile media budget. The print's own host is tried first; a source frame
+ * picked on another machine (auto-routing rendered elsewhere) resolves
+ * through the merged gallery's per-print targets. Failures leave the
  * existing reattach affordance in place. */
 async function restoreReusedH3BoundaryMedia(print: {
+  hostId: string;
   target: ApiTarget;
   filename: string;
 }): Promise<void> {
@@ -4014,34 +4017,46 @@ async function restoreReusedH3BoundaryMedia(print: {
   if (wanted.length === 0) return;
   const modelAtStart = form.model;
   for (const slot of wanted) {
-    try {
-      const response = await apiFetchTo(
-        print.target,
-        galleryMediaPath(slot.filename, "host"),
-      );
-      const existingBytes = inlineGenerationMediaBytes(form, null);
-      const declaredBytes = Number(response.headers?.get("content-length") ?? Number.NaN);
-      if (
-        Number.isFinite(declaredBytes) &&
-        declaredBytes >= 0 &&
-        existingBytes + declaredBytes > MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES
-      ) {
-        continue;
+    // Candidate routes: origin host first, then any host whose merged
+    // gallery lists the named file — deduped by host id.
+    const candidates = new Map<string, ApiTarget>([[print.hostId, print.target]]);
+    for (const entry of gallery.value) {
+      if (entry.filename === slot.filename && !candidates.has(entry.hostId)) {
+        candidates.set(entry.hostId, entry.target);
       }
-      const blob = await response.blob();
-      if (blob.size === 0) continue;
-      if (existingBytes + blob.size > MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES) continue;
-      const base64 = await blobToBase64(blob);
-      if (form.model !== modelAtStart) return;
-      const live = form.h3Authoring?.[slot.endpoint];
-      if (!live || live.data || live.filename !== slot.filename) continue;
-      const result = setMinimaxH3PickedImageBoundary(form.h3Authoring, slot.endpoint, {
-        filename: slot.filename,
-        base64,
-      });
-      if (result.ok) form.h3Authoring = result.state;
-    } catch {
-      // Not found on the origin host — the reattach hint already covers it.
+    }
+    for (const target of candidates.values()) {
+      try {
+        const response = await apiFetchTo(
+          target,
+          galleryMediaPath(slot.filename, "host"),
+        );
+        const existingBytes = inlineGenerationMediaBytes(form, null);
+        const declaredBytes = Number(response.headers?.get("content-length") ?? Number.NaN);
+        if (
+          Number.isFinite(declaredBytes) &&
+          declaredBytes >= 0 &&
+          existingBytes + declaredBytes > MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES
+        ) {
+          break; // over budget on every host — the file is what it is
+        }
+        const blob = await response.blob();
+        if (blob.size === 0) continue;
+        if (existingBytes + blob.size > MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES) break;
+        const base64 = await blobToBase64(blob);
+        if (form.model !== modelAtStart) return;
+        const live = form.h3Authoring?.[slot.endpoint];
+        if (!live || live.data || live.filename !== slot.filename) break;
+        const result = setMinimaxH3PickedImageBoundary(form.h3Authoring, slot.endpoint, {
+          filename: slot.filename,
+          base64,
+        });
+        if (result.ok) form.h3Authoring = result.state;
+        break;
+      } catch {
+        // Not on this host — try the next candidate; the reattach hint
+        // remains if none of them has it.
+      }
     }
   }
 }

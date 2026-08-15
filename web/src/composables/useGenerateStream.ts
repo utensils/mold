@@ -23,6 +23,7 @@ import {
   type ReferenceUploadLease,
 } from "@studio/api/referenceUploads";
 import { redactGenerationReference } from "@studio/lib/generationReferences";
+import { getHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 
 export interface JobProgress {
   stage: string;
@@ -981,12 +982,25 @@ function submitJob(
   return id;
 }
 
+/** The route for a job whose in-memory target died with its session (API
+ * keys never persist): resolve the host back through the registry so cancel
+ * reaches the machine that actually holds the job, not the origin. */
+function routeForDetachedJob(job: Job): StreamTarget | undefined {
+  if (job.target) return job.target;
+  if (!job.hostId || job.hostId === ORIGIN_HOST_ID) return undefined;
+  const host = getHost(job.hostId);
+  if (!host) return undefined;
+  const target: StreamTarget = { baseUrl: host.url };
+  if (host.apiKey) target.apiKey = host.apiKey;
+  return target;
+}
+
 async function cancelJob(id: string): Promise<void> {
   const job = jobs.value.find((j) => j.id === id);
   if (!job || job.state !== "running") return;
   if (job.serverId) {
     try {
-      await cancelQueueJob(job.serverId, job.target ?? undefined);
+      await cancelQueueJob(job.serverId, routeForDetachedJob(job));
     } catch (error) {
       // Completion can race the DELETE. If the stream already settled, its
       // terminal frame is authoritative; otherwise cancellation was not

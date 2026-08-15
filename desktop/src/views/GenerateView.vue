@@ -2952,30 +2952,44 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
     // source well. Reuse leaves bytes-less reattach descriptors there; each
     // one keyed with provenance resolves stash-first, then by gallery
     // filename across every connected host.
-    const wantsFirst = Boolean(form.h3Authoring?.firstFrame && !form.h3Authoring.firstFrame.data);
-    const wantsLast = Boolean(form.h3Authoring?.lastFrame && !form.h3Authoring.lastFrame.data);
-    if (!wantsFirst && !wantsLast) return;
+    // Snapshot the descriptors this restore is answering, so a slot the user
+    // cleared or reattached while the fetch was in flight is never clobbered.
+    const wantedFirst =
+      form.h3Authoring?.firstFrame && !form.h3Authoring.firstFrame.data
+        ? form.h3Authoring.firstFrame
+        : null;
+    const wantedLast =
+      form.h3Authoring?.lastFrame && !form.h3Authoring.lastFrame.data
+        ? form.h3Authoring.lastFrame
+        : null;
+    if (!wantedFirst && !wantedLast) return;
     const boundaries = await restoreH3Boundaries(metadata, deps);
     if (epoch !== restoreEpoch || form.model !== modelAtStart) return;
     if (caps.value.sourceImageMode !== "h3-boundaries") return;
     let failed = 0;
-    const commit = (endpoint: "firstFrame" | "lastFrame", restored: { base64: string; filename: string | null } | null, wanted: boolean) => {
+    const commit = (
+      endpoint: "firstFrame" | "lastFrame",
+      restored: { base64: string; filename: string | null } | null,
+      wanted: { filename: string } | null,
+    ) => {
       if (!wanted) return;
       const slot = form.h3Authoring?.[endpoint];
-      if (slot?.data) return; // the user reattached while we fetched
+      // Cleared (null), reattached (data), or replaced with a different
+      // descriptor while we fetched — the user's action wins.
+      if (!slot || slot.data || slot.filename !== wanted.filename) return;
       if (!restored) {
         failed += 1;
         return;
       }
       const result = setMinimaxH3PickedImageBoundary(form.h3Authoring, endpoint, {
-        filename: restored.filename ?? slot?.filename ?? "First frame",
+        filename: restored.filename ?? slot.filename,
         base64: restored.base64,
       });
       if (result.ok) form.h3Authoring = result.state;
       else failed += 1;
     };
-    commit("firstFrame", boundaries.firstFrame, wantsFirst);
-    commit("lastFrame", boundaries.lastFrame, wantsLast);
+    commit("firstFrame", boundaries.firstFrame, wantedFirst);
+    commit("lastFrame", boundaries.lastFrame, wantedLast);
     if (failed > 0) {
       toasts.push(
         "Couldn't restore the original frame media — the file wasn't found on any connected host. Reattach it to generate.",
