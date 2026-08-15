@@ -286,6 +286,17 @@ describe("ConnectModal", () => {
     expect(w.emitted("close")).toBeTruthy();
   });
 
+  it("labels an unnamed host with the server's hostname, never the raw URL", async () => {
+    hostStatus.mockResolvedValue(okStatus({ hostname: "plato" }));
+    const w = mountModal();
+    await advanceToDetails(w);
+    await w.get('[data-test="connect-address"]').setValue("192.168.1.20:7680");
+    await w.get('[data-test="connect-submit"]').trigger("click");
+    await flushPromises();
+
+    expect(listStoredHosts()[0]?.name).toBe("plato");
+  });
+
   it("rejects an empty address without probing", async () => {
     const w = mountModal();
     await advanceToDetails(w);

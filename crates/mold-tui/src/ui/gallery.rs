@@ -322,6 +322,7 @@ mod tests {
 
     fn test_metadata(width: u32, height: u32) -> mold_core::OutputMetadata {
         mold_core::OutputMetadata {
+            source_fit: None,
             guidance_overrides: None,
             sample_shift: None,
             distill_strength_high: None,

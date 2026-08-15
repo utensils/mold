@@ -223,7 +223,10 @@ export const GENERATE_TARGET_STORAGE_KEY = "mold.web.generateTarget.v1";
 
 /** Host id chosen as the generation target (defaults to the primary origin). */
 export function getGenerateTargetId(): string {
-  return localStorage.getItem(GENERATE_TARGET_STORAGE_KEY) ?? ORIGIN_HOST_ID;
+  // Default to model-aware Auto routing (desktop parity: null = auto). A
+  // fresh install pinned to the origin hid every connected machine's models
+  // from the Create picker until the user found the target control.
+  return localStorage.getItem(GENERATE_TARGET_STORAGE_KEY) ?? "auto";
 }
 
 export function setGenerateTargetId(id: string): void {

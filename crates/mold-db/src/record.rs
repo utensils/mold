@@ -138,6 +138,7 @@ mod tests {
 
     fn meta() -> OutputMetadata {
         OutputMetadata {
+            source_fit: None,
             guidance_overrides: None,
             sample_shift: None,
             distill_strength_high: None,

@@ -1374,6 +1374,7 @@ fn build_generate_request(
     }
 
     Ok(GenerateRequest {
+        source_fit: None,
         hdr_exr_dir: None,
         hdr_exr_full_float: false,
         guidance_overrides: None,
@@ -2248,6 +2249,7 @@ mod tests {
     async fn async_job_registry_tracks_completed_image() {
         let jobs = AsyncJobRegistry::default();
         let req = GenerateRequest {
+            source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
@@ -2363,6 +2365,7 @@ mod tests {
         GalleryImage {
             filename: filename.into(),
             metadata: mold_core::OutputMetadata {
+                source_fit: None,
                 guidance_overrides: None,
                 sample_shift: None,
                 distill_strength_high: None,

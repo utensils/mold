@@ -10,6 +10,7 @@ import {
   useGenerateForm,
   __testing__,
 } from "../../composables/useGenerateForm";
+import type { ModelInfoExtended } from "../../types";
 import {
   addHost,
   getGenerateTargetId,
@@ -573,4 +574,118 @@ describe("ControlsAside — explicit shape pick vs source tie", () => {
     }
     expect(shape.props("modelValue")).toBe(canonical);
   });
+
+  it("advises on an off-profile custom size instead of blocking", () => {
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm({
+          model: "minimax-h3-fl2va:official-bf16",
+          modelFamily: "minimax-h3",
+          width: 1024,
+          height: 576,
+        }),
+        family: "minimax-h3",
+        advCount: 0,
+        model: rejectBucketModel(),
+      },
+    });
+    const warning = wrapper.get("[data-test='resolution-warning']");
+    expect(warning.text()).toContain("1344 × 768");
+    expect(warning.text()).toContain("server may reject");
+  });
+
+  it("marks the nearest aspect chip approximate for a custom size", () => {
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm({
+          model: "minimax-h3-fl2va:official-bf16",
+          modelFamily: "minimax-h3",
+          width: 1000,
+          height: 600,
+        }),
+        family: "minimax-h3",
+        advCount: 0,
+        model: rejectBucketModel(),
+      },
+    });
+    const shape = wrapper.getComponent(ShapePicker);
+    expect(shape.props("modelValue")).toBe("7:4");
+    expect(shape.props("approximate")).toBe(true);
+  });
 });
+
+/** A reject-policy single-bucket profile (H3's shape): min 1344×768, one 7:4
+ * preset. Exercises both the advisory downgrade and the approximate chip. */
+function rejectBucketModel(): ModelInfoExtended {
+  return {
+    name: "minimax-h3-fl2va:official-bf16",
+    family: "minimax-h3",
+    downloaded: true,
+    default_width: 1344,
+    default_height: 768,
+    generation_profile: {
+      schema_version: 1,
+      profile_id: "h3.v1",
+      profile_hash: "hash",
+      default_recipe_id: "default",
+      recipes: [
+        {
+          id: "default",
+          label: "Default",
+          request_selector: {},
+          defaults: { width: 1344, height: 768, steps: 21, guidance: 1 },
+          resolution: {
+            domain: "buckets",
+            alignment: 32,
+            min_width: 1344,
+            min_height: 768,
+            max_pixels: 1_032_192,
+            off_bucket: "reject",
+            aspect_groups: [
+              {
+                id: "7:4",
+                label: "7:4",
+                presets: [
+                  { id: "1344x768", width: 1344, height: 768, tier: "recommended" },
+                ],
+              },
+            ],
+          },
+          steps: { default: 21, min: 1, max: 100, step: 1, mode: "adjustable" },
+          guidance: { default: 1, min: 0, max: 20, step: 0.1, mode: "fixed" },
+          capabilities: {
+            guidance: {
+              adjustable: false,
+              supports_negative_prompt: false,
+              fixed_scale: 1,
+            },
+            negative_prompt: { mode: "hidden", required: false },
+            supports_lora: false,
+            supports_controlnet: false,
+            supports_sequence: false,
+            supports_extend: false,
+            supports_audio: false,
+            source_video: { mode: "hidden", required: false },
+            mask: { mode: "hidden", required: false },
+            keyframes: { mode: "hidden", required: false },
+            audio: { mode: "hidden", required: false },
+            lora: { mode: "hidden", max_count: 0 },
+            controlnet: { mode: "hidden", max_count: 0 },
+            output: {
+              default_format: "mp4",
+              formats: ["mp4"],
+              audio_requires_mp4: false,
+            },
+            wan_recipe: {
+              mode: "hidden",
+              supports_distill_strength: false,
+              supports_first_last_frame: false,
+            },
+            schedulers: [],
+          },
+          provenance: [],
+        },
+      ],
+    },
+  } as unknown as ModelInfoExtended;
+}

@@ -18,8 +18,7 @@ import {
   floatControlError,
   generationRecipeSelectionError,
   integerControlError,
-  resolutionProfileError,
-  resolutionProfileWarning,
+  resolutionProfileFinding,
 } from "@studio/lib/generationProfile";
 
 export const MAX_INLINE_GENERATION_MEDIA_BYTES = 64 * 1024 * 1024;
@@ -153,30 +152,17 @@ export function resolutionValidationError(
   contract?: ModelResolutionContract | null,
   pipeline?: string | null,
 ): string | null {
-  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 64 || height < 64) {
-    return "Width and height must each be at least 64 pixels.";
+  // The server is the authority on whether a size renders: every profile and
+  // legacy limit is an advisory (see `resolutionValidationWarning`). Only
+  // input that cannot form a coherent request blocks here.
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) {
+    return "Width and height must be whole numbers.";
   }
   const selectionError = generationRecipeSelectionError(contract, pipeline);
   if (selectionError) return selectionError;
   const recipe = effectiveGenerationRecipe(contract, pipeline);
-  const profileError = resolutionProfileError(width, height, recipe?.resolution);
-  if (profileError) return profileError;
-  if (recipe) return null;
-  const alignment = contract?.dimension_alignment ?? dimensionAlignmentForFamily(contract?.family);
-  if (width % alignment !== 0 || height % alignment !== 0) {
-    return `Width and height must be multiples of ${alignment}.`;
-  }
-  // Per model, not per family: a checkpoint that ships the spatial upsampler
-  // composes past the trained span, one that does not cannot.
-  const axisLimit = maxAxisPixelsForModel(contract, pipeline);
-  if (axisLimit && Math.max(width, height) > axisLimit) {
-    return `${width} × ${height} exceeds the ${axisLimit}px span this model can hold. Keep the long edge at or below ${axisLimit}px.`;
-  }
-  const maxPixels = maxPixelsForModel(contract, pipeline);
-  const megapixels = (width * height) / 1_000_000;
-  return width * height <= maxPixels
-    ? null
-    : `${width} × ${height} is ${megapixels.toFixed(1)} MP. Choose a resolution at or below ${(maxPixels / 1_000_000).toFixed(1)} MP.`;
+  const finding = resolutionProfileFinding(width, height, recipe?.resolution);
+  return finding?.level === "block" ? finding.message : null;
 }
 
 /**
@@ -189,17 +175,42 @@ export function resolutionValidationError(
  * contains no architecture, so the check passed a preset that cannot resolve
  * and rejected one on a 19B install reached the same way.
  */
-/** Advisory counterpart to {@link resolutionValidationError}: a warn-policy
- * bucket recipe admits this size, but the model is not tuned for it. Never a
- * blocker. */
+/** Advisory counterpart to {@link resolutionValidationError}: every size
+ * constraint — profile minimums, alignment, span, pixel budget, bucket
+ * membership, and the legacy no-recipe family limits — reports here. Never a
+ * blocker: the request submits and the server's own refusal is authoritative. */
 export function resolutionValidationWarning(
   width: number,
   height: number,
   contract?: ModelResolutionContract | null,
   pipeline?: string | null,
 ): string | null {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) {
+    return null; // already blocked as malformed input
+  }
   const recipe = effectiveGenerationRecipe(contract, pipeline);
-  return resolutionProfileWarning(width, height, recipe?.resolution);
+  if (recipe) {
+    const finding = resolutionProfileFinding(width, height, recipe.resolution);
+    return finding?.level === "warn" ? finding.message : null;
+  }
+  // Legacy hosts without a generation profile: the family constants that used
+  // to hard-block now advise.
+  if (width < 64 || height < 64) {
+    return "This model expects at least 64 × 64 pixels — the server may reject this size.";
+  }
+  const alignment = contract?.dimension_alignment ?? dimensionAlignmentForFamily(contract?.family);
+  if (width % alignment !== 0 || height % alignment !== 0) {
+    return `This model expects multiples of ${alignment} — the server may reject this size.`;
+  }
+  const axisLimit = maxAxisPixelsForModel(contract, pipeline);
+  if (axisLimit && Math.max(width, height) > axisLimit) {
+    return `${width} × ${height} exceeds the ${axisLimit}px span this model can hold — the server may reject it.`;
+  }
+  const maxPixels = maxPixelsForModel(contract, pipeline);
+  if (width * height > maxPixels) {
+    return `${width} × ${height} is ${((width * height) / 1_000_000).toFixed(1)} MP — above this model's ${(maxPixels / 1_000_000).toFixed(1)} MP guideline; the server may reject it.`;
+  }
+  return null;
 }
 
 export function cameraControlValidationError(

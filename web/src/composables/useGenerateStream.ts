@@ -93,6 +93,11 @@ export interface Job {
    * or a stable `model·prompt` stand-in when the seed is random (desktop
    * `generationJob.ts` recipe). Recomputed from the request on rehydrate. */
   seedVisual: string;
+  /** True for a job rehydrated from a previous session whose SSE stream is
+   * gone but whose `serverId` is known: the server may still be rendering
+   * it, so the reconciler — not this boot — decides its fate. Never
+   * persisted; derived on load. */
+  detached?: boolean;
 }
 
 /**
@@ -432,6 +437,11 @@ export interface UseGenerateStream {
    * authorities such as queue reconciliation so every failure updates the
    * canvas owner and terminal metadata through the same path. */
   failRunning: (id: string, error: string) => void;
+  /** Settle a detached (rehydrated after reload) job whose server record is
+   * gone. The outcome is genuinely unknown — it may well have finished — so
+   * this records a dismissible note WITHOUT seizing the canvas with a
+   * "Generation failed" takeover. */
+  settleDetached: (id: string, note: string) => void;
   clearDone: () => void;
   /** Remove a specific job from the list (used to dismiss persisted cards). */
   remove: (id: string) => void;
@@ -557,6 +567,11 @@ function loadPersistedState(raw: string | null): LoadedJobsState {
     for (const persisted of parsed.jobs) {
       if (
         persisted.state === "running" &&
+        // A row whose server id is known is NOT dead-lettered on boot: the
+        // server may still be rendering it, and the queue reconciler can
+        // prove that either way. Only a row that never received its queued
+        // frame has nothing to reconcile against.
+        !persisted.serverId &&
         (!newestZombie || persisted.startedAt > newestZombie.startedAt)
       ) {
         newestZombie = persisted;
@@ -565,7 +580,8 @@ function loadPersistedState(raw: string | null): LoadedJobsState {
     const canvasErrorJobId = newestZombie?.id ?? null;
     const loadedAt = Date.now();
     const loadedJobs = parsed.jobs.map((p) => {
-      const wasZombie = p.state === "running";
+      const detached = p.state === "running" && Boolean(p.serverId);
+      const wasZombie = p.state === "running" && !detached;
       const state: Job["state"] = wasZombie ? "error" : p.state;
       const error = wasZombie
         ? (p.error ?? "page reloaded — server progress lost")
@@ -591,9 +607,14 @@ function loadPersistedState(raw: string | null): LoadedJobsState {
         // Genuinely settled history retains its original age.
         settledAt: wasZombie
           ? loadedAt
-          : (p.settledAt ?? p.lastProgressAt ?? p.startedAt),
+          : detached
+            ? null
+            : (p.settledAt ?? p.lastProgressAt ?? p.startedAt),
         chain: p.chain,
-        lastProgressAt: p.lastProgressAt,
+        // A detached job has no stream to be stale about until the
+        // reconciler has had a chance to speak.
+        lastProgressAt: detached ? loadedAt : p.lastProgressAt,
+        detached,
         workStarted: p.workStarted,
         hostId: p.hostId,
         hostLabel: p.hostLabel,
@@ -740,6 +761,17 @@ function failRunningJob(id: string, error: string) {
   if (!job || job.state !== "running") return;
   job.error = error;
   recordFailedSettlement(job);
+}
+
+function settleDetachedJob(id: string, note: string) {
+  const job = jobs.value.find((candidate) => candidate.id === id);
+  if (!job || job.state !== "running") return;
+  job.error = note;
+  job.state = "error";
+  job.settledAt = Date.now();
+  job.previewUrl = null;
+  // Deliberately no canvasErrorJobId takeover: the job may have completed
+  // successfully while the page was away — the note is advisory history.
 }
 
 /// Grace period before a successfully-completed job's running-strip card
@@ -1012,6 +1044,7 @@ export function useGenerateStream(
     submit: submitJob,
     cancel: cancelJob,
     failRunning: failRunningJob,
+    settleDetached: settleDetachedJob,
     clearDone: clearDoneJobs,
     remove: removeJob,
     select: selectJob,

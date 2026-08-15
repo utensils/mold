@@ -59,7 +59,9 @@ import {
   minimaxH3AuthoringError,
   minimaxH3TaskForModel,
   setMinimaxH3GalleryImageFirstFrame,
+  setMinimaxH3PickedImageBoundary,
 } from "@studio/lib/minimaxH3Authoring";
+import { h3BoundariesNeedingMedia } from "@studio/lib/h3BoundaryRestore";
 import {
   classifyPlacementPreview,
   previewChainPlacement,
@@ -473,7 +475,8 @@ function resetCreateSettings(): void {
 }
 
 /** Restore only the advanced-tier fields to their defaults; prompt, model,
- * dimensions, steps, guidance, seed, and batch are left untouched. */
+ * dimensions, steps, guidance, seed, batch, and staged source media (which
+ * lives in the primary form, not the Advanced sheet) are left untouched. */
 function resetAdvancedSettings(): void {
   const defaults = newGenerateForm();
   // Reset restores the model's advertised default negative (wan), not an
@@ -483,15 +486,6 @@ function resetAdvancedSettings(): void {
   form.cfgPlus = defaults.cfgPlus;
   form.upscaleModel = defaults.upscaleModel;
   form.loras = [];
-  form.strength = defaults.strength;
-  form.sourceImage = defaults.sourceImage;
-  form.sourceImageName = defaults.sourceImageName;
-  form.imageAttachments = [];
-  form.sourceFit = { mode: "pad-repaint" };
-  form.maskImage = defaults.maskImage;
-  form.controlImage = defaults.controlImage;
-  form.controlModel = defaults.controlModel;
-  form.controlScale = defaults.controlScale;
   form.guidanceOverrides = emptyGuidanceOverrides();
   form.wanRecipe = emptyWanRecipe();
 }
@@ -1110,7 +1104,9 @@ const developBlockerReason = computed<string | null>(() => {
     return "The prepared rewrite no longer matches these settings. Use a recovery action above.";
   }
   if (!seedValid.value) return "Enter a valid whole-number seed, or choose Random.";
-  if (!resolutionValid.value) return "Choose a supported size for this model.";
+  // Only malformed width/height blocks; off-profile sizes are advisories and
+  // the server's own refusal is the authority.
+  if (!resolutionValid.value) return "Enter whole-number width and height.";
   if (stepsError.value) return stepsError.value;
   if (guidanceError.value) return guidanceError.value;
   if (mobileMediaBudgetError.value) return mobileMediaBudgetError.value;
@@ -3991,6 +3987,10 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     );
     if (endFrameNotice) notes.push(endFrameNotice);
     setGenerationStatus(notes.join(" · "), !!endFrameNotice);
+    // FL2VA reuse leaves bytes-less boundary descriptors; when the original
+    // was a gallery image its bytes are still on the print's host — fetch
+    // them so the wells fill instead of demanding a reattach.
+    void restoreReusedH3BoundaryMedia(print);
     selectedPrint.value = null;
     // The next Gallery visit performs its normal refresh; do not refetch the
     // grid while navigating directly to the restored prompt.
@@ -3999,6 +3999,50 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
   } finally {
     reusingPrint.value = false;
+  }
+}
+
+/** Fetch bytes for the reuse-restored FL2VA boundary descriptors from the
+ * print's own host, within the mobile media budget. Failures leave the
+ * existing reattach affordance in place. */
+async function restoreReusedH3BoundaryMedia(print: {
+  target: ApiTarget;
+  filename: string;
+}): Promise<void> {
+  if (minimaxH3TaskForModel(form.model) !== "fl2va") return;
+  const wanted = h3BoundariesNeedingMedia(form.h3Authoring);
+  if (wanted.length === 0) return;
+  const modelAtStart = form.model;
+  for (const slot of wanted) {
+    try {
+      const response = await apiFetchTo(
+        print.target,
+        galleryMediaPath(slot.filename, "host"),
+      );
+      const existingBytes = inlineGenerationMediaBytes(form, null);
+      const declaredBytes = Number(response.headers?.get("content-length") ?? Number.NaN);
+      if (
+        Number.isFinite(declaredBytes) &&
+        declaredBytes >= 0 &&
+        existingBytes + declaredBytes > MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES
+      ) {
+        continue;
+      }
+      const blob = await response.blob();
+      if (blob.size === 0) continue;
+      if (existingBytes + blob.size > MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES) continue;
+      const base64 = await blobToBase64(blob);
+      if (form.model !== modelAtStart) return;
+      const live = form.h3Authoring?.[slot.endpoint];
+      if (!live || live.data || live.filename !== slot.filename) continue;
+      const result = setMinimaxH3PickedImageBoundary(form.h3Authoring, slot.endpoint, {
+        filename: slot.filename,
+        base64,
+      });
+      if (result.ok) form.h3Authoring = result.state;
+    } catch {
+      // Not found on the origin host — the reattach hint already covers it.
+    }
   }
 }
 

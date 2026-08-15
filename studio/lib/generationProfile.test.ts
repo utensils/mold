@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   advertisedGenerationProfile,
+  closestProfileAspect,
   effectiveGenerationRecipe,
+  fixedRecipeControlOverrides,
   generationRecipeSelectionError,
   profileAspectOptions,
   resolutionProfileError,
+  resolutionProfileFinding,
   resolutionProfileWarning,
   type GenerationProfileModel,
   type GenerationProfileSet,
@@ -179,5 +182,92 @@ describe("generation profile contract", () => {
     expect(profileAspectOptions(profileModel(), "one-stage")).toEqual([
       { id: "16:9", label: "16:9", ratio: 16 / 9 },
     ]);
+  });
+
+  it("snaps form values onto a recipe's fixed controls", () => {
+    // The fixture recipe fixes guidance at 0 and keeps steps adjustable —
+    // a stale form value on a fixed control is never user authority (the
+    // control is disabled), so it snaps instead of stranding Generate
+    // behind an error the user cannot correct. Desktop and web share this.
+    const recipe = effectiveGenerationRecipe(profileModel(), "one-stage");
+    expect(fixedRecipeControlOverrides(recipe)).toEqual({ guidance: 0 });
+    expect(fixedRecipeControlOverrides(null)).toEqual({});
+  });
+});
+
+describe("resolutionProfileFinding — the client never blocks a size", () => {
+  const resolution = () =>
+    effectiveGenerationRecipe(profileModel(), "one-stage")!.resolution;
+
+  it("downgrades an undersized custom size to an advisory", () => {
+    const strict = { ...resolution(), min_width: 1344, min_height: 768 };
+    const finding = resolutionProfileFinding(1024, 576, strict);
+    expect(finding?.level).toBe("warn");
+    expect(finding?.message).toContain("1344 × 768");
+    expect(finding?.message).toContain("server may reject");
+  });
+
+  it("downgrades off-grid, over-budget, and off-bucket sizes to advisories", () => {
+    expect(resolutionProfileFinding(1008, 576, resolution())).toMatchObject({
+      level: "warn",
+    });
+    expect(resolutionProfileFinding(4096, 2048, resolution())).toMatchObject({
+      level: "warn",
+    });
+    expect(resolutionProfileFinding(1024, 1024, resolution())).toMatchObject({
+      level: "warn",
+    });
+  });
+
+  it("still blocks malformed input that cannot form a request", () => {
+    expect(resolutionProfileFinding(1024.5, 576, resolution())).toMatchObject({
+      level: "block",
+    });
+    expect(
+      resolutionProfileFinding(Number.NaN, 576, resolution()),
+    ).toMatchObject({ level: "block" });
+  });
+
+  it("keeps the warn-policy bucket advisory and stays silent on a preset", () => {
+    expect(resolutionProfileFinding(1024, 576, resolution())).toBeNull();
+    const advisory = { ...resolution(), off_bucket: "warn" as const };
+    expect(resolutionProfileFinding(1024, 1024, advisory)?.message).toContain(
+      "results may vary",
+    );
+  });
+
+  it("returns null with no recipe — legacy hosts keep their own checks", () => {
+    expect(resolutionProfileFinding(1024, 576, null)).toBeNull();
+  });
+});
+
+describe("closestProfileAspect — custom sizes highlight the nearest shape", () => {
+  it("matches an exact preset", () => {
+    expect(
+      closestProfileAspect(profileModel(), "one-stage", 1024, 576),
+    ).toEqual({ id: "16:9", label: "16:9", ratio: 16 / 9, exact: true });
+  });
+
+  it("returns the nearest group for a custom size in a buckets domain", () => {
+    const closest = closestProfileAspect(
+      profileModel(),
+      "one-stage",
+      1000,
+      600,
+    );
+    expect(closest).toMatchObject({ id: "16:9", exact: false });
+  });
+
+  it("has no tolerance cutoff — a square custom size still maps somewhere", () => {
+    expect(
+      closestProfileAspect(profileModel(), "one-stage", 1024, 1024),
+    ).toMatchObject({ id: "16:9", exact: false });
+  });
+
+  it("returns null without a recipe or with invalid dimensions", () => {
+    expect(closestProfileAspect(null, null, 1024, 576)).toBeNull();
+    expect(
+      closestProfileAspect(profileModel(), "one-stage", 0, 576),
+    ).toBeNull();
   });
 });

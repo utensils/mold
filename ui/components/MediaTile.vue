@@ -4,10 +4,15 @@
  * carries the inset top highlight; hover lifts with a drop shadow. Optional
  * NEW badge for fresh prints; the "overlay" slot pins extra badges (e.g. a
  * video duration) to the bottom-right corner.
+ *
+ * Loading discipline: until the image bytes land (async blob thumbnails can
+ * take a moment per tile) the tile shows a quiet shimmer, never the browser's
+ * broken-image glyph with the prompt spelled out as alt text — a grid of
+ * loading tiles must read as a grid, not a wall of paragraphs.
  */
-import { useSlots } from "vue";
+import { ref, useSlots, watch } from "vue";
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     src: string;
     alt: string;
@@ -20,11 +25,27 @@ withDefaults(
 const emit = defineEmits<{ open: [] }>();
 
 const slots = useSlots();
+const loaded = ref(false);
+watch(
+  () => props.src,
+  () => {
+    loaded.value = false;
+  },
+);
 </script>
 
 <template>
-  <button type="button" class="ms-tile" @click="emit('open')">
-    <img class="ms-tile__img" :src="src" :alt="alt" loading="lazy" />
+  <button type="button" class="ms-tile" :data-loaded="loaded" @click="emit('open')">
+    <span v-if="!loaded" class="ms-tile__ghost" aria-hidden="true" />
+    <img
+      v-if="src"
+      class="ms-tile__img"
+      :src="src"
+      :alt="alt"
+      loading="lazy"
+      decoding="async"
+      @load="loaded = true"
+    />
     <span v-if="fresh" class="ms-tile__fresh">New</span>
     <span v-if="slots.overlay" class="ms-tile__overlay">
       <slot name="overlay" />
@@ -65,6 +86,42 @@ const slots = useSlots();
   height: 100%;
   object-fit: cover;
   display: block;
+  opacity: 1;
+  transition: opacity var(--dur-quick) var(--ease);
+}
+
+.ms-tile[data-loaded="false"] .ms-tile__img {
+  /* Pending bytes: keep the element (so @load fires) but never its alt text
+   * or the broken-image glyph. */
+  opacity: 0;
+}
+
+.ms-tile__ghost {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 20%,
+    color-mix(in srgb, var(--rebate) 6%, transparent) 50%,
+    transparent 80%
+  );
+  background-size: 220% 100%;
+  animation: ms-tile-shimmer 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ms-tile__ghost {
+    animation: none;
+  }
+}
+
+@keyframes ms-tile-shimmer {
+  0% {
+    background-position: 130% 0;
+  }
+  100% {
+    background-position: -90% 0;
+  }
 }
 
 .ms-tile__fresh {

@@ -212,6 +212,27 @@ describe("AdvancedDrawer sequence contract", () => {
     await wrapper.get("[data-test='advanced-reset']").trigger("click");
     expect(draft.clips[0]?.cameraControl).toBeNull();
   });
+
+  it("sequence Reset preserves the opening image and source conditioning", async () => {
+    const wrapper = factory(
+      "ltx2",
+      { model: "ltx-2-19b-distilled:fp8", strength: 0.6 },
+      { output: "sequence" },
+    );
+    const draft = useSequenceDraftStore();
+    draft.openingImage = {
+      kind: "upload",
+      filename: "open.png",
+      base64: "CCCC",
+    } as never;
+    await wrapper.get("[data-test='advanced-reset']").trigger("click");
+    expect(draft.openingImage).not.toBeNull();
+    // Strength/fit render beside the opening-image well, not in Advanced.
+    const patched = wrapper.emitted("update:modelValue")?.at(-1)?.[0] as
+      | GenerateFormState
+      | undefined;
+    expect(patched?.strength ?? 0.6).toBe(0.6);
+  });
 });
 
 describe("AdvancedDrawer video duration", () => {
@@ -615,6 +636,76 @@ describe("AdvancedDrawer interactions", () => {
     expect(next.negativePrompt).toBe("");
     expect(next.loras).toEqual([]);
     expect(next.upscaleModel).toBe("");
+  });
+
+  it("Reset preserves source media — it lives in the primary form now", async () => {
+    const image = {
+      kind: "upload",
+      filename: "frame.png",
+      base64: "AAAA",
+      width: 1024,
+      height: 576,
+    } as const;
+    const clip = {
+      kind: "upload",
+      filename: "clip.mp4",
+      base64: "BBBB",
+    } as const;
+    const wrapper = factory("ltx2", {
+      imageAttachments: [image],
+      endFrame: { ...image, filename: "end.png" },
+      maskImage: { ...image, filename: "mask.png" },
+      controlImage: { ...image, filename: "control.png" },
+      controlModel: "canny",
+      controlScale: 0.8,
+      strength: 0.5,
+      sourceFitPolicy: { mode: "crop-fill" },
+      audioFile: { ...clip, filename: "voice.wav" },
+      audioFilePath: "/tmp/voice.wav",
+      sourceVideo: clip,
+      sourceVideoPath: "/tmp/clip.mp4",
+      keyframes: [{ frame: 9, image }],
+      negativePrompt: "blurry",
+    });
+    await wrapper.get("[data-test='advanced-reset']").trigger("click");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.imageAttachments).toEqual([image]);
+    expect(next.endFrame?.filename).toBe("end.png");
+    expect(next.maskImage?.filename).toBe("mask.png");
+    expect(next.controlImage?.filename).toBe("control.png");
+    expect(next.controlModel).toBe("canny");
+    expect(next.controlScale).toBe(0.8);
+    expect(next.strength).toBe(0.5);
+    expect(next.sourceFitPolicy).toEqual({ mode: "crop-fill" });
+    expect(next.audioFile?.filename).toBe("voice.wav");
+    expect(next.audioFilePath).toBe("/tmp/voice.wav");
+    expect(next.sourceVideo?.filename).toBe("clip.mp4");
+    expect(next.sourceVideoPath).toBe("/tmp/clip.mp4");
+    expect(next.keyframes).toHaveLength(1);
+    // Advanced fields still reset.
+    expect(next.negativePrompt).toBe("");
+  });
+
+  it("Reset clears guidance overrides and camera motion — they count toward the badge", async () => {
+    const wrapper = factory("ltx2", {
+      guidanceOverrides: {
+        stgScale: 1.5,
+        stgBlocks: "3,4",
+        rescaleScale: null,
+        modalityScale: null,
+        skipStep: null,
+      },
+      cameraControl: "orbit_left",
+    });
+    await wrapper.get("[data-test='advanced-reset']").trigger("click");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.cameraControl).toBe(null);
+    expect(next.guidanceOverrides?.stgScale ?? null).toBe(null);
+    expect(next.guidanceOverrides?.stgBlocks ?? "").toBe("");
   });
 
   it("exact-size inputs snap to 16px and swap orientation", async () => {

@@ -49,6 +49,7 @@ import { OPTIONAL_PROMPT_GUIDANCE, promptRequired } from "@studio/lib/promptRequ
 import {
   emptyMinimaxH3AuthoringState,
   minimaxH3AuthoringError,
+  setMinimaxH3PickedImageBoundary,
 } from "@studio/lib/minimaxH3Authoring";
 import { firstLastFrameRestoreNotice } from "@studio/lib/sourceImageCapability";
 import {
@@ -112,6 +113,7 @@ import {
   profileGuidanceValidationError,
   profileStepsValidationError,
   resolutionValidationError,
+  resolutionValidationWarning,
   sourceConditioningValidationError,
   wanRecipeValidationError,
 } from "../lib/generateValidation";
@@ -148,6 +150,7 @@ import { saveGalleryMedia, showSavedMediaToast } from "../lib/mediaSave";
 import {
   metadataReferencesSource,
   restoreEditImages,
+  restoreH3Boundaries,
   restoreSourceImage,
   sha256HexOfBase64,
   type SourceRestoreDeps,
@@ -2473,6 +2476,20 @@ const composerDisabled = computed(
   () => generationInputBlockerReason.value !== null || preparedBatch.value !== null,
 );
 
+/** Non-blocking pre-generate advisory: an off-profile custom size submits
+ * anyway (the server is the authority), but the inspector can be scrolled
+ * away from the Generate button, so the advisory rides the composer too. */
+const composerWarningReason = computed<string | null>(() =>
+  composerBlockerReason.value
+    ? null
+    : resolutionValidationWarning(
+        form.width,
+        form.height,
+        selectedEntry.value ?? null,
+        form.pipeline,
+      ),
+);
+
 const emptyCanvasGuidance = computed(() =>
   promptRequired(form)
     ? "Describe an image below, pick a look, and press Generate. Everything runs on your own machine."
@@ -2930,6 +2947,43 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
       return blobToBase64(await res.blob());
     },
   };
+  if (caps.value.sourceImageMode === "h3-boundaries") {
+    // FL2VA restores its endpoints into the boundary slots, not the single
+    // source well. Reuse leaves bytes-less reattach descriptors there; each
+    // one keyed with provenance resolves stash-first, then by gallery
+    // filename across every connected host.
+    const wantsFirst = Boolean(form.h3Authoring?.firstFrame && !form.h3Authoring.firstFrame.data);
+    const wantsLast = Boolean(form.h3Authoring?.lastFrame && !form.h3Authoring.lastFrame.data);
+    if (!wantsFirst && !wantsLast) return;
+    const boundaries = await restoreH3Boundaries(metadata, deps);
+    if (epoch !== restoreEpoch || form.model !== modelAtStart) return;
+    if (caps.value.sourceImageMode !== "h3-boundaries") return;
+    let failed = 0;
+    const commit = (endpoint: "firstFrame" | "lastFrame", restored: { base64: string; filename: string | null } | null, wanted: boolean) => {
+      if (!wanted) return;
+      const slot = form.h3Authoring?.[endpoint];
+      if (slot?.data) return; // the user reattached while we fetched
+      if (!restored) {
+        failed += 1;
+        return;
+      }
+      const result = setMinimaxH3PickedImageBoundary(form.h3Authoring, endpoint, {
+        filename: restored.filename ?? slot?.filename ?? "First frame",
+        base64: restored.base64,
+      });
+      if (result.ok) form.h3Authoring = result.state;
+      else failed += 1;
+    };
+    commit("firstFrame", boundaries.firstFrame, wantsFirst);
+    commit("lastFrame", boundaries.lastFrame, wantsLast);
+    if (failed > 0) {
+      toasts.push(
+        "Couldn't restore the original frame media — the file wasn't found on any connected host. Reattach it to generate.",
+        "error",
+      );
+    }
+    return;
+  }
   const editRestore = attachmentMode ? await restoreEditImages(metadata, deps) : null;
   const restored = attachmentMode ? null : await restoreSourceImage(metadata, deps);
   // The lookups can take seconds (cold gallery, cross-host fetch). Bail if
@@ -3598,6 +3652,7 @@ onBeforeUnmount(() => {
             :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
             :disabled="composerDisabled"
             :disabled-reason="composerBlockerReason"
+            :warning-reason="composerWarningReason"
             :submitting="submissionPlanning"
             :button-label="buttonLabel"
             :estimate-request="estimateRequest"

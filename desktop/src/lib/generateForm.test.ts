@@ -9,6 +9,7 @@ import {
   newGenerateForm,
   normalizeLegacyNegativeSnapshot,
   reconcileModelCapabilities,
+  resetAdvancedToModelDefaults,
   resetFormToModelDefaults,
   seedMode,
   type GenerateForm,
@@ -1019,7 +1020,7 @@ describe("applyModelDefaults — model-advertised fps", () => {
 });
 
 describe("applyModelDefaults resets advanced video on family change", () => {
-  it("clears the LTX-2 fields when the new family has no advanced video", () => {
+  it("clears the LTX-2 settings knobs but retains staged media when leaving", () => {
     const form = ltx2Form();
     form.pipeline = "two-stage";
     form.keyframes = [{ frame: 0, image: { filename: "k.png", base64: "K" } }];
@@ -1034,10 +1035,11 @@ describe("applyModelDefaults resets advanced video on family change", () => {
     });
 
     expect(form.pipeline).toBeNull();
-    expect(form.keyframes).toEqual([]);
-    expect(form.sourceVideo).toBeNull();
-    expect(form.audioFile).toBeNull();
     expect(form.spatialUpscale).toBeNull();
+    // Staged media survives the switch; the wire prune keeps it off requests.
+    expect(form.keyframes).toHaveLength(1);
+    expect(form.sourceVideo?.base64).toBe("V");
+    expect(form.audioFile?.base64).toBe("A");
   });
 });
 
@@ -1205,13 +1207,17 @@ describe("applyModelDefaults — qwen-edit attachment seeding", () => {
     expect(form.sourceImage).toBe("T");
   });
 
-  it("clears attachments when switching to ltx-video (no img2img at all)", () => {
+  it("keeps the Target as the staged source across ltx-video (no img2img at all)", () => {
+    // Retention policy: staged media survives a capability-losing switch; the
+    // wire prune keeps it off the request until a capable model returns.
     const form = newGenerateForm();
     applyModelDefaults(form, qwenEditModel());
     form.imageAttachments = ["T"];
     applyModelDefaults(form, { ...ltx2Model(), name: "ltx-video:q8", family: "ltx-video" });
     expect(form.imageAttachments).toEqual([]);
-    expect(form.sourceImage).toBeNull();
+    expect(form.sourceImage).toBe("T");
+    form.prompt = "a cat";
+    expect(buildRequest(form).source_image).toBeUndefined();
   });
 
   it("locks the batch size to 1 on switch to qwen-edit", () => {
@@ -1219,6 +1225,169 @@ describe("applyModelDefaults — qwen-edit attachment seeding", () => {
     form.batchSize = 4;
     applyModelDefaults(form, qwenEditModel());
     expect(form.batchSize).toBe(1);
+  });
+});
+
+describe("model switch — H3 boundary bridge and media retention", () => {
+  const h3Fl2va = (source: string = "required"): ModelEntry => ({
+    ...ltx2Model(),
+    name: "minimax-h3-fl2va:official-bf16",
+    family: "minimax-h3",
+    source_image: source,
+    default_frames: 124,
+    default_fps: 24,
+  });
+  const fluxModel = (): ModelEntry => ({
+    ...ltx2Model(),
+    name: "flux:q8",
+    family: "flux",
+  });
+
+  it("seeds the H3 first frame from the staged single source when entering FL2VA", () => {
+    const form = newGenerateForm();
+    form.family = "flux";
+    form.model = "flux:q8";
+    form.sourceImage = "QUJD";
+    form.sourceImageName = "pic.png";
+    form.sourceImageWidth = 1024;
+    form.sourceImageHeight = 576;
+    applyModelDefaults(form, h3Fl2va());
+    expect(form.h3Authoring!.firstFrame).toMatchObject({
+      data: "QUJD",
+      filename: "pic.png",
+      width: 1024,
+      height: 576,
+    });
+    // Move semantics: the single-source slot empties so leaving H3 promotes
+    // the boundary back without ambiguity.
+    expect(form.sourceImage).toBeNull();
+    expect(form.imageAttachments).toEqual([]);
+  });
+
+  it("never seeds a last frame into a first-frame-only checkpoint", () => {
+    const form = newGenerateForm();
+    form.family = "wan";
+    form.model = "wan22-i2v-a14b:q5";
+    form.sourceImage = "QUJD";
+    form.endFrame = { filename: "end.png", base64: "RU5E" };
+    applyModelDefaults(form, h3Fl2va("required"));
+    expect(form.h3Authoring!.firstFrame?.data).toBe("QUJD");
+    expect(form.h3Authoring!.lastFrame).toBeNull();
+  });
+
+  it("seeds the last frame from a staged closing frame when boundaries allow it", () => {
+    const form = newGenerateForm();
+    form.family = "wan";
+    form.model = "wan22-i2v-a14b:q5";
+    form.sourceImage = "QUJD";
+    form.endFrame = { filename: "end.png", base64: "RU5E" };
+    applyModelDefaults(form, h3Fl2va("optional"));
+    expect(form.h3Authoring!.lastFrame).toMatchObject({
+      data: "RU5E",
+      filename: "end.png",
+    });
+    expect(form.endFrame).toBeNull();
+  });
+
+  it("keeps authored boundaries when re-applying the same H3 model", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, h3Fl2va());
+    form.h3Authoring!.firstFrame = {
+      filename: "authored.png",
+      mimeType: "image/png",
+      width: 1344,
+      height: 768,
+      data: "T1JJRw==",
+    };
+    applyModelDefaults(form, h3Fl2va());
+    expect(form.h3Authoring!.firstFrame?.filename).toBe("authored.png");
+    expect(form.h3Authoring!.firstFrame?.data).toBe("T1JJRw==");
+  });
+
+  it("promotes the H3 first frame back into the single source when leaving", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, h3Fl2va());
+    form.h3Authoring!.firstFrame = {
+      filename: "first.png",
+      mimeType: "image/png",
+      width: 1024,
+      height: 576,
+      data: "QUJD",
+    };
+    applyModelDefaults(form, fluxModel());
+    expect(form.sourceImage).toBe("QUJD");
+    expect(form.sourceImageName).toBe("first.png");
+    expect(form.sourceImageWidth).toBe(1024);
+    expect(form.sourceImageHeight).toBe(576);
+    expect(form.h3Authoring!.firstFrame).toBeNull();
+  });
+
+  it("does not promote a bytes-less reattach descriptor into the source well", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, h3Fl2va());
+    form.h3Authoring!.firstFrame = {
+      filename: "provenance.png",
+      mimeType: "image/*",
+      width: 0,
+      height: 0,
+      data: "",
+      sha256: "a".repeat(64),
+    };
+    applyModelDefaults(form, fluxModel());
+    expect(form.sourceImage).toBeNull();
+  });
+
+  it("does not overwrite an already-staged source when leaving H3", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, h3Fl2va());
+    form.h3Authoring!.firstFrame = {
+      filename: "first.png",
+      mimeType: "image/png",
+      width: 0,
+      height: 0,
+      data: "QUJD",
+    };
+    form.sourceImage = "S1VFUFQ=";
+    applyModelDefaults(form, fluxModel());
+    expect(form.sourceImage).toBe("S1VFUFQ=");
+  });
+
+  it("retains the staged source image across a switch to a family with no img2img", () => {
+    const form = newGenerateForm();
+    form.family = "flux";
+    form.model = "flux:q8";
+    form.sourceImage = "QUJD";
+    form.sourceImageName = "pic.png";
+    form.maskImage = "TUFTSw==";
+    applyModelDefaults(form, { ...ltx2Model(), name: "ltx-video:q8", family: "ltx-video" });
+    expect(form.sourceImage).toBe("QUJD");
+    expect(form.sourceImageName).toBe("pic.png");
+    expect(form.maskImage).toBe("TUFTSw==");
+    // The wire stays gated even though the state is retained.
+    form.prompt = "a cat";
+    const req = buildRequest(form);
+    expect(req.source_image).toBeUndefined();
+    expect(req.mask_image).toBeUndefined();
+  });
+
+  it("retains staged advanced-video media when leaving LTX-2", () => {
+    const form = ltx2Form();
+    form.sourceVideo = { filename: "clip.mp4", base64: "VklE" };
+    form.keyframes = [{ frame: 9, image: { filename: "k.png", base64: "S0VZ" } }];
+    form.audioFile = { filename: "voice.wav", base64: "QVVE" };
+    form.pipeline = "two-stage" as never;
+    applyModelDefaults(form, fluxModel());
+    expect(form.sourceVideo?.filename).toBe("clip.mp4");
+    expect(form.keyframes).toHaveLength(1);
+    expect(form.audioFile?.filename).toBe("voice.wav");
+    // Settings knobs still clear with the advanced-video suite.
+    expect(form.pipeline).toBeNull();
+    // And none of it ships for a family that cannot read it.
+    form.prompt = "a cat";
+    const req = buildRequest(form);
+    expect(req.source_video).toBeUndefined();
+    expect(req.keyframes).toBeUndefined();
+    expect(req.audio_file).toBeUndefined();
   });
 });
 
@@ -1881,14 +2050,18 @@ describe("LTX-2 img2img (image-to-video)", () => {
     form.maskImage = "MASK";
     applyModelDefaults(form, ltx2Model());
     expect(form.sourceImage).toBe("SRC"); // seeds frame-0 conditioning
-    expect(form.maskImage).toBeNull(); // no inpainting on video
+    // The mask is retained media now; the wire prune keeps it off requests.
+    form.prompt = "a cat";
+    expect(buildRequest(form).mask_image).toBeUndefined();
   });
 
-  it("clears the source when switching to plain ltx-video (no img2vid path)", () => {
+  it("retains the source across plain ltx-video but keeps it off the wire", () => {
     const form = newGenerateForm();
     form.sourceImage = "SRC";
     applyModelDefaults(form, { ...ltx2Model(), name: "ltx-video:q8", family: "ltx-video" });
-    expect(form.sourceImage).toBeNull();
+    expect(form.sourceImage).toBe("SRC");
+    form.prompt = "a cat";
+    expect(buildRequest(form).source_image).toBeUndefined();
   });
 
   it("coerces a mask-dependent source-fit policy to crop-fill on entry", () => {
@@ -1928,13 +2101,13 @@ describe("source image provenance (Reuse-settings restore)", () => {
     expect(req.source_image_name).toBe("mold-flux-1-2.png");
   });
 
-  it("clears the label whenever the source is cleared on model switch", () => {
+  it("keeps the label with the retained source across a no-img2img switch", () => {
     const form = newGenerateForm();
     form.sourceImage = "SRC";
     form.sourceImageName = "pic.png";
     applyModelDefaults(form, { ...ltx2Model(), name: "ltx-video:q8", family: "ltx-video" });
-    expect(form.sourceImage).toBeNull();
-    expect(form.sourceImageName).toBeNull();
+    expect(form.sourceImage).toBe("SRC");
+    expect(form.sourceImageName).toBe("pic.png");
   });
 
   it("keeps the label when the source survives a switch into ltx2", () => {
@@ -1953,6 +2126,49 @@ describe("source image provenance (Reuse-settings restore)", () => {
     applyModelDefaults(form, qwenEditModel());
     expect(form.imageAttachments).toEqual(["SRC"]);
     expect(form.sourceImageName).toBeNull();
+  });
+});
+
+describe("source-fit provenance (crop settings survive reuse)", () => {
+  it("ships the fit policy alongside a staged source image", () => {
+    const form = newGenerateForm();
+    form.model = "flux-dev:q8";
+    form.family = "flux";
+    form.prompt = "a cat";
+    form.sourceImage = "SRC";
+    form.sourceFit = { mode: "crop-fill", alignX: "left" };
+    expect(buildRequest(form).source_fit).toEqual({
+      mode: "crop-fill",
+      alignX: "left",
+    });
+  });
+
+  it("ships no fit policy without staged source media", () => {
+    const form = newGenerateForm();
+    form.model = "flux-dev:q8";
+    form.family = "flux";
+    form.prompt = "a cat";
+    form.sourceFit = { mode: "crop-fill" };
+    expect(buildRequest(form).source_fit).toBeUndefined();
+  });
+
+  it("restores the recorded fit policy from metadata", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(form, {
+      ...richImageMetadata(),
+      source_fit: { mode: "lanczos-resize" },
+    });
+    expect(form.sourceFit).toEqual({ mode: "lanczos-resize" });
+  });
+
+  it("ignores malformed fit provenance instead of poisoning the form", () => {
+    const form = newGenerateForm();
+    const before = form.sourceFit;
+    applyMetadataToForm(form, {
+      ...richImageMetadata(),
+      source_fit: { mode: "teleport" },
+    });
+    expect(form.sourceFit).toEqual(before);
   });
 });
 
@@ -2047,6 +2263,108 @@ describe("resetFormToModelDefaults", () => {
     const editModel: ModelEntry = { ...sdxl, name: "qwen-image-edit", family: "qwen-image-edit" };
     resetFormToModelDefaults(form, editModel);
     expect(form.batchSize).toBe(1);
+  });
+});
+
+describe("resetAdvancedToModelDefaults", () => {
+  const ltx2: ModelEntry = {
+    name: "ltx-2-19b-distilled:fp8",
+    family: "ltx2",
+    size_gb: 19,
+    is_loaded: false,
+    hf_repo: "r",
+    default_steps: 8,
+    default_guidance: 1,
+    default_width: 1280,
+    default_height: 704,
+    description: "",
+    downloaded: true,
+  };
+
+  function mediaDirtyForm() {
+    const form = newGenerateForm();
+    form.prompt = "a river at dawn";
+    form.model = ltx2.name;
+    form.family = ltx2.family;
+    form.strength = 0.4;
+    form.sourceImage = "SRC";
+    form.sourceImageName = "pic.png";
+    form.sourceImageWidth = 1024;
+    form.sourceImageHeight = 576;
+    form.endFrame = { filename: "end.png", base64: "END" };
+    form.imageAttachments = ["ATT"];
+    form.sourceFit = { mode: "crop-fill" };
+    form.maskImage = "MASK";
+    form.controlImage = "CTRL";
+    form.controlModel = "canny";
+    form.controlScale = 0.8;
+    form.sourceVideo = { filename: "clip.mp4", base64: "VID" };
+    form.extendVideo = { filename: "cont.mp4", base64: "EXT" };
+    form.extendOverlapFrames = 17;
+    form.keyframes = [{ frame: 9, image: { filename: "k.png", base64: "KEY" } }];
+    form.audioFile = { filename: "voice.wav", base64: "AUD" };
+    form.h3Authoring!.firstFrame = {
+      filename: "first.png",
+      mimeType: "image/png",
+      width: 1344,
+      height: 768,
+      data: "H3",
+    };
+    // Advanced dirt that must still reset.
+    form.negativePrompt = "blurry";
+    form.scheduler = "ddim";
+    form.cfgPlus = true;
+    form.loras = [{ path: "/l.safetensors", name: "l", scale: 0.8, trainedWords: [] }];
+    form.upscaleModel = "esrgan";
+    form.guidanceOverrides.stgScale = 1.5;
+    form.cameraControl = "dolly-in";
+    return form;
+  }
+
+  it("preserves source media — it lives in the primary form, not Advanced", () => {
+    const form = mediaDirtyForm();
+    resetAdvancedToModelDefaults(form, ltx2);
+    expect(form.strength).toBe(0.4);
+    expect(form.sourceImage).toBe("SRC");
+    expect(form.sourceImageName).toBe("pic.png");
+    expect(form.sourceImageWidth).toBe(1024);
+    expect(form.sourceImageHeight).toBe(576);
+    expect(form.endFrame?.filename).toBe("end.png");
+    expect(form.imageAttachments).toEqual(["ATT"]);
+    expect(form.sourceFit).toEqual({ mode: "crop-fill" });
+    expect(form.maskImage).toBe("MASK");
+    expect(form.controlImage).toBe("CTRL");
+    expect(form.controlModel).toBe("canny");
+    expect(form.controlScale).toBe(0.8);
+    expect(form.sourceVideo?.filename).toBe("clip.mp4");
+    expect(form.extendVideo?.filename).toBe("cont.mp4");
+    expect(form.extendOverlapFrames).toBe(17);
+    expect(form.keyframes).toHaveLength(1);
+    expect(form.audioFile?.filename).toBe("voice.wav");
+    expect(form.h3Authoring!.firstFrame?.filename).toBe("first.png");
+  });
+
+  it("still resets the genuinely advanced fields and keeps the prompt", () => {
+    const form = mediaDirtyForm();
+    resetAdvancedToModelDefaults(form, ltx2);
+    expect(form.prompt).toBe("a river at dawn");
+    expect(form.negativePrompt).toBe("");
+    expect(form.scheduler).toBe("default");
+    expect(form.cfgPlus).toBe(false);
+    expect(form.loras).toEqual([]);
+    expect(form.upscaleModel).toBe("");
+    expect(form.guidanceOverrides.stgScale).toBeNull();
+    expect(form.cameraControl).toBeNull();
+    expect(form.width).toBe(1280);
+    expect(form.height).toBe(704);
+  });
+
+  it("keeps media even when no model entry is available", () => {
+    const form = mediaDirtyForm();
+    resetAdvancedToModelDefaults(form, null);
+    expect(form.sourceImage).toBe("SRC");
+    expect(form.sourceVideo?.filename).toBe("clip.mp4");
+    expect(form.model).toBe(ltx2.name);
   });
 });
 

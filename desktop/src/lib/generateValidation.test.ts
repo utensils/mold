@@ -195,3 +195,94 @@ describe("resolutionValidationWarning", () => {
     expect(resolutionValidationWarning(1024, 1024, model)).toContain("results may vary");
   });
 });
+
+describe("resolution checks never block a custom size (server is the authority)", () => {
+  const rejectModel = () => {
+    const recipe = {
+      id: "default",
+      label: "Default",
+      request_selector: {},
+      defaults: { width: 1344, height: 768, steps: 20, guidance: 5 },
+      resolution: {
+        domain: "buckets",
+        alignment: 32,
+        min_width: 1344,
+        min_height: 768,
+        max_pixels: 1_032_192,
+        off_bucket: "reject",
+        aspect_groups: [
+          {
+            id: "7:4",
+            label: "7:4",
+            presets: [{ id: "1344x768", width: 1344, height: 768, tier: "recommended" }],
+          },
+        ],
+      },
+      steps: { default: 20, min: 1, max: 100, step: 1, mode: "adjustable" },
+      guidance: { default: 5, min: 0, max: 20, step: 0.1, mode: "adjustable" },
+      capabilities: {
+        guidance: { adjustable: true, supports_negative_prompt: true, fixed_scale: null },
+        negative_prompt: { mode: "adjustable", required: false },
+        supports_lora: false,
+        supports_controlnet: false,
+        supports_sequence: false,
+        supports_extend: false,
+        supports_audio: false,
+        source_video: { mode: "hidden", required: false },
+        mask: { mode: "hidden", required: false },
+        keyframes: { mode: "hidden", required: false },
+        audio: { mode: "hidden", required: false },
+        lora: { mode: "hidden", max_count: 0 },
+        controlnet: { mode: "hidden", max_count: 0 },
+        output: { default_format: "mp4", formats: ["mp4"], audio_requires_mp4: false },
+        wan_recipe: {
+          mode: "hidden",
+          supports_distill_strength: false,
+          supports_first_last_frame: false,
+        },
+        schedulers: [],
+      },
+      provenance: [],
+    };
+    return {
+      name: "minimax-h3-fl2va:official-bf16",
+      family: "minimax-h3",
+      generation_profile: {
+        schema_version: 1,
+        profile_id: "h3.v1",
+        profile_hash: "hash",
+        default_recipe_id: "default",
+        recipes: [recipe],
+      },
+    } as unknown as Parameters<typeof resolutionValidationError>[2];
+  };
+
+  it("downgrades an undersized custom size to an advisory", () => {
+    expect(resolutionValidationError(1024, 576, rejectModel())).toBeNull();
+    const warning = resolutionValidationWarning(1024, 576, rejectModel());
+    expect(warning).toContain("1344 × 768");
+    expect(warning).toContain("server may reject");
+  });
+
+  it("still blocks input that cannot form a request", () => {
+    expect(resolutionValidationError(1024.5, 576, rejectModel())).toContain(
+      "whole numbers",
+    );
+  });
+
+  it("downgrades the legacy no-recipe limits to advisories too", () => {
+    // No generation_profile at all: the family constants used to hard-block.
+    const legacy = { name: "flux-dev:q8", family: "flux" } as Parameters<
+      typeof resolutionValidationError
+    >[2];
+    expect(resolutionValidationError(48, 48, legacy)).toBeNull();
+    expect(resolutionValidationWarning(48, 48, legacy)).toContain("server may reject");
+    expect(resolutionValidationError(1000, 576, legacy)).toBeNull();
+    expect(resolutionValidationWarning(1000, 576, legacy)).toContain("multiples of");
+    expect(resolutionValidationError(4096, 4096, legacy)).toBeNull();
+    expect(resolutionValidationWarning(4096, 4096, legacy)).toBeTruthy();
+    // A well-formed on-grid size stays silent on both channels.
+    expect(resolutionValidationError(1024, 576, legacy)).toBeNull();
+    expect(resolutionValidationWarning(1024, 576, legacy)).toBeNull();
+  });
+});

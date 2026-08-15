@@ -13,6 +13,7 @@ import type { Ltx2GuidanceOverrides } from "@studio/lib/guidanceOverrides";
 import type { GenerationScheduler } from "@studio/lib/generationCapabilities";
 import type { MiniMaxH3Capability } from "@studio/lib/minimaxH3Inventory";
 import type { GenerationProfileSet } from "@studio/lib/generationProfile";
+import type { SourceFitPolicy } from "@studio/lib/sourceFit";
 
 export interface GpuSnapshot {
   ordinal: number;
@@ -420,6 +421,9 @@ export interface GenerateRequest {
   /** Provenance label for the source image (gallery filename or upload
    * name) — recorded into OutputMetadata for Reuse-settings restore. */
   source_image_name?: string;
+  /** Client-shaped source-fit policy provenance, echoed verbatim into
+   * OutputMetadata so crop controls restore on reuse. Engine never reads it. */
+  source_fit?: SourceFitPolicy;
   /** Qwen-Image-Edit multi-image inputs, base64 each (no data-URI prefix).
    * Order is load-bearing: first = primary edit target, rest = references. */
   edit_images?: string[];
@@ -608,6 +612,9 @@ export interface OutputMetadata {
   /** SHA-256 (hex) of the exact source bytes used — local stash lookup key
    * for Reuse-settings source restore (additive; newer servers only). */
   source_image_sha256?: string | null;
+  /** Client-shaped source-fit provenance echoed verbatim by the server
+   * (additive; newer servers only). Parse defensively before restoring. */
+  source_fit?: unknown;
   /** Ordered content keys for Qwen Image Edit inputs (newer servers only). */
   edit_image_sha256s?: string[] | null;
   /** Redacted ordered H3 reference provenance (newer servers only). */

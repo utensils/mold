@@ -4,6 +4,8 @@ import {
   reconcileRound,
   startGenerateQueueReconciler,
   startQueueReconciler,
+  targetForJob,
+  DETACHED_SETTLE_NOTE,
   RECONCILE_GRACE_MS,
 } from "./useQueueReconciler";
 import type { Job } from "./useGenerateStream";
@@ -133,7 +135,7 @@ describe("startQueueReconciler (live polling)", () => {
     ]);
     const failRunning = vi.fn();
     const handle = startGenerateQueueReconciler(
-      { jobs, failRunning },
+      { jobs, failRunning, settleDetached: vi.fn() },
       { intervalMs: 1_000 },
     );
 
@@ -270,6 +272,68 @@ describe("startQueueReconciler (live polling)", () => {
     await vi.advanceTimersByTimeAsync(5_000);
     expect(fetchQueue).not.toHaveBeenCalled();
     vi.useRealTimers();
+  });
+
+  it("settles a detached job with the check-the-Library note, not a failure", async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetchQueue).mockResolvedValue({ entries: [] } as never);
+
+    const job = makeJob({ detached: true, lastProgressAt: 0 });
+    const jobs = ref<Job[]>([job]);
+    const failRunning = vi.fn();
+    const settleDetached = vi.fn();
+    const handle = startQueueReconciler(jobs, failRunning, {
+      intervalMs: 500,
+      settleDetached,
+    });
+
+    await vi.advanceTimersByTimeAsync(600);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(failRunning).not.toHaveBeenCalled();
+    expect(settleDetached).toHaveBeenCalledWith(
+      "client-1",
+      DETACHED_SETTLE_NOTE,
+    );
+    expect(DETACHED_SETTLE_NOTE).toContain("Library");
+    expect(DETACHED_SETTLE_NOTE.toLowerCase()).not.toContain("failed");
+
+    handle.stop();
+    vi.useRealTimers();
+  });
+
+  it("resolves a reloaded job's route from the host registry", () => {
+    localStorage.setItem(
+      "mold.web.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-2-7680",
+          name: "Studio 2",
+          url: "http://studio-2:7680",
+          apiKey: "secret",
+          connected: true,
+        },
+      ]),
+    );
+    try {
+      // In-memory target always wins (it carries the exact key used).
+      const live = makeJob({
+        target: { baseUrl: "http://live:7680" },
+        hostId: "studio-2-7680",
+      });
+      expect(targetForJob(live)).toEqual({ baseUrl: "http://live:7680" });
+      // A reloaded job (target died with the session) resolves via registry.
+      const reloaded = makeJob({ target: null, hostId: "studio-2-7680" });
+      expect(targetForJob(reloaded)).toEqual({
+        baseUrl: "http://studio-2:7680",
+        apiKey: "secret",
+      });
+      // Origin (or unknown) hosts reconcile against the primary connection.
+      expect(targetForJob(makeJob({ target: null, hostId: null }))).toBeNull();
+    } finally {
+      localStorage.removeItem("mold.web.hosts.v1");
+    }
   });
 
   it("does not dead-letter when the server itself is unreachable (transient)", async () => {

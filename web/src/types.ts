@@ -77,6 +77,9 @@ export interface OutputMetadata {
   /** Source-image provenance supplied by newer servers. */
   source_image_name?: string | null;
   source_image_sha256?: string | null;
+  /** Client-shaped source-fit provenance echoed verbatim by newer servers.
+   * Parse defensively before restoring. */
+  source_fit?: unknown;
   /** Ordered content keys for Qwen Image Edit inputs (newer servers only). */
   edit_image_sha256s?: string[] | null;
   /** Redacted ordered H3 reference provenance (newer servers only). */
@@ -277,6 +280,9 @@ export interface GenerateRequestWire {
   source_image?: string | null; // base64 (no data-URI prefix)
   /** Upload/gallery label recorded as provenance only when source_image exists. */
   source_image_name?: string | null;
+  /** Client-shaped crop/fit policy provenance — the server echoes it into
+   * OutputMetadata verbatim; the engine never reads it. */
+  source_fit?: SourceFitPolicy | null;
   /** Qwen-Image-Edit attachments in order: first image is the target,
    * subsequent images are references. Mutually exclusive with
    * `source_image`. */

@@ -805,6 +805,59 @@ export function minimaxH3ReferenceDraftsFromMetadata(
   );
 }
 
+/** A staged single-source image as the Create surfaces hold one — web's
+ * `SourceImageState`, desktop's `sourceImage` + sidecar fields. Everything but
+ * the bytes is optional so either shape bridges without adapters. */
+export interface StagedSourceImageLike {
+  base64: string;
+  filename?: string | null;
+  width?: number | null;
+  height?: number | null;
+  mime?: string | null;
+  sha256?: string | null;
+  draftId?: string;
+}
+
+/** Model-switch bridge: carry a staged single-source image into the H3
+ * first/last-frame authority so switching into FL2VA keeps the picture.
+ * Bytes are required — a descriptor without payload has nothing to render. */
+export function minimaxH3BoundaryFromStagedImage(
+  staged: StagedSourceImageLike | null | undefined,
+): MinimaxH3BoundaryImage | null {
+  const data = staged?.base64 ?? "";
+  if (!data.trim()) return null;
+  const boundary: MinimaxH3BoundaryImage = {
+    filename: staged?.filename?.trim() || "First frame",
+    mimeType: staged?.mime?.trim() || "image/*",
+    width: staged?.width ?? 0,
+    height: staged?.height ?? 0,
+    data,
+    sha256: staged?.sha256?.trim() || null,
+  };
+  if (staged?.draftId) boundary.draftId = staged.draftId;
+  return boundary;
+}
+
+/** Reverse bridge: promote an H3 boundary back into the staged-image shape
+ * when leaving FL2VA for a single-source model. A bytes-less reattach
+ * descriptor (gallery provenance) must never fill a source well — the well
+ * would look populated while the request had nothing to send. */
+export function stagedImageFromMinimaxH3Boundary(
+  boundary: MinimaxH3BoundaryImage | null | undefined,
+): (StagedSourceImageLike & { base64: string; filename: string }) | null {
+  if (!boundary?.data?.trim()) return null;
+  const staged: StagedSourceImageLike & { base64: string; filename: string } = {
+    base64: boundary.data,
+    filename: boundary.filename || "First frame",
+    width: boundary.width || null,
+    height: boundary.height || null,
+    mime: boundary.mimeType === "image/*" ? null : boundary.mimeType || null,
+    sha256: boundary.sha256 ?? null,
+  };
+  if (boundary.draftId) staged.draftId = boundary.draftId;
+  return staged;
+}
+
 /** Recreate-safe FL2VA opening-frame provenance. Gallery metadata carries a
  * display name and exact digest, never payload bytes, so this deliberately
  * returns a reattach-required descriptor. */

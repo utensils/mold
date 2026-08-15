@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   metadataReferencesSource,
   restoreEditImages,
+  restoreH3Boundaries,
   restoreSourceImage,
   sha256HexOfBase64,
 } from "./sourceRestore";
@@ -109,6 +110,104 @@ describe("restoreEditImages", () => {
         { stashGet, galleryLookup: vi.fn() },
       ),
     ).resolves.toEqual({ images: [], missing: 1 });
+  });
+});
+
+describe("restoreH3Boundaries", () => {
+  const h3Meta: OutputMetadata = {
+    ...baseMeta,
+    model: "minimax-h3-fl2va:official-bf16",
+    frames: 124,
+    source_image_name: "opening.png",
+    source_image_sha256: "a".repeat(64),
+  };
+
+  it("restores the first frame from the stash by sha", async () => {
+    const deps = {
+      stashGet: vi.fn().mockResolvedValue("STASHED"),
+      galleryLookup: vi.fn(),
+    };
+    const restored = await restoreH3Boundaries(h3Meta, deps);
+    expect(restored.firstFrame).toEqual({
+      base64: "STASHED",
+      filename: "opening.png",
+    });
+    expect(restored.lastFrame).toBeNull();
+    expect(restored.missing).toBe(0);
+  });
+
+  it("falls back to a cross-host gallery filename match", async () => {
+    const deps = {
+      stashGet: vi.fn().mockResolvedValue(null),
+      galleryLookup: vi.fn().mockResolvedValue("FROM_GALLERY"),
+    };
+    const restored = await restoreH3Boundaries(h3Meta, deps);
+    expect(restored.firstFrame).toEqual({
+      base64: "FROM_GALLERY",
+      filename: "opening.png",
+    });
+    expect(deps.galleryLookup).toHaveBeenCalledWith("opening.png");
+  });
+
+  it("restores the closing frame from the exact final-frame keyframe", async () => {
+    const deps = {
+      stashGet: vi.fn(async (sha: string) => (sha === "b".repeat(64) ? "CLOSING" : null)),
+      galleryLookup: vi.fn(async (name: string) =>
+        name === "opening.png" ? "OPENING" : null,
+      ),
+    };
+    const restored = await restoreH3Boundaries(
+      {
+        ...h3Meta,
+        keyframes: [{ frame: 123, name: "closing.png", sha256: "b".repeat(64) }],
+      },
+      deps,
+    );
+    expect(restored.firstFrame?.base64).toBe("OPENING");
+    expect(restored.lastFrame).toEqual({
+      base64: "CLOSING",
+      filename: "closing.png",
+    });
+    expect(restored.missing).toBe(0);
+  });
+
+  it("counts keyed slots it could not resolve", async () => {
+    const deps = {
+      stashGet: vi.fn().mockResolvedValue(null),
+      galleryLookup: vi.fn().mockResolvedValue(null),
+    };
+    const restored = await restoreH3Boundaries(
+      {
+        ...h3Meta,
+        keyframes: [{ frame: 123, name: "closing.png", sha256: "b".repeat(64) }],
+      },
+      deps,
+    );
+    expect(restored.firstFrame).toBeNull();
+    expect(restored.lastFrame).toBeNull();
+    expect(restored.missing).toBe(2);
+  });
+
+  it("ignores keyframes that are not the closing frame", async () => {
+    const deps = {
+      stashGet: vi.fn().mockResolvedValue(null),
+      galleryLookup: vi.fn().mockResolvedValue(null),
+    };
+    const {
+      source_image_name: _name,
+      source_image_sha256: _sha,
+      ...unkeyed
+    } = h3Meta;
+    const restored = await restoreH3Boundaries(
+      {
+        ...unkeyed,
+        keyframes: [{ frame: 0, name: "opening.png", sha256: "b".repeat(64) }],
+      },
+      deps,
+    );
+    expect(restored.firstFrame).toBeNull();
+    expect(restored.lastFrame).toBeNull();
+    expect(restored.missing).toBe(0);
   });
 });
 

@@ -1782,6 +1782,7 @@ mod tests {
 
     fn request() -> GenerateRequest {
         GenerateRequest {
+            source_fit: None,
             prompt: "a lighthouse in a storm".into(),
             negative_prompt: None,
             model: contract::FL2VA_COMFY.into(),

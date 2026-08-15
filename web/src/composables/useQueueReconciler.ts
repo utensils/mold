@@ -1,5 +1,7 @@
 import type { Ref } from "vue";
 import { fetchQueue } from "../api";
+import { getHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
+import type { StreamTarget } from "../api";
 import type { Job, UseGenerateStream } from "./useGenerateStream";
 
 /// How long to poll `GET /api/queue` between rounds when the server is
@@ -62,12 +64,37 @@ export interface QueueReconcilerHandle {
 ///
 /// The loop exits early when there are no running jobs to check — no
 /// `/api/queue` call goes out unless we have something to reconcile.
+/** A detached job that vanished from the queue very likely FINISHED while
+ * the page was away — never announce it as a generation failure. */
+export const DETACHED_SETTLE_NOTE =
+  "This ran while the page was away and has since finished or stopped on the server — check the Library for the result.";
+
+/** Resolve the route for a job whose in-memory target died with its session
+ * (API keys are never persisted): look the host back up in the registry so a
+ * reloaded page reconciles against the machine that actually holds the job,
+ * not the origin's unrelated queue. */
+export function targetForJob(job: Job): Job["target"] {
+  if (job.target) return job.target;
+  if (!job.hostId || job.hostId === ORIGIN_HOST_ID) return null;
+  const host = getHost(job.hostId);
+  if (!host) return null;
+  const target: StreamTarget = { baseUrl: host.url };
+  if (host.apiKey) target.apiKey = host.apiKey;
+  return target;
+}
+
 export function startQueueReconciler(
   jobs: Ref<Job[]>,
   failRunning: (id: string, error: string) => void,
-  options: { intervalMs?: number } = {},
+  options: {
+    intervalMs?: number;
+    settleDetached?: (id: string, note: string) => void;
+    resolveTarget?: (job: Job) => Job["target"];
+  } = {},
 ): QueueReconcilerHandle {
   const intervalMs = options.intervalMs ?? RECONCILE_INTERVAL_MS;
+  const settleDetached = options.settleDetached ?? failRunning;
+  const resolveTarget = options.resolveTarget ?? targetForJob;
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let consecutiveFailures = 0;
@@ -84,7 +111,7 @@ export function startQueueReconciler(
     const groups = new Map<string, { target: Job["target"]; jobs: Job[] }>();
     for (const job of candidates) {
       const key = job.hostId ?? "__origin__";
-      const group = groups.get(key) ?? { target: job.target, jobs: [] };
+      const group = groups.get(key) ?? { target: resolveTarget(job), jobs: [] };
       group.jobs.push(job);
       groups.set(key, group);
     }
@@ -93,7 +120,14 @@ export function startQueueReconciler(
         const listing = await fetchQueue(group.target ?? undefined);
         const known = new Set(listing.entries.map((e) => e.id));
         for (const missing of reconcileRound(group.jobs, known, Date.now())) {
-          failRunning(missing.id, "job not found on server — connection lost");
+          if (missing.detached) {
+            settleDetached(missing.id, DETACHED_SETTLE_NOTE);
+          } else {
+            failRunning(
+              missing.id,
+              "job not found on server — connection lost",
+            );
+          }
         }
       }),
     );
@@ -129,8 +163,11 @@ export function startQueueReconciler(
 /** Wire the App-level generation stream to reconciliation without duplicating
  * its ownership boundary at the composition root. */
 export function startGenerateQueueReconciler(
-  stream: Pick<UseGenerateStream, "jobs" | "failRunning">,
+  stream: Pick<UseGenerateStream, "jobs" | "failRunning" | "settleDetached">,
   options: { intervalMs?: number } = {},
 ): QueueReconcilerHandle {
-  return startQueueReconciler(stream.jobs, stream.failRunning, options);
+  return startQueueReconciler(stream.jobs, stream.failRunning, {
+    ...options,
+    settleDetached: stream.settleDetached,
+  });
 }

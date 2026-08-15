@@ -218,6 +218,25 @@ describe("loadPersistedJobs dead-letters running rows on rehydrate", () => {
     localStorage.removeItem(__testing__.STORAGE_KEY);
   });
 
+  it("keeps a reloaded job with a known server id running for the reconciler", () => {
+    // A reload must not announce "Generation failed" while the server may
+    // still be rendering: the queue reconciler proves the outcome instead.
+    const raw = persistedPayload([
+      persisted({ id: "reloaded", serverId: "srv-1" }),
+    ]);
+    const loaded = __testing__.loadPersistedState(raw);
+    expect(loaded.canvasErrorJobId).toBeNull();
+    expect(loaded.jobs[0]).toMatchObject({
+      id: "reloaded",
+      state: "running",
+      error: null,
+      detached: true,
+      settledAt: null,
+    });
+    // Progress carried through so the card shows where it left off.
+    expect(loaded.jobs[0].progress.stage).toBe("Denoising");
+  });
+
   it("does not give settled persisted failures canvas authority", () => {
     const raw = persistedPayload([
       persisted({ id: "old-error", state: "error", error: "old failure" }),

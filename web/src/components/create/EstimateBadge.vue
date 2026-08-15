@@ -19,6 +19,7 @@ type Fit = EstimateFit | "unavailable";
 const fit = ref<Fit>("unknown");
 const text = ref("");
 const visible = ref(false);
+const refreshing = ref(false);
 let timer: ReturnType<typeof setTimeout> | null = null;
 let token = 0;
 
@@ -43,6 +44,7 @@ async function run(request: GenerateRequestWire) {
     text.value = "VRAM · estimate unavailable";
   }
   visible.value = true;
+  refreshing.value = false;
 }
 
 watch(
@@ -50,10 +52,21 @@ watch(
   ([request]) => {
     ++token;
     if (timer) clearTimeout(timer);
-    visible.value = false;
     if (!request?.model) {
+      // Only a model-less form hides the row; a mere refresh keeps the last
+      // estimate on screen so the page never grows and shrinks around it.
+      visible.value = false;
+      refreshing.value = false;
       return;
     }
+    if (!visible.value) {
+      // Reserve the line immediately so the debounced first estimate doesn't
+      // push the layout when it lands.
+      fit.value = "unknown";
+      text.value = "VRAM · estimating…";
+      visible.value = true;
+    }
+    refreshing.value = true;
     timer = setTimeout(() => void run(request), 600);
   },
   { deep: true, immediate: true },
@@ -78,7 +91,9 @@ onUnmounted(() => {
       'text-safelight': fit === 'tight',
       'text-stop': fit === 'wont-fit',
       'text-ink-3': fit === 'unavailable',
+      'opacity-70': refreshing,
     }"
+    :data-refreshing="refreshing || undefined"
   >
     {{ text }}
   </p>

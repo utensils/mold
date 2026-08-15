@@ -558,6 +558,7 @@ pub fn build_generate_request(params: BuildParams<'_>) -> GenerateRequest {
     };
 
     GenerateRequest {
+        source_fit: None,
         hdr_exr_dir: None,
         hdr_exr_full_float: false,
         guidance_overrides: None,

@@ -480,7 +480,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="mx-auto max-w-[1800px] px-4 pb-40 pt-6 sm:px-6 lg:px-10">
+  <!-- w-full: see MachinesPage — an mx-auto child of the column-flex app
+       frame shrinks to content width without it. -->
+  <div class="mx-auto w-full max-w-[1800px] px-4 pb-40 pt-6 sm:px-6 lg:px-10">
     <router-link to="/machines" class="md-back" data-test="detail-back">
       <Icon name="chevron-left" :size="16" /> Machines
     </router-link>

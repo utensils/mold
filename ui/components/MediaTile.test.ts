@@ -47,4 +47,19 @@ describe("MediaTile", () => {
   it("omits the overlay container when no slot is given", () => {
     expect(make().find(".ms-tile__overlay").exists()).toBe(false);
   });
+
+  it("shows a shimmer and hides the image until its bytes land", async () => {
+    const wrapper = make();
+    expect(wrapper.attributes("data-loaded")).toBe("false");
+    expect(wrapper.find(".ms-tile__ghost").exists()).toBe(true);
+    await wrapper.find("img").trigger("load");
+    expect(wrapper.attributes("data-loaded")).toBe("true");
+    expect(wrapper.find(".ms-tile__ghost").exists()).toBe(false);
+  });
+
+  it("renders no img element at all for an empty src", () => {
+    const wrapper = make({ src: "" });
+    expect(wrapper.find("img").exists()).toBe(false);
+    expect(wrapper.find(".ms-tile__ghost").exists()).toBe(true);
+  });
 });

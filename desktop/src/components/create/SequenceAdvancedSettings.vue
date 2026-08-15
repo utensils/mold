@@ -108,11 +108,10 @@ function onPickImage(images: PickedImage[]) {
   props.form.sourceFit = coerceSourceFitForMaskless(props.form.sourceFit);
 }
 
+// Reset clears sequence-advanced knobs only; the opening image and its
+// strength/fit are staged source media and survive (web parity).
 function reset() {
-  draft.openingImage = null;
   draft.enableAudio = false;
-  props.form.strength = 0.75;
-  props.form.sourceFit = { mode: "crop-fill", alignX: "center", alignY: "center" };
   for (const clip of draft.clips) {
     clip.negativePrompt = "";
     clip.cameraControl = null;

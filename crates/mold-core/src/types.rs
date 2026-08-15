@@ -1179,6 +1179,13 @@ pub struct GenerateRequest {
     /// the input image when reusing settings; the engine never reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_image_name: Option<String>,
+    /// Opaque client-shaped source-fit (crop/pad) policy provenance for the
+    /// staged source media. Fitting happens client-side before the bytes
+    /// ship, so the engine never reads this — it is recorded verbatim into
+    /// `OutputMetadata::source_fit` so clients can restore their crop
+    /// controls when reusing settings or selecting a running generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_fit: Option<serde_json::Value>,
     /// Source images for Qwen-Image-Edit generation (raw PNG/JPEG bytes, base64-encoded in JSON).
     /// The first image is the primary edit target; additional images are reference images.
     #[serde(
@@ -2004,6 +2011,12 @@ pub struct OutputMetadata {
     /// names and hashes only, never image payloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_image_sha256: Option<String>,
+    /// Opaque client-shaped source-fit (crop/pad) policy provenance. The
+    /// engine never reads it — fitting happens client-side before the bytes
+    /// ship — but recording it verbatim lets Reuse settings and running-job
+    /// selection restore the crop controls exactly as they were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_fit: Option<serde_json::Value>,
     /// SHA-256 (hex) of each Qwen Image Edit input, in request order. Clients
     /// can restore locally available inputs without persisting image payloads
     /// or private filesystem paths in gallery metadata.
@@ -2182,6 +2195,7 @@ impl OutputMetadata {
                 hasher.update(bytes);
                 format!("{:x}", hasher.finalize())
             }),
+            source_fit: req.source_fit.clone(),
             edit_image_sha256s: req.edit_images.as_ref().and_then(|images| {
                 (!images.is_empty()).then(|| {
                     images
@@ -4353,6 +4367,7 @@ mod tests {
     #[test]
     fn generate_request_serde_roundtrip() {
         let req = GenerateRequest {
+            source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
@@ -4552,6 +4567,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_roundtrip() {
         let req = GenerateRequest {
+            source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
@@ -4618,6 +4634,7 @@ mod tests {
     #[test]
     fn generate_request_negative_prompt_omitted_when_none() {
         let req = GenerateRequest {
+            source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
@@ -4736,6 +4753,7 @@ mod tests {
     #[test]
     fn output_metadata_omits_strength_without_source_image() {
         let req = GenerateRequest {
+            source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
@@ -4814,6 +4832,7 @@ mod tests {
     #[test]
     fn output_metadata_records_source_image_provenance() {
         let mut req = GenerateRequest {
+            source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
@@ -4904,6 +4923,22 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.source_image_name, None);
         assert_eq!(legacy.source_image_sha256, None);
+
+        // The client-shaped source-fit policy is echoed verbatim so crop
+        // controls restore on Reuse settings and running-job selection; when
+        // the client sends none the field stays absent from the JSON.
+        req.source_fit = Some(serde_json::json!({ "mode": "crop-fill" }));
+        let fitted = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
+        assert_eq!(
+            fitted.source_fit,
+            Some(serde_json::json!({ "mode": "crop-fill" }))
+        );
+        req.source_fit = None;
+        let unfitted = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
+        assert_eq!(unfitted.source_fit, None);
+        assert!(!serde_json::to_string(&unfitted)
+            .unwrap()
+            .contains("source_fit"));
     }
 
     #[test]
@@ -5029,6 +5064,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_negative_prompt_when_provided() {
         let req = GenerateRequest {
+            source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
@@ -5092,6 +5128,7 @@ mod tests {
     #[test]
     fn output_metadata_includes_strength_and_scheduler_when_applicable() {
         let req = GenerateRequest {
+            source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
@@ -5158,6 +5195,7 @@ mod tests {
     #[test]
     fn output_metadata_preserves_recreate_knobs() {
         let req = GenerateRequest {
+            source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
@@ -5797,6 +5835,7 @@ mod tests {
         // Minimal PNG-like bytes for testing
         let image_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
@@ -5866,6 +5905,7 @@ mod tests {
         let image_a = vec![0x89, 0x50, 0x4E, 0x47];
         let image_b = vec![0xFF, 0xD8, 0xFF, 0xE0];
         let req = GenerateRequest {
+            source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
@@ -5948,6 +5988,7 @@ mod tests {
     #[test]
     fn generate_request_source_image_omitted_in_json_when_none() {
         let req = GenerateRequest {
+            source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
@@ -6015,6 +6056,7 @@ mod tests {
     fn generate_request_control_image_base64_roundtrip() {
         let control_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,
@@ -6145,6 +6187,7 @@ mod tests {
         let mask_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let source_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let req = GenerateRequest {
+            source_fit: None,
             hdr_exr_dir: None,
             hdr_exr_full_float: false,
             guidance_overrides: None,

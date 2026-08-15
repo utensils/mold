@@ -30,6 +30,9 @@ const props = withDefaults(
     preparedBlocked: boolean;
     disabled: boolean;
     disabledReason: string | null;
+    /** Non-blocking advisory (e.g. an off-profile custom size) shown when no
+     * blocker is active. Generate stays enabled. */
+    warningReason?: string | null;
     submitting: boolean;
     buttonLabel: string;
     estimateRequest: GenerateRequest | null;
@@ -39,7 +42,7 @@ const props = withDefaults(
     /** Recent prompts for ↑/↓ history cycling. */
     history?: string[];
   }>(),
-  { history: () => [], remixSource: "original" },
+  { history: () => [], remixSource: "original", warningReason: null },
 );
 
 const emit = defineEmits<{
@@ -176,6 +179,12 @@ defineExpose({ focus, expand, record });
       </div>
     </div>
     <ActionBlocker v-if="disabledReason" class="ms-composer__blocker" :reason="disabledReason" />
+    <ActionBlocker
+      v-else-if="warningReason"
+      class="ms-composer__blocker"
+      variant="warn"
+      :reason="warningReason"
+    />
   </div>
 </template>
 

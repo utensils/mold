@@ -59,6 +59,13 @@ body,
   min-height: 100svh;
 }
 
+/* Content growing past the viewport (async gallery rows, activity strip,
+ * estimate lines) must never shift the whole page sideways when the
+ * scrollbar appears — reserve its gutter permanently. */
+html {
+  scrollbar-gutter: stable;
+}
+
 body {
   background: var(--desk);
   color: var(--rebate);

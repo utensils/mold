@@ -39,9 +39,10 @@ import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import { ASPECTS } from "@ui/lib/resolution";
 import {
   effectiveGenerationRecipe,
+  fixedRecipeControlOverrides,
   floatControlError,
   integerControlError,
-  resolutionProfileError,
+  resolutionProfileFinding,
 } from "@studio/lib/generationProfile";
 import type { DevelopPhase } from "@ui/lib/grain";
 import type { ClipRailMedia } from "@ui/components/types";
@@ -157,7 +158,13 @@ import {
 import { useQueue } from "../composables/useQueue";
 import { useLiveActivity } from "../composables/useLiveActivity";
 import { useOpenLiveWork } from "../composables/useOpenLiveWork";
-import { ORIGIN_HOST_ID } from "../lib/hostRegistry";
+import { ORIGIN_HOST_ID, listHosts } from "../lib/hostRegistry";
+import { fetchMergedGallery } from "../lib/multiHostGallery";
+import { fetchGalleryBlob } from "../lib/galleryMedia";
+import {
+  fetchH3BoundaryMedia,
+  h3BoundariesNeedingMedia,
+} from "@studio/lib/h3BoundaryRestore";
 import {
   autoChainFieldList,
   decideGenerateRequestRouting,
@@ -253,7 +260,8 @@ const templatesHost = ref<HTMLElement | null>(null);
 const composerError = ref<string | null>(null);
 const preprocessingStatus = ref<string | null>(null);
 const submitStatus = computed(
-  () => composerError.value ?? preprocessingStatus.value,
+  () =>
+    composerError.value ?? preprocessingStatus.value ?? placementStatus.value,
 );
 
 function onTemplatesPointerDown(event: PointerEvent) {
@@ -1860,6 +1868,85 @@ watch(modelsLoaded, (loaded) => {
   noticeFirstLastFrameRestore(pending);
 });
 
+/**
+ * FL2VA reuse restores its first/last frames as bytes-less reattach
+ * descriptors (metadata carries filename + digest only). When the original
+ * was a gallery image, the bytes are still on a connected host — fetch them
+ * by filename so the well fills itself. Watcher-driven so every reuse entry
+ * point (Library reuse, lightbox recreate, generation handoff) is covered;
+ * each descriptor is attempted once per session so a genuinely missing file
+ * degrades to the existing reattach affordance instead of a fetch loop.
+ */
+const attemptedH3BoundaryRestores = new Set<string>();
+async function restoreReusedH3BoundaryMedia() {
+  const s = form.state.value;
+  if (minimaxH3TaskForModel(s.model) !== "fl2va") return;
+  const wanted = h3BoundariesNeedingMedia(s.h3Authoring).filter((slot) => {
+    const key = `${slot.endpoint}|${slot.filename}|${slot.sha256 ?? ""}`;
+    if (attemptedH3BoundaryRestores.has(key)) return false;
+    attemptedH3BoundaryRestores.add(key);
+    return true;
+  });
+  if (wanted.length === 0) return;
+  const modelAtStart = s.model;
+  const outcome = await fetchH3BoundaryMedia(
+    {
+      firstFrame:
+        wanted.some((w) => w.endpoint === "firstFrame") && s.h3Authoring
+          ? s.h3Authoring.firstFrame
+          : null,
+      lastFrame:
+        wanted.some((w) => w.endpoint === "lastFrame") && s.h3Authoring
+          ? s.h3Authoring.lastFrame
+          : null,
+      references: [],
+    },
+    async (filename) => {
+      const merged = await fetchMergedGallery(listHosts());
+      const entry = merged.entries.find((e) => e.filename === filename);
+      if (!entry) return null;
+      const host = listHosts().find((h) => h.id === entry.hostId);
+      if (!host) return null;
+      return blobToBase64(await fetchGalleryBlob(host, filename));
+    },
+  );
+  // The fetches can take seconds; never clobber a slot the user has since
+  // reattached, and stand down entirely if the model moved on.
+  const live = form.state.value;
+  if (live.model !== modelAtStart) return;
+  let authoring = live.h3Authoring;
+  let committed = 0;
+  for (const media of outcome.restored) {
+    const slot = authoring?.[media.endpoint];
+    if (!slot || slot.data || slot.filename !== media.filename) continue;
+    const result = setMinimaxH3PickedImageBoundary(authoring, media.endpoint, {
+      filename: media.filename,
+      base64: media.base64,
+    });
+    if (result.ok) {
+      authoring = result.state;
+      committed += 1;
+    }
+  }
+  if (committed > 0) {
+    form.state.value = { ...form.state.value, h3Authoring: authoring };
+  }
+  if (outcome.failed.length > 0) {
+    toast(
+      "error",
+      `Couldn't restore ${outcome.failed.join(", ")} — the file wasn't found on any connected host. Reattach it to generate.`,
+    );
+  }
+}
+watch(
+  () =>
+    h3BoundariesNeedingMedia(form.state.value.h3Authoring)
+      .map((slot) => `${slot.endpoint}|${slot.filename}`)
+      .join("¦") + `@${form.state.value.model}`,
+  () => void restoreReusedH3BoundaryMedia(),
+  { immediate: true },
+);
+
 function applyGenerationHandoff() {
   const handoff = takeGenerationHandoff();
   if (!handoff) return;
@@ -2326,12 +2413,36 @@ function validateSubmit(): boolean {
     currentModel.value,
     form.state.value.pipeline,
   );
+  // Fixed recipe controls are not user choices: a stale form value (draft
+  // restored before the recipe landed, model swapped under it) snaps to the
+  // value the disabled control displays instead of stranding Generate behind
+  // an error the user cannot correct. Shared logic with desktop.
+  const fixedControls = fixedRecipeControlOverrides(recipe);
+  if (fixedControls.steps !== undefined) {
+    form.state.value.steps = fixedControls.steps;
+  }
+  if (fixedControls.guidance !== undefined) {
+    form.state.value.guidance = fixedControls.guidance;
+  }
+  // Resolution constraints are advisory — the server is the authority and
+  // its own refusal surfaces as the failed job's error. Only malformed
+  // input that cannot form a request blocks the submit (recipe or not).
+  if (
+    !Number.isInteger(form.state.value.width) ||
+    !Number.isInteger(form.state.value.height) ||
+    form.state.value.width < 1 ||
+    form.state.value.height < 1
+  ) {
+    composerError.value = "Width and height must be whole numbers.";
+    return false;
+  }
+  const resolutionFinding = resolutionProfileFinding(
+    form.state.value.width,
+    form.state.value.height,
+    recipe?.resolution,
+  );
   const profileError =
-    resolutionProfileError(
-      form.state.value.width,
-      form.state.value.height,
-      recipe?.resolution,
-    ) ??
+    (resolutionFinding?.level === "block" ? resolutionFinding.message : null) ??
     integerControlError("Steps", form.state.value.steps, recipe?.steps) ??
     floatControlError("Guidance", form.state.value.guidance, recipe?.guidance);
   if (profileError) {
@@ -2598,7 +2709,25 @@ function submitRequestCopies(
   }
 }
 
+/** True while a Generate click is being routed/admitted. The feasibility
+ * previews are authoritative server roundtrips that can take seconds on a
+ * heavy plan; without this the click looked like a silent no-op and a second
+ * click could double-queue. */
+const submitInFlight = ref(false);
+const placementStatus = ref<string | null>(null);
 async function onSubmit(allowStaleQuick = false) {
+  if (submitInFlight.value) return;
+  submitInFlight.value = true;
+  placementStatus.value = "Checking fit on the selected machine…";
+  try {
+    await onSubmitInner(allowStaleQuick);
+  } finally {
+    submitInFlight.value = false;
+    placementStatus.value = null;
+  }
+}
+
+async function onSubmitInner(allowStaleQuick = false) {
   if (ordinarySubmitBlocked.value) return;
   // The route is settled first, and before source preprocessing, for two
   // reasons: an unreachable pinned machine is the real complaint (its model
@@ -3524,7 +3653,7 @@ onBeforeUnmount(() => {
 <template>
   <div
     data-test="generate-shell"
-    class="mx-auto max-w-[1600px] px-4 pb-24 pt-5"
+    class="mx-auto w-full max-w-[1600px] px-4 pb-24 pt-5"
   >
     <div
       data-test="generate-workspace"
@@ -3813,7 +3942,7 @@ onBeforeUnmount(() => {
             :height="form.state.value.height"
             :steps="form.state.value.steps"
             :batch-size="form.state.value.batchSize"
-            :busy="ordinarySubmitBlocked"
+            :busy="ordinarySubmitBlocked || submitInFlight"
             :disabled-reason="h3GenerationInputBlocker"
             :expanded="expanded"
             :prompt-optional="canSkipPrompt"

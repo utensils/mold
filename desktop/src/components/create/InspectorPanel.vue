@@ -39,7 +39,7 @@ import { advancedActiveCount } from "../../lib/advancedCount";
 import { aspectsSupportedByPresets } from "@ui/lib/resolution";
 import {
   effectiveGenerationRecipe,
-  profileAspectIdForResolution,
+  closestProfileAspect,
   profileAspectOptions,
 } from "@studio/lib/generationProfile";
 import {
@@ -386,15 +386,23 @@ const shapeOptions = computed(() => {
       ]
     : canonicalShapeOptions.value;
 });
+/** Always answers, any domain: an exact preset keeps `exact: true`, a custom
+ * size from Advanced maps to the nearest group so a chip still lights up —
+ * marked approximate ("≈") rather than left blank. */
+const closestShape = computed(() =>
+  selectedModel.value
+    ? closestProfileAspect(
+        selectedModel.value,
+        props.form.pipeline,
+        props.form.width,
+        props.form.height,
+      )
+    : null,
+);
 const canonicalShapeId = computed(
   () =>
     (selectedModel.value
-      ? profileAspectIdForResolution(
-          selectedModel.value,
-          props.form.pipeline,
-          props.form.width,
-          props.form.height,
-        )
+      ? closestShape.value?.id
       : aspectIdFor(props.form.width, props.form.height)) ?? "",
 );
 /** The user's explicit Shape pick disambiguates a canvas that satisfies both
@@ -410,6 +418,13 @@ const shapeId = computed(() => {
   }
   return followsSource.value ? "source" : canonicalShapeId.value;
 });
+/** The active chip approximates a custom size (never the Source chip). */
+const shapeApproximate = computed(
+  () =>
+    shapeId.value !== "source" &&
+    shapeId.value !== "" &&
+    closestShape.value?.exact === false,
+);
 const resolutionRatio = computed(() => props.form.width / props.form.height);
 const resolutionPresets = computed(() => {
   const exactGroup = presetsForAspectGroup(selectedModel.value, props.form.pipeline, shapeId.value);
@@ -641,6 +656,7 @@ function resetSettings() {
         <ShapePicker
           :model-value="shapeId"
           :options="shapeOptions"
+          :approximate="shapeApproximate"
           label="Aspect ratio"
           @update:model-value="onShape"
         />

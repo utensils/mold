@@ -97,6 +97,7 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         .unwrap_or_else(|| "unknown".to_string());
 
     OutputMetadata {
+        source_fit: None,
         guidance_overrides: None,
         sample_shift: None,
         distill_strength_high: None,
