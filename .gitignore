@@ -54,6 +54,8 @@ web/*.tsbuildinfo
 !docs/design/**/*.png
 !apps/mobile/src-tauri/app-icon.png
 !apps/mobile/src-tauri/gen/apple/Assets.xcassets/**/*.png
+!crates/mold-inference/src/ltx2/testdata/preprocess/*.jpg
+!crates/mold-inference/src/ltx2/testdata/preprocess/*.png
 apps/mobile/src-tauri/gen/schemas/
 result
 result-*
