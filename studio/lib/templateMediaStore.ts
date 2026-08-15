@@ -26,8 +26,10 @@ export interface GenerationTemplateMediaAsset {
   reference?: GenerationReference;
 }
 
-export interface GenerationTemplateMediaInput
-  extends Omit<GenerationTemplateMediaAsset, "assetId"> {
+export interface GenerationTemplateMediaInput extends Omit<
+  GenerationTemplateMediaAsset,
+  "assetId"
+> {
   base64: string;
 }
 
@@ -36,8 +38,7 @@ export interface StoredTemplateMedia extends GenerationTemplateMediaAsset {
   base64: string;
 }
 
-export interface HydratedGenerationTemplateMedia
-  extends GenerationTemplateMediaAsset {
+export interface HydratedGenerationTemplateMedia extends GenerationTemplateMediaAsset {
   base64: string;
 }
 

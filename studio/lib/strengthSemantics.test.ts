@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { strengthSemantics } from "./strengthSemantics";
+import {
+  strengthSemantics,
+  strengthSemanticsForModel,
+} from "./strengthSemantics";
 
 describe("strengthSemantics", () => {
   it("labels LTX-2 as source strength (higher preserves the source)", () => {
@@ -25,5 +28,27 @@ describe("strengthSemantics", () => {
       expect(semantics.label).toBe("Denoise strength");
       expect(semantics.higherMeansSource).toBe(false);
     }
+  });
+
+  it("resolves saved prints by inventory family first, then model-id markers", () => {
+    expect(strengthSemanticsForModel("cv:12345", "ltx2").label).toBe(
+      "Source strength",
+    );
+    // Sequences record strength with no pipeline; the model id decides.
+    expect(strengthSemanticsForModel("ltx-2-19b-distilled:fp8").label).toBe(
+      "Source strength",
+    );
+    expect(strengthSemanticsForModel("ltx2.3-22b-dev:fp8").label).toBe(
+      "Source strength",
+    );
+    expect(strengthSemanticsForModel("ltx-video-0.9.8").label).toBe(
+      "Denoise strength",
+    );
+    expect(strengthSemanticsForModel("cv:99999").label).toBe(
+      "Denoise strength",
+    );
+    expect(strengthSemanticsForModel("sdxl-base:fp16").label).toBe(
+      "Denoise strength",
+    );
   });
 });

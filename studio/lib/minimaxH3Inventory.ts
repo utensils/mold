@@ -2,16 +2,9 @@ import { modelKindLabel } from "./modelMetadata";
 
 export type MiniMaxH3Task = "fl2va" | "ref2va";
 export type MiniMaxH3ComponentState =
-  | "installed"
-  | "missing"
-  | "downloading"
-  | "failed";
+  "installed" | "missing" | "downloading" | "failed";
 export type MiniMaxH3ComponentRole =
-  | "transformer"
-  | "qwen"
-  | "processor"
-  | "video-vae"
-  | "audio-vae";
+  "transformer" | "qwen" | "processor" | "video-vae" | "audio-vae";
 
 export interface MiniMaxH3DownloadCapability {
   job_id: string;
@@ -141,10 +134,7 @@ export interface MiniMaxH3HostPresentation {
 }
 
 export type MiniMaxH3PlanAction =
-  | "installed"
-  | "install"
-  | "repair"
-  | "waiting";
+  "installed" | "install" | "repair" | "waiting";
 
 export interface MiniMaxH3InstallPlan {
   hostId: string;

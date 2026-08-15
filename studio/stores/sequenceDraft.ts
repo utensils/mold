@@ -78,8 +78,7 @@ export interface SequenceEditSession {
 
 interface PersistedClip extends Omit<SequenceClipForm, "sourceImage"> {
   sourceImage:
-    | (Omit<SequenceClipSourceImage, "base64"> & { base64: null })
-    | null;
+    (Omit<SequenceClipSourceImage, "base64"> & { base64: null }) | null;
 }
 
 interface PersistedDraftV1 {
@@ -87,8 +86,7 @@ interface PersistedDraftV1 {
   output: OutputMode;
   clips: PersistedClip[];
   openingImage?:
-    | (Omit<SequenceClipSourceImage, "base64"> & { base64: null })
-    | null;
+    (Omit<SequenceClipSourceImage, "base64"> & { base64: null }) | null;
   enableAudio: boolean;
   lastSingleModel: string | null;
   sequenceModel?: string | null;

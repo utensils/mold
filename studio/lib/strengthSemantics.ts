@@ -38,3 +38,23 @@ export function strengthSemantics(family: string): StrengthSemantics {
     higherMeansSource: false,
   };
 }
+
+/**
+ * Model-aware variant for saved prints, where only the raw model id (and
+ * possibly an inventory-resolved family) is available. The family wins
+ * when known; otherwise the model id itself is sniffed for the LTX-2
+ * name markers (`ltx-2*`, `ltx2.*` — deliberately NOT `ltx-video`).
+ * Catalog `cv:`/`hf:` ids without an inventory hit keep the SD wording —
+ * a wrong "denoise" caption understates, never inverts, an unknown model.
+ */
+export function strengthSemanticsForModel(
+  model: string | null | undefined,
+  family?: string | null,
+): StrengthSemantics {
+  if (family) return strengthSemantics(family);
+  const id = (model ?? "").trim().toLowerCase();
+  if (id.includes("ltx-2") || id.includes("ltx2.")) {
+    return strengthSemantics("ltx2");
+  }
+  return strengthSemantics(id);
+}

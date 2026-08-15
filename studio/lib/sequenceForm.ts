@@ -174,7 +174,7 @@ export function chainScriptToClips(script: ChainScript): {
         lora.name === "Camera motion" ||
         Boolean(
           lora.name &&
-            CAMERA_MOTION_PRESETS.some((preset) => preset.label === lora.name),
+          CAMERA_MOTION_PRESETS.some((preset) => preset.label === lora.name),
         ),
     );
     if (cameraLora) {

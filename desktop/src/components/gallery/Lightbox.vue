@@ -24,7 +24,7 @@ import {
   type VideoExportCapabilities,
   type VideoExportOptions,
 } from "@studio/lib/videoExport";
-import { strengthSemantics } from "@studio/lib/strengthSemantics";
+import { strengthSemanticsForModel } from "@studio/lib/strengthSemantics";
 import { saveGalleryMedia, showSavedMediaToast } from "../../lib/mediaSave";
 
 const props = withDefaults(
@@ -110,11 +110,15 @@ onBeforeUnmount(() => restoreFocusEl?.focus?.());
 
 const meta = computed(() => props.item.metadata);
 // An LTX-2 print's `strength` is source preservation, not denoise (#1055).
-const strengthCaption = computed(() =>
-  meta.value?.pipeline != null
-    ? strengthSemantics("ltx2").label
-    : "img2img strength",
-);
+// Family resolves through the live inventory (sequences record strength but
+// no `pipeline`), with the model-id name markers as the offline fallback.
+const strengthCaption = computed(() => {
+  const model = meta.value?.model;
+  const family = hostModels.unionInstalled.find(
+    (entry) => entry.name === model,
+  )?.family;
+  return strengthSemanticsForModel(model, family).label;
+});
 const upscaled = computed(() => isUpscaledImage(props.item));
 const canExportVideo = computed(
   () => props.video && props.item.filename.toLowerCase().endsWith(".mp4"),

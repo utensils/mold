@@ -67,9 +67,7 @@ export const DEFAULT_SEQUENCE_CLIP_FRAMES = 25;
 
 export function sequenceMotionTailFrames(
   model:
-    | Pick<SequenceModel, "name" | "family" | "source_image">
-    | null
-    | undefined,
+    Pick<SequenceModel, "name" | "family" | "source_image"> | null | undefined,
 ): number {
   const family = model?.family.trim().toLowerCase();
   // LTX-Video renders independent clips: nothing crosses the seam, so there is

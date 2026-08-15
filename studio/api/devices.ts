@@ -3,11 +3,7 @@ import { IncompatibleHostError, apiJsonTo, type ApiTarget } from "./client";
 export type DeviceBackend = "cuda" | "metal";
 export type DeviceKind = "full_gpu" | "mig" | "unknown_cuda" | "metal";
 export type DeviceAdminState =
-  | "startup_excluded"
-  | "starting"
-  | "enabled"
-  | "draining"
-  | "disabled";
+  "startup_excluded" | "starting" | "enabled" | "draining" | "disabled";
 export type DeviceHealth = "healthy" | "degraded" | "unavailable" | "poisoned";
 export type DeviceActivity =
   | "idle"
