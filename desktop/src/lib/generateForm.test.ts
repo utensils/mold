@@ -704,7 +704,7 @@ describe("cloneGenerateForm", () => {
 });
 
 describe("buildRequest — LTX-2 advanced video", () => {
-  it("preserves distilled guidance state while omitting an ineffective negative", () => {
+  it("serializes fixed distilled guidance while preserving reusable form state", () => {
     const form = ltx2Form();
     form.model = "hf:opaque/distilled-checkpoint";
     form.guidance = 7;
@@ -714,6 +714,7 @@ describe("buildRequest — LTX-2 advanced video", () => {
       supports_negative_prompt: false,
       fixed_scale: 1,
     };
+    expect(buildRequest(form)).toMatchObject({ guidance: 1 });
     expect(buildRequest(form).negative_prompt).toBeUndefined();
     expect(form.negativePrompt).toBe("flicker");
     expect(form.guidance).toBe(7);

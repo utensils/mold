@@ -64,7 +64,7 @@ describe("sequenceSharedParams", () => {
       height: 704,
       fps: 24,
       steps: 8,
-      guidance: 3.5,
+      guidance: 1,
       strength: 0.9,
       sourceFitPolicy: { mode: "crop-fill" },
       upscalerModel: "",
@@ -86,5 +86,18 @@ describe("sequenceSharedParams", () => {
     const state = formState();
     state.fps = null;
     expect(sequenceSharedParams(state, "ltx2").fps).toBe(24);
+  });
+
+  it("projects the effective fixed guidance for a distilled sequence", () => {
+    const state = formState();
+    state.guidance = 7;
+    state.guidanceCapabilities = {
+      adjustable: false,
+      supports_negative_prompt: false,
+      fixed_scale: 1,
+    };
+
+    expect(sequenceSharedParams(state, "ltx2").guidance).toBe(1);
+    expect(state.guidance).toBe(7);
   });
 });

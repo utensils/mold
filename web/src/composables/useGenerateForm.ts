@@ -44,6 +44,7 @@ import {
   effectiveGenerationRecipe,
   fixedRecipeControlOverrides,
 } from "@studio/lib/generationProfile";
+import { effectiveGenerationGuidance } from "@studio/lib/generationCapabilities";
 import {
   cameraMotionLoraPath,
   normalizeCameraMotionLoraState,
@@ -1164,7 +1165,7 @@ export function useGenerateForm(): UseGenerateForm {
         width: s.width,
         height: s.height,
         steps: s.steps,
-        guidance: s.guidance,
+        guidance: effectiveGenerationGuidance(capabilities, s.guidance),
         seed: s.seedMode === "random" ? null : s.seed,
         batch_size: requestForcesBatchSizeOne ? 1 : s.batchSize,
         output_format: s.outputFormat,

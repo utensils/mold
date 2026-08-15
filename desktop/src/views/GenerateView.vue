@@ -543,7 +543,11 @@ const formValidationError = computed(
       form.pipeline,
     ) ??
     profileStepsValidationError(form.steps, selectedEntry.value, form.pipeline) ??
-    profileGuidanceValidationError(form.guidance, selectedEntry.value, form.pipeline) ??
+    profileGuidanceValidationError(
+      caps.value.fixedGuidance ?? form.guidance,
+      selectedEntry.value,
+      form.pipeline,
+    ) ??
     (caps.value.supportsVideo
       ? videoFramesError(form.frames, selectedEntry.value ?? { family: form.family })
       : null) ??

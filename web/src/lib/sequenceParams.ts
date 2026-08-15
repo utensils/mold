@@ -10,12 +10,20 @@
 import type { SequenceSharedParams } from "@studio/lib/sequenceForm";
 import { DEFAULT_VIDEO_FPS } from "@studio/lib/sequence";
 import type { GenerateFormState } from "../types";
+import { generationCapabilitiesForFamily } from "./generateCapabilities";
+import { effectiveGenerationGuidance } from "@studio/lib/generationCapabilities";
 
 /** Project the live web generate form onto the shared chain params. */
 export function sequenceSharedParams(
   state: GenerateFormState,
   family: string,
 ): SequenceSharedParams {
+  const capabilities = generationCapabilitiesForFamily(
+    family,
+    state.model,
+    state.pipeline,
+    state.guidanceCapabilities,
+  );
   return {
     model: state.model,
     family,
@@ -25,7 +33,7 @@ export function sequenceSharedParams(
     // only covers a form that never saw a video model.
     fps: state.fps ?? DEFAULT_VIDEO_FPS,
     steps: state.steps,
-    guidance: state.guidance,
+    guidance: effectiveGenerationGuidance(capabilities, state.guidance),
     strength: state.strength,
     sourceFitPolicy: state.sourceFitPolicy,
     upscalerModel: state.upscaleModel,

@@ -1383,7 +1383,9 @@ describe("CreatePage layout and behavior", () => {
         width: 1216,
         height: 704,
         steps: 4,
-        guidance: 5.5,
+        // Distilled recipes materialize their fixed guidance at submission
+        // while preserving the inspector's adjustable value for other models.
+        guidance: 1,
         fps: 24,
         output_format: "mp4",
         stages: [

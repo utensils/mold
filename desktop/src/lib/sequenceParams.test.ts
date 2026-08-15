@@ -42,4 +42,19 @@ describe("sequenceParams", () => {
     const entry = { name: "cv:12345", family: "ltx2" } as ModelEntry;
     expect(sequenceParams(form, entry).family).toBe("ltx2");
   });
+
+  it("projects the effective fixed guidance for a distilled sequence", () => {
+    const form = newGenerateForm();
+    form.model = "hf:opaque/distilled-checkpoint";
+    form.family = "ltx2";
+    form.guidance = 7;
+    form.guidanceCapabilities = {
+      adjustable: false,
+      supports_negative_prompt: false,
+      fixed_scale: 1,
+    };
+
+    expect(sequenceParams(form).guidance).toBe(1);
+    expect(form.guidance).toBe(7);
+  });
 });

@@ -2381,6 +2381,31 @@ impl App {
         self.refresh_create_rows();
     }
 
+    /// Materialize a fixed recipe's effective guidance only in the frozen
+    /// request. The live TUI form retains its guided value so switching back
+    /// to an adjustable recipe restores the user's setting.
+    fn normalize_fixed_guidance_for_submit(&self, params: &mut GenerateParams) {
+        let family = family_for_model(&params.model, &self.config);
+        let advertised = self
+            .models
+            .catalog
+            .iter()
+            .find(|entry| entry.name == params.model)
+            .and_then(|entry| entry.guidance_capabilities);
+        let capabilities = params
+            .pipeline
+            .map(|pipeline| {
+                mold_core::GuidanceCapabilities::for_recipe(&family, &params.model, Some(pipeline))
+            })
+            .or(advertised)
+            .unwrap_or_else(|| {
+                mold_core::GuidanceCapabilities::for_recipe(&family, &params.model, None)
+            });
+        if let Some(fixed_scale) = capabilities.fixed_scale {
+            params.guidance = fixed_scale;
+        }
+    }
+
     /// Re-resolve the primary guidance/negative-prompt contract after the
     /// user changes an explicit LTX-2 recipe. Returning to Auto must restore
     /// the server-advertised checkpoint contract instead of inferring from an
@@ -6697,6 +6722,7 @@ impl App {
             .seed_mode
             .resolve(self.generate.params.seed);
         let mut params = self.generate.params.clone();
+        self.normalize_fixed_guidance_for_submit(&mut params);
         params.seed = Some(resolved_seed);
         // Nothing to expand when the conditioning carries the shot — expanding
         // "" would let the model invent the prompt. Mirrors the server's
@@ -12259,6 +12285,9 @@ mod tests {
         app.adjust_field(ParamField::Guidance, 1);
 
         assert_eq!(app.generate.params.guidance, 7.0);
+        let mut submitted = app.generate.params.clone();
+        app.normalize_fixed_guidance_for_submit(&mut submitted);
+        assert_eq!(submitted.guidance, 1.0);
         assert!(!app.generate.guidance_adjustable());
         assert!(!app.generate.capabilities.supports_negative_prompt);
     }
@@ -12379,6 +12408,13 @@ mod tests {
     async fn distilled_checkpoint_guidance_cannot_be_adjusted() {
         let mut app = make_settings_test_app();
         app.generate.params.model = "ltx-2.3-22b-distilled:fp8".into();
+        app.config.models.insert(
+            app.generate.params.model.clone(),
+            mold_core::ModelConfig {
+                family: Some("ltx2".into()),
+                ..Default::default()
+            },
+        );
         app.generate.capabilities = crate::model_info::capabilities_for_model(
             "ltx2",
             &app.generate.params.model,
@@ -12387,8 +12423,12 @@ mod tests {
             None,
         );
         app.generate.params.guidance = 7.0;
+        app.sync_generate_capabilities();
         app.adjust_field(ParamField::Guidance, 1);
         assert_eq!(app.generate.params.guidance, 7.0);
+        let mut submitted = app.generate.params.clone();
+        app.normalize_fixed_guidance_for_submit(&mut submitted);
+        assert_eq!(submitted.guidance, 1.0);
 
         app.generate.params.model = "ltx-2.3-22b-dev:fp8".into();
         app.generate.capabilities = crate::model_info::capabilities_for_model(

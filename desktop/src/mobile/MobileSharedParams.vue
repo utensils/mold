@@ -163,7 +163,7 @@ const sourceDimensions = computed(() => {
   </div>
   <p
     v-if="!guidanceCaps.guidanceAdjustable"
-    class="mobile-generate-validation"
+    class="mobile-generate-hint"
     data-test="mobile-fixed-guidance-hint"
   >
     Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline to

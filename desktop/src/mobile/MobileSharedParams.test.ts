@@ -27,6 +27,12 @@ describe("MobileSharedParams video duration", () => {
     expect(wrapper.get("[data-test='mobile-fixed-guidance-hint']").text()).toContain(
       "fixes CFG at 1.0",
     );
+    expect(wrapper.get("[data-test='mobile-fixed-guidance-hint']").classes()).toContain(
+      "mobile-generate-hint",
+    );
+    expect(wrapper.get("[data-test='mobile-fixed-guidance-hint']").classes()).not.toContain(
+      "mobile-generate-validation",
+    );
     form.pipeline = "two-stage";
     await wrapper.vm.$nextTick();
     expect(wrapper.get("input[step='0.1']").attributes("disabled")).toBeUndefined();

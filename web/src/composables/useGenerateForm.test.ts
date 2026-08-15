@@ -1680,6 +1680,7 @@ describe("useGenerateForm", () => {
         fixed_scale: 1,
       },
     });
+    expect(form.toRequest().guidance).toBe(1);
     expect(form.toRequest().negative_prompt).toBeNull();
     expect(form.state.value.negativePrompt).toBe("flicker");
     expect(form.state.value.guidance).toBe(7);
