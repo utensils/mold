@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -99,6 +99,8 @@ pub struct VisualVaeWeightInspection {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct VisualWeightFileIdentity {
     canonical_path: PathBuf,
+    logical_name: String,
+    descriptor_bound: bool,
     len: u64,
     #[cfg(unix)]
     device: u64,
@@ -150,8 +152,8 @@ impl ValidatedVisualVaeWeights {
 
     pub(crate) fn revalidate_files(&self) -> Result<()> {
         for expected in &self.files {
-            let current = visual_weight_file_identity(&expected.canonical_path)?;
-            if &current != expected {
+            let current = current_visual_weight_file_identity(expected)?;
+            if !same_visual_weight_file_identity(&current, expected) {
                 bail!(
                     "validated H3 visual VAE artifact changed after inspection: {}",
                     expected.canonical_path.display()
@@ -806,28 +808,64 @@ pub fn validate_comfy_weight_file(
     config: &MiniMaxH3VisualVaeConfig,
     weight_path: &Path,
 ) -> Result<ValidatedVisualVaeWeights> {
-    config.validate_production_contract()?;
-    let basename = weight_path
+    validate_comfy_weight_file_inner(config, weight_path, true)
+}
+
+/// Validate the Comfy visual VAE through a retained process descriptor.
+/// Descriptor paths intentionally have no model filename; the already-opened
+/// inode remains authoritative even if a writable staging parent is replaced.
+pub fn validate_comfy_weight_file_from_opened_descriptor(
+    config: &MiniMaxH3VisualVaeConfig,
+    weight_path: &Path,
+) -> Result<ValidatedVisualVaeWeights> {
+    let parent = weight_path.parent();
+    let is_descriptor =
+        parent == Some(Path::new("/dev/fd")) || parent == Some(Path::new("/proc/self/fd"));
+    let has_numeric_descriptor = weight_path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| candle::Error::Msg("H3 Comfy VAE path has no UTF-8 basename".into()))?;
-    if basename != COMFY_VISUAL_VAE_FILENAME {
-        bail!(
-            "H3 Comfy visual VAE must use canonical filename {COMFY_VISUAL_VAE_FILENAME}, got {basename}"
-        )
+        .is_some_and(|name| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()));
+    if !is_descriptor || !has_numeric_descriptor {
+        bail!("H3 Comfy visual VAE opened authority must use a process descriptor path")
     }
-    let file_identity = visual_weight_file_identity(weight_path)?;
-    let canonical_basename = file_identity
-        .canonical_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            candle::Error::Msg("H3 Comfy VAE canonical path has no UTF-8 basename".into())
-        })?;
-    if canonical_basename != COMFY_VISUAL_VAE_FILENAME {
-        bail!(
-            "H3 Comfy visual VAE canonical file must be named {COMFY_VISUAL_VAE_FILENAME}, got {canonical_basename}"
-        )
+    validate_comfy_weight_file_inner(config, weight_path, false)
+}
+
+fn validate_comfy_weight_file_inner(
+    config: &MiniMaxH3VisualVaeConfig,
+    weight_path: &Path,
+    require_canonical_filename: bool,
+) -> Result<ValidatedVisualVaeWeights> {
+    config.validate_production_contract()?;
+    if require_canonical_filename {
+        let basename = weight_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| candle::Error::Msg("H3 Comfy VAE path has no UTF-8 basename".into()))?;
+        if basename != COMFY_VISUAL_VAE_FILENAME {
+            bail!(
+                "H3 Comfy visual VAE must use canonical filename {COMFY_VISUAL_VAE_FILENAME}, got {basename}"
+            )
+        }
+    }
+    let file_identity = if require_canonical_filename {
+        visual_weight_file_identity(weight_path)?
+    } else {
+        visual_weight_file_identity_from_descriptor(weight_path)?
+    };
+    if require_canonical_filename {
+        let canonical_basename = file_identity
+            .canonical_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                candle::Error::Msg("H3 Comfy VAE canonical path has no UTF-8 basename".into())
+            })?;
+        if canonical_basename != COMFY_VISUAL_VAE_FILENAME {
+            bail!(
+                "H3 Comfy visual VAE canonical file must be named {COMFY_VISUAL_VAE_FILENAME}, got {canonical_basename}"
+            )
+        }
     }
     let expected = expected_comfy_weight_shapes(config)?;
     let header = inspect_safetensors_header_for_identity(&file_identity)?;
@@ -836,7 +874,7 @@ pub fn validate_comfy_weight_file(
     let mut identity = Sha256::new();
     identity.update(VisualVaeComponentRole::F16T4D24.stable_id().as_bytes());
     identity.update(b"comfy-source-f16");
-    identity.update(basename.as_bytes());
+    identity.update(COMFY_VISUAL_VAE_FILENAME.as_bytes());
     identity.update(header.header_len.to_le_bytes());
     identity.update(header.file_len.to_le_bytes());
     let mut file = open_expected_file(&file_identity, "before header identity read")?;
@@ -950,13 +988,7 @@ fn fingerprint_identities(
     digest.update(VisualVaeComponentRole::F16T4D24.stable_id().as_bytes());
     let mut completed = 0u64;
     for identity in sorted {
-        let name = identity
-            .canonical_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                candle::Error::Msg("H3 fingerprint path has no UTF-8 basename".into())
-            })?;
+        let name = identity.logical_name.as_str();
         validate_shard_basename(name)?;
         digest.update((name.len() as u64).to_le_bytes());
         digest.update(name.as_bytes());
@@ -994,7 +1026,7 @@ fn fingerprint_file(
         identity.canonical_path.clone(),
         &file.metadata()?,
     )?;
-    if &opened != identity {
+    if !same_visual_weight_file_identity(&opened, identity) {
         bail!(
             "H3 visual VAE artifact changed before fingerprinting: {}",
             identity.canonical_path.display()
@@ -1024,8 +1056,11 @@ fn fingerprint_file(
         identity.canonical_path.clone(),
         &file.metadata()?,
     )?;
-    if &closed_identity != identity
-        || visual_weight_file_identity(&identity.canonical_path)? != *identity
+    if !same_visual_weight_file_identity(&closed_identity, identity)
+        || !same_visual_weight_file_identity(
+            &current_visual_weight_file_identity(identity)?,
+            identity,
+        )
     {
         bail!(
             "H3 visual VAE artifact changed while fingerprinting: {}",
@@ -1046,8 +1081,24 @@ fn visual_weight_file_identity(path: &Path) -> Result<VisualWeightFileIdentity> 
     visual_weight_file_identity_from_metadata(canonical_path, &metadata)
 }
 
+fn visual_weight_file_identity_from_descriptor(path: &Path) -> Result<VisualWeightFileIdentity> {
+    let metadata = std::fs::metadata(path)?;
+    visual_weight_file_identity_from_metadata(path.to_path_buf(), &metadata)
+}
+
+fn current_visual_weight_file_identity(
+    expected: &VisualWeightFileIdentity,
+) -> Result<VisualWeightFileIdentity> {
+    if expected.descriptor_bound {
+        visual_weight_file_identity_from_descriptor(&expected.canonical_path)
+    } else {
+        visual_weight_file_identity(&expected.canonical_path)
+    }
+}
+
 fn ensure_identity_unchanged(expected: &VisualWeightFileIdentity, operation: &str) -> Result<()> {
-    if visual_weight_file_identity(&expected.canonical_path)? != *expected {
+    if !same_visual_weight_file_identity(&current_visual_weight_file_identity(expected)?, expected)
+    {
         bail!(
             "H3 visual VAE artifact changed {operation}: {}",
             expected.canonical_path.display()
@@ -1057,7 +1108,8 @@ fn ensure_identity_unchanged(expected: &VisualWeightFileIdentity, operation: &st
 }
 
 fn open_expected_file(expected: &VisualWeightFileIdentity, operation: &str) -> Result<File> {
-    let file = File::open(&expected.canonical_path)?;
+    let mut file = File::open(&expected.canonical_path)?;
+    file.seek(SeekFrom::Start(0))?;
     ensure_open_file_unchanged(&file, expected, operation)?;
     Ok(file)
 }
@@ -1071,13 +1123,33 @@ fn ensure_open_file_unchanged(
         expected.canonical_path.clone(),
         &file.metadata()?,
     )?;
-    if &opened != expected {
+    if !same_visual_weight_file_identity(&opened, expected) {
         bail!(
             "H3 visual VAE artifact changed {operation}: {}",
             expected.canonical_path.display()
         )
     }
     Ok(())
+}
+
+fn same_visual_weight_file_identity(
+    opened: &VisualWeightFileIdentity,
+    expected: &VisualWeightFileIdentity,
+) -> bool {
+    #[cfg(all(unix, not(target_os = "linux")))]
+    if expected.descriptor_bound {
+        // macOS reports a synthetic device id when statting `/dev/fd/N`, but
+        // the descriptor's own metadata retains the underlying filesystem id.
+        return opened.canonical_path == expected.canonical_path
+            && opened.descriptor_bound == expected.descriptor_bound
+            && opened.len == expected.len
+            && opened.inode == expected.inode
+            && opened.modified_seconds == expected.modified_seconds
+            && opened.modified_nanoseconds == expected.modified_nanoseconds
+            && opened.changed_seconds == expected.changed_seconds
+            && opened.changed_nanoseconds == expected.changed_nanoseconds;
+    }
+    opened == expected
 }
 
 fn visual_weight_file_identity_from_metadata(
@@ -1090,8 +1162,22 @@ fn visual_weight_file_identity_from_metadata(
             canonical_path.display()
         )
     }
+    let descriptor_bound = canonical_path.parent().is_some_and(|parent| {
+        parent == Path::new("/dev/fd") || parent == Path::new("/proc/self/fd")
+    });
+    let logical_name = if descriptor_bound {
+        COMFY_VISUAL_VAE_FILENAME.to_owned()
+    } else {
+        canonical_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| candle::Error::Msg("H3 visual VAE path has no UTF-8 basename".into()))?
+            .to_owned()
+    };
     Ok(VisualWeightFileIdentity {
         canonical_path,
+        logical_name,
+        descriptor_bound,
         len: metadata.len(),
         #[cfg(unix)]
         device: metadata.dev(),
@@ -1199,6 +1285,45 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn write_sparse_production_comfy_weights(path: &Path) -> File {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+
+        let expected =
+            expected_comfy_weight_shapes(&MiniMaxH3VisualVaeConfig::production()).unwrap();
+        let mut offset = 0u64;
+        let mut header = serde_json::Map::new();
+        for (name, shape) in expected {
+            let bytes = shape.iter().product::<usize>() as u64 * 2;
+            header.insert(
+                name,
+                serde_json::json!({
+                    "dtype": "F16",
+                    "shape": shape,
+                    "data_offsets": [offset, offset + bytes],
+                }),
+            );
+            offset += bytes;
+        }
+        let mut header = serde_json::to_vec(&header).unwrap();
+        while !header.len().is_multiple_of(8) {
+            header.push(b' ');
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .unwrap();
+        file.write_all(&(header.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(&header).unwrap();
+        file.set_len(8 + header.len() as u64 + offset).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file
+    }
+
     #[test]
     fn production_key_contract_has_the_pinned_703_tensors() {
         let shapes =
@@ -1293,6 +1418,68 @@ mod tests {
             },
         );
         assert!(validate_tensor_headers(&unexpected, &expected, "F16", "Comfy").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_comfy_validator_and_mmap_survive_storage_path_replacement() {
+        use std::os::fd::AsRawFd;
+
+        let directory = tempfile::tempdir().unwrap();
+        let storage_path = directory.path().join(COMFY_VISUAL_VAE_FILENAME);
+        let retained = write_sparse_production_comfy_weights(&storage_path);
+        #[cfg(target_os = "linux")]
+        let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", retained.as_raw_fd()));
+        #[cfg(not(target_os = "linux"))]
+        let descriptor_path = PathBuf::from(format!("/dev/fd/{}", retained.as_raw_fd()));
+
+        let authenticated_path = directory.path().join("authenticated.safetensors");
+        std::fs::rename(&storage_path, &authenticated_path).unwrap();
+        std::fs::write(&storage_path, b"replacement").unwrap();
+
+        let validated = validate_comfy_weight_file_from_opened_descriptor(
+            &MiniMaxH3VisualVaeConfig::production(),
+            &descriptor_path,
+        )
+        .unwrap();
+        validated.revalidate_files().unwrap();
+        validated.mmap_var_builder(&Device::Cpu).unwrap();
+        assert_eq!(validated.files[0].canonical_path, descriptor_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_bound_fingerprint_survives_storage_path_replacement() {
+        use std::os::fd::AsRawFd;
+
+        let directory = tempfile::tempdir().unwrap();
+        let storage_path = directory.path().join("weights.safetensors");
+        std::fs::write(&storage_path, b"authenticated bytes").unwrap();
+        let retained = File::open(&storage_path).unwrap();
+        #[cfg(target_os = "linux")]
+        let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", retained.as_raw_fd()));
+        #[cfg(not(target_os = "linux"))]
+        let descriptor_path = PathBuf::from(format!("/dev/fd/{}", retained.as_raw_fd()));
+        let authenticated_path = directory.path().join("authenticated.safetensors");
+        std::fs::rename(&storage_path, authenticated_path).unwrap();
+        std::fs::write(&storage_path, b"replacement").unwrap();
+
+        let identity = visual_weight_file_identity_from_descriptor(&descriptor_path).unwrap();
+        let token = ValidatedVisualVaeWeights {
+            layout: WeightLayout::OfficialComfySource,
+            inspection: VisualVaeWeightInspection {
+                role: VisualVaeComponentRole::F16T4D24.stable_id(),
+                shard_count: 1,
+                tensor_count: 0,
+                total_size: identity.len,
+                header_identity_sha256: "test".into(),
+            },
+            files: vec![identity],
+        };
+        let digest = token
+            .component_fingerprint(&mut NoopVisualWeightReadObserver)
+            .unwrap();
+        assert_eq!(digest.len(), 64);
     }
 
     #[test]

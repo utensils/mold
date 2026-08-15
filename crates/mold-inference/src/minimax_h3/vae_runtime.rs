@@ -17,15 +17,18 @@ use candle_core::{DType, Device};
 use mold_candle::minimax_h3::{
     expected_visual_vae_parameter_bytes, inspect_audio_vae_config_bytes,
     inspect_safetensors_header, inspect_visual_vae_config_bytes,
-    load_validated_audio_vae_with_observer, validate_audio_safetensors, validate_comfy_weight_file,
-    AudioTensorLayout, AudioVae, AudioVaeLoadObserver, DecodeComputePolicy, MiniMaxH3VisualVae,
-    VisualAttentionBackend, VisualVaeEvent, VisualVaeObserver,
+    load_validated_audio_vae_with_observer, validate_audio_safetensors,
+    validate_comfy_weight_file_from_opened_descriptor, AudioTensorLayout, AudioVae,
+    AudioVaeLoadObserver, DecodeComputePolicy, MiniMaxH3VisualVae, VisualAttentionBackend,
+    VisualVaeEvent, VisualVaeObserver,
 };
 use mold_core::manifest::{find_manifest, storage_path, ModelComponent, ModelManifest};
 use mold_core::minimax_h3::{self as contract, ArtifactRole as ContractArtifactRole, Layout, Task};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
@@ -990,12 +993,11 @@ fn inspect_visual_component(
             message: error.to_string(),
         }
     })?;
-    let validated = validate_comfy_weight_file(&config, weight_path).map_err(|error| {
-        H3ComfyVaeLoadError::Validation {
+    let validated = validate_comfy_weight_file_from_opened_descriptor(&config, weight_path)
+        .map_err(|error| H3ComfyVaeLoadError::Validation {
             role: H3ComfyVaeArtifactRole::VisualWeights,
             message: error.to_string(),
-        }
-    })?;
+        })?;
     let resident_device_weight_bytes = expected_visual_vae_parameter_bytes(&config, DType::F16)
         .map_err(|error| H3ComfyVaeLoadError::Validation {
             role: H3ComfyVaeArtifactRole::VisualWeights,
@@ -1369,9 +1371,10 @@ impl VaeFactory for ProductionVaeFactory {
         let header = inspect_safetensors_header(weight_path).map_err(|error| {
             FactoryError::validation(H3ComfyVaeArtifactRole::VisualWeights, error)
         })?;
-        let validated = validate_comfy_weight_file(&config, weight_path).map_err(|error| {
-            FactoryError::validation(H3ComfyVaeArtifactRole::VisualWeights, error)
-        })?;
+        let validated = validate_comfy_weight_file_from_opened_descriptor(&config, weight_path)
+            .map_err(|error| {
+                FactoryError::validation(H3ComfyVaeArtifactRole::VisualWeights, error)
+            })?;
         let resident_device_weight_bytes = expected_visual_vae_parameter_bytes(&config, DType::F16)
             .map_err(|error| {
                 FactoryError::validation(H3ComfyVaeArtifactRole::VisualWeights, error)
@@ -1770,6 +1773,7 @@ struct StagedWeights {
 struct StagedWeight {
     role: H3ComfyVaeArtifactRole,
     path: PathBuf,
+    opened_path: PathBuf,
     identity: FileIdentity,
     file: File,
 }
@@ -1993,6 +1997,17 @@ impl StagedWeights {
 
     fn path(&self, role: H3ComfyVaeArtifactRole) -> LoadResult<&Path> {
         match role {
+            H3ComfyVaeArtifactRole::VisualWeights => self.visual.opened_path(),
+            H3ComfyVaeArtifactRole::AudioWeights => self.audio.opened_path(),
+            _ => Err(H3ComfyVaeLoadError::InvalidPlan(format!(
+                "artifact {role:?} is not a staged weight"
+            ))),
+        }
+    }
+
+    #[cfg(test)]
+    fn storage_path(&self, role: H3ComfyVaeArtifactRole) -> LoadResult<&Path> {
+        match role {
             H3ComfyVaeArtifactRole::VisualWeights => Ok(&self.visual.path),
             H3ComfyVaeArtifactRole::AudioWeights => Ok(&self.audio.path),
             _ => Err(H3ComfyVaeLoadError::InvalidPlan(format!(
@@ -2013,6 +2028,17 @@ impl StagedWeights {
 }
 
 impl StagedWeight {
+    fn opened_path(&self) -> LoadResult<&Path> {
+        let mut retained = &self.file;
+        retained.seek(SeekFrom::Start(0)).map_err(|error| {
+            artifact_error(
+                self.role,
+                format!("cannot rewind retained staging descriptor: {error}"),
+            )
+        })?;
+        Ok(&self.opened_path)
+    }
+
     fn validate(&self, operation: &str) -> LoadResult<()> {
         let descriptor_identity = file_identity(&self.file.metadata().map_err(|error| {
             artifact_error(
@@ -2158,14 +2184,55 @@ fn stage_weight(
         return Err(artifact_error(role, "sealed staging length changed"));
     }
     artifact.validate_source("after authentication and staging")?;
+    let opened_path = opened_descriptor_path(&output)?;
     let staged = StagedWeight {
         role,
         path: target,
+        opened_path,
         identity,
         file: output,
     };
     staged.validate("after sealing")?;
     Ok(staged)
+}
+
+#[cfg(unix)]
+fn opened_descriptor_path(file: &File) -> LoadResult<PathBuf> {
+    let descriptor = file.as_raw_fd();
+    #[cfg(target_os = "linux")]
+    let path = PathBuf::from(format!("/proc/self/fd/{descriptor}"));
+    #[cfg(not(target_os = "linux"))]
+    let path = PathBuf::from(format!("/dev/fd/{descriptor}"));
+    let metadata = std::fs::metadata(&path).map_err(|error| {
+        H3ComfyVaeLoadError::InvalidPlan(format!(
+            "cannot resolve retained H3 VAE staging descriptor: {error}"
+        ))
+    })?;
+    let retained_metadata = file.metadata().map_err(|error| {
+        H3ComfyVaeLoadError::InvalidPlan(format!(
+            "cannot inspect retained H3 VAE staging descriptor: {error}"
+        ))
+    })?;
+    #[cfg(target_os = "linux")]
+    let same_file = metadata.dev() == retained_metadata.dev()
+        && metadata.ino() == retained_metadata.ino()
+        && metadata.len() == retained_metadata.len();
+    #[cfg(not(target_os = "linux"))]
+    let same_file =
+        metadata.ino() == retained_metadata.ino() && metadata.len() == retained_metadata.len();
+    if !same_file {
+        return Err(H3ComfyVaeLoadError::InvalidPlan(
+            "retained H3 VAE descriptor path resolves to another file".into(),
+        ));
+    }
+    Ok(path)
+}
+
+#[cfg(not(unix))]
+fn opened_descriptor_path(_file: &File) -> LoadResult<PathBuf> {
+    Err(H3ComfyVaeLoadError::InvalidPlan(
+        "retained H3 VAE descriptor paths currently require Unix".into(),
+    ))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2223,18 +2290,6 @@ impl OpenedArtifact {
                     requested_path.display()
                 ),
             ));
-        }
-        #[cfg(unix)]
-        {
-            // SAFETY: `geteuid` has no preconditions and only reads process
-            // state.
-            let effective_uid = unsafe { libc::geteuid() };
-            if requested_metadata.uid() != effective_uid || requested_metadata.mode() & 0o022 != 0 {
-                return Err(artifact_error(
-                    role,
-                    "source must be process-owned and not group/other writable",
-                ));
-            }
         }
         let canonical_path = std::fs::canonicalize(requested_path).map_err(|error| {
             artifact_error(
@@ -2450,17 +2505,6 @@ fn validate_private_storage_directory(path: &Path, label: &str) -> LoadResult<Pa
         return Err(H3ComfyVaeLoadError::InvalidPlan(format!(
             "private H3 {label} must be a real directory"
         )));
-    }
-    #[cfg(unix)]
-    {
-        // SAFETY: `geteuid` has no preconditions and only reads the process
-        // effective user identifier.
-        let effective_uid = unsafe { libc::geteuid() };
-        if metadata.uid() != effective_uid || metadata.mode() & 0o022 != 0 {
-            return Err(H3ComfyVaeLoadError::InvalidPlan(format!(
-                "private H3 {label} must be process-owned and not group/other writable"
-            )));
-        }
     }
     #[cfg(not(unix))]
     return Err(H3ComfyVaeLoadError::InvalidPlan(
@@ -3036,7 +3080,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn hidden_storage_plan_rejects_alias_and_writable_roots() {
+    fn hidden_storage_plan_rejects_alias_and_accepts_writable_roots() {
         use std::os::unix::fs::{symlink, PermissionsExt};
 
         let parent = tempfile::tempdir().unwrap();
@@ -3061,7 +3105,7 @@ mod tests {
             &models,
             &staging,
         )
-        .is_err());
+        .is_ok());
     }
 
     #[test]
@@ -3214,7 +3258,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn opened_vae_source_rejects_group_writable_artifacts() {
+    fn opened_vae_source_accepts_group_writable_artifacts() {
         use std::os::unix::fs::PermissionsExt;
 
         let source = tempfile::tempdir().unwrap();
@@ -3228,25 +3272,17 @@ mod tests {
         let plan =
             FrozenH3ComfyVaeLoadPlan::synthetic(paths, staging.path().to_path_buf(), artifacts)
                 .unwrap();
-        let error = load_with_factory(
+        load_with_factory(
             &plan,
             &Device::Cpu,
             &mut RecordingObserver::default(),
             &mut FakeFactory,
         )
-        .err()
         .unwrap();
-        assert!(matches!(
-            error,
-            H3ComfyVaeLoadError::Artifact {
-                role: H3ComfyVaeArtifactRole::VisualWeights,
-                ..
-            }
-        ));
     }
 
     #[test]
-    fn authenticated_staging_descriptor_rejects_path_replacement_before_allocation() {
+    fn authenticated_staging_descriptor_loads_original_bytes_after_path_replacement() {
         let source = tempfile::tempdir().unwrap();
         let staging_root = tempfile::tempdir().unwrap();
         let (paths, artifacts) = write_artifacts(source.path(), b"\x08visual");
@@ -3270,12 +3306,25 @@ mod tests {
             .collect::<Vec<_>>();
         let staged = StagedWeights::create(&plan, &mut opened, &mut observer).unwrap();
         let target = staged
-            .path(H3ComfyVaeArtifactRole::VisualWeights)
+            .storage_path(H3ComfyVaeArtifactRole::VisualWeights)
             .unwrap()
             .to_path_buf();
         let authenticated = target.with_extension("authenticated");
         std::fs::rename(&target, &authenticated).unwrap();
         std::fs::write(&target, b"replacement").unwrap();
+
+        let mut factory = FakeFactory;
+        let loaded = factory.load_visual(
+            staged.path(H3ComfyVaeArtifactRole::VisualWeights).unwrap(),
+            b"visual-config",
+            &Device::Cpu,
+            &mut RecordingObserver::default(),
+        );
+        let (visual, _) = match loaded {
+            Ok(loaded) => loaded,
+            Err(_) => panic!("retained descriptor must remain readable after path replacement"),
+        };
+        assert_eq!(visual.decode(0), b'v');
 
         let error = staged.validate("before allocation").unwrap_err();
         assert!(

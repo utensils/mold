@@ -226,6 +226,15 @@ That narrow evidence does not activate the factory or qualify a full runtime;
 
 ### Local UAT storage status
 
+The modes in this section record how the private campaign was operated; they
+are not runtime requirements for model storage. Public and private H3 model
+weights, configs, support files, model roots, and staging roots are accepted
+regardless of Unix owner/group identity or group/other write bits. Runtime
+trust comes from pinned content authentication, regular-file and symlink checks,
+canonical containment, and descriptor identity fencing. Staged VAE construction
+uses retained process descriptors rather than replaceable paths. Owner-only
+modes remain required for authorization records and retained private evidence.
+
 The earlier operational exclusion of `/Volumes/ExternalStorage` was superseded
 on 2026-08-08 after the maintainer selected it for private H3 UAT and a fresh
 qualification campaign passed directory enumeration, create/fsync/read/hash/
@@ -257,9 +266,11 @@ into the repository, and no real-checkpoint report is public evidence.
 The development-only qualifier repeats full-content authentication and bounded
 structural inspection before any later runtime qualification. It requires the
 exact external authorization-record schema and license pins, hashes both the
-record and its source document, and accepts only the invoking user's owner-only
-`<campaign>/mold-home/models` plus sibling `<campaign>/compliance` layout. It
-does not trust a host name, caller-asserted scope, or hardcoded storage path.
+record and its source document, accepts the configured
+`<campaign>/mold-home/models` regardless of its Unix owner or write-mode bits,
+and separately requires the sibling `<campaign>/compliance` evidence layout to
+remain owner-only. It does not trust a host name, caller-asserted scope, or
+hardcoded storage path.
 Qualify the two tasks independently so a shared component cannot hide a
 task-transformer mismatch:
 
