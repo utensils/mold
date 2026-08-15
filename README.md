@@ -33,6 +33,7 @@ and source builds are covered in the
 [installation guide](https://utensils.io/mold/guide/installation);
 binaries and checksums are on the
 [releases page](https://github.com/utensils/mold/releases/latest).
+GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
 
 ## Quick start
 

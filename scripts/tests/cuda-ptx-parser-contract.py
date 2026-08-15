@@ -79,17 +79,27 @@ class EmbeddedPtxParserContract(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         path.chmod(0o755)
 
-    def compile_unsealed_fixture(self, name: str, ptx_bytes: bytes) -> Path:
+    def compile_unsealed_fixture(
+        self, name: str, ptx_bytes: bytes, *, copies: int = 1
+    ) -> Path:
         path = self.temp_dir / name
         c_source = self.temp_dir / f"{name}.c"
         byte_literals = ",".join(f"0x{byte:02x}" for byte in ptx_bytes)
+        ptx_definitions = "".join(
+            "__attribute__((used)) static const unsigned char "
+            f"generated_ptx_{index}[] = {{{byte_literals}}};\n"
+            for index in range(copies)
+        )
+        ptx_references = ", ".join(
+            f"generated_ptx_{index}" for index in range(copies)
+        )
         c_source.write_text(
             "#include <string.h>\n"
-            f"__attribute__((used)) static const unsigned char generated_ptx[] = {{{byte_literals}}};\n"
+            f"{ptx_definitions}"
             '__attribute__((used)) static const char nvml_symbol[] = "nvmlDeviceGetCount_v2";\n'
             f'__attribute__((used)) static const char h3_attention_provenance[] = "{H3_OMITTED_ATTENTION_PROVENANCE}";\n'
             "int main(int argc, char **argv) {\n"
-            "  volatile const void *keep[] = {generated_ptx, nvml_symbol, h3_attention_provenance};\n"
+            f"  volatile const void *keep[] = {{{ptx_references}, nvml_symbol, h3_attention_provenance}};\n"
             "  (void)keep;\n"
             '  return argc == 2 && strcmp(argv[1], "version") == 0 ? 0 : 1;\n'
             "}\n",
@@ -416,6 +426,49 @@ class EmbeddedPtxParserContract(unittest.TestCase):
         self.assertNotEqual(seal.returncode, 0, seal.stdout)
         self.assertIn("no generated candle-kernels PTX", seal.stderr)
         self.assert_probe_and_verifier_reject(fixture, 86)
+
+    def test_identical_generated_ptx_copies_choose_a_stable_range(self) -> None:
+        ptx = (
+            b".version 8.0\n.target sm_86\n.address_size 64\n"
+            b".visible .entry duplicated_kernel() { ret; }\n"
+        )
+        rodata = b"prefix\0" + ptx + b"between\0" + ptx + b"suffix\0"
+        self.assertEqual(
+            self.seal_module.generated_ptx_offset(rodata, ptx),
+            len(b"prefix\0"),
+        )
+
+    def test_identical_generated_ptx_copies_are_sealed_once(self) -> None:
+        ptx = (
+            b".version 8.0\n.target sm_86\n.address_size 64\n"
+            b".visible .entry duplicated_kernel() { ret; }\n"
+        )
+        fixture = self.compile_unsealed_fixture(
+            "duplicated-generated-ptx", ptx, copies=2
+        )
+        build_root = self.temp_dir / "duplicated-generated-ptx-build"
+        output_dir = build_root / "candle-kernels-fixture" / "out"
+        output_dir.mkdir(parents=True)
+        (output_dir / "binary.ptx").write_bytes(ptx)
+        (output_dir / "ptx.rs").write_text(
+            'pub const BINARY: &str = include_str!(concat!(env!("OUT_DIR"), "/binary.ptx"));\n',
+            encoding="utf-8",
+        )
+        (output_dir.parent / "output").write_text(
+            "cargo:rustc-env=CUDA_COMPUTE_CAP=86\n", encoding="utf-8"
+        )
+
+        seal = subprocess.run(
+            [str(SEAL_PATH), str(fixture), "86", str(build_root)],
+            text=True,
+            capture_output=True,
+            check=False,
+            env={**os.environ, "TMPDIR": str(self.temp_dir)},
+        )
+
+        self.assertEqual(seal.returncode, 0, seal.stderr)
+        self.assertIn("with 1 generated sm_86 PTX modules", seal.stdout)
+        self.assert_probe_and_verifier_accept(fixture, 86)
 
     def test_partially_overlapping_manifest_ranges_are_rejected(self) -> None:
         fixture = self.fixture(
