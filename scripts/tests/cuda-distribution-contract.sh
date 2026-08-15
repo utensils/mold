@@ -288,6 +288,8 @@ require_release_job_text "docker" 'suffix: ""'
 require_ci_release_path "$cache_workflow"
 require_text "$cache_workflow" 'branches: [main]'
 require_text "$cache_workflow" 'tags: ["v*"]'
+require_text "$cache_workflow" 'group: nix-cache-${{ github.ref }}'
+require_text "$cache_workflow" 'cancel-in-progress: false'
 require_text "$cache_workflow" 'permissions:'
 require_text "$cache_workflow" 'contents: read'
 require_text "$cache_workflow" 'continue-on-error: true'
