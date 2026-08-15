@@ -378,7 +378,10 @@ const PRODUCTION_FAMILY_CAPABILITIES: &[FamilyBatchCapability] = &[
         aliases: &["ltx-2", "ltx2.3"],
         backends: BackendApplicability {
             cuda: BackendQualification::Supported,
-            metal: BackendQualification::CorrectnessOnly,
+            // Promoted after the measured Metal perf campaign (#1030-#1034)
+            // and checkpoint-backed UAT of the 19B and 22B distilled FP8
+            // tiers on Apple Silicon (#597).
+            metal: BackendQualification::Supported,
             cpu: BackendQualification::CorrectnessOnly,
         },
         placement: ComponentPlacementCapability {

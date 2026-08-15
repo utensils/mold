@@ -6,10 +6,13 @@ aimed at synchronized MP4 output and the upstream two-stage / distilled
 pipelines.
 
 ::: tip Current status
-LTX-2 now runs through mold's in-tree Rust runtime. CUDA is the performance-
-qualified backend; CPU and Apple Metal are correctness-oriented paths. Metal
+LTX-2 now runs through mold's in-tree Rust runtime. CUDA and Apple Metal are
+performance-qualified backends; CPU remains a correctness-oriented path. Metal
 uses BF16 transformer compute, fused SDPA, streamed FP8 widening, and temporal
-VAE chunks, but checkpoint-backed end-to-end qualification remains pending. The
+VAE chunks; the measured Apple Silicon campaign and checkpoint-backed renders
+cover the 19B (LTX-2) and 22B (LTX-2.3) distilled FP8 tiers. Expect Metal to
+be slower than a comparable CUDA card — the streamed FP8 path trades speed for
+fitting a 19B-22B model in unified memory. The
 native CUDA workflow matrix is validated across 19B/22B text+audio-video,
 image-to-video, audio-to-video, keyframe, retake, lip dub, public IC-LoRA,
 spatial upscale (`x1.5` / `x2` where published), and temporal upscale (`x2`).

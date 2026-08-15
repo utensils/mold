@@ -70,7 +70,11 @@ fn backend_and_deep_path_claims_match_current_runtime_boundaries() {
         .unwrap();
     assert_eq!(ltx2.backends.cuda, BackendQualification::Supported);
     assert_eq!(ltx2.backends.cpu, BackendQualification::CorrectnessOnly);
-    assert_eq!(ltx2.backends.metal, BackendQualification::CorrectnessOnly);
+    // Metal promoted to `Supported` (#597): the #1030 perf campaign measured
+    // and optimized the path on real Apple Silicon (FP8 LUT widening #1032,
+    // single-decode VAE chunking #1034), and checkpoint-backed renders back
+    // both the 19B (LTX-2) and 22B (LTX-2.3) distilled FP8 tiers.
+    assert_eq!(ltx2.backends.metal, BackendQualification::Supported);
     assert_eq!(ltx2.media, MediaKind::Video);
     assert!(ltx2.workflows.source);
     assert!(ltx2.workflows.generated_audio);

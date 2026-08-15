@@ -212,7 +212,7 @@ ENV MOLD_LOG=info \
 # Video
 # MOLD_LTX_DEBUG=          (1 for per-step LTX Video diagnostics)
 # MOLD_LTX2_DEBUG=         (1 for per-step LTX-2 / LTX-2.3 diagnostics)
-# NOTE: LTX-2 / LTX-2.3 is CUDA-supported; Metal and CPU are correctness-only.
+# NOTE: LTX-2 / LTX-2.3 is supported on CUDA and Apple Metal; CPU is correctness-only.
 # NOTE: LTX-2 Gemma text-encoder assets are HuggingFace-gated; set HF_TOKEN.
 # Expansion
 # MOLD_EXPAND=             (1 to enable LLM prompt expansion)

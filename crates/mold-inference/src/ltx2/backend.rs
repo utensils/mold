@@ -91,7 +91,7 @@ mod tests {
     }
 
     #[test]
-    fn metal_backend_is_available_for_correctness_inference() {
+    fn metal_backend_is_available_for_inference() {
         Ltx2Backend::Metal.ensure_supported().unwrap();
     }
 

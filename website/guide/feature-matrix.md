@@ -97,23 +97,24 @@ the full multiscale refinement path.
 
 ## Backend Support
 
-| Family          | CUDA | Metal            | CPU              |
-| --------------- | ---- | ---------------- | ---------------- |
-| FLUX.1 / FLUX.2 | Yes  | Yes              | Yes (slow)       |
-| SDXL / SD 1.5   | Yes  | Yes              | Yes              |
-| SD 3.5          | Yes  | Yes              | Yes              |
-| Z-Image         | Yes  | Yes              | Yes              |
-| Wuerstchen v2   | Yes  | Yes              | Yes              |
-| Qwen-Image      | Yes  | Yes              | Yes              |
-| Qwen-Image-Edit | Yes  | Yes              | Yes              |
-| LTX Video       | Yes  | Yes              | Yes              |
-| **LTX-2**       | Yes  | Correctness-only | Correctness-only |
+| Family          | CUDA | Metal | CPU              |
+| --------------- | ---- | ----- | ---------------- |
+| FLUX.1 / FLUX.2 | Yes  | Yes   | Yes (slow)       |
+| SDXL / SD 1.5   | Yes  | Yes   | Yes              |
+| SD 3.5          | Yes  | Yes   | Yes              |
+| Z-Image         | Yes  | Yes   | Yes              |
+| Wuerstchen v2   | Yes  | Yes   | Yes              |
+| Qwen-Image      | Yes  | Yes   | Yes              |
+| Qwen-Image-Edit | Yes  | Yes   | Yes              |
+| LTX Video       | Yes  | Yes   | Yes              |
+| **LTX-2**       | Yes  | Yes   | Correctness-only |
 
-::: warning LTX-2 Metal qualification
-LTX-2 / LTX-2.3 uses a correctness-oriented Apple Metal path with BF16
-transformer compute, fused attention, streamed FP8 widening, and temporal VAE
-chunks. Checkpoint-backed end-to-end Metal qualification remains pending; CUDA
-is still the performance-qualified backend.
+::: tip LTX-2 Metal qualification
+LTX-2 / LTX-2.3's Apple Metal path is performance-qualified: BF16 transformer
+compute, fused attention, streamed FP8 lookup-table widening, and temporal VAE
+chunks, measured end-to-end on the 19B and 22B distilled FP8 tiers on Apple
+Silicon. Metal remains slower than a comparable CUDA card — streaming trades
+speed for fitting the model in unified memory.
 :::
 
 ## Native app surfaces
@@ -188,8 +189,8 @@ complete workflows.
   the requested Auto/explicit choice. Server, CLI, and TUI saves preserve that
   response in gallery metadata, and web, desktop, iPhone, and TUI Library
   details show it when present; older and non-LTX prints simply omit the row.
-- LTX-2 is performance-qualified on CUDA; CPU and Metal are correctness-only,
-  with checkpoint-backed Metal UAT still pending.
+- LTX-2 is performance-qualified on CUDA and Apple Metal (19B/22B distilled
+  FP8 tiers, checkpoint-backed); CPU stays correctness-only.
 
 For model size and VRAM fit, see [Models Overview](/models/). For usage
 examples, see [Generating Images](/guide/generating).
