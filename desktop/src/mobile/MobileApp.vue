@@ -4027,10 +4027,7 @@ async function restoreReusedH3BoundaryMedia(print: {
     }
     for (const target of candidates.values()) {
       try {
-        const response = await apiFetchTo(
-          target,
-          galleryMediaPath(slot.filename, "host"),
-        );
+        const response = await apiFetchTo(target, galleryMediaPath(slot.filename, "host"));
         const existingBytes = inlineGenerationMediaBytes(form, null);
         const declaredBytes = Number(response.headers?.get("content-length") ?? Number.NaN);
         if (

@@ -152,9 +152,7 @@ describe("restoreH3Boundaries", () => {
   it("restores the closing frame from the exact final-frame keyframe", async () => {
     const deps = {
       stashGet: vi.fn(async (sha: string) => (sha === "b".repeat(64) ? "CLOSING" : null)),
-      galleryLookup: vi.fn(async (name: string) =>
-        name === "opening.png" ? "OPENING" : null,
-      ),
+      galleryLookup: vi.fn(async (name: string) => (name === "opening.png" ? "OPENING" : null)),
     };
     const restored = await restoreH3Boundaries(
       {
@@ -193,11 +191,7 @@ describe("restoreH3Boundaries", () => {
       stashGet: vi.fn().mockResolvedValue(null),
       galleryLookup: vi.fn().mockResolvedValue(null),
     };
-    const {
-      source_image_name: _name,
-      source_image_sha256: _sha,
-      ...unkeyed
-    } = h3Meta;
+    const { source_image_name: _name, source_image_sha256: _sha, ...unkeyed } = h3Meta;
     const restored = await restoreH3Boundaries(
       {
         ...unkeyed,

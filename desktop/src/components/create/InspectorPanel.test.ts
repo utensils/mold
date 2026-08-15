@@ -184,9 +184,7 @@ describe("InspectorPanel — shape + resolution projection", () => {
                 {
                   id: "7:4",
                   label: "7:4",
-                  presets: [
-                    { id: "1344x768", width: 1344, height: 768, tier: "recommended" },
-                  ],
+                  presets: [{ id: "1344x768", width: 1344, height: 768, tier: "recommended" }],
                 },
               ],
             },

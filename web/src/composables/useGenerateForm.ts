@@ -423,7 +423,9 @@ function modelDefaultsPatch(
       ];
       next.h3Authoring.firstFrame = null;
     }
-    const closing = stagedImageFromMinimaxH3Boundary(next.h3Authoring.lastFrame);
+    const closing = stagedImageFromMinimaxH3Boundary(
+      next.h3Authoring.lastFrame,
+    );
     if (closing && capabilities.supportsEndFrame && !next.endFrame) {
       next.endFrame = {
         kind: "upload",

@@ -91,7 +91,8 @@ function onKeydown(event: KeyboardEvent) {
         <span class="ms-shape__swatch" :style="swatchStyle(option.ratio)" />
       </span>
       <span class="ms-shape__label">
-        {{ option.id === modelValue && approximate ? "≈" : "" }}{{ option.label }}
+        {{ option.id === modelValue && approximate ? "≈" : ""
+        }}{{ option.label }}
       </span>
     </button>
   </div>

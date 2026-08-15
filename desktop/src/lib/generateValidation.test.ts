@@ -265,9 +265,7 @@ describe("resolution checks never block a custom size (server is the authority)"
   });
 
   it("still blocks input that cannot form a request", () => {
-    expect(resolutionValidationError(1024.5, 576, rejectModel())).toContain(
-      "whole numbers",
-    );
+    expect(resolutionValidationError(1024.5, 576, rejectModel())).toContain("whole numbers");
   });
 
   it("downgrades the legacy no-recipe limits to advisories too", () => {

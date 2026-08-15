@@ -11,7 +11,8 @@ const props = withDefaults(
   { compact: false, variant: "error" },
 );
 const effectiveTitle = () =>
-  props.title ?? (props.variant === "warn" ? "Heads up" : "Before you generate");
+  props.title ??
+  (props.variant === "warn" ? "Heads up" : "Before you generate");
 </script>
 
 <template>

@@ -35,7 +35,12 @@ watch(
 </script>
 
 <template>
-  <button type="button" class="ms-tile" :data-loaded="loaded" @click="emit('open')">
+  <button
+    type="button"
+    class="ms-tile"
+    :data-loaded="loaded"
+    @click="emit('open')"
+  >
     <span v-if="!loaded" class="ms-tile__ghost" aria-hidden="true" />
     <img
       v-if="src"

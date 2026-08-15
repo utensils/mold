@@ -490,10 +490,8 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
   // switching back restores the picture instead of losing authored work.
   // Layout *moves* between the three source authorities (single source ↔
   // qwen-edit strip ↔ H3 boundaries) so the visible well keeps the image.
-  const enteringH3 =
-    caps.sourceImageMode === "h3-boundaries" && prevMode !== "h3-boundaries";
-  const leavingH3 =
-    prevMode === "h3-boundaries" && caps.sourceImageMode !== "h3-boundaries";
+  const enteringH3 = caps.sourceImageMode === "h3-boundaries" && prevMode !== "h3-boundaries";
+  const leavingH3 = prevMode === "h3-boundaries" && caps.sourceImageMode !== "h3-boundaries";
   // Pre-#-era snapshots restored via Object.assign may lack the slot.
   form.h3Authoring ??= emptyMinimaxH3AuthoringState();
   if (enteringH3) {
@@ -912,11 +910,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   // Crop provenance rides only when the wire actually carries fitted source
   // media (the server echoes it verbatim into OutputMetadata so Reuse
   // settings and running-job selection can restore the crop controls).
-  if (
-    finalized.source_image ||
-    finalized.edit_images?.length ||
-    finalized.keyframes?.length
-  ) {
+  if (finalized.source_image || finalized.edit_images?.length || finalized.keyframes?.length) {
     finalized.source_fit = form.sourceFit;
   }
   return finalized;

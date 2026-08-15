@@ -11,9 +11,9 @@ describe("ActionBlocker", () => {
       "Before you generate",
     );
     expect(wrapper.text()).toContain("Choose a model first.");
-    expect(wrapper.get("[data-test='action-blocker']").attributes("data-variant")).toBe(
-      "error",
-    );
+    expect(
+      wrapper.get("[data-test='action-blocker']").attributes("data-variant"),
+    ).toBe("error");
   });
 
   it("renders a non-blocking advisory with its own default title", () => {

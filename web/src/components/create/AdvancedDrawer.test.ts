@@ -229,8 +229,7 @@ describe("AdvancedDrawer sequence contract", () => {
     expect(draft.openingImage).not.toBeNull();
     // Strength/fit render beside the opening-image well, not in Advanced.
     const patched = wrapper.emitted("update:modelValue")?.at(-1)?.[0] as
-      | GenerateFormState
-      | undefined;
+      GenerateFormState | undefined;
     expect(patched?.strength ?? 0.6).toBe(0.6);
   });
 });

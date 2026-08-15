@@ -2197,12 +2197,23 @@ describe("useGenerateForm — source image & first/last frames", () => {
                   id: "19:11",
                   label: "19:11",
                   presets: [
-                    { id: "1216x704", width: 1216, height: 704, tier: "recommended" },
+                    {
+                      id: "1216x704",
+                      width: 1216,
+                      height: 704,
+                      tier: "recommended",
+                    },
                   ],
                 },
               ],
             },
-            steps: { default: 8, min: 1, max: 100, step: 1, mode: "adjustable" },
+            steps: {
+              default: 8,
+              min: 1,
+              max: 100,
+              step: 1,
+              mode: "adjustable",
+            },
             guidance: { default: 1, min: 1, max: 1, step: 0.1, mode: "fixed" },
             capabilities: {
               guidance: {

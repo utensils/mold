@@ -269,14 +269,11 @@ function matchSource(): void {
           type="button"
           class="mobile-resolution-aspect"
           :class="{
-            'is-selected':
-              currentPreset?.aspect === aspect || approximateAspect === aspect,
+            'is-selected': currentPreset?.aspect === aspect || approximateAspect === aspect,
             'is-approximate': approximateAspect === aspect,
           }"
           :aria-pressed="currentPreset?.aspect === aspect || approximateAspect === aspect"
-          :aria-label="
-            aspectAccessibleLabel(approximateAspect === aspect ? `≈${aspect}` : aspect)
-          "
+          :aria-label="aspectAccessibleLabel(approximateAspect === aspect ? `≈${aspect}` : aspect)"
           :data-aspect="aspect"
           @click="setAspect(aspect)"
         >

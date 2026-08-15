@@ -420,10 +420,7 @@ const shapeId = computed(() => {
 });
 /** The active chip approximates a custom size (never the Source chip). */
 const shapeApproximate = computed(
-  () =>
-    shapeId.value !== "source" &&
-    shapeId.value !== "" &&
-    closestShape.value?.exact === false,
+  () => shapeId.value !== "source" && shapeId.value !== "" && closestShape.value?.exact === false,
 );
 const resolutionRatio = computed(() => props.form.width / props.form.height);
 const resolutionPresets = computed(() => {
