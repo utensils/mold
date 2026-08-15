@@ -136,6 +136,18 @@ def referenced_ptx_files(output_dir: Path) -> list[Path]:
     return [output_dir / name for name in names]
 
 
+def generated_ptx_offset(rodata: bytes, ptx: bytes) -> int:
+    """Return one exact generated-PTX range from the linked read-only data.
+
+    Rust's linker may retain multiple byte-identical copies of one generated
+    module when separate crate paths reference it. Any copy is equally bound
+    to the build artifact by its full bytes and SHA-256, so the manifest uses
+    the first deterministic range and records the module only once.
+    """
+
+    return rodata.find(ptx)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("binary", type=Path)
@@ -187,12 +199,10 @@ def main() -> int:
                 if not ptx_path.is_file():
                     fail(f"generated PTX is missing: {ptx_path}")
                 ptx = ptx_path.read_bytes()
-                offset = rodata.find(ptx)
+                offset = generated_ptx_offset(rodata, ptx)
                 if offset < 0:
                     # Dead code can remove an otherwise generated module.
                     continue
-                if rodata.find(ptx, offset + 1) >= 0:
-                    fail(f"generated PTX has ambiguous duplicate ranges: {ptx_path}")
                 digest = hashlib.sha256(ptx).hexdigest()
                 modules[digest] = {
                     "source_name": ptx_path.name,
