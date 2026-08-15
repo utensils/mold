@@ -28,6 +28,7 @@ import SequenceComposer from "../components/create/SequenceComposer.vue";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import { profileConflictMessage } from "@studio/lib/profileFleet";
 import { useLiveActivityStore } from "../stores/liveActivity";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
@@ -209,8 +210,7 @@ const liveActivity = useLiveActivityStore();
 
 function placementFailureMessage(result: Exclude<FeasibleRouteResult, { kind: "route" }>): string {
   if (result.kind === "profile_mismatch") {
-    const machines = result.perHost.map((host) => host.label).join(", ");
-    return `Settings differ by machine${machines ? ` (${machines})` : ""}. Choose a specific machine before generating. Nothing was queued.`;
+    return profileConflictMessage(result.perHost);
   }
   if (result.kind === "infeasible") {
     const details = result.perHost

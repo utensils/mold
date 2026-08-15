@@ -19,6 +19,30 @@ export interface ProfileHashConflict {
   hashesByHost: Record<string, string | null>;
 }
 
+export interface ProfileConflictHost {
+  label: string;
+  profileHash: string | null;
+}
+
+function formatMachineList(hosts: readonly ProfileConflictHost[]): string {
+  const labels = hosts.map((host) => host.label);
+  if (labels.length < 2) return labels[0] ?? "the available machines";
+  if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
+  return `${labels.slice(0, -1).join(", ")}, and ${labels.at(-1)}`;
+}
+
+/** Explain why automatic routing cannot safely choose between model owners. */
+export function profileConflictMessage(
+  hosts: readonly ProfileConflictHost[],
+): string {
+  const owners = formatMachineList(hosts);
+  const hasLegacyOwner = hosts.some((host) => !host.profileHash);
+  const cause = hasLegacyOwner
+    ? "At least one may be running an older Mold version, so the same controls could produce different results."
+    : "They may be running different Mold versions or builds, so the same controls could produce different results.";
+  return `Auto can't safely choose a machine because ${owners} use different generation settings for this model. ${cause} Update and reconnect them, or choose one machine for this print. Nothing was queued.`;
+}
+
 export function profileHashConflict(
   modelsByHost: Readonly<Record<string, readonly FleetProfileModel[]>>,
   modelName: string,
