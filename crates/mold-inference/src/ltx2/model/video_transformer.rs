@@ -5983,6 +5983,102 @@ pub(crate) mod tests {
         assert_tensors_close(&fused.to_dtype(DType::F32).unwrap(), &reference, 2e-2);
     }
 
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_fused_attention_matches_reference_at_production_cross_attention_shape() {
+        // The toy-shape test above passes while renders on Metal ignore the
+        // prompt; the production text cross-attention shape (long rectangular
+        // q x k, head_dim 128) selects a different candle SDPA kernel, so
+        // parity must be proven at that shape. Production passes
+        // `context_mask=None` (the connector zero-packs padding), and candle's
+        // Metal SDPA refuses a masked q_seq > k_seq call outright, so the
+        // production-relevant case is the unmasked rectangular one.
+        let device = Device::new_metal(0).unwrap();
+        let (b, h, q_len, k_len, head_dim) = (1usize, 32usize, 3120usize, 256usize, 128usize);
+        let q = Tensor::from_vec(
+            patterned_values(b * h * q_len * head_dim, 41),
+            (b, h, q_len, head_dim),
+            &device,
+        )
+        .unwrap()
+        .to_dtype(DType::BF16)
+        .unwrap();
+        let k = Tensor::from_vec(
+            patterned_values(b * h * k_len * head_dim, 43),
+            (b, h, k_len, head_dim),
+            &device,
+        )
+        .unwrap()
+        .to_dtype(DType::BF16)
+        .unwrap();
+        let v = Tensor::from_vec(
+            patterned_values(b * h * k_len * head_dim, 47),
+            (b, h, k_len, head_dim),
+            &device,
+        )
+        .unwrap()
+        .to_dtype(DType::BF16)
+        .unwrap();
+        let scale = 1f32 / (head_dim as f32).sqrt();
+
+        let fused = super::metal_fused_attention(&q, &k, &v, None, scale).unwrap();
+        let reference = super::full_attention(
+            &q.to_dtype(DType::F32).unwrap(),
+            &k.to_dtype(DType::F32).unwrap(),
+            &v.to_dtype(DType::F32).unwrap(),
+            None,
+            scale,
+        )
+        .unwrap();
+
+        assert_tensors_close(&fused.to_dtype(DType::F32).unwrap(), &reference, 2e-2);
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_fused_attention_matches_reference_at_production_self_attention_shape() {
+        // Long unmasked self-attention at the stage-1 latent token count.
+        let device = Device::new_metal(0).unwrap();
+        let (b, h, q_len, head_dim) = (1usize, 32usize, 3120usize, 128usize);
+        let q = Tensor::from_vec(
+            patterned_values(b * h * q_len * head_dim, 41),
+            (b, h, q_len, head_dim),
+            &device,
+        )
+        .unwrap()
+        .to_dtype(DType::BF16)
+        .unwrap();
+        let k = Tensor::from_vec(
+            patterned_values(b * h * q_len * head_dim, 43),
+            (b, h, q_len, head_dim),
+            &device,
+        )
+        .unwrap()
+        .to_dtype(DType::BF16)
+        .unwrap();
+        let v = Tensor::from_vec(
+            patterned_values(b * h * q_len * head_dim, 47),
+            (b, h, q_len, head_dim),
+            &device,
+        )
+        .unwrap()
+        .to_dtype(DType::BF16)
+        .unwrap();
+        let scale = 1f32 / (head_dim as f32).sqrt();
+
+        let fused = super::metal_fused_attention(&q, &k, &v, None, scale).unwrap();
+        let reference = super::full_attention(
+            &q.to_dtype(DType::F32).unwrap(),
+            &k.to_dtype(DType::F32).unwrap(),
+            &v.to_dtype(DType::F32).unwrap(),
+            None,
+            scale,
+        )
+        .unwrap();
+
+        assert_tensors_close(&fused.to_dtype(DType::F32).unwrap(), &reference, 2e-2);
+    }
+
     #[test]
     fn av_transformer_streaming_matches_eager_with_mixed_fp8_blocks() {
         let device = Device::Cpu;

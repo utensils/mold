@@ -10,7 +10,9 @@
 //! Gemma 3 quirks vs. Qwen3 (the closest sibling in
 //! `crates/mold-inference/src/encoders/qwen3_gguf.rs`):
 //! - `xs * sqrt(hidden_size)` immediately after embedding lookup
-//! - RMSNorm applies `(weight + 1.0)` instead of `weight`
+//! - RMSNorm applies the stored weight directly: llama.cpp's converter folds
+//!   Gemma's `(1 + w)` into every `*norm.weight` at GGUF conversion time, so
+//!   re-adding 1 here would scale norms by `(w + 2)`
 //! - **Four** norms per block: `attn_norm` (input_layernorm), `post_attention_norm`,
 //!   `ffn_norm` (pre_feedforward_layernorm), `post_ffw_norm`
 //! - Sliding-window attention every layer where `(i + 1) % sliding_window_pattern != 0`,
@@ -120,7 +122,7 @@ impl GgufGemmaConfig {
     }
 }
 
-// ── RMSNorm with the (weight + 1.0) Gemma rule ───────────────────────────────
+// ── RMSNorm (GGUF weights arrive with Gemma's +1 fold already applied) ───────
 
 #[derive(Debug)]
 struct GemmaRmsNorm {
@@ -146,9 +148,16 @@ impl Module for GemmaRmsNorm {
         let xs_f = xs.to_dtype(internal)?;
         let variance = (xs_f.sqr()?.sum_keepdim(D::Minus1)? / hidden as f64)?;
         let normed = xs_f.broadcast_div(&(variance + self.eps)?.sqrt()?)?;
-        normed
-            .to_dtype(input_dtype)?
-            .broadcast_mul(&(&self.weight + 1.0)?)
+        // GGUF Gemma norm weights already carry the `(1 + w)` fold:
+        // llama.cpp's convert_hf_to_gguf.py adds 1.0 to every Gemma
+        // `*norm.weight` at conversion time so runtimes apply a plain RMSNorm.
+        // Measured on `gemma-3-12b-it-q4_0.gguf` vs the HF BF16 shards, every
+        // norm tensor differs by exactly +1.0 (e.g. output_norm 9.6834 vs
+        // model.norm 8.6856). Adding 1 again scaled every norm by `(w + 2)`,
+        // which compounded across 48 blocks into prompt-ignoring embeddings.
+        // The BF16 encoder in `encoder.rs` reads raw HF weights and keeps its
+        // own `(1 + w)`; only the GGUF path must not re-add it.
+        normed.to_dtype(input_dtype)?.broadcast_mul(&self.weight)
     }
 }
 
@@ -621,6 +630,352 @@ mod tests {
     use candle_core::quantized::{GgmlDType, QTensor};
     use std::io::Cursor;
 
+    /// GGUF norm weights carry llama.cpp's `(1 + w)` fold, so the norm must
+    /// scale by the stored weight directly. Re-adding Gemma's +1 (the defect
+    /// this pins) scales by `(w + 2)`: w=1 stops being the identity and w=3
+    /// scales by 4 instead of 3.
+    #[test]
+    fn rms_norm_applies_gguf_weight_without_re_adding_the_gemma_fold() {
+        let device = Device::Cpu;
+        let weight = Tensor::from_vec(vec![3.0f32, 3.0, 3.0, 3.0], 4, &device).unwrap();
+        let norm = GemmaRmsNorm { weight, eps: 0.0 };
+        // Constant input row: rms == value, so the normed row is all ones and
+        // the output must be exactly the stored weight.
+        let xs = Tensor::from_vec(vec![5.0f32, 5.0, 5.0, 5.0], (1, 1, 4), &device).unwrap();
+        let out = norm.forward(&xs).unwrap().flatten_all().unwrap();
+        let out = out.to_vec1::<f32>().unwrap();
+        for value in out {
+            assert!(
+                (value - 3.0).abs() < 1e-5,
+                "expected the stored GGUF weight (3.0) to be the exact scale, got {value}"
+            );
+        }
+    }
+
+    /// Does the GGUF file store Gemma norm weights with llama.cpp's +1 fold?
+    /// Prints the mean of `output_norm.weight` from the GGUF next to the mean
+    /// of `model.norm.weight` from the BF16 safetensors. A ~1.0 offset means
+    /// the runtime must NOT add 1 again.
+    #[test]
+    #[ignore = "requires real Gemma 3 checkpoints via MOLD_TEST_GEMMA_ROOT"]
+    fn gguf_norm_weights_offset_against_bf16() {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("MOLD_TEST_GEMMA_ROOT").expect("set MOLD_TEST_GEMMA_ROOT"),
+        );
+        let mut file = std::fs::File::open(root.join("gemma-3-12b-it-q4_0.gguf")).unwrap();
+        let content = candle_core::quantized::gguf_file::Content::read(&mut file).unwrap();
+        let qt = content
+            .tensor(&mut file, "output_norm.weight", &Device::Cpu)
+            .unwrap();
+        let gguf_norm = qt.dequantize(&Device::Cpu).unwrap();
+        let gguf_mean = gguf_norm
+            .to_dtype(candle_core::DType::F32)
+            .unwrap()
+            .mean_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        let mut bf16_mean = None;
+        for entry in std::fs::read_dir(&root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("safetensors")
+                || !path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("model-"))
+            {
+                continue;
+            }
+            let tensors = candle_core::safetensors::load(&path, &Device::Cpu).unwrap();
+            for name in ["model.norm.weight", "language_model.model.norm.weight"] {
+                if let Some(t) = tensors.get(name) {
+                    bf16_mean = Some(
+                        t.to_dtype(candle_core::DType::F32)
+                            .unwrap()
+                            .mean_all()
+                            .unwrap()
+                            .to_scalar::<f32>()
+                            .unwrap(),
+                    );
+                }
+            }
+        }
+        let bf16_mean = bf16_mean.expect("model.norm.weight not found in safetensors shards");
+        let offset = gguf_mean - bf16_mean;
+        eprintln!(
+            "gguf output_norm mean={gguf_mean:.4} bf16 model.norm mean={bf16_mean:.4} offset={offset:.4}"
+        );
+        assert!(
+            (offset - 1.0).abs() < 0.1,
+            "expected the GGUF norm weights to carry llama.cpp's +1 fold; \
+             measured offset {offset} against the HF BF16 shards"
+        );
+
+        let mut file = std::fs::File::open(root.join("gemma-3-12b-it-q4_0.gguf")).unwrap();
+        let content = candle_core::quantized::gguf_file::Content::read(&mut file).unwrap();
+        for name in [
+            "blk.0.attn_q_norm.weight",
+            "blk.0.attn_k_norm.weight",
+            "blk.0.attn_norm.weight",
+            "blk.0.post_attention_norm.weight",
+            "blk.0.ffn_norm.weight",
+            "blk.0.post_ffw_norm.weight",
+        ] {
+            if let Ok(qt) = content.tensor(&mut file, name, &Device::Cpu) {
+                let mean = qt
+                    .dequantize(&Device::Cpu)
+                    .unwrap()
+                    .to_dtype(candle_core::DType::F32)
+                    .unwrap()
+                    .mean_all()
+                    .unwrap()
+                    .to_scalar::<f32>()
+                    .unwrap();
+                eprintln!("{name}: gguf mean={mean:.4}");
+            }
+        }
+        for entry in std::fs::read_dir(&root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("safetensors")
+                || !path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("model-"))
+            {
+                continue;
+            }
+            let tensors = candle_core::safetensors::load(&path, &Device::Cpu).unwrap();
+            for (name, t) in tensors.iter() {
+                if name.contains("layers.0.") && name.contains("norm") {
+                    let mean = t
+                        .to_dtype(candle_core::DType::F32)
+                        .unwrap()
+                        .mean_all()
+                        .unwrap()
+                        .to_scalar::<f32>()
+                        .unwrap();
+                    eprintln!("{name}: hf mean={mean:.4}");
+                }
+            }
+        }
+    }
+
+    /// Three-way real-checkpoint probe: GGUF-on-CPU and GGUF-on-Metal each
+    /// compared against the BF16 encoder on Metal (render-proven good), on the
+    /// final two hidden states. Whichever GGUF backend tracks BF16 is the
+    /// accurate one. Run manually:
+    /// `MOLD_TEST_GEMMA_ROOT=$MOLD_HOME/models/shared/ltx2 \
+    ///  cargo test -p mold-ai-inference --features metal --lib \
+    ///  gguf_backends_tracked_against_bf16_reference -- --ignored --nocapture`
+    #[cfg(feature = "metal")]
+    #[test]
+    #[ignore = "requires real Gemma 3 checkpoints via MOLD_TEST_GEMMA_ROOT"]
+    fn gguf_backends_tracked_against_bf16_reference() {
+        let Some(root) = std::env::var_os("MOLD_TEST_GEMMA_ROOT") else {
+            panic!("set MOLD_TEST_GEMMA_ROOT to the shared ltx2 asset dir");
+        };
+        let root = std::path::PathBuf::from(root);
+        let gguf_path = root.join("gemma-3-12b-it-q4_0.gguf");
+        let ids: Vec<u32> = vec![
+            2, 236746, 13935, 102202, 34646, 55574, 1343, 13030, 9917, 657,
+        ];
+        let seq = ids.len();
+        let final_two = |states: Vec<Tensor>| -> (Tensor, Tensor) {
+            let n = states.len();
+            let f32ify = |t: &Tensor| {
+                t.to_dtype(candle_core::DType::F32)
+                    .unwrap()
+                    .to_device(&Device::Cpu)
+                    .unwrap()
+            };
+            (f32ify(&states[n - 2]), f32ify(&states[n - 1]))
+        };
+        let cosine = |a: &Tensor, b: &Tensor| -> f32 {
+            let dot = (a * b)
+                .unwrap()
+                .sum_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            let n1 = a
+                .sqr()
+                .unwrap()
+                .sum_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap()
+                .sqrt();
+            let n2 = b
+                .sqr()
+                .unwrap()
+                .sum_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap()
+                .sqrt();
+            dot / (n1 * n2).max(f32::MIN_POSITIVE)
+        };
+        let run_gguf = |device: &Device| -> (Tensor, Tensor) {
+            let encoder = GgufGemmaEncoder::load(&gguf_path, device).expect("load gguf");
+            let input_ids = Tensor::from_vec(ids.clone(), (1, seq), device).unwrap();
+            let mask = Tensor::ones((1, seq), candle_core::DType::U8, device).unwrap();
+            final_two(
+                encoder
+                    .forward_hidden_states(&input_ids, &mask)
+                    .expect("forward"),
+            )
+        };
+        let all_states_gguf_cpu: Vec<Tensor> = {
+            let encoder = GgufGemmaEncoder::load(&gguf_path, &Device::Cpu).expect("load gguf");
+            let input_ids = Tensor::from_vec(ids.clone(), (1, seq), &Device::Cpu).unwrap();
+            let mask = Tensor::ones((1, seq), candle_core::DType::U8, &Device::Cpu).unwrap();
+            encoder
+                .forward_hidden_states(&input_ids, &mask)
+                .expect("forward")
+                .iter()
+                .map(|t| t.to_dtype(candle_core::DType::F32).unwrap())
+                .collect()
+        };
+        let n = all_states_gguf_cpu.len();
+        let gguf_cpu_pre = all_states_gguf_cpu[n - 2].clone();
+        let gguf_cpu_last = all_states_gguf_cpu[n - 1].clone();
+        let metal = Device::new_metal(0).unwrap();
+        let (gguf_metal_pre, gguf_metal_last) = run_gguf(&metal);
+        let all_states_bf16: Vec<Tensor> = {
+            let mut encoder = super::super::encoder::GemmaHiddenStateEncoder::load_from_root(
+                &root,
+                &metal,
+                candle_core::DType::BF16,
+            )
+            .expect("load bf16");
+            let input_ids = Tensor::from_vec(ids.clone(), (1, seq), &metal).unwrap();
+            let mask = Tensor::ones((1, seq), candle_core::DType::U8, &metal).unwrap();
+            encoder
+                .forward_hidden_states(&input_ids, &mask)
+                .expect("bf16 forward")
+                .iter()
+                .map(|t| {
+                    t.to_dtype(candle_core::DType::F32)
+                        .unwrap()
+                        .to_device(&Device::Cpu)
+                        .unwrap()
+                })
+                .collect()
+        };
+        assert_eq!(all_states_bf16.len(), n, "hidden-state count mismatch");
+        for (layer, (gguf, bf16)) in all_states_gguf_cpu
+            .iter()
+            .zip(all_states_bf16.iter())
+            .enumerate()
+        {
+            eprintln!(
+                "layer {layer:2}: gguf-cpu vs bf16 cosine={:.6}",
+                cosine(gguf, bf16)
+            );
+        }
+        let (bf16_pre, bf16_last) = (
+            all_states_bf16[n - 2].clone(),
+            all_states_bf16[n - 1].clone(),
+        );
+        let cpu_pre = cosine(&gguf_cpu_pre, &bf16_pre);
+        let cpu_last = cosine(&gguf_cpu_last, &bf16_last);
+        let metal_pre = cosine(&gguf_metal_pre, &bf16_pre);
+        let metal_last = cosine(&gguf_metal_last, &bf16_last);
+        eprintln!("gguf-cpu   vs bf16: pre-norm={cpu_pre:.6} final={cpu_last:.6}");
+        eprintln!("gguf-metal vs bf16: pre-norm={metal_pre:.6} final={metal_last:.6}");
+        // Post-fix measurements: pre-norm 0.9995, final 0.978 on both
+        // backends (the final norm amplifies Q4_0 weight quantization loss;
+        // the pre-fix defect scored 0.70 / 0.19). Thresholds sit between the
+        // healthy and broken regimes with margin on both sides.
+        for (label, pre, last) in [("cpu", cpu_pre, cpu_last), ("metal", metal_pre, metal_last)] {
+            assert!(
+                last > 0.9 && pre > 0.99,
+                "GGUF Gemma on {label} diverges from the BF16 reference \
+                 (pre-norm {pre}, final {last})"
+            );
+        }
+    }
+
+    /// Real-checkpoint CPU↔Metal parity probe. Run manually:
+    /// `MOLD_TEST_GEMMA_GGUF=/path/to/gemma-3-12b-it-q4_0.gguf \
+    ///  cargo test -p mold-ai-inference --features metal --lib \
+    ///  real_checkpoint_metal_hidden_states_match_cpu -- --ignored --nocapture`
+    ///
+    /// Prints per-layer cosine similarity and max abs diff between CPU and
+    /// Metal hidden states so the first diverging layer names the broken op.
+    #[cfg(feature = "metal")]
+    #[test]
+    #[ignore = "requires a real Gemma 3 GGUF checkpoint via MOLD_TEST_GEMMA_GGUF"]
+    fn real_checkpoint_metal_hidden_states_match_cpu() {
+        let Some(path) = std::env::var_os("MOLD_TEST_GEMMA_GGUF") else {
+            panic!("set MOLD_TEST_GEMMA_GGUF to the local gemma-3 q4_0 gguf path");
+        };
+        let path = std::path::PathBuf::from(path);
+        // A short realistic token window: BOS + text-ish ids inside vocab.
+        let ids: Vec<u32> = vec![
+            2, 236746, 13935, 102202, 34646, 55574, 1343, 13030, 9917, 657,
+        ];
+        let seq = ids.len();
+        let run = |device: &Device| -> Vec<Tensor> {
+            let encoder = GgufGemmaEncoder::load(&path, device).expect("load gguf");
+            let input_ids = Tensor::from_vec(ids.clone(), (1, seq), device).unwrap();
+            let mask = Tensor::ones((1, seq), candle_core::DType::U8, device).unwrap();
+            encoder
+                .forward_hidden_states(&input_ids, &mask)
+                .expect("forward")
+                .into_iter()
+                .map(|t| t.to_dtype(candle_core::DType::F32).unwrap())
+                .collect()
+        };
+        let cpu_states = run(&Device::Cpu);
+        let metal_device = Device::new_metal(0).unwrap();
+        let metal_states = run(&metal_device);
+        assert_eq!(cpu_states.len(), metal_states.len());
+        let mut worst_cosine = 1f32;
+        for (layer, (cpu, metal)) in cpu_states.iter().zip(metal_states.iter()).enumerate() {
+            let metal = metal.to_device(&Device::Cpu).unwrap();
+            let dot = (cpu * &metal)
+                .unwrap()
+                .sum_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            let n1 = cpu
+                .sqr()
+                .unwrap()
+                .sum_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap()
+                .sqrt();
+            let n2 = metal
+                .sqr()
+                .unwrap()
+                .sum_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap()
+                .sqrt();
+            let cosine = dot / (n1 * n2).max(f32::MIN_POSITIVE);
+            let max_diff = (cpu - &metal)
+                .unwrap()
+                .abs()
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .max(0)
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            eprintln!("layer {layer:2}: cosine={cosine:.6} max_diff={max_diff:.4}");
+            worst_cosine = worst_cosine.min(cosine);
+        }
+        assert!(
+            worst_cosine > 0.99,
+            "CPU and Metal Gemma hidden states diverge: worst cosine {worst_cosine}"
+        );
+    }
+
     /// Tiny synthetic config that fits Q4_0's 32-element block size.
     /// Real Gemma 3 12B has hidden=3840, head_dim=256, n_layers=48 — too large
     /// for a unit test. Q4_0 requires inner dim divisible by 32, so hidden=32,
@@ -659,8 +1014,10 @@ mod tests {
 
     fn build_synthetic_gguf(cfg: &TinyCfg, vocab: usize, embed_init: Tensor) -> Vec<u8> {
         let device = Device::Cpu;
-        let zeros_norm = || Tensor::zeros(cfg.embedding_length, DType::F32, &device).unwrap();
-        let zeros_head_norm = || Tensor::zeros(cfg.head_dim, DType::F32, &device).unwrap();
+        // Real converters write Gemma norm weights with llama.cpp's +1 fold,
+        // so the identity norm arrives as ones, not zeros.
+        let ones_norm = || Tensor::ones(cfg.embedding_length, DType::F32, &device).unwrap();
+        let ones_head_norm = || Tensor::ones(cfg.head_dim, DType::F32, &device).unwrap();
 
         let metadata: Vec<(&str, gguf_file::Value)> = vec![
             (
@@ -716,7 +1073,7 @@ mod tests {
         let _ = vocab; // shape carried by `embed_init`.
         owned.push((
             "output_norm.weight".to_string(),
-            quantize_or_fail(&zeros_norm(), GgmlDType::F32),
+            quantize_or_fail(&ones_norm(), GgmlDType::F32),
         ));
 
         for i in 0..cfg.block_count {
@@ -790,27 +1147,27 @@ mod tests {
 
             owned.push((
                 format!("{prefix}.attn_q_norm.weight"),
-                quantize_or_fail(&zeros_head_norm(), GgmlDType::F32),
+                quantize_or_fail(&ones_head_norm(), GgmlDType::F32),
             ));
             owned.push((
                 format!("{prefix}.attn_k_norm.weight"),
-                quantize_or_fail(&zeros_head_norm(), GgmlDType::F32),
+                quantize_or_fail(&ones_head_norm(), GgmlDType::F32),
             ));
             owned.push((
                 format!("{prefix}.attn_norm.weight"),
-                quantize_or_fail(&zeros_norm(), GgmlDType::F32),
+                quantize_or_fail(&ones_norm(), GgmlDType::F32),
             ));
             owned.push((
                 format!("{prefix}.post_attention_norm.weight"),
-                quantize_or_fail(&zeros_norm(), GgmlDType::F32),
+                quantize_or_fail(&ones_norm(), GgmlDType::F32),
             ));
             owned.push((
                 format!("{prefix}.ffn_norm.weight"),
-                quantize_or_fail(&zeros_norm(), GgmlDType::F32),
+                quantize_or_fail(&ones_norm(), GgmlDType::F32),
             ));
             owned.push((
                 format!("{prefix}.post_ffw_norm.weight"),
-                quantize_or_fail(&zeros_norm(), GgmlDType::F32),
+                quantize_or_fail(&ones_norm(), GgmlDType::F32),
             ));
         }
 
