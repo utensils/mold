@@ -62,37 +62,54 @@ pub fn ltx2_generation(
     model_name: &str,
     model_version_hint: Option<&str>,
 ) -> Option<Ltx2Generation> {
-    if model_name.contains("ltx-2.3") || model_name.contains("ltx2.3") {
-        return Some(Ltx2Generation::V2_3);
-    }
-    // "ltx-2" followed by ".<digit>" is some *other* generation (2.4, …):
-    // never fold it into V2 by substring accident.
-    if let Some(idx) = model_name.find("ltx-2") {
-        let rest = &model_name[idx + "ltx-2".len()..];
-        let names_unknown_minor = rest
-            .strip_prefix('.')
-            .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()));
-        if !names_unknown_minor {
-            return Some(Ltx2Generation::V2);
+    // A name-embedded version marker (`ltx-2`, `ltx-2.3`, `ltx2.3`, …) is
+    // parsed as a COMPLETE minor component, never an unrestricted
+    // substring: `ltx-2.30` names an unknown generation and must fail
+    // closed rather than be swallowed by an `ltx-2.3` prefix match, and
+    // an explicit `ltx-2.0`/`ltx-2.1`/`ltx-2.2` is the supported V2
+    // lineage rather than an unknown future one.
+    for marker in ["ltx-2", "ltx2"] {
+        let Some(idx) = model_name.find(marker) else {
+            continue;
+        };
+        let rest = &model_name[idx + marker.len()..];
+        let Some(after_dot) = rest.strip_prefix('.') else {
+            // Bare `ltx-2-19b` style names are the V2 lineage; a bare
+            // `ltx2` (no dash, no version) is too weak a marker — fall
+            // through to the metadata hint.
+            if marker == "ltx-2" {
+                return Some(Ltx2Generation::V2);
+            }
+            continue;
+        };
+        let digits: String = after_dot
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if digits.is_empty() {
+            // `ltx-2.` followed by a non-digit — treat the dot as part of
+            // the surrounding name, not a version separator.
+            if marker == "ltx-2" {
+                return Some(Ltx2Generation::V2);
+            }
+            continue;
         }
-        return None;
+        return generation_for_minor(digits.parse().ok()?);
     }
-    match model_version_hint {
-        Some(v) if version_has_minor(v, 3) => Some(Ltx2Generation::V2_3),
-        Some(v) if [0u32, 1, 2].iter().any(|&m| version_has_minor(v, m)) => {
-            Some(Ltx2Generation::V2)
-        }
-        _ => None,
-    }
+    let version = model_version_hint?;
+    let rest = version.strip_prefix("2.")?;
+    let digits = rest.split(['.', '-', '+']).next().unwrap_or("");
+    generation_for_minor(digits.parse().ok()?)
 }
 
-/// True when `version` is `2.<minor>` or `2.<minor>.<anything>`.
-fn version_has_minor(version: &str, minor: u32) -> bool {
-    let Some(rest) = version.strip_prefix("2.") else {
-        return false;
-    };
-    let digits = rest.split(['.', '-', '+']).next().unwrap_or("");
-    digits.parse::<u32>() == Ok(minor)
+/// The generation a `2.<minor>` version component belongs to. Unknown
+/// minors (2.4 and beyond) return `None` — fail closed.
+fn generation_for_minor(minor: u32) -> Option<Ltx2Generation> {
+    match minor {
+        0..=2 => Some(Ltx2Generation::V2),
+        3 => Some(Ltx2Generation::V2_3),
+        _ => None,
+    }
 }
 
 /// The preprocessing profile for a known generation. Both currently
@@ -162,6 +179,23 @@ mod tests {
         assert_eq!(ltx2_generation("some-model", None), None);
         // A future name marker is not folded into V2 by substring.
         assert_eq!(ltx2_generation("ltx-2.4-24b", None), None);
+        // A version marker is a complete minor component: `2.30` is not
+        // `2.3` (codex review, PR #1071).
+        assert_eq!(ltx2_generation("ltx-2.30-22b", None), None);
+        assert_eq!(ltx2_generation("ltx2.30-vae", None), None);
+    }
+
+    #[test]
+    fn explicit_v2_minor_names_resolve_to_v2() {
+        // Codex review (PR #1071): `ltx-2.0`/`2.1`/`2.2` name the
+        // supported V2 lineage explicitly and must not fail closed.
+        for name in ["ltx-2.0-19b", "ltx-2.1-19b:fp8", "ltx-2.2-19b"] {
+            assert_eq!(
+                ltx2_generation(name, None),
+                Some(Ltx2Generation::V2),
+                "{name}"
+            );
+        }
     }
 
     #[test]
