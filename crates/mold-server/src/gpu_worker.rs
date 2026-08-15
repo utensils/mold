@@ -1382,7 +1382,7 @@ fn with_private_h3_cuda_preparation_attempt<T>(
     worker: &GpuWorker,
     operation: impl FnOnce() -> Result<T, crate::routes::ApiError>,
 ) -> Result<T, crate::routes::ApiError> {
-    use cudarc::driver::CudaExecutionAttempt;
+    use cudarc::driver::{CudaContext, CudaExecutionAttempt};
 
     let mut attempt = CudaExecutionAttempt::begin_unbound().map_err(|error| {
         quarantine_poisoned_worker(worker);
@@ -1391,6 +1391,37 @@ fn with_private_h3_cuda_preparation_attempt<T>(
             "failed to install the private H3 CUDA preparation boundary: {error}; server restart required"
         ))
     })?;
+    // The attempt begins unbound because a cold worker has no CUDA context
+    // yet, but `prepare_private_h3_allocation_boundary` evicts the previous
+    // model's engine before any context construction could bind one. cudarc
+    // treats a safe CUDA call on a pre-existing, unadopted context as poison:
+    // the evicted engine's first CUDA-bearing destructor would latch
+    // `force_retain`, leak the rest of that engine, and escalate a healthy
+    // model switch into a whole-process fatal restart (#1081). Adopt the
+    // worker's primary context first: `CudaContext::new` retains the existing
+    // primary context on a warm worker (or creates it on a cold one), and
+    // binding it lets eviction destructors run inside the adopted context.
+    let adopted = CudaContext::new(worker.gpu.ordinal)
+        .map_err(|error| error.to_string())
+        .and_then(|context| {
+            attempt
+                .bind_context(&context)
+                .map_err(|error| error.to_string())
+        });
+    if let Err(error) = adopted {
+        let status = attempt.finish();
+        if status.resources_retained() {
+            quarantine_poisoned_worker(worker);
+            contain_worker_cache(worker);
+            tracing::error!("{H3_CUDA_ATTEMPT_RETAINED_MARKER}");
+            return Err(crate::routes::ApiError::internal(
+                H3_CUDA_ATTEMPT_RETAINED_MARKER,
+            ));
+        }
+        return Err(crate::routes::ApiError::internal(format!(
+            "failed to adopt the worker CUDA context for private H3 preparation: {error}"
+        )));
+    }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
     match result {
         Err(payload) => {
@@ -5556,6 +5587,46 @@ mod tests {
                 "claimed H3 attempt handler must not retain generic runtime path {forbidden}",
             );
         }
+    }
+
+    /// The private H3 preparation boundary begins unbound because a cold
+    /// worker has no CUDA context yet, but the preparation itself evicts the
+    /// previous model's engine before any context construction could bind the
+    /// attempt. cudarc treats a safe CUDA call on a pre-existing, unadopted
+    /// context as poison (`force_retain`), so on a warm worker the evicted
+    /// engine's first CUDA-bearing destructor latched retention, leaked the
+    /// rest of the engine, and escalated a healthy model switch into a
+    /// whole-process fatal restart (#1081). Pin the fix: the wrapper must
+    /// adopt the worker's primary context into the attempt before running the
+    /// prepared operation.
+    #[test]
+    fn private_h3_preparation_attempt_adopts_worker_context_before_operation() {
+        let source = include_str!("gpu_worker.rs");
+        let start = source
+            .find("fn with_private_h3_cuda_preparation_attempt<T>(")
+            .expect("private H3 preparation boundary");
+        let end = source[start..]
+            .find("\nfn validate_scheduled_generation_before_cuda(")
+            .map(|offset| start + offset)
+            .expect("private H3 preparation boundary end");
+        let body = &source[start..end];
+        let begin = body
+            .find("CudaExecutionAttempt::begin_unbound()")
+            .expect("unbound attempt installation");
+        let adopt = body
+            .find("CudaContext::new(worker.gpu.ordinal)")
+            .expect("worker primary-context retention");
+        let bind = body
+            .find(".bind_context(&context)")
+            .expect("attempt context adoption");
+        let run = body
+            .find("std::panic::catch_unwind")
+            .expect("prepared operation execution");
+        assert!(
+            begin < adopt && adopt < bind && bind < run,
+            "the worker's primary CUDA context must be adopted into the unbound \
+             attempt before the prepared operation can evict a previous engine"
+        );
     }
 
     async fn claimed_h3_job_fixture(
