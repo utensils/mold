@@ -4,7 +4,7 @@
 - Runtime status: **compact FL2VA publicly available on the supported SM89 CUDA route**
 - Private qualification status: **authorized under the external private-UAT record**
 - Evidence snapshot: **2026-08-08, Mold main `12bbad65`**
-- Authorization owner: [issue #831](https://github.com/utensils/mold/issues/831)
+- Governance decision: **complete in [issue #831](https://github.com/utensils/mold/issues/831)**
 - Final qualification owner: [issue #827](https://github.com/utensils/mold/issues/827)
 
 This is an engineering status record, not legal advice. Mold lists the two
@@ -20,10 +20,11 @@ metadata only. The reviewed
 defines a default territory that excludes the United States, European Union,
 United Kingdom, and Republic of Korea. On 2026-08-08, the maintainer accepted a
 direct attestation that MiniMax authorized H3 integration with Mold. The
-[decision record](../architecture/minimax-h3-authorization.md) authorizes
-upstream-direct compact downloads and local storage while retaining exact
-runtime admission. It does not authorize Mold-bundled or mirrored weights,
-hosted third-party inference, or publication of private qualification evidence.
+[decision record](../architecture/minimax-h3-authorization.md) authorizes use in
+every territory and Mold surface, including local, remote-client, shared-server,
+hosted, output-distribution, and redistribution paths, while retaining exact
+technical runtime admission. Private correspondence and owner-only
+qualification evidence remain confidential.
 The external campaign contains revision-pinned official and
 practical Comfy artifacts whose size and full SHA-256 identities were verified;
 an authenticated real-checkpoint block-0 qualification also ran on CUDA. Later
@@ -61,33 +62,25 @@ true:
   caller-authored manifests remain blocked; the registry fixes every upstream
   repository, revision, filename, destination, byte count, and SHA-256 before
   transfer.
-- Existing weight files do not imply authorization.
+- Existing weight files do not imply technical runtime support.
 - Ordinary compact rows do not imply runtime availability. Only the separately
   authenticated additive capability and exact generation-profile row may clear
   the execution restriction.
 - An environment variable, HTTP header, client switch, weight presence, or
-  inferred location cannot open the gate.
+  inferred location cannot manufacture a technical capability.
 
-Server mutation paths return HTTP **451 Unavailable For Legal Reasons** with
-the stable machine-readable code:
-
-```json
-{
-  "code": "MINIMAX_H3_AUTHORIZATION_REQUIRED",
-  "error": "MiniMax H3 support is compliance-gated and is not activated in this build (...)"
-}
-```
-
-The exact message also links issue #831. Client capabilities project the same
-restriction; they do not implement a second policy. Authentication and input
-validation may still run before the gate where required for security, but H3
-bytes must not be staged and work must not be queued.
+The two reviewed compact IDs never return a compliance-authorization error.
+Unsupported execution reports the actual task, backend, hardware, artifact,
+memory, or request-profile limitation. Raw repositories, arbitrary aliases,
+caller-authored manifests, and other unreviewed identities remain unavailable
+before network transfer or queueing. Client capabilities consume that same core
+policy rather than implementing a second decision.
 
 ## Engineering implementation ledger
 
 This ledger separates code presence from qualification and release support.
-Every merged row remains subordinate to the authorization gate above, and none
-changes the current product status.
+Every merged row remains subordinate to the technical capability and evidence
+gates above, and none changes the current product status by itself.
 
 | State          | Scope                                                                                                                                                                                                                                                                                 | Exact evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Qualification effect                                                                                                   |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
@@ -619,10 +612,10 @@ generated media was retained.
 
 Private artifact-identity, numerical-parity, T2VA/FL2VA/Ref2VA, Comfy,
 memory/performance, cancellation, fault-recovery, and single-device rows may be
-attempted under the narrow private decision record. Their
-payloads and evidence remain private. Product-surface, hosted/remote-client,
-distribution, and release-artifact rows remain blocked until issue #831 records
-broader authority and the resulting obligations are implemented. Private
+attempted under the private evidence record. Their payloads and evidence remain
+private. Product-surface, hosted/remote-client, distribution, and
+release-artifact rows are authorized; they remain evidence-gated where the
+acceptance matrix requires technical qualification. Private
 authorization, clean storage, artifact identity, and isolated block execution
 have partial evidence described above; numerical parity and end-to-end
 generation rows remain unattempted. The table defines final required evidence
@@ -630,7 +623,7 @@ and does not itself report a completed release gate.
 
 | Gate                          | Required campaign                                                                                                                                                                    | Passing evidence                                                                                                                                                                                          |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Authorization                 | Revalidate the pinned license/Q&A and obtain written authority for every intended product, territory, user, artifact, and output flow                                                | Approved external authorization record with reviewed source-document hash, scope, owner, expiry/revocation terms, and issue #831 approval                                                                 |
+| Authorization                 | Revalidate the pinned license/Q&A and completed governance decision for every intended product, territory, user, artifact, and output flow                                           | Current decision record plus the README and H3 user guide carrying the pinned license link and required user-facing notice                                                                                |
 | Clean storage                 | Use the qualified isolated external campaign with its access-controlled absolute `MOLD_HOME`; never reuse an ordinary Mold home                                                      | Capacity and mount report, private ownership/mode, clean before/after inventory, and no H3 bytes in the checkout                                                                                          |
 | Artifact identity             | Fetch only the approved task/layout and every pinned companion                                                                                                                       | Exact repository/revision/path/byte count/full SHA-256, component-index hashes, license/NOTICE capture, and no unexpected file                                                                            |
 | Full-path numerical parity    | Run tokenizer/processor, Qwen layer 50, visual VAE, AudioVAE, token refiner, transformer block, packed layout, noise allocation, and dual sampler against pinned Diffusers BF16/FP32 | External fixture bundle passes schema/hash validation and every recorded tolerance; no approximate backend contributed a golden value                                                                     |
@@ -653,11 +646,12 @@ after a stable, independently reproduced Mold baseline exists.
 
 ## Updating or closing this record
 
-Issue #831 remains open until affirmative authority and all resulting product
-obligations are implemented and reviewed. Issue #827 remains open until the
-authorized acceptance matrix has real evidence and the exact release artifact
-passes. Landing more weight-free code or synthetic CUDA tests does not close
-either gate.
+Issue #831 records the completed governance decision: the README and H3 user
+guide satisfy the resulting documentation obligations, and no additional
+H3-specific product or acceptable-use control is required. Issue #827 remains
+open until the authorized acceptance matrix has real evidence and the exact
+release artifact passes. Landing more weight-free code or synthetic CUDA tests
+does not close that engineering gate.
 
 Any change to the pinned license, Q&A, source revisions, component identities,
 supported territory, execution layout, attention backend, quantization policy,

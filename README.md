@@ -191,7 +191,12 @@ with prompt, model, seed, and generation metadata.
   Ref2VA, Metal, CPU, and other CUDA architectures remain unavailable until
   those backends are implemented and tested. H3 weights use the
   [MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/bfc8ed0353f5a9733be73e6b2c98ec0948195b86/LICENSE),
-  not Mold's MIT license. See the [H3 model guide](https://utensils.io/mold/models/minimax-h3).
+  not Mold's MIT license. H3 may be used through Mold in every territory and
+  through local, remote-client, shared-server, hosted, output-distribution, and
+  redistribution workflows; technical availability still depends on the
+  implemented model, request, and hardware route. Review the linked terms for
+  your use. No separate Mold acceptance or H3-specific product control is
+  required. See the [H3 model guide](https://utensils.io/mold/models/minimax-h3).
 - Text-to-image, image-to-image, multimodal editing, inpainting, ControlNet,
   LoRA, prompt expansion, and Real-ESRGAN upscaling
 - Text/image-to-video, multi-prompt video chains, one-request continuation of

@@ -1,25 +1,29 @@
 # MiniMax H3 license and integration decision
 
-Status: **public Mold integration and local execution authorized**
+Status: **all Mold integration, distribution, and use authorized**
 
 On 2026-08-08, the project maintainer accepted a direct attestation that MiniMax
 granted permission to integrate H3 with Mold. On 2026-08-12, the maintainer
 explicitly authorized public Mold support: listing and downloading the pinned
 upstream H3 artifacts, shipping Mold's H3 loader and runtime code, and local H3
-generation by Mold users. H3 is therefore treated like other supported model
-families. It does not require a per-user authorization file or a private runtime
-record. Ordinary builds may advertise the two compact Comfy manifests, download
-their exact revision-pinned files directly from Hugging Face, verify their
-recorded SHA-256 identities, retain them in the user's model store, and expose
-supported generation capabilities. Mold does not bundle or mirror model
-payloads in its own releases.
+generation by Mold users. On 2026-08-14, the maintainer completed the broader
+governance review and approved H3 for every territory, operator, product
+surface, local or remote client, shared or hosted server, generated-output
+flow, and distribution or redistribution scenario. H3 is therefore treated
+like other supported model families. It does not require a per-user
+authorization file, private runtime record, location check, license-acceptance
+dialog, or H3-specific downstream control. Ordinary builds may advertise the
+two compact Comfy manifests, download their exact revision-pinned files
+directly from Hugging Face, verify their recorded SHA-256 identities, retain
+them in the user's model store, and expose supported generation capabilities.
+Mold's current releases do not bundle or mirror model payloads.
 
 Execution remains capability-gated for technical reasons. The first supported
 runtime is the compact FL2VA graph on CUDA and its documented request profile.
 Unsupported Metal/CPU routes, Ref2VA execution, altered weights, and broader
 request shapes remain fail-closed because they are not implemented or tested,
-not because the user lacks authorization. Hosted third-party access and
-Mold-hosted weight redistribution remain outside the current decision.
+not because the user, location, deployment topology, or distribution path lacks
+authorization. Authorization does not claim that an unimplemented route works.
 
 The upstream license remains a product compliance boundary, while runtime
 admission is an engineering capability boundary. Model identity and resolved
@@ -78,8 +82,13 @@ The current decision permits:
 - local storage, inventory, deletion, and repair of those downloaded artifacts;
 - public distribution of Mold's H3 integration, manifests, documentation, and
   loader/runtime code;
-- local FL2VA execution for Mold users when a server advertises the supported
-  CUDA capability and request profile;
+- local, remote-client, shared-server, and hosted execution for Mold users when
+  a server advertises the supported CUDA capability and request profile;
+- use by any person or organization in every territory and publication or
+  distribution of generated outputs;
+- distribution or redistribution of official or transformed H3 artifacts,
+  provided the H3 license link and notice described below accompany the user
+  documentation; and
 
 - direct download of revision-pinned official or Comfy H3 artifacts into the
   private qualification root on the authorized host;
@@ -96,10 +105,8 @@ not copy payloads out of the private qualification root.
 
 The current decision does not permit Mold to:
 
-- bundle or mirror official/transformed weights, safetensors headers, private
-  evidence, or real-checkpoint fixtures in Mold releases;
-- offer a Mold-hosted model download mirror or third-party hosted H3 inference
-  service under this record;
+- publish private authorization correspondence, owner-only qualification
+  evidence, or private real-checkpoint fixtures;
 - claim support for unimplemented tasks, devices, artifacts, or request
   envelopes merely because acquisition succeeded; or
 - treat source compilation, synthetic CUDA probes, UI authoring, or existing
@@ -121,30 +128,38 @@ not the private correspondence itself.
 
 | Field                  | Current record                                                                                                                                                                                           |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Decision               | Public Mold integration, upstream-direct discovery/download, local storage, and supported local execution are permitted; Mold-hosted weight redistribution is not authorized                              |
+| Decision               | All territories, users, Mold surfaces, local/remote/hosted execution, outputs, distribution, and redistribution are authorized; technical support remains capability-gated                               |
 | Decision owner         | James Brink, `utensils/mold` maintainer                                                                                                                                                                  |
 | Revocation owner       | James Brink, `utensils/mold` maintainer                                                                                                                                                                  |
-| Last review            | 2026-08-12                                                                                                                                                                                               |
+| Last review            | 2026-08-14                                                                                                                                                                                               |
 | License revision       | `bfc8ed0353f5a9733be73e6b2c98ec0948195b86`; LICENSE SHA-256 `59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44`                                                                           |
 | Authorization evidence | Maintainer attestation that MiniMax authorized H3 integration with Mold; corroborating image SHA-256 `8cd4d6e52cff34d7d39721ebab13b8c1187aa87aafc1c4ae2a16609186f22f1d`; direct grant retained privately |
+| Scope approval         | Maintainer legal/compliance determination on 2026-08-14 that use is permitted everywhere and that the README plus H3 user guide satisfy the remaining obligations                                        |
+| Upstream review        | At upstream HEAD `42ed227ee7df40d41602854ae760620d6eb651fe`, LICENSE and Q&A hashes still match the pinned review; Q&A SHA-256 `c39dcfc5dc3e546918509b57709db826a9b1945311bffaa01e80501101b8abe4`        |
 | Qualification root     | Owner-only `/Volumes/ExternalStorage/mold/uat-h3`; validated external authorization record under its `compliance` directory; no evidence or model payload committed                                      |
-| Permitted artifacts    | Public compact manifest metadata and upstream-direct revision-pinned H3 downloads; private official/qualification artifacts and conformance evidence                                                     |
-| Permitted users        | Mold users downloading directly from the reviewed upstream repositories and running supported local H3 generation                                                                                       |
-| Prohibited scope       | Mold-bundled or mirrored weights; Mold-hosted third-party inference; unsupported runtime/task/device/envelope activation; publication of private evidence                                                |
+| Permitted artifacts    | Mold code/docs/manifests, upstream or transformed H3 artifacts, and generated outputs; private correspondence and owner-only qualification evidence remain confidential                                  |
+| Permitted users        | Any person or organization in every territory, using local, remote-client, shared-server, hosted, or redistributed Mold/H3 paths                                                                         |
+| Prohibited scope       | Claiming technical support for an unimplemented runtime/task/device/envelope; publication of private correspondence or owner-only qualification evidence                                                 |
 | Expiry/revocation      | Immediate on MiniMax revocation, narrowed authority, license/Q&A change, loss of access control, or maintainer decision                                                                                  |
-| Next mandatory review  | Any upstream license/Q&A revision, hosted-service or weight-redistribution proposal, new operator/host/territory, or material scope expansion                                                             |
+| Next mandatory review  | Any upstream license/Q&A revision or maintainer revocation                                                                                                                                               |
 
-Broader hosted service or redistribution authority requires all of the
-following in a reviewed change:
+## User-facing license and acceptable-use delivery
 
-1. Written authorization whose scope explicitly covers implementation, local
-   inference, automated tests and fixtures, distribution, and any hosted use.
-2. A durable repository record of the allowed territories, products, users,
-   attribution, downstream terms, generated-content duties, and expiry or
-   revocation conditions.
-3. Tests proving every disallowed path remains fail-closed and every newly
-   allowed path follows that exact record.
-4. Named ownership for recurring license review and immediate revocation.
+The maintainer's completed review requires documentation, not an additional
+product gate. The root README and H3 user guide identify the MiniMax H3
+Community License, link its pinned text, distinguish the weights from Mold's
+MIT-licensed code, and tell users to review the upstream terms for their use.
+That documentation is the required license, notice, attribution, disclosure,
+downstream-term, and acceptable-use delivery for Mold.
+
+No H3-specific clickthrough, acceptance record, modified-file notice, commercial
+UI attribution, AI-generation label, provenance field, downstream contract,
+reporting path, safeguard, geolocation rule, or periodic in-product review is
+required. Existing Mold authentication, request validation, capability
+admission, safety settings, and ordinary abuse/operations controls continue to
+apply uniformly to CLI, server/API, Discord, desktop, web, iPhone, TUI, gallery,
+remote-client, shared-server, and hosted use. No surface requires a separate H3
+acceptable-use control; the README and H3 user guide are sufficient.
 
 The private qualification path must remain separate from shipping features and
 must fail release-exclusion verification. If authorization expires, is narrowed,
@@ -156,8 +171,8 @@ run, release, or hosted deployment.
 
 - [ ] Compare the pinned H3 license and Q&A revisions with their current
       upstream versions. Any change, or any proposed H3-specific artifact, blocks
-      the release until the authorization record and policy tests are reviewed by
-      the named compliance owner in issue #831.
+      the release until this decision and the user-facing license links are
+      reviewed by the named compliance owner.
 - [ ] Prove that the exact release contains no bundled or mirrored H3 model
       payload, private checkpoint header, authorization correspondence, or
       generated qualification fixture. Public compact manifests and upstream
@@ -165,5 +180,5 @@ run, release, or hosted deployment.
 - [ ] Prove that public SM89 H3 binaries retain consistent H3-scoped attention
       provenance while omitting global FlashAttention, qualification/capture
       executables, private evidence producers, and every private marker.
-- [ ] If hosted inference or redistribution authority is accepted, update this
-      decision in review before that use; a green UAT result is not a substitute.
+- [ ] Verify the README and H3 user guide still carry the pinned license link and
+      clearly distinguish H3 assets from Mold's MIT-licensed code.

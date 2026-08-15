@@ -13,10 +13,10 @@ records the exact, merged attention release candidate from PR #871, its
 weight-free private UAT host qualification, and its landing at main `ff927086`. Its
 same-tree ordinary shipping-feature fixture passed the release-candidate
 exclusion checks, but is deliberately non-publishable and is not a public
-release artifact. The record also explains why nominal mount metadata does not
-make the requested `/Volumes/ExternalStorage` UAT home usable. None of those
-engineering states overrides the open authorization gate in issue #831, and
-none records binary model-artifact access, H3 runtime activation, or licensed
+release artifact. The record also preserves the historical storage decision
+and later qualification of `/Volumes/ExternalStorage`. No engineering state
+substitutes for the completed governance decision in issue #831, and none by
+itself records binary model-artifact access, H3 runtime activation, or licensed
 H3 UAT.
 
 The schema and runner define the deferred real RTX 3090 acceptance gate. No
