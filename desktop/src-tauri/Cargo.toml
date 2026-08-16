@@ -1,6 +1,6 @@
 [package]
 name = "mold-desktop"
-version = "0.22.1"
+version = "0.22.2"
 description = "Mold — native desktop app for local AI image/video generation"
 authors = [
     "James Brink <brink.james@gmail.com>",
@@ -68,9 +68,9 @@ tar = "0.4"
 tempfile = "3"
 filetime = "0.2"
 sha2 = "0.10"
-mold-core = { path = "../../crates/mold-core", package = "mold-ai-core", version = "0.22.1" }
-mold-db = { path = "../../crates/mold-db", package = "mold-ai-db", version = "0.22.1" }
-mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", version = "0.22.1", features = [
+mold-core = { path = "../../crates/mold-core", package = "mold-ai-core", version = "0.22.2" }
+mold-db = { path = "../../crates/mold-db", package = "mold-ai-db", version = "0.22.2" }
+mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", version = "0.22.2", features = [
   "expand",
   "mp4",
   "mdns",

@@ -1,6 +1,6 @@
 [package]
 name = "mold-mobile"
-version = "0.22.1"
+version = "0.22.2"
 edition = "2024"
 license = "MIT"
 description = "Mold iOS companion for remote generation and gallery access"
