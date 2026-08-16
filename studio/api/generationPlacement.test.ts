@@ -445,4 +445,33 @@ describe("generation placement preview", () => {
       vi.useRealTimers();
     }
   });
+
+  test("combines a fleet cancellation signal with the normal preview deadline", async () => {
+    apiJsonTo.mockClear();
+    const controller = new AbortController();
+    let requestSignal: AbortSignal | undefined;
+    apiJsonTo.mockImplementationOnce((_target, _path, init) => {
+      requestSignal = init?.signal as AbortSignal;
+      return new Promise((_resolve, reject) => {
+        requestSignal?.addEventListener(
+          "abort",
+          () => reject(requestSignal?.reason),
+          {
+            once: true,
+          },
+        );
+      });
+    });
+
+    const pending = previewGenerationPlacement(
+      { baseUrl: "http://plato:7680", apiKey: null },
+      { model: "m", prompt: "p" },
+      1,
+      { signal: controller.signal },
+    );
+    controller.abort(new Error("another Auto host is ready"));
+
+    await expect(pending).rejects.toThrow("another Auto host is ready");
+    expect(requestSignal?.aborted).toBe(true);
+  });
 });

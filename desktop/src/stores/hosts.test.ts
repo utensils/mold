@@ -849,6 +849,133 @@ describe("hosts store", () => {
     });
   });
 
+  it("stops waiting on a hung Auto candidate after another host returns a planned route", async () => {
+    vi.useFakeTimers();
+    try {
+      const hosts = useHostsStore();
+      hosts.extras.push({
+        id: hal.id,
+        label: "hal9000",
+        url: hal.url,
+        apiKey: "hal-key",
+        status: "ready",
+        error: null,
+        instanceId: "hal-instance",
+      });
+      let remoteSignal: AbortSignal | undefined;
+      previewGenerationPlacement.mockImplementation(
+        (
+          target: { baseUrl: string },
+          _request: unknown,
+          _copies: number,
+          options?: { signal?: AbortSignal },
+        ) => {
+          if (!target.baseUrl.includes("hal9000")) return Promise.resolve(plannedPlacement());
+          remoteSignal = options?.signal;
+          return new Promise(() => {});
+        },
+      );
+
+      const pending = hosts.resolveFeasible(null, placementRequest);
+      await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(2));
+      await vi.advanceTimersByTimeAsync(250);
+
+      await expect(pending).resolves.toMatchObject({
+        kind: "route",
+        route: { hostId: "local" },
+      });
+      expect(remoteSignal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails closed when the only Auto candidate never finishes planning", async () => {
+    vi.useFakeTimers();
+    try {
+      let requestSignal: AbortSignal | undefined;
+      previewGenerationPlacement.mockImplementation(
+        (
+          _target: unknown,
+          _request: unknown,
+          _copies: number,
+          options?: { signal?: AbortSignal },
+        ) => {
+          requestSignal = options?.signal;
+          return new Promise(() => {});
+        },
+      );
+      const hosts = useHostsStore();
+
+      const pending = hosts.resolveFeasible(null, placementRequest);
+      await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      await expect(pending).resolves.toEqual({
+        kind: "unreachable",
+        perHost: [
+          expect.objectContaining({
+            hostId: "local",
+            error: expect.stringContaining("Auto placement timed out after 5 seconds"),
+          }),
+        ],
+      });
+      expect(requestSignal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for every Most capable probe instead of using Auto's early route window", async () => {
+    vi.useFakeTimers();
+    try {
+      const hosts = useHostsStore();
+      hosts.extras.push({
+        id: hal.id,
+        label: "hal9000",
+        url: hal.url,
+        apiKey: "hal-key",
+        status: "ready",
+        error: null,
+        instanceId: "hal-instance",
+      });
+      const stronger = deferred<ReturnType<typeof plannedPlacement>>();
+      previewGenerationPlacement.mockImplementation((target: { baseUrl: string }) =>
+        target.baseUrl.includes("hal9000")
+          ? stronger.promise
+          : Promise.resolve({
+              ...plannedPlacement("cuda:local"),
+              candidate: {
+                ...plannedPlacement("cuda:local").candidate,
+                predicted_completion_after_ms: 10_000,
+              },
+            }),
+      );
+
+      const pending = hosts.resolveFeasible("capable", placementRequest);
+      await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(2));
+      await vi.advanceTimersByTimeAsync(5_000);
+      let settled = false;
+      void pending.then(() => (settled = true));
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      stronger.resolve({
+        ...plannedPlacement("cuda:remote"),
+        candidate: {
+          ...plannedPlacement("cuda:remote").candidate,
+          predicted_completion_after_ms: 10,
+        },
+      });
+      await expect(pending).resolves.toMatchObject({
+        kind: "route",
+        route: { hostId: hal.id },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("retains the placement probe HTTP status and message", async () => {
     previewGenerationPlacement.mockRejectedValueOnce(
       new ApiError("placement failed", 401, { error: "API key was rejected" }),
@@ -998,7 +1125,9 @@ describe("hosts store", () => {
       instanceId: "instance-a",
       target: { baseUrl: hal.url, apiKey: "host-key" },
     });
-    expect(previewChainPlacement).toHaveBeenCalledWith(expect.anything(), expect.anything(), 3);
+    expect(previewChainPlacement).toHaveBeenCalledWith(expect.anything(), expect.anything(), 3, {
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it("previews an auto-expanded long video through the chain endpoint", async () => {
@@ -1034,6 +1163,7 @@ describe("hosts store", () => {
       expect.anything(),
       expect.objectContaining({ batch_size: 1 }),
       4,
+      { signal: expect.any(AbortSignal) },
     );
     expect(request.batch_size).toBe(4);
   });
