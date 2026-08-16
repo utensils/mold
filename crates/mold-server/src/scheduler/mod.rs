@@ -3296,7 +3296,7 @@ impl Coordinator {
                         let static_estimate = static_generation_estimate(
                             &pending.job.request,
                             plan.predicted_vram_peak_bytes,
-                            plan.predicted_host_increment_bytes,
+                            plan.admission_host_demand_bytes(),
                         );
                         let estimate = self.estimates.estimate(&key, static_estimate);
                         let (cold_setup_ms, warm_setup_ms, predicted_run_ms) =
@@ -3705,7 +3705,7 @@ impl Coordinator {
                 let static_estimate = static_generation_estimate(
                     request,
                     plan.predicted_vram_peak_bytes,
-                    plan.predicted_host_increment_bytes,
+                    plan.admission_host_demand_bytes(),
                 );
                 let estimate = self.estimates.estimate(&key, static_estimate);
                 let (cold_setup_ms, warm_setup_ms, predicted_run_ms) =
@@ -5942,6 +5942,10 @@ fn static_generation_time_ms(request: &mold_core::GenerateRequest) -> u64 {
     )
 }
 
+/// `host_bytes` must be the plan's `admission_host_demand_bytes`, never its raw
+/// `predicted_host_increment_bytes`: on Metal the host claim already rides
+/// `admission_vram_demand_bytes` against the one unified pool, and charging it
+/// again to the host ledger is the #1038 double-count.
 fn static_generation_estimate(
     request: &mold_core::GenerateRequest,
     vram_bytes: u64,
@@ -6330,6 +6334,89 @@ mod tests {
             job_tx,
         });
         (worker, job_rx)
+    }
+
+    /// A worker whose device collapses VRAM and host RAM onto one pool.
+    fn metal_test_worker(
+        ordinal: usize,
+    ) -> (
+        Arc<GpuWorker>,
+        std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>,
+    ) {
+        let (worker, rx) = test_worker(ordinal);
+        let Ok(mut worker) = Arc::try_unwrap(worker) else {
+            unreachable!("test_worker returns the only reference")
+        };
+        worker.gpu.backend = mold_core::GpuBackend::Metal;
+        worker.gpu.stable_id = Some(format!("metal:{ordinal}"));
+        worker.gpu.compute_capability = None;
+        worker.gpu.raw_cuda_uuid = None;
+        worker.gpu.device_kind = None;
+        (Arc::new(worker), rx)
+    }
+
+    /// Metal must reserve nothing in the host ledger.
+    ///
+    /// Its host claim already rides `admission_vram_demand_bytes` against the
+    /// one unified pool, so charging it a second time against a second sample
+    /// of that pool — minus a safety floor the device gate does not pay — is
+    /// the #1038 double-count. It was survivable while a reservation was
+    /// discharged a second after dispatch; now that one stays charged for the
+    /// whole lease, it would park real work.
+    #[tokio::test]
+    async fn metal_reserves_no_host_ram_while_cuda_reserves_its_increment() {
+        for (backend, expected_reservation_bytes) in [
+            (mold_core::GpuBackend::Metal, 0),
+            (mold_core::GpuBackend::Cuda, MIN_TRANSIENT_HOST_RAM),
+        ] {
+            let (worker, worker_rx) = if backend == mold_core::GpuBackend::Metal {
+                metal_test_worker(0)
+            } else {
+                test_worker(0)
+            };
+            let device_id = worker_device_id(&worker);
+            let pool = Arc::new(GpuPool {
+                workers: vec![worker].into(),
+            });
+            let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(1);
+            let queue = QueueHandle::new(ingress_tx);
+            let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 1);
+            state.job_registry.register("job", "flux-dev:q4");
+            let (job, _result) = fake_generation("job");
+            queue.submit(job, 1).await.unwrap();
+            let mut coordinator = Coordinator::with_preparer_and_memory(
+                state,
+                Arc::new(ImmediatePreparer),
+                ample_memory(),
+            );
+            let mut immediate = false;
+            coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+            for pending in coordinator.pending.values_mut() {
+                pending.preparation = PreparationState::Ready;
+            }
+            coordinator.handle_worker_event(
+                WorkerEvent::Ready {
+                    device_id,
+                    ordinal: 0,
+                    owner_epoch: 1,
+                    worker_generation: 1,
+                },
+                &mut immediate,
+            );
+            let _ = coordinator.dispatch_ready().await;
+            assert_eq!(recv_grant(&worker_rx).id, "job", "{backend:?}");
+
+            let reserved = coordinator
+                .memory
+                .reservations
+                .get("job")
+                .map(|reservation| reservation.bytes)
+                .expect("a granted lease holds its reservation");
+            assert_eq!(
+                reserved, expected_reservation_bytes,
+                "{backend:?} reserved {reserved} host bytes"
+            );
+        }
     }
 
     fn recv_grant(rx: &std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>) -> GpuJob {
