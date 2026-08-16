@@ -6704,6 +6704,73 @@ mod tests {
         );
     }
 
+    /// The first `queued` event must be on the same scale as every later one.
+    ///
+    /// It used to carry `Queue::submit`'s return — the pending count, which
+    /// excludes the running job — while `/api/queue`, `/api/activity`, and the
+    /// coordinator's re-announcements all report the registry index, which
+    /// includes it. A job submitted behind one running generation was told 0
+    /// and then re-announced as 1, so its place in line appeared to move
+    /// backwards.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_first_queued_event_is_on_the_registry_scale() {
+        let (state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        // One generation already occupies the machine, so the two scales
+        // disagree: pending count 0, registry index 1.
+        state
+            .job_registry
+            .register("already-running", "flux-dev:q4");
+        state.job_registry.mark_running("already-running", Some(0));
+        let worker_state = state.clone();
+        tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body("a robot", 768, 768)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        let first = sse_json_event(&text, "progress");
+        assert_eq!(first["type"], "queued", "{text}");
+        assert_eq!(
+            first["position"], 1,
+            "the seed must count the running job the registry counts"
+        );
+    }
+
+    /// An idle host must still seed 0 — the CLI reads that as "no queue" and
+    /// stays silent rather than announcing a position to a user who is first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_idle_host_still_seeds_position_zero() {
+        let app = app_with(MockEngine::ready());
+        let response = app
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body("a robot", 768, 768)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        let first = sse_json_event(&text, "progress");
+        assert_eq!(first["type"], "queued", "{text}");
+        assert_eq!(first["position"], 0);
+    }
+
     #[tokio::test]
     async fn stream_invalid_payload_header_returns_422() {
         let app = app_with(MockEngine::ready());

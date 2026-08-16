@@ -3004,7 +3004,7 @@ async fn generate_stream(
         h3_private_ingress_grant,
     };
 
-    let position = state
+    state
         .queue
         .submit(job, state.queue_capacity)
         .await
@@ -3013,6 +3013,17 @@ async fn generate_stream(
 
     // First event the client sees — carries the position AND the server
     // ID so the SPA can later reconcile this job against /api/queue.
+    //
+    // The position is the registry index, not the queue's pending count. The
+    // pending count excludes the running job, so a submit behind one running
+    // generation used to report 0 here and 1 in every later announcement,
+    // making the place in line appear to move backwards. The entry is
+    // registered above, so the fallback only fires if a concurrent cancel
+    // already removed it — a job whose position no longer matters.
+    let position = state
+        .job_registry
+        .entry(&job_id)
+        .map_or(0, |entry| entry.position);
     let _ = tx.send(SseMessage::Progress(SseProgressEvent::Queued {
         position,
         id: job_id,
