@@ -2294,6 +2294,18 @@ pub(crate) fn is_cuda_oom(e: &anyhow::Error) -> bool {
     full.contains("CUDA_ERROR_OUT_OF_MEMORY") || full.contains("out of memory")
 }
 
+/// Detect a dispatch-time rejection of an already-admitted execution plan.
+///
+/// The frozen-plan rechecks refuse work because physical memory changed after
+/// admission, which says nothing about this worker's health. The typed
+/// `ApiError` is flattened to `anyhow` at the load boundary, so the shared
+/// marker travels in the message; `memory_pressure_rejections_do_not_count_
+/// against_worker_health` builds real rejections rather than string literals,
+/// so a reworded message fails the test instead of silently reclassifying.
+pub(crate) fn is_admitted_plan_memory_rejection(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains(crate::memory_preflight::ADMISSION_PRESSURE_MARKER)
+}
+
 /// Detect CUDA errors that invalidate the process-owned context.
 ///
 /// Candle's cudarc layer retains primary-context handles, so resetting that
@@ -3691,6 +3703,14 @@ fn process_job_with_sink(
             } else {
                 (fatal_cuda_user_message(&model_name), false)
             }
+        } else if is_admitted_plan_memory_rejection(&e) {
+            // The machine changed after this plan was admitted. That is a
+            // scheduling condition, and counting it would degrade a healthy
+            // GPU out of rotation for a plan that arrived at a bad moment.
+            (
+                format!("model load error: {}", clean_error_message(&e)),
+                false,
+            )
         } else {
             (
                 format!("model load error: {}", clean_error_message(&e)),
@@ -11318,6 +11338,74 @@ mod tests {
         assert!(
             unchanged_return < fence,
             "the host fence must not gate an unchanged hot-cache hit"
+        );
+    }
+
+    /// Memory pressure is a scheduling condition, not worker ill health.
+    ///
+    /// Both dispatch-time rechecks reject an already-admitted plan because the
+    /// machine changed underneath it. Counting those toward the consecutive
+    /// failure budget degrades a perfectly healthy GPU out of rotation for a
+    /// plan that merely arrived at a bad moment.
+    #[test]
+    fn memory_pressure_rejections_do_not_count_against_worker_health() {
+        let host = anyhow::anyhow!(
+            crate::memory_preflight::check_planned_host_budget("ltx2-19b", 24 << 30, 1 << 30)
+                .expect_err("host pressure rejects")
+                .error
+        );
+        let vram = anyhow::anyhow!(
+            crate::memory_preflight::check_planned_memory_budget(
+                "ltx2-19b",
+                24 << 30,
+                1 << 30,
+                crate::memory_preflight::rejection_suggestion(None),
+            )
+            .expect_err("device pressure rejects")
+            .error
+        );
+
+        for rejection in [&host, &vram] {
+            assert!(
+                is_admitted_plan_memory_rejection(rejection),
+                "a planned-budget recheck must be recognised: {rejection:#}"
+            );
+            assert!(
+                !is_fatal_cuda_error(rejection),
+                "pressure must never reach the quarantine path"
+            );
+            assert!(
+                !is_cuda_oom(rejection),
+                "pressure must not be mistaken for a driver OOM"
+            );
+        }
+
+        assert!(
+            !is_admitted_plan_memory_rejection(&anyhow::anyhow!("safetensors file not found")),
+            "a genuine load fault still counts against the worker"
+        );
+    }
+
+    /// The classification has to reach the branch that decides the count.
+    #[test]
+    fn the_load_failure_branch_classifies_pressure_before_its_generic_arm() {
+        let whole = include_str!("gpu_worker.rs");
+        let source = &whole[..whole.find("\nmod tests {").unwrap_or(whole.len())];
+        let start = source
+            .find("let (err_msg, count_worker_failure) = if is_fatal_cuda {")
+            .expect("model-load failure classification");
+        let end = source[start..]
+            .find("if count_worker_failure {")
+            .map(|offset| start + offset)
+            .expect("failure accounting");
+        let branch = &source[start..end];
+        let pressure = branch
+            .find("is_admitted_plan_memory_rejection(&e)")
+            .expect("pressure arm");
+        let generic = branch.find("model load error:").expect("generic arm");
+        assert!(
+            pressure < generic,
+            "pressure must be classified before the arm that counts a failure"
         );
     }
 

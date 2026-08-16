@@ -197,6 +197,15 @@ pub(crate) fn check_model_memory_budget(
     Ok(())
 }
 
+/// Identifies a dispatch-time rejection of an already-admitted plan.
+///
+/// Both planned-budget rechecks end with this sentence, and the worker's
+/// failure classifier keys on it rather than on prose so that rewording a
+/// message cannot silently start counting memory pressure as worker ill
+/// health.
+pub(crate) const ADMISSION_PRESSURE_MARKER: &str =
+    "memory pressure changed after scheduler admission";
+
 /// Revalidate one already-admitted execution plan against a fresh physical
 /// memory sample without replacing the plan's memory model at dispatch.
 ///
@@ -216,11 +225,11 @@ pub(crate) fn check_planned_memory_budget(
     if predicted_peak_bytes > available_bytes {
         return Err(ApiError::insufficient_memory(format!(
             "model '{}' frozen execution plan peak ~{:.1} GB no longer fits the current ~{:.1} GB \
-             physical memory budget; memory pressure changed after scheduler admission. \
-             Retry after other GPU work releases memory. {}",
+             physical memory budget; {}. Retry after other GPU work releases memory. {}",
             model_name,
             predicted_peak_bytes as f64 / 1_000_000_000.0,
             available_bytes as f64 / 1_000_000_000.0,
+            ADMISSION_PRESSURE_MARKER,
             suggestion,
         )));
     }
@@ -255,7 +264,7 @@ pub(crate) fn check_planned_host_budget(
 ) -> Result<(), ApiError> {
     if predicted_host_increment_bytes > available_host_headroom_bytes {
         return Err(ApiError::insufficient_memory(format!(
-            "model '{model_name}' frozen host-memory increment ~{:.1} GB no longer fits the current ~{:.1} GB host-memory headroom after the canonical safety floor; memory pressure changed after scheduler admission",
+            "model '{model_name}' frozen host-memory increment ~{:.1} GB no longer fits the current ~{:.1} GB host-memory headroom after the canonical safety floor; {ADMISSION_PRESSURE_MARKER}",
             predicted_host_increment_bytes as f64 / 1_000_000_000.0,
             available_host_headroom_bytes as f64 / 1_000_000_000.0,
         )));
