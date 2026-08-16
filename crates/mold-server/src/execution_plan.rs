@@ -305,7 +305,6 @@ pub enum RuntimeSemanticVariable {
     WanStepCache,
     WanStepProfile,
     WuerstchenDecoderGuidance,
-    ZimageGgufDense,
     ZimageQMatMul,
 }
 
@@ -660,10 +659,9 @@ fn runtime_semantic_variable(name: &str) -> Option<RuntimeSemanticVariable> {
         "MOLD_WAN_OFFLOAD_BLOCKS" => RuntimeSemanticVariable::WanOffloadBlocks,
         "MOLD_WAN_STEP_PROFILE" => RuntimeSemanticVariable::WanStepProfile,
         "MOLD_WUERSTCHEN_DECODER_GUIDANCE" => RuntimeSemanticVariable::WuerstchenDecoderGuidance,
-        // Both swap the Z-Image quantized linear implementation, which changes
-        // numerics, memory residency, and step latency — each is its own
+        // Swaps the Z-Image quantized linear implementation on CUDA, which
+        // changes numerics, transient memory, and step latency — its own
         // execution-equivalence and timing class.
-        "MOLD_ZIMAGE_GGUF_DENSE" => RuntimeSemanticVariable::ZimageGgufDense,
         "MOLD_ZIMAGE_QMATMUL" => RuntimeSemanticVariable::ZimageQMatMul,
         // A new engine-shaping input must never silently collapse into an old
         // equivalence class. `None` here surfaces as a per-job
@@ -744,10 +742,6 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> Option<RuntimeSe
                 value.trim().to_ascii_lowercase().as_str(),
                 "1" | "true" | "on" | "yes"
             ))
-        }
-        // Mirrors the engine's `zimage_gguf_dense_forced` exactly.
-        Some(value) if variable == RuntimeSemanticVariable::ZimageGgufDense => {
-            CanonicalRuntimeValue::Boolean(matches!(value, "1" | "true" | "yes"))
         }
         // Do not invent normalization for a runtime parser we have not made
         // authoritative here. Exact text is conservative: it can cause false
