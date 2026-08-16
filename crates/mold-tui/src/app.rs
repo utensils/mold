@@ -8120,6 +8120,21 @@ fn decode_live_preview(encoded: &str) -> Option<image::DynamicImage> {
     reader.decode().ok()
 }
 
+/// Stage label for a `Queued` event. The coordinator re-emits this event
+/// whenever a waiting job's place in line changes, and the stage is one field
+/// rewritten in place, so every position has to render something: skipping
+/// one leaves the previous number on screen while the queue keeps draining.
+/// Position 0 is the front of the line — legacy single-GPU dispatch also
+/// announces 0 as it starts a job, which the running-state events overwrite
+/// immediately. Kept in step with the CLI's `queued_status_message`.
+fn queued_stage_label(position: usize) -> String {
+    if position == 0 {
+        "Queued (next up)".to_string()
+    } else {
+        format!("Queued (position {position})")
+    }
+}
+
 fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) -> bool {
     match event {
         SseProgressEvent::Preview { step, total, .. } => {
@@ -8269,7 +8284,7 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
             return true;
         }
         SseProgressEvent::Queued { position, .. } => {
-            progress.current_stage = Some(format!("Queued (position {position})"));
+            progress.current_stage = Some(queued_stage_label(position));
         }
     }
     false
@@ -9723,6 +9738,103 @@ mod tests {
         assert_eq!(kind, ActivityKind::Error);
         assert!(text.contains("error · boom"), "{text}");
         assert!(!text.contains("second"), "{text}");
+    }
+
+    /// Host-RAM pressure has to reach the strip in every state a waiting job
+    /// can be in — a queue that stops moving because the host is out of
+    /// schedulable RAM looks identical to a slow one otherwise.
+    /// The queue stage is one field the strip rewrites in place, so a repeat
+    /// of `Queued` reads as a live position. Every position must render —
+    /// front of the line included, or the last number the client was told
+    /// stays on screen while the queue keeps moving. Wording is kept in step
+    /// with the CLI's `queued_status_message`.
+    #[test]
+    fn every_queued_position_renders_a_stage_label() {
+        assert_eq!(queued_stage_label(3), "Queued (position 3)");
+        assert_eq!(queued_stage_label(1), "Queued (position 1)");
+        assert_eq!(queued_stage_label(0), "Queued (next up)");
+    }
+
+    #[test]
+    fn repeated_queued_events_rewrite_the_stage_in_place() {
+        let mut progress = ProgressState::default();
+        for position in (0..=2).rev() {
+            reduce_progress_state(
+                &mut progress,
+                mold_core::SseProgressEvent::Queued {
+                    position,
+                    id: "job-7".into(),
+                },
+            );
+        }
+        assert_eq!(
+            progress.current_stage.as_deref(),
+            Some("Queued (next up)"),
+            "the newest position replaces the previous one rather than stacking"
+        );
+    }
+
+    #[tokio::test]
+    async fn activity_line_reports_host_ram_pressure_only_when_the_host_is_under_it() {
+        use crate::ui::chrome::activity_line;
+        let mut app = make_settings_test_app();
+
+        let mut status = mold_core::ServerStatus {
+            version: "0.22.0".into(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: false,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 0,
+            hostname: None,
+            memory_status: None,
+            gpus: None,
+            queue_depth: None,
+            queue_capacity: None,
+            queue_paused: None,
+            instance_id: None,
+            models_disk: None,
+            host_memory: None,
+        };
+
+        // A server too old to report the field is the baseline: whatever the
+        // strip said before this telemetry existed, it still says.
+        app.resource_info.server_status = Some(status.clone());
+        let baseline = activity_line(&app).1;
+        assert!(!baseline.contains("RAM"), "{baseline}");
+
+        // Nor does a host with room to spare.
+        status.host_memory = Some(mold_core::HostMemorySnapshot {
+            total_bytes: 64 * 1024_u64.pow(3),
+            available_bytes: 48 * 1024_u64.pow(3),
+            headroom_bytes: 40 * 1024_u64.pow(3),
+            safety_floor_bytes: 10 * 1024_u64.pow(3),
+        });
+        app.resource_info.server_status = Some(status.clone());
+        assert_eq!(activity_line(&app).1, baseline);
+
+        // Under one safety floor of headroom, every state names the pressure.
+        status.host_memory = Some(mold_core::HostMemorySnapshot {
+            headroom_bytes: 3 * 1024_u64.pow(3),
+            ..status.host_memory.unwrap()
+        });
+        app.resource_info.server_status = Some(status.clone());
+        let idle = activity_line(&app).1;
+        assert!(
+            idle.ends_with(" · RAM tight · 3.0 GB schedulable"),
+            "{idle}"
+        );
+
+        app.generate.generating = true;
+        let generating = activity_line(&app).1;
+        assert!(generating.contains("RAM tight"), "{generating}");
+
+        app.generate.generating = false;
+        app.generate.last_generation_time_ms = Some(4000);
+        let done = activity_line(&app).1;
+        assert!(done.contains("RAM tight"), "{done}");
     }
 
     #[tokio::test]
