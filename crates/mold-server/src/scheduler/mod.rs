@@ -923,9 +923,9 @@ enum ReservationState {
 struct HostReservation {
     bytes: u64,
     state: ReservationState,
-    /// H3 announces its first allocation before gradual model/host loading.
-    /// No OS sample can prove the complete frozen increment is reflected, so
-    /// this reservation remains charged until its lease settles.
+    /// A worker announces its first allocation before gradual model/host
+    /// loading. No OS sample can prove the complete frozen increment is
+    /// reflected, so this reservation remains charged until its lease settles.
     charge_until_release: bool,
 }
 
@@ -1002,6 +1002,11 @@ impl HostMemoryLedger {
             .unwrap_or(u64::MAX)
     }
 
+    /// A worker announces AllocationCommitted immediately before its first
+    /// CUDA construction, while model and host allocations continue after that
+    /// point. A fresh OS sample therefore cannot prove that a lease's entire
+    /// frozen host increment is reflected. Every live reservation stays
+    /// charged until that lease settles.
     fn headroom_bytes(&self) -> u64 {
         let Some(sample) = self.sample else {
             return 0;
@@ -1017,11 +1022,6 @@ impl HostMemoryLedger {
         let Some(sample) = self.sample else {
             return Some(0);
         };
-        // A worker announces AllocationCommitted immediately before its first
-        // CUDA construction, while model and host allocations continue after
-        // that point. A fresh OS sample therefore cannot prove that a peer's
-        // entire frozen host increment is reflected. Keep every live peer
-        // reservation charged until that lease settles.
         let peer_reserved_bytes = self
             .reservations
             .iter()
@@ -1054,7 +1054,6 @@ impl HostMemoryLedger {
         plan: &Plan,
         state_version: u64,
         plan_version: u64,
-        charge_until_release: &BTreeSet<String>,
     ) -> Result<(), GrantFenceError> {
         plan.validate_for_grant(
             state_version,
@@ -1072,7 +1071,7 @@ impl HostMemoryLedger {
                 HostReservation {
                     bytes: item.host_ram_bytes,
                     state: ReservationState::Reserved,
-                    charge_until_release: charge_until_release.contains(item.work_id.as_str()),
+                    charge_until_release: item.host_ram_bytes > 0,
                 },
             );
         }
@@ -4296,26 +4295,10 @@ impl Coordinator {
                 )
                 .is_ok()
             });
-            let charge_until_release: BTreeSet<String> = plan
-                .immediate_leases
-                .iter()
-                .filter_map(|lease| {
-                    let work_id = lease.work_id.to_string();
-                    let execution = generation_plans
-                        .get(&work_id)
-                        .and_then(|plans| exact_leased_execution_plan(plans, lease))?;
-                    mold_core::minimax_h3::is_family(&execution.model_family).then_some(work_id)
-                })
-                .collect();
             if !grants_valid
                 || self
                     .memory
-                    .try_reserve(
-                        &plan,
-                        self.state_version,
-                        self.plan_version,
-                        &charge_until_release,
-                    )
+                    .try_reserve(&plan, self.state_version, self.plan_version)
                     .is_err()
             {
                 self.state_version = self.state_version.saturating_add(1);
@@ -6706,7 +6689,7 @@ mod tests {
         let started = ledger.begin_collection();
         ledger.publish_sample(started, 40 << 30, 20 << 30);
         assert_eq!(
-            ledger.try_reserve(&plan, 3, 9, &BTreeSet::new()),
+            ledger.try_reserve(&plan, 3, 9),
             Err(GrantFenceError::StalePlan)
         );
         assert!(ledger.reservations.is_empty());
@@ -6747,7 +6730,7 @@ mod tests {
 
         let raced_collection = ledger.begin_collection();
         assert_eq!(
-            ledger.try_reserve(&stale_plan, 3, 9, &BTreeSet::new()),
+            ledger.try_reserve(&stale_plan, 3, 9),
             Err(GrantFenceError::StalePlan)
         );
         assert!(
@@ -6759,7 +6742,7 @@ mod tests {
         snapshot.host_memory = ledger.snapshot();
         let fresh_plan = planner.plan(&snapshot).expect("fresh two-lease plan");
         ledger
-            .try_reserve(&fresh_plan, 3, 9, &BTreeSet::new())
+            .try_reserve(&fresh_plan, 3, 9)
             .expect("fresh aggregate reservation");
         assert_eq!(ledger.reservations.len(), 2);
     }
@@ -6830,7 +6813,7 @@ mod tests {
         snapshot.host_memory = ledger.snapshot();
         let plan = planner.plan(&snapshot).unwrap();
         assert_eq!(plan.immediate_leases.len(), 1);
-        ledger.try_reserve(&plan, 1, 1, &BTreeSet::new()).unwrap();
+        ledger.try_reserve(&plan, 1, 1).unwrap();
         assert_eq!(ledger.reservations.len(), 1);
     }
 
@@ -6920,6 +6903,78 @@ mod tests {
 
         ledger.release("h3");
         assert_eq!(ledger.headroom_bytes(), 15 << 30);
+    }
+
+    #[test]
+    fn reserved_work_stays_charged_until_release_for_every_family() {
+        // Every worker announces AllocationCommitted before its model finishes
+        // loading, so no sample can prove the frozen increment landed. H3 was
+        // only the first family to expose it; an LTX-2 lease whose Gemma
+        // encoder loads inside generate() is the same shape.
+        for work_id in ["h3", "ltx2"] {
+            let mut ledger = unsampled_memory(48 << 30, 33 << 30);
+            let initial = ledger.begin_collection();
+            ledger.publish_sample(initial, 48 << 30, 33 << 30);
+            let planner = Planner::default();
+            let mut snapshot = PlannerSnapshot::new(
+                1,
+                1,
+                0,
+                ledger.headroom_bytes(),
+                vec![DeviceSnapshot::idle("gpu-a", 24 << 30)],
+                vec![WorkSnapshot::new(
+                    work_id,
+                    0,
+                    vec![CandidatePlacement::new("gpu-a", "model", 10 << 30)],
+                )],
+            );
+            snapshot.host_memory = ledger.snapshot();
+            let plan = planner.plan(&snapshot).expect("single-lease plan");
+            ledger
+                .try_reserve(&plan, 1, 1)
+                .expect("reservation fits the sampled headroom");
+
+            // The commit lands before a single weight byte is allocated.
+            ledger.commit(work_id);
+            let after_commit = ledger.begin_collection();
+            ledger.publish_sample(after_commit, 48 << 30, 33 << 30);
+            assert!(
+                matches!(
+                    ledger.reservations[work_id].state,
+                    ReservationState::CommittedAfterSample { .. }
+                ),
+                "{work_id}: a sample cannot absorb an allocation that has not happened"
+            );
+            assert_eq!(
+                ledger.headroom_bytes(),
+                15 << 30,
+                "{work_id}: the reservation must stay charged until the lease settles"
+            );
+
+            let mut snapshot = PlannerSnapshot::new(
+                1,
+                1,
+                0,
+                ledger.headroom_bytes(),
+                vec![DeviceSnapshot::idle("gpu-b", 24 << 30)],
+                vec![WorkSnapshot::new(
+                    "peer",
+                    0,
+                    vec![CandidatePlacement::new("gpu-b", "model", 20 << 30)],
+                )],
+            );
+            snapshot.host_memory = ledger.snapshot();
+            let plan = Planner::default().plan(&snapshot).expect("peer plan");
+            assert!(plan.immediate_leases.is_empty(), "{work_id}");
+            assert_eq!(
+                plan.blocked_reason(&WorkId::new("peer")),
+                Some(&BlockedReason::InsufficientHostRam),
+                "{work_id}: a peer must park rather than double-spend the reservation"
+            );
+
+            ledger.release(work_id);
+            assert_eq!(ledger.headroom_bytes(), 25 << 30, "{work_id}");
+        }
     }
 
     #[test]
