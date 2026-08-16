@@ -58,8 +58,8 @@
       "family": "qwen-image",
       "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
       "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-      "qualified": false,
-      "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded",
+      "qualified": true,
+      "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract",
       "candidates": [
         [
           1328,
@@ -16416,7 +16416,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image-2512",
-        "profile_hash": "f4d5fcaebd91648143a47b44ae77971a82a2be6e6e2493887151ca7d528c6992",
+        "profile_hash": "bdacbc97cba130c5440150cf434ac0cdab0c8b269808396323437a86229a4bc3",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16435,7 +16435,92 @@
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1800000,
-              "aspect_groups": []
+              "aspect_groups": [
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "1328x1328",
+                      "width": 1328,
+                      "height": 1328,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈16:9",
+                  "label": "≈16:9",
+                  "presets": [
+                    {
+                      "id": "1664x928",
+                      "width": 1664,
+                      "height": 928,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈9:16",
+                  "label": "≈9:16",
+                  "presets": [
+                    {
+                      "id": "928x1664",
+                      "width": 928,
+                      "height": 1664,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "4:3",
+                  "label": "4:3",
+                  "presets": [
+                    {
+                      "id": "1472x1104",
+                      "width": 1472,
+                      "height": 1104,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:4",
+                  "label": "3:4",
+                  "presets": [
+                    {
+                      "id": "1104x1472",
+                      "width": 1104,
+                      "height": 1472,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "1584x1056",
+                      "width": 1584,
+                      "height": 1056,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "1056x1584",
+                      "width": 1056,
+                      "height": 1584,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
             },
             "steps": {
               "default": 50,
@@ -16518,8 +16603,8 @@
                 "kind": "upstream",
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-                "qualified": false,
-                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded"
+                "qualified": true,
+                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
               }
             ]
           }
@@ -16542,7 +16627,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image-distill",
-        "profile_hash": "2678669bac07550f103b6b4f9b1b3ea546a259ac019743b03c102e2133b212c8",
+        "profile_hash": "bbb2a26828cf53b6ef04d5e20523a035d01cd430e3d0193322bb37bea6d66aec",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16561,7 +16646,92 @@
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1800000,
-              "aspect_groups": []
+              "aspect_groups": [
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "1328x1328",
+                      "width": 1328,
+                      "height": 1328,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈16:9",
+                  "label": "≈16:9",
+                  "presets": [
+                    {
+                      "id": "1664x928",
+                      "width": 1664,
+                      "height": 928,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈9:16",
+                  "label": "≈9:16",
+                  "presets": [
+                    {
+                      "id": "928x1664",
+                      "width": 928,
+                      "height": 1664,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "4:3",
+                  "label": "4:3",
+                  "presets": [
+                    {
+                      "id": "1472x1104",
+                      "width": 1472,
+                      "height": 1104,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:4",
+                  "label": "3:4",
+                  "presets": [
+                    {
+                      "id": "1104x1472",
+                      "width": 1104,
+                      "height": 1472,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "1584x1056",
+                      "width": 1584,
+                      "height": 1056,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "1056x1584",
+                      "width": 1056,
+                      "height": 1584,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
             },
             "steps": {
               "default": 15,
@@ -16644,8 +16814,8 @@
                 "kind": "upstream",
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-                "qualified": false,
-                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded"
+                "qualified": true,
+                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
               }
             ]
           }
@@ -16668,7 +16838,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image-flash",
-        "profile_hash": "ab5f24a5e6d57c074ee38e4f3c17cabe004b238ab4dbe82ad5a1924ab499bba3",
+        "profile_hash": "a98ae058345f418ac489241ba0f13a58edddfb3e835ae1bd7b08a25b01f8c35c",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16687,7 +16857,92 @@
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1800000,
-              "aspect_groups": []
+              "aspect_groups": [
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "1328x1328",
+                      "width": 1328,
+                      "height": 1328,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈16:9",
+                  "label": "≈16:9",
+                  "presets": [
+                    {
+                      "id": "1664x928",
+                      "width": 1664,
+                      "height": 928,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈9:16",
+                  "label": "≈9:16",
+                  "presets": [
+                    {
+                      "id": "928x1664",
+                      "width": 928,
+                      "height": 1664,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "4:3",
+                  "label": "4:3",
+                  "presets": [
+                    {
+                      "id": "1472x1104",
+                      "width": 1472,
+                      "height": 1104,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:4",
+                  "label": "3:4",
+                  "presets": [
+                    {
+                      "id": "1104x1472",
+                      "width": 1104,
+                      "height": 1472,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "1584x1056",
+                      "width": 1584,
+                      "height": 1056,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "1056x1584",
+                      "width": 1056,
+                      "height": 1584,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
             },
             "steps": {
               "default": 4,
@@ -16770,8 +17025,8 @@
                 "kind": "upstream",
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-                "qualified": false,
-                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded"
+                "qualified": true,
+                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
               }
             ]
           }
@@ -16789,7 +17044,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image-lightning",
-        "profile_hash": "5f8ce16d397d82442a72d709b40877c9c3c75f2c437c4bdae7f307c8ef739d3d",
+        "profile_hash": "119c55322a38f2ad63d393ef931e24d2336c89a657f5e3ecbf5e2967d0b44abb",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16808,7 +17063,92 @@
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1800000,
-              "aspect_groups": []
+              "aspect_groups": [
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "1328x1328",
+                      "width": 1328,
+                      "height": 1328,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈16:9",
+                  "label": "≈16:9",
+                  "presets": [
+                    {
+                      "id": "1664x928",
+                      "width": 1664,
+                      "height": 928,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈9:16",
+                  "label": "≈9:16",
+                  "presets": [
+                    {
+                      "id": "928x1664",
+                      "width": 928,
+                      "height": 1664,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "4:3",
+                  "label": "4:3",
+                  "presets": [
+                    {
+                      "id": "1472x1104",
+                      "width": 1472,
+                      "height": 1104,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:4",
+                  "label": "3:4",
+                  "presets": [
+                    {
+                      "id": "1104x1472",
+                      "width": 1104,
+                      "height": 1472,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "1584x1056",
+                      "width": 1584,
+                      "height": 1056,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "1056x1584",
+                      "width": 1056,
+                      "height": 1584,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
             },
             "steps": {
               "default": 4,
@@ -16891,8 +17231,8 @@
                 "kind": "upstream",
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-                "qualified": false,
-                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded"
+                "qualified": true,
+                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
               }
             ]
           }
@@ -16910,7 +17250,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image-lightning",
-        "profile_hash": "3bc6cc213ffad6ecd9e91b9e33385f9e896f1ce79104b6f287b8df7bcfd14fcc",
+        "profile_hash": "abbf897a109a4cb1256fedac07e79d4e1f37939dca3ea6951487403a9aeea148",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16929,7 +17269,92 @@
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1800000,
-              "aspect_groups": []
+              "aspect_groups": [
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "1328x1328",
+                      "width": 1328,
+                      "height": 1328,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈16:9",
+                  "label": "≈16:9",
+                  "presets": [
+                    {
+                      "id": "1664x928",
+                      "width": 1664,
+                      "height": 928,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈9:16",
+                  "label": "≈9:16",
+                  "presets": [
+                    {
+                      "id": "928x1664",
+                      "width": 928,
+                      "height": 1664,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "4:3",
+                  "label": "4:3",
+                  "presets": [
+                    {
+                      "id": "1472x1104",
+                      "width": 1472,
+                      "height": 1104,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:4",
+                  "label": "3:4",
+                  "presets": [
+                    {
+                      "id": "1104x1472",
+                      "width": 1104,
+                      "height": 1472,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "1584x1056",
+                      "width": 1584,
+                      "height": 1056,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "1056x1584",
+                      "width": 1056,
+                      "height": 1584,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
             },
             "steps": {
               "default": 8,
@@ -17012,8 +17437,8 @@
                 "kind": "upstream",
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-                "qualified": false,
-                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded"
+                "qualified": true,
+                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
               }
             ]
           }
@@ -17066,7 +17491,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image",
-        "profile_hash": "937d87cd33d58722f402a6c14a01946c08145ad5fc77ee8985fb4f7fd3608ef6",
+        "profile_hash": "2a9c24b2f917612549d901f8a012619220f8f323087392141505adcfc1dd9364",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -17085,7 +17510,92 @@
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1800000,
-              "aspect_groups": []
+              "aspect_groups": [
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "1328x1328",
+                      "width": 1328,
+                      "height": 1328,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈16:9",
+                  "label": "≈16:9",
+                  "presets": [
+                    {
+                      "id": "1664x928",
+                      "width": 1664,
+                      "height": 928,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈9:16",
+                  "label": "≈9:16",
+                  "presets": [
+                    {
+                      "id": "928x1664",
+                      "width": 928,
+                      "height": 1664,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "4:3",
+                  "label": "4:3",
+                  "presets": [
+                    {
+                      "id": "1472x1104",
+                      "width": 1472,
+                      "height": 1104,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:4",
+                  "label": "3:4",
+                  "presets": [
+                    {
+                      "id": "1104x1472",
+                      "width": 1104,
+                      "height": 1472,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "1584x1056",
+                      "width": 1584,
+                      "height": 1056,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "1056x1584",
+                      "width": 1056,
+                      "height": 1584,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
             },
             "steps": {
               "default": 50,
@@ -17168,8 +17678,8 @@
                 "kind": "upstream",
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-                "qualified": false,
-                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded"
+                "qualified": true,
+                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
               }
             ]
           }
@@ -17217,7 +17727,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image-edit.qwen-image-edit-2511",
-        "profile_hash": "92a923d0572aa6bbd057968c52971ba1424676e6f370212e628394d757085fcc",
+        "profile_hash": "65d26a1d98818b80bce51f864925d7d67931cacea596f2132d54828875e00939",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -17236,7 +17746,92 @@
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1800000,
-              "aspect_groups": []
+              "aspect_groups": [
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "1328x1328",
+                      "width": 1328,
+                      "height": 1328,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈16:9",
+                  "label": "≈16:9",
+                  "presets": [
+                    {
+                      "id": "1664x928",
+                      "width": 1664,
+                      "height": 928,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈9:16",
+                  "label": "≈9:16",
+                  "presets": [
+                    {
+                      "id": "928x1664",
+                      "width": 928,
+                      "height": 1664,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "4:3",
+                  "label": "4:3",
+                  "presets": [
+                    {
+                      "id": "1472x1104",
+                      "width": 1472,
+                      "height": 1104,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:4",
+                  "label": "3:4",
+                  "presets": [
+                    {
+                      "id": "1104x1472",
+                      "width": 1104,
+                      "height": 1472,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "1584x1056",
+                      "width": 1584,
+                      "height": 1056,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "1056x1584",
+                      "width": 1056,
+                      "height": 1584,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
             },
             "steps": {
               "default": 50,
@@ -17319,8 +17914,8 @@
                 "kind": "upstream",
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-                "qualified": false,
-                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded"
+                "qualified": true,
+                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
               }
             ]
           }
@@ -17338,7 +17933,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image-edit.qwen-image-edit-lightning",
-        "profile_hash": "2a7c3f15ce20372bd3c2b6d8fc68de63ce15e1e38d70b0c751099acdcf539b57",
+        "profile_hash": "484b16f943bf0868b3ad9343de364cfa28fa81082241bd2716f0b7ef63ef49fb",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -17357,7 +17952,92 @@
               "min_width": 64,
               "min_height": 64,
               "max_pixels": 1800000,
-              "aspect_groups": []
+              "aspect_groups": [
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "1328x1328",
+                      "width": 1328,
+                      "height": 1328,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈16:9",
+                  "label": "≈16:9",
+                  "presets": [
+                    {
+                      "id": "1664x928",
+                      "width": 1664,
+                      "height": 928,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "≈9:16",
+                  "label": "≈9:16",
+                  "presets": [
+                    {
+                      "id": "928x1664",
+                      "width": 928,
+                      "height": 1664,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "4:3",
+                  "label": "4:3",
+                  "presets": [
+                    {
+                      "id": "1472x1104",
+                      "width": 1472,
+                      "height": 1104,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:4",
+                  "label": "3:4",
+                  "presets": [
+                    {
+                      "id": "1104x1472",
+                      "width": 1104,
+                      "height": 1472,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "1584x1056",
+                      "width": 1584,
+                      "height": 1056,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "1056x1584",
+                      "width": 1056,
+                      "height": 1584,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
             },
             "steps": {
               "default": 4,
@@ -17440,8 +18120,8 @@
                 "kind": "upstream",
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-                "qualified": false,
-                "evidence": "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded"
+                "qualified": true,
+                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
               }
             ]
           }

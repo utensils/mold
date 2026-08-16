@@ -6882,13 +6882,12 @@ mod tests {
     }
 
     #[test]
-    fn dimension_warning_qwen_image_withholds_unqualified_candidates() {
-        assert!(recommended_dimensions("qwen-image").is_empty());
-        // No recommendation warning is emitted when Mold has not qualified a
-        // recommendation set. The ordinary dynamic canvas constraints remain
-        // the admission authority.
+    fn dimension_warning_qwen_image_uses_upstream_aspect_presets() {
+        assert_eq!(recommended_dimensions("qwen-image").len(), 7);
         assert_eq!(dimension_warning(1328, 1328, "qwen-image"), None);
-        assert_eq!(dimension_warning(512, 512, "qwen-image"), None);
+        assert_eq!(dimension_warning(1664, 928, "qwen-image"), None);
+        assert_eq!(dimension_warning(928, 1664, "qwen-image"), None);
+        assert!(dimension_warning(512, 512, "qwen-image").is_some());
     }
 
     #[test]
@@ -6897,7 +6896,7 @@ mod tests {
             recommended_dimensions("qwen-image-edit"),
             recommended_dimensions("qwen-image")
         );
-        assert_eq!(dimension_warning(1024, 1024, "qwen-image-edit"), None);
+        assert_eq!(dimension_warning(1328, 1328, "qwen-image-edit"), None);
     }
 
     #[test]
@@ -6912,10 +6911,8 @@ mod tests {
     #[test]
     fn every_family_native_in_recommendations() {
         // Each family with a qualified recommendation set includes its native
-        // resolution. Z-Image joined them once its exact-size Q4 Metal
-        // generation-and-delivery campaign was checked in
-        // (`Z_IMAGE_QUALIFICATION`); Qwen remains dynamic-only until its own
-        // pinned candidates pass one.
+        // resolution. Z-Image and Qwen both expose their qualified upstream
+        // aspect sets through the same shared profile registry.
         let families = &[
             ("sd15", 512, 512),
             ("sdxl", 1024, 1024),
@@ -6926,6 +6923,8 @@ mod tests {
             ("ltx-video", 768, 512),
             ("minimax-h3", 1344, 768),
             ("z-image", 1024, 1024),
+            ("qwen-image", 1328, 1328),
+            ("qwen-image-edit", 1328, 1328),
         ];
         for (family, w, h) in families {
             let dims = recommended_dimensions(family);
@@ -6933,9 +6932,6 @@ mod tests {
                 dims.contains(&(*w, *h)),
                 "{family} native {w}x{h} missing from recommended list"
             );
-        }
-        for family in ["qwen-image", "qwen-image-edit"] {
-            assert!(recommended_dimensions(family).is_empty());
         }
     }
 
