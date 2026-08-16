@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Now Developing shows completed image and video thumbnails.** Desktop sidebar activity rows now load the same authenticated gallery thumbnails as Library, including remote-host videos that previously fell back to an empty black tile.
+
 ## [0.22.1] - 2026-08-16
 
 ## [0.22.0] - 2026-08-15

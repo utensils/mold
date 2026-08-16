@@ -4,6 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import NavItem from "@ui/components/NavItem.vue";
 import Keycap from "@ui/components/Keycap.vue";
 import LiveActivityList from "@ui/components/LiveActivityList.vue";
+import AuthedMedia from "../gallery/AuthedMedia.vue";
 import type { IconName } from "@ui/icons";
 import logoUrl from "../../assets/logo.png";
 import StatusPopover from "./StatusPopover.vue";
@@ -36,6 +37,7 @@ import { shortcutLabel } from "../../lib/platform";
 import { modelDisplayNameForId } from "../../lib/models";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { useOpenLiveWork } from "../../composables/useOpenLiveWork";
+import { thumbnailPath } from "../../lib/gallery/media";
 
 const route = useRoute();
 const router = useRouter();
@@ -356,8 +358,15 @@ function selectSequence(vm: ActivityJobVM & { kind: "sequence" }) {
           <span
             class="h-[30px] w-[30px] shrink-0 overflow-hidden rounded-[6px] border border-[color-mix(in_srgb,var(--rebate)_12%,transparent)] bg-print-surface"
           >
+            <AuthedMedia
+              v-if="job.status === 'complete' && job.result?.filename"
+              :path="thumbnailPath(job.result.filename)"
+              :target="generation.targetForJob(job.clientId)"
+              :cache-key="job.hostId ?? hosts.primaryHost?.id ?? 'primary'"
+              :alt="job.prompt"
+            />
             <img
-              v-if="job.resultUrl && !job.result?.video_frames"
+              v-else-if="job.resultUrl && !job.result?.video_frames"
               :src="job.resultUrl"
               alt=""
               class="h-full w-full object-cover"
