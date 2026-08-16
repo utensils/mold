@@ -1123,6 +1123,7 @@ export function applyRequestToForm(
   form.sourceImageName = request.source_image_name ?? null;
   form.sourceImageWidth = null;
   form.sourceImageHeight = null;
+  form.sourceFit = parseSourceFitPolicy(request.source_fit) ?? form.sourceFit;
   form.imageAttachments = [...(request.edit_images ?? [])];
   form.maskImage = request.mask_image ?? null;
   form.controlImage = request.control_image ?? null;

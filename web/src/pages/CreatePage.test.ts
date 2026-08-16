@@ -2418,6 +2418,8 @@ describe("CreatePage layout and behavior", () => {
         height: 512,
         steps: 20,
         guidance: 3,
+        source_fit: { mode: "crop-fill", alignX: "right", alignY: "bottom" },
+        enable_audio: true,
       },
       startedAt: 0,
       controller: new AbortController(),
@@ -2458,6 +2460,12 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.controlModel).toBe("");
     expect(form.state.value.frames).toBeNull();
     expect(form.state.value.imageAttachments).toEqual([]);
+    expect(form.state.value.sourceFitPolicy).toEqual({
+      mode: "crop-fill",
+      alignX: "right",
+      alignY: "bottom",
+    });
+    expect(form.state.value.enableAudio).toBe(true);
   });
 
   it("restores a queued camera LoRA into both the picker and visible stack", async () => {
