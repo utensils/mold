@@ -567,6 +567,9 @@ struct PendingGeneration {
     retry_not_before_ms: Option<u64>,
     preparation_retry_attempts: u8,
     preparation_refresh_observation: Option<PreparationRefreshObservation>,
+    /// Place in line this job's client was last told about, so a drained queue
+    /// re-announces exactly once per actual move. `None` until first observed.
+    announced_position: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1450,6 +1453,44 @@ impl Coordinator {
             .publish_host_memory(self.memory.wire_snapshot());
     }
 
+    /// Re-emit `Queued { position }` for every still-queued job whose place in
+    /// line moved, using the registry order `GET /api/queue` reports.
+    ///
+    /// A client used to learn its position exactly once, in the first SSE
+    /// event, and the queue then drained in silence. This needs no new event
+    /// type: both terminal clients render `Queued` in place — indicatif's
+    /// `set_message` and the TUI's `current_stage` — so a repeat reads as a
+    /// live update rather than another line.
+    ///
+    /// Only an actual change emits. Reconcile runs on every registry
+    /// notification and on a 10 ms ticker, so announcing unconditionally would
+    /// be a firehose. The first observation seeds silently: the submit-time
+    /// event has already told that client where it stands.
+    fn announce_queue_positions(&mut self, listing: &crate::job_registry::QueueListing) {
+        for entry in &listing.entries {
+            if entry.state != crate::job_registry::JobLifecycle::Queued {
+                continue;
+            }
+            let Some(pending) = self.pending.get_mut(&entry.id) else {
+                continue;
+            };
+            if pending.announced_position == Some(entry.position) {
+                continue;
+            }
+            let seeding = pending.announced_position.is_none();
+            pending.announced_position = Some(entry.position);
+            if seeding {
+                continue;
+            }
+            if let Some(progress) = pending.job.progress_tx.as_ref() {
+                let _ = progress.send(SseMessage::Progress(mold_core::SseProgressEvent::Queued {
+                    position: entry.position,
+                    id: entry.id.clone(),
+                }));
+            }
+        }
+    }
+
     fn install_cpu_utility_lane(
         &mut self,
         tx: std::sync::mpsc::SyncSender<crate::gpu_pool::GpuWorkerCommand>,
@@ -1526,6 +1567,7 @@ impl Coordinator {
                 retry_not_before_ms: None,
                 preparation_retry_attempts: 0,
                 preparation_refresh_observation: None,
+                announced_position: None,
             },
         );
         self.mutate(immediate);
@@ -2095,6 +2137,7 @@ impl Coordinator {
                                         ),
                                         preparation_retry_attempts: 0,
                                         preparation_refresh_observation: None,
+                                        announced_position: None,
                                     },
                                 );
                             }
@@ -2117,6 +2160,7 @@ impl Coordinator {
                                     retry_not_before_ms: None,
                                     preparation_retry_attempts: 0,
                                     preparation_refresh_observation: None,
+                                    announced_position: None,
                                 },
                             );
                         }
@@ -2449,6 +2493,7 @@ impl Coordinator {
         }
 
         let listing = self.state.job_registry.snapshot();
+        self.announce_queue_positions(&listing);
         let queue_shape = listing
             .entries
             .iter()
@@ -4665,6 +4710,7 @@ impl Coordinator {
                                     retry_not_before_ms,
                                     preparation_retry_attempts: 0,
                                     preparation_refresh_observation: None,
+                                    announced_position: None,
                                 },
                             );
                             self.unavailable.insert(device_id.clone());
@@ -6474,6 +6520,105 @@ mod tests {
                 "{backend:?} reserved {reserved} host bytes"
             );
         }
+    }
+
+    fn fake_generation_with_progress(
+        id: &str,
+    ) -> (
+        GenerationJob,
+        tokio::sync::mpsc::UnboundedReceiver<SseMessage>,
+        tokio::sync::oneshot::Receiver<Result<crate::state::GenerationJobResult, String>>,
+    ) {
+        let (job, result) = fake_generation(id);
+        let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            GenerationJob {
+                progress_tx: Some(progress_tx),
+                ..job
+            },
+            progress_rx,
+            result,
+        )
+    }
+
+    fn drain_queued_positions(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<SseMessage>,
+    ) -> Vec<usize> {
+        let mut positions = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let SseMessage::Progress(mold_core::SseProgressEvent::Queued { position, .. }) =
+                message
+            {
+                positions.push(position);
+            }
+        }
+        positions
+    }
+
+    /// A queued client is told its place in line as the queue drains.
+    ///
+    /// The only position a client ever received was the submit-time depth in
+    /// its first SSE event; after that the queue moved in silence. Positions
+    /// are re-announced from the registry — the same order `GET /api/queue`
+    /// reports — and only when a job's own place actually changed, so a
+    /// reconcile tick over a still queue emits nothing.
+    #[tokio::test]
+    async fn a_draining_queue_reannounces_positions_only_when_they_change() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(8);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 8);
+        let mut progress = Vec::new();
+        let mut results = Vec::new();
+        for id in ["a", "b", "c"] {
+            state.job_registry.register(id, "flux-dev:q4");
+            let (job, progress_rx, result) = fake_generation_with_progress(id);
+            progress.push(progress_rx);
+            results.push(result);
+            queue.submit(job, 8).await.unwrap();
+        }
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state.clone(),
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        for _ in 0..3 {
+            coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        }
+
+        // First observation seeds each job's known place without re-telling a
+        // client what its submit-time event already said.
+        coordinator.reconcile_external_mutations(&mut immediate);
+        for (index, rx) in progress.iter_mut().enumerate() {
+            assert!(
+                drain_queued_positions(rx).is_empty(),
+                "job {index} must not be re-announced before anything moved"
+            );
+        }
+
+        state.job_registry.remove("a");
+        coordinator.reconcile_external_mutations(&mut immediate);
+        assert_eq!(
+            drain_queued_positions(&mut progress[1]),
+            vec![0],
+            "b moved to the front and must be told once"
+        );
+        assert_eq!(drain_queued_positions(&mut progress[2]), vec![1]);
+
+        // A tick over an unchanged queue is silent.
+        coordinator.reconcile_external_mutations(&mut immediate);
+        for (index, rx) in progress.iter_mut().enumerate() {
+            assert!(
+                drain_queued_positions(rx).is_empty(),
+                "job {index} must not be re-announced without a change"
+            );
+        }
+        drop(results);
+        coordinator.stop_preparations().await;
     }
 
     fn recv_grant(rx: &std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>) -> GpuJob {
