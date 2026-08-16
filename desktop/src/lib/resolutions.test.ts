@@ -46,10 +46,12 @@ describe("resolution presets", () => {
     expect(matchPreset(1000, 1000, "flux")).toBeNull();
   });
 
-  it("withholds Qwen candidates until core qualification is recorded", () => {
+  it("exposes Qwen Image aspect presets for generation and editing", () => {
     for (const family of ["qwen-image", "qwen-image-edit"]) {
-      expect(matchPreset(1328, 1328, family)).toBeNull();
-      expect(presetsForFamily(family)).toEqual([]);
+      expect(matchPreset(1328, 1328, family)?.aspect).toBe("1:1");
+      expect(matchPreset(1664, 928, family)?.aspect).toBe("≈16:9");
+      expect(matchPreset(928, 1664, family)?.aspect).toBe("≈9:16");
+      expect(presetsForFamily(family)).toHaveLength(7);
     }
   });
 

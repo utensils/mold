@@ -284,17 +284,12 @@ their steps and sizes under
 | Width | Height | Aspect Ratio |
 | ----- | ------ | ------------ |
 | 1328  | 1328   | 1:1 (native) |
-| 1024  | 1024   | 1:1          |
-| 1152  | 896    | 9:7          |
-| 896   | 1152   | 7:9          |
-| 1216  | 832    | 19:13        |
-| 832   | 1216   | 13:19        |
-| 1344  | 768    | 7:4          |
-| 768   | 1344   | 4:7          |
 | 1664  | 928    | ~16:9        |
 | 928   | 1664   | ~9:16        |
-| 768   | 768    | 1:1 (small)  |
-| 512   | 512    | 1:1 (small)  |
+| 1472  | 1104   | 4:3          |
+| 1104  | 1472   | 3:4          |
+| 1584  | 1056   | 3:2          |
+| 1056  | 1584   | 2:3          |
 
 Using non-recommended dimensions will trigger a warning. All values must be
 multiples of 16.
