@@ -706,11 +706,18 @@ jobs:
             -f "sha=${GITHUB_SHA}" \
             -F force=true >/dev/null
 
-          tag_sha="$(
-            gh api \
-              "repos/${GITHUB_REPOSITORY}/git/ref/tags/latest" \
-              --jq '.object.sha'
-          )"
+          # GitHub's ref read can briefly lag a successful forced update.
+          # Retry only the observation; the mutation remains single-shot.
+          tag_sha=""
+          for attempt in $(seq 1 10); do
+            tag_sha="$(
+              gh api \
+                "repos/${GITHUB_REPOSITORY}/git/ref/tags/latest" \
+                --jq '.object.sha'
+            )"
+            [[ "$tag_sha" == "$GITHUB_SHA" ]] && break
+            [[ "$attempt" -eq 10 ]] || sleep 2
+          done
           if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
             echo "::error::latest resolved to $tag_sha instead of $GITHUB_SHA"
             exit 1
