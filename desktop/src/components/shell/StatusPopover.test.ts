@@ -431,3 +431,92 @@ describe("StatusPopover trigger", () => {
     expect(wrapper.find("[role='dialog']").exists()).toBe(true);
   });
 });
+
+describe("StatusPopover host-memory pressure", () => {
+  const RAM_SNAPSHOT = JSON.stringify({
+    hostname: "plato",
+    timestamp: 0,
+    gpus: [],
+    system_ram: {
+      total: 64_000_000_000,
+      used: 60_000_000_000,
+      used_by_mold: 0,
+      used_by_other: 0,
+    },
+  });
+
+  async function openWithRam(hostMemory: unknown) {
+    apiJson.mockResolvedValue({
+      version: "0.16.0",
+      models_loaded: [],
+      uptime_secs: 1,
+      queue_depth: 0,
+      queue_capacity: 200,
+      ...(hostMemory === undefined ? {} : { host_memory: hostMemory }),
+    });
+    const wrapper = mountPopover();
+    await flushPromises();
+    streamCalls.at(-1)?.onEvent?.("snapshot", RAM_SNAPSHOT);
+    await openPopover(wrapper);
+    return wrapper;
+  }
+
+  // `/api/status` is the fresher source and the only one polled while neither
+  // Machines nor a queued print is holding the cross-host queue poll open.
+  it("colors the RAM row from the status snapshot with no queue polling active", async () => {
+    const wrapper = await openWithRam({
+      total_bytes: 64_000_000_000,
+      available_bytes: 4_000_000_000,
+      headroom_bytes: 0,
+      safety_floor_bytes: 4_000_000_000,
+    });
+    const ram = wrapper.get("[data-test='status-ram']");
+    expect(ram.classes()).toContain("text-stop");
+    expect(ram.classes()).not.toContain("text-ink-3");
+  });
+
+  it("warns inside one safety floor of the wall", async () => {
+    const wrapper = await openWithRam({
+      total_bytes: 64_000_000_000,
+      available_bytes: 6_000_000_000,
+      headroom_bytes: 3_000_000_000,
+      safety_floor_bytes: 4_000_000_000,
+    });
+    expect(wrapper.get("[data-test='status-ram']").classes()).toContain("text-halide");
+  });
+
+  // The status poll is primary-only by design, so its ledger describes this
+  // Mac. Painting it onto a remote's RAM row would report the wrong machine.
+  it("never paints the primary's ledger onto a remote display host", async () => {
+    apiJson.mockResolvedValue({
+      version: "0.16.0",
+      models_loaded: [],
+      uptime_secs: 1,
+      queue_depth: 0,
+      queue_capacity: 200,
+      host_memory: {
+        total_bytes: 64_000_000_000,
+        available_bytes: 1_000_000_000,
+        headroom_bytes: 0,
+        safety_floor_bytes: 4_000_000_000,
+      },
+    });
+    const wrapper = mountPopover();
+    addRemoteHost();
+    useAppPrefsStore().settings = { generateTargetHost: "hal9000-7680" } as never;
+    await flushPromises();
+    streamCalls.at(-1)?.onEvent?.("snapshot", RAM_SNAPSHOT);
+    await openPopover(wrapper);
+    const ram = wrapper.get("[data-test='status-ram']");
+    expect(ram.classes()).toContain("text-ink-3");
+    expect(ram.classes()).not.toContain("text-stop");
+  });
+
+  it("keeps the neutral look when neither source reports host memory", async () => {
+    const wrapper = await openWithRam(undefined);
+    const ram = wrapper.get("[data-test='status-ram']");
+    expect(ram.classes()).toContain("text-ink-3");
+    expect(ram.classes()).not.toContain("text-stop");
+    expect(ram.attributes("title")).toBeUndefined();
+  });
+});

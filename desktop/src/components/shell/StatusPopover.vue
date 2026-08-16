@@ -10,6 +10,7 @@ import { useToastStore } from "../../stores/toasts";
 import { apiJson } from "../../lib/api/client";
 import { gpuSnapshotsFromWorkers } from "../../lib/api/gpuStatus";
 import { sseStream } from "../../lib/api/sse";
+import { hostMemoryLevel } from "@studio/lib/hostMemory";
 import { formatGB, percent, vramLevel } from "../../lib/format";
 import { normalizeTargetHost, pickDisplayHost } from "../../lib/hosts";
 import { shouldRestartEmbeddedEngine } from "../../lib/connectionRecovery";
@@ -89,6 +90,41 @@ const stableDevices = computed(() => {
 const queuePlan = computed(() => {
   const host = displayHost.value;
   return host ? (jobs.queues[host.id]?.plan ?? null) : null;
+});
+/**
+ * Host-RAM pressure from the scheduler's own ledger, not used/total: RAM
+ * committed to a reservation that has not allocated yet looks free to the OS,
+ * and that gap is what parks a queue.
+ *
+ * `/api/status` is the source of record — this popover polls it every 10 s for
+ * the primary, whereas the queue plan's mirror only refreshes when a plan is
+ * published for some other reason AND when something is holding the cross-host
+ * queue poll open (Machines mounted, or Create with queued work). Reading the
+ * plan first blanked the indicator exactly when the last queued job started
+ * running. The status poll is deliberately primary-only, so a remote display
+ * host still falls back to that host's queue plan.
+ */
+const hostMemory = computed(
+  () =>
+    (displayingRemote.value ? null : (status.value?.host_memory ?? null)) ??
+    queuePlan.value?.host_memory ??
+    null,
+);
+const hostMemoryPressure = computed(() => hostMemoryLevel(hostMemory.value));
+const ramToneClass = computed(() => {
+  switch (hostMemoryPressure.value) {
+    case "critical":
+      return "text-stop";
+    case "warn":
+      return "text-halide";
+    default:
+      return "text-ink-3";
+  }
+});
+const ramTitle = computed(() => {
+  const memory = hostMemory.value;
+  if (!memory) return undefined;
+  return `${formatGB(memory.headroom_bytes)} of ${formatGB(memory.total_bytes)} available to schedule`;
 });
 const replanLabel = computed(() => {
   const deadline = queuePlan.value?.next_replan_at_unix_ms;
@@ -360,9 +396,11 @@ onUnmounted(() => {
       </template>
       <p v-else class="text-caption text-ink-3">{{ unavailableTelemetryLabel }}</p>
 
-      <div v-if="snapshot" class="mt-2 flex items-center justify-between">
+      <div v-if="snapshot" class="mt-2 flex items-center justify-between" :title="ramTitle">
         <span class="edge-code">ram</span>
-        <span class="data-mono text-ink-3">{{ formatGB(snapshot.system_ram.used) }}</span>
+        <span class="data-mono" :class="ramToneClass" data-test="status-ram">
+          {{ formatGB(snapshot.system_ram.used) }}
+        </span>
       </div>
 
       <template v-if="displayStatus.modelsLoaded.length">

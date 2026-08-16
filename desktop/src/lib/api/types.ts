@@ -5,6 +5,7 @@
  */
 
 import type { ChainOutputMetadata } from "@studio/lib/api/chainTypes";
+import type { HostMemorySnapshot } from "@studio/lib/hostMemory";
 import type {
   GenerationReference,
   GenerationReferenceMetadata,
@@ -74,6 +75,11 @@ export interface ServerStatus {
   instance_id?: string | null;
   /** Disk stats for the filesystem holding the models dir; absent on older servers. */
   models_disk?: { total_bytes: number; free_bytes: number } | null;
+  /** Host-RAM ledger snapshot; absent on older servers. This is the FRESHER
+   * copy — the queue plan only republishes its mirror when a plan is emitted
+   * for some other reason. Read it through `hostMemoryLevel`, which validates
+   * before anything renders. */
+  host_memory?: HostMemorySnapshot | null;
 }
 
 export type ExpandBackend = "local" | "api";

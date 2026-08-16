@@ -70,13 +70,25 @@ import {
   requiresAuthoritativePlacement,
   type GenerationPlacementPreview,
 } from "@studio/api/generationPlacement";
-import { mergeActivity, sequenceToVM, type ActivityJobVM } from "@studio/lib/activity";
+import {
+  mergeActivity,
+  sequenceToVM,
+  withLiveQueueStatus,
+  type ActivityJobVM,
+  type PrintActivityVM,
+} from "@studio/lib/activity";
+import {
+  blockedReasonLabel,
+  buildQueueStatusIndex,
+  queueStatusFor,
+} from "@studio/lib/queuePosition";
 import {
   mergeFleetActivity,
   listActiveWork,
   reconcileActivityHost,
   type ActivityHostSnapshot,
 } from "@studio/api/activity";
+import { listQueue, type QueueListing } from "@studio/api/queuePlan";
 import { buildChainRequest } from "@studio/lib/sequenceForm";
 import { chainScriptToClips } from "@studio/lib/sequenceForm";
 import { normalizeServerChainScript } from "@studio/lib/chainScriptWire";
@@ -246,7 +258,14 @@ interface CatalogFilterIntent {
 
 /** One queue row, already resolved to the print or sequence it renders. */
 type ActivityRow =
-  | { key: string; print: Job; sequence: null }
+  | {
+      key: string;
+      print: Job;
+      /** Live dispatch order from `/api/queue`; absent on older hosts. */
+      queuePosition: number | null;
+      blockedReason: string | null;
+      sequence: null;
+    }
   | { key: string; print: null; sequence: Extract<ActivityJobVM, { kind: "sequence" }> };
 
 interface DiscoveredHost {
@@ -387,6 +406,9 @@ function loadMobileActivity(): Record<string, ActivityHostSnapshot> {
   }
 }
 const liveActivityHosts = ref(loadMobileActivity());
+/** Live `/api/queue` listings per host, in memory only. Unlike the activity
+ *  snapshot this carries full prompts, so it is deliberately never persisted. */
+const liveQueues = ref<Record<string, QueueListing>>({});
 const liveActivityEpochs: Record<string, number> = {};
 let liveActivityTimer: ReturnType<typeof setInterval> | null = null;
 let liveActivityRefreshing = false;
@@ -1136,30 +1158,44 @@ const queuedJobs = computed(() => railOrder(generation.pending));
 const printJobsByKey = computed(
   () => new Map(generation.pending.map((job) => [`print:${job.clientId}`, job])),
 );
+/** Live dispatch order across every connected host, folded from the queue
+ *  listings the activity poll already reads. */
+const queueStatusIndex = computed(() =>
+  buildQueueStatusIndex(
+    Object.entries(liveQueues.value).map(([hostId, listing]) => ({
+      hostId,
+      entries: listing.entries,
+      plan: listing.plan,
+    })),
+  ),
+);
 const printActivity = computed<ActivityJobVM[]>(() => {
   const ordered = queuedJobs.value;
   // `mergeActivity` sorts active work by RECENCY, but a print queue is FIFO.
   // Re-express each rail position as a descending timestamp so the merge can
   // interleave sequences without ever reversing the queue the user submitted.
   const newest = ordered.reduce((max, job) => Math.max(max, job.clientId), 0);
-  return ordered.map((job, index) => ({
-    kind: "print" as const,
-    key: `print:${job.clientId}`,
-    hostId: job.hostId ?? selectedHostId.value,
-    hostLabel: job.hostLabel ?? "",
-    model: job.model,
-    prompt: job.prompt,
-    phase: job.status === "queued" ? ("queued" as const) : ("running" as const),
-    progress: null,
-    chain: null,
-    actions: ["cancel" as const],
-    createdAtMs: newest - index,
-    // The iPhone queue renders `generation.pending` only, so nothing settled
-    // ever reaches this list — the strip's attention/expiry rules are a
-    // desktop and web concern for now.
-    settledAtMs: job.settledAtMs,
-    error: job.error,
-  }));
+  return ordered.map((job, index) => {
+    const vm: PrintActivityVM = {
+      kind: "print" as const,
+      key: `print:${job.clientId}`,
+      hostId: job.hostId ?? selectedHostId.value,
+      hostLabel: job.hostLabel ?? "",
+      model: job.model,
+      prompt: job.prompt,
+      phase: job.status === "queued" ? ("queued" as const) : ("running" as const),
+      progress: null,
+      chain: null,
+      actions: ["cancel" as const],
+      createdAtMs: newest - index,
+      // The iPhone queue renders `generation.pending` only, so nothing settled
+      // ever reaches this list — the strip's attention/expiry rules are a
+      // desktop and web concern for now.
+      settledAtMs: job.settledAtMs,
+      error: job.error,
+    };
+    return withLiveQueueStatus(vm, queueStatusIndex.value, job.id);
+  });
 });
 const sequenceActivity = computed<ActivityJobVM[]>(() => {
   const route = sequenceRoute.value;
@@ -1178,9 +1214,33 @@ const activityRows = computed<ActivityRow[]>(() =>
   mergeActivity(printActivity.value, sequenceActivity.value).flatMap((vm): ActivityRow[] => {
     if (vm.kind === "sequence") return [{ key: vm.key, sequence: vm, print: null }];
     const print = printJobsByKey.value.get(vm.key);
-    return print ? [{ key: vm.key, sequence: null, print }] : [];
+    return print
+      ? [
+          {
+            key: vm.key,
+            sequence: null,
+            print,
+            queuePosition: vm.queuePosition ?? null,
+            blockedReason: vm.blockedReason ?? null,
+          },
+        ]
+      : [];
   }),
 );
+
+/**
+ * Status code for one queue row. A queued print reads its place from the live
+ * `/api/queue` listing rather than the one-shot SSE frame it was born with, so
+ * the number counts down; a job the scheduler parked says why instead.
+ */
+function activityRowStatus(row: ActivityRow): string {
+  if (!row.print) return "";
+  if (row.print.status !== "queued") return jobStatusCode(row.print);
+  const blocked = blockedReasonLabel(row.blockedReason);
+  if (blocked) return blocked;
+  const position = row.queuePosition ?? row.print.queuePosition;
+  return position && position > 0 ? `QUEUED #${position}` : "QUEUED";
+}
 const sharedMobileActivity = computed(() => {
   const local = new Set(
     generation.jobs.flatMap((job) =>
@@ -1402,10 +1462,18 @@ const generationStatus = computed(() => {
   const active = activeGeneration.value;
   if (!active) return progress.value;
   switch (active.status) {
-    case "queued":
-      return active.queuePosition && active.queuePosition > 0
-        ? `Queued #${active.queuePosition}`
-        : "Queued";
+    case "queued": {
+      // Live listing over the one-shot SSE frame, so the number counts down.
+      const live = queueStatusFor(
+        queueStatusIndex.value,
+        active.hostId ?? selectedHostId.value,
+        active.id,
+      );
+      const blocked = blockedReasonLabel(live?.blockedReason);
+      if (blocked) return blocked;
+      const position = live?.position ?? active.queuePosition;
+      return position && position > 0 ? `Queued #${position}` : "Queued";
+    }
     case "loading":
       return active.stage ?? "Loading model";
     case "denoising":
@@ -1738,23 +1806,44 @@ async function refreshMobileActivity(): Promise<void> {
         const epoch = (liveActivityEpochs[host.id] ?? 0) + 1;
         liveActivityEpochs[host.id] = epoch;
         const previous = liveActivityHosts.value[host.id];
-        let result;
-        try {
-          if (!host.online) throw new Error("Host is offline");
-          result = await listActiveWork(route.target);
-        } catch (error) {
-          result = error instanceof Error ? error : new Error(String(error));
-        }
+        const previousQueue = liveQueues.value[host.id] ?? null;
+        // The queue read rides the same tick: it is what makes a queued row's
+        // position count down, and losing it only costs the position.
+        const [result, queue] = await Promise.all([
+          (async () => {
+            try {
+              if (!host.online) throw new Error("Host is offline");
+              return await listActiveWork(route.target);
+            } catch (error) {
+              return error instanceof Error ? error : new Error(String(error));
+            }
+          })(),
+          (async (): Promise<QueueListing | null> => {
+            try {
+              if (!host.online) return null;
+              return await listQueue(route.target);
+            } catch {
+              return previousQueue;
+            }
+          })(),
+        ]);
         if (liveActivityEpochs[host.id] !== epoch) return;
         liveActivityHosts.value = {
           ...liveActivityHosts.value,
           [host.id]: reconcileActivityHost(route, previous, result),
         };
+        const queues = { ...liveQueues.value };
+        if (queue) queues[host.id] = queue;
+        else delete queues[host.id];
+        liveQueues.value = queues;
       }),
     );
     const ids = new Set(connectedHosts.value.map((host) => host.id));
     liveActivityHosts.value = Object.fromEntries(
       Object.entries(liveActivityHosts.value).filter(([id]) => ids.has(id)),
+    );
+    liveQueues.value = Object.fromEntries(
+      Object.entries(liveQueues.value).filter(([id]) => ids.has(id)),
     );
     persistMobileActivity();
   } finally {
@@ -5338,7 +5427,7 @@ onBeforeUnmount(() => {
                     <span>{{ modelLabel(row.print.model) }} · {{ row.print.hostLabel }}</span>
                   </div>
                   <div class="mobile-generation-job-action">
-                    <span data-test="mobile-generation-status">{{ jobStatusCode(row.print) }}</span>
+                    <span data-test="mobile-generation-status">{{ activityRowStatus(row) }}</span>
                     <button
                       class="mobile-generation-cancel"
                       type="button"

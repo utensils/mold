@@ -70,6 +70,10 @@ export interface CurrentServerStatus {
   hostname: string;
   queue_depth: number;
   gpu_info: { backend: string | null } | null;
+  /** Host-RAM ledger snapshot, mirrored here for hosts without a queue plan
+   * (additive; absent on older servers). Read it through
+   * `studio/lib/hostMemory`, which validates before anything renders. */
+  host_memory?: import("../lib/hostMemory").HostMemorySnapshot | null;
 }
 
 export function parseCurrentServerStatus(value: unknown): CurrentServerStatus {

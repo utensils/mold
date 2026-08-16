@@ -133,6 +133,12 @@ pushed screen opened from the header.
   unload, open-in-Models, and forget actions. Still-queued generation rows have
   a 44pt two-tap **Cancel** action against that exact Keychain-authenticated
   host; running work remains visible but cannot be preempted.
+  Host detail's RAM card colors off the server's additive `host_memory`
+  admission telemetry (headroom vs safety floor, mirroring the shared
+  `studio/lib/hostMemory` levels; older servers keep the uncolored card), and
+  queued Create activity rows show their live position in line, read over the
+  existing 5-second activity tick from the host's authenticated `/api/queue`
+  and never persisted (that endpoint carries full prompts).
   Current V2 hosts also expose every GPU/MIG device and its queue lane. Device
   lifecycle controls are shown only when the host advertises
   `devices.lifecycle`; disabling a busy device leaves its current work running

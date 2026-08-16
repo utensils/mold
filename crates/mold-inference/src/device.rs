@@ -1418,7 +1418,10 @@ pub fn select_expand_device_with_preference(
 /// next — so the layers are never co-resident. What stays live is the token
 /// embedding table (262,208 × 3,840 BF16 ≈ 2.01 GB), at most two decoder
 /// layers in flight (≈ 0.45 GB each), and the 49 retained hidden states
-/// (≈ 0.39 GB at the fixed 1,024-token context) — a peak near 3.3 GB.
+/// (≈ 0.39 GB budgeted at a 1,024-token context — deliberately conservative:
+/// `ltx2::text::gemma::DEFAULT_GEMMA_MAX_LENGTH` is 256, and every LTX-2
+/// call site uses it, but the budget keeps the larger figure so a future
+/// longer context cannot silently outgrow it) — a peak near 3.3 GB.
 ///
 /// 6 GB leaves roughly 2× headroom over that peak while keeping a 24 GB
 /// consumer card eligible. The previous value was 24 GB, which described the

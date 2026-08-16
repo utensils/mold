@@ -151,6 +151,28 @@ pub(crate) fn remote_backend(status: &mold_core::ServerStatus) -> Option<&'stati
     }
 }
 
+/// Host-RAM pressure segment for the activity strip — `" · RAM tight · 3.0
+/// GB schedulable"`.
+///
+/// The strip is one line shared with the live job, so this is a pressure
+/// warning rather than routine telemetry: a comfortable host, and a server
+/// too old to report the field at all, both add nothing. The full reading
+/// lives in the Machines detail pane. Levels come from
+/// [`super::host_memory`], which mirrors `studio/lib/hostMemory.ts`.
+pub(crate) fn host_ram_segment(status: Option<&mold_core::ServerStatus>) -> String {
+    use super::host_memory::{format_gb, host_memory_level, HostMemoryLevel};
+
+    let snapshot = status.and_then(|status| status.host_memory.as_ref());
+    match host_memory_level(snapshot) {
+        Some(level @ (HostMemoryLevel::Warn | HostMemoryLevel::Critical)) => format!(
+            " · RAM {} · {} schedulable",
+            level.as_str(),
+            format_gb(snapshot.map(|s| s.headroom_bytes).unwrap_or(0))
+        ),
+        _ => String::new(),
+    }
+}
+
 /// Render the two-row tab strip: workspace tabs + underline row.
 pub fn render_tab_strip(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
@@ -296,6 +318,7 @@ pub fn activity_line(app: &App) -> (ActivityKind, String) {
         .and_then(|s| s.queue_depth)
         .map(|n| format!(" · queue {n}"))
         .unwrap_or_default();
+    let ram_seg = host_ram_segment(app.resource_info.server_status.as_ref());
 
     if app.generate.generating {
         let p = &app.generate.progress;
@@ -314,6 +337,7 @@ pub fn activity_line(app: &App) -> (ActivityKind, String) {
             s.push_str(&format!(" · {rate:.1} it/s"));
         }
         s.push_str(&queue_seg);
+        s.push_str(&ram_seg);
         return (ActivityKind::Generating, s);
     }
 
@@ -339,6 +363,7 @@ pub fn activity_line(app: &App) -> (ActivityKind, String) {
             s.push_str(&format!(" · saved to {}", tildify(dir)));
         }
         s.push_str(&queue_seg);
+        s.push_str(&ram_seg);
         return (ActivityKind::Done, s);
     }
 
@@ -354,6 +379,7 @@ pub fn activity_line(app: &App) -> (ActivityKind, String) {
     {
         s.push_str(&format!(" · {mem}"));
     }
+    s.push_str(&ram_seg);
     (ActivityKind::Idle, s)
 }
 
@@ -460,6 +486,69 @@ mod tests {
         }
     }
 
+    fn status_with_host_memory(
+        host_memory: Option<mold_core::HostMemorySnapshot>,
+    ) -> mold_core::ServerStatus {
+        mold_core::ServerStatus {
+            version: "0.22.0".into(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: false,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 0,
+            hostname: Some("hal9000".into()),
+            memory_status: None,
+            gpus: None,
+            queue_depth: None,
+            queue_capacity: None,
+            queue_paused: None,
+            instance_id: None,
+            models_disk: None,
+            host_memory,
+        }
+    }
+
+    fn host_memory(headroom_bytes: u64) -> mold_core::HostMemorySnapshot {
+        mold_core::HostMemorySnapshot {
+            total_bytes: 64 * 1024_u64.pow(3),
+            available_bytes: 48 * 1024_u64.pow(3),
+            headroom_bytes,
+            safety_floor_bytes: 10 * 1024_u64.pow(3),
+        }
+    }
+
+    /// The strip is one line shared with the live job, so host RAM earns a
+    /// segment only when it is the reason work is about to stop moving.
+    #[test]
+    fn host_ram_segment_reports_only_real_pressure() {
+        assert_eq!(host_ram_segment(None), "");
+        assert_eq!(
+            host_ram_segment(Some(&status_with_host_memory(None))),
+            "",
+            "an older server that reports nothing renders nothing"
+        );
+        assert_eq!(
+            host_ram_segment(Some(&status_with_host_memory(Some(host_memory(
+                40 * 1024_u64.pow(3)
+            ))))),
+            "",
+            "a comfortable host stays out of the strip"
+        );
+    }
+
+    #[test]
+    fn host_ram_segment_names_the_level_and_the_bytes_left() {
+        let tight = host_ram_segment(Some(&status_with_host_memory(Some(host_memory(
+            3 * 1024_u64.pow(3),
+        )))));
+        assert_eq!(tight, " · RAM tight · 3.0 GB schedulable");
+
+        let critical = host_ram_segment(Some(&status_with_host_memory(Some(host_memory(0)))));
+        assert_eq!(critical, " · RAM critical · 0.0 GB schedulable");
+    }
+
     #[test]
     fn remote_backend_uses_worker_names_when_legacy_gpu_info_is_absent() {
         let status = mold_core::ServerStatus {
@@ -486,6 +575,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            host_memory: None,
         };
 
         assert_eq!(remote_backend(&status), Some("CUDA"));

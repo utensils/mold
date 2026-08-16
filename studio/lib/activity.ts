@@ -12,6 +12,12 @@ import type {
   ChainJobState,
   ChainJobSummary,
 } from "./api/chainTypes";
+import {
+  blockedReasonLabel,
+  queuePositionLabel,
+  queueStatusFor,
+  type QueueStatusIndex,
+} from "./queuePosition";
 import { friendlySequenceError } from "./sequence";
 
 export type ActivityAction =
@@ -38,6 +44,12 @@ export type ActivityJobVM =
       /** Wall clock when the job settled; null while it is still in flight. */
       settledAtMs: number | null;
       error: string | null;
+      /** Live 0-based dispatch order from the host's `/api/queue` listing, not
+       *  the one-shot SSE `Queued` frame. Absent when the host has not been
+       *  read or is too old to list the job. */
+      queuePosition?: number | null;
+      /** Raw scheduler `blocked_reason` for this job, when the plan named one. */
+      blockedReason?: string | null;
     }
   | {
       kind: "sequence";
@@ -134,6 +146,42 @@ export function sequenceToVM(
     createdAtMs: summary.created_at_unix_ms,
     settledAtMs: settled ? summary.updated_at_unix_ms : null,
   };
+}
+
+export type PrintActivityVM = Extract<ActivityJobVM, { kind: "print" }>;
+
+/**
+ * Attach the host's live dispatch order to a print row.
+ *
+ * Positions belong to work that is still waiting: the moment a job starts
+ * denoising (or settles) its slot number is history, and leaving it on the row
+ * would contradict the present-tense rule the strip is built on (G15). A host
+ * that has not been read contributes nothing rather than a guess.
+ */
+export function withLiveQueueStatus(
+  vm: PrintActivityVM,
+  index: QueueStatusIndex | null | undefined,
+  serverJobId: string | null | undefined,
+): PrintActivityVM {
+  if (vm.phase !== "queued") return vm;
+  const status = queueStatusFor(index, vm.hostId, serverJobId);
+  if (!status) return vm;
+  const next: PrintActivityVM = { ...vm };
+  if (status.position !== null) next.queuePosition = status.position;
+  if (status.blockedReason !== null) next.blockedReason = status.blockedReason;
+  return next;
+}
+
+/**
+ * The one short suffix a queued pill adds after "Queued". A parked job says
+ * why it is parked — that is the answer the user is actually after — and
+ * otherwise the row counts down its place in line. Null means stay quiet.
+ */
+export function queueStatusLabel(vm: ActivityJobVM): string | null {
+  if (vm.kind !== "print" || vm.phase !== "queued") return null;
+  return (
+    blockedReasonLabel(vm.blockedReason) ?? queuePositionLabel(vm.queuePosition)
+  );
 }
 
 function isActive(vm: ActivityJobVM): boolean {

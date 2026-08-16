@@ -10,6 +10,7 @@ import {
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
+import { hostMemoryLevel } from "@studio/lib/hostMemory";
 import { apiJsonTo } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { gpuSnapshotsFromStatus } from "../lib/api/gpuStatus";
@@ -112,6 +113,14 @@ const cpu = computed(() => snapshot.value?.cpu ?? null);
 /** Apple Metal shares one physical pool — a VRAM row and a RAM row would
  *  show the same numbers twice, so unified hosts render one Memory row. */
 const unifiedMemory = computed(() => unifiedMemoryHost(gpus.value));
+/** RAM pressure from the scheduler's own ledger, not used/total: a committed
+ *  reservation that has not allocated yet still parks the queue and the OS
+ *  cannot see it. Absent on older servers, which keeps the plain meter. */
+const hostMemoryPressure = computed(() => hostMemoryLevel(queuePlan.value?.host_memory));
+const hostMemoryLabel = computed(() => {
+  const memory = queuePlan.value?.host_memory;
+  return memory ? `${formatGB(memory.headroom_bytes)} available to schedule` : null;
+});
 const disk = computed(() => status.value?.models_disk ?? null);
 const h3Host = computed(() => [
   {
@@ -651,6 +660,8 @@ onBeforeUnmount(() => {
               :aria-valuenow="Math.round(percent(ram.used, ram.total))"
               aria-valuemin="0"
               aria-valuemax="100"
+              :data-pressure="hostMemoryPressure ?? undefined"
+              :title="hostMemoryLabel ?? undefined"
             >
               <span :style="{ width: `${percent(ram.used, ram.total)}%` }" />
             </div>

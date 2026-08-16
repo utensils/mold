@@ -21,6 +21,12 @@ import {
   type ActivityAction,
   type ActivityJobVM,
 } from "@studio/lib/activity";
+import {
+  blockedReasonLabel,
+  queuePositionLabel,
+  queueStatusFor,
+  type QueueStatusIndex,
+} from "@studio/lib/queuePosition";
 import type { Job } from "../../composables/useGenerateStream";
 import { ORIGIN_HOST_ID } from "../../lib/hostRegistry";
 
@@ -32,9 +38,27 @@ const props = withDefaults(
     sequences?: ActivityJobVM[];
     /** Server-owned work discovered after a reload or in another client. */
     shared?: FleetActiveWork[];
+    /** Live dispatch order per host from `/api/queue`. Absent (or missing an
+     * entry) simply means the pill says "Queued" and nothing more. */
+    queueStatus?: QueueStatusIndex | null;
   }>(),
-  { sequences: () => [], shared: () => [] },
+  { sequences: () => [], shared: () => [], queueStatus: null },
 );
+
+/** "#2 in line", or "Waiting for memory" when the scheduler parked the job.
+ * Null keeps today's bare pill against a server that lists nothing. */
+function queueLabel(job: Job): string | null {
+  const status = queueStatusFor(
+    props.queueStatus,
+    job.hostId ?? ORIGIN_HOST_ID,
+    job.serverId,
+  );
+  if (!status) return null;
+  return (
+    blockedReasonLabel(status.blockedReason) ??
+    queuePositionLabel(status.position)
+  );
+}
 
 /** Which machine a job is running on — omitted when it's this server, so the
  * single-host case stays uncluttered and a routed job is always attributed. */
@@ -318,6 +342,12 @@ const active = computed(
             :data-test="`activity-host-${job.id}`"
             >{{ hostBadge(job) }}</span
           >
+          <span
+            v-if="queueLabel(job)"
+            class="activity__queue-position"
+            :data-test="`activity-queue-position-${job.id}`"
+            >{{ queueLabel(job) }}</span
+          >
           {{ promptFor(job) }}
         </span>
         <button
@@ -508,6 +538,15 @@ const active = computed(
   text-overflow: ellipsis;
 }
 
+.activity__queue-position {
+  display: inline-block;
+  font-family: var(--f-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: var(--safelight);
+  margin-right: 5px;
+  vertical-align: middle;
+}
 .activity__host {
   display: inline-block;
   font-family: var(--f-mono);

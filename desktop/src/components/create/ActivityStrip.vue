@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watchEffect } from "vue";
+import { computed, onBeforeUnmount, reactive, ref, watch, watchEffect } from "vue";
 import { useRouter } from "vue-router";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import LiveActivityList from "@ui/components/LiveActivityList.vue";
@@ -8,16 +8,21 @@ import {
   activityDigestLabel,
   mergeActivity,
   partitionActivity,
+  queueStatusLabel,
   sequenceToVM,
+  withLiveQueueStatus,
   type ActivityAction,
   type ActivityJobVM,
+  type PrintActivityVM,
 } from "@studio/lib/activity";
+import { buildQueueStatusIndex } from "@studio/lib/queuePosition";
 import PodCostMeter from "../machines/PodCostMeter.vue";
 import ConfirmDialog from "../shell/ConfirmDialog.vue";
 import { runPodForHostUrl } from "../../lib/runpod";
 import { modelDisplayNameForId } from "../../lib/models";
 import { jobProgress, useGenerationStore, type Job } from "../../stores/generation";
 import { useChainJobsStore } from "../../stores/chainJobs";
+import { useJobsStore } from "../../stores/jobs";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useRunPodStore } from "../../stores/runpod";
@@ -44,6 +49,7 @@ const generation = useGenerationStore();
 const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
 const chains = useChainJobsStore();
+const jobsStore = useJobsStore();
 const runpod = useRunPodStore();
 const toasts = useToastStore();
 const composer = useComposerStore();
@@ -76,6 +82,34 @@ const running = computed<Job | null>(
     ) ?? null,
 );
 const queued = computed<Job[]>(() => generation.pending.filter((j) => j.status === "queued"));
+
+/**
+ * Live dispatch order for our own queued prints. The SSE `Queued { position }`
+ * frame is a one-shot — it never fires again as the queue drains — so the pill
+ * reads the host's `/api/queue` listing through the same store the Machines
+ * queue column uses. The poll is retained only while something is actually
+ * waiting, so an idle Create window costs nothing.
+ */
+const queueStatus = computed(() =>
+  buildQueueStatusIndex(
+    Object.values(jobsStore.queues).map((snapshot) => ({
+      hostId: snapshot.hostId,
+      entries: snapshot.entries,
+      plan: snapshot.plan,
+    })),
+  ),
+);
+
+let retainedQueuePoll = false;
+function retainQueuePoll(want: boolean) {
+  if (want === retainedQueuePoll) return;
+  retainedQueuePoll = want;
+  if (want) jobsStore.startPolling();
+  else jobsStore.stopPolling();
+}
+watch(() => queued.value.length > 0, retainQueuePoll, { immediate: true });
+onBeforeUnmount(() => retainQueuePoll(false));
+
 const MAX_QUEUED_PILLS = 4;
 const visibleQueued = computed(() => queued.value.slice(0, MAX_QUEUED_PILLS));
 const hiddenQueuedCount = computed(() =>
@@ -115,29 +149,46 @@ const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.unio
  *  row, so it has to survive the merge. `createdAtMs` is a real wall clock —
  *  the old `job.clientId` counter sorted every print below every sequence. */
 const printVMs = computed<ActivityJobVM[]>(() =>
-  generation.jobs.map((job) => ({
-    kind: "print" as const,
-    key: `print:${job.clientId}`,
-    hostId: job.hostId ?? "local",
-    hostLabel: hostLabel(job.hostId ?? "local"),
-    model: job.model,
-    prompt: job.prompt,
-    phase:
-      job.status === "queued"
-        ? ("queued" as const)
-        : job.status === "error"
-          ? ("failed" as const)
-          : job.status === "complete"
-            ? ("done" as const)
-            : ("running" as const),
-    progress: null,
-    chain: null,
-    actions: ["cancel" as const],
-    createdAtMs: job.submittedAtUnixMs,
-    settledAtMs: job.settledAtMs,
-    error: job.error,
-  })),
+  generation.jobs.map((job) => {
+    const vm: PrintActivityVM = {
+      kind: "print" as const,
+      key: `print:${job.clientId}`,
+      hostId: job.hostId ?? "local",
+      hostLabel: hostLabel(job.hostId ?? "local"),
+      model: job.model,
+      prompt: job.prompt,
+      phase:
+        job.status === "queued"
+          ? ("queued" as const)
+          : job.status === "error"
+            ? ("failed" as const)
+            : job.status === "complete"
+              ? ("done" as const)
+              : ("running" as const),
+      progress: null,
+      chain: null,
+      actions: ["cancel" as const],
+      createdAtMs: job.submittedAtUnixMs,
+      settledAtMs: job.settledAtMs,
+      error: job.error,
+    };
+    return withLiveQueueStatus(vm, queueStatus.value, job.id);
+  }),
 );
+
+/** "#2 in line" / "Waiting for memory" per queued pill, or nothing at all when
+ *  the host is too old to list the job. */
+const queueLabelByKey = computed(() => {
+  const labels = new Map<string, string>();
+  for (const vm of printVMs.value) {
+    const label = queueStatusLabel(vm);
+    if (label) labels.set(vm.key, label);
+  }
+  return labels;
+});
+function queuedLabel(job: Job): string | null {
+  return queueLabelByKey.value.get(`print:${job.clientId}`) ?? null;
+}
 
 const sequenceVMs = computed<ActivityJobVM[]>(() =>
   chains.allJobs.map(({ hostId, job }) => {
@@ -286,11 +337,19 @@ function deleteConfirmed() {
         data-test="activity-queued"
         role="button"
         tabindex="0"
+        :title="queuedLabel(job) ? `Queued · ${queuedLabel(job)} · ${job.prompt}` : job.prompt"
         @click="selectPrint(job)"
         @keydown.enter.prevent="selectPrint(job)"
         @keydown.space.prevent="selectPrint(job)"
       >
-        <span class="ms-activity__pill-text">Queued · {{ job.prompt }}</span>
+        <span class="ms-activity__pill-text">
+          Queued<template v-if="queuedLabel(job)">
+            ·
+            <span class="ms-activity__pill-queue" data-test="activity-queued-position">{{
+              queuedLabel(job)
+            }}</span> </template
+          >· {{ job.prompt }}
+        </span>
         <button
           type="button"
           class="ms-activity__cancel"
@@ -488,6 +547,11 @@ function deleteConfirmed() {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.ms-activity__pill-queue {
+  font-family: var(--f-mono);
+  font-size: 9.5px;
+  color: var(--safelight);
 }
 .ms-activity__cancel {
   width: 18px;

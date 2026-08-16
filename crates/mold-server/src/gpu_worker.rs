@@ -164,6 +164,12 @@ struct PlannedLoadContract<'a> {
     /// Decayed observed high-water envelope for this estimate bucket. Zero
     /// when there is no learned evidence.
     learned_vram_envelope_bytes: u64,
+    /// Frozen host-RAM demand this plan was admitted against, already zero on
+    /// Metal where the same claim rides the unified device gate.
+    predicted_host_increment_bytes: u64,
+    /// Ledger headroom for the owning lease, or `None` when no ledger can
+    /// answer — the recheck then retains the scheduler's grant.
+    available_host_headroom_bytes: Option<u64>,
     execution_fingerprint: &'a str,
     request: &'a mold_core::GenerateRequest,
     engine_paths: &'a mold_core::ModelPaths,
@@ -1187,7 +1193,7 @@ fn process_owner_work(
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let h3_prepare_error = match (&mut grant.work, h3_cancellation.as_ref()) {
         (OwnerWork::Generation(job), Some(cancellation)) => {
-            request_private_h3_host_headroom(scheduler_tx, &grant.fence)
+            request_lease_host_headroom(scheduler_tx, &grant.fence)
                 .map_err(|error| error.error)
                 .and_then(|available_host_headroom_bytes| {
                     with_private_h3_cuda_preparation_attempt(worker, || {
@@ -1351,8 +1357,12 @@ fn complete_h3_claim_failure(grant: LeaseGrant, error: String) -> OwnerProcessOu
     }
 }
 
-#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-fn request_private_h3_host_headroom(
+/// Ask the coordinator for this lease's host-RAM headroom against a fresh
+/// sample of the ledger that granted it.
+///
+/// The reply restores the caller's own reservation and keeps every peer
+/// charged, so admission and dispatch read one number and cannot oscillate.
+fn request_lease_host_headroom(
     scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
     fence: &crate::scheduler::LeaseFence,
 ) -> Result<u64, crate::routes::ApiError> {
@@ -1363,15 +1373,13 @@ fn request_private_h3_host_headroom(
             reply,
         })
         .map_err(|_| {
-            crate::routes::ApiError::internal(
-                "private H3 host-memory recheck could not reach Scheduler V2",
-            )
+            crate::routes::ApiError::internal("host-memory recheck could not reach Scheduler V2")
         })?;
     response
         .recv_timeout(Duration::from_secs(5))
         .map_err(|error| {
             crate::routes::ApiError::internal(format!(
-                "private H3 host-memory recheck did not complete: {error}"
+                "host-memory recheck did not complete: {error}"
             ))
         })?
         .map_err(crate::routes::ApiError::internal)
@@ -1659,6 +1667,30 @@ fn process_scheduled_chain_stage(
     })
 }
 
+/// Return idle glibc arena pages to the OS, and report the RSS just before
+/// doing so.
+///
+/// glibc keeps freed pages in per-arena heaps even after the allocations are
+/// dropped — large transient buffers from GGUF+LoRA rebuilds can leave tens of
+/// GB of unreclaimed RSS. `malloc_trim(0)` walks the arenas and returns idle
+/// pages via `madvise(MADV_DONTNEED)`. Cheap (~ms), glibc-only, gated so we can
+/// A/B with `MOLD_MALLOC_TRIM=0`. `None` means the trim was disabled and no RSS
+/// was sampled.
+fn trim_malloc_arenas() -> Option<u64> {
+    let enabled = std::env::var("MOLD_MALLOC_TRIM")
+        .map(|value| value != "0")
+        .unwrap_or(true);
+    if !enabled {
+        return None;
+    }
+    let rss_pre_trim = crate::resources::ram_snapshot().used_by_mold;
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+    Some(rss_pre_trim)
+}
+
 /// Scheduled chain stages bypass `process_job`, so they need their own memory
 /// heartbeat around model readiness and rendering. A channel-backed stop wakes
 /// the thread immediately for short stages instead of making completion wait
@@ -1725,6 +1757,7 @@ impl Drop for ChainStageMemoryWatchdog {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+        let rss_pre_trim = trim_malloc_arenas();
         let rss_after = crate::resources::ram_snapshot().used_by_mold;
         tracing::info!(
             gpu = self.ordinal,
@@ -1733,6 +1766,7 @@ impl Drop for ChainStageMemoryWatchdog {
             rss_before_mb = self.rss_before / 1_000_000,
             rss_after_mb = rss_after / 1_000_000,
             rss_delta_mb = (rss_after as i64 - self.rss_before as i64) / 1_000_000,
+            rss_pre_trim_mb = rss_pre_trim.map(|value| value / 1_000_000).unwrap_or(0),
             "chain stage memory delta"
         );
     }
@@ -2258,6 +2292,18 @@ pub(crate) fn record_h3_progress(
 pub(crate) fn is_cuda_oom(e: &anyhow::Error) -> bool {
     let full = format!("{e:#}");
     full.contains("CUDA_ERROR_OUT_OF_MEMORY") || full.contains("out of memory")
+}
+
+/// Detect a dispatch-time rejection of an already-admitted execution plan.
+///
+/// The frozen-plan rechecks refuse work because physical memory changed after
+/// admission, which says nothing about this worker's health. The typed
+/// `ApiError` is flattened to `anyhow` at the load boundary, so the shared
+/// marker travels in the message; `memory_pressure_rejections_do_not_count_
+/// against_worker_health` builds real rejections rather than string literals,
+/// so a reworded message fails the test instead of silently reclassifying.
+pub(crate) fn is_admitted_plan_memory_rejection(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains(crate::memory_preflight::ADMISSION_PRESSURE_MARKER)
 }
 
 /// Detect CUDA errors that invalidate the process-owned context.
@@ -2989,8 +3035,7 @@ fn run_claimed_h3_generation(
         }
     };
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-    let available_host_headroom_bytes = match request_private_h3_host_headroom(scheduler_tx, &lease)
-    {
+    let available_host_headroom_bytes = match request_lease_host_headroom(scheduler_tx, &lease) {
         Ok(headroom) => headroom,
         Err(error) => return reject_claimed_h3_generation_message(job, error.error),
     };
@@ -3459,6 +3504,18 @@ impl GenerationEventSink<'_> {
         }
     }
 
+    /// Host-RAM headroom for this lease, or `None` when no ledger can answer.
+    ///
+    /// Legacy dispatch has no host ledger, and an unreachable or stale
+    /// coordinator is missing evidence rather than proof of pressure — both
+    /// retain the scheduler's grant instead of inventing a rejection.
+    fn host_headroom_for_lease(&self, lease: &crate::scheduler::LeaseFence) -> Option<u64> {
+        match self {
+            Self::V2(scheduler_tx) => request_lease_host_headroom(scheduler_tx, lease).ok(),
+            Self::Legacy(_) => None,
+        }
+    }
+
     fn followup_ready(
         &self,
         work: crate::scheduler::ScheduledOwnerWork,
@@ -3590,10 +3647,24 @@ fn process_job_with_sink(
     let activation_hint =
         crate::model_manager::activation_hint_for_request_sync(&config_snapshot, &job.request);
     let request_has_lora = crate::model_manager::request_has_effective_lora(&job.request);
+    // `admission_host_demand_bytes` is already zero on Metal, whose host claim
+    // rides the unified device gate — asking for headroom there would be the
+    // #1038 double-count.
+    let planned_host_increment_bytes = job
+        .execution_plan
+        .as_ref()
+        .map_or(0, |plan| plan.admission_host_demand_bytes());
+    let planned_host_headroom_bytes = job
+        .lease
+        .as_ref()
+        .filter(|_| planned_host_increment_bytes > 0)
+        .and_then(|lease| event_sink.host_headroom_for_lease(lease));
     let planned_load = job.execution_plan.as_ref().map(|plan| PlannedLoadContract {
         mode: PlannedEngineMode::from_plan(plan),
         predicted_vram_peak_bytes: plan.predicted_vram_peak_bytes,
         learned_vram_envelope_bytes: plan.learned_vram_envelope_bytes,
+        predicted_host_increment_bytes: planned_host_increment_bytes,
+        available_host_headroom_bytes: planned_host_headroom_bytes,
         execution_fingerprint: plan.execution_fingerprint.as_str(),
         request: &job.request,
         engine_paths: &plan.engine_paths,
@@ -3632,6 +3703,14 @@ fn process_job_with_sink(
             } else {
                 (fatal_cuda_user_message(&model_name), false)
             }
+        } else if is_admitted_plan_memory_rejection(&e) {
+            // The machine changed after this plan was admitted. That is a
+            // scheduling condition, and counting it would degrade a healthy
+            // GPU out of rotation for a plan that arrived at a bad moment.
+            (
+                format!("model load error: {}", clean_error_message(&e)),
+                false,
+            )
         } else {
             (
                 format!("model load error: {}", clean_error_message(&e)),
@@ -3778,24 +3857,7 @@ fn process_job_with_sink(
     watchdog_stop.store(true, Ordering::SeqCst);
     let _ = watchdog_handle.join();
 
-    // glibc keeps freed pages in per-arena heaps even after the allocations
-    // are dropped — large transient buffers from GGUF+LoRA rebuilds can leave
-    // tens of GB of unreclaimed RSS. `malloc_trim(0)` walks the arenas and
-    // returns idle pages to the OS via madvise(MADV_DONTNEED). Cheap (~ms),
-    // glibc-only, gated so we can A/B with `MOLD_MALLOC_TRIM=0`.
-    let trim_enabled = std::env::var("MOLD_MALLOC_TRIM")
-        .map(|v| v != "0")
-        .unwrap_or(true);
-    let rss_pre_trim = if trim_enabled {
-        let v = crate::resources::ram_snapshot().used_by_mold;
-        #[cfg(target_os = "linux")]
-        unsafe {
-            libc::malloc_trim(0);
-        }
-        Some(v)
-    } else {
-        None
-    };
+    let rss_pre_trim = trim_malloc_arenas();
 
     let rss_after = crate::resources::ram_snapshot().used_by_mold;
     let rss_delta = rss_after as i64 - rss_before as i64;
@@ -4493,14 +4555,11 @@ fn validate_private_h3_physical_capacity(
         available_device_bytes,
         crate::memory_preflight::rejection_suggestion(None),
     )?;
-    if predicted_host_increment_bytes > available_host_headroom_bytes {
-        return Err(crate::routes::ApiError::insufficient_memory(format!(
-            "model '{model_name}' frozen private host-memory increment ~{:.1} GB no longer fits the current ~{:.1} GB host-memory headroom after the canonical safety floor; memory pressure changed after scheduler admission",
-            predicted_host_increment_bytes as f64 / 1_000_000_000.0,
-            available_host_headroom_bytes as f64 / 1_000_000_000.0,
-        )));
-    }
-    Ok(())
+    crate::memory_preflight::check_planned_host_budget(
+        model_name,
+        predicted_host_increment_bytes,
+        available_host_headroom_bytes,
+    )
 }
 
 fn ensure_model_ready_sync_inner(
@@ -4520,6 +4579,10 @@ fn ensure_model_ready_sync_inner(
         )
     });
     let planned_execution_fingerprint = planned_load.map(|planned| planned.execution_fingerprint);
+    let planned_host_increment_bytes =
+        planned_load.map_or(0, |planned| planned.predicted_host_increment_bytes);
+    let planned_host_headroom_bytes =
+        planned_load.and_then(|planned| planned.available_host_headroom_bytes);
     let load_request = planned_load.map(|planned| planned.request);
     let planned_engine_paths = planned_load.map(|planned| planned.engine_paths);
     let planned_engine_config = planned_load.map(|planned| planned.engine_config);
@@ -4571,6 +4634,29 @@ fn ensure_model_ready_sync_inner(
             }
         }
         return Ok(ModelLoadDisposition::Unchanged);
+    }
+
+    // Everything below allocates the frozen host increment afresh — a cold
+    // load, a parked reload, or a reconstruction. The hot-cache hit above is
+    // deliberately exempt: its host bytes are already resident and already in
+    // the ledger's sample, so charging the increment a second time would
+    // double-count exactly the pages it is meant to protect. Absent ledger
+    // evidence retains the scheduler's grant.
+    if planned_host_increment_bytes > 0 {
+        if let Some(available_host_headroom_bytes) = planned_host_headroom_bytes {
+            crate::memory_preflight::check_planned_host_budget(
+                model_name,
+                planned_host_increment_bytes,
+                available_host_headroom_bytes,
+            )
+            .map_err(|error| anyhow::anyhow!(error.error))?;
+        } else {
+            tracing::debug!(
+                gpu = worker.gpu.ordinal,
+                model = %model_name,
+                "host-memory headroom unavailable; retaining scheduler grant authority"
+            );
+        }
     }
 
     // Check if we have it cached but not on GPU (Parked).
@@ -5413,6 +5499,11 @@ fn run_stage_blocking_planned<T, E: std::fmt::Display + std::fmt::Debug>(
             mode: PlannedEngineMode::from_plan(load.plan),
             predicted_vram_peak_bytes: load.plan.predicted_vram_peak_bytes,
             learned_vram_envelope_bytes: load.plan.learned_vram_envelope_bytes,
+            // A chain stage runs inside a lease the coordinator already holds
+            // and has no route back to the ledger from here, so it retains the
+            // scheduler's grant rather than rechecking against a guess.
+            predicted_host_increment_bytes: load.plan.admission_host_demand_bytes(),
+            available_host_headroom_bytes: None,
             execution_fingerprint: &load.plan.execution_fingerprint,
             request: load.request,
             engine_paths: &load.plan.engine_paths,
@@ -5533,7 +5624,7 @@ mod tests {
             .expect("owner work handler boundary");
         let owner = &source[owner_start..owner_end];
         let headroom = owner
-            .find("request_private_h3_host_headroom(")
+            .find("request_lease_host_headroom(")
             .expect("ledger-aware private host-memory recheck");
         let containment = owner
             .find("with_private_h3_cuda_preparation_attempt(worker, ||")
@@ -11176,7 +11267,7 @@ mod tests {
             1_999_999_999,
         )
         .expect_err("fresh host pressure below the frozen increment must reject");
-        assert!(error.error.contains("frozen private host-memory increment"));
+        assert!(error.error.contains("frozen host-memory increment"));
 
         let predicted_host_increment_bytes = 2 << 30;
         let error = validate_private_h3_physical_capacity(
@@ -11188,6 +11279,158 @@ mod tests {
         )
         .expect_err("ledger-aware headroom below the frozen host increment must reject");
         assert!(error.error.contains("canonical safety floor"));
+    }
+
+    /// Ordinary work gets the same host-RAM fence H3 already had.
+    ///
+    /// The reservation only proves the plan fit when it was admitted; LTX-2
+    /// then loads a 24 GB CPU-placed encoder minutes later. Without a dispatch
+    /// recheck, whatever pressure appeared in between is discovered by the
+    /// kernel rather than by the scheduler (#1099).
+    #[test]
+    fn planned_host_budget_rejects_ordinary_work_at_the_ledger_boundary() {
+        let predicted_host_increment_bytes = 24 << 30;
+        crate::memory_preflight::check_planned_host_budget(
+            "ltx2-19b",
+            predicted_host_increment_bytes,
+            predicted_host_increment_bytes,
+        )
+        .expect("exactly enough headroom must admit");
+
+        let error = crate::memory_preflight::check_planned_host_budget(
+            "ltx2-19b",
+            predicted_host_increment_bytes,
+            predicted_host_increment_bytes - 1,
+        )
+        .expect_err("one byte short of the frozen increment must reject");
+        assert!(error.error.contains("canonical safety floor"));
+        assert!(
+            !crate::gpu_worker::is_fatal_cuda_error(&anyhow::anyhow!(error.error.clone())),
+            "host pressure must never reach the fatal-CUDA quarantine"
+        );
+
+        crate::memory_preflight::check_planned_host_budget("ltx2-19b", 0, 0)
+            .expect("a plan with no host increment is not gated");
+    }
+
+    /// The host fence must sit past the hot-cache early return.
+    ///
+    /// An unchanged resident engine already holds its host increment and the
+    /// ledger's sample already excludes those pages, so rechecking there would
+    /// charge the same bytes twice and park work that is physically fine.
+    #[test]
+    fn planned_host_fence_runs_only_where_the_increment_is_allocated_afresh() {
+        let source = include_str!("gpu_worker.rs");
+        let start = source
+            .find("fn ensure_model_ready_sync_inner(")
+            .expect("model readiness handler");
+        let end = source[start..]
+            .find("\nfn select_load_strategy_for_worker(")
+            .map(|offset| start + offset)
+            .unwrap_or(source.len());
+        let body = &source[start..end];
+        let unchanged_return = body
+            .find("return Ok(ModelLoadDisposition::Unchanged);")
+            .expect("hot-cache early return");
+        let fence = body
+            .find("check_planned_host_budget(")
+            .expect("dispatch-time host-RAM fence");
+        assert!(
+            unchanged_return < fence,
+            "the host fence must not gate an unchanged hot-cache hit"
+        );
+    }
+
+    /// Memory pressure is a scheduling condition, not worker ill health.
+    ///
+    /// Both dispatch-time rechecks reject an already-admitted plan because the
+    /// machine changed underneath it. Counting those toward the consecutive
+    /// failure budget degrades a perfectly healthy GPU out of rotation for a
+    /// plan that merely arrived at a bad moment.
+    #[test]
+    fn memory_pressure_rejections_do_not_count_against_worker_health() {
+        let host = anyhow::anyhow!(
+            crate::memory_preflight::check_planned_host_budget("ltx2-19b", 24 << 30, 1 << 30)
+                .expect_err("host pressure rejects")
+                .error
+        );
+        let vram = anyhow::anyhow!(
+            crate::memory_preflight::check_planned_memory_budget(
+                "ltx2-19b",
+                24 << 30,
+                1 << 30,
+                crate::memory_preflight::rejection_suggestion(None),
+            )
+            .expect_err("device pressure rejects")
+            .error
+        );
+
+        for rejection in [&host, &vram] {
+            assert!(
+                is_admitted_plan_memory_rejection(rejection),
+                "a planned-budget recheck must be recognised: {rejection:#}"
+            );
+            assert!(
+                !is_fatal_cuda_error(rejection),
+                "pressure must never reach the quarantine path"
+            );
+            assert!(
+                !is_cuda_oom(rejection),
+                "pressure must not be mistaken for a driver OOM"
+            );
+        }
+
+        assert!(
+            !is_admitted_plan_memory_rejection(&anyhow::anyhow!("safetensors file not found")),
+            "a genuine load fault still counts against the worker"
+        );
+    }
+
+    /// The classification has to reach the branch that decides the count.
+    #[test]
+    fn the_load_failure_branch_classifies_pressure_before_its_generic_arm() {
+        let whole = include_str!("gpu_worker.rs");
+        let source = &whole[..whole.find("\nmod tests {").unwrap_or(whole.len())];
+        let start = source
+            .find("let (err_msg, count_worker_failure) = if is_fatal_cuda {")
+            .expect("model-load failure classification");
+        let end = source[start..]
+            .find("if count_worker_failure {")
+            .map(|offset| start + offset)
+            .expect("failure accounting");
+        let branch = &source[start..end];
+        let pressure = branch
+            .find("is_admitted_plan_memory_rejection(&e)")
+            .expect("pressure arm");
+        let generic = branch.find("model load error:").expect("generic arm");
+        assert!(
+            pressure < generic,
+            "pressure must be classified before the arm that counts a failure"
+        );
+    }
+
+    /// A chain stage leaves the same glibc arenas behind as an ordinary
+    /// generation, and had no trim to return them.
+    #[test]
+    fn both_generation_paths_reclaim_glibc_arenas_through_one_gate() {
+        let whole = include_str!("gpu_worker.rs");
+        let source = &whole[..whole.find("\nmod tests {").unwrap_or(whole.len())];
+        assert_eq!(
+            source.matches("libc::malloc_trim(0)").count(),
+            1,
+            "one implementation, so the MOLD_MALLOC_TRIM gate cannot drift"
+        );
+        let start = source
+            .find("impl Drop for ChainStageMemoryWatchdog {")
+            .expect("chain stage watchdog");
+        let end = source[start..]
+            .find("\nfn fence_chain_stage_render(")
+            .map(|offset| start + offset)
+            .expect("chain stage watchdog boundary");
+        assert!(
+            source[start..end].contains("trim_malloc_arenas()"),
+            "the chain-stage path must reclaim arenas the way process_job does"
+        );
     }
 
     #[test]

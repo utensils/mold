@@ -1201,6 +1201,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            host_memory: None,
         };
         let embed = format_server_status(&status);
         assert_eq!(embed.title, "Server Status");
@@ -1238,6 +1239,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            host_memory: None,
         };
         let embed = format_server_status(&status);
         assert!(embed
@@ -1270,6 +1272,7 @@ mod tests {
             queue_paused: Some(false),
             instance_id: None,
             models_disk: None,
+            host_memory: None,
         };
         let mut inventory = mold_core::DeviceState {
             devices: (0..64)
@@ -1386,6 +1389,7 @@ mod tests {
             queue_paused: Some(false),
             instance_id: None,
             models_disk: None,
+            host_memory: None,
         };
         let queue = mold_core::QueueListingWire {
             entries: vec![],
@@ -1445,6 +1449,7 @@ mod tests {
             queue_paused: Some(false),
             instance_id: None,
             models_disk: None,
+            host_memory: None,
         };
         let queue = mold_core::QueueListingWire {
             entries: vec![],

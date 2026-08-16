@@ -3741,6 +3741,7 @@ onBeforeUnmount(() => {
           :jobs="stream.jobs.value"
           :sequences="sequenceVMs"
           :shared="sharedActivityRows"
+          :queue-status="routing.queueStatus.value"
           @cancel="cancelPrint"
           @dismiss="stream.remove"
           @open="openJob"

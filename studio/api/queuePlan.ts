@@ -4,6 +4,7 @@ import {
   apiJsonTo,
   type ApiTarget,
 } from "./client";
+import { parseHostMemory, type HostMemorySnapshot } from "../lib/hostMemory";
 
 export type EstimateConfidence = "low" | "medium" | "high" | (string & {});
 export type QueueLaneKind = "device" | "host_utility" | (string & {});
@@ -66,6 +67,8 @@ export interface QueuePlan {
   dirty_since_unix_ms: number | null;
   next_replan_at_unix_ms: number | null;
   work_items: QueueWorkItem[];
+  /** Host-RAM ledger snapshot (additive; absent on older servers). */
+  host_memory?: HostMemorySnapshot | null;
 }
 
 export interface QueueListing {
@@ -131,6 +134,7 @@ export function parseQueuePlan(value: unknown): QueuePlan {
     dirty_since_unix_ms: nullableNumber(plan.dirty_since_unix_ms),
     next_replan_at_unix_ms: nullableNumber(plan.next_replan_at_unix_ms),
     work_items: plan.work_items as QueueWorkItem[],
+    host_memory: parseHostMemory(plan.host_memory),
   };
 }
 
