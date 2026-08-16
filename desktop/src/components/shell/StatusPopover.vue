@@ -91,11 +91,26 @@ const queuePlan = computed(() => {
   const host = displayHost.value;
   return host ? (jobs.queues[host.id]?.plan ?? null) : null;
 });
-/** Host-RAM pressure from the scheduler's own ledger, not used/total: RAM
- *  committed to a reservation that has not allocated yet looks free to the OS,
- *  and that gap is what parks a queue. Absent on older servers — the row then
- *  keeps its plain look rather than guessing a level. */
-const hostMemoryPressure = computed(() => hostMemoryLevel(queuePlan.value?.host_memory));
+/**
+ * Host-RAM pressure from the scheduler's own ledger, not used/total: RAM
+ * committed to a reservation that has not allocated yet looks free to the OS,
+ * and that gap is what parks a queue.
+ *
+ * `/api/status` is the source of record — this popover polls it every 10 s for
+ * the primary, whereas the queue plan's mirror only refreshes when a plan is
+ * published for some other reason AND when something is holding the cross-host
+ * queue poll open (Machines mounted, or Create with queued work). Reading the
+ * plan first blanked the indicator exactly when the last queued job started
+ * running. The status poll is deliberately primary-only, so a remote display
+ * host still falls back to that host's queue plan.
+ */
+const hostMemory = computed(
+  () =>
+    (displayingRemote.value ? null : (status.value?.host_memory ?? null)) ??
+    queuePlan.value?.host_memory ??
+    null,
+);
+const hostMemoryPressure = computed(() => hostMemoryLevel(hostMemory.value));
 const ramToneClass = computed(() => {
   switch (hostMemoryPressure.value) {
     case "critical":
@@ -107,7 +122,7 @@ const ramToneClass = computed(() => {
   }
 });
 const ramTitle = computed(() => {
-  const memory = queuePlan.value?.host_memory;
+  const memory = hostMemory.value;
   if (!memory) return undefined;
   return `${formatGB(memory.headroom_bytes)} of ${formatGB(memory.total_bytes)} available to schedule`;
 });
