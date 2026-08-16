@@ -548,7 +548,7 @@ require_text crates/mold-server/src/gpu_worker.rs \
   'with_private_h3_cuda_preparation_attempt(worker, || {' \
   "server owner preparation is not inside a separate CUDA containment scope"
 require_text crates/mold-server/src/gpu_worker.rs \
-  'request_private_h3_host_headroom(' \
+  'request_lease_host_headroom(' \
   "private H3 live owner does not request ledger-aware host headroom"
 require_text crates/mold-server/src/scheduler/mod.rs \
   'WorkerEvent::HostMemoryRecheck { fence, reply }' \
@@ -563,8 +563,8 @@ require_text crates/mold-server/src/scheduler/mod.rs \
   '!reservation.charge_until_release' \
   "Scheduler V2 can absorb a gradual private H3 reservation into a premature host sample"
 require_text crates/mold-server/src/scheduler/mod.rs \
-  'mold_core::minimax_h3::is_family(&execution.model_family)' \
-  "Scheduler V2 does not select private H3 leases for sticky host-memory accounting"
+  'charge_until_release: item.host_ram_bytes > 0,' \
+  "Scheduler V2 does not keep host-memory leases charged through release"
 require_text crates/mold-server/src/scheduler/mod.rs \
   'fn h3_reservation_stays_charged_until_release_and_blocks_ordinary_work()' \
   "Scheduler V2 lacks a regression for private H3 host-memory isolation"

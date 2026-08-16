@@ -6722,7 +6722,6 @@ mod tests {
             .register("already-running", "flux-dev:q4");
         state.job_registry.mark_running("already-running", Some(0));
         let worker_state = state.clone();
-        tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
         let app = create_router(state);
 
         let response = app
@@ -6735,6 +6734,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        // Keep the worker stopped until the handler has snapshotted the seed.
+        // Under coverage instrumentation, starting it first can let the new
+        // job reach its processing `position: 0` event before this assertion
+        // observes the submit-time event this test is meant to pin.
+        tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
             .unwrap();

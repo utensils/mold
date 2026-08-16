@@ -187,6 +187,10 @@ require_release_job_text "release-latest" \
 require_release_job_text "release-latest" \
   '-F force=true'
 require_release_job_text "release-latest" \
+  'for attempt in $(seq 1 10); do'
+require_release_job_text "release-latest" \
+  '[[ "$attempt" -eq 10 ]] || sleep 2'
+require_release_job_text "release-latest" \
   'if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then'
 main_freshness_guard_count="$(
   awk '
