@@ -2481,7 +2481,7 @@ fn build_plan(
     }
 
     let mut components = BTreeMap::new();
-    let mut host_paths = BTreeSet::new();
+    let mut host_bytes_by_path: BTreeMap<PathBuf, u64> = BTreeMap::new();
     for (role, path) in context.artifacts {
         let place_cpu = placements.get(role).copied().unwrap_or(false);
         let bytes = context
@@ -2489,12 +2489,14 @@ fn build_plan(
             .get(path)
             .map_or_else(|| artifact_size(path), |artifact| artifact.bytes);
         let (placement, load_strategy, vram, host) = if place_cpu {
-            host_paths.insert(path.clone());
+            let host =
+                bytes.saturating_mul(cpu_host_bytes_per_stored_byte(context.family, role, path));
+            host_bytes_by_path.insert(path.clone(), host);
             (
                 ResolvedComponentPlacement::Cpu,
                 ComponentLoadStrategy::ParkedCpu,
                 0,
-                bytes,
+                host,
             )
         } else {
             let strategy = if memory.block_offload
@@ -2504,7 +2506,9 @@ fn build_plan(
                         | ComponentRole::TransformerShard(_)
                         | ComponentRole::LowNoiseTransformer
                 ) {
-                host_paths.insert(path.clone());
+                // Streamed blocks are uploaded at their stored precision, so
+                // the host copy is the artifact's own size.
+                host_bytes_by_path.insert(path.clone(), bytes);
                 ComponentLoadStrategy::StreamedBlocks
             } else if role.is_text_encoder() {
                 ComponentLoadStrategy::DropReload
@@ -2541,14 +2545,11 @@ fn build_plan(
     }
 
     let predicted_vram = memory.peak_memory_bytes.max(pending_dependency_peak);
-    let predicted_host = host_paths.iter().fold(BASE_HOST_TRANSIENT, |total, path| {
-        total.saturating_add(
-            context
-                .pending_artifacts
-                .get(path)
-                .map_or_else(|| artifact_size(path), |artifact| artifact.bytes),
-        )
-    });
+    let predicted_host = host_bytes_by_path
+        .values()
+        .fold(BASE_HOST_TRANSIENT, |total, bytes| {
+            total.saturating_add(*bytes)
+        });
     let fingerprint = execution_fingerprint(
         context.model,
         device,
@@ -2885,6 +2886,25 @@ fn exact_v1_compatibility_dtype(model: &str) -> Option<PlannedDType> {
         Some(PlannedDType::F16)
     } else {
         None
+    }
+}
+
+/// Host bytes a CPU-placed component occupies per byte of its artifact.
+///
+/// Most engines map or copy CPU-parked weights at their stored precision, so
+/// the file length is the reservation. LTX-2 is the exception its own backend
+/// documents: the CPU compute dtype is F32, and its Gemma prompt encoder is
+/// built through a `VarBuilder` at that dtype rather than at the shards' BF16.
+/// Reserving the file length there under-charged the ledger by half of the
+/// largest host allocation the family makes (#1099). Widen only where the
+/// engine is known to upcast — a family added here without that evidence
+/// over-reserves and parks work that would have fit.
+fn cpu_host_bytes_per_stored_byte(family: &str, role: &ComponentRole, path: &Path) -> u64 {
+    match (family, role) {
+        ("ltx2" | "ltx-2" | "ltx2.3", ComponentRole::GemmaShard(_)) => {
+            mold_inference::ltx2::cpu_host_bytes_per_stored_byte(path)
+        }
+        _ => 1,
     }
 }
 
@@ -4517,6 +4537,94 @@ mod tests {
         assert!(plan.components.iter().any(|(role, component)| {
             role.is_text_encoder() && component.placement == ResolvedComponentPlacement::Cpu
         }));
+    }
+
+    /// A CPU-placed LTX-2 Gemma encoder costs twice its file size.
+    ///
+    /// The CPU compute dtype is F32 and candle's safetensors reader copies each
+    /// tensor into a fresh allocation at that dtype, so reserving the BF16
+    /// shards at their on-disk length under-charges the ledger by half of the
+    /// largest host allocation the family makes (#1099).
+    #[test]
+    fn ltx2_cpu_gemma_is_charged_at_its_resident_f32_size() {
+        let root = TempDir::new().unwrap();
+        let transformer = root.path().join("ltx2-transformer.safetensors");
+        let vae = root.path().join("ltx2-vae.safetensors");
+        let gemma = root.path().join("gemma-00001-of-00001.safetensors");
+        sparse_file(&transformer, 8 * GIB);
+        sparse_file(&vae, GIB);
+        sparse_file(&gemma, 4 * GIB);
+        let mut config = Config::default();
+        config.models.insert(
+            "ltx2-case:bf16".to_string(),
+            ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                text_encoder_files: Some(vec![gemma.display().to_string()]),
+                family: Some("ltx2".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let mut request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"x","model":"ltx2-case:bf16","width":512,"height":512,"steps":4,"guidance":1.0}"#,
+        )
+        .unwrap();
+        request.placement = Some(DevicePlacement {
+            text_encoders: DeviceRef::Cpu,
+            advanced: None,
+        });
+
+        let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+            .expect("a CPU-pinned Gemma keeps LTX-2 admissible")
+            .remove(0);
+
+        let encoder = &plan.components[&ComponentRole::GemmaShard(0)];
+        assert_eq!(encoder.placement, ResolvedComponentPlacement::Cpu);
+        assert_eq!(
+            encoder.predicted_host_bytes,
+            8 * GIB,
+            "BF16 shards are materialized at the CPU compute dtype"
+        );
+        assert_eq!(
+            plan.predicted_host_increment_bytes,
+            BASE_HOST_TRANSIENT + 8 * GIB
+        );
+    }
+
+    /// Widening is a property of the CPU placement, not of the family.
+    #[test]
+    fn ltx2_gemma_on_the_leased_device_is_not_widened() {
+        let root = TempDir::new().unwrap();
+        let transformer = root.path().join("ltx2-transformer.safetensors");
+        let vae = root.path().join("ltx2-vae.safetensors");
+        let gemma = root.path().join("gemma-00001-of-00001.safetensors");
+        sparse_file(&transformer, 8 * GIB);
+        sparse_file(&vae, GIB);
+        sparse_file(&gemma, 4 * GIB);
+        let mut config = Config::default();
+        config.models.insert(
+            "ltx2-case:bf16".to_string(),
+            ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                text_encoder_files: Some(vec![gemma.display().to_string()]),
+                family: Some("ltx2".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"x","model":"ltx2-case:bf16","width":512,"height":512,"steps":4,"guidance":1.0}"#,
+        )
+        .unwrap();
+
+        let plan = resolve_execution_plans(&config, &request, &devices(&[48 * GIB]), false)
+            .expect("a roomy device keeps every component on the GPU")
+            .remove(0);
+
+        let encoder = &plan.components[&ComponentRole::GemmaShard(0)];
+        assert_ne!(encoder.placement, ResolvedComponentPlacement::Cpu);
+        assert_eq!(encoder.predicted_host_bytes, 0);
+        assert_eq!(plan.predicted_host_increment_bytes, BASE_HOST_TRANSIENT);
     }
 
     #[test]

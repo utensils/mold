@@ -85,3 +85,24 @@ pub fn audio_output_gap(paths: &mold_core::ModelPaths) -> Option<String> {
 pub fn checkpoint_supports_audio_output(path: &std::path::Path) -> bool {
     single_file::supports_audio_output(path).unwrap_or(false)
 }
+
+/// Host bytes one on-disk byte of a CPU-placed LTX-2 artifact occupies once it
+/// is resident, for admission's host-RAM reservation.
+///
+/// [`backend::Ltx2Backend::Cpu`] computes in F32 while the safetensors Gemma
+/// shards store BF16, and candle's safetensors reader copies every tensor into
+/// a fresh allocation at the requested dtype instead of mapping it — so a
+/// CPU-placed BF16 encoder is resident at twice its file size. The Q4 GGUF
+/// variant is loaded without a dtype and stays quantized, so it is unwidened;
+/// accelerator placements compute at the stored precision and never reach here.
+pub fn cpu_host_bytes_per_stored_byte(artifact: &std::path::Path) -> u64 {
+    if artifact
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"))
+    {
+        return 1;
+    }
+    let stored = candle_core::DType::BF16.size_in_bytes() as u64;
+    let resident = backend::Ltx2Backend::Cpu.compute_dtype().size_in_bytes() as u64;
+    resident.div_ceil(stored.max(1)).max(1)
+}
