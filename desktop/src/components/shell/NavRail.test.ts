@@ -14,6 +14,11 @@ import { useLiveActivityStore } from "../../stores/liveActivity";
 import { useComposerStore } from "../../stores/composer";
 
 const stub = { template: "<div />" };
+const authedMediaStub = {
+  props: ["path", "target", "cacheKey", "alt"],
+  template:
+    '<img data-test="rail-library-thumbnail" :data-path="path" :data-cache-key="cacheKey" :data-target-base-url="target?.baseUrl" :data-target-authenticated="String(Boolean(target?.apiKey))" :alt="alt" />',
+};
 
 function makeRouter(): Router {
   return createRouter({
@@ -40,7 +45,7 @@ async function mountAt(path: string) {
       plugins: [pinia, router],
       // StatusPopover opens its own telemetry streams on mount; the rail tests
       // don't exercise it, so stub it out to keep them off the network.
-      stubs: { StatusPopover: stub },
+      stubs: { StatusPopover: stub, AuthedMedia: authedMediaStub },
     },
   });
 }
@@ -239,6 +244,35 @@ describe("NavRail developing jobs", () => {
 
     await wrapper.get("[data-test='developing-print']").trigger("click");
     expect(refresh).toHaveBeenCalledWith(13);
+  });
+
+  it("shows the authenticated Library thumbnail for a completed video", async () => {
+    const wrapper = await mountAt("/create");
+    const generation = useGenerationStore();
+    vi.spyOn(generation, "targetForJob").mockReturnValue({
+      baseUrl: "http://hal9000:7680",
+      apiKey: "secret",
+    });
+    generation.jobs = [
+      {
+        clientId: 14,
+        model: "ltx-2.3-22b-distilled:fp8",
+        prompt: "a finished clip",
+        status: "complete",
+        hostId: "hal9000-7680",
+        resultUrl: "https://example.test/result.mp4",
+        previewUrl: null,
+        result: { filename: "finished clip.mp4", video_frames: 97 },
+      } as never,
+    ];
+    await flushPromises();
+
+    const thumbnail = wrapper.get("[data-test='rail-library-thumbnail']");
+    expect(thumbnail.attributes("data-path")).toBe("/api/gallery/thumbnail/finished%20clip.mp4");
+    expect(thumbnail.attributes("data-cache-key")).toBe("hal9000-7680");
+    expect(thumbnail.attributes("data-target-base-url")).toBe("http://hal9000:7680");
+    expect(thumbnail.attributes("data-target-authenticated")).toBe("true");
+    expect(thumbnail.attributes("alt")).toBe("a finished clip");
   });
 
   // G14 hole: the rail only ever read `generation.jobs`, so a running sequence

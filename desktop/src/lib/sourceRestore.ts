@@ -18,8 +18,15 @@
  */
 import type { OutputMetadata } from "./api/types";
 import { minimaxH3ClosingBoundaryFromMetadata } from "@studio/lib/minimaxH3Authoring";
+import {
+  restoreGenerationSourceMedia,
+  type GenerationSourceMedia,
+} from "@studio/lib/generationSourceMedia";
+export { sha256HexOfBase64 } from "@studio/lib/generationSourceMedia";
 
 export interface SourceRestoreDeps {
+  /** Browser/WebView-local original source snapshot. */
+  localGet?(sha256: string): Promise<GenerationSourceMedia | null>;
   /** Local stash lookup (ipc). Rejections are treated as misses. */
   stashGet(sha256: string): Promise<string | null>;
   /** Cross-host gallery lookup by filename → base64 bytes, or null. */
@@ -30,6 +37,9 @@ export interface RestoredSource {
   base64: string;
   /** Label to carry back into the form (and future requests). */
   filename: string | null;
+  width?: number | null;
+  height?: number | null;
+  mime?: string | null;
 }
 
 /** Whether a restore is even attemptable — old prints have no keys. */
@@ -47,6 +57,16 @@ export async function restoreSourceImage(
 ): Promise<RestoredSource | null> {
   const sha = meta.source_image_sha256 ?? null;
   if (sha) {
+    const local = await (deps.localGet ?? restoreGenerationSourceMedia)(sha).catch(() => null);
+    if (local) {
+      return {
+        base64: local.base64,
+        filename: local.filename,
+        ...(local.width === undefined ? {} : { width: local.width }),
+        ...(local.height === undefined ? {} : { height: local.height }),
+        ...(local.mime === undefined ? {} : { mime: local.mime }),
+      };
+    }
     const stashed = await deps.stashGet(sha).catch(() => null);
     if (stashed) return { base64: stashed, filename: meta.source_image_name ?? null };
   }
@@ -134,10 +154,3 @@ export async function restoreEditImages(
  * payload — identical to the server's hash of the wire `source_image`, so
  * stash keys and `source_image_sha256` always agree.
  */
-export async function sha256HexOfBase64(b64: string): Promise<string> {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}

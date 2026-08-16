@@ -191,7 +191,12 @@ import { isGenerationModel } from "../stores/models";
 import type { HostRoute } from "../stores/hosts";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { applyH3BoundaryFit, applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
-import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
+import { coerceSourceFitForMaskless, parseSourceFitPolicy } from "@studio/lib/sourceFit";
+import {
+  persistGenerationSourceMedia,
+  restoreGenerationSourceMedia,
+  sha256HexOfBase64,
+} from "@studio/lib/generationSourceMedia";
 import {
   isCancelledError,
   jobPhase,
@@ -1258,17 +1263,54 @@ function toggleQueueFailure(key: string): void {
   expandedQueueFailures.value = next;
 }
 
+let mobilePrintSelectionEpoch = 0;
+
 async function selectMobilePrint(job: Job): Promise<void> {
+  const epoch = ++mobilePrintSelectionEpoch;
   generation.select(job.clientId);
   if (job.hostId && hosts.value.some((host) => host.id === job.hostId)) {
     await selectHost(job.hostId);
   }
+  if (epoch !== mobilePrintSelectionEpoch) return;
   const request = job.request;
-  if (request) applyRequestToForm(form, request, generationModels.value);
+  if (request) {
+    applyRequestToForm(form, request, generationModels.value);
+    void restoreRunningJobSource(request, epoch);
+  }
   draft.stopEditing();
   draft.output = "single";
   latestResultClientId.value = job.status === "complete" ? job.clientId : null;
   tab.value = "generate";
+}
+
+async function restoreRunningJobSource(request: GenerateRequest, epoch: number): Promise<void> {
+  if (!request.source_image) return;
+  const effective = request.source_image;
+  const restored = await sha256HexOfBase64(effective)
+    .then((sha256) => restoreGenerationSourceMedia(sha256))
+    .catch(() => null);
+  if (
+    !restored ||
+    epoch !== mobilePrintSelectionEpoch ||
+    form.sourceImage !== effective ||
+    form.model !== request.model
+  )
+    return;
+  form.sourceImage = restored.base64;
+  form.sourceImageName = restored.filename;
+  await nextTick();
+  if (
+    epoch !== mobilePrintSelectionEpoch ||
+    form.sourceImage !== restored.base64 ||
+    form.model !== request.model
+  )
+    return;
+  form.sourceImageWidth = restored.width ?? null;
+  form.sourceImageHeight = restored.height ?? null;
+  form.width = request.width;
+  form.height = request.height;
+  const fit = parseSourceFitPolicy(request.source_fit);
+  if (fit) form.sourceFit = fit;
 }
 
 function selectCurrentMobileSequence(): void {
@@ -3458,6 +3500,24 @@ async function generate(): Promise<void> {
     return;
 
   const draft = cloneGenerateForm(form);
+  const originalSource = draft.sourceImage
+    ? {
+        base64: draft.sourceImage,
+        filename: draft.sourceImageName ?? "Source image",
+        width: draft.sourceImageWidth,
+        height: draft.sourceImageHeight,
+        sourceFit: parseSourceFitPolicy(draft.sourceFit) ?? { mode: "pad-repaint" },
+      }
+    : draft.h3Authoring?.firstFrame?.data
+      ? {
+          base64: draft.h3Authoring.firstFrame.data,
+          filename: draft.h3Authoring.firstFrame.filename,
+          width: draft.h3Authoring.firstFrame.width,
+          height: draft.h3Authoring.firstFrame.height,
+          mime: draft.h3Authoring.firstFrame.mimeType,
+          sourceFit: parseSourceFitPolicy(draft.sourceFit) ?? { mode: "pad-repaint" },
+        }
+      : null;
   const draftCaps = generationCapabilitiesForFamily(
     draft.family,
     draft.model,
@@ -3500,6 +3560,9 @@ async function generate(): Promise<void> {
   preparedSubmitting.value = !!preparedSubmission;
   try {
     request = await prepareGenerationRequest(target, draft, () => submissionGuard.isCurrent(token));
+    if (request.source_image && originalSource) {
+      void persistGenerationSourceMedia(request.source_image, originalSource);
+    }
     if (appliedRemix.value && appliedRemix.value.prompt === form.prompt) {
       request.prompt_transform = {
         operation: "remix",
@@ -4039,6 +4102,7 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       reusePrintError.value = reuse.sequenceUnsupportedReason;
       return;
     }
+    if (!reuse.sequence) await restoreOrdinaryReusedSource(print);
     if (reuse.sequence) {
       // A sequence print reloads the clip rail as a NEW draft: no edit
       // session, nothing cached (iPhone has no chain-detail recovery route,
@@ -4093,6 +4157,62 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
   } finally {
     reusingPrint.value = false;
   }
+}
+
+async function restoreOrdinaryReusedSource(print: GalleryPrint): Promise<void> {
+  if (caps.value.sourceImageMode !== "single") return;
+  const restoredSourceFit = parseSourceFitPolicy(print.metadata.source_fit);
+  const stored = await restoreGenerationSourceMedia(print.metadata.source_image_sha256).catch(
+    () => null,
+  );
+  if (stored) {
+    form.sourceImage = stored.base64;
+    form.sourceImageName = stored.filename;
+    // The normal source-change watcher selects Resize for a newly attached
+    // image. Let that watcher settle, then reassert provenance attributes:
+    // Library reuse is restoration, not a new pick.
+    await nextTick();
+    form.sourceImageWidth = stored.width ?? null;
+    form.sourceImageHeight = stored.height ?? null;
+    form.width = print.metadata.generation_width ?? print.metadata.width;
+    form.height = print.metadata.generation_height ?? print.metadata.height;
+    if (restoredSourceFit) form.sourceFit = restoredSourceFit;
+    return;
+  }
+
+  const filename = print.metadata.source_image_name;
+  if (!filename) return;
+  const candidates = new Map<string, ApiTarget>([[print.hostId, print.target]]);
+  for (const entry of gallery.value) {
+    if (entry.filename === filename && !candidates.has(entry.hostId)) {
+      candidates.set(entry.hostId, entry.target);
+    }
+  }
+  for (const target of candidates.values()) {
+    try {
+      const response = await apiFetchTo(target, galleryMediaPath(filename, "host"));
+      if (!response.ok) continue;
+      const blob = await response.blob();
+      if (!blob.size) continue;
+      const base64 = await blobToBase64(blob);
+      const dimensions = imageDimensionsFromBase64(base64);
+      form.sourceImage = base64;
+      form.sourceImageName = filename;
+      await nextTick();
+      form.sourceImageWidth = dimensions?.width ?? null;
+      form.sourceImageHeight = dimensions?.height ?? null;
+      form.width = print.metadata.generation_width ?? print.metadata.width;
+      form.height = print.metadata.generation_height ?? print.metadata.height;
+      if (restoredSourceFit) form.sourceFit = restoredSourceFit;
+      return;
+    } catch {
+      // Continue through every host that advertises the named source.
+    }
+  }
+  setGenerationStatus(
+    "The original source image is unavailable. Reattach it before developing.",
+    true,
+  );
 }
 
 /** Fetch bytes for the reuse-restored FL2VA boundary descriptors, within the

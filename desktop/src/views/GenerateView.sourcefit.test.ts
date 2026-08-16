@@ -163,6 +163,8 @@ describe("GenerateView source-fit submit path", () => {
         guidance: 7,
         width: 512,
         height: 512,
+        generation_width: 768,
+        generation_height: 1344,
         version: "test",
         source_image_sha256: "a".repeat(64),
         source_image_name: "camera.png",
@@ -176,6 +178,8 @@ describe("GenerateView source-fit submit path", () => {
     expect(form.sourceImage).toBe("RESTORED");
     expect(form.sourceImageName).toBe("camera.png");
     expect(form.sourceFit).toEqual({ mode: "crop-fill", alignX: "right", alignY: "bottom" });
+    expect(form.width).toBe(768);
+    expect(form.height).toBe(1344);
   });
 
   it("resolves the host before preprocessing and routes the upscale to it", async () => {

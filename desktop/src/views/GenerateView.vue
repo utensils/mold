@@ -120,7 +120,7 @@ import {
 } from "../lib/generateValidation";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { applyH3BoundaryFit, applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
-import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
+import { coerceSourceFitForMaskless, parseSourceFitPolicy } from "@studio/lib/sourceFit";
 import { expansionTaskForRequest } from "@studio/lib/expandTask";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { upscaleImage } from "../lib/api/upscale";
@@ -156,6 +156,10 @@ import {
   sha256HexOfBase64,
   type SourceRestoreDeps,
 } from "../lib/sourceRestore";
+import {
+  persistGenerationSourceMedia,
+  restoreGenerationSourceMedia,
+} from "@studio/lib/generationSourceMedia";
 import { isMissingModelError } from "../lib/generateErrors";
 import { copyableError, describeTransportError } from "../lib/api/errors";
 import { startCatalogDownload } from "../lib/api/catalog";
@@ -2565,6 +2569,24 @@ async function generate() {
   submissionPlanning.value = true;
   try {
     const draft = cloneGenerateForm(form);
+    const originalSource = draft.sourceImage
+      ? {
+          base64: draft.sourceImage,
+          filename: draft.sourceImageName ?? "Source image",
+          width: draft.sourceImageWidth,
+          height: draft.sourceImageHeight,
+          sourceFit: parseSourceFitPolicy(draft.sourceFit) ?? { mode: "pad-repaint" },
+        }
+      : draft.h3Authoring?.firstFrame?.data
+        ? {
+            base64: draft.h3Authoring.firstFrame.data,
+            filename: draft.h3Authoring.firstFrame.filename,
+            width: draft.h3Authoring.firstFrame.width,
+            height: draft.h3Authoring.firstFrame.height,
+            mime: draft.h3Authoring.firstFrame.mimeType,
+            sourceFit: parseSourceFitPolicy(draft.sourceFit) ?? { mode: "pad-repaint" },
+          }
+        : null;
     const draftCaps = generationCapabilitiesForFamily(draft.family, draft.model);
     // The composer style preset is baked into the OUTGOING request at submit —
     // the textarea and negative field are never mutated. Reviewed prepared
@@ -2685,6 +2707,9 @@ async function generate() {
     const request = buildRequest(draft);
     if (quickExpansionSnapshot.value?.promptTransform) {
       request.prompt_transform = quickExpansionSnapshot.value.promptTransform;
+    }
+    if (request.source_image && originalSource) {
+      void persistGenerationSourceMedia(request.source_image, originalSource);
     }
     const chainRouting = decideGenerateRequestRouting(request, draft.family);
     if (chainRouting.kind === "reject") {
@@ -2917,8 +2942,35 @@ function applyPrefill() {
     );
     if (endFrameNotice) toasts.push(endFrameNotice, "error");
     void restorePrefillSource(prefill.metadata, restoreEpoch);
+  } else if ("request" in prefill && prefill.request) {
+    void restoreRequestSource(prefill.request, restoreEpoch);
   }
   void nextTick(() => composerRef.value?.focus?.());
+}
+
+async function restoreRequestSource(request: GenerateRequest, epoch: number) {
+  if (!request.source_image) return;
+  const effective = request.source_image;
+  const restored = await sha256HexOfBase64(effective)
+    .then((sha256) => restoreGenerationSourceMedia(sha256))
+    .catch(() => null);
+  if (
+    !restored ||
+    epoch !== restoreEpoch ||
+    form.model !== request.model ||
+    form.sourceImage !== effective
+  )
+    return;
+  form.sourceImage = restored.base64;
+  form.sourceImageName = restored.filename;
+  await nextTick();
+  if (epoch !== restoreEpoch || form.sourceImage !== restored.base64) return;
+  form.sourceImageWidth = restored.width ?? null;
+  form.sourceImageHeight = restored.height ?? null;
+  form.width = request.width;
+  form.height = request.height;
+  const fit = parseSourceFitPolicy(request.source_fit);
+  if (fit) form.sourceFit = fit;
 }
 
 /**
@@ -3029,8 +3081,23 @@ async function restorePrefillSource(metadata: OutputMetadata, epoch: number) {
       );
     }
   } else if (!attachmentMode && caps.value.sourceImageMode === "single" && restored) {
+    const generationWidth = metadata.generation_width ?? metadata.width;
+    const generationHeight = metadata.generation_height ?? metadata.height;
     form.sourceImage = restored.base64;
     form.sourceImageName = restored.filename;
+    await nextTick();
+    if (
+      epoch !== restoreEpoch ||
+      form.model !== modelAtStart ||
+      form.sourceImage !== restored.base64
+    )
+      return;
+    form.sourceImageWidth = restored.width ?? null;
+    form.sourceImageHeight = restored.height ?? null;
+    form.width = generationWidth;
+    form.height = generationHeight;
+    const fit = parseSourceFitPolicy(metadata.source_fit);
+    if (fit) form.sourceFit = fit;
   } else {
     toasts.push(
       attachmentMode

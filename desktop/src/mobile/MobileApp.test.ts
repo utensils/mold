@@ -18,6 +18,8 @@ const {
   startCatalogDownload,
   previewChainPlacement,
   previewGenerationPlacement,
+  persistGenerationSourceMedia,
+  restoreGenerationSourceMedia,
   checkBarcodeScannerPermissions,
   requestBarcodeScannerPermissions,
   cancelBarcodeScanner,
@@ -39,6 +41,8 @@ const {
   startCatalogDownload: vi.fn(),
   previewChainPlacement: vi.fn(),
   previewGenerationPlacement: vi.fn(),
+  persistGenerationSourceMedia: vi.fn(),
+  restoreGenerationSourceMedia: vi.fn(),
   checkBarcodeScannerPermissions: vi.fn(),
   requestBarcodeScannerPermissions: vi.fn(),
   cancelBarcodeScanner: vi.fn(),
@@ -93,6 +97,10 @@ vi.mock("@studio/api/generationPlacement", async (importOriginal) => ({
   previewChainPlacement,
   previewGenerationPlacement,
 }));
+vi.mock("@studio/lib/generationSourceMedia", () => ({
+  persistGenerationSourceMedia,
+  restoreGenerationSourceMedia,
+}));
 
 function plannedPlacement() {
   return {
@@ -128,6 +136,7 @@ vi.mock("./mobileGenerationRecovery", async (importOriginal) => {
 import MobileApp from "./MobileApp.vue";
 import MobileImagePickerSheet from "./MobileImagePickerSheet.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
+import MobileSourceControls from "./MobileSourceControls.vue";
 import MobileTemplates from "./MobileTemplates.vue";
 import { useMobileDownloadsStore } from "./mobileDownloads";
 import { ApiError } from "../lib/api/client";
@@ -334,6 +343,8 @@ beforeEach(() => {
   startCatalogDownload.mockReset().mockResolvedValue("expansion-job");
   previewChainPlacement.mockReset().mockResolvedValue(plannedPlacement());
   previewGenerationPlacement.mockReset().mockResolvedValue(plannedPlacement());
+  persistGenerationSourceMedia.mockReset().mockResolvedValue(null);
+  restoreGenerationSourceMedia.mockReset().mockResolvedValue(null);
   checkBarcodeScannerPermissions.mockReset().mockResolvedValue("granted");
   requestBarcodeScannerPermissions.mockReset();
   cancelBarcodeScanner.mockReset().mockResolvedValue(undefined);
@@ -5213,6 +5224,64 @@ describe("MobileApp gallery", () => {
     expect(fieldControl("Format").element).toHaveProperty("value", "mp4");
     expect(fieldControl("Frames").element).toHaveProperty("value", "121");
     expect(fieldControl("FPS").element).toHaveProperty("value", "30");
+  });
+
+  it("restores the original source image attributes and crop when reusing a print", async () => {
+    const sourcePrint: GalleryImage = {
+      ...print,
+      filename: "portrait-result.png",
+      format: "png",
+      metadata: {
+        ...print.metadata,
+        output_format: "png",
+        source_image_name: "portrait.jpg",
+        source_image_sha256: "a".repeat(64),
+        source_fit: { mode: "crop-fill", alignX: "right", alignY: "top" },
+      },
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([sourcePrint]);
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    restoreGenerationSourceMedia.mockResolvedValue({
+      draftId: "source-portrait",
+      base64: btoa("original portrait"),
+      filename: "portrait.jpg",
+      kind: "upload",
+      width: 1600,
+      height: 900,
+      mime: "image/jpeg",
+      sourceFit: { mode: "crop-fill", alignX: "right", alignY: "top" },
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-viewer-reuse']").trigger("click");
+    await flushPromises();
+
+    expect(restoreGenerationSourceMedia).toHaveBeenCalledWith("a".repeat(64));
+    expect(wrapper.getComponent(MobileSourceControls).props("form")).toMatchObject({
+      sourceImage: btoa("original portrait"),
+      sourceImageName: "portrait.jpg",
+      sourceImageWidth: 1600,
+      sourceImageHeight: 900,
+      sourceFit: { mode: "crop-fill", alignX: "right", alignY: "top" },
+      width: 768,
+      height: 512,
+    });
+    expect(wrapper.get("[data-test='mobile-source-fit']").element).toHaveProperty(
+      "value",
+      "crop-fill",
+    );
   });
 
   it("opens the latest generated image in the full-screen print viewer when tapped", async () => {

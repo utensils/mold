@@ -19,6 +19,34 @@ const baseMeta: OutputMetadata = {
 };
 
 describe("restoreSourceImage", () => {
+  it("prefers the editable local snapshot and restores its source attributes", async () => {
+    const deps = {
+      localGet: vi.fn().mockResolvedValue({
+        draftId: `generation-source:${"a".repeat(64)}`,
+        base64: "ORIGINAL",
+        filename: "portrait.jpg",
+        width: 1600,
+        height: 900,
+        mime: "image/jpeg",
+        sourceFit: { mode: "crop-fill" as const, alignX: "right" as const },
+      }),
+      stashGet: vi.fn(),
+      galleryLookup: vi.fn(),
+    };
+    const restored = await restoreSourceImage(
+      { ...baseMeta, source_image_sha256: "a".repeat(64) },
+      deps,
+    );
+    expect(restored).toEqual({
+      base64: "ORIGINAL",
+      filename: "portrait.jpg",
+      width: 1600,
+      height: 900,
+      mime: "image/jpeg",
+    });
+    expect(deps.stashGet).not.toHaveBeenCalled();
+  });
+
   it("prefers the local stash by sha256", async () => {
     const deps = {
       stashGet: vi.fn().mockResolvedValue("STASHED"),
