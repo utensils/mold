@@ -650,11 +650,16 @@ impl Ltx2RuntimeSession {
 
     /// Whether this session can serve `plan` without a rebuild. Returns
     /// `true` if the encoder is still available OR the cached encoding
-    /// matches the plan's prompt tokens. Callers use this to decide
-    /// whether to reuse a persisted runtime (fast path — keeps transformer
-    /// and VAE warm) or drop it and build a fresh one (the only way to
-    /// recover when the encoder has been consumed on a prior `prepare()`
-    /// and a different prompt arrives).
+    /// matches the plan's prompt tokens exactly. Callers use this to decide
+    /// whether to reuse a persisted runtime or drop it and build a fresh
+    /// one — the only way to recover when the encoder has been consumed on
+    /// a prior `prepare()` and a different prompt arrives.
+    ///
+    /// What reuse preserves is the cached prompt encoding and the compute
+    /// device handle, which is what lets a matching plan skip the Gemma
+    /// load entirely. It does NOT keep a transformer or VAE warm: neither
+    /// lives in this session — `prepare()` builds them per call and hands
+    /// them back in the `NativePreparedRun`.
     pub fn can_reuse_for(&self, plan: &Ltx2GeneratePlan) -> bool {
         if self.prompt_encoder.is_some() {
             return true;
