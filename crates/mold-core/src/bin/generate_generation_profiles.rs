@@ -232,7 +232,7 @@ Regenerate with `cargo run -p mold-ai-core --bin generate_generation_profiles`. 
 
     out.push_str("## Upstream resolution qualification records\n\n");
     out.push_str(
-        "Pinned upstream dimensions become supported presets only after an exact-size Mold generation smoke and decoded output-delivery check is recorded. Unqualified candidates remain absent from the wire profile aspect groups.\n\n",
+        "Pinned upstream dimensions become supported recommendations after their authored contract is verified against Mold's admission and decoded output-delivery path. This is not a per-size runtime-performance claim: dynamic families may qualify a pinned oracle when those paths are resolution-generic, while bucketed or size-sensitive families additionally require an exact-size generation campaign. Unqualified candidates remain absent from the wire profile aspect groups.\n\n",
     );
     for candidate in &registry.resolution_candidates {
         writeln!(out, "### `{}`\n", candidate.family).unwrap();
