@@ -8,6 +8,9 @@
 //! - Fused QKV projection (single `[dim, 3*dim]` weight instead of separate Q/K/V)
 //! - Different tensor naming (GGUF convention vs safetensors convention)
 
+use std::sync::Arc;
+
+use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use candle_nn::RmsNorm as CandleRmsNorm;
 use candle_transformers::models::z_image::transformer::{
@@ -17,19 +20,136 @@ use candle_transformers::models::z_image::transformer::{
 use mold_candle::quantized::VarBuilder;
 use mold_candle::quantized_nn::{self, Linear};
 
+// ==================== Quantized linear arm ====================
+
+/// Which implementation a quantized Z-Image linear resolves to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ZImageLinearKind {
+    /// Weight stays quantized; candle's kernels consume it directly.
+    QMatMul,
+    /// Full per-forward dequantization to the activation dtype.
+    Dequant,
+}
+
+/// `MOLD_ZIMAGE_QMATMUL`: a truthy value opts CUDA back into candle's
+/// quantized fast path. Unset — or a value we do not understand — keeps the
+/// per-forward dequantization arm, so a typo degrades to the shipped correct
+/// behavior rather than to the broken one. The falsey set mirrors
+/// `parse_qwen_qmatmul`.
+pub(crate) fn parse_zimage_qmatmul(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "on" | "yes")
+    )
+}
+
+/// Process-frozen `MOLD_ZIMAGE_QMATMUL`, read once per process through the
+/// admission-frozen environment.
+fn zimage_qmatmul_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let enabled =
+            parse_zimage_qmatmul(crate::runtime_env::value("MOLD_ZIMAGE_QMATMUL").as_deref());
+        if enabled {
+            tracing::warn!(
+                "z-image: MOLD_ZIMAGE_QMATMUL=1 — candle's quantized CUDA fast path re-enabled; \
+                 it is known to return non-finite values for Z-Image's linears (black renders)"
+            );
+        }
+        enabled
+    })
+}
+
+/// CUDA takes the dequantization arm; Metal and CPU keep `QMatMul`.
+///
+/// candle's fast MMQ CUDA kernels return non-finite garbage for Z-Image's
+/// quantized linears — the same defect family documented for Qwen-Image in
+/// `docs/architecture/qwen-mmq-nan.md`. Measured on an RTX 4090
+/// (`z-image-turbo:q4`, 512², seed 42): with the fast path, the unified-stream
+/// feed-forward output reaches `inf` from finite ±40 inputs at the first
+/// denoise step past t≈0.07 and every render is solid black; with the
+/// dequantize fallback forced (`FORCE_DMMV`) the identical request renders
+/// correctly. Metal is untouched: `QMatMul` there is the arm the #942
+/// validation ran against stable-diffusion.cpp, and its kernels are correct.
+pub(crate) fn select_linear_kind(is_cuda: bool, qmatmul_enabled: bool) -> ZImageLinearKind {
+    if is_cuda && !qmatmul_enabled {
+        ZImageLinearKind::Dequant
+    } else {
+        ZImageLinearKind::QMatMul
+    }
+}
+
+/// Device-dispatched quantized linear layer.
+///
+/// CUDA dequantizes the weight to the activation dtype per forward (correct,
+/// slower); Metal and CPU keep the weight quantized behind `QMatMul`. The
+/// opt-in `QMatMul` arm on CUDA needs no per-forward decline fallback: Z-Image
+/// activations are F32, which candle's own `dequantize_matmul` fallback
+/// accepts, unlike the BF16 activations that force Qwen-Image to carry one.
+enum ZImageLinear {
+    QMatMul(Linear),
+    Dequant {
+        weight: Arc<QTensor>,
+        bias: Option<Tensor>,
+    },
+}
+
+/// Dequantize `weight` to the activation's dtype and apply it densely.
+fn dequant_forward(weight: &QTensor, bias: Option<&Tensor>, x: &Tensor) -> Result<Tensor> {
+    let w = weight.dequantize(x.device())?.to_dtype(x.dtype())?;
+    let bias = bias.map(|b| b.to_dtype(x.dtype())).transpose()?;
+    candle_nn::Linear::new(w, bias).forward(x)
+}
+
+impl Module for ZImageLinear {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::QMatMul(inner) => inner.forward(x),
+            Self::Dequant { weight, bias } => dequant_forward(weight, bias.as_ref(), x),
+        }
+    }
+}
+
+fn zimage_linear(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<ZImageLinear> {
+    match select_linear_kind(vb.device().is_cuda(), zimage_qmatmul_enabled()) {
+        ZImageLinearKind::QMatMul => Ok(ZImageLinear::QMatMul(quantized_nn::linear(
+            in_dim, out_dim, vb,
+        )?)),
+        ZImageLinearKind::Dequant => {
+            let weight = vb.get((out_dim, in_dim), "weight")?;
+            let bias = vb.get(out_dim, "bias")?.dequantize(vb.device())?;
+            Ok(ZImageLinear::Dequant {
+                weight,
+                bias: Some(bias),
+            })
+        }
+    }
+}
+
+fn zimage_linear_no_bias(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<ZImageLinear> {
+    match select_linear_kind(vb.device().is_cuda(), zimage_qmatmul_enabled()) {
+        ZImageLinearKind::QMatMul => Ok(ZImageLinear::QMatMul(quantized_nn::linear_no_bias(
+            in_dim, out_dim, vb,
+        )?)),
+        ZImageLinearKind::Dequant => {
+            let weight = vb.get((out_dim, in_dim), "weight")?;
+            Ok(ZImageLinear::Dequant { weight, bias: None })
+        }
+    }
+}
+
 // ==================== TimestepEmbedder ====================
 
 struct TimestepEmbedder {
-    linear1: Linear,
-    linear2: Linear,
+    linear1: ZImageLinear,
+    linear2: ZImageLinear,
     frequency_embedding_size: usize,
 }
 
 impl TimestepEmbedder {
     fn new(out_size: usize, mid_size: usize, vb: VarBuilder) -> Result<Self> {
-        let linear1 =
-            quantized_nn::linear(FREQUENCY_EMBEDDING_SIZE, mid_size, vb.pp("mlp").pp("0"))?;
-        let linear2 = quantized_nn::linear(mid_size, out_size, vb.pp("mlp").pp("2"))?;
+        let linear1 = zimage_linear(FREQUENCY_EMBEDDING_SIZE, mid_size, vb.pp("mlp").pp("0"))?;
+        let linear2 = zimage_linear(mid_size, out_size, vb.pp("mlp").pp("2"))?;
         Ok(Self {
             linear1,
             linear2,
@@ -60,16 +180,16 @@ impl TimestepEmbedder {
 // ==================== FeedForward (SwiGLU) ====================
 
 struct FeedForward {
-    w1: Linear,
-    w2: Linear,
-    w3: Linear,
+    w1: ZImageLinear,
+    w2: ZImageLinear,
+    w3: ZImageLinear,
 }
 
 impl FeedForward {
     fn new(dim: usize, hidden_dim: usize, vb: VarBuilder) -> Result<Self> {
-        let w1 = quantized_nn::linear_no_bias(dim, hidden_dim, vb.pp("w1"))?;
-        let w2 = quantized_nn::linear_no_bias(hidden_dim, dim, vb.pp("w2"))?;
-        let w3 = quantized_nn::linear_no_bias(dim, hidden_dim, vb.pp("w3"))?;
+        let w1 = zimage_linear_no_bias(dim, hidden_dim, vb.pp("w1"))?;
+        let w2 = zimage_linear_no_bias(hidden_dim, dim, vb.pp("w2"))?;
+        let w3 = zimage_linear_no_bias(dim, hidden_dim, vb.pp("w3"))?;
         Ok(Self { w1, w2, w3 })
     }
 }
@@ -110,8 +230,8 @@ impl QkNorm {
 
 /// Z-Image attention with fused QKV (GGUF layout), QK normalization, and 3D RoPE.
 struct ZImageAttention {
-    qkv: Linear,
-    out: Linear,
+    qkv: ZImageLinear,
+    out: ZImageLinear,
     qk_norm: Option<QkNorm>,
     n_heads: usize,
     head_dim: usize,
@@ -125,9 +245,9 @@ impl ZImageAttention {
         let head_dim = cfg.head_dim();
 
         // GGUF: fused QKV [dim, 3*n_heads*head_dim]
-        let qkv = quantized_nn::linear_no_bias(dim, 3 * n_heads * head_dim, vb.pp("qkv"))?;
+        let qkv = zimage_linear_no_bias(dim, 3 * n_heads * head_dim, vb.pp("qkv"))?;
         // GGUF: "out" instead of "to_out.0"
-        let out = quantized_nn::linear_no_bias(n_heads * head_dim, dim, vb.pp("out"))?;
+        let out = zimage_linear_no_bias(n_heads * head_dim, dim, vb.pp("out"))?;
 
         let qk_norm = if cfg.qk_norm {
             Some(QkNorm::new(head_dim, 1e-5, vb.clone())?)
@@ -276,7 +396,7 @@ struct ZImageTransformerBlock {
     attention_norm2: quantized_nn::RmsNorm,
     ffn_norm1: quantized_nn::RmsNorm,
     ffn_norm2: quantized_nn::RmsNorm,
-    adaln_modulation: Option<Linear>,
+    adaln_modulation: Option<ZImageLinear>,
 }
 
 impl ZImageTransformerBlock {
@@ -296,7 +416,7 @@ impl ZImageTransformerBlock {
 
         let adaln_modulation = if modulation {
             let adaln_dim = dim.min(ADALN_EMBED_DIM);
-            Some(quantized_nn::linear(
+            Some(zimage_linear(
                 adaln_dim,
                 4 * dim,
                 vb.pp("adaLN_modulation").pp("0"),
@@ -368,17 +488,16 @@ impl ZImageTransformerBlock {
 
 struct FinalLayer {
     norm_final: LayerNormNoParams,
-    linear: Linear,
-    adaln_silu: Linear,
+    linear: ZImageLinear,
+    adaln_silu: ZImageLinear,
 }
 
 impl FinalLayer {
     fn new(hidden_size: usize, out_channels: usize, vb: VarBuilder) -> Result<Self> {
         let norm_final = LayerNormNoParams::new(1e-6);
-        let linear = quantized_nn::linear(hidden_size, out_channels, vb.pp("linear"))?;
+        let linear = zimage_linear(hidden_size, out_channels, vb.pp("linear"))?;
         let adaln_dim = hidden_size.min(ADALN_EMBED_DIM);
-        let adaln_silu =
-            quantized_nn::linear(adaln_dim, hidden_size, vb.pp("adaLN_modulation").pp("1"))?;
+        let adaln_silu = zimage_linear(adaln_dim, hidden_size, vb.pp("adaLN_modulation").pp("1"))?;
         Ok(Self {
             norm_final,
             linear,
@@ -400,8 +519,8 @@ impl FinalLayer {
 pub struct QuantizedZImageTransformer2DModel {
     t_embedder: TimestepEmbedder,
     cap_embedder_norm: quantized_nn::RmsNorm,
-    cap_embedder_linear: Linear,
-    x_embedder: Linear,
+    cap_embedder_linear: ZImageLinear,
+    x_embedder: ZImageLinear,
     final_layer: FinalLayer,
     noise_refiner: Vec<ZImageTransformerBlock>,
     context_refiner: Vec<ZImageTransformerBlock>,
@@ -425,14 +544,14 @@ impl QuantizedZImageTransformer2DModel {
             vb.pp("cap_embedder").pp("0"),
         )?;
         let cap_embedder_linear =
-            quantized_nn::linear(cfg.cap_feat_dim, cfg.dim, vb.pp("cap_embedder").pp("1"))?;
+            zimage_linear(cfg.cap_feat_dim, cfg.dim, vb.pp("cap_embedder").pp("1"))?;
 
         // Patch embedder — GGUF: x_embedder (not all_x_embedder.2-1)
         let patch_dim = cfg.all_f_patch_size[0]
             * cfg.all_patch_size[0]
             * cfg.all_patch_size[0]
             * cfg.in_channels;
-        let x_embedder = quantized_nn::linear(patch_dim, cfg.dim, vb.pp("x_embedder"))?;
+        let x_embedder = zimage_linear(patch_dim, cfg.dim, vb.pp("x_embedder"))?;
 
         // Final layer — GGUF: final_layer (not all_final_layer.2-1)
         let out_channels = cfg.all_patch_size[0]
@@ -592,5 +711,84 @@ impl QuantizedZImageTransformer2DModel {
             self.cfg.in_channels,
         )?;
         result.to_dtype(out_dtype)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Linear arm selection ───────────────────────────────────────────────
+
+    /// CUDA must default to the dequantization arm: candle's fast MMQ kernels
+    /// return non-finite values for Z-Image's linears there, which is the
+    /// solid-black-render defect this gate exists to prevent.
+    #[test]
+    fn cuda_defaults_to_the_dequant_arm() {
+        assert_eq!(select_linear_kind(true, false), ZImageLinearKind::Dequant);
+    }
+
+    /// The escape hatch restores the fast path on CUDA only when explicitly
+    /// requested, so the kernel investigation keeps a one-variable repro.
+    #[test]
+    fn cuda_opt_in_restores_qmatmul() {
+        assert_eq!(select_linear_kind(true, true), ZImageLinearKind::QMatMul);
+    }
+
+    /// Metal and CPU keep `QMatMul` — the arm the #942 stable-diffusion.cpp
+    /// validation ran against — regardless of the CUDA escape hatch.
+    #[test]
+    fn non_cuda_always_uses_qmatmul() {
+        for opt_in in [false, true] {
+            assert_eq!(select_linear_kind(false, opt_in), ZImageLinearKind::QMatMul);
+        }
+    }
+
+    #[test]
+    fn qmatmul_env_parser_accepts_truthy_and_rejects_the_rest() {
+        for v in ["1", "true", "on", "yes", " TRUE ", "Yes"] {
+            assert!(parse_zimage_qmatmul(Some(v)), "{v:?} must enable");
+        }
+        for v in ["0", "false", "off", "no", "", "definitely"] {
+            assert!(!parse_zimage_qmatmul(Some(v)), "{v:?} must not enable");
+        }
+        assert!(!parse_zimage_qmatmul(None));
+    }
+
+    // ── Dequant arm numerics ───────────────────────────────────────────────
+
+    /// The dequant arm must be exactly `dequantize + dense linear`: same
+    /// orientation, same bias handling. Uses Q8_0 on CPU so the reference can
+    /// dequantize the identical weight.
+    #[test]
+    fn dequant_forward_matches_a_dense_linear_over_the_dequantized_weight() {
+        use candle_core::quantized::GgmlDType;
+
+        let dev = Device::Cpu;
+        let (out_dim, in_dim) = (4usize, 64usize);
+        let w_data: Vec<f32> = (0..out_dim * in_dim)
+            .map(|i| ((i % 13) as f32 - 6.0) * 0.25)
+            .collect();
+        let w = Tensor::from_vec(w_data, (out_dim, in_dim), &dev).unwrap();
+        let qw = QTensor::quantize(&w, GgmlDType::Q8_0).unwrap();
+        let bias = Tensor::from_vec(vec![0.5f32, -0.5, 1.0, 0.0], out_dim, &dev).unwrap();
+
+        let x_data: Vec<f32> = (0..2 * in_dim).map(|i| (i as f32 * 0.01) - 0.3).collect();
+        let x = Tensor::from_vec(x_data, (1, 2, in_dim), &dev).unwrap();
+
+        let got = dequant_forward(&qw, Some(&bias), &x).unwrap();
+        let reference = candle_nn::Linear::new(qw.dequantize(&dev).unwrap(), Some(bias))
+            .forward(&x)
+            .unwrap();
+
+        let diff = (got - reference)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        assert_eq!(diff, 0.0, "dequant arm must equal the dense reference");
     }
 }

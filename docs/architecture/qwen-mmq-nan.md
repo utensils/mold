@@ -21,8 +21,11 @@ arm dequantizes each GGUF weight to BF16 per forward
 which is correct and slow. Setting `MOLD_QWEN_QMATMUL=1` opts into `QMatMul`,
 which is where candle's MMQ/MMVQ kernels are reached — and where this defect is.
 
-Every other quantized family (FLUX, Z-Image, Wan, SD3) already uses `QMatMul`
-on CUDA. Qwen-Image is the exception, and this is why.
+FLUX, Wan, and SD3 use `QMatMul` on CUDA and render correctly. Z-Image used it
+too until 2026-08-15, when its CUDA renders were found solid black from the
+same defect (see "Z-Image is a second victim" below); it now defaults to a
+per-forward dequant arm exactly like Qwen's, with `MOLD_ZIMAGE_QMATMUL=1` as
+the opt-in.
 
 ---
 
@@ -55,9 +58,37 @@ Measured 2026-08-14 on an RTX 4090, `qwen-image-2512:q4`, 1024², CUDA 12.8.
 
 Wan runs quantized CUDA `QMatMul` through the identical
 `candle-core/src/quantized/cuda.rs` dispatch and renders correctly. Whatever is
-wrong is a function of Qwen's shapes, its dtype mix, or its activation
+wrong is a function of the affected models' shapes, dtype mix, or activation
 statistics — not of the kernels being universally wrong. Any hypothesis that
 would also break Wan is, on that evidence alone, the wrong hypothesis.
+
+### Z-Image is a second victim (2026-08-15)
+
+Every quantized Z-Image render on CUDA (`z-image-turbo:q4`/`q6`/`q8`) produced
+solid-black images. Instrumented on an RTX 4090 at 512², seed-independent:
+
+- The failure is **timestep-value-dependent, not shape-dependent**: the first
+  denoise steps are finite, and the forward whose timestep first exceeds
+  t≈0.07 (threshold bracketed between 0.062 and 0.086 across 4/9/20-step
+  schedules) goes non-finite. All shapes are identical across steps.
+- The eruption site is the **unified-stream feed-forward** (`w2` over the
+  SwiGLU product, `k = 10240`, 1035 rows): its output reaches `inf` from
+  finite ±40 inputs — impossible for a correct matmul at these magnitudes, so
+  the kernel is producing garbage, not merely rounding. Z-Image's activations
+  are F32 here (its quantized runtime computes in F32), so this is not a BF16
+  artifact.
+- Forcing `FORCE_DMMV` (skipping both fast arms) renders the identical request
+  correctly — the same control result as Qwen's.
+
+This falsifies the earlier framing that only Qwen's shapes trigger the defect,
+and adds a useful datum: Z-Image's per-block intermediates are legitimately
+huge (sandwich-norm design; feed-forward outputs at ±1e5 that the post-norm
+rescales), so activation dynamic range is now the strongest of the
+distinguishing features listed in step 5 below. The shipped mitigation mirrors
+Qwen's: the Z-Image quantized linears default to a per-forward dequant arm on
+CUDA (`crates/mold-inference/src/zimage/quantized_transformer.rs`,
+`select_linear_kind`), with `MOLD_ZIMAGE_QMATMUL=1` re-enabling the fast path
+for this investigation. Metal keeps `QMatMul`.
 
 ---
 

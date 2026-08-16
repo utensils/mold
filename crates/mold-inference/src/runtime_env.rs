@@ -88,6 +88,12 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     "MOLD_WAN_STEP_CACHE",
     "MOLD_WAN_STEP_PROFILE",
     "MOLD_WUERSTCHEN_DECODER_GUIDANCE",
+    // Z-Image GGUF runtime escape hatches. GGUF_DENSE swaps the quantized
+    // runtime for the dense dequantized map (different weights residency and
+    // numerics); QMATMUL re-enables candle's quantized CUDA fast path, which
+    // is known to return non-finite values for Z-Image's linears.
+    "MOLD_ZIMAGE_GGUF_DENSE",
+    "MOLD_ZIMAGE_QMATMUL",
 ];
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

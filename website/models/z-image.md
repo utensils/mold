@@ -53,6 +53,13 @@ Z-Image uses a Qwen3 text encoder (BF16 or GGUF with auto-fallback). The
 quantized transformer is implemented directly in mold (not upstream candle) due
 to GGUF tensor naming differences.
 
+On CUDA, the quantized transformer's linears dequantize each weight per
+forward rather than feeding candle's quantized fast-matmul kernels, which
+return non-finite values for Z-Image's layers and produced solid-black
+renders. Metal keeps the fast quantized path, which is validated against
+stable-diffusion.cpp. `MOLD_ZIMAGE_QMATMUL=1` re-enables the CUDA fast path
+for kernel debugging only.
+
 On CUDA, `MOLD_ZIMAGE_GGUF_DENSE=1` is a diagnostic escape hatch that
 dequantizes a GGUF transformer into a dense BF16 parameter map. This uses about
 12 GB for the map instead of keeping a Q4 checkpoint near its roughly 3.4 GB
