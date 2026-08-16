@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Qwen Image aspect ratios are available again on every Create surface.** Web, desktop, and iPhone now receive the seven pinned Qwen Image presets (`1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, and `2:3`) from the shared server profile, with the same fallback on older hosts. Qwen Image Edit keeps source-driven fitting and presents the shapes as optional Mold guidance rather than claiming a text-to-image upstream contract. A catalog-wide regression now prevents any shipped visual generation model from silently exposing an empty shape picker.
 - **Now Developing shows completed image and video thumbnails.** Desktop sidebar activity rows now load the same authenticated gallery thumbnails as Library, including remote-host videos that previously fell back to an empty black tile.
 
 ## [0.22.1] - 2026-08-16

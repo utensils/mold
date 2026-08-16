@@ -59,7 +59,7 @@
       "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
       "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
       "qualified": true,
-      "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract",
+      "evidence": "contract qualification: pinned upstream README.md aspect_ratios oracle; Mold dynamic /16 admission and common decoded-image delivery are resolution-generic; no per-size runtime-performance claim",
       "candidates": [
         [
           1328,
@@ -16416,7 +16416,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image-2512",
-        "profile_hash": "bdacbc97cba130c5440150cf434ac0cdab0c8b269808396323437a86229a4bc3",
+        "profile_hash": "1b76df43c69c2bcd867e04c387be07875d7da33943427aed5c7032df31d38ead",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16604,7 +16604,7 @@
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
                 "qualified": true,
-                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
+                "evidence": "contract qualification: pinned upstream README.md aspect_ratios oracle; Mold dynamic /16 admission and common decoded-image delivery are resolution-generic; no per-size runtime-performance claim"
               }
             ]
           }
@@ -16627,7 +16627,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image-distill",
-        "profile_hash": "bbb2a26828cf53b6ef04d5e20523a035d01cd430e3d0193322bb37bea6d66aec",
+        "profile_hash": "97147458f303adac4a500bdf98b8ff9ccf042fc038f7fcbedfac78c737141db9",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16815,7 +16815,7 @@
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
                 "qualified": true,
-                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
+                "evidence": "contract qualification: pinned upstream README.md aspect_ratios oracle; Mold dynamic /16 admission and common decoded-image delivery are resolution-generic; no per-size runtime-performance claim"
               }
             ]
           }
@@ -16838,7 +16838,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image-flash",
-        "profile_hash": "a98ae058345f418ac489241ba0f13a58edddfb3e835ae1bd7b08a25b01f8c35c",
+        "profile_hash": "43db5e517f22de3c448d15bbcd64b43060ecb9003fa0571060114d154cebbb7f",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -17026,7 +17026,7 @@
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
                 "qualified": true,
-                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
+                "evidence": "contract qualification: pinned upstream README.md aspect_ratios oracle; Mold dynamic /16 admission and common decoded-image delivery are resolution-generic; no per-size runtime-performance claim"
               }
             ]
           }
@@ -17044,7 +17044,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image-lightning",
-        "profile_hash": "119c55322a38f2ad63d393ef931e24d2336c89a657f5e3ecbf5e2967d0b44abb",
+        "profile_hash": "7cc066ce9457025d333011ec05caeb6b6910d5b164beb5e02fa772e5710edd97",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -17232,7 +17232,7 @@
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
                 "qualified": true,
-                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
+                "evidence": "contract qualification: pinned upstream README.md aspect_ratios oracle; Mold dynamic /16 admission and common decoded-image delivery are resolution-generic; no per-size runtime-performance claim"
               }
             ]
           }
@@ -17250,7 +17250,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image-lightning",
-        "profile_hash": "abbf897a109a4cb1256fedac07e79d4e1f37939dca3ea6951487403a9aeea148",
+        "profile_hash": "d926443f0dc5fed7cf769c24accf6491c82f59d3a2c5f20d374abe91b67aa4e7",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -17438,7 +17438,7 @@
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
                 "qualified": true,
-                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
+                "evidence": "contract qualification: pinned upstream README.md aspect_ratios oracle; Mold dynamic /16 admission and common decoded-image delivery are resolution-generic; no per-size runtime-performance claim"
               }
             ]
           }
@@ -17491,7 +17491,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image.qwen-image",
-        "profile_hash": "2a9c24b2f917612549d901f8a012619220f8f323087392141505adcfc1dd9364",
+        "profile_hash": "ed2130c2fe67cf080799e236707851281aabae2f173dad14d8c829f76a2b3df7",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -17679,7 +17679,7 @@
                 "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
                 "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
                 "qualified": true,
-                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
+                "evidence": "contract qualification: pinned upstream README.md aspect_ratios oracle; Mold dynamic /16 admission and common decoded-image delivery are resolution-generic; no per-size runtime-performance claim"
               }
             ]
           }
@@ -17727,7 +17727,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image-edit.qwen-image-edit-2511",
-        "profile_hash": "65d26a1d98818b80bce51f864925d7d67931cacea596f2132d54828875e00939",
+        "profile_hash": "20790f77b3bbee4261ab6366410898296ecd63a0ab3b30e7c11b1a0a383fbc48",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -17911,11 +17911,10 @@
             },
             "provenance": [
               {
-                "kind": "upstream",
-                "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
-                "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
+                "kind": "mold-policy",
+                "source": "Mold source-driven Qwen Image Edit guidance",
                 "qualified": true,
-                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
+                "evidence": "source fitting preserves the input aspect on the dynamic /16 canvas; optional shape presets reuse Mold's qualified Qwen Image aspect set"
               }
             ]
           }
@@ -17933,7 +17932,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "qwen-image-edit.qwen-image-edit-lightning",
-        "profile_hash": "484b16f943bf0868b3ad9343de364cfa28fa81082241bd2716f0b7ef63ef49fb",
+        "profile_hash": "4d53cca9b1a529ecc841fe9b570d6e15feb3657a61f9cf90d905a2be2ce3963a",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -18117,11 +18116,10 @@
             },
             "provenance": [
               {
-                "kind": "upstream",
-                "source": "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
-                "revision": "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
+                "kind": "mold-policy",
+                "source": "Mold source-driven Qwen Image Edit guidance",
                 "qualified": true,
-                "evidence": "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract"
+                "evidence": "source fitting preserves the input aspect on the dynamic /16 canvas; optional shape presets reuse Mold's qualified Qwen Image aspect set"
               }
             ]
           }

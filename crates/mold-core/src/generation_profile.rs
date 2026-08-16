@@ -80,11 +80,13 @@ pub struct ProfileProvenance {
 
 /// Server-side qualification record for upstream resolution candidates.
 ///
-/// Candidate dimensions are deliberately separate from `ResolutionProfile`:
-/// only dimensions backed by a passing Mold runtime-and-delivery campaign may
-/// enter `aspect_groups` and therefore become UI recommendations. The
-/// generator includes these records in maintainer artifacts so an upstream
-/// candidate cannot be mistaken for a shipped contract.
+/// `qualified` means the dimensions may be presented as recommendations; it
+/// is not a per-size runtime-performance claim. A dynamic family can qualify
+/// a pinned upstream oracle when Mold's alignment, pixel admission, and image
+/// delivery paths are resolution-generic. Bucketed or size-sensitive families
+/// additionally need a checked-in exact-size generation-and-delivery campaign.
+/// The generator keeps the evidence visible so those two qualification paths
+/// cannot be conflated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolutionQualificationRecord {
     pub family: &'static str,
@@ -837,7 +839,7 @@ const QWEN_IMAGE_QUALIFICATION: ResolutionQualificationRecord =
         source: "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
         revision: "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
         qualified: true,
-        evidence: "upstream README.md aspect_ratios oracle + Mold dynamic-resolution admission and decoded image delivery contract",
+        evidence: "contract qualification: pinned upstream README.md aspect_ratios oracle; Mold dynamic /16 admission and common decoded-image delivery are resolution-generic; no per-size runtime-performance claim",
         candidates: QWEN_UPSTREAM_CANDIDATES,
     };
 
@@ -848,7 +850,7 @@ pub fn resolution_qualification_record(
 ) -> Option<&'static ResolutionQualificationRecord> {
     match canonical_family(family) {
         "z-image" => Some(&Z_IMAGE_QUALIFICATION),
-        "qwen-image" | "qwen-image-edit" => Some(&QWEN_IMAGE_QUALIFICATION),
+        "qwen-image" => Some(&QWEN_IMAGE_QUALIFICATION),
         _ => None,
     }
 }
@@ -1378,6 +1380,18 @@ fn pipeline_label(pipeline: Ltx2PipelineMode) -> String {
 }
 
 fn provenance(family: &str) -> Vec<ProfileProvenance> {
+    if canonical_family(family) == "qwen-image-edit" {
+        return vec![ProfileProvenance {
+            kind: ProvenanceKind::MoldPolicy,
+            source: "Mold source-driven Qwen Image Edit guidance".to_string(),
+            revision: None,
+            qualified: true,
+            evidence: Some(
+                "source fitting preserves the input aspect on the dynamic /16 canvas; optional shape presets reuse Mold's qualified Qwen Image aspect set"
+                    .to_string(),
+            ),
+        }];
+    }
     if let Some(record) = resolution_qualification_record(family) {
         return vec![ProfileProvenance {
             kind: ProvenanceKind::Upstream,
@@ -1623,7 +1637,7 @@ mod tests {
                 "qwen-image",
                 "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
                 true,
-                "dynamic-resolution admission and decoded image delivery contract",
+                "no per-size runtime-performance claim",
             ),
         ] {
             let profile = resolve_generation_profile(input(model, family));
@@ -1634,6 +1648,17 @@ mod tests {
             let evidence = provenance.evidence.as_deref().unwrap();
             assert!(evidence.contains(evidence_fragment));
         }
+    }
+
+    #[test]
+    fn qwen_image_edit_presets_are_mold_source_fitting_guidance() {
+        let profile =
+            resolve_generation_profile(input("qwen-image-edit-2511:q4", "qwen-image-edit"));
+        let recipe = profile.default_recipe().unwrap();
+        assert_eq!(recipe.resolution.domain, ResolutionDomain::SourceDriven);
+        assert_eq!(recipe.provenance[0].kind, ProvenanceKind::MoldPolicy);
+        assert!(recipe.provenance[0].source.contains("source-driven"));
+        assert!(resolution_qualification_record("qwen-image-edit").is_none());
     }
 
     #[test]
