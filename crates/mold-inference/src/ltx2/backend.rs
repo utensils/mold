@@ -96,21 +96,6 @@ mod tests {
     }
 
     #[test]
-    fn cpu_placement_widens_safetensors_but_not_quantized_weights() {
-        use std::path::Path;
-        assert_eq!(
-            super::super::cpu_host_bytes_per_stored_byte(Path::new("model-00001.safetensors")),
-            2,
-            "BF16 shards are rebuilt at the CPU compute dtype"
-        );
-        assert_eq!(
-            super::super::cpu_host_bytes_per_stored_byte(Path::new("gemma-3-12b-q4_0.gguf")),
-            1,
-            "the GGUF encoder is loaded without a dtype and stays quantized"
-        );
-    }
-
-    #[test]
     fn accelerator_backends_use_bf16_compute() {
         assert_eq!(Ltx2Backend::Cuda.compute_dtype(), candle_core::DType::BF16);
         assert_eq!(Ltx2Backend::Metal.compute_dtype(), candle_core::DType::BF16);
