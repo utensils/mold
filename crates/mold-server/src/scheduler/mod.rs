@@ -35,6 +35,17 @@ const PREPARATION_RETRY_BASE_MS: u64 = 250;
 const PREPARATION_RETRY_MAX_MS: u64 = 5_000;
 const PREPARATION_CAPACITY_DELTA_BYTES: u64 = 2 << 30;
 const MAX_DISPATCH_REPLANS_PER_TURN: u8 = 3;
+/// How many dependency preparations may resolve variants and download weights
+/// at once.
+///
+/// Preparation is unbounded fan-out in front of a GPU that runs one job at a
+/// time: a burst of submissions used to start one resolution per job, all of
+/// them competing for the same disk and host RAM to stage work the scheduler
+/// cannot dispatch for minutes. Two keeps a single stuck download from
+/// stalling the next ready job — the property
+/// `blocked_dependency_preparation_does_not_block_other_ready_gpu_work` pins —
+/// without letting the queue depth set the parallelism.
+const MAX_CONCURRENT_PREPARATIONS: usize = 2;
 const DISPATCH_RETRY_BASE_MS: u64 = 25;
 const DISPATCH_RETRY_MAX_MS: u64 = 1_000;
 pub(crate) const CPU_UTILITY_DEVICE_ID: &str = "cpu:utility:0";
@@ -1267,6 +1278,7 @@ struct Coordinator {
     preparation_tx: tokio::sync::mpsc::UnboundedSender<PreparationEvent>,
     preparation_rx: tokio::sync::mpsc::UnboundedReceiver<PreparationEvent>,
     preparation_tasks: tokio::task::JoinSet<()>,
+    preparation_slots: Arc<tokio::sync::Semaphore>,
     last_queue_shape: Vec<(String, Option<usize>)>,
     last_registry_sequence: u64,
     last_paused: bool,
@@ -1369,6 +1381,7 @@ impl Coordinator {
             preparation_tx,
             preparation_rx,
             preparation_tasks: tokio::task::JoinSet::new(),
+            preparation_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PREPARATIONS)),
             last_queue_shape: Vec::new(),
             last_registry_sequence: 0,
             last_paused: false,
@@ -1626,7 +1639,12 @@ impl Coordinator {
             let context = crate::variant_dependencies::DependencyPreparationContext::default();
             let preparer = self.preparer.clone();
             let tx = self.preparation_tx.clone();
+            let slots = self.preparation_slots.clone();
             self.preparation_tasks.spawn(async move {
+                // The permit is taken inside the task so a queued preparation
+                // waits here rather than in `Needed`, where the scheduler
+                // would keep re-spawning it.
+                let _slot = slots.acquire_owned().await;
                 let event = match preparer
                     .prepare(state, id.clone(), request, progress, context)
                     .await
@@ -11609,6 +11627,100 @@ mod tests {
             PreparationState::Preparing
         );
         release.notify_waiters();
+        coordinator.stop_preparations().await;
+    }
+
+    struct ConcurrencyProbePreparer {
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        released: Arc<AtomicBool>,
+    }
+
+    impl DependencyPreparer for ConcurrencyProbePreparer {
+        fn prepare(
+            &self,
+            _state: AppState,
+            _work_id: String,
+            _request: mold_core::GenerateRequest,
+            _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+            _context: crate::variant_dependencies::DependencyPreparationContext,
+        ) -> PreparationFuture {
+            let in_flight = self.in_flight.clone();
+            let peak = self.peak.clone();
+            let released = self.released.clone();
+            Box::pin(async move {
+                let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(current, Ordering::SeqCst);
+                while !released.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                Ok(PreparedGeneration::default())
+            })
+        }
+    }
+
+    /// A burst of submissions must not run one dependency resolution per job.
+    ///
+    /// Every preparation resolves variants and can start a multi-GB download,
+    /// all of it behind a GPU that runs one job at a time. Eight submissions
+    /// used to mean eight concurrent resolutions competing for the same disk
+    /// and host RAM (#1099).
+    #[tokio::test]
+    async fn a_submission_burst_bounds_concurrent_dependency_preparations() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(16);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 16);
+        let burst = MAX_CONCURRENT_PREPARATIONS * 3;
+        let mut results = Vec::new();
+        for index in 0..burst {
+            let id = format!("burst-{index}");
+            state.job_registry.register(&id, "flux-dev:q4");
+            let (job, result) = fake_generation(&id);
+            results.push(result);
+            queue.submit(job, 16).await.unwrap();
+        }
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicBool::new(false));
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ConcurrencyProbePreparer {
+                in_flight: in_flight.clone(),
+                peak: peak.clone(),
+                released: released.clone(),
+            }),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        for _ in 0..burst {
+            coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        }
+        coordinator.start_needed_preparations();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            MAX_CONCURRENT_PREPARATIONS,
+            "the burst must saturate the bound and never exceed it"
+        );
+
+        released.store(true, Ordering::SeqCst);
+        for _ in 0..burst {
+            let event =
+                tokio::time::timeout(Duration::from_secs(5), coordinator.preparation_rx.recv())
+                    .await
+                    .expect("every held preparation must still complete")
+                    .expect("preparation event");
+            coordinator.handle_preparation_event(event, &mut immediate);
+        }
+        assert!(
+            peak.load(Ordering::SeqCst) <= MAX_CONCURRENT_PREPARATIONS,
+            "draining must not raise the bound"
+        );
         coordinator.stop_preparations().await;
     }
 

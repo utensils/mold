@@ -1667,6 +1667,30 @@ fn process_scheduled_chain_stage(
     })
 }
 
+/// Return idle glibc arena pages to the OS, and report the RSS just before
+/// doing so.
+///
+/// glibc keeps freed pages in per-arena heaps even after the allocations are
+/// dropped — large transient buffers from GGUF+LoRA rebuilds can leave tens of
+/// GB of unreclaimed RSS. `malloc_trim(0)` walks the arenas and returns idle
+/// pages via `madvise(MADV_DONTNEED)`. Cheap (~ms), glibc-only, gated so we can
+/// A/B with `MOLD_MALLOC_TRIM=0`. `None` means the trim was disabled and no RSS
+/// was sampled.
+fn trim_malloc_arenas() -> Option<u64> {
+    let enabled = std::env::var("MOLD_MALLOC_TRIM")
+        .map(|value| value != "0")
+        .unwrap_or(true);
+    if !enabled {
+        return None;
+    }
+    let rss_pre_trim = crate::resources::ram_snapshot().used_by_mold;
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+    Some(rss_pre_trim)
+}
+
 /// Scheduled chain stages bypass `process_job`, so they need their own memory
 /// heartbeat around model readiness and rendering. A channel-backed stop wakes
 /// the thread immediately for short stages instead of making completion wait
@@ -1733,6 +1757,7 @@ impl Drop for ChainStageMemoryWatchdog {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+        let rss_pre_trim = trim_malloc_arenas();
         let rss_after = crate::resources::ram_snapshot().used_by_mold;
         tracing::info!(
             gpu = self.ordinal,
@@ -1741,6 +1766,7 @@ impl Drop for ChainStageMemoryWatchdog {
             rss_before_mb = self.rss_before / 1_000_000,
             rss_after_mb = rss_after / 1_000_000,
             rss_delta_mb = (rss_after as i64 - self.rss_before as i64) / 1_000_000,
+            rss_pre_trim_mb = rss_pre_trim.map(|value| value / 1_000_000).unwrap_or(0),
             "chain stage memory delta"
         );
     }
@@ -3811,24 +3837,7 @@ fn process_job_with_sink(
     watchdog_stop.store(true, Ordering::SeqCst);
     let _ = watchdog_handle.join();
 
-    // glibc keeps freed pages in per-arena heaps even after the allocations
-    // are dropped — large transient buffers from GGUF+LoRA rebuilds can leave
-    // tens of GB of unreclaimed RSS. `malloc_trim(0)` walks the arenas and
-    // returns idle pages to the OS via madvise(MADV_DONTNEED). Cheap (~ms),
-    // glibc-only, gated so we can A/B with `MOLD_MALLOC_TRIM=0`.
-    let trim_enabled = std::env::var("MOLD_MALLOC_TRIM")
-        .map(|v| v != "0")
-        .unwrap_or(true);
-    let rss_pre_trim = if trim_enabled {
-        let v = crate::resources::ram_snapshot().used_by_mold;
-        #[cfg(target_os = "linux")]
-        unsafe {
-            libc::malloc_trim(0);
-        }
-        Some(v)
-    } else {
-        None
-    };
+    let rss_pre_trim = trim_malloc_arenas();
 
     let rss_after = crate::resources::ram_snapshot().used_by_mold;
     let rss_delta = rss_after as i64 - rss_before as i64;
@@ -11309,6 +11318,30 @@ mod tests {
         assert!(
             unchanged_return < fence,
             "the host fence must not gate an unchanged hot-cache hit"
+        );
+    }
+
+    /// A chain stage leaves the same glibc arenas behind as an ordinary
+    /// generation, and had no trim to return them.
+    #[test]
+    fn both_generation_paths_reclaim_glibc_arenas_through_one_gate() {
+        let whole = include_str!("gpu_worker.rs");
+        let source = &whole[..whole.find("\nmod tests {").unwrap_or(whole.len())];
+        assert_eq!(
+            source.matches("libc::malloc_trim(0)").count(),
+            1,
+            "one implementation, so the MOLD_MALLOC_TRIM gate cannot drift"
+        );
+        let start = source
+            .find("impl Drop for ChainStageMemoryWatchdog {")
+            .expect("chain stage watchdog");
+        let end = source[start..]
+            .find("\nfn fence_chain_stage_render(")
+            .map(|offset| start + offset)
+            .expect("chain stage watchdog boundary");
+        assert!(
+            source[start..end].contains("trim_malloc_arenas()"),
+            "the chain-stage path must reclaim arenas the way process_job does"
         );
     }
 
