@@ -3004,7 +3004,23 @@ async fn generate_stream(
         h3_private_ingress_grant,
     };
 
+    // The seed position is the registry index, not the queue's pending count.
+    // The pending count excludes the running job, so a submit behind one
+    // running generation used to report 0 here and 1 in every later
+    // announcement, making the place in line appear to move backwards.
+    //
+    // Read it BEFORE `submit`: once the job is in the channel a worker can run
+    // it to completion and unregister the entry before this task resumes, and
+    // the fallback would seed 0 for a job that genuinely had a queue ahead of
+    // it. Pre-submit the job cannot be dispatched, so the read is race-free;
+    // the fallback only fires if a concurrent cancel already removed the
+    // entry — a job whose position no longer matters.
     let position = state
+        .job_registry
+        .entry(&job_id)
+        .map_or(0, |entry| entry.position);
+
+    state
         .queue
         .submit(job, state.queue_capacity)
         .await
@@ -4205,6 +4221,7 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         queue_paused: Some(state.queue_pause.is_paused()),
         instance_id: Some(state.instance_id.as_ref().clone()),
         models_disk,
+        host_memory: state.scheduled_work.host_memory(),
     })
 }
 

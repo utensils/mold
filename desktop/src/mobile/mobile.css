@@ -4120,6 +4120,16 @@ button:disabled {
   transition: width 180ms ease-out;
 }
 
+/* Host-RAM pressure from the scheduler's ledger. Absent on older servers,
+   which leaves the meter its default halide fill. */
+.meter[data-pressure="warn"] > span {
+  background: var(--safelight);
+}
+
+.meter[data-pressure="critical"] > span {
+  background: var(--stop);
+}
+
 .mobile-data-list {
   margin: 10px 0 0;
   padding: 0;

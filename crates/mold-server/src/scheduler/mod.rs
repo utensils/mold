@@ -35,6 +35,17 @@ const PREPARATION_RETRY_BASE_MS: u64 = 250;
 const PREPARATION_RETRY_MAX_MS: u64 = 5_000;
 const PREPARATION_CAPACITY_DELTA_BYTES: u64 = 2 << 30;
 const MAX_DISPATCH_REPLANS_PER_TURN: u8 = 3;
+/// How many dependency preparations may resolve variants and download weights
+/// at once.
+///
+/// Preparation is unbounded fan-out in front of a GPU that runs one job at a
+/// time: a burst of submissions used to start one resolution per job, all of
+/// them competing for the same disk and host RAM to stage work the scheduler
+/// cannot dispatch for minutes. Two keeps a single stuck download from
+/// stalling the next ready job — the property
+/// `blocked_dependency_preparation_does_not_block_other_ready_gpu_work` pins —
+/// without letting the queue depth set the parallelism.
+const MAX_CONCURRENT_PREPARATIONS: usize = 2;
 const DISPATCH_RETRY_BASE_MS: u64 = 25;
 const DISPATCH_RETRY_MAX_MS: u64 = 1_000;
 pub(crate) const CPU_UTILITY_DEVICE_ID: &str = "cpu:utility:0";
@@ -256,6 +267,11 @@ pub struct ScheduledWorkHandle {
     observes_v2_decisions: bool,
     observations: Arc<crate::dispatch_mode::DispatchObservationRecorder>,
     latest_plan: Arc<std::sync::RwLock<Option<mold_core::QueuePlan>>>,
+    /// Most recent host-RAM reading from the coordinator's admission ledger,
+    /// so `/api/status` reports the same numbers admission spends. `None`
+    /// until the first sample, and permanently `None` wherever the coordinator
+    /// does not run.
+    latest_host_memory: Arc<std::sync::RwLock<Option<mold_core::HostMemorySnapshot>>>,
 }
 
 impl Default for ScheduledWorkHandle {
@@ -268,6 +284,7 @@ impl Default for ScheduledWorkHandle {
             observes_v2_decisions: false,
             observations: Arc::new(crate::dispatch_mode::DispatchObservationRecorder::default()),
             latest_plan: Arc::new(std::sync::RwLock::new(None)),
+            latest_host_memory: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 }
@@ -303,11 +320,27 @@ impl ScheduledWorkHandle {
             observes_v2_decisions,
             observations: Arc::new(crate::dispatch_mode::DispatchObservationRecorder::default()),
             latest_plan: Arc::new(std::sync::RwLock::new(None)),
+            latest_host_memory: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
     pub const fn dispatch_mode(&self) -> crate::dispatch_mode::DispatchMode {
         self.dispatch_mode
+    }
+
+    /// Latest host-RAM reading, or `None` when nothing has sampled it.
+    pub fn host_memory(&self) -> Option<mold_core::HostMemorySnapshot> {
+        *self
+            .latest_host_memory
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn publish_host_memory(&self, snapshot: Option<mold_core::HostMemorySnapshot>) {
+        *self
+            .latest_host_memory
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = snapshot;
     }
 
     pub const fn v2_authoritative(&self) -> bool {
@@ -534,6 +567,9 @@ struct PendingGeneration {
     retry_not_before_ms: Option<u64>,
     preparation_retry_attempts: u8,
     preparation_refresh_observation: Option<PreparationRefreshObservation>,
+    /// Place in line this job's client was last told about, so a drained queue
+    /// re-announces exactly once per actual move. `None` until first observed.
+    announced_position: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -923,9 +959,9 @@ enum ReservationState {
 struct HostReservation {
     bytes: u64,
     state: ReservationState,
-    /// H3 announces its first allocation before gradual model/host loading.
-    /// No OS sample can prove the complete frozen increment is reflected, so
-    /// this reservation remains charged until its lease settles.
+    /// A worker announces its first allocation before gradual model/host
+    /// loading. No OS sample can prove the complete frozen increment is
+    /// reflected, so this reservation remains charged until its lease settles.
     charge_until_release: bool,
 }
 
@@ -1002,6 +1038,11 @@ impl HostMemoryLedger {
             .unwrap_or(u64::MAX)
     }
 
+    /// A worker announces AllocationCommitted immediately before its first
+    /// CUDA construction, while model and host allocations continue after that
+    /// point. A fresh OS sample therefore cannot prove that a lease's entire
+    /// frozen host increment is reflected. Every live reservation stays
+    /// charged until that lease settles.
     fn headroom_bytes(&self) -> u64 {
         let Some(sample) = self.sample else {
             return 0;
@@ -1017,11 +1058,6 @@ impl HostMemoryLedger {
         let Some(sample) = self.sample else {
             return Some(0);
         };
-        // A worker announces AllocationCommitted immediately before its first
-        // CUDA construction, while model and host allocations continue after
-        // that point. A fresh OS sample therefore cannot prove that a peer's
-        // entire frozen host increment is reflected. Keep every live peer
-        // reservation charged until that lease settles.
         let peer_reserved_bytes = self
             .reservations
             .iter()
@@ -1041,6 +1077,19 @@ impl HostMemoryLedger {
         self.headroom_for_reserved_work(work_id)
     }
 
+    /// Client-facing telemetry, or `None` while the sampler has produced no
+    /// reading. Absent means unknown — a zeroed snapshot would read as a host
+    /// under total memory pressure.
+    fn wire_snapshot(&self) -> Option<mold_core::HostMemorySnapshot> {
+        let sample = self.sample?;
+        Some(mold_core::HostMemorySnapshot {
+            total_bytes: sample.total_bytes,
+            available_bytes: sample.available_bytes,
+            headroom_bytes: self.headroom_bytes(),
+            safety_floor_bytes: self.safety_floor_bytes(),
+        })
+    }
+
     fn snapshot(&self) -> HostMemorySnapshot {
         HostMemorySnapshot {
             headroom_bytes: self.headroom_bytes(),
@@ -1054,7 +1103,6 @@ impl HostMemoryLedger {
         plan: &Plan,
         state_version: u64,
         plan_version: u64,
-        charge_until_release: &BTreeSet<String>,
     ) -> Result<(), GrantFenceError> {
         plan.validate_for_grant(
             state_version,
@@ -1072,7 +1120,7 @@ impl HostMemoryLedger {
                 HostReservation {
                     bytes: item.host_ram_bytes,
                     state: ReservationState::Reserved,
-                    charge_until_release: charge_until_release.contains(item.work_id.as_str()),
+                    charge_until_release: item.host_ram_bytes > 0,
                 },
             );
         }
@@ -1200,6 +1248,9 @@ fn queue_plan_semantically_equal(
         plan.state_version = 0;
         plan.dirty_since_unix_ms = None;
         plan.next_replan_at_unix_ms = None;
+        // Host memory is a live 1 Hz reading. Letting it decide semantic
+        // equality would publish a plan event every second forever.
+        plan.host_memory = None;
         for work in &mut plan.work_items {
             let duration = work
                 .estimated_start_unix_ms
@@ -1268,6 +1319,7 @@ struct Coordinator {
     preparation_tx: tokio::sync::mpsc::UnboundedSender<PreparationEvent>,
     preparation_rx: tokio::sync::mpsc::UnboundedReceiver<PreparationEvent>,
     preparation_tasks: tokio::task::JoinSet<()>,
+    preparation_slots: Arc<tokio::sync::Semaphore>,
     last_queue_shape: Vec<(String, Option<usize>)>,
     last_registry_sequence: u64,
     last_paused: bool,
@@ -1370,6 +1422,7 @@ impl Coordinator {
             preparation_tx,
             preparation_rx,
             preparation_tasks: tokio::task::JoinSet::new(),
+            preparation_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PREPARATIONS)),
             last_queue_shape: Vec::new(),
             last_registry_sequence: 0,
             last_paused: false,
@@ -1388,6 +1441,53 @@ impl Coordinator {
             before_grant_hook: None,
             #[cfg(test)]
             before_queue_control_plan_hook: None,
+        }
+    }
+
+    /// Sample host memory and republish it, so `/api/status` and the queue
+    /// plan report the numbers admission is actually spending.
+    fn collect_host_memory(&mut self) {
+        self.memory.collect_now();
+        self.state
+            .scheduled_work
+            .publish_host_memory(self.memory.wire_snapshot());
+    }
+
+    /// Re-emit `Queued { position }` for every still-queued job whose place in
+    /// line moved, using the registry order `GET /api/queue` reports.
+    ///
+    /// A client used to learn its position exactly once, in the first SSE
+    /// event, and the queue then drained in silence. This needs no new event
+    /// type: both terminal clients render `Queued` in place — indicatif's
+    /// `set_message` and the TUI's `current_stage` — so a repeat reads as a
+    /// live update rather than another line.
+    ///
+    /// Only an actual change emits. Reconcile runs on every registry
+    /// notification and on a 10 ms ticker, so announcing unconditionally would
+    /// be a firehose. The first observation seeds silently: the submit-time
+    /// event has already told that client where it stands.
+    fn announce_queue_positions(&mut self, listing: &crate::job_registry::QueueListing) {
+        for entry in &listing.entries {
+            if entry.state != crate::job_registry::JobLifecycle::Queued {
+                continue;
+            }
+            let Some(pending) = self.pending.get_mut(&entry.id) else {
+                continue;
+            };
+            if pending.announced_position == Some(entry.position) {
+                continue;
+            }
+            let seeding = pending.announced_position.is_none();
+            pending.announced_position = Some(entry.position);
+            if seeding {
+                continue;
+            }
+            if let Some(progress) = pending.job.progress_tx.as_ref() {
+                let _ = progress.send(SseMessage::Progress(mold_core::SseProgressEvent::Queued {
+                    position: entry.position,
+                    id: entry.id.clone(),
+                }));
+            }
         }
     }
 
@@ -1467,6 +1567,7 @@ impl Coordinator {
                 retry_not_before_ms: None,
                 preparation_retry_attempts: 0,
                 preparation_refresh_observation: None,
+                announced_position: None,
             },
         );
         self.mutate(immediate);
@@ -1627,7 +1728,12 @@ impl Coordinator {
             let context = crate::variant_dependencies::DependencyPreparationContext::default();
             let preparer = self.preparer.clone();
             let tx = self.preparation_tx.clone();
+            let slots = self.preparation_slots.clone();
             self.preparation_tasks.spawn(async move {
+                // The permit is taken inside the task so a queued preparation
+                // waits here rather than in `Needed`, where the scheduler
+                // would keep re-spawning it.
+                let _slot = slots.acquire_owned().await;
                 let event = match preparer
                     .prepare(state, id.clone(), request, progress, context)
                     .await
@@ -1948,7 +2054,7 @@ impl Coordinator {
                 let work_id = rejected_work_id;
                 if rejected_lease.is_some() {
                     self.memory.release(&work_id);
-                    self.memory.collect_now();
+                    self.collect_host_memory();
                     let rejected_worker = rejected_lease_device.as_ref().and_then(|device| {
                         self.state
                             .gpu_pool
@@ -2031,6 +2137,7 @@ impl Coordinator {
                                         ),
                                         preparation_retry_attempts: 0,
                                         preparation_refresh_observation: None,
+                                        announced_position: None,
                                     },
                                 );
                             }
@@ -2053,6 +2160,7 @@ impl Coordinator {
                                     retry_not_before_ms: None,
                                     preparation_retry_attempts: 0,
                                     preparation_refresh_observation: None,
+                                    announced_position: None,
                                 },
                             );
                         }
@@ -2167,7 +2275,7 @@ impl Coordinator {
                         .remove(&device_id)
                         .expect("validated lease must still exist");
                     self.memory.release(&lease.work_id);
-                    self.memory.collect_now();
+                    self.collect_host_memory();
                     self.plan_invalidations.remove(&lease.work_id);
                     self.observe_estimate(
                         lease.estimate_key,
@@ -2250,7 +2358,7 @@ impl Coordinator {
                         .remove(&device_id)
                         .expect("exact owner lease must still exist");
                     self.memory.release(&lease.work_id);
-                    self.memory.collect_now();
+                    self.collect_host_memory();
                     if self.state.job_registry.remove_if_present(&lease.work_id) {
                         self.state.queue.decrement();
                     }
@@ -2385,6 +2493,7 @@ impl Coordinator {
         }
 
         let listing = self.state.job_registry.snapshot();
+        self.announce_queue_positions(&listing);
         let queue_shape = listing
             .entries
             .iter()
@@ -3279,7 +3388,7 @@ impl Coordinator {
                         let static_estimate = static_generation_estimate(
                             &pending.job.request,
                             plan.predicted_vram_peak_bytes,
-                            plan.predicted_host_increment_bytes,
+                            plan.admission_host_demand_bytes(),
                         );
                         let estimate = self.estimates.estimate(&key, static_estimate);
                         let (cold_setup_ms, warm_setup_ms, predicted_run_ms) =
@@ -3688,7 +3797,7 @@ impl Coordinator {
                 let static_estimate = static_generation_estimate(
                     request,
                     plan.predicted_vram_peak_bytes,
-                    plan.predicted_host_increment_bytes,
+                    plan.admission_host_demand_bytes(),
                 );
                 let estimate = self.estimates.estimate(&key, static_estimate);
                 let (cold_setup_ms, warm_setup_ms, predicted_run_ms) =
@@ -4296,26 +4405,10 @@ impl Coordinator {
                 )
                 .is_ok()
             });
-            let charge_until_release: BTreeSet<String> = plan
-                .immediate_leases
-                .iter()
-                .filter_map(|lease| {
-                    let work_id = lease.work_id.to_string();
-                    let execution = generation_plans
-                        .get(&work_id)
-                        .and_then(|plans| exact_leased_execution_plan(plans, lease))?;
-                    mold_core::minimax_h3::is_family(&execution.model_family).then_some(work_id)
-                })
-                .collect();
             if !grants_valid
                 || self
                     .memory
-                    .try_reserve(
-                        &plan,
-                        self.state_version,
-                        self.plan_version,
-                        &charge_until_release,
-                    )
+                    .try_reserve(&plan, self.state_version, self.plan_version)
                     .is_err()
             {
                 self.state_version = self.state_version.saturating_add(1);
@@ -4617,6 +4710,7 @@ impl Coordinator {
                                     retry_not_before_ms,
                                     preparation_retry_attempts: 0,
                                     preparation_refresh_observation: None,
+                                    announced_position: None,
                                 },
                             );
                             self.unavailable.insert(device_id.clone());
@@ -4969,7 +5063,7 @@ impl Coordinator {
             );
             confidence.insert(lease.work_id.clone(), confidence_value);
         }
-        let wire = queue_plan_projection(
+        let mut wire = queue_plan_projection(
             snapshot,
             plan,
             &self.state.gpu_pool,
@@ -4977,6 +5071,7 @@ impl Coordinator {
             &confidence,
             dirty_since,
         );
+        wire.host_memory = self.memory.wire_snapshot();
         let mut current = self
             .state
             .scheduled_work
@@ -5098,6 +5193,12 @@ pub async fn run_scheduler_coordinator(
     let (cpu_utility_tx, cpu_utility_rx) = std::sync::mpsc::sync_channel(1);
     let cpu_utility_handle = crate::gpu_worker::spawn_cpu_utility_thread(cpu_utility_rx, worker_tx);
     let mut coordinator = Coordinator::new(state).await;
+    // The constructor's first reading predates the shared handle, so publish
+    // it before serving a status request that would otherwise report nothing.
+    coordinator
+        .state
+        .scheduled_work
+        .publish_host_memory(coordinator.memory.wire_snapshot());
     coordinator.install_cpu_utility_lane(cpu_utility_tx.clone());
     let registry_notify = coordinator.state.job_registry.mutation_notifier();
     let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
@@ -5193,7 +5294,7 @@ pub async fn run_scheduler_coordinator(
                 coordinator.reconcile_external_mutations(&mut immediate);
             }
             _ = memory_ticker.tick() => {
-                coordinator.memory.collect_now();
+                coordinator.collect_host_memory();
                 coordinator.sample_active_lease_high_waters();
                 coordinator.mutate(&mut immediate);
             }
@@ -5651,6 +5752,9 @@ fn queue_plan_projection_at_unix(
         }),
         next_replan_at_unix_ms: plan.next_replan_at_ms.map(to_unix),
         work_items,
+        // Attached by the publisher: telemetry is not a projection of the
+        // plan, and it must not widen this signature.
+        host_memory: None,
     }
 }
 
@@ -5941,6 +6045,10 @@ fn static_generation_time_ms(request: &mold_core::GenerateRequest) -> u64 {
     )
 }
 
+/// `host_bytes` must be the plan's `admission_host_demand_bytes`, never its raw
+/// `predicted_host_increment_bytes`: on Metal the host claim already rides
+/// `admission_vram_demand_bytes` against the one unified pool, and charging it
+/// again to the host ledger is the #1038 double-count.
 fn static_generation_estimate(
     request: &mold_core::GenerateRequest,
     vram_bytes: u64,
@@ -6331,6 +6439,188 @@ mod tests {
         (worker, job_rx)
     }
 
+    /// A worker whose device collapses VRAM and host RAM onto one pool.
+    fn metal_test_worker(
+        ordinal: usize,
+    ) -> (
+        Arc<GpuWorker>,
+        std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>,
+    ) {
+        let (worker, rx) = test_worker(ordinal);
+        let Ok(mut worker) = Arc::try_unwrap(worker) else {
+            unreachable!("test_worker returns the only reference")
+        };
+        worker.gpu.backend = mold_core::GpuBackend::Metal;
+        worker.gpu.stable_id = Some(format!("metal:{ordinal}"));
+        worker.gpu.compute_capability = None;
+        worker.gpu.raw_cuda_uuid = None;
+        worker.gpu.device_kind = None;
+        (Arc::new(worker), rx)
+    }
+
+    /// Metal must reserve nothing in the host ledger.
+    ///
+    /// Its host claim already rides `admission_vram_demand_bytes` against the
+    /// one unified pool, so charging it a second time against a second sample
+    /// of that pool — minus a safety floor the device gate does not pay — is
+    /// the #1038 double-count. It was survivable while a reservation was
+    /// discharged a second after dispatch; now that one stays charged for the
+    /// whole lease, it would park real work.
+    #[tokio::test]
+    async fn metal_reserves_no_host_ram_while_cuda_reserves_its_increment() {
+        for (backend, expected_reservation_bytes) in [
+            (mold_core::GpuBackend::Metal, 0),
+            (mold_core::GpuBackend::Cuda, MIN_TRANSIENT_HOST_RAM),
+        ] {
+            let (worker, worker_rx) = if backend == mold_core::GpuBackend::Metal {
+                metal_test_worker(0)
+            } else {
+                test_worker(0)
+            };
+            let device_id = worker_device_id(&worker);
+            let pool = Arc::new(GpuPool {
+                workers: vec![worker].into(),
+            });
+            let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(1);
+            let queue = QueueHandle::new(ingress_tx);
+            let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 1);
+            state.job_registry.register("job", "flux-dev:q4");
+            let (job, _result) = fake_generation("job");
+            queue.submit(job, 1).await.unwrap();
+            let mut coordinator = Coordinator::with_preparer_and_memory(
+                state,
+                Arc::new(ImmediatePreparer),
+                ample_memory(),
+            );
+            let mut immediate = false;
+            coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+            for pending in coordinator.pending.values_mut() {
+                pending.preparation = PreparationState::Ready;
+            }
+            coordinator.handle_worker_event(
+                WorkerEvent::Ready {
+                    device_id,
+                    ordinal: 0,
+                    owner_epoch: 1,
+                    worker_generation: 1,
+                },
+                &mut immediate,
+            );
+            let _ = coordinator.dispatch_ready().await;
+            assert_eq!(recv_grant(&worker_rx).id, "job", "{backend:?}");
+
+            let reserved = coordinator
+                .memory
+                .reservations
+                .get("job")
+                .map(|reservation| reservation.bytes)
+                .expect("a granted lease holds its reservation");
+            assert_eq!(
+                reserved, expected_reservation_bytes,
+                "{backend:?} reserved {reserved} host bytes"
+            );
+        }
+    }
+
+    fn fake_generation_with_progress(
+        id: &str,
+    ) -> (
+        GenerationJob,
+        tokio::sync::mpsc::UnboundedReceiver<SseMessage>,
+        tokio::sync::oneshot::Receiver<Result<crate::state::GenerationJobResult, String>>,
+    ) {
+        let (job, result) = fake_generation(id);
+        let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            GenerationJob {
+                progress_tx: Some(progress_tx),
+                ..job
+            },
+            progress_rx,
+            result,
+        )
+    }
+
+    fn drain_queued_positions(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<SseMessage>,
+    ) -> Vec<usize> {
+        let mut positions = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let SseMessage::Progress(mold_core::SseProgressEvent::Queued { position, .. }) =
+                message
+            {
+                positions.push(position);
+            }
+        }
+        positions
+    }
+
+    /// A queued client is told its place in line as the queue drains.
+    ///
+    /// The only position a client ever received was the submit-time depth in
+    /// its first SSE event; after that the queue moved in silence. Positions
+    /// are re-announced from the registry — the same order `GET /api/queue`
+    /// reports — and only when a job's own place actually changed, so a
+    /// reconcile tick over a still queue emits nothing.
+    #[tokio::test]
+    async fn a_draining_queue_reannounces_positions_only_when_they_change() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(8);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 8);
+        let mut progress = Vec::new();
+        let mut results = Vec::new();
+        for id in ["a", "b", "c"] {
+            state.job_registry.register(id, "flux-dev:q4");
+            let (job, progress_rx, result) = fake_generation_with_progress(id);
+            progress.push(progress_rx);
+            results.push(result);
+            queue.submit(job, 8).await.unwrap();
+        }
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state.clone(),
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        for _ in 0..3 {
+            coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        }
+
+        // First observation seeds each job's known place without re-telling a
+        // client what its submit-time event already said.
+        coordinator.reconcile_external_mutations(&mut immediate);
+        for (index, rx) in progress.iter_mut().enumerate() {
+            assert!(
+                drain_queued_positions(rx).is_empty(),
+                "job {index} must not be re-announced before anything moved"
+            );
+        }
+
+        state.job_registry.remove("a");
+        coordinator.reconcile_external_mutations(&mut immediate);
+        assert_eq!(
+            drain_queued_positions(&mut progress[1]),
+            vec![0],
+            "b moved to the front and must be told once"
+        );
+        assert_eq!(drain_queued_positions(&mut progress[2]), vec![1]);
+
+        // A tick over an unchanged queue is silent.
+        coordinator.reconcile_external_mutations(&mut immediate);
+        for (index, rx) in progress.iter_mut().enumerate() {
+            assert!(
+                drain_queued_positions(rx).is_empty(),
+                "job {index} must not be re-announced without a change"
+            );
+        }
+        drop(results);
+        coordinator.stop_preparations().await;
+    }
+
     fn recv_grant(rx: &std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>) -> GpuJob {
         match rx
             .recv_timeout(Duration::from_secs(1))
@@ -6706,7 +6996,7 @@ mod tests {
         let started = ledger.begin_collection();
         ledger.publish_sample(started, 40 << 30, 20 << 30);
         assert_eq!(
-            ledger.try_reserve(&plan, 3, 9, &BTreeSet::new()),
+            ledger.try_reserve(&plan, 3, 9),
             Err(GrantFenceError::StalePlan)
         );
         assert!(ledger.reservations.is_empty());
@@ -6747,7 +7037,7 @@ mod tests {
 
         let raced_collection = ledger.begin_collection();
         assert_eq!(
-            ledger.try_reserve(&stale_plan, 3, 9, &BTreeSet::new()),
+            ledger.try_reserve(&stale_plan, 3, 9),
             Err(GrantFenceError::StalePlan)
         );
         assert!(
@@ -6759,7 +7049,7 @@ mod tests {
         snapshot.host_memory = ledger.snapshot();
         let fresh_plan = planner.plan(&snapshot).expect("fresh two-lease plan");
         ledger
-            .try_reserve(&fresh_plan, 3, 9, &BTreeSet::new())
+            .try_reserve(&fresh_plan, 3, 9)
             .expect("fresh aggregate reservation");
         assert_eq!(ledger.reservations.len(), 2);
     }
@@ -6830,7 +7120,7 @@ mod tests {
         snapshot.host_memory = ledger.snapshot();
         let plan = planner.plan(&snapshot).unwrap();
         assert_eq!(plan.immediate_leases.len(), 1);
-        ledger.try_reserve(&plan, 1, 1, &BTreeSet::new()).unwrap();
+        ledger.try_reserve(&plan, 1, 1).unwrap();
         assert_eq!(ledger.reservations.len(), 1);
     }
 
@@ -6920,6 +7210,78 @@ mod tests {
 
         ledger.release("h3");
         assert_eq!(ledger.headroom_bytes(), 15 << 30);
+    }
+
+    #[test]
+    fn reserved_work_stays_charged_until_release_for_every_family() {
+        // Every worker announces AllocationCommitted before its model finishes
+        // loading, so no sample can prove the frozen increment landed. H3 was
+        // only the first family to expose it; an LTX-2 lease whose Gemma
+        // encoder loads inside generate() is the same shape.
+        for work_id in ["h3", "ltx2"] {
+            let mut ledger = unsampled_memory(48 << 30, 33 << 30);
+            let initial = ledger.begin_collection();
+            ledger.publish_sample(initial, 48 << 30, 33 << 30);
+            let planner = Planner::default();
+            let mut snapshot = PlannerSnapshot::new(
+                1,
+                1,
+                0,
+                ledger.headroom_bytes(),
+                vec![DeviceSnapshot::idle("gpu-a", 24 << 30)],
+                vec![WorkSnapshot::new(
+                    work_id,
+                    0,
+                    vec![CandidatePlacement::new("gpu-a", "model", 10 << 30)],
+                )],
+            );
+            snapshot.host_memory = ledger.snapshot();
+            let plan = planner.plan(&snapshot).expect("single-lease plan");
+            ledger
+                .try_reserve(&plan, 1, 1)
+                .expect("reservation fits the sampled headroom");
+
+            // The commit lands before a single weight byte is allocated.
+            ledger.commit(work_id);
+            let after_commit = ledger.begin_collection();
+            ledger.publish_sample(after_commit, 48 << 30, 33 << 30);
+            assert!(
+                matches!(
+                    ledger.reservations[work_id].state,
+                    ReservationState::CommittedAfterSample { .. }
+                ),
+                "{work_id}: a sample cannot absorb an allocation that has not happened"
+            );
+            assert_eq!(
+                ledger.headroom_bytes(),
+                15 << 30,
+                "{work_id}: the reservation must stay charged until the lease settles"
+            );
+
+            let mut snapshot = PlannerSnapshot::new(
+                1,
+                1,
+                0,
+                ledger.headroom_bytes(),
+                vec![DeviceSnapshot::idle("gpu-b", 24 << 30)],
+                vec![WorkSnapshot::new(
+                    "peer",
+                    0,
+                    vec![CandidatePlacement::new("gpu-b", "model", 20 << 30)],
+                )],
+            );
+            snapshot.host_memory = ledger.snapshot();
+            let plan = Planner::default().plan(&snapshot).expect("peer plan");
+            assert!(plan.immediate_leases.is_empty(), "{work_id}");
+            assert_eq!(
+                plan.blocked_reason(&WorkId::new("peer")),
+                Some(&BlockedReason::InsufficientHostRam),
+                "{work_id}: a peer must park rather than double-spend the reservation"
+            );
+
+            ledger.release(work_id);
+            assert_eq!(ledger.headroom_bytes(), 25 << 30, "{work_id}");
+        }
     }
 
     #[test]
@@ -7099,6 +7461,76 @@ mod tests {
         );
     }
 
+    /// Telemetry rides the plan but must never be why one is published.
+    ///
+    /// The ledger resamples every second, so if `host_memory` decided semantic
+    /// equality every host would emit a queue-plan SSE event once a second for
+    /// as long as the server ran.
+    #[test]
+    fn host_memory_telemetry_never_triggers_a_queue_plan_event() {
+        let base = mold_core::QueuePlan {
+            plan_version: 1,
+            state_version: 2,
+            optimizer_state: "optimized".into(),
+            host_memory: Some(mold_core::HostMemorySnapshot {
+                total_bytes: 64 << 30,
+                available_bytes: 40 << 30,
+                headroom_bytes: 20 << 30,
+                safety_floor_bytes: 10 << 30,
+            }),
+            ..Default::default()
+        };
+        let resampled = mold_core::QueuePlan {
+            host_memory: Some(mold_core::HostMemorySnapshot {
+                total_bytes: 64 << 30,
+                available_bytes: 12 << 30,
+                headroom_bytes: 0,
+                safety_floor_bytes: 10 << 30,
+            }),
+            ..base.clone()
+        };
+        assert!(queue_plan_semantically_equal(&base, &resampled));
+
+        let absent = mold_core::QueuePlan {
+            host_memory: None,
+            ..base.clone()
+        };
+        assert!(queue_plan_semantically_equal(&base, &absent));
+    }
+
+    /// An unsampled ledger reports nothing rather than a host at zero.
+    #[test]
+    fn an_unsampled_ledger_publishes_no_host_memory() {
+        let mut ledger = unsampled_memory(64 << 30, 40 << 30);
+        assert_eq!(ledger.wire_snapshot(), None);
+
+        let started = ledger.begin_collection();
+        ledger.publish_sample(started, 64 << 30, 40 << 30);
+        let wire = ledger.wire_snapshot().expect("a sampled ledger reports");
+        assert_eq!(wire.total_bytes, 64 << 30);
+        assert_eq!(wire.available_bytes, 40 << 30);
+        assert_eq!(wire.safety_floor_bytes, ledger.safety_floor_bytes());
+        assert_eq!(wire.headroom_bytes, ledger.headroom_bytes());
+
+        // Headroom is not `available - floor`: a live reservation spends it
+        // while the machine still reports the same free memory.
+        ledger.reservations.insert(
+            "held".to_string(),
+            HostReservation {
+                bytes: 8 << 30,
+                state: ReservationState::Reserved,
+                charge_until_release: true,
+            },
+        );
+        let held = ledger.wire_snapshot().expect("still sampled");
+        assert_eq!(held.available_bytes, wire.available_bytes);
+        assert_eq!(
+            held.headroom_bytes,
+            wire.headroom_bytes - (8 << 30),
+            "a reservation must be visible as spent headroom"
+        );
+    }
+
     #[test]
     fn queue_plan_event_dedup_ignores_versions_and_wall_clock_drift() {
         let work = mold_core::QueueWorkItem {
@@ -7119,6 +7551,7 @@ mod tests {
             dirty_since_unix_ms: Some(9_000),
             next_replan_at_unix_ms: Some(11_000),
             work_items: vec![work.clone()],
+            host_memory: None,
         };
         let shifted = mold_core::QueuePlan {
             plan_version: 99,
@@ -11554,6 +11987,100 @@ mod tests {
             PreparationState::Preparing
         );
         release.notify_waiters();
+        coordinator.stop_preparations().await;
+    }
+
+    struct ConcurrencyProbePreparer {
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        released: Arc<AtomicBool>,
+    }
+
+    impl DependencyPreparer for ConcurrencyProbePreparer {
+        fn prepare(
+            &self,
+            _state: AppState,
+            _work_id: String,
+            _request: mold_core::GenerateRequest,
+            _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+            _context: crate::variant_dependencies::DependencyPreparationContext,
+        ) -> PreparationFuture {
+            let in_flight = self.in_flight.clone();
+            let peak = self.peak.clone();
+            let released = self.released.clone();
+            Box::pin(async move {
+                let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(current, Ordering::SeqCst);
+                while !released.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                Ok(PreparedGeneration::default())
+            })
+        }
+    }
+
+    /// A burst of submissions must not run one dependency resolution per job.
+    ///
+    /// Every preparation resolves variants and can start a multi-GB download,
+    /// all of it behind a GPU that runs one job at a time. Eight submissions
+    /// used to mean eight concurrent resolutions competing for the same disk
+    /// and host RAM (#1099).
+    #[tokio::test]
+    async fn a_submission_burst_bounds_concurrent_dependency_preparations() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(16);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 16);
+        let burst = MAX_CONCURRENT_PREPARATIONS * 3;
+        let mut results = Vec::new();
+        for index in 0..burst {
+            let id = format!("burst-{index}");
+            state.job_registry.register(&id, "flux-dev:q4");
+            let (job, result) = fake_generation(&id);
+            results.push(result);
+            queue.submit(job, 16).await.unwrap();
+        }
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicBool::new(false));
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ConcurrencyProbePreparer {
+                in_flight: in_flight.clone(),
+                peak: peak.clone(),
+                released: released.clone(),
+            }),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        for _ in 0..burst {
+            coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        }
+        coordinator.start_needed_preparations();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            MAX_CONCURRENT_PREPARATIONS,
+            "the burst must saturate the bound and never exceed it"
+        );
+
+        released.store(true, Ordering::SeqCst);
+        for _ in 0..burst {
+            let event =
+                tokio::time::timeout(Duration::from_secs(5), coordinator.preparation_rx.recv())
+                    .await
+                    .expect("every held preparation must still complete")
+                    .expect("preparation event");
+            coordinator.handle_preparation_event(event, &mut immediate);
+        }
+        assert!(
+            peak.load(Ordering::SeqCst) <= MAX_CONCURRENT_PREPARATIONS,
+            "draining must not raise the bound"
+        );
         coordinator.stop_preparations().await;
     }
 

@@ -41,6 +41,14 @@ import { useHostModelsStore } from "./hostModels";
 
 const POLL_INTERVAL_MS = 10_000;
 const MAX_SAVED_HOSTS = 8;
+/** Once Auto has one authoritative route, allow normal LAN peers a brief
+ * window to return a better plan, then stop waiting on cold artifact checks.
+ * Explicitly selected hosts retain the full placement-preview deadline. */
+const AUTO_PLACEMENT_SETTLE_MS = 250;
+/** Auto must remain a bounded interaction even when no candidate ever answers.
+ * A pinned machine may legitimately spend minutes authenticating cold weights;
+ * Auto instead fails closed and tells the user to retry or pin that machine. */
+const AUTO_PLACEMENT_DEADLINE_MS = 5_000;
 
 /**
  * Serialize this store's settings read-modify-writes: `app_settings_set`
@@ -718,8 +726,22 @@ export const useHostsStore = defineStore("hosts", {
           };
         }
 
-        const probes = await Promise.all(
-          candidates.map(async (host) => {
+        type PlacementProbe = {
+          host: HostView;
+          preview: Awaited<ReturnType<typeof previewGenerationPlacement>> | null;
+          error: unknown;
+          legacyUnsupported: boolean;
+          roundTripMs: number;
+        };
+        const probes: PlacementProbe[] = [];
+        const controllers = candidates.map(() => new AbortController());
+        let pendingProbes = candidates.length;
+        let resolveAllProbes!: () => void;
+        let resolveFirstPlanned!: () => void;
+        const allProbesSettled = new Promise<void>((resolve) => (resolveAllProbes = resolve));
+        const firstPlanned = new Promise<void>((resolve) => (resolveFirstPlanned = resolve));
+        candidates.forEach((host, index) => {
+          void (async () => {
             const started = performance.now();
             try {
               const target = { baseUrl: host.baseUrl!, apiKey: host.apiKey };
@@ -732,6 +754,7 @@ export const useHostsStore = defineStore("hosts", {
                         copies,
                       ),
                       copies,
+                      { signal: controllers[index]!.signal },
                     )
                   : await previewGenerationPlacement(
                       target,
@@ -740,26 +763,72 @@ export const useHostsStore = defineStore("hosts", {
                         copies,
                       ),
                       copies,
+                      { signal: controllers[index]!.signal },
                     );
-              return {
+              probes.push({
                 host,
                 preview,
                 error: null,
                 legacyUnsupported: false,
                 roundTripMs: Math.max(0, performance.now() - started),
-              };
+              });
+              if (classifyPlacementPreview(preview) === "planned") resolveFirstPlanned();
             } catch (error) {
-              return {
+              probes.push({
                 host,
                 preview: null,
                 error,
                 legacyUnsupported:
                   error instanceof ApiError && (error.status === 404 || error.status === 405),
                 roundTripMs: Math.max(0, performance.now() - started),
-              };
+              });
+            } finally {
+              pendingProbes -= 1;
+              if (pendingProbes === 0) resolveAllProbes();
             }
-          }),
-        );
+          })();
+        });
+        const responsiveAuto = selection === null;
+        let autoDeadlineReached = false;
+        if (responsiveAuto) {
+          let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+          const deadline = new Promise<void>((resolve) => {
+            deadlineTimer = setTimeout(() => {
+              autoDeadlineReached = true;
+              resolve();
+            }, AUTO_PLACEMENT_DEADLINE_MS);
+          });
+          const firstRouteWindow = firstPlanned.then(
+            () => new Promise<void>((resolve) => setTimeout(resolve, AUTO_PLACEMENT_SETTLE_MS)),
+          );
+          await Promise.race([
+            allProbesSettled,
+            deadline,
+            ...(candidates.length > 1 ? [firstRouteWindow] : []),
+          ]);
+          clearTimeout(deadlineTimer);
+          if (pendingProbes > 0) controllers.forEach((controller) => controller.abort());
+        } else {
+          await allProbesSettled;
+        }
+        // Aborted fetches settle on a later microtask. Route using the stable
+        // snapshot that met Auto's response window, not late cancellation rows.
+        const settledProbes = probes.slice();
+        if (autoDeadlineReached) {
+          const settledHostIds = new Set(settledProbes.map((probe) => probe.host.id));
+          for (const host of candidates) {
+            if (settledHostIds.has(host.id)) continue;
+            settledProbes.push({
+              host,
+              preview: null,
+              error: new Error(
+                "Auto placement timed out after 5 seconds; retry or select this machine explicitly for a longer cold check",
+              ),
+              legacyUnsupported: false,
+              roundTripMs: AUTO_PLACEMENT_DEADLINE_MS,
+            });
+          }
+        }
         if (intentSignature() !== capturedIntent || identitySignature() !== capturedIdentity) {
           return {
             kind: "transient",
@@ -784,7 +853,7 @@ export const useHostsStore = defineStore("hosts", {
           };
         }
 
-        const planned = probes
+        const planned = settledProbes
           .flatMap((probe) =>
             probe.preview && classifyPlacementPreview(probe.preview) === "planned"
               ? [
@@ -808,7 +877,7 @@ export const useHostsStore = defineStore("hosts", {
           if (route) return { kind: "route", route };
         }
 
-        const unsupportedIds = probes
+        const unsupportedIds = settledProbes
           .filter(
             (probe) =>
               probe.legacyUnsupported || classifyPlacementPreview(probe.preview) === "unsupported",
@@ -837,7 +906,7 @@ export const useHostsStore = defineStore("hosts", {
           if (route) return { kind: "route", route };
         }
 
-        const failures = probes.flatMap<HostFeasibilityFailure>((probe) => {
+        const failures = settledProbes.flatMap<HostFeasibilityFailure>((probe) => {
           const classification = classifyPlacementPreview(probe.preview);
           if (
             requireAuthoritative &&

@@ -24,6 +24,7 @@ import { gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
 import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
+import { hostMemoryLevel } from "@studio/lib/hostMemory";
 import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
 import { unifiedMemoryHost } from "@studio/lib/telemetryMemory";
 import { inferBackendFromGpuName } from "../lib/hosts";
@@ -359,6 +360,26 @@ function vramFill(gpu: GpuSnapshot): string {
   return hostBusy.value ? "bg-safelight" : "bg-halide";
 }
 
+/** The RAM meter colors off the scheduler's own ledger rather than used/total:
+ *  reservations that have not allocated yet still park the queue, and the OS
+ *  cannot see them. Absent on older servers, which keeps today's plain bar. */
+const hostMemoryPressure = computed(() => hostMemoryLevel(queueSnapshot.value?.plan?.host_memory));
+const ramFill = computed(() => {
+  switch (hostMemoryPressure.value) {
+    case "critical":
+      return "bg-stop";
+    case "warn":
+      return "bg-safelight";
+    default:
+      return "bg-halide";
+  }
+});
+const ramPressureLabel = computed(() => {
+  const memory = queueSnapshot.value?.plan?.host_memory;
+  if (!memory) return null;
+  return `${formatGB(memory.headroom_bytes)} available to schedule`;
+});
+
 /** `14 · 96.4 GB` summary for the models section header; null without sizes. */
 const installedTotalLabel = computed(() => {
   const bytes = installedModels.value.reduce(
@@ -652,9 +673,12 @@ async function forget() {
                     aria-valuemax="100"
                     :aria-valuenow="Math.round(percent(ram.used, ram.total))"
                     aria-label="System RAM used"
+                    :title="ramPressureLabel ?? undefined"
+                    :data-pressure="hostMemoryPressure ?? undefined"
                   >
                     <div
-                      class="h-full bg-halide transition-[width] duration-300"
+                      class="h-full transition-[width] duration-300"
+                      :class="ramFill"
                       :style="{ width: `${percent(ram.used, ram.total)}%` }"
                     />
                   </div>

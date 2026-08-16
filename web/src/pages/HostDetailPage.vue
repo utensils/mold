@@ -15,6 +15,7 @@ import Icon from "@ui/components/Icon.vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
 import { setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
+import { hostMemoryLevel } from "@studio/lib/hostMemory";
 import {
   modelDisplayName,
   modelDisplayNameForId,
@@ -89,6 +90,23 @@ const dotState = computed<"online" | "offline" | "unknown">(() => {
 const telemetry = computed(() =>
   deriveTelemetry(poll.status.value ?? null, poll.resources.value ?? null),
 );
+
+/** RAM pressure from the scheduler's ledger rather than used/total — a
+ * reservation that has not allocated yet still parks the queue and the OS
+ * cannot see it. Absent on older servers, which keeps the plain info bar. */
+const hostMemoryPressure = computed(() =>
+  hostMemoryLevel(queuePlan.value?.host_memory),
+);
+const ramTone = computed<"info" | "warning" | "danger">(() => {
+  switch (hostMemoryPressure.value) {
+    case "critical":
+      return "danger";
+    case "warn":
+      return "warning";
+    default:
+      return "info";
+  }
+});
 const gpuOrdinals = computed(() => {
   const devices = poll.devices.value;
   if (devices !== null && devices !== undefined)
@@ -608,8 +626,9 @@ onBeforeUnmount(() => {
           <ProgressBar
             v-if="!telemetry.unifiedMemory"
             :value="telemetry.ramPct ?? 0"
-            tone="info"
+            :tone="ramTone"
             label="System RAM"
+            :data-pressure="hostMemoryPressure ?? undefined"
           />
 
           <div class="md-tiles">

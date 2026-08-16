@@ -3354,6 +3354,52 @@ describe("MobileApp generation queue", () => {
     expect(firstSignal?.aborted).toBe(true);
   });
 
+  it("counts a queued print's live place in line rather than its submit slot", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      if (path === "/api/queue")
+        return Promise.resolve({
+          entries: [
+            { id: "job-a", model: "m", state: "running", started_at_unix_ms: 1, position: 0 },
+            { id: "job-2", model: "m", state: "queued", started_at_unix_ms: 2, position: 1 },
+          ],
+          plan: {
+            plan_version: 1,
+            state_version: 1,
+            optimizer_state: "settled",
+            dirty_since_unix_ms: null,
+            next_replan_at_unix_ms: null,
+            work_items: [],
+          },
+        });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await submitPrompt("first prompt");
+    openStreams[0]?.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "denoise_step", step: 3, total: 30, elapsed_ms: 10 }),
+    );
+    await submitPrompt("second prompt");
+    // The one-shot SSE frame says 7; the live listing says 1 and wins.
+    openStreams[1]?.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "queued", position: 7, id: "job-2" }),
+    );
+    await flushPromises();
+    window.dispatchEvent(new Event("pageshow"));
+    await flushPromises();
+
+    const rows = wrapper.findAll("[data-test='mobile-generation-job']");
+    expect(rows[1]?.get("[data-test='mobile-generation-status']").text()).toBe("QUEUED #1");
+  });
+
   it("keeps a pre-ID job live when remote cancellation is unconfirmed", async () => {
     wrapper = mountMobileApp();
     await flushPromises();

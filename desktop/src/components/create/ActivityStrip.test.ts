@@ -5,6 +5,7 @@ import ActivityStrip from "./ActivityStrip.vue";
 import { useChainJobsStore } from "../../stores/chainJobs";
 import { useGenerationStore } from "../../stores/generation";
 import { useHostsStore } from "../../stores/hosts";
+import { useJobsStore } from "../../stores/jobs";
 import { useRunPodStore } from "../../stores/runpod";
 import { useLiveActivityStore } from "../../stores/liveActivity";
 import { useToastStore } from "../../stores/toasts";
@@ -371,5 +372,99 @@ describe("ActivityStrip — present tense", () => {
     expect(generation.selectedClientId).toBe(1);
     await row.get("[data-test='print-dismiss']").trigger("click");
     expect(wrapper.find("[data-test='activity-strip']").exists()).toBe(false);
+  });
+});
+
+describe("ActivityStrip live queue position", () => {
+  // The strip retains the cross-host queue poll while work waits; with no
+  // hosts configured a real refresh would prune the seeded snapshot.
+  beforeEach(() => {
+    const jobs = useJobsStore();
+    vi.spyOn(jobs, "refresh").mockResolvedValue(undefined);
+  });
+
+  function seedQueue(entries: unknown[], plan: unknown = null) {
+    useJobsStore().queues = {
+      local: {
+        hostId: "local",
+        entries: entries as never,
+        plan: plan as never,
+        paused: null,
+        caps: null,
+        gpuOrdinals: [],
+        error: null,
+      },
+    };
+  }
+
+  it("counts a queued print's live place in line", () => {
+    const generation = useGenerationStore();
+    generation.jobs = [{ ...baseJob(), id: "srv-2", hostId: "local" }];
+    seedQueue([
+      { id: "srv-1", model: "m", state: "running", started_at_unix_ms: 1, position: 0 },
+      { id: "srv-2", model: "m", state: "queued", started_at_unix_ms: 2, position: 1 },
+    ]);
+    const wrapper = mount(ActivityStrip);
+    expect(wrapper.get("[data-test='activity-queued-position']").text()).toBe("#1 in line");
+  });
+
+  it("follows the queue as it drains rather than freezing at the submit slot", async () => {
+    const generation = useGenerationStore();
+    generation.jobs = [{ ...baseJob(), id: "srv-3", hostId: "local" }];
+    seedQueue([{ id: "srv-3", model: "m", state: "queued", started_at_unix_ms: 3, position: 3 }]);
+    const wrapper = mount(ActivityStrip);
+    expect(wrapper.get("[data-test='activity-queued-position']").text()).toBe("#3 in line");
+    seedQueue([{ id: "srv-3", model: "m", state: "queued", started_at_unix_ms: 3, position: 1 }]);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get("[data-test='activity-queued-position']").text()).toBe("#1 in line");
+  });
+
+  it("says why a job is parked instead of counting its place", () => {
+    const generation = useGenerationStore();
+    generation.jobs = [{ ...baseJob(), id: "srv-4", hostId: "local" }];
+    seedQueue([{ id: "srv-4", model: "m", state: "queued", started_at_unix_ms: 4, position: 2 }], {
+      plan_version: 1,
+      state_version: 1,
+      optimizer_state: "settled",
+      dirty_since_unix_ms: null,
+      next_replan_at_unix_ms: null,
+      work_items: [
+        {
+          work_id: "w4",
+          parent_id: "srv-4",
+          work_kind: "generation",
+          priority_class: "normal",
+          queue_rank: 2,
+          bypass_count: 0,
+          estimate_confidence: "low",
+          blocked_reason: "insufficient_host_ram",
+        },
+      ],
+    });
+    const wrapper = mount(ActivityStrip);
+    expect(wrapper.get("[data-test='activity-queued-position']").text()).toBe("Waiting for memory");
+  });
+
+  it("shows the plain pill against a host that lists nothing", () => {
+    const generation = useGenerationStore();
+    generation.jobs = [{ ...baseJob(), id: "srv-5", hostId: "local" }];
+    const wrapper = mount(ActivityStrip);
+    expect(wrapper.get("[data-test='activity-queued']").text()).toContain("Queued");
+    expect(wrapper.find("[data-test='activity-queued-position']").exists()).toBe(false);
+  });
+
+  it("retains the shared queue poll only while work is waiting", async () => {
+    const jobs = useJobsStore();
+    const start = vi.spyOn(jobs, "startPolling").mockImplementation(() => undefined);
+    const stop = vi.spyOn(jobs, "stopPolling").mockImplementation(() => undefined);
+    const generation = useGenerationStore();
+    const wrapper = mount(ActivityStrip);
+    expect(start).not.toHaveBeenCalled();
+    generation.jobs = [{ ...baseJob(), id: "srv-6", hostId: "local" }];
+    await wrapper.vm.$nextTick();
+    expect(start).toHaveBeenCalledTimes(1);
+    generation.jobs = [{ ...baseJob(), id: "srv-6", hostId: "local", status: "complete" }];
+    await wrapper.vm.$nextTick();
+    expect(stop).toHaveBeenCalledTimes(1);
   });
 });

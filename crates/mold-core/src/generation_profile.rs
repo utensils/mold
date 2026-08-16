@@ -80,11 +80,13 @@ pub struct ProfileProvenance {
 
 /// Server-side qualification record for upstream resolution candidates.
 ///
-/// Candidate dimensions are deliberately separate from `ResolutionProfile`:
-/// only dimensions backed by a passing Mold runtime-and-delivery campaign may
-/// enter `aspect_groups` and therefore become UI recommendations. The
-/// generator includes these records in maintainer artifacts so an upstream
-/// candidate cannot be mistaken for a shipped contract.
+/// `qualified` means the dimensions may be presented as recommendations; it
+/// is not a per-size runtime-performance claim. A dynamic family can qualify
+/// a pinned upstream oracle when Mold's alignment, pixel admission, and image
+/// delivery paths are resolution-generic. Bucketed or size-sensitive families
+/// additionally need a checked-in exact-size generation-and-delivery campaign.
+/// The generator keeps the evidence visible so those two qualification paths
+/// cannot be conflated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolutionQualificationRecord {
     pub family: &'static str,
@@ -759,9 +761,7 @@ const FLUX: &[(u32, u32)] = &[
     (576, 1024),
     (768, 768),
 ];
-/// Official Z-Image-Turbo 1024-tier candidates. These remain withheld from
-/// `family_presets` until an exact-size runtime-and-delivery campaign is
-/// checked in.
+/// Official, runtime-qualified Z-Image-Turbo 1024-tier presets.
 const Z_IMAGE_UPSTREAM_CANDIDATES: &[(u32, u32)] = &[
     (1024, 1024),
     (1152, 896),
@@ -775,8 +775,7 @@ const Z_IMAGE_UPSTREAM_CANDIDATES: &[(u32, u32)] = &[
     (1344, 576),
     (576, 1344),
 ];
-/// Current official Qwen-Image standard candidates. Static contract tests
-/// prove the oracle transcription, not runtime generation or output delivery.
+/// Current official Qwen-Image standard aspect-ratio presets.
 const QWEN_UPSTREAM_CANDIDATES: &[(u32, u32)] = &[
     (1328, 1328),
     (1664, 928),
@@ -839,19 +838,19 @@ const QWEN_IMAGE_QUALIFICATION: ResolutionQualificationRecord =
         family: "qwen-image",
         source: "https://github.com/QwenLM/Qwen-Image/blob/6b5e1f5cec987d404be5ac6657db3b9aacb56a89/README.md",
         revision: "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-        qualified: false,
-        evidence: "static-contract: upstream README.md aspect_ratios oracle + exact profile/admission tests; runtime generation and decoded delivery smoke not recorded",
+        qualified: true,
+        evidence: "contract qualification: pinned upstream README.md aspect_ratios oracle; Mold dynamic /16 admission and common decoded-image delivery are resolution-generic; no per-size runtime-performance claim",
         candidates: QWEN_UPSTREAM_CANDIDATES,
     };
 
-/// Return a pinned upstream candidate record when the family has candidates
-/// awaiting Mold runtime-and-delivery qualification.
+/// Return the pinned upstream dimension record and its Mold qualification
+/// status for a family with an authored aspect set.
 pub fn resolution_qualification_record(
     family: &str,
 ) -> Option<&'static ResolutionQualificationRecord> {
     match canonical_family(family) {
         "z-image" => Some(&Z_IMAGE_QUALIFICATION),
-        "qwen-image" | "qwen-image-edit" => Some(&QWEN_IMAGE_QUALIFICATION),
+        "qwen-image" => Some(&QWEN_IMAGE_QUALIFICATION),
         _ => None,
     }
 }
@@ -862,10 +861,8 @@ pub fn family_presets(family: &str) -> &'static [(u32, u32)] {
         "sdxl" => SDXL,
         "sd3" => SD3,
         "flux" | "flux2" => FLUX,
-        // Upstream candidates are not recommendations until a checked-in
-        // runtime-and-delivery campaign qualifies their exact dimensions.
         "z-image" => Z_IMAGE_UPSTREAM_CANDIDATES,
-        "qwen-image" | "qwen-image-edit" => &[],
+        "qwen-image" | "qwen-image-edit" => QWEN_UPSTREAM_CANDIDATES,
         "wuerstchen" => WUERSTCHEN,
         "ltx-video" => LTX_VIDEO,
         "ltx2" => LTX2,
@@ -1383,6 +1380,18 @@ fn pipeline_label(pipeline: Ltx2PipelineMode) -> String {
 }
 
 fn provenance(family: &str) -> Vec<ProfileProvenance> {
+    if canonical_family(family) == "qwen-image-edit" {
+        return vec![ProfileProvenance {
+            kind: ProvenanceKind::MoldPolicy,
+            source: "Mold source-driven Qwen Image Edit guidance".to_string(),
+            revision: None,
+            qualified: true,
+            evidence: Some(
+                "source fitting preserves the input aspect on the dynamic /16 canvas; optional shape presets reuse Mold's qualified Qwen Image aspect set"
+                    .to_string(),
+            ),
+        }];
+    }
     if let Some(record) = resolution_qualification_record(family) {
         return vec![ProfileProvenance {
             kind: ProvenanceKind::Upstream,
@@ -1627,8 +1636,8 @@ mod tests {
                 "qwen-image:q4",
                 "qwen-image",
                 "6b5e1f5cec987d404be5ac6657db3b9aacb56a89",
-                false,
-                "runtime generation and decoded delivery smoke not recorded",
+                true,
+                "no per-size runtime-performance claim",
             ),
         ] {
             let profile = resolve_generation_profile(input(model, family));
@@ -1642,17 +1651,34 @@ mod tests {
     }
 
     #[test]
-    fn qwen_candidates_match_oracle_but_are_not_profile_recommendations() {
+    fn qwen_image_edit_presets_are_mold_source_fitting_guidance() {
+        let profile =
+            resolve_generation_profile(input("qwen-image-edit-2511:q4", "qwen-image-edit"));
+        let recipe = profile.default_recipe().unwrap();
+        assert_eq!(recipe.resolution.domain, ResolutionDomain::SourceDriven);
+        assert_eq!(recipe.provenance[0].kind, ProvenanceKind::MoldPolicy);
+        assert!(recipe.provenance[0].source.contains("source-driven"));
+        assert!(resolution_qualification_record("qwen-image-edit").is_none());
+    }
+
+    #[test]
+    fn qwen_candidates_are_profile_recommendations() {
         let profile = resolve_generation_profile(input("qwen-image:q4", "qwen-image"));
-        assert!(profile
+        let presets = profile
             .default_recipe()
             .unwrap()
             .resolution
             .aspect_groups
-            .is_empty());
+            .iter()
+            .flat_map(|group| &group.presets)
+            .map(|preset| (preset.width, preset.height))
+            .collect::<std::collections::HashSet<_>>();
         let candidates = resolution_qualification_record("qwen-image").unwrap();
-        assert!(!candidates.qualified);
+        assert!(candidates.qualified);
         assert_eq!(candidates.candidates, QWEN_UPSTREAM_CANDIDATES);
+        assert_eq!(presets.len(), candidates.candidates.len());
+        assert!(presets.contains(&(1664, 928)));
+        assert!(presets.contains(&(928, 1664)));
     }
 
     #[test]

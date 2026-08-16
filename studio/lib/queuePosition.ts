@@ -1,0 +1,140 @@
+/**
+ * Live queue position and blocked-reason copy, shared by web, desktop, and
+ * iPhone.
+ *
+ * The SSE `Queued { position }` frame is a one-shot: it says where a job
+ * landed at submit time and never again. `GET /api/queue` is the live view —
+ * `entries[].position` is the 0-based dispatch order and it shifts as jobs
+ * finish and on a PATCH reorder. Every surface resolves through here so a
+ * queued row counts down instead of freezing at the number it was born with.
+ */
+
+import type { QueueEntry, QueuePlan, QueueWorkItem } from "../api/queuePlan";
+
+export interface QueueStatus {
+  /** Live 0-based dispatch order, or null when the host did not list the job. */
+  position: number | null;
+  /** Raw scheduler reason this work is parked, or null when it is simply waiting. */
+  blockedReason: string | null;
+}
+
+/** One host's live queue read, in whatever shape the shell already holds. */
+export interface QueueStatusSource {
+  hostId: string;
+  entries?: readonly QueueEntry[] | null | undefined;
+  plan?: QueuePlan | null | undefined;
+}
+
+export type QueueStatusIndex = ReadonlyMap<string, QueueStatus>;
+
+/** Job ids live in per-host id spaces, so the key always carries the host. */
+export function queueStatusKey(hostId: string, jobId: string): string {
+  return `${hostId}\u0000${jobId}`;
+}
+
+function finitePosition(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : null;
+}
+
+/**
+ * Reasons the scheduler reports that are ordinary bookkeeping rather than
+ * something a user can act on. Same set the device panel filters, so the two
+ * surfaces never disagree about what counts as blocked.
+ */
+const BENIGN_REASONS = new Set([
+  "priority",
+  "starvation_forced",
+  "warm_resident",
+]);
+
+/** Scheduler reason → display text, or null when it is not worth surfacing. */
+export function normalizeBlockedReason(
+  reason: string | null | undefined,
+): string | null {
+  if (!reason || BENIGN_REASONS.has(reason)) return null;
+  return reason.replaceAll("_", " ");
+}
+
+/**
+ * Short, plain-language copy for a queued row. Falls back to the normalized
+ * scheduler reason so a server that grows a new one still says something.
+ */
+export function blockedReasonLabel(
+  reason: string | null | undefined,
+): string | null {
+  switch (reason) {
+    case "insufficient_host_ram":
+      return "Waiting for memory";
+    case "insufficient_vram":
+      return "Waiting for GPU memory";
+    case "device_unavailable":
+      return "Waiting for a device";
+    case "queue_paused":
+      return "Queue paused";
+    default:
+      return normalizeBlockedReason(reason);
+  }
+}
+
+/** The parked reason for a job's work items, if the plan named one. */
+function planBlockedReason(
+  plan: QueuePlan | null | undefined,
+  jobId: string,
+): string | null {
+  if (!plan) return null;
+  const items: readonly QueueWorkItem[] = plan.work_items ?? [];
+  for (const item of items) {
+    if (item.parent_id !== jobId && item.work_id !== jobId) continue;
+    const label = normalizeBlockedReason(item.blocked_reason ?? item.reason);
+    if (label !== null) return item.blocked_reason ?? item.reason ?? null;
+  }
+  return null;
+}
+
+/**
+ * Fold every host's live queue read into one lookup. Hosts that have not been
+ * read contribute nothing, which is exactly right: absence of an entry is
+ * absence of evidence, never "position 0".
+ */
+export function buildQueueStatusIndex(
+  sources: Iterable<QueueStatusSource>,
+): QueueStatusIndex {
+  const index = new Map<string, QueueStatus>();
+  for (const source of sources) {
+    if (!source || !source.hostId) continue;
+    for (const entry of source.entries ?? []) {
+      if (!entry || typeof entry.id !== "string" || entry.id.length === 0)
+        continue;
+      index.set(queueStatusKey(source.hostId, entry.id), {
+        position: finitePosition(entry.position),
+        blockedReason: planBlockedReason(source.plan, entry.id),
+      });
+    }
+  }
+  return index;
+}
+
+/** Live status for one job, or null when its host has not been read. */
+export function queueStatusFor(
+  index: QueueStatusIndex | null | undefined,
+  hostId: string | null | undefined,
+  jobId: string | null | undefined,
+): QueueStatus | null {
+  if (!index || !hostId || !jobId) return null;
+  return index.get(queueStatusKey(hostId, jobId)) ?? null;
+}
+
+/**
+ * Pill copy for a queued print. Position is 0-based, so slot 0 is the job
+ * about to run and has no line to be in — the same threshold the Machines
+ * queue panel already uses for `QUEUED #N`.
+ */
+export function queuePositionLabel(
+  position: number | null | undefined,
+): string | null {
+  const value = finitePosition(position);
+  if (value === null || value < 1) return null;
+  return `#${value} in line`;
+}

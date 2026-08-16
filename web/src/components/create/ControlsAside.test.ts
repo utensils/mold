@@ -96,6 +96,35 @@ describe("ControlsAside", () => {
     );
   });
 
+  it("exposes and applies Qwen Image aspect ratios on web", async () => {
+    const wrapper = factory(
+      {
+        model: "qwen-image:q4",
+        modelFamily: "qwen-image",
+        width: 1328,
+        height: 1328,
+      },
+      "qwen-image",
+    );
+    const shape = wrapper.getComponent(ShapePicker);
+    expect(shape.props("options")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "square", label: "1:1" }),
+        expect.objectContaining({ id: "landscape", label: "4:3" }),
+        expect.objectContaining({ id: "portrait", label: "3:4" }),
+        expect.objectContaining({ id: "wide", label: "16:9" }),
+        expect.objectContaining({ id: "tall", label: "9:16" }),
+      ]),
+    );
+
+    shape.vm.$emit("update:modelValue", "wide");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.emitted("update:modelValue")?.at(-1)?.[0]).toMatchObject({
+      width: 1664,
+      height: 928,
+    });
+  });
+
   it("renders a custom source canvas and restores it after a manual override", async () => {
     const sourceDimensions = { width: 896, height: 1152 };
     const wrapper = mount(ControlsAside, {

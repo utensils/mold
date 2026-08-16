@@ -638,13 +638,28 @@ impl Ltx2RuntimeSession {
         self.tail_capture = None;
     }
 
+    /// Whether the live prompt encoder is still held. False once a
+    /// `prepare()` has consumed it (its VRAM is handed to the transformer),
+    /// after which only a matching [`Self::can_reuse_for`] cache hit can
+    /// serve another `prepare()`. Test-only observable: production code asks
+    /// [`Self::can_reuse_for`], which folds this in with the cache.
+    #[cfg(test)]
+    pub(crate) fn has_prompt_encoder(&self) -> bool {
+        self.prompt_encoder.is_some()
+    }
+
     /// Whether this session can serve `plan` without a rebuild. Returns
     /// `true` if the encoder is still available OR the cached encoding
-    /// matches the plan's prompt tokens. Callers use this to decide
-    /// whether to reuse a persisted runtime (fast path — keeps transformer
-    /// and VAE warm) or drop it and build a fresh one (the only way to
-    /// recover when the encoder has been consumed on a prior `prepare()`
-    /// and a different prompt arrives).
+    /// matches the plan's prompt tokens exactly. Callers use this to decide
+    /// whether to reuse a persisted runtime or drop it and build a fresh
+    /// one — the only way to recover when the encoder has been consumed on
+    /// a prior `prepare()` and a different prompt arrives.
+    ///
+    /// What reuse preserves is the cached prompt encoding and the compute
+    /// device handle, which is what lets a matching plan skip the Gemma
+    /// load entirely. It does NOT keep a transformer or VAE warm: neither
+    /// lives in this session — `prepare()` builds them per call and hands
+    /// them back in the `NativePreparedRun`.
     pub fn can_reuse_for(&self, plan: &Ltx2GeneratePlan) -> bool {
         if self.prompt_encoder.is_some() {
             return true;
