@@ -43,7 +43,6 @@ fn phase_rank(phase: &str) -> u8 {
 struct SchedulerActivity {
     kind: String,
     phase: &'static str,
-    position: Option<usize>,
     current: Option<u64>,
     total: Option<u64>,
 }
@@ -61,10 +60,13 @@ fn scheduler_activity(state: &AppState) -> HashMap<String, SchedulerActivity> {
             other => other,
         }
         .to_string();
+        // `queue_rank` is deliberately not read here. It is the coordinator's
+        // monotonic submission counter, not a place in line; the registry
+        // ordering below is the one authority for that, and it is what
+        // `GET /api/queue` reports.
         let candidate = SchedulerActivity {
             kind,
             phase,
-            position: usize::try_from(work.queue_rank).ok(),
             current: work.chain_stage.map(u64::from),
             total: work
                 .batch_partition
@@ -76,7 +78,6 @@ fn scheduler_activity(state: &AppState) -> HashMap<String, SchedulerActivity> {
                 if phase_rank(candidate.phase) > phase_rank(current.phase) {
                     current.phase = candidate.phase;
                 }
-                current.position = current.position.min(candidate.position);
                 current.current = current.current.max(candidate.current);
                 current.total = current.total.max(candidate.total);
             })
@@ -111,9 +112,6 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
             },
             |activity| activity.phase,
         );
-        let position = scheduled
-            .and_then(|activity| activity.position)
-            .or(Some(entry.position));
         items.push(ActiveWorkItem {
             id: entry.id,
             kind: "generation".into(),
@@ -121,7 +119,7 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
             model: Some(entry.model),
             created_at_unix_ms: entry.started_at_unix_ms,
             updated_at_unix_ms: observed_at_unix_ms,
-            position,
+            position: Some(entry.position),
             current: None,
             total: None,
             can_cancel: matches!(entry.state, crate::job_registry::JobLifecycle::Queued),
@@ -199,7 +197,9 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
             model: None,
             created_at_unix_ms: observed_at_unix_ms,
             updated_at_unix_ms: observed_at_unix_ms,
-            position: activity.position,
+            // Scheduler-only work never entered the queue registry, so it has
+            // no dispatch-order place to report — the same as a sequence row.
+            position: None,
             current: activity.current,
             total: activity.total,
             can_cancel: false,

@@ -2800,6 +2800,55 @@ mod tests {
         assert!(ids.contains(&"expand-parent"));
     }
 
+    /// `/api/activity` must report the place in line, not the submission id.
+    ///
+    /// `queue_rank` is `Coordinator::synthetic_id`, a monotonic submission
+    /// counter, so once V2 published a plan the route projected it as
+    /// `position` and clients rendered "#1041 in line". The registry ordering
+    /// that `GET /api/queue` reports is the single authority.
+    #[tokio::test]
+    async fn activity_positions_come_from_the_registry_not_the_synthetic_rank() {
+        let state = AppState::for_tests();
+        state.job_registry.register("queued-a", "flux-dev:q4");
+        state.job_registry.register("queued-b", "flux-dev:q4");
+        state.scheduled_work.set_queue_work_items_for_tests(vec![
+            mold_core::QueueWorkItem {
+                work_id: "queued-a:0".into(),
+                parent_id: "queued-a".into(),
+                work_kind: "generation".into(),
+                activity_phase: mold_core::QueueActivityPhase::Queued,
+                queue_rank: 1_041,
+                ..Default::default()
+            },
+            mold_core::QueueWorkItem {
+                work_id: "queued-b:0".into(),
+                parent_id: "queued-b".into(),
+                work_kind: "generation".into(),
+                activity_phase: mold_core::QueueActivityPhase::Queued,
+                queue_rank: 1_042,
+                ..Default::default()
+            },
+        ]);
+        let app = app_with_state(state);
+
+        let body = json_body(
+            app.oneshot(Request::get("/api/activity").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let items = body["items"].as_array().unwrap();
+        let position = |id: &str| {
+            items
+                .iter()
+                .find(|item| item["id"] == id)
+                .unwrap_or_else(|| panic!("{id} present"))["position"]
+                .clone()
+        };
+        assert_eq!(position("queued-a"), serde_json::json!(0));
+        assert_eq!(position("queued-b"), serde_json::json!(1));
+    }
+
     #[tokio::test]
     async fn activity_snapshot_marks_sequences_unavailable_without_metadata_db() {
         let app = app_with_state(AppState::for_tests());
