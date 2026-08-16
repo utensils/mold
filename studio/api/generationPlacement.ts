@@ -280,8 +280,33 @@ interface PlacementPreviewBound {
   release: () => void;
 }
 
-function placementPreviewBound(): PlacementPreviewBound | undefined {
+export interface PlacementPreviewOptions {
+  /** Let a fleet router stop a probe once another host has supplied a usable
+   * route. The normal 15-minute authority deadline still applies. */
+  signal?: AbortSignal;
+}
+
+function placementPreviewBound(
+  externalSignal?: AbortSignal,
+): PlacementPreviewBound | undefined {
   if (typeof AbortSignal === "undefined") return undefined;
+  if (externalSignal && typeof AbortController !== "undefined") {
+    const controller = new AbortController();
+    const abort = () => controller.abort(externalSignal.reason);
+    if (externalSignal.aborted) abort();
+    else externalSignal.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(
+      () => controller.abort(new Error("placement preview timed out")),
+      PLACEMENT_PREVIEW_TIMEOUT_MS,
+    );
+    return {
+      signal: controller.signal,
+      release: () => {
+        clearTimeout(timer);
+        externalSignal.removeEventListener("abort", abort);
+      },
+    };
+  }
   if (typeof AbortSignal.timeout === "function") {
     // Engine-managed timer; nothing to disarm.
     return {
@@ -305,8 +330,9 @@ export async function previewGenerationPlacement(
   target: ApiTarget,
   request: Record<string, unknown>,
   copies = 1,
+  options: PlacementPreviewOptions = {},
 ): Promise<GenerationPlacementPreview> {
-  const bound = placementPreviewBound();
+  const bound = placementPreviewBound(options.signal);
   try {
     return await apiJsonTo<GenerationPlacementPreview>(
       target,
@@ -354,8 +380,9 @@ export async function previewChainPlacement(
   target: ApiTarget,
   request: Record<string, unknown>,
   copies = 1,
+  options: PlacementPreviewOptions = {},
 ): Promise<GenerationPlacementPreview> {
-  const bound = placementPreviewBound();
+  const bound = placementPreviewBound(options.signal);
   try {
     return await apiJsonTo<GenerationPlacementPreview>(
       target,

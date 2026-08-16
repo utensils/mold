@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type { DeviceInfo } from "../api/devices";
 import type { QueuePlan, QueueWorkItem } from "../api/queuePlan";
+import { normalizeBlockedReason } from "../lib/queuePosition";
 
 const props = withDefaults(
   defineProps<{
@@ -138,14 +139,7 @@ function hasUnmatchedDevice(work: QueueWorkItem): boolean {
 }
 
 function blockedReason(work: QueueWorkItem): string | null {
-  const reason = work.blocked_reason ?? work.reason;
-  if (
-    !reason ||
-    ["priority", "starvation_forced", "warm_resident"].includes(reason)
-  ) {
-    return null;
-  }
-  return reason.replaceAll("_", " ");
+  return normalizeBlockedReason(work.blocked_reason ?? work.reason);
 }
 
 function pinnedDevice(work: QueueWorkItem): DeviceInfo | null {

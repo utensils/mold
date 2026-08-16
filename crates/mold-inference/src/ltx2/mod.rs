@@ -85,3 +85,113 @@ pub fn audio_output_gap(paths: &mold_core::ModelPaths) -> Option<String> {
 pub fn checkpoint_supports_audio_output(path: &std::path::Path) -> bool {
     single_file::supports_audio_output(path).unwrap_or(false)
 }
+
+/// Whether a CPU-placed Gemma artifact pays the streaming encoder's
+/// anonymous-heap peak on top of its own bytes.
+///
+/// The Q4 GGUF variant is loaded through `GgufGemmaEncoder::load`, which takes
+/// no dtype and keeps its own quantized residency
+/// (`text/prompt_encoder.rs:111-119`), so only the safetensors variant does.
+pub fn cpu_gemma_allocates_anon_peak(artifact: &std::path::Path) -> bool {
+    !artifact
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"))
+}
+
+/// Host bytes a CPU-placed Gemma prompt encoder allocates on top of its
+/// memory-mapped weight files, for admission's host-RAM reservation.
+///
+/// The CPU encoder does not materialize the checkpoint. `load_from_assets`
+/// builds through `new_streaming` (`text/encoder.rs:445-451`), so the shards
+/// stay an mmap'd `VarBuilder` and `forward_hidden_states` constructs each
+/// decoder layer inside the loop and drops it before the next
+/// (`text/encoder.rs:507-522`). Pricing the whole file at the CPU compute
+/// dtype would therefore charge a second full copy of ~24.7 GB that is never
+/// allocated, and park work that runs comfortably.
+///
+/// What is anonymous heap is the composition
+/// [`crate::device::LTX2_GEMMA_VRAM_THRESHOLD`] documents: the retained token
+/// embedding table, at most two in-flight decoder layers, and the retained
+/// hidden states. That note states the arithmetic at BF16 — a peak near
+/// 3.3 GB — while on CPU every one of those tensors is built at
+/// [`backend::Ltx2Backend::Cpu`]'s compute dtype, so the same element count is
+/// priced at F32 here.
+pub fn cpu_gemma_streaming_anon_peak_bytes() -> u64 {
+    /// `forward_hidden_states` holds the layer it is running and the one it
+    /// just produced output from; they are never all co-resident.
+    const LAYERS_IN_FLIGHT: u64 = 2;
+    /// The context [`crate::device::LTX2_GEMMA_VRAM_THRESHOLD`]'s note prices.
+    /// Conservative against today's `DEFAULT_GEMMA_MAX_LENGTH`, which is
+    /// smaller, and one arithmetic rather than two that can drift apart.
+    const HIDDEN_STATE_CONTEXT_TOKENS: u64 = 1_024;
+
+    let cfg = text::encoder::ltx_gemma_config();
+    let hidden_size = cfg.hidden_size as u64;
+    let embedding_table = cfg.vocab_size as u64 * hidden_size;
+    let hidden_states =
+        (cfg.num_hidden_layers as u64 + 1) * HIDDEN_STATE_CONTEXT_TOKENS * hidden_size;
+    let elements =
+        embedding_table + LAYERS_IN_FLIGHT * gemma_decoder_layer_elements(&cfg) + hidden_states;
+    elements * backend::Ltx2Backend::Cpu.compute_dtype().size_in_bytes() as u64
+}
+
+/// Parameter count of one Gemma decoder layer, from the shapes
+/// `DecoderLayer::new` actually constructs (`text/encoder.rs:323-350`).
+fn gemma_decoder_layer_elements(cfg: &text::encoder::GemmaConfig) -> u64 {
+    let hidden = cfg.hidden_size as u64;
+    let attention_dim = (cfg.num_attention_heads * cfg.head_dim) as u64;
+    let kv_dim = (cfg.num_key_value_heads * cfg.head_dim) as u64;
+    // q_proj and o_proj span the full attention width; k_proj and v_proj are
+    // grouped-query and span the smaller key/value width. q_norm and k_norm
+    // are per-head.
+    let attention = hidden * attention_dim * 2 + hidden * kv_dim * 2 + (cfg.head_dim as u64) * 2;
+    // gate_proj, up_proj, down_proj.
+    let mlp = hidden * cfg.intermediate_size as u64 * 3;
+    // input, post-attention, pre-feedforward, and post-feedforward norms.
+    let layernorms = hidden * 4;
+    attention + mlp + layernorms
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    /// The streaming heap must reproduce the composition
+    /// `device::LTX2_GEMMA_VRAM_THRESHOLD` documents, priced at the CPU dtype.
+    ///
+    /// That note derives its figures at BF16 — a 2.01 GB embedding table,
+    /// ~0.45 GB per in-flight decoder layer, ~0.39 GB of retained hidden
+    /// states, "a peak near 3.3 GB". Halving the F32 answer must land back on
+    /// it, or the two arithmetics have drifted.
+    #[test]
+    fn cpu_gemma_streaming_heap_matches_the_documented_bf16_peak() {
+        let f32_peak = super::cpu_gemma_streaming_anon_peak_bytes();
+        assert_eq!(f32_peak, 6_591_410_176);
+        let bf16_peak = f32_peak / 2;
+        assert!(
+            (3_200_000_000..3_400_000_000).contains(&bf16_peak),
+            "BF16 peak {bf16_peak} must still be the documented ~3.3 GB"
+        );
+    }
+
+    /// The heap is what the encoder allocates, never a second copy of the
+    /// weights: it must stay small beside a real 24.7 GB BF16 checkpoint.
+    #[test]
+    fn cpu_gemma_streaming_heap_is_not_a_second_copy_of_the_weights() {
+        const REAL_GEMMA_BF16_BYTES: u64 = 24_700_000_000;
+        assert!(
+            super::cpu_gemma_streaming_anon_peak_bytes() < REAL_GEMMA_BF16_BYTES / 3,
+            "a streaming encoder does not materialize its checkpoint"
+        );
+    }
+
+    #[test]
+    fn a_quantized_gemma_allocates_no_streaming_heap() {
+        assert!(super::cpu_gemma_allocates_anon_peak(Path::new(
+            "model-00001-of-00005.safetensors"
+        )));
+        assert!(!super::cpu_gemma_allocates_anon_peak(Path::new(
+            "gemma-3-12b-it-q4_0.gguf"
+        )));
+    }
+}

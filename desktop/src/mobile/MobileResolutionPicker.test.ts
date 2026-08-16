@@ -69,13 +69,27 @@ describe("MobileResolutionPicker", () => {
     expect(state).toMatchObject({ width: 576, height: 1024 });
   });
 
-  it("withholds unqualified Qwen candidates and keeps custom dimensions", () => {
-    const { wrapper } = mountPicker(1328, 1328, "qwen-image");
+  it("shows every Qwen Image aspect ratio on iPhone", async () => {
+    const { wrapper, state } = mountPicker(1328, 1328, "qwen-image");
 
-    expect(wrapper.find("[data-test='mobile-resolution-tier']").exists()).toBe(false);
-    expect(wrapper.findAll(".mobile-resolution-aspect")).toHaveLength(0);
-    expect(wrapper.find("[data-test='mobile-resolution-custom']").exists()).toBe(true);
-    expect(wrapper.get("[data-orientation='portrait']").attributes("disabled")).toBeDefined();
+    expect(wrapper.find("[data-test='mobile-resolution-tier']").exists()).toBe(true);
+    expect(wrapper.findAll(".mobile-resolution-aspect").map((button) => button.text())).toEqual([
+      "1:1",
+    ]);
+    await wrapper.get("[data-orientation='portrait']").trigger("click");
+    expect(wrapper.findAll(".mobile-resolution-aspect").map((button) => button.text())).toEqual([
+      "≈9:16",
+      "3:4",
+      "2:3",
+    ]);
+    await wrapper.get("[data-aspect='≈9:16']").trigger("click");
+    expect(state).toMatchObject({ width: 928, height: 1664 });
+    await wrapper.get("[data-orientation='landscape']").trigger("click");
+    expect(wrapper.findAll(".mobile-resolution-aspect").map((button) => button.text())).toEqual([
+      "≈16:9",
+      "4:3",
+      "3:2",
+    ]);
   });
 
   it("projects the selected tier's exact pixel dimensions under the control", async () => {

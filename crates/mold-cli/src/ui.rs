@@ -192,6 +192,27 @@ fn format_eta(secs: f64) -> String {
     }
 }
 
+/// Spinner message for a `Queued` event, or `None` to leave the line alone.
+///
+/// The coordinator re-announces this event every time a waiting job's place
+/// in line changes and the spinner rewrites one line from it, so every
+/// *update* has to render: declining to draw one leaves the previous, now-wrong
+/// number on screen for as long as the job waits. Position 0 is the front of
+/// the line, and it moved there like any other position.
+///
+/// The exception is the very first event. Position 0 there means there was no
+/// queue to report — the submit-time event and legacy single-GPU dispatch both
+/// announce 0 as the job starts — so the ordinary idle run says nothing rather
+/// than flashing a queue it was never in. Wording is kept in step with the
+/// TUI's `queued_stage_label`.
+fn queued_status_message(position: usize, first_event: bool) -> Option<String> {
+    match position {
+        0 if first_event => None,
+        0 => Some("Queued (next up)".to_string()),
+        n => Some(format!("Queued (position {n})")),
+    }
+}
+
 pub(crate) async fn render_progress(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<SseProgressEvent>,
 ) {
@@ -210,6 +231,7 @@ pub(crate) async fn render_progress(
     let mut weight_bar: Option<ProgressBar> = None;
     let mut download_multi: Option<MultiProgress> = None;
     let mut download_bars: HashMap<usize, (ProgressBar, SmoothedRate)> = HashMap::new();
+    let mut queued_seen = false;
     while let Some(event) = rx.recv().await {
         match event {
             // Latent previews are for canvas clients; the terminal keeps
@@ -334,8 +356,10 @@ pub(crate) async fn render_progress(
                 }
             }
             SseProgressEvent::Queued { position, .. } => {
-                if position > 0 {
-                    pb.set_message(format!("Queued (position {})", position));
+                let message = queued_status_message(position, !queued_seen);
+                queued_seen = true;
+                if let Some(message) = message {
+                    pb.set_message(message);
                     pb.enable_steady_tick(Duration::from_millis(100));
                 }
             }
@@ -691,6 +715,42 @@ mod tests {
         let label = download_label(&long_name, 0, 20);
         assert!(label.contains(".safetensors"));
         assert!(label.contains("[1/20]"));
+    }
+
+    /// The coordinator re-emits `Queued` every time a waiting job's place in
+    /// line changes, and the spinner rewrites one line from these strings.
+    /// Every position must therefore produce a message: a position the
+    /// renderer declines to draw leaves the previous, now-wrong number on
+    /// screen for as long as the job waits.
+    #[test]
+    fn every_queued_position_produces_a_live_message() {
+        assert_eq!(
+            queued_status_message(3, true).as_deref(),
+            Some("Queued (position 3)")
+        );
+        assert_eq!(
+            queued_status_message(1, false).as_deref(),
+            Some("Queued (position 1)")
+        );
+        assert_eq!(
+            queued_status_message(0, false).as_deref(),
+            Some("Queued (next up)"),
+            "the front of the line is a real position, not an absent one"
+        );
+        assert_eq!(
+            queued_status_message(0, true),
+            None,
+            "a run that was never queued must not flash a queue"
+        );
+        // Draining 3 → 0 must read as four distinct messages: never repeat
+        // one, never fall silent, never leave a stale number on screen.
+        let drain: Vec<String> = (0..=3)
+            .rev()
+            .enumerate()
+            .filter_map(|(i, position)| queued_status_message(position, i == 0))
+            .collect();
+        let unique: std::collections::BTreeSet<&String> = drain.iter().collect();
+        assert_eq!(unique.len(), 4, "{drain:?}");
     }
 
     /// #806 acceptance criterion 1: the CLI presents the wan family as

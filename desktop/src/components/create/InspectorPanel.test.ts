@@ -296,6 +296,29 @@ describe("InspectorPanel — shape + resolution projection", () => {
     expect([form.width, form.height]).toEqual([720, 1280]);
   });
 
+  it("exposes and applies Qwen Image aspect ratios on desktop", async () => {
+    const form = formFor("qwen-image");
+    form.model = "qwen-image:q4";
+    form.width = 1328;
+    form.height = 1328;
+
+    const wrapper = mount(InspectorPanel, { props: { form } });
+    const shape = wrapper.getComponent(ShapePicker);
+    expect(shape.props("options")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "square", label: "1:1" }),
+        expect.objectContaining({ id: "landscape", label: "4:3" }),
+        expect.objectContaining({ id: "portrait", label: "3:4" }),
+        expect.objectContaining({ id: "wide", label: "16:9" }),
+        expect.objectContaining({ id: "tall", label: "9:16" }),
+      ]),
+    );
+
+    shape.vm.$emit("update:modelValue", "wide");
+    await flushPromises();
+    expect([form.width, form.height]).toEqual([1664, 928]);
+  });
+
   it("applies a picked shape to the form dimensions at the current budget", async () => {
     const form = formFor("flux");
     form.width = 1024;

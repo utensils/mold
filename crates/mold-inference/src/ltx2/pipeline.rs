@@ -123,6 +123,32 @@ impl Ltx2Engine {
         std::env::var_os("MOLD_LTX2_DEBUG_TIMINGS").is_some()
     }
 
+    /// `MOLD_LTX2_KEEP_SESSION` — `0` / `false` / `off` drops the runtime
+    /// session at the end of every generation, restoring the pre-#1099
+    /// behavior where each job rebuilt one and reloaded the ~24 GB Gemma
+    /// prompt encoder. Default on, matching the chain and text-to-audio
+    /// paths, which have always written their session back.
+    ///
+    /// Retention turns the encoder's host RAM into a steady-state resident
+    /// cost of the cached engine instead of a per-job spike. Releasing it is
+    /// [`Ltx2Engine::unload`] — what mold-server's `ModelCache` calls on LRU
+    /// eviction — which clears `native_runtime` via `unload_runtime_state`.
+    ///
+    /// Read straight from the environment rather than through
+    /// [`crate::runtime_env`]: the knob moves residency and wall clock but
+    /// not device choice, weights, or numerics (a cached encoding is the
+    /// same tensor re-encoding the same tokens would produce), so it is not
+    /// an engine-shaping fingerprint input.
+    fn keep_session_enabled() -> bool {
+        match std::env::var("MOLD_LTX2_KEEP_SESSION") {
+            Ok(value) => !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off"
+            ),
+            Err(_) => true,
+        }
+    }
+
     fn log_timing(label: &str, start: Instant) {
         if Self::debug_timings_enabled() {
             eprintln!(
@@ -1062,6 +1088,20 @@ impl Ltx2Engine {
         )?;
         self.checkpoint()?;
         Self::log_timing("pipeline.render_runtime", render_start);
+
+        // #1099: keep the session so the next generation can serve its
+        // prompt from the session-level encoding cache instead of loading
+        // Gemma again. Written back only once the render completed — every
+        // `?` above leaves the session dropped, because a prepare or render
+        // that died (OOM, cancellation) may have taken device state with it
+        // and rebuilding from scratch is the recovery those paths rely on.
+        // Nothing below can invalidate the session: `encode_native_video`
+        // is CPU media work that never touches it.
+        if Self::keep_session_enabled() {
+            self.native_runtime = Some(runtime);
+        } else {
+            drop(runtime);
+        }
 
         // The EXR sequence is a sidecar: the gallery artifact stays the
         // tonemapped video, because a frame sequence is many files and
@@ -2713,7 +2753,144 @@ mod tests {
         assert_eq!(video.frames, 17);
         assert_eq!(video.fps, 12);
         assert!(!video.has_audio);
-        assert!(engine.native_runtime.is_none());
+        // #1099: the session outlives the generation so the next job can
+        // serve its prompt from the session cache instead of reloading the
+        // ~24 GB Gemma encoder. This assertion used to pin the opposite.
+        assert!(engine.native_runtime.is_some());
+    }
+
+    /// Take the env lock, set `MOLD_LTX2_KEEP_SESSION`, run `body`, restore.
+    /// Process-global env state can only be touched from one test at a time.
+    fn with_keep_session_env<F: FnOnce()>(value: Option<&str>, body: F) {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("MOLD_LTX2_KEEP_SESSION");
+        // SAFETY: serialized through `LOCK`.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var("MOLD_LTX2_KEEP_SESSION", v),
+                None => std::env::remove_var("MOLD_LTX2_KEEP_SESSION"),
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+        unsafe {
+            std::env::remove_var("MOLD_LTX2_KEEP_SESSION");
+            if let Some(v) = prior {
+                std::env::set_var("MOLD_LTX2_KEEP_SESSION", v);
+            }
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    /// An engine whose runtime session is a fake CPU one and whose on-disk
+    /// assets are the tiny test fixtures. `create_runtime_session` cannot
+    /// succeed against these — which is exactly what makes "did it rebuild?"
+    /// observable in the tests below.
+    fn engine_with_test_assets(temp_dir: &tempfile::TempDir) -> Ltx2Engine {
+        let gemma_dir = temp_dir.path().join("gemma");
+        fs::create_dir_all(&gemma_dir).unwrap();
+        write_test_gemma_assets(&gemma_dir);
+        let paths = dummy_paths_in(temp_dir.path(), &gemma_dir);
+        fs::write(&paths.transformer, []).unwrap();
+        write_minimal_ltx2_checkpoint(&paths.vae, true);
+        Ltx2Engine::with_runtime_session(
+            "ltx-2-19b-distilled:fp8".to_string(),
+            paths,
+            runtime_session(),
+        )
+    }
+
+    #[test]
+    fn second_same_prompt_generation_reuses_the_retained_session() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with_test_assets(&temp_dir);
+
+        with_keep_session_env(None, || {
+            engine
+                .generate(&request(OutputFormat::Gif, Some(false)))
+                .unwrap();
+            let retained = engine
+                .native_runtime
+                .as_ref()
+                .expect("the first generation must retain its session");
+            // `prepare()` consumed the encoder to free its memory, so the
+            // second run can only succeed by reusing the cached encoding.
+            assert!(!retained.has_prompt_encoder());
+
+            let second = engine
+                .generate(&request(OutputFormat::Gif, Some(false)))
+                .expect("a same-prompt repeat must reuse the retained session");
+            assert_eq!(&second.video.unwrap().data[..6], b"GIF89a");
+            assert!(engine.native_runtime.is_some());
+        });
+    }
+
+    #[test]
+    fn changed_prompt_forces_a_runtime_session_rebuild() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with_test_assets(&temp_dir);
+
+        with_keep_session_env(None, || {
+            engine
+                .generate(&request(OutputFormat::Gif, Some(false)))
+                .unwrap();
+            assert!(engine.native_runtime.is_some());
+
+            // The retained session's encoder is gone and its cached encoding
+            // is for the old prompt, so `can_reuse_for` must refuse it —
+            // otherwise `prepare()` would serve the previous prompt's
+            // embeddings for this one.
+            let mut changed = request(OutputFormat::Gif, Some(false));
+            changed.prompt = "unseen".to_string();
+            let err = engine
+                .generate(&changed)
+                .expect_err("a changed prompt must rebuild rather than reuse a consumed encoder");
+            // The rebuild is what fails: these fixtures carry no Gemma
+            // weights, so reaching the loader proves reuse was refused.
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("Gemma"),
+                "the failure must come from rebuilding the encoder, got: {msg}"
+            );
+            assert!(
+                engine.native_runtime.is_none(),
+                "a failed rebuild must not leave the stale session behind"
+            );
+        });
+    }
+
+    /// `ModelCache` eviction calls `unload()`, which is the only release
+    /// path for a retained session's host RAM.
+    #[test]
+    fn unload_releases_a_session_retained_by_a_generation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with_test_assets(&temp_dir);
+
+        with_keep_session_env(None, || {
+            engine
+                .generate(&request(OutputFormat::Gif, Some(false)))
+                .unwrap();
+            assert!(engine.native_runtime.is_some());
+
+            engine.unload();
+            assert!(engine.native_runtime.is_none());
+            assert!(!engine.is_loaded());
+        });
+    }
+
+    #[test]
+    fn keep_session_opt_out_restores_transient_runtime_sessions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut engine = engine_with_test_assets(&temp_dir);
+
+        with_keep_session_env(Some("0"), || {
+            engine
+                .generate(&request(OutputFormat::Gif, Some(false)))
+                .unwrap();
+            assert!(engine.native_runtime.is_none());
+        });
     }
 
     #[test]

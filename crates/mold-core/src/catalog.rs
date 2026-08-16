@@ -642,6 +642,33 @@ mod tests {
         }
     }
 
+    /// A shipped visual generation profile without any aspect preset leaves
+    /// web, desktop, and iPhone with an empty Shape control. Audio-only
+    /// recipes are the sole intentional exception because they have no canvas.
+    #[test]
+    fn every_shipped_visual_generation_profile_advertises_aspect_presets() {
+        let catalog = build_model_catalog(&Config::default(), None, false);
+        for model in catalog {
+            if !model.is_generation_model() {
+                continue;
+            }
+            let Some(profile) = &model.generation_profile else {
+                continue;
+            };
+            for recipe in &profile.recipes {
+                if recipe.resolution.domain == crate::generation_profile::ResolutionDomain::None {
+                    continue;
+                }
+                assert!(
+                    !recipe.resolution.aspect_groups.is_empty(),
+                    "{} recipe {} advertises a visual canvas without aspect presets",
+                    model.name,
+                    recipe.id,
+                );
+            }
+        }
+    }
+
     /// The low-VRAM Wan tiers (#794) surface in the catalog with their
     /// manifests' own recipes — the Q4_K_M A14B pair keeps the Lightning
     /// 4-step contract and the TI2V-5B Q8_0 keeps the 5B's 121@24 — and the

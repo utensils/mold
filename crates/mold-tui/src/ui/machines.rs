@@ -44,6 +44,31 @@ fn kv_owned(
     ])
 }
 
+/// Detail-pane row for host RAM: what the scheduler can still spend, out of
+/// what the machine has, coloured and worded by the shared pressure level.
+///
+/// `None` when the host reports no snapshot — an older server keeps exactly
+/// the rows it had before the field existed rather than showing a zeroed
+/// meter, which would read as a machine under total pressure.
+fn host_memory_row(
+    theme: &crate::ui::theme::Theme,
+    snapshot: Option<&mold_core::HostMemorySnapshot>,
+) -> Option<Line<'static>> {
+    use crate::ui::host_memory::{host_memory_detail_value, host_memory_level, host_memory_style};
+
+    let snapshot = snapshot?;
+    Some(Line::from(vec![
+        Span::styled(
+            format!("{:<w$}", "Host RAM", w = KV_LABEL_W),
+            theme.param_label(),
+        ),
+        Span::styled(
+            host_memory_detail_value(snapshot),
+            host_memory_style(host_memory_level(Some(snapshot)), theme),
+        ),
+    ]))
+}
+
 fn device_summary_state_label(
     admin_state: mold_core::DeviceAdminState,
     health: mold_core::DeviceHealth,
@@ -382,6 +407,9 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
                 lines.push(kv_owned(theme, "GPU", gpu.name.clone(), false));
                 let vram = vram_label(gpu.vram_used_mb, gpu.vram_total_mb);
                 lines.push(kv_owned(theme, "VRAM", vram, false));
+            }
+            if let Some(row) = host_memory_row(theme, status.host_memory.as_ref()) {
+                lines.push(row);
             }
             if let Some(disk) = &status.models_disk {
                 let d = disk_label(disk.free_bytes, disk.total_bytes);
@@ -869,6 +897,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            host_memory: None,
         }
     }
 
@@ -1177,6 +1206,57 @@ mod tests {
         assert_eq!(queue_elapsed_label(0, 7_200_000), "2h");
         // Clock skew (start in the future) must not underflow.
         assert_eq!(queue_elapsed_label(10_000, 5_000), "0s");
+    }
+
+    fn host_memory_snapshot(headroom_bytes: u64) -> mold_core::HostMemorySnapshot {
+        mold_core::HostMemorySnapshot {
+            total_bytes: 64 * 1024_u64.pow(3),
+            available_bytes: 48 * 1024_u64.pow(3),
+            headroom_bytes,
+            safety_floor_bytes: 10 * 1024_u64.pow(3),
+        }
+    }
+
+    fn row_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn host_ram_row_is_absent_until_the_host_reports_one() {
+        let theme = crate::ui::theme::Theme::default();
+        assert!(
+            host_memory_row(&theme, None).is_none(),
+            "an older server keeps exactly the rows it had before this field"
+        );
+    }
+
+    #[test]
+    fn host_ram_row_carries_headroom_total_and_pressure() {
+        let theme = crate::ui::theme::Theme::default();
+
+        let healthy =
+            host_memory_row(&theme, Some(&host_memory_snapshot(40 * 1024_u64.pow(3)))).unwrap();
+        assert_eq!(
+            row_text(&healthy),
+            "Host RAM  40.0 GB schedulable of 64.0 GB"
+        );
+        assert_eq!(healthy.spans[1].style, theme.param_value());
+
+        let tight =
+            host_memory_row(&theme, Some(&host_memory_snapshot(3 * 1024_u64.pow(3)))).unwrap();
+        assert!(
+            row_text(&tight).ends_with("· tight"),
+            "{}",
+            row_text(&tight)
+        );
+        assert_eq!(tight.spans[1].style, theme.warning());
+
+        let critical = host_memory_row(&theme, Some(&host_memory_snapshot(0))).unwrap();
+        assert!(row_text(&critical).ends_with("· critical"));
+        assert_eq!(critical.spans[1].style, theme.error());
     }
 
     #[test]

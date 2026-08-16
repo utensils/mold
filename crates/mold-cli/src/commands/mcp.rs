@@ -1968,6 +1968,7 @@ mod tests {
                     queue_paused: Some(false),
                     instance_id: None,
                     models_disk: None,
+                    host_memory: None,
                 }),
             )
             .expect(1)

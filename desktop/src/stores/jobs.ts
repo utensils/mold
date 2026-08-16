@@ -107,6 +107,10 @@ export const useJobsStore = defineStore("jobs", {
     queues: {} as Record<string, HostQueueSnapshot>,
     requestGenerations: {} as Record<string, number>,
     pollTimer: null as ReturnType<typeof setInterval> | null,
+    /** Views currently asking for the cross-host poll. Machines wants it while
+     * it is open and Create wants it only while something is queued, so the
+     * one that leaves first must not silence the other. */
+    pollConsumers: 0,
   }),
   getters: {
     /**
@@ -329,11 +333,14 @@ export const useJobsStore = defineStore("jobs", {
       await apiFetchTo(target, path, init);
     },
     startPolling() {
+      this.pollConsumers += 1;
       if (this.pollTimer) return;
       void this.refresh();
       this.pollTimer = setInterval(() => void this.refresh(), POLL_INTERVAL_MS);
     },
     stopPolling() {
+      this.pollConsumers = Math.max(0, this.pollConsumers - 1);
+      if (this.pollConsumers > 0) return;
       if (this.pollTimer) clearInterval(this.pollTimer);
       this.pollTimer = null;
     },

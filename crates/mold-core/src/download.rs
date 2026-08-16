@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
 
 use console::Term;
@@ -954,18 +956,15 @@ async fn pull_model_with_hf_token(
         bar.set_style(bar_style.clone());
         bar.set_message(truncate_filename(&file.hf_filename, msg_width));
 
-        let hf_path = download_file(
+        let clean_path = download_and_place_file(
             &api,
             file,
             DownloadProgress::new(bar, msg_width),
             &manifest.name,
+            &clean_path,
+            opts.skip_verify,
         )
         .await?;
-
-        // Place at clean path via hardlink (or copy as fallback)
-        hardlink_or_copy(&hf_path, &clean_path)?;
-
-        verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
 
         downloads.push((file.component, clean_path));
     }
@@ -1085,11 +1084,15 @@ async fn pull_model_with_callback_and_hf_token(
             total_bytes_to_download,
             batch_started_at,
         );
-        let hf_path = download_file(&api, file, progress, &manifest.name).await?;
-
-        hardlink_or_copy(&hf_path, &clean_path)?;
-
-        verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
+        let clean_path = download_and_place_file(
+            &api,
+            file,
+            progress,
+            &manifest.name,
+            &clean_path,
+            opts.skip_verify,
+        )
+        .await?;
 
         downloads.push((file.component, clean_path));
         completed_bytes += file.size_bytes;
@@ -1147,17 +1150,15 @@ async fn pull_model_files_only_with_hf_token(
         bar.set_style(bar_style.clone());
         bar.set_message(truncate_filename(&file.hf_filename, msg_width));
 
-        let hf_path = download_file(
+        download_and_place_file(
             &api,
             file,
             DownloadProgress::new(bar, msg_width),
             &manifest.name,
+            &clean_path,
+            opts.skip_verify,
         )
         .await?;
-
-        hardlink_or_copy(&hf_path, &clean_path)?;
-
-        verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
     }
 
     remove_pulling_marker(&manifest.name);
@@ -1255,11 +1256,15 @@ async fn pull_model_files_only_with_callback_and_hf_token(
             batch_started_at,
         );
 
-        let hf_path = download_file(&api, file, progress, &manifest.name).await?;
-
-        hardlink_or_copy(&hf_path, &clean_path)?;
-
-        verify_file_integrity(&clean_path, file, &manifest.name, opts.skip_verify)?;
+        download_and_place_file(
+            &api,
+            file,
+            progress,
+            &manifest.name,
+            &clean_path,
+            opts.skip_verify,
+        )
+        .await?;
         completed_bytes += file.size_bytes;
     }
 
@@ -1276,46 +1281,93 @@ fn extract_http_status(err: &ApiError) -> Option<u16> {
     }
 }
 
-async fn download_file<P: Progress + Clone + Send + Sync + 'static>(
+type HfFileDownloadFlight = tokio::sync::Mutex<()>;
+type HfFileDownloadFlights =
+    tokio::sync::Mutex<HashMap<(String, String), Weak<HfFileDownloadFlight>>>;
+
+/// Return the process-wide flight for one Hugging Face repository file.
+///
+/// Different model variants often reuse the same large encoder or VAE blob.
+/// The server deliberately runs unrelated pulls in parallel, so coordinate
+/// only identical HF files here before entering hf-hub's short-lived file
+/// lock. Weak entries keep completed identities from accumulating forever.
+async fn hf_file_download_flight(repo: &str, filename: &str) -> Arc<HfFileDownloadFlight> {
+    static FLIGHTS: OnceLock<HfFileDownloadFlights> = OnceLock::new();
+
+    let flights = FLIGHTS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
+    let mut flights = flights.lock().await;
+    flights.retain(|_, flight| flight.strong_count() > 0);
+
+    let key = (repo.to_string(), filename.to_string());
+    if let Some(flight) = flights.get(&key).and_then(Weak::upgrade) {
+        return flight;
+    }
+
+    let flight = Arc::new(tokio::sync::Mutex::new(()));
+    flights.insert(key, Arc::downgrade(&flight));
+    flight
+}
+
+async fn with_hf_file_download_flight<T, Fut>(repo: &str, filename: &str, operation: Fut) -> T
+where
+    Fut: Future<Output = T>,
+{
+    let flight = hf_file_download_flight(repo, filename).await;
+    let _flight_guard = flight.lock().await;
+    operation.await
+}
+
+async fn download_and_place_file<P: Progress + Clone + Send + Sync + 'static>(
     api: &Api,
     file: &ModelFile,
     progress: P,
     model_name: &str,
+    clean_path: &Path,
+    skip_verify: bool,
 ) -> Result<PathBuf, DownloadError> {
-    let repo = api.repo(hf_model_repo(&file.hf_repo));
-
-    match repo
-        .download_with_progress(&file.hf_filename, progress)
-        .await
-    {
-        Ok(path) => Ok(path),
-        Err(e) => {
-            let status = extract_http_status(&e);
-            let err_str = e.to_string();
-            if status == Some(401) || err_str.contains("401") || err_str.contains("Unauthorized") {
-                Err(DownloadError::Unauthorized {
-                    repo: file.hf_repo.clone(),
-                    model: model_name.to_string(),
-                })
-            } else if status == Some(403)
-                || err_str.contains("403")
-                || err_str.contains("Forbidden")
-                || err_str.contains("gated")
-                || err_str.contains("Access denied")
-            {
-                Err(DownloadError::GatedModel {
-                    repo: file.hf_repo.clone(),
-                    model: model_name.to_string(),
-                })
-            } else {
-                Err(DownloadError::DownloadFailed {
-                    repo: file.hf_repo.clone(),
-                    filename: file.hf_filename.clone(),
-                    source: e,
-                })
+    with_hf_file_download_flight(&file.hf_repo, &file.hf_filename, async move {
+        let repo = api.repo(hf_model_repo(&file.hf_repo));
+        let hf_path = match repo
+            .download_with_progress(&file.hf_filename, progress)
+            .await
+        {
+            Ok(path) => path,
+            Err(e) => {
+                let status = extract_http_status(&e);
+                let err_str = e.to_string();
+                if status == Some(401)
+                    || err_str.contains("401")
+                    || err_str.contains("Unauthorized")
+                {
+                    return Err(DownloadError::Unauthorized {
+                        repo: file.hf_repo.clone(),
+                        model: model_name.to_string(),
+                    });
+                } else if status == Some(403)
+                    || err_str.contains("403")
+                    || err_str.contains("Forbidden")
+                    || err_str.contains("gated")
+                    || err_str.contains("Access denied")
+                {
+                    return Err(DownloadError::GatedModel {
+                        repo: file.hf_repo.clone(),
+                        model: model_name.to_string(),
+                    });
+                } else {
+                    return Err(DownloadError::DownloadFailed {
+                        repo: file.hf_repo.clone(),
+                        filename: file.hf_filename.clone(),
+                        source: e,
+                    });
+                }
             }
-        }
-    }
+        };
+
+        hardlink_or_copy(&hf_path, clean_path)?;
+        verify_file_integrity(clean_path, file, model_name, skip_verify)?;
+        Ok(clean_path.to_path_buf())
+    })
+    .await
 }
 
 // ── Synchronous single-file download (for use from spawn_blocking) ───────────
@@ -2303,6 +2355,43 @@ async fn fetch_recipe_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn identical_hf_files_serialize_acquisition_and_placement() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let filename = format!("shared-{}.safetensors", uuid::Uuid::new_v4());
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("blob");
+        let destination = temp.path().join("shared").join("encoder.safetensors");
+        std::fs::write(&source, b"shared encoder").unwrap();
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let operation = || {
+            let active = active.clone();
+            let peak = peak.clone();
+            let source = source.clone();
+            let destination = destination.clone();
+            async move {
+                let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now_active, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                let result = hardlink_or_copy(&source, &destination);
+                active.fetch_sub(1, Ordering::SeqCst);
+                result
+            }
+        };
+
+        let first = with_hf_file_download_flight("Qwen/Qwen-Image-2512", &filename, operation());
+        let second = with_hf_file_download_flight("Qwen/Qwen-Image-2512", &filename, operation());
+        let (first_result, second_result) = tokio::join!(first, second);
+
+        first_result.unwrap();
+        second_result.unwrap();
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(destination).unwrap(), b"shared encoder");
+    }
 
     #[test]
     fn hidden_ltx2_adapters_use_files_only_pulls() {

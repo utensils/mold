@@ -2,6 +2,7 @@ pub mod chrome;
 pub mod create_form;
 pub mod gallery;
 pub mod generate;
+pub mod host_memory;
 pub mod info;
 pub mod library_details;
 pub mod machines;
