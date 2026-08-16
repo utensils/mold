@@ -821,7 +821,7 @@
               let
                 moduleWarnings =
                   cudaArch: package:
-                  (lib.nixosSystem {
+                  (inputs.nixpkgs.lib.nixosSystem {
                     inherit system;
                     modules = [
                       ./nix/module.nix
