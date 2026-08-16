@@ -2854,6 +2854,10 @@ pub struct ServerStatus {
     /// older servers or when the mount cannot be determined.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models_disk: Option<DiskUsage>,
+    /// Host-RAM telemetry from the scheduler's admission ledger. Absent on
+    /// older servers and wherever that ledger does not run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_memory: Option<HostMemorySnapshot>,
 }
 
 /// Total/free bytes for the filesystem backing a directory (currently the
@@ -3254,6 +3258,29 @@ impl QueueWorkItem {
     }
 }
 
+/// Host-RAM telemetry for the machine serving this request.
+///
+/// `headroom_bytes` is what admission actually spends: available bytes less
+/// the safety floor and every live reservation, so it is not
+/// `available_bytes - safety_floor_bytes` and can be zero while the machine
+/// still reports free memory. Clients colour pressure from `headroom_bytes`
+/// against `safety_floor_bytes`.
+///
+/// Absent on the parent whenever the host ledger has produced no sample —
+/// legacy dispatch, or before the first sample lands. Absent means unknown;
+/// the server never reports zeros it did not measure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct HostMemorySnapshot {
+    #[schema(example = 67_430_000_000_u64)]
+    pub total_bytes: u64,
+    #[schema(example = 58_000_000_000_u64)]
+    pub available_bytes: u64,
+    #[schema(example = 48_700_000_000_u64)]
+    pub headroom_bytes: u64,
+    #[schema(example = 10_114_500_000_u64)]
+    pub safety_floor_bytes: u64,
+}
+
 /// Versioned scheduler plan appended to `GET /api/queue`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QueuePlan {
@@ -3266,6 +3293,9 @@ pub struct QueuePlan {
     pub next_replan_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub work_items: Vec<QueueWorkItem>,
+    /// Host-RAM telemetry sampled by the scheduler's own ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_memory: Option<HostMemorySnapshot>,
 }
 
 /// Whole-queue listing returned by `GET /api/queue` — the client-side twin of
@@ -6358,6 +6388,7 @@ mod tests {
             queue_paused: Some(true),
             instance_id: None,
             models_disk: None,
+            host_memory: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         let parsed: super::ServerStatus = serde_json::from_str(&json).unwrap();
@@ -8252,6 +8283,88 @@ mod queue_plan_wire_tests {
             serde_json::to_value(future).unwrap(),
             serde_json::json!("remote_utility")
         );
+    }
+
+    /// The exact shape three frontends parse. Renaming a field or emitting
+    /// zeros for an unsampled host silently miscolours every pressure meter.
+    #[test]
+    fn host_memory_telemetry_serializes_its_published_field_names() {
+        let plan = QueuePlan {
+            host_memory: Some(HostMemorySnapshot {
+                total_bytes: 67_430_000_000,
+                available_bytes: 58_000_000_000,
+                headroom_bytes: 48_700_000_000,
+                safety_floor_bytes: 10_114_500_000,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_eq!(
+            json["host_memory"],
+            serde_json::json!({
+                "total_bytes": 67_430_000_000_u64,
+                "available_bytes": 58_000_000_000_u64,
+                "headroom_bytes": 48_700_000_000_u64,
+                "safety_floor_bytes": 10_114_500_000_u64,
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<QueuePlan>(json).unwrap(),
+            plan,
+            "the wire shape must round-trip"
+        );
+    }
+
+    #[test]
+    fn absent_host_memory_is_omitted_rather_than_zeroed() {
+        let plan = QueuePlan::default();
+        assert!(plan.host_memory.is_none());
+        let json = serde_json::to_value(&plan).unwrap();
+        assert!(
+            json.get("host_memory").is_none(),
+            "an unsampled host reports nothing, never a zeroed snapshot"
+        );
+        // A legacy payload with no field at all must still parse.
+        let legacy = serde_json::json!({
+            "plan_version": 1,
+            "state_version": 1,
+            "optimizer_state": "optimized",
+        });
+        assert!(serde_json::from_value::<QueuePlan>(legacy)
+            .unwrap()
+            .host_memory
+            .is_none());
+    }
+
+    #[test]
+    fn server_status_carries_the_same_host_memory_shape() {
+        let json = serde_json::json!({
+            "version": "0.21.0",
+            "models_loaded": [],
+            "gpu_info": null,
+            "uptime_secs": 1,
+            "host_memory": {
+                "total_bytes": 67_430_000_000_u64,
+                "available_bytes": 58_000_000_000_u64,
+                "headroom_bytes": 48_700_000_000_u64,
+                "safety_floor_bytes": 10_114_500_000_u64,
+            },
+        });
+        let status: ServerStatus = serde_json::from_value(json).unwrap();
+        let host_memory = status.host_memory.expect("host memory parses on status");
+        assert_eq!(host_memory.total_bytes, 67_430_000_000);
+        assert_eq!(host_memory.safety_floor_bytes, 10_114_500_000);
+
+        let legacy = serde_json::json!({
+            "version": "0.20.0",
+            "models_loaded": [],
+            "gpu_info": null,
+            "uptime_secs": 1,
+        });
+        assert!(serde_json::from_value::<ServerStatus>(legacy)
+            .unwrap()
+            .host_memory
+            .is_none());
     }
 
     #[test]

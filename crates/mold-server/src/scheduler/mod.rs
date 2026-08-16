@@ -267,6 +267,11 @@ pub struct ScheduledWorkHandle {
     observes_v2_decisions: bool,
     observations: Arc<crate::dispatch_mode::DispatchObservationRecorder>,
     latest_plan: Arc<std::sync::RwLock<Option<mold_core::QueuePlan>>>,
+    /// Most recent host-RAM reading from the coordinator's admission ledger,
+    /// so `/api/status` reports the same numbers admission spends. `None`
+    /// until the first sample, and permanently `None` wherever the coordinator
+    /// does not run.
+    latest_host_memory: Arc<std::sync::RwLock<Option<mold_core::HostMemorySnapshot>>>,
 }
 
 impl Default for ScheduledWorkHandle {
@@ -279,6 +284,7 @@ impl Default for ScheduledWorkHandle {
             observes_v2_decisions: false,
             observations: Arc::new(crate::dispatch_mode::DispatchObservationRecorder::default()),
             latest_plan: Arc::new(std::sync::RwLock::new(None)),
+            latest_host_memory: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 }
@@ -314,11 +320,27 @@ impl ScheduledWorkHandle {
             observes_v2_decisions,
             observations: Arc::new(crate::dispatch_mode::DispatchObservationRecorder::default()),
             latest_plan: Arc::new(std::sync::RwLock::new(None)),
+            latest_host_memory: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
     pub const fn dispatch_mode(&self) -> crate::dispatch_mode::DispatchMode {
         self.dispatch_mode
+    }
+
+    /// Latest host-RAM reading, or `None` when nothing has sampled it.
+    pub fn host_memory(&self) -> Option<mold_core::HostMemorySnapshot> {
+        *self
+            .latest_host_memory
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn publish_host_memory(&self, snapshot: Option<mold_core::HostMemorySnapshot>) {
+        *self
+            .latest_host_memory
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = snapshot;
     }
 
     pub const fn v2_authoritative(&self) -> bool {
@@ -1052,6 +1074,19 @@ impl HostMemoryLedger {
         self.headroom_for_reserved_work(work_id)
     }
 
+    /// Client-facing telemetry, or `None` while the sampler has produced no
+    /// reading. Absent means unknown — a zeroed snapshot would read as a host
+    /// under total memory pressure.
+    fn wire_snapshot(&self) -> Option<mold_core::HostMemorySnapshot> {
+        let sample = self.sample?;
+        Some(mold_core::HostMemorySnapshot {
+            total_bytes: sample.total_bytes,
+            available_bytes: sample.available_bytes,
+            headroom_bytes: self.headroom_bytes(),
+            safety_floor_bytes: self.safety_floor_bytes(),
+        })
+    }
+
     fn snapshot(&self) -> HostMemorySnapshot {
         HostMemorySnapshot {
             headroom_bytes: self.headroom_bytes(),
@@ -1210,6 +1245,9 @@ fn queue_plan_semantically_equal(
         plan.state_version = 0;
         plan.dirty_since_unix_ms = None;
         plan.next_replan_at_unix_ms = None;
+        // Host memory is a live 1 Hz reading. Letting it decide semantic
+        // equality would publish a plan event every second forever.
+        plan.host_memory = None;
         for work in &mut plan.work_items {
             let duration = work
                 .estimated_start_unix_ms
@@ -1401,6 +1439,15 @@ impl Coordinator {
             #[cfg(test)]
             before_queue_control_plan_hook: None,
         }
+    }
+
+    /// Sample host memory and republish it, so `/api/status` and the queue
+    /// plan report the numbers admission is actually spending.
+    fn collect_host_memory(&mut self) {
+        self.memory.collect_now();
+        self.state
+            .scheduled_work
+            .publish_host_memory(self.memory.wire_snapshot());
     }
 
     fn install_cpu_utility_lane(
@@ -1965,7 +2012,7 @@ impl Coordinator {
                 let work_id = rejected_work_id;
                 if rejected_lease.is_some() {
                     self.memory.release(&work_id);
-                    self.memory.collect_now();
+                    self.collect_host_memory();
                     let rejected_worker = rejected_lease_device.as_ref().and_then(|device| {
                         self.state
                             .gpu_pool
@@ -2184,7 +2231,7 @@ impl Coordinator {
                         .remove(&device_id)
                         .expect("validated lease must still exist");
                     self.memory.release(&lease.work_id);
-                    self.memory.collect_now();
+                    self.collect_host_memory();
                     self.plan_invalidations.remove(&lease.work_id);
                     self.observe_estimate(
                         lease.estimate_key,
@@ -2267,7 +2314,7 @@ impl Coordinator {
                         .remove(&device_id)
                         .expect("exact owner lease must still exist");
                     self.memory.release(&lease.work_id);
-                    self.memory.collect_now();
+                    self.collect_host_memory();
                     if self.state.job_registry.remove_if_present(&lease.work_id) {
                         self.state.queue.decrement();
                     }
@@ -4970,7 +5017,7 @@ impl Coordinator {
             );
             confidence.insert(lease.work_id.clone(), confidence_value);
         }
-        let wire = queue_plan_projection(
+        let mut wire = queue_plan_projection(
             snapshot,
             plan,
             &self.state.gpu_pool,
@@ -4978,6 +5025,7 @@ impl Coordinator {
             &confidence,
             dirty_since,
         );
+        wire.host_memory = self.memory.wire_snapshot();
         let mut current = self
             .state
             .scheduled_work
@@ -5099,6 +5147,12 @@ pub async fn run_scheduler_coordinator(
     let (cpu_utility_tx, cpu_utility_rx) = std::sync::mpsc::sync_channel(1);
     let cpu_utility_handle = crate::gpu_worker::spawn_cpu_utility_thread(cpu_utility_rx, worker_tx);
     let mut coordinator = Coordinator::new(state).await;
+    // The constructor's first reading predates the shared handle, so publish
+    // it before serving a status request that would otherwise report nothing.
+    coordinator
+        .state
+        .scheduled_work
+        .publish_host_memory(coordinator.memory.wire_snapshot());
     coordinator.install_cpu_utility_lane(cpu_utility_tx.clone());
     let registry_notify = coordinator.state.job_registry.mutation_notifier();
     let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
@@ -5194,7 +5248,7 @@ pub async fn run_scheduler_coordinator(
                 coordinator.reconcile_external_mutations(&mut immediate);
             }
             _ = memory_ticker.tick() => {
-                coordinator.memory.collect_now();
+                coordinator.collect_host_memory();
                 coordinator.sample_active_lease_high_waters();
                 coordinator.mutate(&mut immediate);
             }
@@ -5652,6 +5706,9 @@ fn queue_plan_projection_at_unix(
         }),
         next_replan_at_unix_ms: plan.next_replan_at_ms.map(to_unix),
         work_items,
+        // Attached by the publisher: telemetry is not a projection of the
+        // plan, and it must not widen this signature.
+        host_memory: None,
     }
 }
 
@@ -7259,6 +7316,76 @@ mod tests {
         );
     }
 
+    /// Telemetry rides the plan but must never be why one is published.
+    ///
+    /// The ledger resamples every second, so if `host_memory` decided semantic
+    /// equality every host would emit a queue-plan SSE event once a second for
+    /// as long as the server ran.
+    #[test]
+    fn host_memory_telemetry_never_triggers_a_queue_plan_event() {
+        let base = mold_core::QueuePlan {
+            plan_version: 1,
+            state_version: 2,
+            optimizer_state: "optimized".into(),
+            host_memory: Some(mold_core::HostMemorySnapshot {
+                total_bytes: 64 << 30,
+                available_bytes: 40 << 30,
+                headroom_bytes: 20 << 30,
+                safety_floor_bytes: 10 << 30,
+            }),
+            ..Default::default()
+        };
+        let resampled = mold_core::QueuePlan {
+            host_memory: Some(mold_core::HostMemorySnapshot {
+                total_bytes: 64 << 30,
+                available_bytes: 12 << 30,
+                headroom_bytes: 0,
+                safety_floor_bytes: 10 << 30,
+            }),
+            ..base.clone()
+        };
+        assert!(queue_plan_semantically_equal(&base, &resampled));
+
+        let absent = mold_core::QueuePlan {
+            host_memory: None,
+            ..base.clone()
+        };
+        assert!(queue_plan_semantically_equal(&base, &absent));
+    }
+
+    /// An unsampled ledger reports nothing rather than a host at zero.
+    #[test]
+    fn an_unsampled_ledger_publishes_no_host_memory() {
+        let mut ledger = unsampled_memory(64 << 30, 40 << 30);
+        assert_eq!(ledger.wire_snapshot(), None);
+
+        let started = ledger.begin_collection();
+        ledger.publish_sample(started, 64 << 30, 40 << 30);
+        let wire = ledger.wire_snapshot().expect("a sampled ledger reports");
+        assert_eq!(wire.total_bytes, 64 << 30);
+        assert_eq!(wire.available_bytes, 40 << 30);
+        assert_eq!(wire.safety_floor_bytes, ledger.safety_floor_bytes());
+        assert_eq!(wire.headroom_bytes, ledger.headroom_bytes());
+
+        // Headroom is not `available - floor`: a live reservation spends it
+        // while the machine still reports the same free memory.
+        ledger.reservations.insert(
+            "held".to_string(),
+            HostReservation {
+                bytes: 8 << 30,
+                state: ReservationState::Reserved,
+                charge_until_release: true,
+            },
+        );
+        let held = ledger.wire_snapshot().expect("still sampled");
+        assert_eq!(held.available_bytes, wire.available_bytes);
+        assert_eq!(
+            held.headroom_bytes,
+            wire.headroom_bytes - (8 << 30),
+            "a reservation must be visible as spent headroom"
+        );
+    }
+
     #[test]
     fn queue_plan_event_dedup_ignores_versions_and_wall_clock_drift() {
         let work = mold_core::QueueWorkItem {
@@ -7279,6 +7406,7 @@ mod tests {
             dirty_since_unix_ms: Some(9_000),
             next_replan_at_unix_ms: Some(11_000),
             work_items: vec![work.clone()],
+            host_memory: None,
         };
         let shifted = mold_core::QueuePlan {
             plan_version: 99,

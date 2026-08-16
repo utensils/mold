@@ -9755,6 +9755,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            host_memory: None,
         });
         let (state, text) = host_chip(&app);
         assert_eq!(state, ChipState::Ready);
@@ -13362,6 +13363,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            host_memory: None,
         };
         ri.update_from_server_status(status);
         assert_eq!(ri.memory_line.as_deref(), Some("VRAM: 16.0 GB free"));
@@ -13392,6 +13394,7 @@ mod tests {
                 queue_paused: None,
                 instance_id: None,
                 models_disk: None,
+                host_memory: None,
             }),
             ..Default::default()
         };
@@ -13422,6 +13425,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            host_memory: None,
         };
         let _event = BackgroundEvent::ServerStatusUpdate(Some(Box::new(status)));
         // None variant for server-unreachable
@@ -14624,6 +14628,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            host_memory: None,
         });
 
         app.sync_resource_info_mode();
@@ -14693,6 +14698,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            host_memory: None,
         };
 
         let _ = app
@@ -14732,6 +14738,7 @@ mod tests {
                 queue_paused: None,
                 instance_id: None,
                 models_disk: None,
+                host_memory: None,
             });
         assert!(app.resource_info.server_status.is_some());
 
@@ -15153,6 +15160,7 @@ mod tests {
                 queue_paused: Some(false),
                 instance_id: Some("instance-64".into()),
                 models_disk: None,
+                host_memory: None,
             })),
         );
         let devices = (0..64)
@@ -15392,6 +15400,7 @@ mod tests {
                 queue_paused: None,
                 instance_id: Some("uuid-a".into()),
                 models_disk: None,
+                host_memory: None,
             };
             let _ = app.bg_tx.send(BackgroundEvent::MachineConnectTested {
                 url: "http://hal9000:7680".into(),

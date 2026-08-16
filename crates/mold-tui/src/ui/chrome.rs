@@ -486,6 +486,7 @@ mod tests {
             queue_paused: None,
             instance_id: None,
             models_disk: None,
+            host_memory: None,
         };
 
         assert_eq!(remote_backend(&status), Some("CUDA"));

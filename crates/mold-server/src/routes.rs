@@ -4205,6 +4205,7 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         queue_paused: Some(state.queue_pause.is_paused()),
         instance_id: Some(state.instance_id.as_ref().clone()),
         models_disk,
+        host_memory: state.scheduled_work.host_memory(),
     })
 }
 
