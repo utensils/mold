@@ -4,6 +4,8 @@ import ActivityStrip from "./ActivityStrip.vue";
 import { sequenceToVM } from "@studio/lib/activity";
 import type { ActivityJobVM } from "@studio/lib/activity";
 import type { ChainJobSummary } from "@studio/lib/api/chainTypes";
+import { buildQueueStatusIndex } from "@studio/lib/queuePosition";
+import { ORIGIN_HOST_ID } from "../../lib/hostRegistry";
 import type { Job } from "../../composables/useGenerateStream";
 import type { GenerateRequestWire } from "../../types";
 
@@ -416,5 +418,106 @@ describe("ActivityStrip — present tense", () => {
       props: { jobs: [makeJob({ state: "done", settledAt: NOW - 1_000 })] },
     });
     expect(wrapper.find("[data-test='activity-strip']").exists()).toBe(false);
+  });
+});
+
+describe("ActivityStrip live queue position", () => {
+  const queued = (serverId: string) =>
+    makeJob({
+      id: `client-${serverId}`,
+      serverId,
+      workStarted: false,
+      state: "running",
+    });
+
+  const index = buildQueueStatusIndex([
+    {
+      hostId: ORIGIN_HOST_ID,
+      entries: [
+        {
+          id: "srv-1",
+          model: "m",
+          state: "running",
+          started_at_unix_ms: 1,
+          position: 0,
+        },
+        {
+          id: "srv-2",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 2,
+          position: 2,
+        },
+        {
+          id: "srv-3",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 3,
+          position: 3,
+        },
+      ],
+      plan: {
+        plan_version: 1,
+        state_version: 1,
+        optimizer_state: "settled",
+        dirty_since_unix_ms: null,
+        next_replan_at_unix_ms: null,
+        work_items: [
+          {
+            work_id: "w3",
+            parent_id: "srv-3",
+            work_kind: "generation",
+            priority_class: "normal",
+            queue_rank: 3,
+            bypass_count: 0,
+            estimate_confidence: "low",
+            blocked_reason: "insufficient_host_ram",
+          },
+        ],
+      },
+    },
+  ]);
+
+  it("counts a queued print's live place in line", () => {
+    const wrapper = mount(ActivityStrip, {
+      props: { jobs: [queued("srv-2")], queueStatus: index },
+    });
+    expect(
+      wrapper.get("[data-test='activity-queue-position-client-srv-2']").text(),
+    ).toBe("#2 in line");
+  });
+
+  it("says why a parked job is waiting instead of counting its place", () => {
+    const wrapper = mount(ActivityStrip, {
+      props: { jobs: [queued("srv-3")], queueStatus: index },
+    });
+    expect(
+      wrapper.get("[data-test='activity-queue-position-client-srv-3']").text(),
+    ).toBe("Waiting for memory");
+  });
+
+  it("keeps the bare pill against a server that lists nothing", () => {
+    const wrapper = mount(ActivityStrip, {
+      props: { jobs: [queued("srv-9")] },
+    });
+    expect(
+      wrapper
+        .find("[data-test='activity-queue-position-client-srv-9']")
+        .exists(),
+    ).toBe(false);
+    expect(wrapper.get("[data-test='activity-strip']").text()).toContain(
+      "a cat",
+    );
+  });
+
+  it("says nothing for the job at the head of the queue", () => {
+    const wrapper = mount(ActivityStrip, {
+      props: { jobs: [queued("srv-1")], queueStatus: index },
+    });
+    expect(
+      wrapper
+        .find("[data-test='activity-queue-position-client-srv-1']")
+        .exists(),
+    ).toBe(false);
   });
 });

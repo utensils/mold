@@ -6,10 +6,14 @@ import {
   sequenceActionLabel,
   sequenceActions,
   sequenceToVM,
+  queueStatusLabel,
+  withLiveQueueStatus,
   MAX_ATTENTION_ROWS,
   SETTLED_VISIBLE_MS,
   type ActivityJobVM,
+  type PrintActivityVM,
 } from "./activity";
+import { buildQueueStatusIndex } from "./queuePosition";
 import type { ChainJobSummary } from "./api/chainTypes";
 
 function print(
@@ -335,5 +339,118 @@ describe("activityDigestLabel", () => {
     expect(
       activityDigestLabel({ settledSequences: 0, hiddenAttention: 3 }),
     ).toBe("3 failed");
+  });
+});
+
+describe("withLiveQueueStatus", () => {
+  const index = buildQueueStatusIndex([
+    {
+      hostId: "local",
+      entries: [
+        {
+          id: "srv-run",
+          model: "m",
+          state: "running",
+          started_at_unix_ms: 1,
+          position: 0,
+        },
+        {
+          id: "srv-2",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 2,
+          position: 2,
+        },
+        {
+          id: "srv-3",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 3,
+          position: 3,
+        },
+      ],
+      plan: {
+        plan_version: 1,
+        state_version: 1,
+        optimizer_state: "settled",
+        dirty_since_unix_ms: null,
+        next_replan_at_unix_ms: null,
+        work_items: [
+          {
+            work_id: "w3",
+            parent_id: "srv-3",
+            work_kind: "generation",
+            priority_class: "normal",
+            queue_rank: 3,
+            bypass_count: 0,
+            estimate_confidence: "low",
+            blocked_reason: "insufficient_host_ram",
+          },
+        ],
+      },
+    },
+  ]);
+
+  it("maps a queued job to its live position", () => {
+    const vm = withLiveQueueStatus(print() as PrintActivityVM, index, "srv-2");
+    expect(vm.queuePosition).toBe(2);
+    expect(queueStatusLabel(vm)).toBe("#2 in line");
+  });
+
+  it("leaves the position absent when the host never listed the job", () => {
+    const vm = withLiveQueueStatus(
+      print() as PrintActivityVM,
+      index,
+      "srv-missing",
+    );
+    expect(vm.queuePosition).toBeUndefined();
+    expect(queueStatusLabel(vm)).toBeNull();
+    const unread = withLiveQueueStatus(
+      print() as PrintActivityVM,
+      null,
+      "srv-2",
+    );
+    expect(unread.queuePosition).toBeUndefined();
+    const unsubmitted = withLiveQueueStatus(
+      print() as PrintActivityVM,
+      index,
+      "",
+    );
+    expect(unsubmitted.queuePosition).toBeUndefined();
+  });
+
+  it("never carries a position on running or settled rows", () => {
+    for (const phase of ["running", "done", "failed", "cancelled"] as const) {
+      const vm = withLiveQueueStatus(
+        print({
+          phase,
+          settledAtMs: phase === "running" ? null : 10,
+        }) as PrintActivityVM,
+        index,
+        "srv-2",
+      );
+      expect(vm.queuePosition).toBeUndefined();
+      expect(queueStatusLabel(vm)).toBeNull();
+    }
+  });
+
+  it("says why a parked job is waiting instead of counting its place", () => {
+    const vm = withLiveQueueStatus(print() as PrintActivityVM, index, "srv-3");
+    expect(vm.blockedReason).toBe("insufficient_host_ram");
+    expect(queueStatusLabel(vm)).toBe("Waiting for memory");
+  });
+
+  it("stays quiet for the job at the head of the queue", () => {
+    const vm = withLiveQueueStatus(
+      print() as PrintActivityVM,
+      index,
+      "srv-run",
+    );
+    expect(vm.queuePosition).toBe(0);
+    expect(queueStatusLabel(vm)).toBeNull();
+  });
+
+  it("says nothing for a sequence row", () => {
+    expect(queueStatusLabel(print({ kind: "sequence" } as never))).toBeNull();
   });
 });

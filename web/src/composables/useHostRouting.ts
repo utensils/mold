@@ -39,7 +39,15 @@ import {
 import type { DeviceInfo } from "@studio/api/devices";
 import { ApiError, type ApiTarget } from "@studio/api/client";
 import { profileHashConflict } from "@studio/lib/profileFleet";
-import { predictedCompletionUnixMs } from "@studio/api/queuePlan";
+import {
+  predictedCompletionUnixMs,
+  type QueueListing,
+} from "@studio/api/queuePlan";
+import { hostMemoryLevel, type HostMemoryLevel } from "@studio/lib/hostMemory";
+import {
+  buildQueueStatusIndex,
+  type QueueStatusIndex,
+} from "@studio/lib/queuePosition";
 import {
   comparePlacementPreviews,
   classifyPlacementPreview,
@@ -82,6 +90,9 @@ interface HostTelemetry {
   queueDepth: number | null;
   gpu: RoutableGpu | null;
   predictedCompletionMs: number | null;
+  /** Last good `/api/queue` read, retained through a blip so a live queue
+   * position does not flicker away for one poll. */
+  queue: QueueListing | null;
 }
 
 export interface HostRouting {
@@ -110,6 +121,12 @@ export interface HostRouting {
   /** Last successful capability snapshot per exact host. Presentation-only
    * consumers must still fail closed when a host has no current entry. */
   capabilitiesByHost: Ref<Record<string, ServerCapabilities>>;
+  /** Live dispatch order (and any blocked reason) for every listed host's
+   * queued work, keyed by host + server job id. The one-shot SSE `Queued`
+   * frame never updates; this does, on every poll. */
+  queueStatus: ComputedRef<QueueStatusIndex>;
+  /** Host-RAM pressure for one machine, or null when it does not report it. */
+  hostMemoryPressure: (hostId: string) => HostMemoryLevel | null;
   /** Resolve the concrete dispatch route for a model, or null if unreachable. */
   resolve: (model: string | null) => HostRoute | null;
   /** Resolve through each host's read-only authoritative scheduler preview. */
@@ -250,6 +267,25 @@ const hosts = computed<RoutableHost[]>(() =>
     return host;
   }),
 );
+
+/**
+ * Live queue positions across the whole registry, folded from the `/api/queue`
+ * read this poll already performs. A host that has not answered contributes
+ * nothing — absence of an entry is never "position 0".
+ */
+const queueStatus = computed<QueueStatusIndex>(() =>
+  buildQueueStatusIndex(
+    Object.entries(telemetry.value).flatMap(([hostId, live]) =>
+      live.queue
+        ? [{ hostId, entries: live.queue.entries, plan: live.queue.plan }]
+        : [],
+    ),
+  ),
+);
+
+function hostMemoryPressure(hostId: string): HostMemoryLevel | null {
+  return hostMemoryLevel(telemetry.value[hostId]?.queue?.plan?.host_memory);
+}
 
 const targetId = computed(() =>
   normalizeTargetId(rawTargetId.value, hosts.value),
@@ -421,6 +457,10 @@ async function pollHost(entry: HostEntry): Promise<void> {
           queue.status === "fulfilled" && queue.value.plan
             ? predictedCompletionUnixMs(queue.value.plan)
             : null,
+        queue:
+          queue.status === "fulfilled"
+            ? { entries: queue.value.entries, plan: queue.value.plan ?? null }
+            : (telemetry.value[entry.id]?.queue ?? null),
       },
     };
   } else {
@@ -433,6 +473,7 @@ async function pollHost(entry: HostEntry): Promise<void> {
         queueDepth: null,
         gpu: null,
         predictedCompletionMs: null,
+        queue: null,
       },
     };
   }
@@ -1091,6 +1132,8 @@ export function useHostRouting(): HostRouting {
     modelOwnerIds: hostsForModel,
     inventoryKnown,
     capabilitiesByHost,
+    queueStatus,
+    hostMemoryPressure,
     resolve,
     resolveFeasible,
     revalidateFeasible,
