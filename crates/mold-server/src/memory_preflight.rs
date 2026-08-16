@@ -238,6 +238,31 @@ pub(crate) fn check_planned_memory_budget(
     Ok(())
 }
 
+/// Revalidate an already-admitted plan's host-RAM increment against the same
+/// ledger that granted its lease.
+///
+/// The host counterpart of [`check_planned_memory_budget`], and it obeys the
+/// same discipline: it rechecks the exact frozen increment and never recomputes
+/// a demand of its own. `available_host_headroom_bytes` must come from
+/// `HostMemoryLedger`, not from an independent floor computation — admission
+/// and dispatch disagreeing is what oscillates work through the dispatch-replan
+/// budget. Callers with no ledger evidence retain the grant instead of calling
+/// this with a guessed headroom.
+pub(crate) fn check_planned_host_budget(
+    model_name: &str,
+    predicted_host_increment_bytes: u64,
+    available_host_headroom_bytes: u64,
+) -> Result<(), ApiError> {
+    if predicted_host_increment_bytes > available_host_headroom_bytes {
+        return Err(ApiError::insufficient_memory(format!(
+            "model '{model_name}' frozen host-memory increment ~{:.1} GB no longer fits the current ~{:.1} GB host-memory headroom after the canonical safety floor; memory pressure changed after scheduler admission",
+            predicted_host_increment_bytes as f64 / 1_000_000_000.0,
+            available_host_headroom_bytes as f64 / 1_000_000_000.0,
+        )));
+    }
+    Ok(())
+}
+
 fn check_planned_memory_budget_with_resident(
     model_name: &str,
     predicted_peak_bytes: u64,
