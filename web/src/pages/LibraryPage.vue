@@ -7,7 +7,14 @@
  * `?q=`), marquee multi-select + bulk delete, and a two-pane / full-screen
  * Lightbox with reuse / use-as-source / download / delete.
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
 import { useRoute, useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import SegmentedControl, {
@@ -64,6 +71,7 @@ import { setSequenceHandoff } from "../composables/useSequenceHandoff";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
+import { restoreGenerationSourceMedia } from "@studio/lib/generationSourceMedia";
 import {
   appendMinimaxH3GalleryImageReference,
   isMinimaxH3Identity,
@@ -611,7 +619,93 @@ function reuseSequence(item: GalleryImage) {
   void router.push({ path: "/create", query: { output: "sequence" } });
 }
 
-function onReuse(item: GalleryImage) {
+let reuseEpoch = 0;
+
+async function restoreLibrarySource(
+  item: GalleryImage,
+  epoch: number,
+  expected: {
+    model: string;
+    width: number;
+    height: number;
+    sourceFit: string;
+  },
+): Promise<void> {
+  const stillOwnsEmptySource = () =>
+    epoch === reuseEpoch &&
+    form.state.value.model === expected.model &&
+    form.state.value.width === expected.width &&
+    form.state.value.height === expected.height &&
+    JSON.stringify(form.state.value.sourceFitPolicy) === expected.sourceFit &&
+    form.state.value.imageAttachments.length === 0;
+  const restoreCanvas = async (base64: string) => {
+    await nextTick();
+    if (
+      epoch !== reuseEpoch ||
+      form.state.value.model !== expected.model ||
+      form.state.value.imageAttachments[0]?.base64 !== base64
+    )
+      return;
+    form.state.value.width =
+      item.metadata.generation_width ?? item.metadata.width;
+    form.state.value.height =
+      item.metadata.generation_height ?? item.metadata.height;
+  };
+  const sha256 = item.metadata.source_image_sha256;
+  const stored = await restoreGenerationSourceMedia(sha256).catch(() => null);
+  if (stored && stillOwnsEmptySource()) {
+    form.state.value.imageAttachments = [
+      {
+        kind: stored.kind ?? "upload",
+        filename: stored.filename,
+        base64: stored.base64,
+        width: stored.width ?? undefined,
+        height: stored.height ?? undefined,
+        mime: stored.mime ?? undefined,
+      },
+    ];
+    await restoreCanvas(stored.base64);
+    return;
+  }
+
+  const filename = item.metadata.source_image_name;
+  if (!filename) return;
+  const owner = hostForEntry(item);
+  const candidates = [owner, ...listHosts()].filter(
+    (host, index, hosts) =>
+      host && hosts.findIndex((other) => other?.id === host.id) === index,
+  );
+  for (const host of candidates) {
+    if (!host) continue;
+    try {
+      const blob = await fetchGalleryBlob(host, filename);
+      const base64 = await blobToBase64(blob);
+      if (!stillOwnsEmptySource()) return;
+      const dimensions = imageDimensionsFromBase64(base64);
+      form.state.value.imageAttachments = [
+        {
+          kind: "gallery",
+          filename,
+          base64,
+          width: dimensions?.width,
+          height: dimensions?.height,
+          mime: blob.type || undefined,
+        },
+      ];
+      await restoreCanvas(base64);
+      return;
+    } catch {
+      // A source picked on another machine may not exist on the print owner.
+    }
+  }
+  toast(
+    "error",
+    "The original source image is unavailable. Reattach it before generating.",
+  );
+}
+
+async function onReuse(item: GalleryImage) {
+  const epoch = ++reuseEpoch;
   if (isSequencePrint(item)) {
     reuseSequence(item);
     return;
@@ -633,8 +727,16 @@ function onReuse(item: GalleryImage) {
     format: item.format,
     models: models.value,
   });
+  const expected = {
+    model: form.state.value.model,
+    width: form.state.value.width,
+    height: form.state.value.height,
+    sourceFit: JSON.stringify(form.state.value.sourceFitPolicy),
+  };
   closeLightbox();
-  void router.push({ name: "create" });
+  await router.push({ name: "create" });
+  if (epoch !== reuseEpoch) return;
+  await restoreLibrarySource(item, epoch, expected);
 }
 
 /**

@@ -173,8 +173,14 @@ import { isStandaloneGenerationModel } from "../lib/modelFilters";
 import {
   coerceSourceFitForMaskless,
   maskPaddingRectangles,
+  parseSourceFitPolicy,
   resolveSourceFitTransform,
 } from "@studio/lib/sourceFit";
+import {
+  persistGenerationSourceMedia,
+  restoreGenerationSourceMedia,
+  sha256HexOfBase64,
+} from "@studio/lib/generationSourceMedia";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import {
   useHostRouting,
@@ -2752,6 +2758,25 @@ async function onSubmitInner(allowStaleQuick = false) {
     return;
   }
   const currentRequest = form.toRequest(currentModel.value);
+  const originalSource = form.state.value.imageAttachments[0]
+    ? {
+        ...form.state.value.imageAttachments[0],
+        sourceFit: parseSourceFitPolicy(form.state.value.sourceFitPolicy) ?? {
+          mode: "pad-repaint",
+        },
+      }
+    : form.state.value.h3Authoring?.firstFrame?.data
+      ? {
+          base64: form.state.value.h3Authoring.firstFrame.data,
+          filename: form.state.value.h3Authoring.firstFrame.filename,
+          width: form.state.value.h3Authoring.firstFrame.width,
+          height: form.state.value.h3Authoring.firstFrame.height,
+          mime: form.state.value.h3Authoring.firstFrame.mimeType,
+          sourceFit: parseSourceFitPolicy(form.state.value.sourceFitPolicy) ?? {
+            mode: "pad-repaint",
+          },
+        }
+      : null;
   const copies = requestCopyCount(currentRequest);
   if (quick && !allowStaleQuick) {
     const result = route
@@ -2843,6 +2868,9 @@ async function onSubmitInner(allowStaleQuick = false) {
     req.source_image = preparedSource.source?.base64 ?? null;
     if (preparedSource.mask) req.mask_image = preparedSource.mask.base64;
     else delete req.mask_image;
+  }
+  if (req.source_image && originalSource) {
+    void persistGenerationSourceMedia(req.source_image, originalSource);
   }
   const finalizedResult = route
     ? decision.kind === "chain"
@@ -3408,7 +3436,10 @@ function recreateFromGallery(item: GalleryImage) {
   noticeFirstLastFrameRestore(item.metadata);
 }
 
+let openJobEpoch = 0;
+
 function openJob(job: Job) {
+  const epoch = ++openJobEpoch;
   stream.select(job.id);
   setOutput("single");
   // Activity's print rows call this path; durable sequence rows use the
@@ -3430,7 +3461,9 @@ function openJob(job: Job) {
     variations: 1,
     familyOverride: null,
   };
-  form.state.value.sourceFitPolicy = { mode: "pad-repaint" };
+  form.state.value.sourceFitPolicy = parseSourceFitPolicy(
+    request.source_fit,
+  ) ?? { mode: "pad-repaint" };
   form.state.value.cameraControl = null;
   form.state.value.model = request.model;
   const requestModel = models.value.find(
@@ -3472,6 +3505,42 @@ function openJob(job: Job) {
     : source
       ? [source]
       : [];
+  if (request.source_image) {
+    const effectiveSource = request.source_image;
+    void sha256HexOfBase64(effectiveSource)
+      .then((sha256) => restoreGenerationSourceMedia(sha256))
+      .then(async (restored) => {
+        if (
+          !restored ||
+          epoch !== openJobEpoch ||
+          form.state.value.imageAttachments[0]?.base64 !== effectiveSource
+        )
+          return;
+        form.state.value.imageAttachments = [
+          {
+            kind: restored.kind ?? "upload",
+            filename: restored.filename,
+            base64: restored.base64,
+            width: restored.width ?? undefined,
+            height: restored.height ?? undefined,
+            mime: restored.mime ?? undefined,
+          },
+        ];
+        await nextTick();
+        if (
+          epoch !== openJobEpoch ||
+          form.state.value.imageAttachments[0]?.base64 !== restored.base64
+        )
+          return;
+        form.state.value.width = request.width;
+        form.state.value.height = request.height;
+        form.state.value.sourceFitPolicy = parseSourceFitPolicy(
+          request.source_fit,
+        ) ?? {
+          mode: "pad-repaint",
+        };
+      });
+  }
   form.state.value.maskImage = request.mask_image
     ? image(request.mask_image, "Mask")
     : null;

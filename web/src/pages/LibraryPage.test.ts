@@ -28,6 +28,11 @@ const { pushMock, replaceMock } = vi.hoisted(() => ({
   pushMock: vi.fn(),
   replaceMock: vi.fn(),
 }));
+const restoreSourceMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@studio/lib/generationSourceMedia", () => ({
+  restoreGenerationSourceMedia: restoreSourceMock,
+}));
 
 vi.mock("../api", () => ({
   listGallery: listGalleryMock,
@@ -201,6 +206,7 @@ describe("LibraryPage", () => {
     deleteMock.mockReset().mockResolvedValue(undefined);
     hostDeleteMock.mockReset().mockResolvedValue(undefined);
     fetchBlobMock.mockReset().mockResolvedValue(new Blob(["bytes"]));
+    restoreSourceMock.mockReset().mockResolvedValue(null);
     pushMock.mockReset();
     replaceMock.mockReset();
     vi.mocked(requestConfirm).mockReset().mockResolvedValue(true);
@@ -388,6 +394,53 @@ describe("LibraryPage", () => {
 
     expect(useGenerateForm().state.value.model).toBe("sdxl:fp16");
     expect(useGenerateForm().state.value.modelFamily).toBe("sdxl");
+  });
+
+  it("reuse restores the original source, dimensions, type, and crop policy", async () => {
+    const sourcePrint = {
+      ...cat,
+      metadata: {
+        ...cat.metadata,
+        generation_width: 768,
+        generation_height: 1344,
+        source_image_name: "portrait.jpg",
+        source_image_sha256: "a".repeat(64),
+        source_fit: { mode: "crop-fill", alignX: "right", alignY: "top" },
+      },
+    };
+    listGalleryMock.mockResolvedValue([sourcePrint]);
+    restoreSourceMock.mockResolvedValue({
+      base64: "ORIGINAL",
+      filename: "portrait.jpg",
+      kind: "upload",
+      width: 1600,
+      height: 900,
+      mime: "image/jpeg",
+      sourceFit: { mode: "crop-fill", alignX: "right", alignY: "top" },
+    });
+    const wrapper = await mounted();
+    await wrapper.find("[data-test='grid-open']").trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.find("[data-test='lb-reuse']").trigger("click");
+    await flushPromises();
+
+    expect(useGenerateForm().state.value.imageAttachments).toEqual([
+      {
+        kind: "upload",
+        filename: "portrait.jpg",
+        base64: "ORIGINAL",
+        width: 1600,
+        height: 900,
+        mime: "image/jpeg",
+      },
+    ]);
+    expect(useGenerateForm().state.value.sourceFitPolicy).toEqual({
+      mode: "crop-fill",
+      alignX: "right",
+      alignY: "top",
+    });
+    expect(useGenerateForm().state.value.width).toBe(768);
+    expect(useGenerateForm().state.value.height).toBe(1344);
   });
 
   it("single delete removes optimistically and commits only after the window", async () => {
