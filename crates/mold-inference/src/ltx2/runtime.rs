@@ -638,6 +638,16 @@ impl Ltx2RuntimeSession {
         self.tail_capture = None;
     }
 
+    /// Whether the live prompt encoder is still held. False once a
+    /// `prepare()` has consumed it (its VRAM is handed to the transformer),
+    /// after which only a matching [`Self::can_reuse_for`] cache hit can
+    /// serve another `prepare()`. Test-only observable: production code asks
+    /// [`Self::can_reuse_for`], which folds this in with the cache.
+    #[cfg(test)]
+    pub(crate) fn has_prompt_encoder(&self) -> bool {
+        self.prompt_encoder.is_some()
+    }
+
     /// Whether this session can serve `plan` without a rebuild. Returns
     /// `true` if the encoder is still available OR the cached encoding
     /// matches the plan's prompt tokens. Callers use this to decide
