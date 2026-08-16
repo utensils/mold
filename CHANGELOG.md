@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-08-16
+
 ## [0.22.0] - 2026-08-15
 
 - **A MiniMax H3 request dispatched to a GPU worker holding another model's engine no longer takes down the whole server** (#1081). The private H3 preparation boundary began an *unbound* CUDA execution attempt and then evicted the previous model's resident engine inside it; cudarc treats any safe CUDA call on a pre-existing, unadopted context as poison, so the evicted engine's first CUDA-bearing destructor (e.g. `CudaStream::drop`) latched `force_retain`, leaked the rest of that engine, failed the post-drop VRAM sample, and escalated a healthy model switch — with no actual GPU fault — into worker quarantine plus a whole-process restart that cost every healthy GPU on the host. The boundary now adopts the worker's primary CUDA context (idempotent primary-context retain) into the attempt before the prepared operation runs, so eviction destructors free normally and the retained-resources escalation is reserved for genuine fatal CUDA errors.
@@ -1822,7 +1824,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.22.1...HEAD
+[0.22.1]: https://github.com/utensils/mold/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/utensils/mold/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/utensils/mold/compare/v0.20.2...v0.21.0
 [0.20.2]: https://github.com/utensils/mold/compare/v0.20.1...v0.20.2

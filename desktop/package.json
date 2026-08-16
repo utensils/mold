@@ -1,6 +1,6 @@
 {
   "name": "mold-desktop",
-  "version": "0.22.0",
+  "version": "0.22.1",
   "private": true,
   "type": "module",
   "description": "Mold — native desktop app for local AI image/video generation.",
