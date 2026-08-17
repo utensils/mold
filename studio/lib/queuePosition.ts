@@ -119,7 +119,11 @@ const ASSIGNMENT_REASONS = new Set([
 const UNKNOWN_REASON_LABEL = "Waiting on the host";
 
 function knownCopy(reason: string): string | null | undefined {
-  return Object.hasOwn(BLOCKED_REASON_COPY, reason)
+  // Not `Object.hasOwn`: the desktop app ships `minimumSystemVersion: 12.0`
+  // and WebKit only gained it in Safari 15.4 (macOS 12.3), so on 12.0-12.2 the
+  // first non-empty reason in a queue plan would throw and take the queue and
+  // device panels down with it. Vite does not polyfill it.
+  return Object.prototype.hasOwnProperty.call(BLOCKED_REASON_COPY, reason)
     ? BLOCKED_REASON_COPY[reason as QueueBlockedReasonId]
     : undefined;
 }
