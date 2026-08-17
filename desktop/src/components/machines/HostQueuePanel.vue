@@ -13,6 +13,7 @@ import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import QueueEntryDrawer from "../jobs/QueueEntryDrawer.vue";
 import { useGenerationStore, jobPhase, jobProgress, type Job } from "../../stores/generation";
 import { type HostView } from "../../stores/hosts";
+import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
 import { enrichQueueEntries, useJobsStore, type EnrichedQueueEntry } from "../../stores/jobs";
 import { useHostsStore } from "../../stores/hosts";
 import { useHostModelsStore } from "../../stores/hostModels";
@@ -89,9 +90,11 @@ function entryCode(entry: EnrichedQueueEntry): string {
     return entry.gpu !== undefined ? `RUNNING · GPU ${entry.gpu}` : "RUNNING";
   }
   // Held work is parked, not in line. Showing it a position tells the operator
-  // to wait for something the host will never start on its own.
+  // to wait for something the host will never start on its own — and the
+  // shared waiting vocabulary below is about a row that IS in line.
   if (entry.state === "held") return "HELD";
-  return entry.position > 0 ? `QUEUED #${entry.position}` : "QUEUED";
+  // Same waiting vocabulary as Create and iPhone, resolved once in studio.
+  return queueWaitCode(resolveQueueWait({ position: entry.position }));
 }
 
 /** The host's own words for why a job is parked, shown beside the row so the

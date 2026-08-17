@@ -176,8 +176,9 @@ const printVMs = computed<ActivityJobVM[]>(() =>
   }),
 );
 
-/** "#2 in line" / "Waiting for memory" per queued pill, or nothing at all when
- *  the host is too old to list the job. */
+/** "Next up" / "#2 in line" / "Waiting for memory" per queued pill, resolved in
+ *  the shared studio layer so this pill and web's say the same thing. A host
+ *  too old to list the job degrades to the plain "Queued". */
 const queueLabelByKey = computed(() => {
   const labels = new Map<string, string>();
   for (const vm of printVMs.value) {
@@ -186,8 +187,8 @@ const queueLabelByKey = computed(() => {
   }
   return labels;
 });
-function queuedLabel(job: Job): string | null {
-  return queueLabelByKey.value.get(`print:${job.clientId}`) ?? null;
+function queuedLabel(job: Job): string {
+  return queueLabelByKey.value.get(`print:${job.clientId}`) ?? "Queued";
 }
 
 const sequenceVMs = computed<ActivityJobVM[]>(() =>
@@ -337,18 +338,16 @@ function deleteConfirmed() {
         data-test="activity-queued"
         role="button"
         tabindex="0"
-        :title="queuedLabel(job) ? `Queued · ${queuedLabel(job)} · ${job.prompt}` : job.prompt"
+        :title="`${queuedLabel(job)} · ${job.prompt}`"
         @click="selectPrint(job)"
         @keydown.enter.prevent="selectPrint(job)"
         @keydown.space.prevent="selectPrint(job)"
       >
         <span class="ms-activity__pill-text">
-          Queued<template v-if="queuedLabel(job)">
-            ·
-            <span class="ms-activity__pill-queue" data-test="activity-queued-position">{{
-              queuedLabel(job)
-            }}</span> </template
-          >· {{ job.prompt }}
+          <span class="ms-activity__pill-queue" data-test="activity-queued-position">{{
+            queuedLabel(job)
+          }}</span>
+          · {{ job.prompt }}
         </span>
         <button
           type="button"

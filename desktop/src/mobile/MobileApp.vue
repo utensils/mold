@@ -71,6 +71,8 @@ import {
   type GenerationPlacementPreview,
 } from "@studio/api/generationPlacement";
 import {
+  activityAnnouncement,
+  activityCountLabel,
   mergeActivity,
   sequenceToVM,
   withLiveQueueStatus,
@@ -78,9 +80,11 @@ import {
   type PrintActivityVM,
 } from "@studio/lib/activity";
 import {
-  blockedReasonLabel,
   buildQueueStatusIndex,
   queueStatusFor,
+  queueWaitCode,
+  queueWaitLabel,
+  resolveQueueWait,
 } from "@studio/lib/queuePosition";
 import {
   mergeFleetActivity,
@@ -1229,17 +1233,22 @@ const activityRows = computed<ActivityRow[]>(() =>
 );
 
 /**
- * Status code for one queue row. A queued print reads its place from the live
- * `/api/queue` listing rather than the one-shot SSE frame it was born with, so
- * the number counts down; a job the scheduler parked says why instead.
+ * Status code for one queue row, in this list's compact uppercase idiom. A
+ * queued print reads its place from the live `/api/queue` listing rather than
+ * the one-shot SSE frame it was born with, so the number counts down; only a
+ * job the scheduler genuinely parked says why instead. The vocabulary itself
+ * is the shared one — web and desktop resolve the same waiting row the same
+ * way and only the casing is local.
  */
 function activityRowStatus(row: ActivityRow): string {
   if (!row.print) return "";
   if (row.print.status !== "queued") return jobStatusCode(row.print);
-  const blocked = blockedReasonLabel(row.blockedReason);
-  if (blocked) return blocked;
-  const position = row.queuePosition ?? row.print.queuePosition;
-  return position && position > 0 ? `QUEUED #${position}` : "QUEUED";
+  return queueWaitCode(
+    resolveQueueWait({
+      position: row.queuePosition ?? row.print.queuePosition,
+      blockedReason: row.blockedReason,
+    }),
+  );
 }
 const sharedMobileActivity = computed(() => {
   const local = new Set(
@@ -1339,15 +1348,28 @@ function selectCurrentMobileSequence(): void {
   }
   tab.value = "generate";
 }
-/** A settled sequence keeps its row (for Resume / Dismiss) but is NOT active,
- *  so the header counts real work rather than rows on screen. */
-const activeRowCount = computed(
+/**
+ * Running and waiting are counted apart. A settled sequence keeps its row (for
+ * Resume / Dismiss) but is neither, and a queued print is NOT active work —
+ * counting rows on screen is what made one rendering job plus four waiting
+ * ones read "5 ACTIVE".
+ */
+const runningRowCount = computed(
   () =>
-    activityRows.value.filter(
-      (row) =>
-        row.print !== null || row.sequence.state === "queued" || row.sequence.state === "running",
+    activityRows.value.filter((row) =>
+      row.print ? row.print.status !== "queued" : row.sequence.state === "running",
     ).length,
 );
+const waitingRowCount = computed(
+  () =>
+    activityRows.value.filter((row) =>
+      row.print ? row.print.status === "queued" : row.sequence.state === "queued",
+    ).length,
+);
+const activityCounts = computed(() => ({
+  running: runningRowCount.value,
+  waiting: waitingRowCount.value,
+}));
 const sequenceRowProgress = computed(() => {
   const progress = sequenceProgress.value;
   return progress && progress.total > 0 ? Math.round((progress.step / progress.total) * 100) : null;
@@ -1452,12 +1474,7 @@ const expansionPullEtaSeconds = computed(() => {
   const job = expansionPullStatus.value?.job;
   return attempt && recovery && job ? mobileDownloads.etaFor(recovery.route.hostId, job.id) : null;
 });
-const queueAnnouncement = computed(() => {
-  const count = queuedJobs.value.length;
-  return count === 0
-    ? "No active generations."
-    : `${count} active generation${count === 1 ? "" : "s"}.`;
-});
+const queueAnnouncement = computed(() => activityAnnouncement(activityCounts.value));
 const generationStatus = computed(() => {
   const active = activeGeneration.value;
   if (!active) return progress.value;
@@ -1469,10 +1486,12 @@ const generationStatus = computed(() => {
         active.hostId ?? selectedHostId.value,
         active.id,
       );
-      const blocked = blockedReasonLabel(live?.blockedReason);
-      if (blocked) return blocked;
-      const position = live?.position ?? active.queuePosition;
-      return position && position > 0 ? `Queued #${position}` : "Queued";
+      return queueWaitLabel(
+        resolveQueueWait({
+          position: live?.position ?? active.queuePosition,
+          blockedReason: live?.blockedReason,
+        }),
+      );
     }
     case "loading":
       return active.stage ?? "Loading model";
@@ -5406,7 +5425,7 @@ onBeforeUnmount(() => {
           >
             <div class="mobile-generation-queue-head">
               <h2>Queue</h2>
-              <span data-test="mobile-queue-count">{{ activeRowCount }} active</span>
+              <span data-test="mobile-queue-count">{{ activityCountLabel(activityCounts) }}</span>
             </div>
             <ol>
               <li

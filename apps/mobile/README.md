@@ -138,7 +138,12 @@ pushed screen opened from the header.
   `studio/lib/hostMemory` levels; older servers keep the uncolored card), and
   queued Create activity rows show their live position in line, read over the
   existing 5-second activity tick from the host's authenticated `/api/queue`
-  and never persisted (that endpoint carries full prompts).
+  and never persisted (that endpoint carries full prompts). Those rows use the
+  shared `studio/lib/queuePosition` vocabulary in this app's compact uppercase
+  casing (`NEXT UP`, `QUEUED #2`, `WAITING FOR MEMORY`, plain `QUEUED` against
+  a host that lists nothing); ordinary serialization on a busy GPU never
+  overrides the position, and the queue header counts running and waiting
+  separately ("1 active · 4 queued") rather than calling queued work active.
   Current V2 hosts also expose every GPU/MIG device and its queue lane. Device
   lifecycle controls are shown only when the host advertises
   `devices.lifecycle`; disabling a busy device leaves its current work running

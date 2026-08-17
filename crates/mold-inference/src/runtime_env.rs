@@ -90,10 +90,6 @@ pub const ENGINE_SHAPING_VARIABLES: &[&str] = &[
     "MOLD_WUERSTCHEN_DECODER_GUIDANCE",
     // Re-enables candle's quantized CUDA fast path for Z-Image, which is
     // known to return non-finite values for its linears (black renders).
-    // NOTE: `MOLD_ZIMAGE_GGUF_DENSE` is deliberately NOT listed — reading it
-    // through the frozen environment therefore always returns unset, keeping
-    // the dense-map escape hatch inert until memory admission budgets the
-    // dense expansion (#1109).
     "MOLD_ZIMAGE_QMATMUL",
 ];
 

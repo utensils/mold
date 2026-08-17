@@ -565,7 +565,10 @@ fn write_gallery_bytes_no_replace_with_directory_sync(
     // gallery name, which the next boot's `db.reconcile` imports as a valid
     // print — and the shutdown path deliberately bounds itself and exits, so
     // that kill is a routine event rather than a hypothetical one.
-    let staged = dir.join(format!("{filename}.partial"));
+    let staged = dir.join(format!("{filename}{GALLERY_PARTIAL_SUFFIX}"));
+    // Any leftover from an earlier interrupted write at this exact name: the
+    // reservation says the name is ours, so a stale sibling is ours to drop.
+    let _ = std::fs::remove_file(&staged);
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -576,12 +579,196 @@ fn write_gallery_bytes_no_replace_with_directory_sync(
         return Err(error.into());
     }
     drop(file);
-    if let Err(error) = std::fs::rename(&staged, &path) {
+    if let Err(error) = publish_staged_no_replace(&staged, &path) {
         let _ = std::fs::remove_file(&staged);
         return Err(error.into());
     }
     sync_directory(dir)?;
     Ok((filename, path, reservation))
+}
+
+/// Move staged bytes onto their final gallery name, atomically, without ever
+/// replacing a file somebody else put there.
+///
+/// Plain `rename` replaces its destination on Unix, which would silently
+/// overwrite a name another writer took between reservation and publication.
+/// `hard_link` refuses correctly but demands a filesystem with links, and
+/// exFAT and some SMB mounts do not have them — requiring links made every
+/// save on such a gallery fail, discard its bytes, and hold the durable job
+/// forever. So: use the platform's real no-replace rename where there is one,
+/// and fall back to reserving the name where there is not.
+fn publish_staged_no_replace(
+    staged: &std::path::Path,
+    final_path: &std::path::Path,
+) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FORCE_PUBLISH_FALLBACK.load(std::sync::atomic::Ordering::SeqCst) {
+        return publish_by_reserving_final_name(staged, final_path);
+    }
+    match platform_rename_no_replace(staged, final_path) {
+        Some(Ok(())) => Ok(()),
+        // The destination exists — the contract firing, not a platform gap.
+        Some(Err(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(error),
+        Some(Err(error)) if !is_unsupported_operation(&error) => Err(error),
+        // No primitive, or this filesystem does not implement it.
+        _ => publish_by_reserving_final_name(staged, final_path),
+    }
+}
+
+/// Test seam: behave as a filesystem with no no-replace rename, which is what
+/// exFAT and some SMB mounts are. Setting it is harmless to any test running
+/// concurrently — the fallback satisfies exactly the same contract, so every
+/// other gallery assertion holds under either path.
+#[cfg(test)]
+static FORCE_PUBLISH_FALLBACK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// `Some` when the platform has a no-replace rename; `None` when it has none
+/// to try.
+fn platform_rename_no_replace(
+    staged: &std::path::Path,
+    final_path: &std::path::Path,
+) -> Option<std::io::Result<()>> {
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let (Ok(from), Ok(to)) = (
+            std::ffi::CString::new(staged.as_os_str().as_bytes()),
+            std::ffi::CString::new(final_path.as_os_str().as_bytes()),
+        ) else {
+            return None;
+        };
+        // SAFETY: both paths are NUL-terminated C strings that outlive the call.
+        let result = unsafe {
+            #[cfg(target_os = "macos")]
+            {
+                libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL)
+            }
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            {
+                libc::renameat2(
+                    libc::AT_FDCWD,
+                    from.as_ptr(),
+                    libc::AT_FDCWD,
+                    to.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            }
+        };
+        if result == 0 {
+            Some(Ok(()))
+        } else {
+            Some(Err(std::io::Error::last_os_error()))
+        }
+    }
+    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+    {
+        let _ = (staged, final_path);
+        None
+    }
+}
+
+/// Whether the error means "this platform or filesystem cannot do that",
+/// rather than a genuine failure to publish.
+fn is_unsupported_operation(error: &std::io::Error) -> bool {
+    // Compared rather than pattern-matched: Linux defines ENOTSUP and
+    // EOPNOTSUPP as the same value, so listing both as patterns makes the
+    // second arm unreachable and `-D warnings` rejects it. macOS keeps them
+    // distinct, which is why the pattern form compiled locally and failed only
+    // on Linux CI.
+    let Some(code) = error.raw_os_error() else {
+        return false;
+    };
+    code == libc::ENOSYS
+        || code == libc::ENOTSUP
+        || code == libc::EINVAL
+        || code == libc::EOPNOTSUPP
+}
+
+/// The universal fallback: reserve the final name with an atomic `create_new`,
+/// then rename our own staged bytes over our own reservation.
+///
+/// `create_new` is the no-replace guarantee — it fails with `AlreadyExists` if
+/// anybody else holds the name — and the rename that follows only ever
+/// replaces the empty placeholder this call just made. A crash in between
+/// leaves a zero-byte file, which the gallery's existing size floor already
+/// filters out, so it is never mistaken for a print.
+fn publish_by_reserving_final_name(
+    staged: &std::path::Path,
+    final_path: &std::path::Path,
+) -> std::io::Result<()> {
+    let placeholder = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(final_path)?;
+    drop(placeholder);
+    if let Err(error) = std::fs::rename(staged, final_path) {
+        let _ = std::fs::remove_file(final_path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Suffix of a gallery write that has been staged but not yet published.
+const GALLERY_PARTIAL_SUFFIX: &str = ".partial";
+
+/// Remove staged gallery writes no process is still making.
+///
+/// A kill between staging and publication leaves `<final>.partial` behind, and
+/// the bounded shutdown deadline turns that from a rare event into a routine
+/// one. Nothing else reclaims them and later generations take fresh
+/// timestamped names, so without this repeated interruptions consume gallery
+/// disk permanently.
+///
+/// Safe against a concurrent writer — including one in another server sharing
+/// this gallery — because it holds the gallery bookkeeping lock, which every
+/// writer already holds for its whole reserve-write-publish window. A partial
+/// visible while we hold that lock cannot be in flight.
+pub(crate) fn sweep_stale_gallery_partials(dir: &std::path::Path) -> usize {
+    let _bookkeeping = match crate::batch_transaction::acquire_gallery_bookkeeping_lock(dir) {
+        Ok(guard) => guard,
+        Err(error) => {
+            tracing::warn!(
+                dir = %dir.display(),
+                error = %format!("{error:#}"),
+                "skipping stale gallery partial sweep: bookkeeping lock unavailable"
+            );
+            return 0;
+        }
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .ends_with(GALLERY_PARTIAL_SUFFIX)
+        {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                tracing::info!(
+                    file = %path.display(),
+                    "removed a gallery write interrupted before publication"
+                );
+                removed += 1;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                file = %path.display(),
+                %error,
+                "could not remove an interrupted gallery write"
+            ),
+        }
+    }
+    removed
 }
 
 fn requested_post_upscale_model(req: &mold_core::GenerateRequest) -> Option<&str> {
@@ -1691,6 +1878,11 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 None,
                 mold_core::build_info::version_string(),
             );
+            // The replay idempotence key, exactly as the GPU worker stamps it.
+            // Without it a print saved by this path is unrecognisable to boot
+            // replay, which would re-render it into a duplicate — and output
+            // filenames are wall-clock, so nothing downstream could merge them.
+            metadata.job_id = Some(job.id.clone());
             if let Some(video) = response.video.as_ref() {
                 metadata.apply_video_output(video);
             }
@@ -1769,6 +1961,26 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                     })
                 };
                 saved_names = save_task.await.unwrap_or_default();
+            }
+
+            // Settle the durable row on what actually reached the gallery,
+            // mirroring the GPU worker. Left to the ticket's ordinary drop,
+            // a render finishing during shutdown would keep its row behind the
+            // retention fence and replay into a duplicate print; and a failed
+            // publication would delete the row, losing a replayed job outright
+            // since the gallery file is its only delivery.
+            if let Some(ticket) = job.journal.take() {
+                if saved_names.output.is_some() {
+                    ticket.complete();
+                } else {
+                    tracing::error!(
+                        job = %job.id,
+                        dir = ?job.output_dir,
+                        "generation finished but its output could not be saved; \
+                         holding the queue row for review"
+                    );
+                    ticket.hold("the generated output could not be saved to the gallery");
+                }
             }
 
             // Send SSE complete event
@@ -3830,6 +4042,156 @@ mod tests {
         assert!(
             !tmp.path().join("ordinary.png").exists(),
             "a failed write must leave nothing at the gallery name"
+        );
+    }
+
+    /// The helper is `no_replace` in its name and in its contract. Publishing
+    /// by plain `rename` quietly broke that on Unix, where rename REPLACES the
+    /// destination: an external gallery writer that created the reserved
+    /// filename between reservation and publication would be overwritten
+    /// instead of refused.
+    #[test]
+    fn ordinary_gallery_save_refuses_to_replace_a_name_that_appeared_underneath_it() {
+        let tmp = TempDir::new().unwrap();
+        let reservations = tmp
+            .path()
+            .join(crate::batch_transaction::TRANSACTION_DIR)
+            .join("reservations");
+        std::fs::create_dir_all(&reservations).unwrap();
+        // Reserve the name so the helper picks it, then have somebody else
+        // create the file after the reservation and before publication.
+        let planted = tmp.path().join("ordinary.png");
+        std::fs::write(&planted, b"written by someone else").unwrap();
+
+        let outcome = write_gallery_bytes_no_replace(tmp.path(), "ordinary.png", b"ours");
+
+        if let Ok((filename, _, _)) = outcome {
+            assert_ne!(
+                filename, "ordinary.png",
+                "a taken name must never be published over"
+            );
+        }
+        assert_eq!(
+            std::fs::read(&planted).unwrap(),
+            b"written by someone else",
+            "the other writer's bytes must survive"
+        );
+    }
+
+    /// A filesystem without hard-link support — exFAT, some SMB mounts — is a
+    /// perfectly ordinary place to keep a gallery. Requiring links there made
+    /// every save fail, discard its bytes, and hold the durable job forever,
+    /// so the server rendered and then threw the result away. The fallback is
+    /// what such a host runs, and it has to be correct on its own.
+    #[test]
+    fn the_link_free_publish_fallback_is_atomic_and_still_refuses_to_replace() {
+        let tmp = TempDir::new().unwrap();
+        let staged = tmp.path().join("out.png.partial");
+        let published = tmp.path().join("out.png");
+        std::fs::write(&staged, b"generated bytes").unwrap();
+
+        publish_by_reserving_final_name(&staged, &published).expect("publishes without links");
+        assert_eq!(std::fs::read(&published).unwrap(), b"generated bytes");
+        assert!(!staged.exists());
+
+        // A name somebody else already holds is refused, not overwritten.
+        let other = tmp.path().join("taken.png.partial");
+        std::fs::write(&other, b"ours").unwrap();
+        std::fs::write(tmp.path().join("taken.png"), b"theirs").unwrap();
+        let refused = publish_by_reserving_final_name(&other, &tmp.path().join("taken.png"))
+            .expect_err("a taken name must be refused");
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(tmp.path().join("taken.png")).unwrap(),
+            b"theirs"
+        );
+    }
+
+    /// The proof that matters for a link-less host: not that a fallback
+    /// function exists, but that a real gallery save completes through it. A
+    /// broken fallback would park every job on exactly the filesystems it was
+    /// added for, so this drives the whole helper with the platform primitive
+    /// forced off.
+    #[test]
+    fn a_filesystem_without_no_replace_rename_still_publishes_and_still_refuses() {
+        let tmp = TempDir::new().unwrap();
+        FORCE_PUBLISH_FALLBACK.store(true, Ordering::SeqCst);
+
+        let saved = write_gallery_bytes_no_replace(tmp.path(), "ordinary.png", b"generated output");
+
+        let published = match saved {
+            Ok((filename, path, _reservation)) => {
+                assert_eq!(filename, "ordinary.png");
+                path
+            }
+            Err(error) => {
+                FORCE_PUBLISH_FALLBACK.store(false, Ordering::SeqCst);
+                panic!("a link-less filesystem must still publish: {error:#}");
+            }
+        };
+        assert_eq!(
+            std::fs::read(&published).unwrap(),
+            b"generated output",
+            "the whole file must land, not a placeholder"
+        );
+        assert!(
+            !tmp.path().join("ordinary.png.partial").exists(),
+            "staging must not be left behind"
+        );
+
+        // And the no-replace contract still holds on that path.
+        std::fs::write(tmp.path().join("taken.png"), b"someone else's").unwrap();
+        let refused = write_gallery_bytes_no_replace(tmp.path(), "taken.png", b"ours");
+        FORCE_PUBLISH_FALLBACK.store(false, Ordering::SeqCst);
+        if let Ok((filename, _, _)) = refused {
+            assert_ne!(
+                filename, "taken.png",
+                "a taken name must not be published over"
+            );
+        }
+        assert_eq!(
+            std::fs::read(tmp.path().join("taken.png")).unwrap(),
+            b"someone else's"
+        );
+    }
+
+    /// Whatever primitive the host supports, the contract is the same.
+    #[test]
+    fn publishing_refuses_an_existing_destination_on_this_host() {
+        let tmp = TempDir::new().unwrap();
+        let staged = tmp.path().join("out.png.partial");
+        std::fs::write(&staged, b"ours").unwrap();
+        let published = tmp.path().join("out.png");
+        std::fs::write(&published, b"theirs").unwrap();
+
+        let refused = publish_staged_no_replace(&staged, &published).expect_err("must not replace");
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&published).unwrap(), b"theirs");
+    }
+
+    /// A kill mid-write leaves `<final>.partial` behind, and the bounded
+    /// shutdown deadline makes that a routine event rather than a rare one.
+    /// Nothing else reclaims them and later generations take fresh timestamped
+    /// names, so repeated interruptions would consume gallery disk forever.
+    #[test]
+    fn stale_gallery_partials_are_reclaimed_at_startup() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("mold-1.png.partial"), b"half a print").unwrap();
+        std::fs::write(tmp.path().join("mold-2.mp4.partial"), b"half a clip").unwrap();
+        // Real prints and unrelated files are not partials.
+        std::fs::write(tmp.path().join("mold-3.png"), b"a real print").unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), b"not ours").unwrap();
+
+        assert_eq!(sweep_stale_gallery_partials(tmp.path()), 2);
+
+        assert!(!tmp.path().join("mold-1.png.partial").exists());
+        assert!(!tmp.path().join("mold-2.mp4.partial").exists());
+        assert!(tmp.path().join("mold-3.png").is_file());
+        assert!(tmp.path().join("notes.txt").is_file());
+        assert_eq!(
+            sweep_stale_gallery_partials(tmp.path()),
+            0,
+            "sweeping is idempotent"
         );
     }
 

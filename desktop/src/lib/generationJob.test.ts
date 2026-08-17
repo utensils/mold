@@ -3,6 +3,7 @@ import type { GenerateRequest, SseChainCompleteEvent } from "./api/types";
 import {
   applyChainProgress,
   chainCompleteToComplete,
+  jobStatusCode,
   markJobSettled,
   newJob,
 } from "./generationJob";
@@ -187,5 +188,19 @@ describe("settle stamps", () => {
     // Guards the activity-strip bug where printVMs used clientId (1,2,3…)
     // as createdAtMs and always sorted below sequence epoch timestamps.
     expect(newJob(request).submittedAtUnixMs).toBeGreaterThan(1_600_000_000_000);
+  });
+});
+
+describe("jobStatusCode queue vocabulary", () => {
+  function queued(queuePosition: number | null) {
+    return { ...newJob(request), status: "queued" as const, queuePosition };
+  }
+
+  it("speaks the shared waiting vocabulary in this surface's casing", () => {
+    expect(jobStatusCode(queued(3))).toBe("QUEUED #3");
+    // 0-based dispatch order: slot 0 is next, not "somewhere in line".
+    expect(jobStatusCode(queued(0))).toBe("NEXT UP");
+    // No evidence at all still says the one true thing.
+    expect(jobStatusCode(queued(null))).toBe("QUEUED");
   });
 });

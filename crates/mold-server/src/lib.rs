@@ -304,10 +304,19 @@ pub async fn run_server(
             std::sync::Arc::new(None)
         }
     };
+    // Resolved here rather than at its later assignment to `state` so the
+    // queue journal can use it: the identity is `(data dir, port)`-scoped, which
+    // is exactly the evidence a restarting server needs to recognise its own
+    // retained queue among a peer's.
+    let instance_id = instance::resolve_instance_id(metadata_db.as_ref().as_ref(), port);
     // Built before any GPU owner thread exists: a worker that quarantines
     // itself must be able to raise the retention fence, and that is the one
     // restart mold performs on its own behalf.
-    let queue_journal = std::sync::Arc::new(queue_journal::QueueJournal::new(metadata_db.clone()));
+    let queue_journal = std::sync::Arc::new(queue_journal::QueueJournal::new(
+        metadata_db.clone(),
+        Config::mold_dir().as_deref(),
+        &instance_id,
+    ));
     let generation_cancel = std::sync::Arc::new(generation_cancel::CancelRegistry::new());
     if queue_journal.is_enabled() {
         info!("durable generation queue enabled");
@@ -680,10 +689,7 @@ pub async fn run_server(
     // runs on the same DB — its address changes every run anyway. Captured
     // for mDNS here because `state` is moved into the router before the TXT
     // records are built.
-    state.instance_id = std::sync::Arc::new(instance::resolve_instance_id(
-        state.metadata_db.as_ref().as_ref(),
-        port,
-    ));
+    state.instance_id = std::sync::Arc::new(instance_id);
     #[cfg(feature = "mdns")]
     let mdns_instance_id = state.instance_id.clone();
 
@@ -837,9 +843,44 @@ pub async fn run_server(
     // directory of reference media under MOLD_HOME. Swept in the same startup
     // pass that recovers the queue, because the two have the same cause.
     {
-        let swept = reference_uploads::sweep_orphaned_staging_roots(state.reference_uploads.root());
-        if swept > 0 {
-            info!(swept, "removed orphaned reference-upload staging roots");
+        let sweep = reference_uploads::sweep_orphaned_staging_roots(state.reference_uploads.root());
+        if sweep.removed > 0 || sweep.live > 0 {
+            info!(
+                removed = sweep.removed,
+                live = sweep.live,
+                "swept reference-upload staging roots"
+            );
+        }
+        if sweep.untracked > 0 {
+            // Not deleted on purpose: without a lock their liveness cannot be
+            // established, and another server may still be using them.
+            info!(
+                untracked = sweep.untracked,
+                "reference-upload staging roots predate lock tracking and were left alone; \
+                 remove them by hand once no other mold server is using this MOLD_HOME"
+            );
+        }
+    }
+
+    // Reclaim gallery writes that were staged but never published. The bounded
+    // shutdown deadline makes an interrupted write routine, so without this the
+    // partials accumulate forever.
+    {
+        let config = state.config.read().await;
+        if !state.is_output_disabled(&config) {
+            let output_dir = config.effective_output_dir();
+            drop(config);
+            let swept = tokio::task::spawn_blocking(move || {
+                queue::sweep_stale_gallery_partials(&output_dir)
+            })
+            .await
+            .unwrap_or(0);
+            if swept > 0 {
+                info!(
+                    swept,
+                    "removed gallery writes interrupted before publication"
+                );
+            }
         }
     }
 
@@ -848,12 +889,17 @@ pub async fn run_server(
     // mutex, so parallel replay would land in arbitrary order and destroy the
     // ordering the journal exists to preserve.
     {
-        let report = crate::queue_journal::replay(&state).await;
-        if report.resumed > 0 || report.held > 0 || report.already_completed > 0 {
+        let report = crate::queue_journal::replay(&state, startup.start_generation_runner).await;
+        if report.resumed > 0
+            || report.held > 0
+            || report.already_completed > 0
+            || report.skipped_unverified > 0
+        {
             info!(
                 resumed = report.resumed,
                 already_completed = report.already_completed,
                 held = report.held,
+                skipped_unverified = report.skipped_unverified,
                 "durable generation queue replay complete"
             );
         }

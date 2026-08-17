@@ -1,25 +1,24 @@
 //! Z-Image LoRA support.
 //!
-//! Z-Image has a curious architecture choice that simplifies LoRA wiring
-//! compared to FLUX / Flux.2: there is exactly **one** candle key-space the
-//! transformer ever sees — the diffusers / split-Q-K-V layout that
-//! `candle_transformers::models::z_image::ZImageTransformer2DModel`
-//! consumes. The GGUF "quantized" path actually dequantises into BF16 dense
-//! tensors via [`super::gguf_dense::load_gguf_dense_transformer`] before the
-//! transformer is constructed — the *fused* `attention.qkv` weight is split
-//! into three `attention.to_q` / `attention.to_k` / `attention.to_v`
-//! tensors at load time, never reaches the model.
+//! Z-Image has two transformer key-spaces. The dense BF16 model consumes the
+//! diffusers layout with split `attention.to_q` / `to_k` / `to_v` tensors;
+//! the quantized GGUF model consumes the native fused `attention.qkv` tensor.
+//! LoRA parsing normalizes both naming styles into split logical targets. The
+//! BF16 backend applies those targets directly, while the GGUF backend maps
+//! each split target back onto its slice of the fused quantized tensor before
+//! requantizing it.
 //!
 //! What that means for LoRAs:
 //!
 //! * Civitai-style Z-Image LoRAs (cv:2904324 is the canonical reference)
 //!   target the **BFL-native fused** `diffusion_model.layers.{i}.attention.qkv`
 //!   layer. Their `B` is shape `[3 * dim, rank]`. We must **splat** each
-//!   third of `B @ A` onto the corresponding split `to_q` / `to_k` / `to_v`
-//!   tensor — exactly the asymmetry flux2's `Splat` patch type was built
-//!   for, just with a single key-space rather than two.
+//!   third of `B @ A` onto the corresponding logical `to_q` / `to_k` / `to_v`
+//!   target. The GGUF backend then merges those slices back into its fused
+//!   `attention.qkv` tensor.
 //! * Trainers that natively emit split `attention.to_q` / `to_k` / `to_v`
-//!   layers map to `Direct` patches, one tensor each.
+//!   layers map to `Direct` logical patches, one projection each; GGUF maps
+//!   each projection to the matching fused-tensor slice.
 //! * Non-attention leaves (`attention.out`, `feed_forward.w{1,2,3}`,
 //!   `adaLN_modulation.0`) map to `Direct` regardless of LoRA naming.
 //!

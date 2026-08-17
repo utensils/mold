@@ -107,9 +107,302 @@ pub struct JournalAdmission<'a> {
     pub carries_reference_authority: bool,
 }
 
+/// Directory of per-identity claim records, one file per queue owner.
+const QUEUE_OWNERS_DIR: &str = "queue-owners";
+
+/// Adopt a specific orphaned owner by id. The documented escape hatch for the
+/// one case the server cannot decide: several orphans with rows and no hint
+/// match.
+pub const QUEUE_ADOPT_OWNER_ENV: &str = "MOLD_QUEUE_ADOPT_OWNER";
+
+/// A retained queue nobody is running and this server did not recognise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanedOwner {
+    pub owner_uuid: String,
+    /// The server instance that last held it, when the record names one.
+    pub instance_hint: Option<String>,
+    pub queued: usize,
+    /// Counted separately: a held row that is also orphaned is invisible twice
+    /// over, so folding it into the queued total hides it completely.
+    pub held: usize,
+}
+
+/// A queue identity held for this process's lifetime.
+///
+/// Identity and liveness are deliberately separate concerns, because conflating
+/// them is what four earlier attempts got wrong. The owner id is a minted,
+/// port-independent UUID and never changes for the life of that server's queue.
+/// The lock file proves only whether that owner is running *right now*; it
+/// never confers ownership, so "unlocked" means "not running", not "yours".
+///
+/// What identifies a returning server is a hint recorded in the record: the
+/// instance id it last claimed under. That resolves a requirement which cannot
+/// be met from intrinsic state alone — two servers sharing one `MOLD_HOME`
+/// differ only by port, so a port-independent id cannot also be per-server
+/// distinct — by remembering rather than deriving.
+pub struct QueueOwnerClaim {
+    owner_uuid: String,
+    _lock: std::fs::File,
+    /// True when no record matched this instance and exactly one unclaimed
+    /// queue existed, so it was taken across an apparent port change.
+    pub adopted_across_port_change: bool,
+    /// Retained queues this server did not take. Reported at startup so work
+    /// is never silently stranded.
+    pub orphans: Vec<OrphanedOwner>,
+}
+
+impl QueueOwnerClaim {
+    pub fn owner_uuid(&self) -> &str {
+        &self.owner_uuid
+    }
+}
+
+struct OwnerCandidate {
+    owner_uuid: String,
+    instance_hint: Option<String>,
+    lock: std::fs::File,
+    queued: usize,
+    held: usize,
+}
+
+impl OwnerCandidate {
+    fn has_rows(&self) -> bool {
+        self.queued > 0 || self.held > 0
+    }
+
+    fn into_orphan(self) -> OrphanedOwner {
+        OrphanedOwner {
+            owner_uuid: self.owner_uuid,
+            instance_hint: self.instance_hint,
+            queued: self.queued,
+            held: self.held,
+        }
+    }
+}
+
+fn owner_record_path(owners: &Path, owner_uuid: &str) -> std::path::PathBuf {
+    owners.join(format!("{owner_uuid}.lock"))
+}
+
+/// Record which instance holds this owner now, so the next restart recognises
+/// it without guessing.
+fn write_instance_hint(file: &std::fs::File, instance_id: &str) {
+    use std::io::{Seek, Write};
+    let mut file = file;
+    let wrote = file
+        .set_len(0)
+        .and_then(|()| file.seek(std::io::SeekFrom::Start(0)))
+        .and_then(|_| file.write_all(instance_id.as_bytes()))
+        .and_then(|()| file.flush());
+    if let Err(error) = wrote {
+        tracing::warn!(%error, "could not record the queue owner's instance hint");
+    }
+}
+
+/// Take a queue identity for this process, or `None` when one cannot be held.
+pub fn claim_queue_owner(
+    mold_dir: &Path,
+    instance_id: &str,
+    db: Option<&MetadataDb>,
+) -> Option<QueueOwnerClaim> {
+    let requested = std::env::var(QUEUE_ADOPT_OWNER_ENV)
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty());
+    claim_queue_owner_adopting(mold_dir, instance_id, db, requested.as_deref())
+}
+
+/// [`claim_queue_owner`] with the explicit adoption request passed in.
+pub fn claim_queue_owner_adopting(
+    mold_dir: &Path,
+    instance_id: &str,
+    db: Option<&MetadataDb>,
+    adopt: Option<&str>,
+) -> Option<QueueOwnerClaim> {
+    let owners = mold_dir.join(QUEUE_OWNERS_DIR);
+    if let Err(error) = std::fs::create_dir_all(&owners) {
+        tracing::warn!(
+            dir = %owners.display(),
+            %error,
+            "durable generation queue unavailable: could not create its identity directory"
+        );
+        return None;
+    }
+
+    let mut names: Vec<String> = std::fs::read_dir(&owners)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .strip_suffix(".lock")
+                .map(str::to_string)
+        })
+        .collect();
+    names.sort();
+
+    // Lock what we can. A record we cannot lock belongs to a live peer and is
+    // left entirely alone — not read as a candidate, not reported as orphaned.
+    let mut candidates: Vec<OwnerCandidate> = Vec::new();
+    for owner_uuid in names {
+        let path = owner_record_path(&owners, &owner_uuid);
+        let Ok(file) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+        else {
+            continue;
+        };
+        let instance_hint = std::fs::read_to_string(&path)
+            .ok()
+            .map(|hint| hint.trim().to_string())
+            .filter(|hint| !hint.is_empty());
+        if fs2::FileExt::try_lock_exclusive(&file).is_err() {
+            continue;
+        }
+        let (queued, held) = owner_row_counts(db, &owner_uuid);
+        candidates.push(OwnerCandidate {
+            owner_uuid,
+            instance_hint,
+            lock: file,
+            queued,
+            held,
+        });
+    }
+
+    // 1. An explicit adoption request outranks everything: a human looked.
+    let mut chosen = adopt.and_then(|wanted| {
+        let found = candidates
+            .iter()
+            .position(|candidate| candidate.owner_uuid == wanted);
+        match found {
+            Some(index) => {
+                tracing::info!(owner = %wanted, "adopting a queue identity by explicit request");
+                Some(candidates.remove(index))
+            }
+            None => {
+                tracing::warn!(
+                    owner = %wanted,
+                    env = QUEUE_ADOPT_OWNER_ENV,
+                    "the requested queue identity is not present or is held by a live server"
+                );
+                None
+            }
+        }
+    });
+
+    // 2. Our own record, recognised by the instance that last held it. This is
+    //    every ordinary restart, including peers restarting in any order.
+    let mut adopted_across_port_change = false;
+    if chosen.is_none() {
+        if let Some(index) = candidates
+            .iter()
+            .position(|candidate| candidate.instance_hint.as_deref() == Some(instance_id))
+        {
+            chosen = Some(candidates.remove(index));
+        }
+    }
+
+    // 3. No record knows us. Exactly one unclaimed queue is unambiguous — the
+    //    single-server port change — so take it and say so. More than one and
+    //    the machine genuinely cannot tell which is ours: take none.
+    if chosen.is_none() {
+        let with_rows: Vec<usize> = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| candidate.has_rows())
+            .map(|(index, _)| index)
+            .collect();
+        if with_rows.len() == 1 {
+            let candidate = candidates.remove(with_rows[0]);
+            tracing::warn!(
+                owner = %candidate.owner_uuid,
+                was = ?candidate.instance_hint,
+                now = %instance_id,
+                queued = candidate.queued,
+                held = candidate.held,
+                "adopting the only retained queue on this host after an apparent port change"
+            );
+            adopted_across_port_change = true;
+            chosen = Some(candidate);
+        } else if with_rows.is_empty() && !candidates.is_empty() {
+            // Every unclaimed record is empty, so reusing one carries nothing
+            // and keeps the directory from growing a record per port change.
+            chosen = Some(candidates.remove(0));
+        }
+    }
+
+    let orphans: Vec<OrphanedOwner> = candidates
+        .into_iter()
+        .filter(OwnerCandidate::has_rows)
+        .map(OwnerCandidate::into_orphan)
+        .collect();
+
+    if let Some(candidate) = chosen {
+        write_instance_hint(&candidate.lock, instance_id);
+        return Some(QueueOwnerClaim {
+            owner_uuid: candidate.owner_uuid,
+            _lock: candidate.lock,
+            adopted_across_port_change,
+            orphans,
+        });
+    }
+
+    // 4. Mint. Two simultaneous first starts each land here with their own id,
+    //    because there is no shared record to race on.
+    let owner_uuid = uuid::Uuid::new_v4().to_string();
+    let path = owner_record_path(&owners, &owner_uuid);
+    let file = match std::fs::File::create(&path) {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "durable generation queue unavailable: could not create its identity record"
+            );
+            return None;
+        }
+    };
+    if fs2::FileExt::try_lock_exclusive(&file).is_err() {
+        tracing::warn!(
+            path = %path.display(),
+            "durable generation queue unavailable: this filesystem cannot fence its identity"
+        );
+        return None;
+    }
+    write_instance_hint(&file, instance_id);
+    Some(QueueOwnerClaim {
+        owner_uuid,
+        _lock: file,
+        adopted_across_port_change: false,
+        orphans,
+    })
+}
+
+fn owner_row_counts(db: Option<&MetadataDb>, owner_uuid: &str) -> (usize, usize) {
+    let Some(db) = db else {
+        return (0, 0);
+    };
+    let Ok(rows) = generation_queue::list_all(db, owner_uuid) else {
+        return (0, 0);
+    };
+    let held = rows
+        .iter()
+        .filter(|row| row.state == QueueRowState::Held)
+        .count();
+    (rows.len() - held, held)
+}
+
 pub struct QueueJournal {
     db: Arc<Option<MetadataDb>>,
     owner_uuid: Option<String>,
+    #[cfg(test)]
+    fail_completion_lookup: AtomicBool,
+    /// Held for the process's lifetime so a peer sharing this `MOLD_HOME`
+    /// cannot adopt the same identity.
+    _owner_claim: Option<QueueOwnerClaim>,
     retain: AtomicBool,
     max_bytes: usize,
     max_dispatch_attempts: u32,
@@ -120,28 +413,39 @@ impl QueueJournal {
     /// Build the journal for a running server. Returns a disabled journal when
     /// the DB is unavailable or `MOLD_QUEUE_JOURNAL_DISABLE` is set — the
     /// server still runs every job, it just cannot promise replay.
-    pub fn new(db: Arc<Option<MetadataDb>>) -> Self {
-        let owner_uuid = if env_flag(JOURNAL_DISABLE_ENV) {
+    pub fn new(db: Arc<Option<MetadataDb>>, mold_dir: Option<&Path>, instance_id: &str) -> Self {
+        let claim = if env_flag(JOURNAL_DISABLE_ENV) {
             tracing::info!("durable generation queue disabled by environment");
             None
         } else {
-            match db.as_ref().as_ref() {
-                Some(db) => match generation_queue::resolve_owner_uuid(db) {
-                    Ok(owner) => Some(owner),
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %format!("{error:#}"),
-                            "durable generation queue unavailable: could not resolve its owner id"
-                        );
-                        None
-                    }
-                },
-                None => None,
+            match (db.as_ref().as_ref(), mold_dir) {
+                (Some(db), Some(dir)) => claim_queue_owner(dir, instance_id, Some(db)),
+                (Some(_), None) => {
+                    tracing::warn!(
+                        "durable generation queue unavailable: MOLD_HOME could not be resolved"
+                    );
+                    None
+                }
+                _ => None,
             }
         };
+        for orphan in claim.iter().flat_map(|claim| claim.orphans.iter()) {
+            tracing::warn!(
+                owner = %orphan.owner_uuid,
+                last_instance = ?orphan.instance_hint,
+                queued = orphan.queued,
+                held = orphan.held,
+                env = QUEUE_ADOPT_OWNER_ENV,
+                "a retained generation queue on this host belongs to no running server; \
+                 set the adoption environment variable to this owner id to replay it"
+            );
+        }
         Self {
             db,
-            owner_uuid,
+            owner_uuid: claim.as_ref().map(|claim| claim.owner_uuid.clone()),
+            _owner_claim: claim,
+            #[cfg(test)]
+            fail_completion_lookup: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: env_usize(JOURNAL_MAX_BYTES_ENV, DEFAULT_JOURNAL_MAX_BYTES),
             max_dispatch_attempts: env_u32(
@@ -158,6 +462,9 @@ impl QueueJournal {
         Self {
             db: Arc::new(None),
             owner_uuid: None,
+            _owner_claim: None,
+            #[cfg(test)]
+            fail_completion_lookup: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -243,6 +550,9 @@ impl QueueJournal {
             request_json,
             output_dir: output_dir.to_path_buf(),
             target_gpu: admission.target_gpu,
+            // Admission records the ordinal a client asked for; a stable pin
+            // only ever arrives later, through PATCH /api/queue/:id.
+            target_device_id: None,
             completion_payload: completion_payload_as_str(admission.completion_payload).to_string(),
             seed_pinned: admission.request.seed.is_some(),
             dispatch_attempts: 0,
@@ -334,6 +644,31 @@ impl QueueJournal {
             if row.output_dir.is_dir() {
                 continue;
             }
+            // Absent is not the same as moved. If the configured gallery is
+            // still this row's own directory, the save helpers would simply
+            // create it — so a routine cleanup or a remount must not park work
+            // that would have run perfectly well.
+            if current_output_dir == Some(row.output_dir.as_path()) {
+                match std::fs::create_dir_all(&row.output_dir) {
+                    Ok(()) => {
+                        tracing::info!(
+                            job = %row.id,
+                            dir = %row.output_dir.display(),
+                            "recreated a retained generation's gallery directory"
+                        );
+                        report.recreated += 1;
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            job = %row.id,
+                            dir = %row.output_dir.display(),
+                            %error,
+                            "a retained generation's gallery directory cannot be recreated"
+                        );
+                    }
+                }
+            }
             match current_output_dir {
                 Some(replacement) if replacement != row.output_dir => {
                     tracing::warn!(
@@ -369,38 +704,48 @@ impl QueueJournal {
         report
     }
 
+    /// Test seam: force the idempotence gate to fail the way a malformed
+    /// `metadata_json` or a transient SQLite error would.
+    #[cfg(test)]
+    pub(crate) fn fail_completion_lookup_for_tests(&self) {
+        self.fail_completion_lookup
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Drop every row whose output already exists.
     ///
     /// A print records the queue job that produced it, so a job that finished
     /// between its last save and the crash is recognised and never re-run.
     /// Without this, replay duplicates prints: output filenames are wall-clock,
     /// so no downstream dedupe can merge the two afterwards.
-    pub fn drop_already_completed(&self) -> usize {
+    pub fn drop_already_completed(&self) -> Result<usize, String> {
         let Some(db) = self.db() else {
-            return 0;
+            return Ok(0);
         };
+        #[cfg(test)]
+        if self
+            .fail_completion_lookup
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("injected completion-lookup failure".to_string());
+        }
         let candidates: Vec<String> = self
             .list_all()
             .into_iter()
             .filter(|row| row.state != QueueRowState::Held)
             .map(|row| row.id)
             .collect();
-        let completed = match generation_queue::find_completed_job_ids(db, &candidates) {
-            Ok(completed) => completed,
-            Err(error) => {
-                tracing::warn!(
-                    error = %format!("{error:#}"),
-                    "could not check the durable queue against saved prints; \
-                     skipping replay to avoid duplicating output"
-                );
-                return 0;
-            }
-        };
+        // A failure here is NOT "nothing was completed". Reporting it as an
+        // empty result would let replay re-render every job whose output was
+        // already published, so one malformed `metadata_json` or a transient
+        // SQLite error would defeat the idempotence guarantee outright.
+        let completed = generation_queue::find_completed_job_ids(db, &candidates)
+            .map_err(|error| format!("{error:#}"))?;
         for id in &completed {
             tracing::info!(job = %id, "a retained generation already produced its print");
             self.discard_id(id);
         }
-        completed.len()
+        Ok(completed.len())
     }
 
     /// Rows to replay, oldest first, after reconcile and the idempotence gate.
@@ -453,6 +798,7 @@ impl QueueJournal {
         &self,
         id: &str,
         target_gpu: Option<Option<usize>>,
+        target_device_id: Option<Option<&str>>,
         order: Option<&[String]>,
     ) {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
@@ -460,7 +806,11 @@ impl QueueJournal {
         };
         let now = now_ms();
         if let Some(target_gpu) = target_gpu {
-            if let Err(error) = generation_queue::set_target_gpu(db, id, target_gpu, now) {
+            // The stable id is recorded alongside the ordinal so replay can
+            // re-resolve it: ordinals are an enumeration artifact that MIG or
+            // a changed MOLD_GPUS renumbers across a restart.
+            let stable = target_device_id.flatten();
+            if let Err(error) = generation_queue::set_target_gpu(db, id, target_gpu, stable, now) {
                 tracing::warn!(
                     job = %id,
                     error = %format!("{error:#}"),
@@ -478,16 +828,23 @@ impl QueueJournal {
         }
     }
 
-    /// Whether this id names a parked row. `DELETE /api/queue/:id` is the
-    /// documented way to clear one, and a held job has no registry entry.
-    pub fn is_held(&self, id: &str) -> bool {
+    /// Whether this id names a retained row that is cancellable but has no
+    /// registry entry.
+    ///
+    /// Two kinds qualify: a held row, which exists only in the journal; and a
+    /// queued row on a boot with no dispatch owner, which replay deliberately
+    /// never registered. `DELETE /api/queue/:id` is the documented way to
+    /// clear either, and listing work an operator cannot then act on would be
+    /// half an answer. A `running` row is excluded — the endpoint refuses
+    /// running work, and the registry is the authority on that.
+    pub fn owns_cancellable_row(&self, id: &str) -> bool {
         let Some(db) = self.db() else {
             return false;
         };
         generation_queue::get(db, id)
             .ok()
             .flatten()
-            .is_some_and(|row| row.state == QueueRowState::Held)
+            .is_some_and(|row| matches!(row.state, QueueRowState::Held | QueueRowState::Queued))
     }
 
     /// Park a row by id, for a caller that has no ticket.
@@ -524,6 +881,8 @@ impl QueueJournal {
 pub struct ReconcileReport {
     pub requeued: usize,
     pub repointed: usize,
+    /// Galleries that were simply absent and could be made again.
+    pub recreated: usize,
     pub held: usize,
 }
 
@@ -533,6 +892,9 @@ pub struct ReplayReport {
     pub resumed: usize,
     pub already_completed: usize,
     pub held: usize,
+    /// Rows left untouched because the idempotence gate could not be checked.
+    /// They keep their full replay budget for the next boot.
+    pub skipped_unverified: usize,
 }
 
 /// Resubmit every retained generation through the ordinary admission path.
@@ -548,10 +910,26 @@ pub struct ReplayReport {
 /// type. Everything downstream — validation, admission, frozen plans,
 /// placement, auto-pull — applies unchanged: a model uninstalled between boots
 /// is blocked as `model_not_installed`, not silently rerouted.
-pub async fn replay(state: &crate::state::AppState) -> ReplayReport {
+pub async fn replay(state: &crate::state::AppState, dispatch_available: bool) -> ReplayReport {
     let journal = state.queue_journal.clone();
     let mut report = ReplayReport::default();
     if !journal.is_enabled() {
+        return report;
+    }
+    // A maintenance boot has no dispatch owner, so there is nothing to replay
+    // INTO — `run_server` has already dropped the queue receiver. Attempting
+    // it anyway would fail every send, and a failed send used to drop the
+    // ticket with this boot's fence still down, deleting the whole queue on a
+    // routine `MOLD_GPUS=none` restart. Skipped before anything is charged, so
+    // the rows keep their full replay budget for a boot that can run them.
+    if !dispatch_available {
+        let retained = journal.replayable().len();
+        if retained > 0 {
+            tracing::info!(
+                retained,
+                "generation is unavailable on this boot; retained jobs stay queued for the next one"
+            );
+        }
         return report;
     }
 
@@ -565,7 +943,22 @@ pub async fn replay(state: &crate::state::AppState) -> ReplayReport {
     };
     let reconcile = journal.startup_reconcile(current_output_dir.as_deref());
     report.held += reconcile.held;
-    report.already_completed = journal.drop_already_completed();
+    match journal.drop_already_completed() {
+        Ok(dropped) => report.already_completed = dropped,
+        Err(error) => {
+            // Skip the whole boot's replay rather than replay blind. The rows
+            // are untouched and unspent, so the next boot tries again; running
+            // them now could duplicate prints that already exist, and a
+            // duplicate is unmergeable because output filenames are wall-clock.
+            tracing::error!(
+                %error,
+                "could not check the durable queue against saved prints; \
+                 skipping replay this boot so nothing is rendered twice"
+            );
+            report.skipped_unverified = journal.replayable().len();
+            return report;
+        }
+    }
 
     let cancellation = tokio_util::sync::CancellationToken::new();
     for row in journal.replayable() {
@@ -596,10 +989,28 @@ pub async fn replay(state: &crate::state::AppState) -> ReplayReport {
             request.scheduler,
             mold_core::build_info::version_string(),
         ));
+        // Re-resolve a stable pin against THIS boot's device inventory. The
+        // recorded ordinal is only a fallback, and only when no stable pin was
+        // taken — replaying a renumbered ordinal runs the job on a device the
+        // user did not choose.
+        let target_gpu = match row.target_device_id.as_deref() {
+            Some(device_id) => match resolve_pinned_ordinal(state, device_id) {
+                Some(ordinal) => Some(ordinal),
+                None => {
+                    tracing::warn!(
+                        job = %row.id,
+                        device = %device_id,
+                        "the device this job was pinned to is not present; resuming on Auto"
+                    );
+                    None
+                }
+            },
+            None => row.target_gpu,
+        };
         let cancel = state.job_registry.register_job(
             &row.id,
             &row.model,
-            row.target_gpu,
+            target_gpu,
             Some(row.seed_pinned),
             Some(metadata),
         );
@@ -642,9 +1053,10 @@ pub async fn replay(state: &crate::state::AppState) -> ReplayReport {
             h3_private_ingress_grant: None,
         };
 
+        let mut pending = Some(job);
         match state
             .queue
-            .submit_when_available(job, state.queue_capacity, &cancellation)
+            .submit_when_available(&mut pending, state.queue_capacity, &cancellation)
             .await
         {
             Ok(_) => report.resumed += 1,
@@ -654,11 +1066,28 @@ pub async fn replay(state: &crate::state::AppState) -> ReplayReport {
                     ?error,
                     "could not resubmit a retained generation; it stays in the journal"
                 );
+                // Settle the ticket explicitly. Dropping it would delete a row
+                // for work that never reached a worker — the opposite of what
+                // the log line above promises.
+                if let Some(ticket) = pending.take().and_then(|job| job.journal) {
+                    ticket.retain();
+                }
                 state.job_registry.remove(&row.id);
             }
         }
     }
     report
+}
+
+/// Map a stable device id to this boot's ordinal, or `None` when the device is
+/// no longer present.
+fn resolve_pinned_ordinal(state: &crate::state::AppState, device_id: &str) -> Option<usize> {
+    state
+        .gpu_pool
+        .workers
+        .iter()
+        .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+        .map(|worker| worker.gpu.ordinal)
 }
 
 fn completion_payload_as_str(payload: SseCompletionPayload) -> &'static str {
@@ -718,6 +1147,15 @@ impl QueueTicket {
     pub fn discard(mut self) {
         self.settled = true;
         self.journal.discard_id(&self.id);
+    }
+
+    /// The job never reached a worker, so leave its row exactly as it is.
+    ///
+    /// Distinct from `hold`: nothing is wrong with the job and the next boot
+    /// should replay it normally. The `replay_seen` budget is what stops a row
+    /// retrying forever if the condition persists.
+    pub fn retain(mut self) {
+        self.settled = true;
     }
 
     /// Charge a dispatch attempt on the GPU owner thread, immediately before
@@ -798,10 +1236,12 @@ mod tests {
 
     fn journal_with_db() -> Arc<QueueJournal> {
         let db = MetadataDb::open_in_memory().unwrap();
-        let owner = generation_queue::resolve_owner_uuid(&db).unwrap();
+        let owner = "test-owner".to_string();
         Arc::new(QueueJournal {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
+            _owner_claim: None,
+            fail_completion_lookup: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -839,6 +1279,205 @@ mod tests {
 
     fn rows(journal: &QueueJournal) -> Vec<String> {
         journal.list_all().into_iter().map(|row| row.id).collect()
+    }
+
+    fn owner_db() -> MetadataDb {
+        MetadataDb::open_in_memory().unwrap()
+    }
+
+    fn seed_row(db: &MetadataDb, owner: &str, id: &str) {
+        generation_queue::insert(
+            db,
+            &GenerationQueueRow {
+                id: id.to_string(),
+                owner_uuid: owner.to_string(),
+                state: QueueRowState::Queued,
+                model: "flux-dev:q4".to_string(),
+                request_json: "{}".to_string(),
+                output_dir: std::path::PathBuf::from("/gallery"),
+                target_gpu: None,
+                target_device_id: None,
+                completion_payload: "full".to_string(),
+                seed_pinned: false,
+                dispatch_attempts: 0,
+                replay_seen: 0,
+                held_reason: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                started_at_ms: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// The case four earlier attempts got wrong. A server restarting must
+    /// reclaim ITS OWN identity, not merely one nobody is holding — otherwise
+    /// it replays a peer's retained jobs under its own GPUs and configuration
+    /// while its own rows sit unreplayed under another id.
+    #[test]
+    fn a_restart_reclaims_its_own_identity_not_whichever_is_unlocked() {
+        let home = tempfile::tempdir().unwrap();
+        let db = owner_db();
+
+        // Both servers run at once at least briefly, which is how a genuine
+        // peer gets an identity of its own: while the other holds its record,
+        // there is nothing unclaimed to adopt.
+        let peer = claim_queue_owner(home.path(), "instance-b", Some(&db)).unwrap();
+        let mine = claim_queue_owner(home.path(), "instance-a", Some(&db)).unwrap();
+        let peer_owner = peer.owner_uuid().to_string();
+        let my_owner = mine.owner_uuid().to_string();
+        assert_ne!(peer_owner, my_owner);
+        seed_row(&db, &peer_owner, "peer-job");
+        seed_row(&db, &my_owner, "my-job");
+        drop(peer);
+        drop(mine);
+
+        // Both records are unlocked; the peer's sorts first roughly half the
+        // time, which is what made "first unlocked wins" appear to work.
+        let restarted = claim_queue_owner(home.path(), "instance-a", Some(&db)).unwrap();
+        assert_eq!(restarted.owner_uuid(), my_owner);
+        assert!(!restarted.adopted_across_port_change);
+        assert_eq!(
+            restarted.orphans.len(),
+            1,
+            "the peer's rows are reported, not silently taken"
+        );
+        assert_eq!(restarted.orphans[0].owner_uuid, peer_owner);
+        assert_eq!(restarted.orphans[0].queued, 1);
+    }
+
+    #[test]
+    fn two_stopped_servers_each_reclaim_their_own_in_either_order() {
+        let home = tempfile::tempdir().unwrap();
+        let db = owner_db();
+        let a = claim_queue_owner(home.path(), "instance-a", Some(&db)).unwrap();
+        let b = claim_queue_owner(home.path(), "instance-b", Some(&db)).unwrap();
+        let (owner_a, owner_b) = (a.owner_uuid().to_string(), b.owner_uuid().to_string());
+        drop(a);
+        drop(b);
+
+        let b_again = claim_queue_owner(home.path(), "instance-b", Some(&db)).unwrap();
+        assert_eq!(b_again.owner_uuid(), owner_b);
+        let a_again = claim_queue_owner(home.path(), "instance-a", Some(&db)).unwrap();
+        assert_eq!(a_again.owner_uuid(), owner_a);
+    }
+
+    #[test]
+    fn a_live_peers_identity_is_never_taken() {
+        let home = tempfile::tempdir().unwrap();
+        let db = owner_db();
+        let live = claim_queue_owner(home.path(), "instance-a", Some(&db)).unwrap();
+
+        let other = claim_queue_owner(home.path(), "instance-b", Some(&db)).unwrap();
+        assert_ne!(other.owner_uuid(), live.owner_uuid());
+    }
+
+    /// The single-server port change the port-independent id exists to serve:
+    /// exactly one unlocked owner has rows, so it is unambiguous.
+    #[test]
+    fn a_changed_port_adopts_the_one_unambiguous_orphan() {
+        let home = tempfile::tempdir().unwrap();
+        let db = owner_db();
+        let before = claim_queue_owner(home.path(), "instance-port-7680", Some(&db)).unwrap();
+        let owner = before.owner_uuid().to_string();
+        seed_row(&db, &owner, "job-1");
+        drop(before);
+
+        let after = claim_queue_owner(home.path(), "instance-port-7681", Some(&db)).unwrap();
+        assert_eq!(after.owner_uuid(), owner);
+        assert!(
+            after.adopted_across_port_change,
+            "an adoption across a changed port must be announced, not silent"
+        );
+    }
+
+    /// Ambiguity is the only case a human has to resolve: two orphans with
+    /// rows and no hint match, so adopting either could replay the wrong
+    /// server's queue.
+    #[test]
+    fn several_orphans_with_rows_are_reported_rather_than_guessed_between() {
+        let home = tempfile::tempdir().unwrap();
+        let db = owner_db();
+        // Two live peers, so each holds an identity of its own, then both stop.
+        let claims: Vec<QueueOwnerClaim> = ["instance-a", "instance-b"]
+            .iter()
+            .map(|instance| claim_queue_owner(home.path(), instance, Some(&db)).unwrap())
+            .collect();
+        let owners: Vec<String> = claims
+            .iter()
+            .map(|claim| claim.owner_uuid().to_string())
+            .collect();
+        for (index, owner) in owners.iter().enumerate() {
+            seed_row(&db, owner, &format!("job-{index}"));
+        }
+        drop(claims);
+
+        let fresh = claim_queue_owner(home.path(), "instance-c", Some(&db)).unwrap();
+
+        assert!(!owners.contains(&fresh.owner_uuid().to_string()));
+        assert!(!fresh.adopted_across_port_change);
+        assert_eq!(fresh.orphans.len(), 2);
+        for orphan in &fresh.orphans {
+            assert_eq!(orphan.queued, 1);
+            assert!(orphan.instance_hint.is_some());
+        }
+    }
+
+    /// The documented escape hatch for the ambiguous case.
+    #[test]
+    fn an_explicitly_named_owner_is_adopted() {
+        let home = tempfile::tempdir().unwrap();
+        let db = owner_db();
+        let first = claim_queue_owner(home.path(), "instance-a", Some(&db)).unwrap();
+        let second = claim_queue_owner(home.path(), "instance-b", Some(&db)).unwrap();
+        let wanted = first.owner_uuid().to_string();
+        seed_row(&db, &wanted, "job-1");
+        seed_row(&db, second.owner_uuid(), "job-2");
+        drop(first);
+        drop(second);
+
+        let adopted =
+            claim_queue_owner_adopting(home.path(), "instance-c", Some(&db), Some(&wanted))
+                .unwrap();
+        assert_eq!(adopted.owner_uuid(), wanted);
+    }
+
+    /// A held row that is also orphaned is doubly invisible, so the report
+    /// counts it separately rather than folding it into the queued total.
+    #[test]
+    fn the_orphan_report_separates_held_rows_from_queued_ones() {
+        let home = tempfile::tempdir().unwrap();
+        let db = owner_db();
+        let claim = claim_queue_owner(home.path(), "instance-a", Some(&db)).unwrap();
+        let owner = claim.owner_uuid().to_string();
+        seed_row(&db, &owner, "waiting");
+        seed_row(&db, &owner, "parked");
+        generation_queue::hold(&db, "parked", "attempts exhausted", 9).unwrap();
+        drop(claim);
+
+        let fresh = claim_queue_owner(home.path(), "instance-b", Some(&db)).unwrap();
+        // One orphan with rows, so it is adopted — but the counts are reported
+        // either way.
+        let reported = fresh
+            .orphans
+            .iter()
+            .find(|orphan| orphan.owner_uuid == owner);
+        let counts = match reported {
+            Some(orphan) => (orphan.queued, orphan.held),
+            None => {
+                assert_eq!(fresh.owner_uuid(), owner, "adopted the sole orphan");
+                let rows = generation_queue::list_all(&db, &owner).unwrap();
+                (
+                    rows.iter()
+                        .filter(|row| row.state == QueueRowState::Queued)
+                        .count(),
+                    rows.iter()
+                        .filter(|row| row.state == QueueRowState::Held)
+                        .count(),
+                )
+            }
+        };
+        assert_eq!(counts, (1, 1));
     }
 
     #[test]
@@ -925,10 +1564,12 @@ mod tests {
     #[test]
     fn an_oversized_request_runs_without_being_journaled() {
         let db = MetadataDb::open_in_memory().unwrap();
-        let owner = generation_queue::resolve_owner_uuid(&db).unwrap();
+        let owner = "test-owner".to_string();
         let journal = Arc::new(QueueJournal {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
+            _owner_claim: None,
+            fail_completion_lookup: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: 64,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -946,10 +1587,12 @@ mod tests {
     #[test]
     fn claiming_past_the_dispatch_cap_holds_the_row_instead_of_deleting_it() {
         let db = MetadataDb::open_in_memory().unwrap();
-        let owner = generation_queue::resolve_owner_uuid(&db).unwrap();
+        let owner = "test-owner".to_string();
         let journal = Arc::new(QueueJournal {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
+            _owner_claim: None,
+            fail_completion_lookup: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: 2,
@@ -990,23 +1633,29 @@ mod tests {
             );
         }
 
-        journal.apply_queue_mutation("b", Some(Some(2)), None);
+        journal.apply_queue_mutation("b", Some(Some(2)), Some(Some("cuda:sibling")), None);
         let relaned = journal
             .list_all()
             .into_iter()
             .find(|row| row.id == "b")
             .unwrap();
         assert_eq!(relaned.target_gpu, Some(2));
+        assert_eq!(
+            relaned.target_device_id.as_deref(),
+            Some("cuda:sibling"),
+            "the stable pin is what replay re-resolves; the ordinal renumbers"
+        );
 
         journal.apply_queue_mutation(
             "c",
+            None,
             None,
             Some(&["c".to_string(), "a".to_string(), "b".to_string()]),
         );
         assert_eq!(rows(&journal), vec!["c", "a", "b"]);
 
         // Clearing the pin returns the row to Auto rather than leaving it.
-        journal.apply_queue_mutation("b", Some(None), None);
+        journal.apply_queue_mutation("b", Some(None), Some(None), None);
         assert_eq!(
             journal
                 .list_all()
@@ -1020,6 +1669,17 @@ mod tests {
         for ticket in tickets {
             ticket.discard();
         }
+    }
+
+    /// The point of persisting the stable pin: if the device is gone at replay
+    /// the job resumes on Auto rather than on whatever now holds that ordinal.
+    #[test]
+    fn a_missing_pinned_device_resolves_to_auto_rather_than_a_renumbered_ordinal() {
+        let state = crate::state::AppState::for_tests();
+        assert_eq!(
+            super::resolve_pinned_ordinal(&state, "cuda:not-present-on-this-boot"),
+            None
+        );
     }
 
     #[test]

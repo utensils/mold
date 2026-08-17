@@ -10630,7 +10630,11 @@ mod tests {
         std::fs::write(&blocked, b"not a directory").unwrap();
 
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let journal = Arc::new(crate::queue_journal::QueueJournal::new(db.clone()));
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db.clone(),
+            Some(tmp.path()),
+            "test-instance",
+        ));
         let request = fake_upscale_job(Config::default(), "unused").request;
         let ticket = journal
             .record(crate::queue_journal::JournalAdmission {
@@ -10689,7 +10693,11 @@ mod tests {
     fn a_published_generation_clears_its_row() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let journal = Arc::new(crate::queue_journal::QueueJournal::new(db.clone()));
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db.clone(),
+            Some(tmp.path()),
+            "test-instance",
+        ));
         let request = fake_upscale_job(Config::default(), "unused").request;
         let ticket = journal
             .record(crate::queue_journal::JournalAdmission {
