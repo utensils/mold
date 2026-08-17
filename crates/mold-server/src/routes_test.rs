@@ -4020,7 +4020,7 @@ mod tests {
         let rows = journal.list_all();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, job.id);
-        assert_eq!(rows[0].output_dir, durable_gallery_dir(output_dir.path()));
+        assert_eq!(rows[0].output_dir, output_dir.path());
 
         gen_task.abort();
         let _ = gen_task.await;
