@@ -644,6 +644,31 @@ impl QueueJournal {
             if row.output_dir.is_dir() {
                 continue;
             }
+            // Absent is not the same as moved. If the configured gallery is
+            // still this row's own directory, the save helpers would simply
+            // create it — so a routine cleanup or a remount must not park work
+            // that would have run perfectly well.
+            if current_output_dir == Some(row.output_dir.as_path()) {
+                match std::fs::create_dir_all(&row.output_dir) {
+                    Ok(()) => {
+                        tracing::info!(
+                            job = %row.id,
+                            dir = %row.output_dir.display(),
+                            "recreated a retained generation's gallery directory"
+                        );
+                        report.recreated += 1;
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            job = %row.id,
+                            dir = %row.output_dir.display(),
+                            %error,
+                            "a retained generation's gallery directory cannot be recreated"
+                        );
+                    }
+                }
+            }
             match current_output_dir {
                 Some(replacement) if replacement != row.output_dir => {
                     tracing::warn!(
@@ -849,6 +874,8 @@ impl QueueJournal {
 pub struct ReconcileReport {
     pub requeued: usize,
     pub repointed: usize,
+    /// Galleries that were simply absent and could be made again.
+    pub recreated: usize,
     pub held: usize,
 }
 

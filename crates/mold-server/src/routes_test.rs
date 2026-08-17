@@ -4440,6 +4440,38 @@ mod tests {
         submitted
     }
 
+    /// A directory that is simply absent is not a directory that moved. The
+    /// save helpers create it on demand, so holding every retained job because
+    /// somebody tidied up the gallery — or a mount came back empty — parks
+    /// work that would have run perfectly well.
+    #[tokio::test]
+    async fn an_absent_but_unchanged_gallery_is_recreated_rather_than_parking_every_job() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let submitted = seed_retained_jobs(db.clone(), output_dir.path(), 2).await;
+
+        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+        // The configured path is unchanged; the directory itself is gone.
+        // Removed after the fixture builds, or it would just recreate it.
+        std::fs::remove_dir_all(durable_gallery_dir(output_dir.path())).unwrap();
+        let report = crate::queue_journal::replay(&state, true).await;
+
+        assert_eq!(report.held, 0, "nothing should be parked");
+        assert_eq!(report.resumed, 2);
+        assert!(durable_gallery_dir(output_dir.path()).is_dir());
+        let mut replayed = Vec::new();
+        for _ in 0..2 {
+            replayed.push(
+                tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("replayed job")
+                    .expect("open queue")
+                    .id,
+            );
+        }
+        assert_eq!(replayed, submitted);
+    }
+
     /// A failure to CHECK the idempotence gate is not the same as "nothing was
     /// completed". Reading it as an empty result would re-render every job
     /// whose print already exists, and those duplicates are unmergeable
