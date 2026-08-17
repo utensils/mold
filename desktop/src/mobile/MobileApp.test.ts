@@ -4607,6 +4607,75 @@ describe("MobileApp foreground resume", () => {
     expect(invoke).toHaveBeenCalledWith("restore_mobile_viewport");
   });
 
+  it("restores the native WKWebView frame after the software keyboard dismisses", async () => {
+    vi.useFakeTimers();
+    try {
+      Object.defineProperty(window, "__TAURI_INTERNALS__", {
+        value: {},
+        configurable: true,
+      });
+      wrapper = mountMobileApp();
+      await flushPromises();
+      invoke.mockClear();
+
+      const prompt = fieldControl("Prompt").element as HTMLTextAreaElement;
+      prompt.focus();
+      prompt.blur();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(invoke).toHaveBeenCalledTimes(1);
+      expect(invoke).toHaveBeenLastCalledWith("restore_mobile_viewport");
+
+      await vi.advanceTimersByTimeAsync(400);
+      expect(invoke).toHaveBeenCalledTimes(2);
+      expect(invoke).toHaveBeenLastCalledWith("restore_mobile_viewport");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not restore the viewport while focus moves between keyboard editors", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: {},
+      configurable: true,
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    invoke.mockClear();
+
+    const prompt = fieldControl("Prompt").element as HTMLTextAreaElement;
+    const negativePrompt = fieldControl("Negative prompt").element as HTMLTextAreaElement;
+    prompt.focus();
+    negativePrompt.focus();
+    await Promise.resolve();
+
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("cancels the settling restore when an editor refocuses before it fires", async () => {
+    vi.useFakeTimers();
+    try {
+      Object.defineProperty(window, "__TAURI_INTERNALS__", {
+        value: {},
+        configurable: true,
+      });
+      wrapper = mountMobileApp();
+      await flushPromises();
+      invoke.mockClear();
+
+      const prompt = fieldControl("Prompt").element as HTMLTextAreaElement;
+      prompt.focus();
+      prompt.blur();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(invoke).toHaveBeenCalledTimes(1);
+
+      prompt.focus();
+      await vi.advanceTimersByTimeAsync(400);
+      expect(invoke).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   async function submitSeededPrompt(prompt: string, seed: number): Promise<void> {
     const liveForm = wrapper!.getComponent(MobileLoraControls).props("form") as GenerateForm;
     liveForm.seed = String(seed);

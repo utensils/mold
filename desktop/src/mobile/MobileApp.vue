@@ -547,6 +547,20 @@ let expansionRecoveryId = 0;
 let submissionUiId = 0;
 let recoveryRetryId = 0;
 let unmounted = false;
+let keyboardViewportRestoreTimer: ReturnType<typeof setTimeout> | null = null;
+const KEYBOARD_VIEWPORT_SETTLE_MS = 400;
+const NON_KEYBOARD_INPUT_TYPES = new Set([
+  "button",
+  "checkbox",
+  "color",
+  "file",
+  "hidden",
+  "image",
+  "radio",
+  "range",
+  "reset",
+  "submit",
+]);
 const downloadConsumerId = `mobile-generate-${createUuid()}`;
 const progress = ref("Ready");
 /** Whether the status line under Develop currently shows a failure. Set with
@@ -4705,12 +4719,55 @@ function handleForegroundResume(): void {
   if (tab.value === "gallery") void refreshGallery();
 }
 
+function usesSoftwareKeyboard(target: EventTarget | null): target is HTMLElement {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.matches("textarea, select, [contenteditable='true']")) return true;
+  if (!(target instanceof HTMLInputElement)) return false;
+  return !NON_KEYBOARD_INPUT_TYPES.has(target.type.toLowerCase());
+}
+
+function restoreNativeViewport(): void {
+  if (!("__TAURI_INTERNALS__" in window) || unmounted) return;
+  void invoke("restore_mobile_viewport").catch(() => undefined);
+}
+
+function cancelKeyboardViewportRestore(): void {
+  if (!keyboardViewportRestoreTimer) return;
+  clearTimeout(keyboardViewportRestoreTimer);
+  keyboardViewportRestoreTimer = null;
+}
+
+function handleKeyboardFocusIn(event: FocusEvent): void {
+  if (usesSoftwareKeyboard(event.target)) cancelKeyboardViewportRestore();
+}
+
+/**
+ * WKWebView can keep the keyboard-reduced presentation frame after an editor
+ * blurs. Repair once after focus has moved, then again after UIKit's keyboard
+ * dismissal animation so its final layout pass cannot reinstate the gap.
+ */
+function handleKeyboardFocusOut(event: FocusEvent): void {
+  if (!usesSoftwareKeyboard(event.target)) return;
+  queueMicrotask(() => {
+    if (unmounted || usesSoftwareKeyboard(document.activeElement)) return;
+    restoreNativeViewport();
+    cancelKeyboardViewportRestore();
+    keyboardViewportRestoreTimer = setTimeout(() => {
+      keyboardViewportRestoreTimer = null;
+      if (usesSoftwareKeyboard(document.activeElement)) return;
+      restoreNativeViewport();
+    }, KEYBOARD_VIEWPORT_SETTLE_MS);
+  });
+}
+
 watch(resultPreviewError, (error) => {
   if (!error) return;
   generationAnnouncement.value = `Generation completed, but its preview is unavailable. ${error}`;
 });
 
 onMounted(async () => {
+  document.addEventListener("focusin", handleKeyboardFocusIn, true);
+  document.addEventListener("focusout", handleKeyboardFocusOut, true);
   if ("__TAURI_INTERNALS__" in window) {
     void invoke("restore_mobile_viewport").catch(() => undefined);
     void import("@tauri-apps/api/app")
@@ -4763,7 +4820,10 @@ onBeforeUnmount(() => {
   expansionPullRequestId += 1;
   clearExpansionRecovery();
   document.removeEventListener("visibilitychange", handleForegroundResume);
+  document.removeEventListener("focusin", handleKeyboardFocusIn, true);
+  document.removeEventListener("focusout", handleKeyboardFocusOut, true);
   window.removeEventListener("pageshow", handleForegroundResume);
+  cancelKeyboardViewportRestore();
   stopPairingDeepLinks?.();
   stopPairingDeepLinks = null;
   if (hostProbeTimer) clearInterval(hostProbeTimer);
