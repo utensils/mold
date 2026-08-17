@@ -1350,6 +1350,99 @@ describe("useGenerateStream host routing", () => {
     expect(failed.job.error).toBe("connection lost");
   });
 
+  it("never overwrites a cancellation that lands while the lookup is in flight", async () => {
+    // The lookup is asynchronous, so a cancel can be confirmed between the
+    // close and the answer. Cancellation is terminal: neither settlement may
+    // replace it, and neither may hand it canvas failure authority.
+    let releaseLookup: (value: unknown) => void = () => {};
+    vi.mocked(fetchQueue).mockReturnValue(
+      new Promise((resolve) => {
+        releaseLookup = resolve;
+      }) as never,
+    );
+
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 1,
+      id: "srv-cancel",
+    });
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+
+    await stream.cancel(id);
+    expect(job.state).toBe("canceled");
+
+    // The host answers after the cancel: not journalled, i.e. the hard path.
+    releaseLookup({ entries: [] });
+    await vi.waitFor(() => expect(vi.mocked(fetchQueue)).toHaveBeenCalled());
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(job.state).toBe("canceled");
+    expect(stream.canvasErrorJobId.value).toBeNull();
+  });
+
+  it("never overwrites a cancellation with the soft detached settle either", async () => {
+    let releaseLookup: (value: unknown) => void = () => {};
+    vi.mocked(fetchQueue).mockReturnValue(
+      new Promise((resolve) => {
+        releaseLookup = resolve;
+      }) as never,
+    );
+
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "queued",
+      position: 1,
+      id: "srv-cancel-2",
+    });
+    lastSingleHandlers!.onError({
+      kind: "network",
+      message: "connection lost",
+    });
+
+    await stream.cancel(id);
+    const cancelledAt = job.settledAt;
+
+    // ...and the durable answer must not resurrect it either.
+    releaseLookup({
+      entries: [
+        {
+          id: "srv-cancel-2",
+          model: "m",
+          state: "queued",
+          started_at_unix_ms: 0,
+          position: 0,
+          durable: true,
+        },
+      ],
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Still cancelled, and never re-settled: a detached settle would have
+    // stamped a new `settledAt` and reopened the row's story. (The note itself
+    // was written by the still-running row before the cancel landed; the state
+    // is what the UI reads, and Cancelled wins.)
+    expect(job.state).toBe("canceled");
+    expect(job.settledAt).toBe(cancelledAt);
+  });
+
   it("keeps a frameless close hard when no server id was ever assigned", async () => {
     const stream = useGenerateStream();
     const id = stream.submit(

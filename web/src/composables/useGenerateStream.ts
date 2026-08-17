@@ -939,6 +939,10 @@ function submitJob(
     body?: string;
     message?: string;
   }) => {
+    // Terminal state wins. A confirmed cancellation (or a completion) can land
+    // between the socket dying and this handler running, and a settled row must
+    // not be re-opened by a late transport event — not even to carry its note.
+    if (job.state !== "running") return;
     if (err.kind === "http") {
       const message = serverErrorMessage(err.body);
       job.error =
@@ -987,6 +991,11 @@ function submitJob(
       !!job.serverId &&
       !requestNeedsReferenceUpload(request as GenerateRequestWire) &&
       (await hostJournalledJob(job.serverId, route?.target));
+    // The lookup is asynchronous: a cancellation can be confirmed, or a late
+    // completion can land, while it is in flight. Re-check before EITHER
+    // settlement — replacing a confirmed cancellation with an error is as
+    // wrong as replacing it with a detached note.
+    if (job.state !== "running") return;
     if (durable) {
       // Soft settle: the row stops moving and keeps its note, but the canvas
       // never claims a print failed that the host is still going to render.
