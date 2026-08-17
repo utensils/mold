@@ -51,6 +51,11 @@ export interface Job {
    *  the id match. Kept because it is still the exact key for the print the
    *  host eventually saves (`OutputMetadata.job_id`). */
   recoveredJobId?: string;
+  /** When a reconciliation pass last finished for this job. Two entry points
+   *  run the same recovery — the shared store as part of a batch settling, and
+   *  the iPhone shell on foreground resume — and a pass that ended without a
+   *  verdict leaves the job eligible for both. */
+  reconciledAtUnixMs?: number;
   /** Client submission time used to avoid joining a later fixed-seed duplicate.
    *  Also the print's `createdAtMs` in the shared activity merge — a real wall
    *  clock, never the clientId counter. */

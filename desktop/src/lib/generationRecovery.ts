@@ -56,6 +56,14 @@ const RETAINED_TRANSPORT_RETRIES = 75;
  *  is invisible until replay resubmits it — so it is sized like the retry
  *  budget above rather than like a normal poll. */
 const RETAINED_HANDOFF_POLLS = 75;
+/** How long a finished reconciliation pass suppresses another one for the same
+ *  job. The shared store runs recovery as part of a batch settling and the
+ *  iPhone shell calls the same entry point immediately afterwards in its own
+ *  `settled.then`; a pass that reached no verdict deliberately leaves the job
+ *  eligible, so without this the second caller spends the ENTIRE retry budget
+ *  again before the phone can show a summary. Short enough that a genuine
+ *  later resume still reconciles. */
+const RECONCILE_COOLDOWN_MS = 5_000;
 const PRE_ID_CLOCK_SKEW_MS = 1_000;
 const PRE_ID_JOIN_WINDOW_MS = 5_000;
 
@@ -745,8 +753,20 @@ export function reconcileInterruptedGenerationJobs(
   jobs: readonly Job[],
   opts: GenerationRecoveryOptions,
 ): Promise<void> {
+  const now = Date.now();
   const interrupted = jobs.filter(
-    (job) => job.status === "error" && (job.interrupted || isInterruptedGenerationError(job.error)),
+    (job) =>
+      job.status === "error" &&
+      (job.interrupted || isInterruptedGenerationError(job.error)) &&
+      // A cancel is terminal even on a row already flagged as interrupted —
+      // the store guards this in its own pre-filter, and the entry point both
+      // callers share must not depend on that.
+      !isCancelledError(job.error) &&
+      // Not one another pass just finished: its outcome is this outcome.
+      !(
+        typeof job.reconciledAtUnixMs === "number" &&
+        now - job.reconciledAtUnixMs < RECONCILE_COOLDOWN_MS
+      ),
   );
   if (interrupted.length === 0) return Promise.resolve();
   for (const job of interrupted) {
@@ -757,5 +777,11 @@ export function reconcileInterruptedGenerationJobs(
     job.status = "loading";
     job.stage = `Reconnecting to ${opts.hostLabel}`;
   }
-  return Promise.all(interrupted.map((job) => reconcileJob(job, opts))).then(() => undefined);
+  return Promise.all(
+    interrupted.map((job) =>
+      reconcileJob(job, opts).finally(() => {
+        job.reconciledAtUnixMs = Date.now();
+      }),
+    ),
+  ).then(() => undefined);
 }

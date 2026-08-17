@@ -381,6 +381,64 @@ describe("galleryCompletion", () => {
   });
 });
 
+describe("a second pass does not repeat a pass that just ran", () => {
+  it("skips a job the shared store already reconciled moments ago", async () => {
+    // The store runs reconciliation as part of `settled`, and MobileApp then
+    // calls the same entry point in its own `settled.then`. A first pass that
+    // ended unreconciled deliberately leaves `interrupted = true`, so the
+    // foreground call would immediately spend the ENTIRE retry budget again —
+    // up to another five minutes before the phone shows any summary.
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ retainedByHost: true });
+    await reconcileInterruptedGenerationJobs([job], options());
+    expect(job.interrupted).toBe(true);
+    const settledError = job.error;
+    apiJsonTo.mockClear();
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(apiJsonTo).not.toHaveBeenCalled();
+    expect(job.error).toBe(settledError);
+  });
+
+  it("never reconciles a job the user cancelled, however it was flagged", async () => {
+    // The store guards this in its own pre-filter; the module did not, so the
+    // OTHER caller had no protection. A retained frame sets `interrupted`, and
+    // a cancel landing afterwards must still be terminal — reconciliation
+    // would re-attach a job the user deliberately stopped.
+    apiJsonTo.mockImplementation(() => Promise.resolve([]));
+    const job = makeJob({ interrupted: true, error: "Cancelled" });
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(apiJsonTo).not.toHaveBeenCalled();
+    expect(job.error).toBe("Cancelled");
+  });
+
+  it("reconciles again once the cooldown has passed", async () => {
+    // A genuine later resume — minutes on from the last attempt — must still
+    // get a fresh pass; the cooldown suppresses a duplicate, not recovery.
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+    job.interrupted = true;
+    job.reconciledAtUnixMs = Date.now() - 10 * 60_000;
+    apiJsonTo.mockClear();
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(apiJsonTo).toHaveBeenCalled();
+  });
+});
+
 describe("gallery recovery reads the server's own job id", () => {
   it("matches on job_id even when the host clock trails the client's", async () => {
     // The age fence compares a CLIENT submit time against a HOST print stamp,
