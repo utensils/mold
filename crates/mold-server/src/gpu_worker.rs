@@ -10633,6 +10633,7 @@ mod tests {
         let journal = Arc::new(crate::queue_journal::QueueJournal::new(
             db.clone(),
             Some(tmp.path()),
+            "test-instance",
         ));
         let request = fake_upscale_job(Config::default(), "unused").request;
         let ticket = journal
@@ -10695,6 +10696,7 @@ mod tests {
         let journal = Arc::new(crate::queue_journal::QueueJournal::new(
             db.clone(),
             Some(tmp.path()),
+            "test-instance",
         ));
         let request = fake_upscale_job(Config::default(), "unused").request;
         let ticket = journal

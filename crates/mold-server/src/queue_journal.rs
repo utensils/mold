@@ -107,26 +107,48 @@ pub struct JournalAdmission<'a> {
     pub carries_reference_authority: bool,
 }
 
-/// Directory of per-identity claim locks, one file per queue owner.
+/// Directory of per-identity claim records, one file per queue owner.
 const QUEUE_OWNERS_DIR: &str = "queue-owners";
+
+/// Adopt a specific orphaned owner by id. The documented escape hatch for the
+/// one case the server cannot decide: several orphans with rows and no hint
+/// match.
+pub const QUEUE_ADOPT_OWNER_ENV: &str = "MOLD_QUEUE_ADOPT_OWNER";
+
+/// A retained queue nobody is running and this server did not recognise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanedOwner {
+    pub owner_uuid: String,
+    /// The server instance that last held it, when the record names one.
+    pub instance_hint: Option<String>,
+    pub queued: usize,
+    /// Counted separately: a held row that is also orphaned is invisible twice
+    /// over, so folding it into the queued total hides it completely.
+    pub held: usize,
+}
 
 /// A queue identity held for this process's lifetime.
 ///
-/// The identity is port-independent so a server that comes back on a different
-/// port still adopts its own rows — but two servers can legitimately share one
-/// `MOLD_HOME`, and a shared identity would let the second to start adopt the
-/// first's queued *and running* rows, requeue work that is actively rendering,
-/// and run the same job twice at once.
+/// Identity and liveness are deliberately separate concerns, because conflating
+/// them is what four earlier attempts got wrong. The owner id is a minted,
+/// port-independent UUID and never changes for the life of that server's queue.
+/// The lock file proves only whether that owner is running *right now*; it
+/// never confers ownership, so "unlocked" means "not running", not "yours".
 ///
-/// So identities are claimed rather than derived: each is a lock file, and a
-/// booting server adopts the first one nobody holds. A restart finds its own
-/// lock free and reclaims it; a live peer's lock is held, so it is skipped and
-/// a fresh identity is minted. Two simultaneous first starts cannot collide,
-/// because neither can see a directory entry the other has not created yet and
-/// each mints its own — there is no shared setting to race on.
+/// What identifies a returning server is a hint recorded in the record: the
+/// instance id it last claimed under. That resolves a requirement which cannot
+/// be met from intrinsic state alone — two servers sharing one `MOLD_HOME`
+/// differ only by port, so a port-independent id cannot also be per-server
+/// distinct — by remembering rather than deriving.
 pub struct QueueOwnerClaim {
     owner_uuid: String,
     _lock: std::fs::File,
+    /// True when no record matched this instance and exactly one unclaimed
+    /// queue existed, so it was taken across an apparent port change.
+    pub adopted_across_port_change: bool,
+    /// Retained queues this server did not take. Reported at startup so work
+    /// is never silently stranded.
+    pub orphans: Vec<OrphanedOwner>,
 }
 
 impl QueueOwnerClaim {
@@ -135,12 +157,68 @@ impl QueueOwnerClaim {
     }
 }
 
+struct OwnerCandidate {
+    owner_uuid: String,
+    instance_hint: Option<String>,
+    lock: std::fs::File,
+    queued: usize,
+    held: usize,
+}
+
+impl OwnerCandidate {
+    fn has_rows(&self) -> bool {
+        self.queued > 0 || self.held > 0
+    }
+
+    fn into_orphan(self) -> OrphanedOwner {
+        OrphanedOwner {
+            owner_uuid: self.owner_uuid,
+            instance_hint: self.instance_hint,
+            queued: self.queued,
+            held: self.held,
+        }
+    }
+}
+
+fn owner_record_path(owners: &Path, owner_uuid: &str) -> std::path::PathBuf {
+    owners.join(format!("{owner_uuid}.lock"))
+}
+
+/// Record which instance holds this owner now, so the next restart recognises
+/// it without guessing.
+fn write_instance_hint(file: &std::fs::File, instance_id: &str) {
+    use std::io::{Seek, Write};
+    let mut file = file;
+    let wrote = file
+        .set_len(0)
+        .and_then(|()| file.seek(std::io::SeekFrom::Start(0)))
+        .and_then(|_| file.write_all(instance_id.as_bytes()))
+        .and_then(|()| file.flush());
+    if let Err(error) = wrote {
+        tracing::warn!(%error, "could not record the queue owner's instance hint");
+    }
+}
+
 /// Take a queue identity for this process, or `None` when one cannot be held.
-///
-/// Failing to lock means the filesystem cannot give us exclusive ownership, and
-/// an identity we cannot fence is one a peer might share — so the journal is
-/// disabled rather than risk two servers replaying each other's work.
-pub fn claim_queue_owner(mold_dir: &Path) -> Option<QueueOwnerClaim> {
+pub fn claim_queue_owner(
+    mold_dir: &Path,
+    instance_id: &str,
+    db: Option<&MetadataDb>,
+) -> Option<QueueOwnerClaim> {
+    let requested = std::env::var(QUEUE_ADOPT_OWNER_ENV)
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty());
+    claim_queue_owner_adopting(mold_dir, instance_id, db, requested.as_deref())
+}
+
+/// [`claim_queue_owner`] with the explicit adoption request passed in.
+pub fn claim_queue_owner_adopting(
+    mold_dir: &Path,
+    instance_id: &str,
+    db: Option<&MetadataDb>,
+    adopt: Option<&str>,
+) -> Option<QueueOwnerClaim> {
     let owners = mold_dir.join(QUEUE_OWNERS_DIR);
     if let Err(error) = std::fs::create_dir_all(&owners) {
         tracing::warn!(
@@ -151,8 +229,7 @@ pub fn claim_queue_owner(mold_dir: &Path) -> Option<QueueOwnerClaim> {
         return None;
     }
 
-    // Deterministic order so a restarting pair reclaims predictably.
-    let mut existing: Vec<String> = std::fs::read_dir(&owners)
+    let mut names: Vec<String> = std::fs::read_dir(&owners)
         .into_iter()
         .flatten()
         .flatten()
@@ -164,32 +241,126 @@ pub fn claim_queue_owner(mold_dir: &Path) -> Option<QueueOwnerClaim> {
                 .map(str::to_string)
         })
         .collect();
-    existing.sort();
+    names.sort();
 
-    for owner_uuid in existing {
-        let path = owners.join(format!("{owner_uuid}.lock"));
-        let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) else {
+    // Lock what we can. A record we cannot lock belongs to a live peer and is
+    // left entirely alone — not read as a candidate, not reported as orphaned.
+    let mut candidates: Vec<OwnerCandidate> = Vec::new();
+    for owner_uuid in names {
+        let path = owner_record_path(&owners, &owner_uuid);
+        let Ok(file) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+        else {
             continue;
         };
-        if fs2::FileExt::try_lock_exclusive(&file).is_ok() {
-            tracing::debug!(owner = %owner_uuid, "adopted an existing durable queue identity");
-            return Some(QueueOwnerClaim {
-                owner_uuid,
-                _lock: file,
-            });
+        let instance_hint = std::fs::read_to_string(&path)
+            .ok()
+            .map(|hint| hint.trim().to_string())
+            .filter(|hint| !hint.is_empty());
+        if fs2::FileExt::try_lock_exclusive(&file).is_err() {
+            continue;
         }
-        // Held by a live peer sharing this MOLD_HOME.
+        let (queued, held) = owner_row_counts(db, &owner_uuid);
+        candidates.push(OwnerCandidate {
+            owner_uuid,
+            instance_hint,
+            lock: file,
+            queued,
+            held,
+        });
     }
 
+    // 1. An explicit adoption request outranks everything: a human looked.
+    let mut chosen = adopt.and_then(|wanted| {
+        let found = candidates
+            .iter()
+            .position(|candidate| candidate.owner_uuid == wanted);
+        match found {
+            Some(index) => {
+                tracing::info!(owner = %wanted, "adopting a queue identity by explicit request");
+                Some(candidates.remove(index))
+            }
+            None => {
+                tracing::warn!(
+                    owner = %wanted,
+                    env = QUEUE_ADOPT_OWNER_ENV,
+                    "the requested queue identity is not present or is held by a live server"
+                );
+                None
+            }
+        }
+    });
+
+    // 2. Our own record, recognised by the instance that last held it. This is
+    //    every ordinary restart, including peers restarting in any order.
+    let mut adopted_across_port_change = false;
+    if chosen.is_none() {
+        if let Some(index) = candidates
+            .iter()
+            .position(|candidate| candidate.instance_hint.as_deref() == Some(instance_id))
+        {
+            chosen = Some(candidates.remove(index));
+        }
+    }
+
+    // 3. No record knows us. Exactly one unclaimed queue is unambiguous — the
+    //    single-server port change — so take it and say so. More than one and
+    //    the machine genuinely cannot tell which is ours: take none.
+    if chosen.is_none() {
+        let with_rows: Vec<usize> = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| candidate.has_rows())
+            .map(|(index, _)| index)
+            .collect();
+        if with_rows.len() == 1 {
+            let candidate = candidates.remove(with_rows[0]);
+            tracing::warn!(
+                owner = %candidate.owner_uuid,
+                was = ?candidate.instance_hint,
+                now = %instance_id,
+                queued = candidate.queued,
+                held = candidate.held,
+                "adopting the only retained queue on this host after an apparent port change"
+            );
+            adopted_across_port_change = true;
+            chosen = Some(candidate);
+        } else if with_rows.is_empty() && !candidates.is_empty() {
+            // Every unclaimed record is empty, so reusing one carries nothing
+            // and keeps the directory from growing a record per port change.
+            chosen = Some(candidates.remove(0));
+        }
+    }
+
+    let orphans: Vec<OrphanedOwner> = candidates
+        .into_iter()
+        .filter(OwnerCandidate::has_rows)
+        .map(OwnerCandidate::into_orphan)
+        .collect();
+
+    if let Some(candidate) = chosen {
+        write_instance_hint(&candidate.lock, instance_id);
+        return Some(QueueOwnerClaim {
+            owner_uuid: candidate.owner_uuid,
+            _lock: candidate.lock,
+            adopted_across_port_change,
+            orphans,
+        });
+    }
+
+    // 4. Mint. Two simultaneous first starts each land here with their own id,
+    //    because there is no shared record to race on.
     let owner_uuid = uuid::Uuid::new_v4().to_string();
-    let path = owners.join(format!("{owner_uuid}.lock"));
+    let path = owner_record_path(&owners, &owner_uuid);
     let file = match std::fs::File::create(&path) {
         Ok(file) => file,
         Err(error) => {
             tracing::warn!(
                 path = %path.display(),
                 %error,
-                "durable generation queue unavailable: could not create its identity lock"
+                "durable generation queue unavailable: could not create its identity record"
             );
             return None;
         }
@@ -201,11 +372,27 @@ pub fn claim_queue_owner(mold_dir: &Path) -> Option<QueueOwnerClaim> {
         );
         return None;
     }
-    tracing::debug!(owner = %owner_uuid, "minted a durable queue identity");
+    write_instance_hint(&file, instance_id);
     Some(QueueOwnerClaim {
         owner_uuid,
         _lock: file,
+        adopted_across_port_change: false,
+        orphans,
     })
+}
+
+fn owner_row_counts(db: Option<&MetadataDb>, owner_uuid: &str) -> (usize, usize) {
+    let Some(db) = db else {
+        return (0, 0);
+    };
+    let Ok(rows) = generation_queue::list_all(db, owner_uuid) else {
+        return (0, 0);
+    };
+    let held = rows
+        .iter()
+        .filter(|row| row.state == QueueRowState::Held)
+        .count();
+    (rows.len() - held, held)
 }
 
 pub struct QueueJournal {
@@ -226,23 +413,33 @@ impl QueueJournal {
     /// Build the journal for a running server. Returns a disabled journal when
     /// the DB is unavailable or `MOLD_QUEUE_JOURNAL_DISABLE` is set — the
     /// server still runs every job, it just cannot promise replay.
-    pub fn new(db: Arc<Option<MetadataDb>>, mold_dir: Option<&Path>) -> Self {
+    pub fn new(db: Arc<Option<MetadataDb>>, mold_dir: Option<&Path>, instance_id: &str) -> Self {
         let claim = if env_flag(JOURNAL_DISABLE_ENV) {
             tracing::info!("durable generation queue disabled by environment");
             None
-        } else if db.as_ref().is_none() {
-            None
         } else {
-            match mold_dir {
-                Some(dir) => claim_queue_owner(dir),
-                None => {
+            match (db.as_ref().as_ref(), mold_dir) {
+                (Some(db), Some(dir)) => claim_queue_owner(dir, instance_id, Some(db)),
+                (Some(_), None) => {
                     tracing::warn!(
                         "durable generation queue unavailable: MOLD_HOME could not be resolved"
                     );
                     None
                 }
+                _ => None,
             }
         };
+        for orphan in claim.iter().flat_map(|claim| claim.orphans.iter()) {
+            tracing::warn!(
+                owner = %orphan.owner_uuid,
+                last_instance = ?orphan.instance_hint,
+                queued = orphan.queued,
+                held = orphan.held,
+                env = QUEUE_ADOPT_OWNER_ENV,
+                "a retained generation queue on this host belongs to no running server; \
+                 set the adoption environment variable to this owner id to replay it"
+            );
+        }
         Self {
             db,
             owner_uuid: claim.as_ref().map(|claim| claim.owner_uuid.clone()),
@@ -1050,63 +1247,203 @@ mod tests {
         journal.list_all().into_iter().map(|row| row.id).collect()
     }
 
-    /// Two servers can share one `MOLD_HOME` on different ports. They must
-    /// never resolve the same queue identity: the second to start would adopt
-    /// the first's queued AND running rows, requeue work that is actively
-    /// rendering, and run the same job twice at once.
+    fn owner_db() -> MetadataDb {
+        MetadataDb::open_in_memory().unwrap()
+    }
+
+    fn seed_row(db: &MetadataDb, owner: &str, id: &str) {
+        generation_queue::insert(
+            db,
+            &GenerationQueueRow {
+                id: id.to_string(),
+                owner_uuid: owner.to_string(),
+                state: QueueRowState::Queued,
+                model: "flux-dev:q4".to_string(),
+                request_json: "{}".to_string(),
+                output_dir: std::path::PathBuf::from("/gallery"),
+                target_gpu: None,
+                target_device_id: None,
+                completion_payload: "full".to_string(),
+                seed_pinned: false,
+                dispatch_attempts: 0,
+                replay_seen: 0,
+                held_reason: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                started_at_ms: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// The case four earlier attempts got wrong. A server restarting must
+    /// reclaim ITS OWN identity, not merely one nobody is holding — otherwise
+    /// it replays a peer's retained jobs under its own GPUs and configuration
+    /// while its own rows sit unreplayed under another id.
     #[test]
-    fn a_second_live_server_never_adopts_the_first_servers_queue() {
+    fn a_restart_reclaims_its_own_identity_not_whichever_is_unlocked() {
         let home = tempfile::tempdir().unwrap();
+        let db = owner_db();
 
-        let first = claim_queue_owner(home.path()).expect("first server claims an identity");
-        let second = claim_queue_owner(home.path()).expect("second server claims its own");
+        // Both servers run at once at least briefly, which is how a genuine
+        // peer gets an identity of its own: while the other holds its record,
+        // there is nothing unclaimed to adopt.
+        let peer = claim_queue_owner(home.path(), "instance-b", Some(&db)).unwrap();
+        let mine = claim_queue_owner(home.path(), "instance-a", Some(&db)).unwrap();
+        let peer_owner = peer.owner_uuid().to_string();
+        let my_owner = mine.owner_uuid().to_string();
+        assert_ne!(peer_owner, my_owner);
+        seed_row(&db, &peer_owner, "peer-job");
+        seed_row(&db, &my_owner, "my-job");
+        drop(peer);
+        drop(mine);
 
-        assert_ne!(
-            first.owner_uuid(),
-            second.owner_uuid(),
-            "a live peer's identity must never be adopted"
+        // Both records are unlocked; the peer's sorts first roughly half the
+        // time, which is what made "first unlocked wins" appear to work.
+        let restarted = claim_queue_owner(home.path(), "instance-a", Some(&db)).unwrap();
+        assert_eq!(restarted.owner_uuid(), my_owner);
+        assert!(!restarted.adopted_across_port_change);
+        assert_eq!(
+            restarted.orphans.len(),
+            1,
+            "the peer's rows are reported, not silently taken"
+        );
+        assert_eq!(restarted.orphans[0].owner_uuid, peer_owner);
+        assert_eq!(restarted.orphans[0].queued, 1);
+    }
+
+    #[test]
+    fn two_stopped_servers_each_reclaim_their_own_in_either_order() {
+        let home = tempfile::tempdir().unwrap();
+        let db = owner_db();
+        let a = claim_queue_owner(home.path(), "instance-a", Some(&db)).unwrap();
+        let b = claim_queue_owner(home.path(), "instance-b", Some(&db)).unwrap();
+        let (owner_a, owner_b) = (a.owner_uuid().to_string(), b.owner_uuid().to_string());
+        drop(a);
+        drop(b);
+
+        let b_again = claim_queue_owner(home.path(), "instance-b", Some(&db)).unwrap();
+        assert_eq!(b_again.owner_uuid(), owner_b);
+        let a_again = claim_queue_owner(home.path(), "instance-a", Some(&db)).unwrap();
+        assert_eq!(a_again.owner_uuid(), owner_a);
+    }
+
+    #[test]
+    fn a_live_peers_identity_is_never_taken() {
+        let home = tempfile::tempdir().unwrap();
+        let db = owner_db();
+        let live = claim_queue_owner(home.path(), "instance-a", Some(&db)).unwrap();
+
+        let other = claim_queue_owner(home.path(), "instance-b", Some(&db)).unwrap();
+        assert_ne!(other.owner_uuid(), live.owner_uuid());
+    }
+
+    /// The single-server port change the port-independent id exists to serve:
+    /// exactly one unlocked owner has rows, so it is unambiguous.
+    #[test]
+    fn a_changed_port_adopts_the_one_unambiguous_orphan() {
+        let home = tempfile::tempdir().unwrap();
+        let db = owner_db();
+        let before = claim_queue_owner(home.path(), "instance-port-7680", Some(&db)).unwrap();
+        let owner = before.owner_uuid().to_string();
+        seed_row(&db, &owner, "job-1");
+        drop(before);
+
+        let after = claim_queue_owner(home.path(), "instance-port-7681", Some(&db)).unwrap();
+        assert_eq!(after.owner_uuid(), owner);
+        assert!(
+            after.adopted_across_port_change,
+            "an adoption across a changed port must be announced, not silent"
         );
     }
 
-    /// The intentional case the port-independent identity exists for: the same
-    /// server stopping and starting again adopts its own rows, including after
-    /// a port change.
+    /// Ambiguity is the only case a human has to resolve: two orphans with
+    /// rows and no hint match, so adopting either could replay the wrong
+    /// server's queue.
     #[test]
-    fn a_restarted_server_adopts_its_own_queue() {
+    fn several_orphans_with_rows_are_reported_rather_than_guessed_between() {
         let home = tempfile::tempdir().unwrap();
+        let db = owner_db();
+        // Two live peers, so each holds an identity of its own, then both stop.
+        let claims: Vec<QueueOwnerClaim> = ["instance-a", "instance-b"]
+            .iter()
+            .map(|instance| claim_queue_owner(home.path(), instance, Some(&db)).unwrap())
+            .collect();
+        let owners: Vec<String> = claims
+            .iter()
+            .map(|claim| claim.owner_uuid().to_string())
+            .collect();
+        for (index, owner) in owners.iter().enumerate() {
+            seed_row(&db, owner, &format!("job-{index}"));
+        }
+        drop(claims);
 
-        let first = claim_queue_owner(home.path()).unwrap();
-        let owner = first.owner_uuid().to_string();
-        drop(first);
+        let fresh = claim_queue_owner(home.path(), "instance-c", Some(&db)).unwrap();
 
-        let restarted = claim_queue_owner(home.path()).expect("restart reclaims the identity");
-        assert_eq!(restarted.owner_uuid(), owner);
+        assert!(!owners.contains(&fresh.owner_uuid().to_string()));
+        assert!(!fresh.adopted_across_port_change);
+        assert_eq!(fresh.orphans.len(), 2);
+        for orphan in &fresh.orphans {
+            assert_eq!(orphan.queued, 1);
+            assert!(orphan.instance_hint.is_some());
+        }
     }
 
-    /// Both peers stopped, then both start: each takes back one identity and
-    /// neither is left orphaned.
+    /// The documented escape hatch for the ambiguous case.
     #[test]
-    fn two_stopped_servers_each_reclaim_one_identity() {
+    fn an_explicitly_named_owner_is_adopted() {
         let home = tempfile::tempdir().unwrap();
-        let first = claim_queue_owner(home.path()).unwrap();
-        let second = claim_queue_owner(home.path()).unwrap();
-        let owners = std::collections::BTreeSet::from([
-            first.owner_uuid().to_string(),
-            second.owner_uuid().to_string(),
-        ]);
+        let db = owner_db();
+        let first = claim_queue_owner(home.path(), "instance-a", Some(&db)).unwrap();
+        let second = claim_queue_owner(home.path(), "instance-b", Some(&db)).unwrap();
+        let wanted = first.owner_uuid().to_string();
+        seed_row(&db, &wanted, "job-1");
+        seed_row(&db, second.owner_uuid(), "job-2");
         drop(first);
         drop(second);
 
-        let a = claim_queue_owner(home.path()).unwrap();
-        let b = claim_queue_owner(home.path()).unwrap();
-        assert_eq!(
-            std::collections::BTreeSet::from([
-                a.owner_uuid().to_string(),
-                b.owner_uuid().to_string()
-            ]),
-            owners,
-            "restarting the pair must not mint fresh identities and strand the old rows"
-        );
+        let adopted =
+            claim_queue_owner_adopting(home.path(), "instance-c", Some(&db), Some(&wanted))
+                .unwrap();
+        assert_eq!(adopted.owner_uuid(), wanted);
+    }
+
+    /// A held row that is also orphaned is doubly invisible, so the report
+    /// counts it separately rather than folding it into the queued total.
+    #[test]
+    fn the_orphan_report_separates_held_rows_from_queued_ones() {
+        let home = tempfile::tempdir().unwrap();
+        let db = owner_db();
+        let claim = claim_queue_owner(home.path(), "instance-a", Some(&db)).unwrap();
+        let owner = claim.owner_uuid().to_string();
+        seed_row(&db, &owner, "waiting");
+        seed_row(&db, &owner, "parked");
+        generation_queue::hold(&db, "parked", "attempts exhausted", 9).unwrap();
+        drop(claim);
+
+        let fresh = claim_queue_owner(home.path(), "instance-b", Some(&db)).unwrap();
+        // One orphan with rows, so it is adopted — but the counts are reported
+        // either way.
+        let reported = fresh
+            .orphans
+            .iter()
+            .find(|orphan| orphan.owner_uuid == owner);
+        let counts = match reported {
+            Some(orphan) => (orphan.queued, orphan.held),
+            None => {
+                assert_eq!(fresh.owner_uuid(), owner, "adopted the sole orphan");
+                let rows = generation_queue::list_all(&db, &owner).unwrap();
+                (
+                    rows.iter()
+                        .filter(|row| row.state == QueueRowState::Queued)
+                        .count(),
+                    rows.iter()
+                        .filter(|row| row.state == QueueRowState::Held)
+                        .count(),
+                )
+            }
+        };
+        assert_eq!(counts, (1, 1));
     }
 
     #[test]

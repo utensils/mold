@@ -304,12 +304,18 @@ pub async fn run_server(
             std::sync::Arc::new(None)
         }
     };
+    // Resolved here rather than at its later assignment to `state` so the
+    // queue journal can use it: the identity is `(data dir, port)`-scoped, which
+    // is exactly the evidence a restarting server needs to recognise its own
+    // retained queue among a peer's.
+    let instance_id = instance::resolve_instance_id(metadata_db.as_ref().as_ref(), port);
     // Built before any GPU owner thread exists: a worker that quarantines
     // itself must be able to raise the retention fence, and that is the one
     // restart mold performs on its own behalf.
     let queue_journal = std::sync::Arc::new(queue_journal::QueueJournal::new(
         metadata_db.clone(),
         Config::mold_dir().as_deref(),
+        &instance_id,
     ));
     let generation_cancel = std::sync::Arc::new(generation_cancel::CancelRegistry::new());
     if queue_journal.is_enabled() {
@@ -683,10 +689,7 @@ pub async fn run_server(
     // runs on the same DB — its address changes every run anyway. Captured
     // for mDNS here because `state` is moved into the router before the TXT
     // records are built.
-    state.instance_id = std::sync::Arc::new(instance::resolve_instance_id(
-        state.metadata_db.as_ref().as_ref(),
-        port,
-    ));
+    state.instance_id = std::sync::Arc::new(instance_id);
     #[cfg(feature = "mdns")]
     let mdns_instance_id = state.instance_id.clone();
 

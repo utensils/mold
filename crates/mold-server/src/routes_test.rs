@@ -3993,6 +3993,7 @@ mod tests {
         state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
             state.metadata_db.clone(),
             Some(home.path()),
+            "test-instance",
         ));
         let journal = state.queue_journal.clone();
         let app = app_with_state(state.clone());
@@ -4037,6 +4038,7 @@ mod tests {
         state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
             state.metadata_db.clone(),
             Some(home.path()),
+            "test-instance",
         ));
         let journal = state.queue_journal.clone();
         let app = app_with_state(state.clone());
@@ -4083,7 +4085,11 @@ mod tests {
         let (mut state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
         state.output_disabled_override = false;
         state.metadata_db = db.clone();
-        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(db, Some(root)));
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db,
+            Some(root),
+            "test-instance",
+        ));
         state
             .config
             .try_write()
@@ -4617,6 +4623,7 @@ mod tests {
         state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
             db.clone(),
             Some(home.path()),
+            "test-instance",
         ));
         assert!(
             state.queue_journal.is_enabled(),
