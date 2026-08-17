@@ -2019,23 +2019,6 @@ fn concrete_artifacts_for_family(
     if let Some(path) = &paths.clip_tokenizer_2 {
         artifacts.insert(ComponentRole::ClipGTokenizer, path.clone());
     }
-    /// Whether a Gemma text-encoder file holds *weights* rather than a
-    /// companion artifact.
-    ///
-    /// Mirrors the patterns `variant_dependencies::materialize_gemma` selects
-    /// on: BF16 arrives as `model.safetensors` or `model-<i>-of-<n>.safetensors`
-    /// shards, Q4 as a single `.gguf`. Everything else in `text_encoder_files`
-    /// — the tokenizer anchor, the LTX-2.3 text projection — belongs to every
-    /// variant and must survive the filter.
-    fn is_gemma_weight_file(path: &Path) -> bool {
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            return false;
-        };
-        name.ends_with(".gguf")
-            || name == "model.safetensors"
-            || (name.starts_with("model-") && name.ends_with(".safetensors"))
-    }
-
     let selected_text_paths = if !engine_config.selected_qwen3_paths.is_empty() {
         engine_config.selected_qwen3_paths.clone()
     } else if let Some(path) = engine_config.selected_qwen2_path.as_ref() {
@@ -2932,17 +2915,40 @@ fn exact_v1_compatibility_dtype(model: &str) -> Option<PlannedDType> {
 /// that set belongs to the encoder rather than to any one shard, so it is
 /// attributed to the lowest-ordered shard. Added per shard it would be charged
 /// five times over on a real Gemma split.
+/// Whether a Gemma text-encoder file holds *weights* rather than a companion
+/// artifact.
+///
+/// Mirrors the patterns `variant_dependencies::materialize_gemma` selects on:
+/// BF16 arrives as `model.safetensors` or `model-<i>-of-<n>.safetensors`
+/// shards, Q4 as a single `.gguf`. Everything else in `text_encoder_files` —
+/// the tokenizer anchor, the LTX-2.3 text projection — belongs to every variant
+/// and must survive the filter. Every entry is given a `GemmaShard` role, so
+/// the role alone cannot tell a streamed weight shard from a companion the
+/// runtime materializes.
+fn is_gemma_weight_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name.ends_with(".gguf")
+        || name == "model.safetensors"
+        || (name.starts_with("model-") && name.ends_with(".safetensors"))
+}
+
 /// Whether a CPU-placed component's weights stay a reclaimable file mapping
 /// rather than becoming anonymous host demand.
 ///
-/// True only for LTX-2's safetensors Gemma shards, which
+/// True only for LTX-2's safetensors Gemma **weight shards**, which
 /// `GemmaHiddenStateEncoder::load_from_assets` builds through `new_streaming`.
 /// The Q4 GGUF variant keeps its own quantized residency in host RAM, and every
 /// other family's CPU-parked encoder is copied to the host, so both are charged
-/// their bytes.
+/// their bytes. LTX-2.3's ~2.3 GB text projection shares the `GemmaShard` role
+/// but is loaded separately into the retained `EmbeddingsProcessor` rather than
+/// through the streaming layer loader, so it is real anonymous demand and must
+/// keep being charged — exempting it would over-admit a host near its floor.
 fn ltx2_cpu_gemma_streams_from_mmap(family: &str, role: &ComponentRole, path: &Path) -> bool {
     matches!(family, "ltx2" | "ltx-2" | "ltx2.3")
         && matches!(role, ComponentRole::GemmaShard(_))
+        && is_gemma_weight_file(path)
         && mold_inference::ltx2::cpu_gemma_allocates_anon_peak(path)
 }
 
@@ -2959,6 +2965,7 @@ fn ltx2_cpu_gemma_anon_peak_anchor(
         .find(|(role, path)| {
             matches!(role, ComponentRole::GemmaShard(_))
                 && placements.get(*role).copied().unwrap_or(false)
+                && is_gemma_weight_file(path)
                 && mold_inference::ltx2::cpu_gemma_allocates_anon_peak(path)
         })
         .map(|(role, _)| role.clone())
@@ -4611,7 +4618,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let transformer = root.path().join("ltx2-transformer.safetensors");
         let vae = root.path().join("ltx2-vae.safetensors");
-        let gemma = root.path().join("gemma-00001-of-00001.safetensors");
+        let gemma = root.path().join("model-00001-of-00001.safetensors");
         sparse_file(&transformer, 8 * GIB);
         sparse_file(&vae, GIB);
         sparse_file(&gemma, 4 * GIB);
@@ -4653,6 +4660,59 @@ mod tests {
         );
     }
 
+    /// LTX-2.3's text projection is materialized, so it keeps paying host RAM.
+    ///
+    /// Every `text_encoder_files` entry is given a `GemmaShard` role, so the
+    /// role cannot distinguish a streamed weight shard from the ~2.3 GB
+    /// projection the runtime loads separately into the retained
+    /// `EmbeddingsProcessor`. Exempting it along with the mmap'd shards would
+    /// charge it zero and over-admit a host sitting near its memory floor.
+    #[test]
+    fn a_cpu_placed_text_projection_is_still_charged_to_host_ram() {
+        let root = TempDir::new().unwrap();
+        let transformer = root.path().join("ltx2-transformer.safetensors");
+        let vae = root.path().join("ltx2-vae.safetensors");
+        let gemma = root.path().join("model-00001-of-00001.safetensors");
+        let projection = root.path().join("text_projection.safetensors");
+        sparse_file(&transformer, 8 * GIB);
+        sparse_file(&vae, GIB);
+        sparse_file(&gemma, 4 * GIB);
+        sparse_file(&projection, 2 * GIB);
+        let mut config = Config::default();
+        config.models.insert(
+            "ltx2-case:bf16".to_string(),
+            ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                text_encoder_files: Some(vec![
+                    gemma.display().to_string(),
+                    projection.display().to_string(),
+                ]),
+                family: Some("ltx2.3".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let mut request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"x","model":"ltx2-case:bf16","width":512,"height":512,"steps":4,"guidance":1.0}"#,
+        )
+        .unwrap();
+        request.placement = Some(DevicePlacement {
+            text_encoders: DeviceRef::Cpu,
+            advanced: None,
+        });
+
+        let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+            .expect("a CPU-pinned LTX-2.3 encoder set keeps the model admissible")
+            .remove(0);
+
+        let streaming_heap = mold_inference::ltx2::cpu_gemma_streaming_anon_peak_bytes();
+        assert_eq!(
+            plan.predicted_host_increment_bytes,
+            BASE_HOST_TRANSIENT + 2 * GIB + streaming_heap,
+            "the projection is anonymous demand; only the weight shard is a mapping"
+        );
+    }
+
     /// hal9000 refusing every LTX-2 job on an idle 4090 (#1108).
     ///
     /// Its 24.37 GB Gemma plus the 6.59 GB streaming heap came to 30.96 GB
@@ -4667,7 +4727,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let transformer = root.path().join("ltx2-transformer.safetensors");
         let vae = root.path().join("ltx2-vae.safetensors");
-        let gemma = root.path().join("gemma-00001-of-00001.safetensors");
+        let gemma = root.path().join("model-00001-of-00001.safetensors");
         sparse_file(&transformer, 8 * GIB);
         sparse_file(&vae, GIB);
         sparse_file(&gemma, HAL9000_GEMMA_BYTES);
@@ -4718,7 +4778,7 @@ mod tests {
             .map(|index| {
                 let path = root
                     .path()
-                    .join(format!("gemma-0000{index}-of-00005.safetensors"));
+                    .join(format!("model-0000{index}-of-00005.safetensors"));
                 sparse_file(&path, 4 * GIB);
                 path
             })
@@ -4779,7 +4839,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let transformer = root.path().join("ltx2-transformer.safetensors");
         let vae = root.path().join("ltx2-vae.safetensors");
-        let gemma = root.path().join("gemma-00001-of-00001.safetensors");
+        let gemma = root.path().join("model-00001-of-00001.safetensors");
         sparse_file(&transformer, 8 * GIB);
         sparse_file(&vae, GIB);
         sparse_file(&gemma, REAL_GEMMA_BF16_BYTES);
@@ -4830,7 +4890,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let transformer = root.path().join("ltx2-transformer.safetensors");
         let vae = root.path().join("ltx2-vae.safetensors");
-        let gemma = root.path().join("gemma-00001-of-00001.safetensors");
+        let gemma = root.path().join("model-00001-of-00001.safetensors");
         sparse_file(&transformer, 8 * GIB);
         sparse_file(&vae, GIB);
         sparse_file(&gemma, 4 * GIB);
