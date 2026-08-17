@@ -1691,6 +1691,11 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 None,
                 mold_core::build_info::version_string(),
             );
+            // The replay idempotence key, exactly as the GPU worker stamps it.
+            // Without it a print saved by this path is unrecognisable to boot
+            // replay, which would re-render it into a duplicate — and output
+            // filenames are wall-clock, so nothing downstream could merge them.
+            metadata.job_id = Some(job.id.clone());
             if let Some(video) = response.video.as_ref() {
                 metadata.apply_video_output(video);
             }
@@ -1769,6 +1774,26 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                     })
                 };
                 saved_names = save_task.await.unwrap_or_default();
+            }
+
+            // Settle the durable row on what actually reached the gallery,
+            // mirroring the GPU worker. Left to the ticket's ordinary drop,
+            // a render finishing during shutdown would keep its row behind the
+            // retention fence and replay into a duplicate print; and a failed
+            // publication would delete the row, losing a replayed job outright
+            // since the gallery file is its only delivery.
+            if let Some(ticket) = job.journal.take() {
+                if saved_names.output.is_some() {
+                    ticket.complete();
+                } else {
+                    tracing::error!(
+                        job = %job.id,
+                        dir = ?job.output_dir,
+                        "generation finished but its output could not be saved; \
+                         holding the queue row for review"
+                    );
+                    ticket.hold("the generated output could not be saved to the gallery");
+                }
             }
 
             // Send SSE complete event

@@ -4259,6 +4259,69 @@ mod tests {
         );
     }
 
+    /// The CPU-only worker is a separate publication path from the GPU one, so
+    /// it needs the same two settlements: stamp the idempotence key before the
+    /// save, and clear the row only once the output actually landed. Without
+    /// the stamp, boot replay cannot recognise a print this path produced and
+    /// re-renders it into a duplicate that no client-side dedupe can merge,
+    /// because output filenames are wall-clock.
+    #[tokio::test]
+    async fn a_cpu_rendered_generation_stamps_its_job_id_and_clears_its_row() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, rx) = durable_state(db.clone(), output_dir.path());
+        let journal = state.queue_journal.clone();
+
+        // The real CPU-only dispatch owner — `StartupMode::CpuFallback` spawns
+        // exactly this.
+        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body("a cat", 512, 512)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert!(
+            journal.list_all().is_empty(),
+            "a published generation clears its durable row"
+        );
+
+        // The saved print carries the queue job that produced it, which is
+        // what makes replay idempotent.
+        let saved: Vec<String> = db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                let mut stmt = conn
+                    .prepare("SELECT json_extract(metadata_json, '$.job_id') FROM generations")?;
+                let rows = stmt.query_map([], |row| row.get::<_, Option<String>>(0))?;
+                Ok(rows.filter_map(|row| row.ok().flatten()).collect())
+            })
+            .unwrap();
+        assert_eq!(saved.len(), 1, "one print, carrying one job id: {saved:?}");
+        assert!(!saved[0].is_empty());
+        assert_eq!(
+            mold_db::generation_queue::find_completed_job_ids(
+                db.as_ref().as_ref().unwrap(),
+                &saved
+            )
+            .unwrap()
+            .len(),
+            1,
+            "replay's idempotence gate must recognise a CPU-rendered print"
+        );
+
+        worker.abort();
+        let _ = worker.await;
+    }
+
     /// A maintenance boot (`MOLD_GPUS=none`) has no dispatch owner at all, so
     /// there is nothing to replay INTO. Attempting it anyway sent every job
     /// into a dropped receiver, and the failed send dropped the ticket with a
