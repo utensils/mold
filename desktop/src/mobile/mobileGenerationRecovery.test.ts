@@ -421,6 +421,66 @@ describe("reconcileInterruptedGenerationJobs", () => {
     );
   });
 
+  it("keeps a queued row waiting when the host retains its queue across restarts", async () => {
+    let queueCalls = 0;
+    let capabilityCalls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/capabilities") {
+        capabilityCalls += 1;
+        return Promise.resolve({ queue: { durable_queue: true } });
+      }
+      if (path === "/api/queue") {
+        queueCalls += 1;
+        return Promise.resolve({
+          entries:
+            queueCalls <= 2
+              ? [{ id: "job-9", model: "ltx2:q8", state: "queued", position: 0 }]
+              : [],
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([galleryPrint]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+    const stages: Array<string | null> = [];
+    await reconcileInterruptedGenerationJobs(
+      [job],
+      options({
+        sleep: () => {
+          stages.push(job.stage);
+          return Promise.resolve();
+        },
+      }),
+    );
+
+    // The durable host runs the job with no client attached — deleting it
+    // would destroy exactly the work the server kept.
+    expect(apiFetchTo).not.toHaveBeenCalled();
+    expect(capabilityCalls).toBe(1);
+    expect(stages).toEqual(["Waiting in Studio’s queue", "Waiting in Studio’s queue"]);
+    expect(job.status).toBe("complete");
+    expect(job.result?.filename).toBe("resumed print.png");
+  });
+
+  it("still clears a zombie queued row when the host advertises no durable queue", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/capabilities") {
+        return Promise.resolve({ queue: { can_pause: false } });
+      }
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [{ id: "job-9", model: "ltx2:q8", state: "queued", position: 0 }],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob();
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/job-9", { method: "DELETE" });
+    expect(job.status).toBe("error");
+  });
+
   it("re-attaches to a running job by polling until the print lands", async () => {
     let queueCalls = 0;
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {

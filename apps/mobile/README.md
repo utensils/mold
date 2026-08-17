@@ -210,6 +210,15 @@ depending on localized WebKit error text. On resume, pre-ID queue and durable
 chain joins are bounded to the original submission window, so a later
 fixed-seed duplicate cannot be mistaken for the interrupted print or cancelled
 as its zombie. Background failure notifications wait for this reconciliation.
+Whether a still-queued row is cleared depends on the host: a server that
+advertises `queue.durable_queue` runs everything it admitted with no client
+attached and replays across a restart, so reconciliation keeps polling that row
+instead of deleting it (deleting would destroy exactly the work the host kept).
+A host without that capability — or one that cannot be asked — keeps the legacy
+contract and the zombie row is cleared. A terminal error frame carrying
+`retained` is likewise treated as an interruption rather than a failure, so the
+job is reconciled back to life instead of announcing a failure the host is
+still going to finish.
 
 **Output** (One shot | Sequence) is a segmented field in the Create form
 stack, directly above the model field — sequences are a setting of Create,

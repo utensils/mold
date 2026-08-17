@@ -416,7 +416,29 @@ async function findPreIdChain(job: Job, opts: GenerationRecoveryOptions): Promis
   );
 }
 
-async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<void> {
+/**
+ * Whether the frozen host keeps admitted generations across a restart and
+ * dispatches them with no client attached (`/api/capabilities.queue`
+ * `durable_queue`). Probed lazily — only a queued row asks — and memoized for
+ * the whole resume pass so one foreground wake costs at most one request.
+ * Any failure resolves `false`: an unknown host keeps the legacy contract,
+ * where a queued job whose stream died is skipped at dispatch.
+ */
+function durableQueueProbe(opts: GenerationRecoveryOptions): () => Promise<boolean> {
+  let pending: Promise<boolean> | null = null;
+  return () => {
+    pending ??= apiJsonTo<{ queue?: { durable_queue?: boolean } }>(opts.target, "/api/capabilities")
+      .then((capabilities) => capabilities.queue?.durable_queue === true)
+      .catch(() => false);
+    return pending;
+  };
+}
+
+async function reconcileJob(
+  job: Job,
+  opts: GenerationRecoveryOptions,
+  hostRetainsQueue: () => Promise<boolean> = durableQueueProbe(opts),
+): Promise<void> {
   const isActive = opts.isActive ?? (() => true);
   const sleep =
     opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -543,6 +565,15 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
         continue;
       }
       if (entry?.state === "queued") {
+        if (await hostRetainsQueue()) {
+          // A durable-queue host runs everything it admitted, client attached
+          // or not, and replays what a restart interrupted. Deleting the row
+          // here would destroy exactly the work the host kept — wait for it.
+          if (settledExternally(job) || !isActive()) return;
+          job.stage = `Waiting in ${opts.hostLabel}’s queue`;
+          await sleep(interval);
+          continue;
+        }
         // The host skips queued jobs whose client stream died with the
         // suspension — clear the zombie row instead of letting it linger.
         await apiFetchTo(opts.target, `/api/queue/${encodeURIComponent(entry.id)}`, {
@@ -593,5 +624,10 @@ export function reconcileInterruptedGenerationJobs(
     job.status = "loading";
     job.stage = `Reconnecting to ${opts.hostLabel}`;
   }
-  return Promise.all(interrupted.map((job) => reconcileJob(job, opts))).then(() => undefined);
+  // One probe for the whole batch: every sibling was submitted to the same
+  // frozen route, so they share one answer about that host's queue contract.
+  const hostRetainsQueue = durableQueueProbe(opts);
+  return Promise.all(interrupted.map((job) => reconcileJob(job, opts, hostRetainsQueue))).then(
+    () => undefined,
+  );
 }
