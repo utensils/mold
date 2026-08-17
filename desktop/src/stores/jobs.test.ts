@@ -121,6 +121,58 @@ beforeEach(() => {
   listDevices.mockRejectedValue(new Error("legacy server"));
 });
 
+describe("held rows", () => {
+  it("keeps a held row in the listing and sorts it after live work", async () => {
+    // A held job exceeded its replay or dispatch cap: it exists only in the
+    // journal and will never start on its own. Dropping it here is the one
+    // outcome the held-row visibility contract forbids — nothing reports it,
+    // and the operator cannot clear the row that is guaranteed to be stuck.
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [
+            {
+              id: "srv-held",
+              model: "flux2-klein",
+              state: "held",
+              started_at_unix_ms: 1,
+              position: 2,
+              durable: true,
+              held_reason: "dispatch attempts exhausted",
+            },
+            {
+              id: "srv-run",
+              model: "flux2-klein",
+              state: "running",
+              started_at_unix_ms: 2,
+              position: 0,
+              gpu: 0,
+            },
+          ],
+        });
+      }
+      if (path === "/api/status") return Promise.resolve({ queue_depth: 0 });
+      if (path === "/api/capabilities") return Promise.resolve({ queue: {} });
+      return Promise.resolve({});
+    });
+    listDevices.mockResolvedValue({ plan_version: 1, devices: [device(0)] });
+    const hosts = seedHosts();
+    const host = hosts.all.find((entry) => entry.id === "hal9000-7680")!;
+    const jobs = useJobsStore();
+
+    await jobs.refreshHost(host);
+
+    const states = (jobs.queues[host.id]?.entries ?? []).map((entry) => entry.state);
+    expect(states).toContain("held");
+    // The shared surface both Machines and Create render puts running work
+    // first and parked work last — held is not competing for a lane.
+    const surface = jobs.queueSurface.map((row) => row.entry.state);
+    expect(surface.indexOf("running")).toBeLessThan(surface.indexOf("held"));
+    const held = jobs.queues[host.id]?.entries.find((entry) => entry.state === "held");
+    expect(held?.held_reason).toBe("dispatch attempts exhausted");
+  });
+});
+
 describe("jobs store", () => {
   it("refresh() snapshots every ready host's queue, pause state, and capabilities", async () => {
     seedHosts();

@@ -480,7 +480,10 @@ export interface HostDiskUsage {
 
 // ── /api/queue (L3 reconciliation) ─────────────────────────────────────────
 
-export type QueueJobState = "queued" | "running";
+/** `held` is additive: a journalled job the host parked after it exhausted its
+ * replay or dispatch budget. It exists only in the durable queue, never starts
+ * on its own, and is listed so it is not invisible. Absent on older servers. */
+export type QueueJobState = "queued" | "running" | "held";
 
 export interface QueueEntry {
   id: string;
@@ -492,6 +495,8 @@ export interface QueueEntry {
   gpu?: number;
   /** Preferred lane for queued jobs. Omitted/null means Auto. */
   target_gpu?: number | null;
+  /** Why the host parked this job. Present only for `state: "held"`. */
+  held_reason?: string | null;
   /** Whether the host journalled THIS job and will run it across a restart.
    * Additive and deliberately per-job: a host that advertises
    * `queue.durable_queue` still reports `false` for a job it excluded at

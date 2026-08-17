@@ -105,3 +105,30 @@ describe("QueueCard reorder index", () => {
     expect(wrapper.emitted("move")).toEqual([["A", 1]]);
   });
 });
+
+describe("held rows", () => {
+  it("shows why a held job is parked, and still offers to clear it", async () => {
+    // A held job exceeded its replay or dispatch budget: it will never start
+    // on its own, so the reason and the cancel action are the only two things
+    // that make the row actionable rather than merely puzzling.
+    const wrapper = mount(QueueCard, {
+      props: {
+        gpuOrdinals: [],
+        entries: [
+          {
+            id: "srv-held",
+            model: "flux2-klein",
+            state: "held" as const,
+            started_at_unix_ms: 1,
+            position: 2,
+            held_reason: "dispatch attempts exhausted",
+          },
+        ],
+      },
+    });
+
+    expect(wrapper.text()).toContain("held");
+    expect(wrapper.text()).toContain("dispatch attempts exhausted");
+    expect(wrapper.find("[data-test='queue-cancel']").exists()).toBe(true);
+  });
+});

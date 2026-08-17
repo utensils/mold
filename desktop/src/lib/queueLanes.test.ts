@@ -22,6 +22,28 @@ describe("laneForEntry", () => {
   });
 });
 
+describe("held rows", () => {
+  it("orders held last instead of comparing an unknown state", () => {
+    // `STATE_RANK` is indexed by the row's state: an unrecognised one yields
+    // `undefined`, and `undefined - n` is NaN, so the comparator silently
+    // stops ordering rather than failing loudly.
+    const rows = [
+      entry({ id: "held", state: "held", position: 0 }),
+      entry({ id: "run", state: "running", position: 1 }),
+      entry({ id: "queued", state: "queued", position: 2 }),
+    ];
+
+    const lanes = computeQueueLanes(rows, []);
+
+    expect(lanes[0]!.entries.map((row) => row.id)).toEqual(["run", "queued", "held"]);
+  });
+
+  it("puts a held row in the Auto lane rather than claiming a GPU", () => {
+    // It is not running anywhere and is not waiting for a turn.
+    expect(laneForEntry(entry({ id: "h", state: "held" }))).toBeNull();
+  });
+});
+
 describe("computeQueueLanes", () => {
   it("keeps a single flat lane when the host reports fewer than two GPUs", () => {
     const rows = [entry({ id: "a" }), entry({ id: "b", position: 1 })];
