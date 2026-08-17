@@ -222,7 +222,15 @@ cleared as before. A `held` row is listed but never auto-run, so it settles
 immediately with the host's `held_reason`. A terminal error frame carrying
 `retained` is likewise treated as an interruption rather than a failure, so the
 job is reconciled back to life instead of announcing a failure the host is
-still going to finish.
+still going to finish, and it buys a much longer wait than a suspended socket
+does — a restarting host is unreachable for longer than a cold model load.
+
+Reconciliation lives in `desktop/src/lib/generationRecovery.ts` and is run by
+the shared generation store for every surface, not by this shell alone; the
+iPhone keeps its own call as the foreground-resume entry point. A host that
+never answers produces no verdict: the row stays flagged as an interruption so
+a later resume can try again, and only a host that answers "no such job, no
+such print" settles it as a failure.
 
 **Output** (One shot | Sequence) is a segmented field in the Create form
 stack, directly above the model field — sequences are a setting of Create,
