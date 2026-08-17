@@ -2503,12 +2503,27 @@ fn build_plan(
             .get(path)
             .map_or_else(|| artifact_size(path), |artifact| artifact.bytes);
         let (placement, load_strategy, vram, host) = if place_cpu {
-            let anon_peak = if gemma_anon_peak_anchor.as_ref() == Some(role) {
-                mold_inference::ltx2::cpu_gemma_streaming_anon_peak_bytes()
+            // A streaming CPU encoder never materializes its weights: the
+            // shards stay a memory-mapped `VarBuilder` and each decoder layer
+            // is built and dropped inside the forward loop. Those pages are
+            // file-backed and reclaimable — the kernel evicts them under
+            // pressure and `MemAvailable`, this ledger's own input, already
+            // counts them as available — so reserving them as anonymous demand
+            // asks for ~24 GB of free anonymous room to hold memory that can
+            // never cause an OOM. On a host whose headroom lands just under
+            // that sum it refuses every job while the GPU idles (#1108).
+            // Only the encoder's real anonymous heap is irreclaimable, and
+            // only the anchor shard carries it.
+            let streams_from_mmap = ltx2_cpu_gemma_streams_from_mmap(context.family, role, path);
+            let host = if streams_from_mmap {
+                if gemma_anon_peak_anchor.as_ref() == Some(role) {
+                    mold_inference::ltx2::cpu_gemma_streaming_anon_peak_bytes()
+                } else {
+                    0
+                }
             } else {
-                0
+                bytes
             };
-            let host = bytes.saturating_add(anon_peak);
             host_bytes_by_path.insert(path.clone(), host);
             (
                 ResolvedComponentPlacement::Cpu,
@@ -2917,6 +2932,20 @@ fn exact_v1_compatibility_dtype(model: &str) -> Option<PlannedDType> {
 /// that set belongs to the encoder rather than to any one shard, so it is
 /// attributed to the lowest-ordered shard. Added per shard it would be charged
 /// five times over on a real Gemma split.
+/// Whether a CPU-placed component's weights stay a reclaimable file mapping
+/// rather than becoming anonymous host demand.
+///
+/// True only for LTX-2's safetensors Gemma shards, which
+/// `GemmaHiddenStateEncoder::load_from_assets` builds through `new_streaming`.
+/// The Q4 GGUF variant keeps its own quantized residency in host RAM, and every
+/// other family's CPU-parked encoder is copied to the host, so both are charged
+/// their bytes.
+fn ltx2_cpu_gemma_streams_from_mmap(family: &str, role: &ComponentRole, path: &Path) -> bool {
+    matches!(family, "ltx2" | "ltx-2" | "ltx2.3")
+        && matches!(role, ComponentRole::GemmaShard(_))
+        && mold_inference::ltx2::cpu_gemma_allocates_anon_peak(path)
+}
+
 fn ltx2_cpu_gemma_anon_peak_anchor(
     family: &str,
     artifacts: &BTreeMap<ComponentRole, PathBuf>,
@@ -4566,14 +4595,19 @@ mod tests {
         }));
     }
 
-    /// A CPU-placed LTX-2 Gemma costs its mmap plus a bounded streaming heap.
+    /// A CPU-placed LTX-2 Gemma costs its streaming heap and nothing else.
     ///
-    /// It is neither the file size alone — which ignores the ~6.6 GB of F32
-    /// embedding table, in-flight layers, and hidden states the encoder really
-    /// allocates — nor twice the file size, which invents a second 24.7 GB copy
-    /// the streaming loader never makes and parks the job forever (#1099).
+    /// The shards stay a memory-mapped `VarBuilder`, so their pages are
+    /// file-backed and reclaimable: the kernel can evict them under pressure
+    /// and `MemAvailable` — the ledger's own input — already counts them as
+    /// available. Reserving them as though they were anonymous demand requires
+    /// ~24 GB of free anonymous room for memory that can never cause an OOM,
+    /// and on a host whose headroom sits just under that sum it refuses the
+    /// job forever (#1108). Only the encoder's real anonymous allocations —
+    /// the F32 embedding table, in-flight layers, and hidden states — are
+    /// irreclaimable, and those are exactly the streaming heap.
     #[test]
-    fn ltx2_cpu_gemma_is_charged_its_mmap_plus_streaming_heap() {
+    fn ltx2_cpu_gemma_is_charged_only_its_streaming_heap() {
         let root = TempDir::new().unwrap();
         let transformer = root.path().join("ltx2-transformer.safetensors");
         let vae = root.path().join("ltx2-vae.safetensors");
@@ -4609,13 +4643,63 @@ mod tests {
         let encoder = &plan.components[&ComponentRole::GemmaShard(0)];
         assert_eq!(encoder.placement, ResolvedComponentPlacement::Cpu);
         assert_eq!(
-            encoder.predicted_host_bytes,
-            4 * GIB + streaming_heap,
-            "the mmap'd shard plus the heap its streaming encoder allocates"
+            encoder.predicted_host_bytes, streaming_heap,
+            "only the streaming encoder's anonymous heap; the shard itself is a \
+             reclaimable file mapping"
         );
         assert_eq!(
             plan.predicted_host_increment_bytes,
-            BASE_HOST_TRANSIENT + 4 * GIB + streaming_heap
+            BASE_HOST_TRANSIENT + streaming_heap
+        );
+    }
+
+    /// hal9000 refusing every LTX-2 job on an idle 4090 (#1108).
+    ///
+    /// Its 24.37 GB Gemma plus the 6.59 GB streaming heap came to 30.96 GB
+    /// against 30.78 GB of ledger headroom, so both queued jobs sat blocked on
+    /// `insufficient_host_ram` while the GPU was at 0% and nothing would ever
+    /// free the difference. Charging the mapping is what made a 180 MB gap
+    /// fatal.
+    #[test]
+    fn a_cpu_gemma_fits_the_host_that_reported_1108() {
+        const HAL9000_GEMMA_BYTES: u64 = 24_370_000_000;
+        const HAL9000_HOST_HEADROOM_BYTES: u64 = 30_782_477_722;
+        let root = TempDir::new().unwrap();
+        let transformer = root.path().join("ltx2-transformer.safetensors");
+        let vae = root.path().join("ltx2-vae.safetensors");
+        let gemma = root.path().join("gemma-00001-of-00001.safetensors");
+        sparse_file(&transformer, 8 * GIB);
+        sparse_file(&vae, GIB);
+        sparse_file(&gemma, HAL9000_GEMMA_BYTES);
+        let mut config = Config::default();
+        config.models.insert(
+            "ltx2-case:bf16".to_string(),
+            ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                text_encoder_files: Some(vec![gemma.display().to_string()]),
+                family: Some("ltx2".to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let mut request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"x","model":"ltx2-case:bf16","width":512,"height":512,"steps":4,"guidance":1.0}"#,
+        )
+        .unwrap();
+        request.placement = Some(DevicePlacement {
+            text_encoders: DeviceRef::Cpu,
+            advanced: None,
+        });
+
+        let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+            .expect("an idle 4090 must admit this plan")
+            .remove(0);
+
+        assert!(
+            plan.predicted_host_increment_bytes < HAL9000_HOST_HEADROOM_BYTES,
+            "charged {} against {HAL9000_HOST_HEADROOM_BYTES} of headroom — this host \
+             would refuse every LTX-2 job with an idle GPU",
+            plan.predicted_host_increment_bytes
         );
     }
 
@@ -4671,11 +4755,12 @@ mod tests {
         let streaming_heap = mold_inference::ltx2::cpu_gemma_streaming_anon_peak_bytes();
         assert_eq!(
             plan.predicted_host_increment_bytes,
-            BASE_HOST_TRANSIENT + 5 * 4 * GIB + streaming_heap
+            BASE_HOST_TRANSIENT + streaming_heap,
+            "five reclaimable mappings and one streaming heap"
         );
         let carrying_the_heap = (0..5)
             .filter(|index| {
-                plan.components[&ComponentRole::GemmaShard(*index)].predicted_host_bytes > 4 * GIB
+                plan.components[&ComponentRole::GemmaShard(*index)].predicted_host_bytes > 0
             })
             .count();
         assert_eq!(carrying_the_heap, 1, "exactly one shard anchors the heap");
@@ -4723,8 +4808,13 @@ mod tests {
             .remove(0);
 
         assert!(
-            plan.predicted_host_increment_bytes > REAL_GEMMA_BF16_BYTES,
+            plan.predicted_host_increment_bytes
+                >= mold_inference::ltx2::cpu_gemma_streaming_anon_peak_bytes(),
             "the streaming heap is real and must be charged"
+        );
+        assert!(
+            plan.predicted_host_increment_bytes < REAL_GEMMA_BF16_BYTES,
+            "the shards are a reclaimable file mapping, not anonymous demand"
         );
         assert!(
             plan.predicted_host_increment_bytes < REPORTED_HOST_HEADROOM_BYTES,
