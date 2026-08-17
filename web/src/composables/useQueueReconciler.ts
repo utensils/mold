@@ -120,7 +120,15 @@ export function startQueueReconciler(
         const listing = await fetchQueue(group.target ?? undefined);
         const known = new Set(listing.entries.map((e) => e.id));
         for (const missing of reconcileRound(group.jobs, known, Date.now())) {
-          if (missing.detached) {
+          // A row leaves the queue for two reasons this loop cannot tell
+          // apart: the job died, or it FINISHED. Absence alone is therefore
+          // not proof of failure — and every trigger this sweeper documents
+          // (page reload, server restart, tab suspended past keepalive) leaves
+          // the host still working, so for a job that reached real work the
+          // likely answer is that its print is already in the Library. Only a
+          // job that never started work can be dead-lettered with authority:
+          // it produced nothing, so there is nothing to find.
+          if (missing.detached || missing.workStarted) {
             settleDetached(missing.id, DETACHED_SETTLE_NOTE);
           } else {
             failRunning(

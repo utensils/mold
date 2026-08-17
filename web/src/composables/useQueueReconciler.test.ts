@@ -131,7 +131,9 @@ describe("startQueueReconciler (live polling)", () => {
     vi.useFakeTimers();
     vi.mocked(fetchQueue).mockResolvedValue({ entries: [] });
     const jobs = ref<Job[]>([
-      makeJob({ id: "missing-client", lastProgressAt: 0 }),
+      // Never started work: no output can exist, so a vanished row is a
+      // genuine dead letter rather than a print waiting in the Library.
+      makeJob({ id: "missing-client", lastProgressAt: 0, workStarted: false }),
     ]);
     const failRunning = vi.fn();
     const handle = startGenerateQueueReconciler(
@@ -144,6 +146,36 @@ describe("startQueueReconciler (live polling)", () => {
     expect(failRunning).toHaveBeenCalledWith(
       "missing-client",
       "job not found on server — connection lost",
+    );
+    handle.stop();
+    vi.useRealTimers();
+  });
+
+  it("does not dead-letter a job whose row vanished because it COMPLETED", async () => {
+    // A row leaves `/api/queue` for two reasons and this loop cannot tell them
+    // apart: the job died, or it FINISHED. For a job that had started real
+    // work, finishing is the likely one — and every trigger this sweeper
+    // documents (reload, server restart, tab suspended past keepalive) leaves
+    // the host still rendering. Announcing "connection lost" there reports a
+    // failure for a print sitting in the Library.
+    vi.useFakeTimers();
+    vi.mocked(fetchQueue).mockResolvedValue({ entries: [] });
+    const jobs = ref<Job[]>([
+      makeJob({ id: "finished-client", lastProgressAt: 0, workStarted: true }),
+    ]);
+    const failRunning = vi.fn();
+    const settleDetached = vi.fn();
+    const handle = startGenerateQueueReconciler(
+      { jobs, failRunning, settleDetached },
+      { intervalMs: 1_000 },
+    );
+
+    await vi.advanceTimersByTimeAsync(RECONCILE_GRACE_MS + 2_100);
+
+    expect(failRunning).not.toHaveBeenCalled();
+    expect(settleDetached).toHaveBeenCalledWith(
+      "finished-client",
+      DETACHED_SETTLE_NOTE,
     );
     handle.stop();
     vi.useRealTimers();
@@ -165,7 +197,12 @@ describe("startQueueReconciler (live polling)", () => {
 
     const jobs = ref<Job[]>([
       makeJob({ id: "j-keep", serverId: "srv-keep", lastProgressAt: 0 }),
-      makeJob({ id: "j-zombie", serverId: "srv-zombie", lastProgressAt: 0 }),
+      makeJob({
+        id: "j-zombie",
+        serverId: "srv-zombie",
+        lastProgressAt: 0,
+        workStarted: false,
+      }),
     ]);
     const failed: Array<{ id: string; error: string }> = [];
     const handle = startQueueReconciler(
