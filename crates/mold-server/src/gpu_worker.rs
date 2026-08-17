@@ -2026,9 +2026,7 @@ fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUp
         }
         let message = fatal_cuda_user_message(&job.generation.model);
         if let Some(ref tx) = job.generation.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                message: message.clone(),
-            }));
+            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(message.clone())));
         }
         let _ = job.generation.result_tx.send(Err(message));
         drop(cleanup);
@@ -2359,14 +2357,26 @@ pub(crate) fn shutdown_retention_user_message(model_name: &str) -> String {
     format!("the host is restarting; '{model_name}' did not start and stays queued to finish there")
 }
 
-/// The reason this worker cannot accept work, if any. Poison outranks
-/// shutdown: a quarantined context is the more specific and more actionable
-/// fact.
-fn worker_unavailable_message(worker: &GpuWorker, model_name: &str) -> Option<String> {
+/// Why this worker cannot accept work, if it cannot. Poison outranks shutdown:
+/// a quarantined context is the more specific and more actionable fact.
+struct WorkerUnavailable {
+    message: String,
+    /// True only for the shutdown branch — a poisoned context is a real
+    /// failure and must not be dressed up as a retention.
+    retainable: bool,
+}
+
+fn worker_unavailable(worker: &GpuWorker, model_name: &str) -> Option<WorkerUnavailable> {
     if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
-        Some(fatal_cuda_user_message(model_name))
+        Some(WorkerUnavailable {
+            message: fatal_cuda_user_message(model_name),
+            retainable: false,
+        })
     } else if worker.shutdown_requested.load(Ordering::SeqCst) {
-        Some(shutdown_retention_user_message(model_name))
+        Some(WorkerUnavailable {
+            message: shutdown_retention_user_message(model_name),
+            retainable: true,
+        })
     } else {
         None
     }
@@ -2647,8 +2657,8 @@ pub(crate) fn ensure_worker_not_poisoned(
     worker: &GpuWorker,
     model_name: &str,
 ) -> anyhow::Result<()> {
-    if let Some(message) = worker_unavailable_message(worker, model_name) {
-        anyhow::bail!(message);
+    if let Some(unavailable) = worker_unavailable(worker, model_name) {
+        anyhow::bail!(unavailable.message);
     }
     Ok(())
 }
@@ -3498,9 +3508,7 @@ fn validate_h3_publication_contract(
 
 fn reject_claimed_h3_generation_message(job: GpuJob, error: String) -> bool {
     if let Some(progress_tx) = &job.progress_tx {
-        let _ = progress_tx.send(SseMessage::Error(SseErrorEvent {
-            message: error.clone(),
-        }));
+        let _ = progress_tx.send(SseMessage::Error(SseErrorEvent::failed(error.clone())));
     }
     let _ = job.result_tx.send(Err(error));
     false
@@ -3593,11 +3601,16 @@ fn process_job_with_sink(
     // Jobs may already be buffered in this worker's channel when a preceding
     // job kills the context. Fail them without touching CUDA, including jobs
     // explicitly pinned to this ordinal.
-    if let Some(err_msg) = worker_unavailable_message(worker, &model_name) {
+    if let Some(unavailable) = worker_unavailable(worker, &model_name) {
+        let err_msg = unavailable.message;
+        let retained = job.journal.is_some() && unavailable.retainable;
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                message: err_msg.clone(),
-            }));
+            let event = if retained {
+                SseErrorEvent::retained(err_msg.clone())
+            } else {
+                SseErrorEvent::failed(err_msg.clone())
+            };
+            let _ = tx.send(SseMessage::Error(event));
         }
         let _ = job.result_tx.send(Err(err_msg));
         return false;
@@ -3622,9 +3635,7 @@ fn process_job_with_sink(
             );
             tracing::error!(gpu = ordinal, model = %model_name, attempts, cap, "held an exhausted durable queue row");
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: err_msg.clone(),
-                }));
+                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
             }
             // The row is already `held`; settle the ticket so its drop does
             // not delete what the operator now needs to inspect.
@@ -3669,9 +3680,7 @@ fn process_job_with_sink(
         Err(error) => {
             let err_msg = format!("generation reference binding error: {error:#}");
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: err_msg.clone(),
-                }));
+                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
             }
             let _ = job.result_tx.send(Err(err_msg));
             return false;
@@ -3706,9 +3715,7 @@ fn process_job_with_sink(
     if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
         let err_msg = error.to_string();
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                message: err_msg.clone(),
-            }));
+            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
         }
         let _ = job.result_tx.send(Err(err_msg));
         return false;
@@ -3791,9 +3798,7 @@ fn process_job_with_sink(
             )
         };
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                message: err_msg.clone(),
-            }));
+            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
         }
         let _ = job.result_tx.send(Err(err_msg));
         if count_worker_failure {
@@ -3818,9 +3823,7 @@ fn process_job_with_sink(
     if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
         let err_msg = error.to_string();
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                message: err_msg.clone(),
-            }));
+            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
         }
         let _ = job.result_tx.send(Err(err_msg));
         return false;
@@ -3859,9 +3862,7 @@ fn process_job_with_sink(
     let Some(mut cached_engine) = taken else {
         let err_msg = "engine not found in cache after load".to_string();
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                message: err_msg.clone(),
-            }));
+            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
         }
         let _ = job.result_tx.send(Err(err_msg));
         clear_active_generation(worker);
@@ -3983,9 +3984,7 @@ fn process_job_with_sink(
                 clear_active_generation(worker);
                 let error = error.to_string();
                 if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                        message: error.clone(),
-                    }));
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(error.clone())));
                 }
                 let _ = job.result_tx.send(Err(error));
                 return false;
@@ -4012,9 +4011,7 @@ fn process_job_with_sink(
                 let err_msg =
                     "generation error: engine returned no images, video, or audio".to_string();
                 if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                        message: err_msg.clone(),
-                    }));
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
                 }
                 let _ = job.result_tx.send(Err(err_msg));
                 return false;
@@ -4185,10 +4182,18 @@ fn process_job_with_sink(
             if count_worker_failure {
                 record_failure(worker);
             }
+            // A retained job's stream ends with a terminal frame rather than a
+            // quiet close: a quiet close leaves the desktop app in `loading`
+            // forever and hard-fails the web client. The flag is what lets a
+            // new client read this as interrupted instead of failed.
+            let retained = job.journal.is_some() && mold_inference::is_inference_cancelled(&e);
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: err_msg.clone(),
-                }));
+                let event = if retained {
+                    SseErrorEvent::retained(err_msg.clone())
+                } else {
+                    SseErrorEvent::failed(err_msg.clone())
+                };
+                let _ = tx.send(SseMessage::Error(event));
             }
             let _ = job.result_tx.send(Err(err_msg));
             false
@@ -4204,9 +4209,7 @@ fn process_job_with_sink(
                 "inference panicked on GPU {ordinal}: {msg}; CUDA owner was quarantined and the server must restart"
             );
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: err_msg.clone(),
-                }));
+                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
             }
             let _ = job.result_tx.send(Err(err_msg));
             false
@@ -6877,7 +6880,7 @@ mod tests {
         assert!(error.contains("claimed-attempt runtime bridge is not available"));
         assert!(matches!(
             progress_rx.recv().await,
-            Some(SseMessage::Error(SseErrorEvent { message }))
+            Some(SseMessage::Error(SseErrorEvent { message, .. }))
                 if message.contains("claimed-attempt runtime bridge is not available")
         ));
         assert_eq!(settlements.load(Ordering::SeqCst), 1);
@@ -6912,7 +6915,7 @@ mod tests {
         assert!(error.contains("cancelled before execution"));
         assert!(matches!(
             progress_rx.recv().await,
-            Some(SseMessage::Error(SseErrorEvent { message }))
+            Some(SseMessage::Error(SseErrorEvent { message, .. }))
                 if message.contains("cancelled before execution")
         ));
         assert_eq!(settlements.load(Ordering::SeqCst), 1);

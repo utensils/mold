@@ -833,6 +833,32 @@ pub async fn run_server(
         );
     }
 
+    // A SIGKILL runs no destructor, so every hard stop used to leak a
+    // directory of reference media under MOLD_HOME. Swept in the same startup
+    // pass that recovers the queue, because the two have the same cause.
+    {
+        let swept = reference_uploads::sweep_orphaned_staging_roots(state.reference_uploads.root());
+        if swept > 0 {
+            info!(swept, "removed orphaned reference-upload staging roots");
+        }
+    }
+
+    // Retained generations resume before the router serves, as ONE sequential
+    // task: `submit_when_available` serializes on a single global capacity
+    // mutex, so parallel replay would land in arbitrary order and destroy the
+    // ordering the journal exists to preserve.
+    {
+        let report = crate::queue_journal::replay(&state).await;
+        if report.resumed > 0 || report.held > 0 || report.already_completed > 0 {
+            info!(
+                resumed = report.resumed,
+                already_completed = report.already_completed,
+                held = report.held,
+                "durable generation queue replay complete"
+            );
+        }
+    }
+
     // Background idle-TTL sweeper: reclaims parked engines that haven't been
     // touched for `MOLD_CACHE_IDLE_TTL_SECS` seconds. Abort handle bound to
     // graceful shutdown like every other long-running task in this fn.

@@ -3856,6 +3856,40 @@ pub struct SseUpscaleCompleteEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SseErrorEvent {
     pub message: String,
+    /// The job did not fail — the host is restarting and the job stays queued
+    /// to finish there. A terminal frame is sent rather than a quiet close
+    /// because a quiet close leaves the desktop app in `loading` forever and
+    /// hard-fails the web client. Old clients ignore the flag and show the
+    /// message; new clients treat it as interrupted, not failed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retained: bool,
+    /// Machine-readable reason, when there is one worth branching on
+    /// (currently only `server_restarting`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
+/// `SseErrorEvent.code` for a job the host retained across a restart.
+pub const SSE_ERROR_CODE_SERVER_RESTARTING: &str = "server_restarting";
+
+impl SseErrorEvent {
+    /// An ordinary failure: the job is over and the client should say so.
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retained: false,
+            code: None,
+        }
+    }
+
+    /// The host is restarting and will finish this job after it comes back.
+    pub fn retained(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retained: true,
+            code: Some(SSE_ERROR_CODE_SERVER_RESTARTING.to_string()),
+        }
+    }
 }
 
 // ── Resource telemetry (Agent B scope) ───────────────────────────────────────
@@ -5640,9 +5674,7 @@ mod tests {
 
     #[test]
     fn sse_error_event_roundtrip() {
-        let event = SseErrorEvent {
-            message: "something failed".to_string(),
-        };
+        let event = SseErrorEvent::failed("something failed".to_string());
         let json = serde_json::to_string(&event).unwrap();
         let back: SseErrorEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back.message, "something failed");
@@ -6924,9 +6956,17 @@ pub struct QueueCapabilities {
     /// Queue pins may use opaque stable device IDs.
     #[serde(default)]
     pub stable_device_pins: bool,
-    /// Server can cooperatively cancel already-running work.
+    /// Server can cooperatively cancel already-running work. Deliberately
+    /// false: the machinery exists after the durable-queue work, but exposing
+    /// it contradicts the standing "running work remains non-cancellable"
+    /// contract and is its own UX decision.
     #[serde(default)]
     pub cooperative_cancellation: bool,
+    /// A queued job survives a server restart and is replayed automatically.
+    /// Clients that see this must stop dead-lettering a queued job whose
+    /// stream died — on this host that job is still going to run.
+    #[serde(default)]
+    pub durable_queue: bool,
     /// Server accepts one atomic batch request instead of client siblings.
     #[serde(default)]
     pub server_batch: bool,
@@ -8479,5 +8519,57 @@ mod queue_plan_wire_tests {
         assert!(serialized
             .get("execution_equivalence_fingerprint")
             .is_none());
+    }
+
+    /// Every field the durable queue adds is additive in both directions: an
+    /// old server's payload deserializes, and a new server's payload stays
+    /// readable by an old client (which ignores what it does not know).
+    #[test]
+    fn durable_queue_wire_fields_are_additive() {
+        let legacy: SseErrorEvent = serde_json::from_str(r#"{"message":"boom"}"#).unwrap();
+        assert!(!legacy.retained);
+        assert_eq!(legacy.code, None);
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap(),
+            serde_json::json!({"message": "boom"}),
+            "a plain failure must not grow fields on the wire"
+        );
+
+        let retained = SseErrorEvent::retained("the host is restarting");
+        let encoded = serde_json::to_value(&retained).unwrap();
+        assert_eq!(encoded["retained"], serde_json::json!(true));
+        assert_eq!(
+            encoded["code"],
+            serde_json::json!(SSE_ERROR_CODE_SERVER_RESTARTING)
+        );
+        let round_tripped: SseErrorEvent = serde_json::from_value(encoded).unwrap();
+        assert!(round_tripped.retained);
+
+        let legacy_queue: QueueCapabilities =
+            serde_json::from_str(r#"{"can_pause":true,"can_cancel_all":true}"#).unwrap();
+        assert!(!legacy_queue.durable_queue);
+        assert!(!legacy_queue.cooperative_cancellation);
+
+        let legacy_metadata: OutputMetadata = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat",
+            "model": "flux-dev:q4",
+            "seed": 7,
+            "steps": 4,
+            "guidance": 3.5,
+            "width": 512,
+            "height": 512,
+            "format": "png",
+            "version": "0.0.0",
+        }))
+        .unwrap();
+        assert_eq!(legacy_metadata.job_id, None);
+        assert!(
+            !serde_json::to_value(&legacy_metadata)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("job_id"),
+            "an unstamped print must not gain a null job id"
+        );
     }
 }

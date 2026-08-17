@@ -306,6 +306,168 @@ impl QueueJournal {
         }
     }
 
+    /// Reconcile the journal against reality before anything is replayed.
+    ///
+    /// A `running` row means the process died mid-dispatch, so the state
+    /// column is rewritten to say what to do next. A row whose output
+    /// directory no longer exists is re-pointed at the currently configured
+    /// gallery, and held if even that is unusable — a replay whose output has
+    /// nowhere to land is a wasted render.
+    pub fn startup_reconcile(&self, current_output_dir: Option<&Path>) -> ReconcileReport {
+        let mut report = ReconcileReport::default();
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return report;
+        };
+        let now = now_ms();
+        match generation_queue::requeue_running(db, owner, now) {
+            Ok(count) => report.requeued = count,
+            Err(error) => tracing::warn!(
+                error = %format!("{error:#}"),
+                "could not requeue interrupted durable generations"
+            ),
+        }
+        for row in self.list_all() {
+            if row.state == QueueRowState::Held {
+                report.held += 1;
+                continue;
+            }
+            if row.output_dir.is_dir() {
+                continue;
+            }
+            match current_output_dir {
+                Some(replacement) if replacement != row.output_dir => {
+                    tracing::warn!(
+                        job = %row.id,
+                        was = %row.output_dir.display(),
+                        now = %replacement.display(),
+                        "a retained generation's gallery directory moved; re-pointing it"
+                    );
+                    let replacement = replacement.to_string_lossy().into_owned();
+                    if let Err(error) =
+                        generation_queue::set_output_dir(db, &row.id, &replacement, now)
+                    {
+                        tracing::warn!(
+                            job = %row.id,
+                            error = %format!("{error:#}"),
+                            "could not re-point a retained generation"
+                        );
+                    } else {
+                        report.repointed += 1;
+                    }
+                }
+                _ => {
+                    let _ = generation_queue::hold(
+                        db,
+                        &row.id,
+                        "the gallery directory this job was admitted for no longer exists",
+                        now,
+                    );
+                    report.held += 1;
+                }
+            }
+        }
+        report
+    }
+
+    /// Drop every row whose output already exists.
+    ///
+    /// A print records the queue job that produced it, so a job that finished
+    /// between its last save and the crash is recognised and never re-run.
+    /// Without this, replay duplicates prints: output filenames are wall-clock,
+    /// so no downstream dedupe can merge the two afterwards.
+    pub fn drop_already_completed(&self) -> usize {
+        let Some(db) = self.db() else {
+            return 0;
+        };
+        let candidates: Vec<String> = self
+            .list_all()
+            .into_iter()
+            .filter(|row| row.state != QueueRowState::Held)
+            .map(|row| row.id)
+            .collect();
+        let completed = match generation_queue::find_completed_job_ids(db, &candidates) {
+            Ok(completed) => completed,
+            Err(error) => {
+                tracing::warn!(
+                    error = %format!("{error:#}"),
+                    "could not check the durable queue against saved prints; \
+                     skipping replay to avoid duplicating output"
+                );
+                return 0;
+            }
+        };
+        for id in &completed {
+            tracing::info!(job = %id, "a retained generation already produced its print");
+            self.discard_id(id);
+        }
+        completed.len()
+    }
+
+    /// Rows to replay, oldest first, after reconcile and the idempotence gate.
+    pub fn replayable(&self) -> Vec<GenerationQueueRow> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Vec::new();
+        };
+        generation_queue::list_replayable(db, owner).unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "could not read the durable generation queue"
+            );
+            Vec::new()
+        })
+    }
+
+    /// Charge this boot against a row. `Err` carries the reason it was held.
+    pub fn charge_replay(&self, id: &str) -> Result<(), String> {
+        let Some(db) = self.db() else {
+            return Ok(());
+        };
+        let now = now_ms();
+        match generation_queue::bump_replay_seen(db, id, now) {
+            Ok(Some(seen)) if seen > self.max_replay_seen => {
+                let cap = self.max_replay_seen;
+                let reason = format!("replayed by {seen} boots without ever running (limit {cap})");
+                let _ = generation_queue::hold(db, id, &reason, now);
+                Err(reason)
+            }
+            Ok(_) => Ok(()),
+            Err(error) => {
+                tracing::warn!(
+                    job = %id,
+                    error = %format!("{error:#}"),
+                    "could not charge a replay against a durable queue row"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether this id names a parked row. `DELETE /api/queue/:id` is the
+    /// documented way to clear one, and a held job has no registry entry.
+    pub fn is_held(&self, id: &str) -> bool {
+        let Some(db) = self.db() else {
+            return false;
+        };
+        generation_queue::get(db, id)
+            .ok()
+            .flatten()
+            .is_some_and(|row| row.state == QueueRowState::Held)
+    }
+
+    /// Park a row by id, for a caller that has no ticket.
+    pub fn hold_id(&self, id: &str, reason: &str) {
+        let Some(db) = self.db() else {
+            return;
+        };
+        if let Err(error) = generation_queue::hold(db, id, reason, now_ms()) {
+            tracing::warn!(
+                job = %id,
+                error = %format!("{error:#}"),
+                "could not hold a durable queue row"
+            );
+        }
+    }
+
     /// Rows this server owns, oldest first. Backs the `held` listing.
     pub fn list_all(&self) -> Vec<GenerationQueueRow> {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
@@ -319,6 +481,148 @@ impl QueueJournal {
             Vec::new()
         })
     }
+}
+
+/// What `startup_reconcile` did, for one startup log line.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReconcileReport {
+    pub requeued: usize,
+    pub repointed: usize,
+    pub held: usize,
+}
+
+/// What one boot's replay admitted, for one startup log line.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayReport {
+    pub resumed: usize,
+    pub already_completed: usize,
+    pub held: usize,
+}
+
+/// Resubmit every retained generation through the ordinary admission path.
+///
+/// **Sequential on purpose.** `submit_when_available` serializes on one global
+/// `capacity_waiter` mutex, so parallel replay tasks would arrive in arbitrary
+/// order and destroy the ordering the journal exists to preserve. A journal
+/// deeper than `queue_capacity` therefore blocks here in order rather than
+/// racing, which is why this runs before the router starts serving.
+///
+/// Replay reuses the original job id, which also emits `ServerEvent::JobQueued`
+/// for free, so `/api/events` subscribers see resumed jobs with no new event
+/// type. Everything downstream — validation, admission, frozen plans,
+/// placement, auto-pull — applies unchanged: a model uninstalled between boots
+/// is blocked as `model_not_installed`, not silently rerouted.
+pub async fn replay(state: &crate::state::AppState) -> ReplayReport {
+    let journal = state.queue_journal.clone();
+    let mut report = ReplayReport::default();
+    if !journal.is_enabled() {
+        return report;
+    }
+
+    let current_output_dir = {
+        let config = state.config.read().await;
+        if state.is_output_disabled(&config) {
+            None
+        } else {
+            Some(config.effective_output_dir())
+        }
+    };
+    let reconcile = journal.startup_reconcile(current_output_dir.as_deref());
+    report.held += reconcile.held;
+    report.already_completed = journal.drop_already_completed();
+
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    for row in journal.replayable() {
+        if let Err(reason) = journal.charge_replay(&row.id) {
+            tracing::warn!(job = %row.id, %reason, "holding a durable queue row");
+            report.held += 1;
+            continue;
+        }
+        let request: mold_core::GenerateRequest = match serde_json::from_str(&row.request_json) {
+            Ok(request) => request,
+            Err(error) => {
+                // Fail closed: a request this build cannot read must not be
+                // guessed at, and must not be silently discarded either.
+                tracing::warn!(
+                    job = %row.id,
+                    %error,
+                    "holding a durable queue row whose request this build cannot read"
+                );
+                journal.hold_id(&row.id, "the recorded request could not be deserialized");
+                report.held += 1;
+                continue;
+            }
+        };
+
+        let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
+            &request,
+            request.seed.unwrap_or(0),
+            request.scheduler,
+            mold_core::build_info::version_string(),
+        ));
+        let cancel = state.job_registry.register_job(
+            &row.id,
+            &row.model,
+            row.target_gpu,
+            Some(row.seed_pinned),
+            Some(metadata),
+        );
+        // The supervisor is what keeps `result_tx` open for a job with no
+        // client at all — without it every `is_closed()` gate would skip a
+        // replayed job on sight.
+        let crate::job_supervisor::SupervisedJob {
+            result_tx,
+            outcome_rx,
+        } = crate::job_supervisor::supervise_job(row.id.clone(), cancel);
+        let replayed_id = row.id.clone();
+        tokio::spawn(async move {
+            match outcome_rx.await {
+                Ok(crate::job_supervisor::SupervisedOutcome::Finished(outcome)) => match *outcome {
+                    Ok(_) => tracing::info!(job = %replayed_id, "resumed generation finished"),
+                    Err(error) => {
+                        tracing::warn!(job = %replayed_id, %error, "resumed generation failed")
+                    }
+                },
+                Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) => {
+                    tracing::info!(job = %replayed_id, "resumed generation cancelled")
+                }
+                Err(_) => {}
+            }
+        });
+
+        let job = crate::state::GenerationJob {
+            id: row.id.clone(),
+            request,
+            resolved_references: None,
+            completion_payload: completion_payload_from_str(&row.completion_payload),
+            // No client to stream to. The output still lands in the gallery,
+            // which is the whole reason the row was durable.
+            progress_tx: None,
+            result_tx,
+            output_dir: Some(row.output_dir.clone()),
+            batch_child: None,
+            journal: Some(journal.attach(&row.id)),
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+            h3_private_ingress_grant: None,
+        };
+
+        match state
+            .queue
+            .submit_when_available(job, state.queue_capacity, &cancellation)
+            .await
+        {
+            Ok(_) => report.resumed += 1,
+            Err(error) => {
+                tracing::warn!(
+                    job = %row.id,
+                    ?error,
+                    "could not resubmit a retained generation; it stays in the journal"
+                );
+                state.job_registry.remove(&row.id);
+            }
+        }
+    }
+    report
 }
 
 fn completion_payload_as_str(payload: SseCompletionPayload) -> &'static str {

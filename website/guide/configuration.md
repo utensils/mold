@@ -246,6 +246,37 @@ Environment variables take precedence over config file values.
 | `MOLD_FLUX_DELTA_CACHE`       | `1`                 | `0` disables the CPU-side FLUX LoRA delta cache (~25 GB host RAM on typical FLUX LoRAs). Disabling forces a sub-second `B@A·scale` recompute on each rebuild.                                            |
 | `MOLD_FLUX_KEEP_TRANSFORMER`  | `0`                 | `1` keeps the FLUX transformer GPU-resident across same-LoRA generations (saves a full GGUF+LoRA rebuild). Server force-drops it if VAE decode headroom is too tight at that resolution.                 |
 
+### Durable queue and shutdown
+
+A queued generation survives a server restart: it is recorded in `mold.db`
+before it is queued and replayed automatically at the next start, under its
+original job id. `GET /api/capabilities` reports `queue.durable_queue`, and
+each row in `GET /api/queue` reports whether that particular job is durable —
+a job with no gallery target, one carrying reference-upload media, or one
+whose request exceeds the payload ceiling runs normally but is not replayed.
+
+| Variable                           | Default             | Description                                                                                                                                                                                                                   |
+| ---------------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MOLD_QUEUE_JOURNAL_DISABLE`       | —                   | `1` turns the durable queue off entirely. Jobs still run; nothing survives a restart, and `queue.durable_queue` reports `false`.                                                                                              |
+| `MOLD_QUEUE_JOURNAL_MAX_BYTES`     | `33554432` (32 MiB) | Ceiling on one recorded request. A larger request (an inline video, say) runs normally and is reported `durable: false` rather than being half-persisted.                                                                     |
+| `MOLD_QUEUE_MAX_DISPATCH_ATTEMPTS` | `2`                 | How many times a worker may start a job before it is **held** instead of retried. Charged only when a worker actually claims the job, so a job that merely waits behind a long render through many restarts is never charged. |
+| `MOLD_QUEUE_MAX_REPLAY_SEEN`       | `10`                | How many restarts may replay a job that never starts before it is **held**. Sized for a crash loop; ordinary deploys never approach it.                                                                                       |
+| `MOLD_SHUTDOWN_ABORT_SECS`         | `45`                | How long the server waits for its GPU workers after `SIGTERM` before exiting anyway. The running generation is aborted at its next checkpoint and requeued; queued work is retained and replayed.                             |
+
+A **held** job is listed by `GET /api/queue` with `state: "held"` and a reason,
+and is never started automatically — it is waiting for you to look at it.
+Clear one with `DELETE /api/queue/{id}`.
+
+Under systemd, set the budget through the NixOS module rather than the
+environment, so the unit's stop timeout stays derived from it:
+
+```nix
+services.mold.shutdown.abortSeconds = 45;  # TimeoutStopSec becomes 105s
+```
+
+Do not set `TimeoutStopSec=infinity`: with a durable queue the right response
+to a wedged worker is to exit and replay, not to hang the deploy.
+
 ### Upscaling
 
 | Variable                 | Default | Description                                                    |

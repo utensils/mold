@@ -1030,10 +1030,9 @@ pub(crate) fn build_sse_completion_message(
     payload: SseCompletionPayload,
 ) -> SseMessage {
     if payload == SseCompletionPayload::MetadataOnly && saved.output.is_none() {
-        return SseMessage::Error(SseErrorEvent {
-            message: "generation completed but the output could not be saved for streaming"
-                .to_string(),
-        });
+        return SseMessage::Error(SseErrorEvent::failed(
+            "generation completed but the output could not be saved for streaming".to_string(),
+        ));
     }
     SseMessage::Complete(Box::new(build_sse_complete_event(
         response, img, original, metadata, saved, payload,
@@ -1469,9 +1468,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         Err(error) => {
             let err_msg = format!("generation reference binding error: {error:#}");
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: err_msg.clone(),
-                }));
+                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
             }
             let _ = job.result_tx.send(Err(err_msg));
             return;
@@ -1499,9 +1496,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     {
         let err_msg = api_err.error.clone();
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                message: err_msg.clone(),
-            }));
+            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
         }
         let _ = job.result_tx.send(Err(err_msg));
         return;
@@ -1529,9 +1524,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     let Some(mut cached_engine) = taken else {
         let err_msg = "no engine available after model readiness check".to_string();
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                message: err_msg.clone(),
-            }));
+            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
         }
         let _ = job.result_tx.send(Err(err_msg));
         return;
@@ -1634,9 +1627,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 let err_msg =
                     "generation error: engine returned no images, video, or audio".to_string();
                 if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                        message: err_msg.clone(),
-                    }));
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
                 }
                 let _ = job.result_tx.send(Err(err_msg));
                 return;
@@ -1807,9 +1798,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             tracing::error!("generation error: {e:#}");
             let err_msg = format!("generation error: {}", clean_error_message(&e));
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: err_msg.clone(),
-                }));
+                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
             }
             let _ = job.result_tx.send(Err(err_msg));
         }
@@ -1826,9 +1815,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             tracing::error!("inference panicked: {msg}");
             let err_msg = format!("inference panicked: {msg}");
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: err_msg.clone(),
-                }));
+                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
             }
             let _ = job.result_tx.send(Err(err_msg));
         }
@@ -1840,9 +1827,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             tracing::error!("inference task join error: {join_err:?}");
             let err_msg = "inference task failed".to_string();
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: err_msg.clone(),
-                }));
+                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
             }
             let _ = job.result_tx.send(Err(err_msg));
         }
@@ -2296,9 +2281,7 @@ async fn run_queue_dispatcher_with_tuning(
         {
             tracing::warn!(model = %model_name, "{err_msg}");
             if let Some(tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: err_msg.clone(),
-                }));
+                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
             }
             let _ = job.result_tx.send(Err(err_msg));
             state.queue.decrement();
@@ -2316,9 +2299,7 @@ async fn run_queue_dispatcher_with_tuning(
             Err(err_msg) => {
                 tracing::warn!(model = %model_name, "{err_msg}");
                 if let Some(tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                        message: err_msg.clone(),
-                    }));
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
                 }
                 let _ = job.result_tx.send(Err(err_msg));
                 state.queue.decrement();
@@ -2357,9 +2338,7 @@ async fn run_queue_dispatcher_with_tuning(
                 "{err_msg}"
             );
             if let Some(tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                    message: err_msg.clone(),
-                }));
+                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
             }
             let _ = job.result_tx.send(Err(err_msg));
             state.queue.decrement();
@@ -2471,9 +2450,7 @@ async fn run_queue_dispatcher_with_tuning(
                 };
                 tracing::error!(model = %model_name, "{err_msg}");
                 if let Some(tx) = rejected.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                        message: err_msg.clone(),
-                    }));
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
                 }
                 let _ = rejected.result_tx.send(Err(err_msg));
                 state.queue.decrement();
@@ -2561,9 +2538,8 @@ async fn run_queue_dispatcher_with_tuning(
                             worker.gpu.ordinal
                         );
                         if let Some(tx) = rejected.progress_tx {
-                            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                                message: err_msg.clone(),
-                            }));
+                            let _ =
+                                tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
                         }
                         let _ = rejected.result_tx.send(Err(err_msg));
                         state.queue.decrement();
@@ -2588,9 +2564,7 @@ async fn run_queue_dispatcher_with_tuning(
 
 fn reject_generation_job(state: &AppState, job: GenerationJob, message: String) {
     if let Some(progress) = &job.progress_tx {
-        let _ = progress.send(SseMessage::Error(SseErrorEvent {
-            message: message.clone(),
-        }));
+        let _ = progress.send(SseMessage::Error(SseErrorEvent::failed(message.clone())));
     }
     let job_id = job.id.clone();
     let _ = job.result_tx.send(Err(message));

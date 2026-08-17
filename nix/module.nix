@@ -203,6 +203,25 @@ in
       example = "0,1";
     };
 
+    shutdown = {
+      abortSeconds = lib.mkOption {
+        type = lib.types.int;
+        default = 45;
+        description = ''
+          How long the server waits for its GPU workers to return after
+          SIGTERM before exiting anyway. SIGTERM aborts the running
+          generation at its next inference checkpoint; anything still queued
+          is retained and replayed on the next start.
+
+          TimeoutStopSec is derived from this and is strictly larger, so
+          systemd is never the component that decides. Do not raise this
+          expecting a wedged worker to finish — with a durable queue the
+          correct response is to die and replay, not to hang the deploy.
+          Sets MOLD_SHUTDOWN_ABORT_SECS.
+        '';
+      };
+    };
+
     queueSize = lib.mkOption {
       type = lib.types.nullOr lib.types.int;
       default = null;
@@ -377,6 +396,9 @@ in
       // lib.optionalAttrs (cfg.queueSize != null) {
         MOLD_QUEUE_SIZE = toString cfg.queueSize;
       }
+      // {
+        MOLD_SHUTDOWN_ABORT_SECS = toString cfg.shutdown.abortSeconds;
+      }
       // lib.optionalAttrs (!cfg.mdns) {
         MOLD_MDNS = "0";
       }
@@ -423,6 +445,13 @@ in
         ExecStart = "${lib.getExe cfg.package} serve --bind ${cfg.bindAddress} --port ${toString cfg.port}${lib.optionalString cfg.logToFile " --log-file"}";
         Restart = "on-failure";
         RestartSec = 5;
+
+        # The server owns the shutdown budget; the unit's is strictly larger so
+        # systemd never SIGKILLs a server that is still winding down. The
+        # default 90 s was tighter than a cold model load, which is how a
+        # mid-render deploy used to lose the whole queue.
+        KillSignal = "SIGTERM";
+        TimeoutStopSec = cfg.shutdown.abortSeconds + 60;
 
         RuntimeDirectory = "mold";
         # StateDirectory and CacheDirectory omitted — homeDir is created

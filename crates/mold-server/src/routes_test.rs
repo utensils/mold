@@ -4060,6 +4060,356 @@ mod tests {
         let _ = gen_task.await;
     }
 
+    /// Build a state whose journal is backed by `db` and whose gallery lands
+    /// in `output_dir` — the shape a durable generation is admitted under.
+    fn durable_state(
+        db: Arc<Option<mold_db::MetadataDb>>,
+        output_dir: &std::path::Path,
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
+    ) {
+        let (mut state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.output_disabled_override = false;
+        state.metadata_db = db.clone();
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(db));
+        state
+            .config
+            .try_write()
+            .expect("fresh test config")
+            .output_dir = Some(output_dir.to_string_lossy().into_owned());
+        (state, rx)
+    }
+
+    /// The end-to-end shape: admit jobs, fence, drop the coordinator, rebuild
+    /// `AppState` on the same DB, replay. The rows come back under their
+    /// original ids, in submit order, through the ordinary queue.
+    #[tokio::test]
+    async fn retained_generations_replay_in_order_under_their_original_ids() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+
+        let submitted = {
+            let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+            let app = app_with_state(state.clone());
+            let mut submitted = Vec::new();
+            // Held until the fence goes up: dropping a job before that is
+            // ordinary completion, and deletes its row.
+            let mut in_flight = Vec::new();
+            for index in 0..3 {
+                let app = app.clone();
+                let task = tokio::spawn(async move {
+                    app.oneshot(
+                        Request::post("/api/generate")
+                            .header("content-type", "application/json")
+                            .body(Body::from(generate_body(
+                                &format!("prompt {index}"),
+                                512,
+                                512,
+                            )))
+                            .unwrap(),
+                    )
+                    .await
+                });
+                let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("submitted job")
+                    .expect("open queue");
+                submitted.push(job.id.clone());
+                // The client goes away and the whole runtime is torn down.
+                task.abort();
+                let _ = task.await;
+                // One of them was already claimed by a worker before the crash.
+                if index == 0 {
+                    assert_eq!(
+                        job.journal.as_ref().unwrap().claim_dispatch(),
+                        crate::queue_journal::DispatchClaim::Granted
+                    );
+                }
+                in_flight.push(job);
+            }
+            state.queue_journal.retain_all();
+            drop(in_flight);
+            submitted
+        };
+
+        // A fresh server on the same database.
+        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+        let report = crate::queue_journal::replay(&state).await;
+
+        assert_eq!(report.resumed, 3);
+        assert_eq!(report.held, 0);
+        assert_eq!(report.already_completed, 0);
+
+        let mut replayed = Vec::new();
+        for _ in 0..3 {
+            let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("replayed job")
+                .expect("open queue");
+            assert!(
+                job.journal.is_some(),
+                "a replayed job keeps owning its durable row"
+            );
+            assert!(
+                job.progress_tx.is_none(),
+                "a replayed job has no client to stream to"
+            );
+            replayed.push(job.id);
+        }
+        assert_eq!(replayed, submitted);
+        assert_eq!(
+            state
+                .job_registry
+                .snapshot()
+                .entries
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>(),
+            submitted,
+            "replay re-registers under the original ids, so /api/queue and \
+             /api/events see resumed jobs with no new event type"
+        );
+    }
+
+    /// A job that finished between its last save and the crash must not be
+    /// re-rendered — output filenames are wall-clock, so a duplicate print
+    /// could never be merged afterwards.
+    #[tokio::test]
+    async fn a_retained_generation_whose_print_already_exists_is_never_replayed() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+
+        let finished_id = {
+            let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+            let app = app_with_state(state.clone());
+            let task = tokio::spawn(async move {
+                app.oneshot(
+                    Request::post("/api/generate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("a cat", 512, 512)))
+                        .unwrap(),
+                )
+                .await
+            });
+            let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("submitted job")
+                .expect("open queue");
+            task.abort();
+            let _ = task.await;
+            state.queue_journal.retain_all();
+            job.id.clone()
+        };
+
+        // The print landed; only the journal delete was lost.
+        db.as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.execute(
+                    &format!(
+                        "INSERT INTO generations
+                            (filename, output_dir, created_at_ms, format, model, metadata_json)
+                         VALUES ('done.png', '/gallery', 1, 'png', 'mock-model',
+                                 '{{\"job_id\":\"{finished_id}\"}}')"
+                    ),
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+        let report = crate::queue_journal::replay(&state).await;
+
+        assert_eq!(report.already_completed, 1);
+        assert_eq!(report.resumed, 0);
+        assert!(rx.try_recv().is_err(), "nothing may be resubmitted");
+        assert!(state.queue_journal.list_all().is_empty());
+    }
+
+    /// Fail closed: a request this build cannot read is parked for inspection,
+    /// never guessed at and never silently dropped.
+    #[tokio::test]
+    async fn a_retained_generation_with_an_unreadable_request_is_held() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let owner =
+            mold_db::generation_queue::resolve_owner_uuid(db.as_ref().as_ref().unwrap()).unwrap();
+        mold_db::generation_queue::insert(
+            db.as_ref().as_ref().unwrap(),
+            &mold_db::generation_queue::GenerationQueueRow {
+                id: "unreadable".to_string(),
+                owner_uuid: owner,
+                state: mold_db::generation_queue::QueueRowState::Queued,
+                model: "mock-model".to_string(),
+                request_json: "{\"prompt\":".to_string(),
+                output_dir: output_dir.path().to_path_buf(),
+                target_gpu: None,
+                completion_payload: "full".to_string(),
+                seed_pinned: false,
+                dispatch_attempts: 0,
+                replay_seen: 0,
+                held_reason: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                started_at_ms: None,
+            },
+        )
+        .unwrap();
+
+        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+        let report = crate::queue_journal::replay(&state).await;
+
+        assert_eq!(report.held, 1);
+        assert_eq!(report.resumed, 0);
+        assert!(rx.try_recv().is_err());
+        let row = state.queue_journal.list_all().pop().unwrap();
+        assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Held);
+        assert!(row.held_reason.is_some());
+    }
+
+    /// Another installation sharing this MOLD_HOME owns its own rows.
+    #[tokio::test]
+    async fn a_foreign_owners_rows_are_never_replayed() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        mold_db::generation_queue::insert(
+            db.as_ref().as_ref().unwrap(),
+            &mold_db::generation_queue::GenerationQueueRow {
+                id: "theirs".to_string(),
+                owner_uuid: "some-other-installation".to_string(),
+                state: mold_db::generation_queue::QueueRowState::Queued,
+                model: "mock-model".to_string(),
+                request_json: r#"{"prompt":"a cat","model":"mock-model","width":512,"height":512,"steps":4,"guidance":3.5}"#
+                    .to_string(),
+                output_dir: output_dir.path().to_path_buf(),
+                target_gpu: None,
+                completion_payload: "full".to_string(),
+                seed_pinned: false,
+                dispatch_attempts: 0,
+                replay_seen: 0,
+                held_reason: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                started_at_ms: None,
+            },
+        )
+        .unwrap();
+
+        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+        let report = crate::queue_journal::replay(&state).await;
+
+        assert_eq!(report.resumed, 0);
+        assert!(rx.try_recv().is_err());
+        assert!(state.queue_journal.list_all().is_empty());
+    }
+
+    /// `durable_queue` is a promise about this host, and a held row is
+    /// something only the journal knows about — invisible work that is never
+    /// going to run is worse than work that failed.
+    #[tokio::test]
+    async fn the_queue_listing_reports_durability_and_surfaces_held_rows() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+        let app = app_with_state(state.clone());
+
+        let capabilities = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(capabilities["queue"]["durable_queue"], true);
+        assert_eq!(
+            capabilities["queue"]["cooperative_cancellation"], false,
+            "running work stays non-cancellable until that UX decision is made"
+        );
+
+        let gen_app = app.clone();
+        let gen_task = tokio::spawn(async move {
+            gen_app
+                .oneshot(
+                    Request::post("/api/generate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("a cat", 512, 512)))
+                        .unwrap(),
+                )
+                .await
+        });
+        let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("submitted job")
+            .expect("open queue");
+
+        let listing = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let live = &listing["entries"][0];
+        assert_eq!(live["id"], serde_json::json!(job.id));
+        assert_eq!(live["durable"], true);
+        assert_eq!(live["replayed"], false);
+        assert_eq!(live["dispatch_attempts"], 0);
+
+        // Park it the way an exhausted attempt cap would.
+        state
+            .queue_journal
+            .hold_id(&job.id, "dispatch attempts exhausted");
+        gen_task.abort();
+        let _ = gen_task.await;
+        state.job_registry.remove(&job.id);
+
+        let listing = json_body(
+            app.oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let held = &listing["entries"][0];
+        assert_eq!(held["id"], serde_json::json!(job.id));
+        assert_eq!(held["state"], "held");
+        assert_eq!(held["held_reason"], "dispatch attempts exhausted");
+
+        // A held job has no registry entry, so the documented way to clear one
+        // has to reach the journal directly or the row is unreachable short of
+        // editing the database.
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::delete(format!("/api/queue/{}", job.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(state.queue_journal.list_all().is_empty());
+
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::delete("/api/queue/never-existed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "an unknown id is still a 404"
+        );
+    }
+
     /// Once the retention fence is up the process is tearing down, so a new
     /// request is refused with a retryable 503 rather than admitted into a
     /// queue that immediately retains it.

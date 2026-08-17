@@ -5462,9 +5462,9 @@ fn exact_leased_execution_plan(
 
 fn reject_generation(state: &AppState, job: GenerationJob, error: String) {
     if let Some(progress) = job.progress_tx {
-        let _ = progress.send(SseMessage::Error(mold_core::SseErrorEvent {
-            message: error.clone(),
-        }));
+        let _ = progress.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
+            error.clone(),
+        )));
     }
     let id = job.id.clone();
     let _ = job.result_tx.send(Err(error));
